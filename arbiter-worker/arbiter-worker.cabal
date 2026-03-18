@@ -1,0 +1,95 @@
+cabal-version: 2.2
+name:          arbiter-worker
+version:       0.1.0.0
+synopsis:      Worker framework for arbiter
+description:
+  This package provides a highly concurrent worker framework for processing jobs from arbiter queues.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Worker
+    Arbiter.Worker.BackoffStrategy
+    Arbiter.Worker.Config
+    Arbiter.Worker.Cron
+    Arbiter.Worker.Logger
+    Arbiter.Worker.WorkerState
+
+  other-modules:
+    Arbiter.Worker.Dispatcher
+    Arbiter.Worker.Heartbeat
+    Arbiter.Worker.Logger.Internal
+    Arbiter.Worker.NotificationListener
+    Arbiter.Worker.Retry
+
+  build-depends:
+    , aeson               >=2.0  && <2.3
+    , arbiter-core        <0.2
+    , base                >=4.14 && <5
+    , bytestring          >=0.10 && <0.13
+    , containers          >=0.6  && <0.8
+    , cron                >=0.7  && <0.9
+    , directory           >=1.3  && <1.4
+    , exceptions          >=0.10 && <0.11
+    , fast-logger         >=3.0  && <3.3
+    , monad-logger        >=0.3  && <0.4
+    , monad-logger-aeson  >=0.4  && <0.5
+    , postgresql-simple   >=0.6  && <0.8
+    , random              >=1.2  && <1.3
+    , stm                 >=2.5  && <2.6
+    , text                >=1.2  && <2.2
+    , time                >=1.9  && <1.15
+    , transformers        >=0.5  && <0.7
+    , unliftio            >=0.2  && <0.3
+    , uuid                >=1.3  && <1.4
+
+test-suite arbiter-worker-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  other-modules:
+    Test.Arbiter.Worker
+    Test.Arbiter.Worker.Concurrency
+    Test.Arbiter.Worker.ConnectionRecovery
+    Test.Arbiter.Worker.Cron
+
+  build-depends:
+    , aeson
+    , arbiter-core         <0.2
+    , arbiter-simple
+    , arbiter-test-common
+    , arbiter-worker
+    , base
+    , bytestring
+    , directory
+    , hspec
+    , postgresql-simple
+    , resource-pool
+    , text
+    , time
+    , unliftio

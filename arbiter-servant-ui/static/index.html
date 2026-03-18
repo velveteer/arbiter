@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Arbiter Admin</title>
+  <script>
+    document.documentElement.setAttribute('data-bs-theme',
+      localStorage.getItem('arbiter-theme') || 'dark');
+  </script>
+  <link href="vendor/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <style>[x-cloak] { display: none !important; }</style>
+</head>
+<body x-cloak x-data>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="#">Arbiter Admin</a>
+
+    <div class="d-flex align-items-center gap-3">
+      <!-- Queue selector -->
+      <div class="dropdown" x-data>
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+          <span x-text="$store.app.selectedQueue || 'Select Queue'"></span>
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <template x-for="q in $store.app.queues" :key="q">
+            <li>
+              <a class="dropdown-item" href="#" @click.prevent="$store.app.selectQueue(q)" x-text="q"
+                :class="{ 'active': q === $store.app.selectedQueue }"></a>
+            </li>
+          </template>
+        </ul>
+      </div>
+
+      <!-- SSE status dot (hidden when SSE is disabled server-side) -->
+      <span class="sse-dot" x-show="!$store.app.sseDisabled"
+        :class="$store.app.connected ? 'connected' : 'disconnected'"
+        :title="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"></span>
+
+      <!-- Theme toggle -->
+      <button class="btn btn-sm nav-theme-toggle" @click="$store.app.toggleTheme()"
+        :title="$store.app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'">
+        <span x-show="$store.app.theme === 'dark'">&#9788;</span>
+        <span x-show="$store.app.theme !== 'dark'">&#9789;</span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- Main content -->
+<div class="container-fluid mt-3">
+  <!-- Tabs -->
+  <ul class="nav nav-tabs" id="main-tabs" role="tablist">
+    <li class="nav-item tab-group-label" aria-hidden="true">Queue</li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-stats" type="button" role="tab">Stats</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-jobs" type="button" role="tab">Jobs</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-dlq" type="button" role="tab">DLQ</button>
+    </li>
+    <li class="nav-item tab-group-label tab-group-divider" aria-hidden="true">Global</li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-events" type="button" role="tab">Events</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-cron" type="button" role="tab">Cron</button>
+    </li>
+  </ul>
+
+  <div class="tab-content mt-3">
+    <!-- Stats Tab -->
+    <div class="tab-pane fade show active" id="tab-stats" role="tabpanel" x-data="statsTab">
+      <div class="row g-3" x-show="stats">
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Total Jobs</h5>
+              <p class="display-6" x-text="stats?.totalJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Visible</h5>
+              <p class="display-6" x-text="stats?.visibleJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title text-muted">In-Flight</h5>
+              <p class="display-6" x-text="stats?.invisibleJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Oldest Age (s)</h5>
+              <p class="display-6" x-text="stats?.oldestJobAgeSeconds != null ? Math.round(stats.oldestJobAgeSeconds) : '-'"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div x-show="$store.app.initialized && !$store.app.selectedQueue" class="text-muted mt-3">No queues available.</div>
+    </div>
+
+    <!-- Jobs Tab -->
+    <div class="tab-pane fade" id="tab-jobs" role="tabpanel" x-data="jobsTab">
+      <!-- Toolbar -->
+      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+        <div class="position-relative" style="max-width: 250px;">
+          <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
+            placeholder="Filter by group key..."
+            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
+          <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
+            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter"
+            style="line-height: 1; font-size: .75rem; opacity: .6;"
+            @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
+        </div>
+        <div class="position-relative" style="max-width: 180px;">
+          <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
+            placeholder="Filter by parent ID..."
+            x-model="parentIdFilter" @keyup.enter="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
+          <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
+            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter"
+            style="line-height: 1; font-size: .75rem; opacity: .6;"
+            @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
+        </div>
+        <select class="form-select form-select-sm" style="width: auto;"
+          x-model="suspendedFilter" @change="applyFilter()">
+          <option value="">All states</option>
+          <option value="true">Suspended</option>
+          <option value="false">Not suspended</option>
+        </select>
+        <button class="btn btn-outline-secondary btn-sm" @click="applyFilter()">Filter</button>
+        <button class="btn btn-sm" :class="showInFlight ? 'btn-primary' : 'btn-outline-primary'" @click="toggleInFlight()">
+          <span x-text="showInFlight ? 'In-Flight' : 'All Jobs'"></span>
+        </button>
+        <button class="btn btn-sm" :class="viewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
+          @click="viewMode = viewMode === 'tree' ? 'flat' : 'tree'"
+          :title="viewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
+          <span x-text="viewMode === 'tree' ? 'Tree' : 'Flat'"></span>
+        </button>
+        <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm">
+          + Insert Job
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" @click="loadJobs()">Refresh</button>
+        <select class="form-select form-select-sm" style="width: auto;"
+          x-model="refreshMode" @change="setRefreshMode(refreshMode)">
+          <option value="1s">1s</option>
+          <option value="5s">5s</option>
+          <option value="10s">10s</option>
+          <option value="30s">30s</option>
+          <option value="paused">Paused</option>
+        </select>
+      </div>
+      <div class="text-info small mb-2" x-show="refreshMode === 'paused' && pendingChanges > 0" x-text="pendingChanges + ' changes pending'"></div>
+
+      <!-- Insert Form -->
+      <div class="card mb-3" x-show="showInsertForm">
+        <div class="card-body">
+          <h6 class="card-title">Insert New Job</h6>
+          <div class="row g-2">
+            <div class="col-md-6">
+              <label class="form-label">Payload (JSON)</label>
+              <textarea class="form-control font-monospace" rows="3" x-model="insertPayload"></textarea>
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Group Key</label>
+              <input type="text" class="form-control" x-model="insertGroupKey" placeholder="Optional">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Dedup Key</label>
+              <input type="text" class="form-control" x-model="insertDedupKey" placeholder="Optional">
+            </div>
+            <div class="col-md-1" x-show="insertDedupKey">
+              <label class="form-label">Strategy</label>
+              <select class="form-select" x-model="insertDedupStrategy">
+                <option value="ignore">Ignore</option>
+                <option value="replace">Replace</option>
+              </select>
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Priority</label>
+              <input type="number" class="form-control" x-model="insertPriority">
+            </div>
+          </div>
+          <div class="mt-2 d-flex align-items-center gap-2">
+            <button class="btn btn-primary btn-sm" @click="submitInsert()">Insert</button>
+            <small class="alert alert-danger mb-0 inline-error" x-show="insertError" x-text="insertError"></small>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pagination (top) -->
+      <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+        </div>
+        <span class="text-muted small" x-text="displayTotal + ' jobs \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
+        <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
+          placeholder="#" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page">
+      </div>
+
+      <!-- Jobs table -->
+      <div class="table-responsive">
+        <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
+          <colgroup>
+            <col style="width: 4%;">
+            <col style="width: 13%;">
+            <col style="width: 7%;">
+            <col style="width: 5%;">
+            <col style="width: 9%;">
+            <col style="width: 5%;">
+            <col style="width: 6%;">
+            <col style="width: 7%;">
+            <col style="width: 10%;">
+            <col style="width: 9%;">
+            <col style="width: 25%;">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Payload</th>
+              <th>Group</th>
+              <th>Parent</th>
+              <th>Children</th>
+              <th>Priority</th>
+              <th>Attempts</th>
+              <th>Status</th>
+              <th>Inserted At</th>
+              <th>Not Visible Until</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="job in displayJobs" :key="String(job.primaryKey) + '-' + job._depth">
+              <tr :class="job._depth > 0 ? 'child-row' : ''">
+                <td class="text-truncate"
+                  :style="job._depth ? 'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)' : ''"
+                  x-text="job.primaryKey"></td>
+                <td class="text-truncate" :title="JSON.stringify(job.payload)"
+                  x-text="truncate(job.payload)"></td>
+                <td class="text-truncate" x-text="job.groupKey || '-'"></td>
+                <td>
+                  <template x-if="job.parentId">
+                    <a href="#" class="text-decoration-none"
+                      @click.prevent="filterByParent(job.parentId)"
+                      x-text="job.parentId"></a>
+                  </template>
+                  <template x-if="!job.parentId">
+                    <span>-</span>
+                  </template>
+                </td>
+                <td>
+                  <template x-if="job._childCount || job._dlqChildCount">
+                    <span class="d-inline-flex gap-1 flex-wrap align-items-center">
+                      <template x-if="job._childCount">
+                        <a href="#" class="text-decoration-none d-inline-flex align-items-center gap-1"
+                          @click.prevent="toggleChildren(job.primaryKey)">
+                          <span class="expand-arrow" x-text="isExpanded(job.primaryKey) ? '\u25BC' : '\u25B6'"></span>
+                          <span class="badge bg-info-subtle text-info-emphasis"
+                            x-text="job._childCount + (job._childCount === 1 ? ' child' : ' children')"></span>
+                        </a>
+                      </template>
+                      <template x-if="job._dlqChildCount">
+                        <span class="badge bg-danger-subtle text-danger-emphasis"
+                          x-text="job._dlqChildCount + ' in DLQ'"></span>
+                      </template>
+                    </span>
+                  </template>
+                  <template x-if="!job._childCount && !job._dlqChildCount">
+                    <span>-</span>
+                  </template>
+                </td>
+                <td x-text="job.priority"></td>
+                <td x-text="job.attempts"></td>
+                <td>
+                  <span class="badge"
+                    :class="{
+                      'bg-warning-subtle text-warning-emphasis': job.status === 'suspended',
+                      'bg-primary-subtle text-primary-emphasis': job.status === 'in_flight',
+                      'bg-secondary-subtle text-secondary-emphasis': job.status === 'scheduled',
+                      'bg-success-subtle text-success-emphasis': job.status === 'ready',
+                    }"
+                    x-text="job.status"></span>
+                </td>
+                <td class="text-truncate" :title="job.insertedAt" x-text="job.insertedAt ? new Date(job.insertedAt).toLocaleString() : '-'"></td>
+                <td class="text-truncate" x-text="job.notVisibleUntil ? new Date(job.notVisibleUntil).toLocaleString() : '-'"></td>
+                <td>
+                  <div class="d-inline-flex gap-1 flex-nowrap">
+                    <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
+                    <button class="btn btn-outline-success btn-sm" @click="promoteJob(job.primaryKey)" title="Promote"
+                      x-show="job.status === 'scheduled'">Promote</button>
+                    <button class="btn btn-outline-danger btn-sm" @click="cancelJob(job.primaryKey, job._childCount)" title="Cancel">Cancel</button>
+                    <button class="btn btn-outline-secondary btn-sm" @click="moveToDLQ(job.primaryKey)" title="Move to DLQ">DLQ</button>
+                    <button class="btn btn-sm text-nowrap"
+                      :class="isPaused(job) ? 'btn-outline-info' : 'btn-outline-warning'"
+                      @click="togglePause(job)"
+                      x-text="isPaused(job) ? 'Resume' : 'Pause'"></button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="displayJobs.length === 0">
+              <td colspan="11" class="text-muted text-center">No jobs found.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination (bottom) -->
+      <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+        </div>
+        <span class="text-muted small" x-text="'Page ' + currentPage + ' of ' + totalPages"></span>
+      </div>
+
+      <!-- Job Detail Modal -->
+      <div class="modal fade" id="jobDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Job Detail</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" x-show="selectedJob">
+              <dl class="row">
+                <dt class="col-sm-4">ID</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.primaryKey"></dd>
+                <dt class="col-sm-4">Queue</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.queueName"></dd>
+                <dt class="col-sm-4">Group Key</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.groupKey || '-'"></dd>
+                <dt class="col-sm-4">Parent ID</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.parentId || '-'"></dd>
+                <dt class="col-sm-4">Suspended</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.suspended ? 'Yes' : 'No'"></dd>
+                <dt class="col-sm-4">Priority</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.priority"></dd>
+                <dt class="col-sm-4">Attempts</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.attempts"></dd>
+                <dt class="col-sm-4">Max Attempts</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.maxAttempts ?? '-'"></dd>
+                <dt class="col-sm-4">Dedup Key</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.dedupKey ? selectedJob.dedupKey.key + ' (' + selectedJob.dedupKey.strategy + ')' : '-'"></dd>
+                <dt class="col-sm-4">Inserted At</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.insertedAt"></dd>
+                <dt class="col-sm-4">Updated At</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.updatedAt || '-'"></dd>
+                <dt class="col-sm-4">Last Attempted At</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.lastAttemptedAt || '-'"></dd>
+                <dt class="col-sm-4">Not Visible Until</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.notVisibleUntil || '-'"></dd>
+                <dt class="col-sm-4">Last Error</dt>
+                <dd class="col-sm-8" x-text="selectedJob?.lastError || '-'"></dd>
+                <dt class="col-sm-4">Payload</dt>
+                <dd class="col-sm-8">
+                  <pre class="payload-display p-2 rounded" x-text="formatJson(selectedJob?.payload)"></pre>
+                </dd>
+                <template x-if="selectedJob?.parentState != null">
+                  <dt class="col-sm-4">Child Results</dt>
+                </template>
+                <template x-if="selectedJob?.parentState != null">
+                  <dd class="col-sm-8">
+                    <pre class="payload-display p-2 rounded" x-text="formatJson(selectedJob?.parentState)"></pre>
+                  </dd>
+                </template>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DLQ Tab -->
+    <div class="tab-pane fade" id="tab-dlq" role="tabpanel" x-data="dlqTab">
+      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+        <div class="position-relative" style="max-width: 250px;">
+          <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
+            placeholder="Filter by group key..."
+            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
+          <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
+            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter"
+            style="line-height: 1; font-size: .75rem; opacity: .6;"
+            @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
+        </div>
+        <div class="position-relative" style="max-width: 180px;">
+          <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
+            placeholder="Filter by parent ID..."
+            x-model="parentIdFilter" @keyup.enter="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
+          <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
+            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter"
+            style="line-height: 1; font-size: .75rem; opacity: .6;"
+            @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" @click="applyFilter()">Filter</button>
+        <button class="btn btn-outline-secondary btn-sm" @click="loadDLQ()">Refresh</button>
+        <select class="form-select form-select-sm" style="width: auto;"
+          x-model="refreshMode" @change="setRefreshMode(refreshMode)">
+          <option value="1s">1s</option>
+          <option value="5s">5s</option>
+          <option value="10s">10s</option>
+          <option value="30s">30s</option>
+          <option value="paused">Paused</option>
+        </select>
+      </div>
+      <div class="text-info small mb-2" x-show="refreshMode === 'paused' && pendingChanges > 0" x-text="pendingChanges + ' changes pending'"></div>
+
+      <!-- Pagination (top) -->
+      <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+        </div>
+        <span class="text-muted small" x-text="total + ' DLQ entries \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
+        <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
+          placeholder="#" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page">
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
+          <colgroup>
+            <col style="width: 6%;">
+            <col style="width: 6%;">
+            <col style="width: 6%;">
+            <col style="width: 8%;">
+            <col style="width: 18%;">
+            <col style="width: 12%;">
+            <col style="width: 5%;">
+            <col style="width: 21%;">
+            <col style="width: 18%;">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>DLQ ID</th>
+              <th>Job ID</th>
+              <th>Parent</th>
+              <th>Group</th>
+              <th>Payload</th>
+              <th>Failed At</th>
+              <th>Attempts</th>
+              <th>Last Error</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="job in dlqJobs" :key="job.dlqPrimaryKey">
+              <tr>
+                <td class="text-truncate" x-text="job.dlqPrimaryKey"></td>
+                <td class="text-truncate" x-text="job.jobSnapshot?.primaryKey ?? '-'"></td>
+                <td class="text-truncate">
+                  <template x-if="job.jobSnapshot?.parentId">
+                    <a href="#" class="text-decoration-none" @click.prevent="filterByParent(job.jobSnapshot.parentId)"
+                      x-text="job.jobSnapshot.parentId"></a>
+                  </template>
+                  <template x-if="!job.jobSnapshot?.parentId">
+                    <span>-</span>
+                  </template>
+                </td>
+                <td class="text-truncate" x-text="job.jobSnapshot?.groupKey || '-'"></td>
+                <td class="text-truncate" :title="JSON.stringify(job.jobSnapshot?.payload)"
+                  x-text="truncate(job.jobSnapshot?.payload)"></td>
+                <td class="text-truncate" x-text="job.failedAt ? new Date(job.failedAt).toLocaleString() : '-'"></td>
+                <td x-text="job.jobSnapshot?.attempts ?? '-'"></td>
+                <td class="text-truncate" :title="job.jobSnapshot?.lastError"
+                  x-text="truncate(job.jobSnapshot?.lastError)"></td>
+                <td>
+                  <div class="d-inline-flex gap-1 flex-nowrap">
+                    <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job)" title="View">Detail</button>
+                    <button class="btn btn-outline-success btn-sm" @click="retryJob(job.dlqPrimaryKey)" title="Retry">Retry</button>
+                    <button class="btn btn-outline-danger btn-sm" @click="deleteJob(job.dlqPrimaryKey)" title="Delete">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="dlqJobs.length === 0">
+              <td colspan="9" class="text-muted text-center">No DLQ entries.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination (bottom) -->
+      <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+        </div>
+        <span class="text-muted small" x-text="'Page ' + currentPage + ' of ' + totalPages"></span>
+      </div>
+
+      <!-- DLQ Detail Modal -->
+      <div class="modal fade" id="dlqDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">DLQ Job Detail</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" x-show="selectedDLQJob">
+              <dl class="row">
+                <dt class="col-sm-4">DLQ ID</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.dlqPrimaryKey"></dd>
+                <dt class="col-sm-4">Failed At</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.failedAt"></dd>
+                <dt class="col-sm-4">Original Job ID</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.primaryKey"></dd>
+                <dt class="col-sm-4">Parent ID</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.parentId || '-'"></dd>
+                <dt class="col-sm-4">Group Key</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.groupKey || '-'"></dd>
+                <dt class="col-sm-4">Attempts</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.attempts"></dd>
+                <dt class="col-sm-4">Last Error</dt>
+                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.lastError || '-'"></dd>
+                <dt class="col-sm-4">Payload</dt>
+                <dd class="col-sm-8">
+                  <pre class="payload-display p-2 rounded" x-text="formatJson(selectedDLQJob?.jobSnapshot?.payload)"></pre>
+                </dd>
+                <template x-if="selectedDLQJob?.jobSnapshot?.parentState != null">
+                  <dt class="col-sm-4">Child Results</dt>
+                </template>
+                <template x-if="selectedDLQJob?.jobSnapshot?.parentState != null">
+                  <dd class="col-sm-8">
+                    <pre class="payload-display p-2 rounded" x-text="formatJson(selectedDLQJob?.jobSnapshot?.parentState)"></pre>
+                  </dd>
+                </template>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Events Tab -->
+    <div class="tab-pane fade" id="tab-events" role="tabpanel" x-data="eventsTab">
+      <template x-if="active">
+        <div>
+          <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+            <div class="input-group" style="max-width: 200px;">
+              <select class="form-select form-select-sm" x-model="filterQueue">
+                <option value="">All Queues</option>
+                <template x-for="q in $store.app.queues" :key="q">
+                  <option :value="q" x-text="q"></option>
+                </template>
+              </select>
+            </div>
+            <div class="d-flex gap-2">
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-inserted" x-model="filterTypes.job_inserted">
+                <label class="form-check-label" for="evt-inserted"><span class="badge bg-primary-subtle text-primary-emphasis">Inserted</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-updated" x-model="filterTypes.job_updated">
+                <label class="form-check-label" for="evt-updated"><span class="badge bg-warning-subtle text-warning-emphasis">Updated</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-deleted" x-model="filterTypes.job_deleted">
+                <label class="form-check-label" for="evt-deleted"><span class="badge bg-danger-subtle text-danger-emphasis">Deleted</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-dlq" x-model="filterTypes.job_dlq">
+                <label class="form-check-label" for="evt-dlq"><span class="badge bg-secondary-subtle text-secondary-emphasis">DLQ</span></label>
+              </div>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @click="clearEvents()">Clear</button>
+          </div>
+
+          <div class="event-log">
+            <table class="table table-sm table-hover">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Event</th>
+                  <th>Table</th>
+                  <th>Job ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(evt, idx) in filteredEvents" :key="idx">
+                  <tr>
+                    <td x-text="formatTime(evt.receivedAt)"></td>
+                    <td><span class="badge" :class="badgeClass(evt.event)" x-text="evt.event"></span></td>
+                    <td x-text="evt.table || '-'"></td>
+                    <td x-text="evt.job_id || '-'"></td>
+                  </tr>
+                </template>
+                <tr x-show="filteredEvents.length === 0">
+                  <td colspan="4" class="text-muted text-center">No events yet. Events appear in real-time via SSE.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Cron Tab -->
+    <div class="tab-pane fade" id="tab-cron" role="tabpanel" x-data="cronTab">
+      <div class="d-flex gap-2 mb-3 align-items-center">
+        <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
+        <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
+          <colgroup>
+            <col style="width: 18%">
+            <col style="width: 24%">
+            <col style="width: 14%">
+            <col style="width: 8%">
+            <col style="width: 18%">
+            <col style="width: 18%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Expression</th>
+              <th>Overlap Policy</th>
+              <th>Enabled</th>
+              <th>Last Fired At</th>
+              <th>Last Checked</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="s in schedules" :key="s.name">
+              <tr>
+                <td class="text-truncate" x-text="s.name" :title="s.name"></td>
+
+                <!-- Expression (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'expression'">
+                    <div class="d-flex gap-1 align-items-center">
+                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
+                        x-model="editValue" @keyup.enter="saveEdit()" @keyup.escape="cancelEdit()">
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'expression')">
+                    <div class="d-flex flex-column gap-0">
+                      <div class="d-flex align-items-center gap-1">
+                        <span class="editable-cell" @click="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          x-text="effectiveExpression(s)"></span>
+                        <template x-if="isOverridden(s, 'expression')">
+                          <span class="d-inline-flex align-items-center gap-1">
+                            <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                            <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                              @click="resetToDefault(s.name, 'expression')" title="Reset to default">reset</button>
+                          </span>
+                        </template>
+                      </div>
+                      <small class="text-muted" x-text="describeExpression(s)"></small>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'expression' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Overlap (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'overlap'">
+                    <div class="d-flex gap-1 align-items-center">
+                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue"
+                        @change="saveEdit()">
+                        <option value="SkipOverlap">SkipOverlap</option>
+                        <option value="AllowOverlap">AllowOverlap</option>
+                      </select>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'overlap')">
+                    <div class="d-flex align-items-center gap-1">
+                      <span class="editable-cell" @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        x-text="effectiveOverlap(s)"></span>
+                      <template x-if="isOverridden(s, 'overlap')">
+                        <span class="d-inline-flex align-items-center gap-1">
+                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                            @click="resetToDefault(s.name, 'overlap')" title="Reset to default">reset</button>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'overlap' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Enabled toggle -->
+                <td>
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" :checked="s.enabled"
+                      @change="toggleEnabled(s)">
+                  </div>
+                </td>
+
+                <td x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
+              </tr>
+            </template>
+            <tr x-show="schedules.length === 0 && !loading">
+              <td colspan="6" class="text-muted text-center">No cron schedules configured.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+<!-- Scripts -->
+<script src="vendor/bootstrap.bundle.min.js"></script>
+<script>
+  // Fix Bootstrap aria-hidden warning: blur focus before modal hides
+  document.addEventListener('hide.bs.modal', () => document.activeElement?.blur());
+
+  // Restore tab from URL hash (runs before Alpine removes x-cloak, so no flash)
+  (function() {
+    var hash = location.hash.replace('#', '');
+    if (hash) {
+      var tab = document.querySelector('[data-bs-target="#tab-' + hash + '"]');
+      if (tab) bootstrap.Tab.getOrCreateInstance(tab).show();
+    }
+  })();
+</script>
+<script src="js/api.js"></script>
+<script src="js/helpers.js"></script>
+<script src="js/store.js"></script>
+<script src="js/stats.js"></script>
+<script src="js/jobs.js"></script>
+<script src="js/dlq.js"></script>
+<script src="js/events.js"></script>
+<script src="vendor/cronstrue.min.js"></script>
+<script src="js/cron.js"></script>
+<script defer src="vendor/alpine.min.js"></script>
+</body>
+</html>

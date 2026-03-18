@@ -1,0 +1,57 @@
+cabal-version: 2.2
+name:          arbiter-bench
+version:       0.1.0.0
+synopsis:      Benchmarks for arbiter job queue
+description:
+  Performance benchmarks for the arbiter PostgreSQL job queue library.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+benchmark benchmarks
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: bench
+  main-is:        Benchmarks.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , aeson               >=2.0
+    , arbiter-core
+    , arbiter-hasql
+    , arbiter-migrations
+    , arbiter-orville
+    , arbiter-simple
+    , arbiter-worker
+    , async               >=2.2
+    , base                >=4.14 && <5
+    , bytestring          >=0.10
+    , exceptions          >=0.10
+    , hasql               >=1.9
+    , orville-postgresql  >=1.0
+    , postgresql-simple   >=0.6
+    , tagged              >=0.8
+    , tasty               >=1.4
+    , tasty-bench         >=0.3
+    , text                >=1.2
+    , time                >=1.9
+    , transformers        >=0.5
+    , unliftio            >=0.2

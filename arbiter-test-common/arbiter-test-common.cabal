@@ -1,0 +1,53 @@
+cabal-version: 2.2
+name:          arbiter-test-common
+version:       0.1.0.0
+synopsis:      Shared test utilities for arbiter test suites
+description:
+  Common test fixtures, setup utilities, and helper functions shared across arbiter test suites.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Testing
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Test.Concurrency
+    Arbiter.Test.Config
+    Arbiter.Test.Fixtures
+    Arbiter.Test.GroupsInvariant
+    Arbiter.Test.Operations
+    Arbiter.Test.Poll
+    Arbiter.Test.Setup
+
+  build-depends:
+    , aeson              >=2.0  && <2.3
+    , arbiter-core
+    , base               >=4.14 && <5
+    , bytestring         >=0.10 && <0.13
+    , containers         >=0.6  && <0.8
+    , hspec              >=2.8  && <2.12
+    , postgresql-libpq   >=0.9  && <0.12
+    , postgresql-simple  >=0.6  && <0.8
+    , text               >=1.2  && <2.2
+    , time               >=1.9  && <1.15
+    , unliftio           >=0.2  && <0.3

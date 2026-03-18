@@ -1,0 +1,41 @@
+cabal-version: 2.2
+name:          arbiter-migrations
+version:       0.1.0.0
+synopsis:      SQL schema migrations for arbiter
+description:
+  This package uses postgresql-migration to track and execute DDL for arbiter job queue tables.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules: Arbiter.Migrations
+  build-depends:
+    , arbiter-core          <0.2
+    , base                  >=4.14 && <5
+    , bytestring            >=0.10 && <0.13
+    , postgresql-libpq      >=0.10 && <0.12
+    , postgresql-migration  >=0.2  && <0.3
+    , postgresql-simple     >=0.6  && <0.8
+    , text                  >=1.2  && <2.2

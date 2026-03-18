@@ -1,0 +1,50 @@
+cabal-version: 2.2
+name:          arbiter-servant-demo
+version:       0.1.0.0
+synopsis:      Demo application for arbiter-servant with admin UI
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Web
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+executable arbiter-servant-demo
+  import:         shared-properties
+  main-is:        Main.hs
+  hs-source-dirs: .
+  build-depends:
+    , aeson               >=2.0
+    , arbiter-core
+    , arbiter-migrations
+    , arbiter-servant
+    , arbiter-servant-ui
+    , arbiter-simple
+    , arbiter-worker
+    , async               >=2.2
+    , base                >=4.14 && <5
+    , bytestring          >=0.10
+    , postgresql-simple   >=0.6
+    , text                >=1.2
+    , time                >=1.9
+    , unix                >=2.7
+    , wai-cors            >=0.2
+    , wai-extra           >=3.0
+    , warp
+
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N

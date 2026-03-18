@@ -1,0 +1,82 @@
+cabal-version: 2.2
+name:          arbiter-servant
+version:       0.1.0.0
+synopsis:      Servant REST API for arbiter job queue
+description:
+  This package provides a Servant-based REST API for managing and monitoring
+  arbiter job queues. Includes endpoints for job management, DLQ operations, statistics, and real-time events.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Web
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Servant
+    Arbiter.Servant.API
+    Arbiter.Servant.Server
+    Arbiter.Servant.Types
+
+  build-depends:
+    , aeson              >=2.0  && <2.3
+    , arbiter-core       <0.2
+    , arbiter-simple     <0.2
+    , arbiter-worker     <0.2
+    , base               >=4.14 && <5
+    , bytestring         >=0.10 && <0.13
+    , containers         >=0.6  && <0.8
+    , cron               >=0.7  && <0.8
+    , http-types         >=0.12 && <0.13
+    , postgresql-simple  >=0.6  && <0.8
+    , resource-pool      >=0.4  && <0.6
+    , servant            >=0.19 && <0.21
+    , servant-server     >=0.19 && <0.21
+    , text               >=1.2  && <2.2
+    , time               >=1.9  && <1.15
+    , wai                >=3.2  && <3.3
+    , warp               >=3.3  && <3.5
+
+test-suite arbiter-servant-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  other-modules:  Test.Arbiter.Servant.API
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , aeson
+    , arbiter-core         <0.2
+    , arbiter-servant
+    , arbiter-simple       <0.2
+    , arbiter-test-common
+    , base
+    , bytestring
+    , containers
+    , hspec
+    , hspec-wai
+    , hspec-wai-json
+    , postgresql-simple
+    , resource-pool
+    , text
+    , time
+    , wai-extra

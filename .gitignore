@@ -1,0 +1,5 @@
+dist-newstyle
+tags
+*.bak*
+.stack-work
+cabal.project.freeze

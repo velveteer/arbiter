@@ -1,0 +1,61 @@
+cabal-version: 2.2
+name:          arbiter-core
+version:       0.1.0.0
+synopsis:      Core types and logic for PostgreSQL-backed job queue
+description:
+  Core job and dead-letter queue types, SQL templates, and monadic operations for arbiter.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Core
+    Arbiter.Core.Array
+    Arbiter.Core.Codec
+    Arbiter.Core.CronSchedule
+    Arbiter.Core.Exceptions
+    Arbiter.Core.HasArbiterSchema
+    Arbiter.Core.HighLevel
+    Arbiter.Core.Job.DLQ
+    Arbiter.Core.Job.Schema
+    Arbiter.Core.Job.Types
+    Arbiter.Core.JobTree
+    Arbiter.Core.MonadArbiter
+    Arbiter.Core.Operations
+    Arbiter.Core.PoolConfig
+    Arbiter.Core.QueueRegistry
+    Arbiter.Core.SqlTemplates
+
+  build-depends:
+    , aeson               >=2.0  && <2.3
+    , base                >=4.14 && <5
+    , bytestring          >=0.10 && <0.13
+    , containers          >=0.6  && <0.8
+    , free                >=5.1  && <5.3
+    , neat-interpolation  >=0.5  && <0.6
+    , postgresql-simple   >=0.6  && <0.8
+    , text                >=1.2  && <2.2
+    , time                >=1.9  && <1.15
+    , unliftio            >=0.2  && <0.3

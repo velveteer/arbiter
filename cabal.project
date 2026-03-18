@@ -1,0 +1,15 @@
+packages:
+  arbiter-core
+  arbiter-migrations
+  arbiter-worker
+  arbiter-simple
+  arbiter-hasql
+  arbiter-orville
+  arbiter-servant
+  arbiter-servant-ui
+  arbiter-servant-demo
+  arbiter-test-common
+  arbiter-bench
+
+multi-repl: True
+tests: True

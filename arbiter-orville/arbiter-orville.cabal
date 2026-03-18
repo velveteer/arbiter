@@ -1,0 +1,70 @@
+cabal-version: 2.2
+name:          arbiter-orville
+version:       0.1.0.0
+synopsis:      Orville implementation of arbiter
+description:   Orville-postgresql backend for arbiter.
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Orville
+    Arbiter.Orville.MonadArbiter
+
+  build-depends:
+    , aeson               >=2.0  && <2.3
+    , arbiter-core        <0.2
+    , base                >=4.14 && <5
+    , bytestring          >=0.10 && <0.13
+    , orville-postgresql  >=1.0  && <1.2
+    , postgresql-libpq    >=0.9  && <0.12
+    , text                >=1.2  && <2.2
+
+test-suite arbiter-orville-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  other-modules:
+    Test.Arbiter.Orville.Concurrency
+    Test.Arbiter.Orville.Operations
+    Test.Arbiter.Orville.TestHelpers
+    Test.Arbiter.Orville.Worker
+
+  build-depends:
+    , aeson
+    , arbiter-core         <0.2
+    , arbiter-orville
+    , arbiter-test-common
+    , arbiter-worker
+    , base
+    , bytestring
+    , exceptions
+    , hspec                >=2.0 && <2.12
+    , orville-postgresql
+    , postgresql-simple
+    , text
+    , transformers
+    , unliftio

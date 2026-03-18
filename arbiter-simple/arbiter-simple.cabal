@@ -1,0 +1,72 @@
+cabal-version: 2.2
+name:          arbiter-simple
+version:       0.1.0.0
+synopsis:      PostgreSQL-simple implementation of arbiter
+description:
+  PostgreSQL-simple backend for arbiter with connection pooling and savepoint-based nested transactions.
+
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Simple
+    Arbiter.Simple.MonadArbiter
+    Arbiter.Simple.SimpleDb
+
+  build-depends:
+    , arbiter-core       <0.2
+    , base               >=4.14 && <5
+    , bytestring         >=0.10 && <0.13
+    , exceptions         >=0.10 && <0.11
+    , mtl                >=2.2  && <2.4
+    , postgresql-simple  >=0.6  && <0.8
+    , resource-pool      >=0.4  && <0.6
+    , text               >=1.2  && <2.2
+    , transformers       >=0.5  && <0.7
+    , unliftio           >=0.2  && <0.3
+
+test-suite arbiter-simple-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  other-modules:
+    Test.Arbiter.Simple.Concurrency
+    Test.Arbiter.Simple.GroupsInvariant
+    Test.Arbiter.Simple.Operations
+    Test.Arbiter.Simple.TestHelpers
+
+  build-depends:
+    , arbiter-core         <0.2
+    , arbiter-simple
+    , arbiter-test-common
+    , base
+    , bytestring
+    , hspec                >=2.0 && <2.12
+    , postgresql-simple
+    , resource-pool
+    , text
+    , unliftio

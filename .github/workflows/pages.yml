@@ -1,0 +1,77 @@
+name: Haddock Pages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.10'
+          cabal-version: '3.12'
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('**/*.cabal', 'cabal.project') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-
+
+      - name: Build
+        run: |
+          cabal update
+          cabal build all
+
+      - name: Generate Haddocks
+        run: |
+          cabal haddock all \
+            --haddock-hyperlink-source \
+            --haddock-quickjump \
+            --disable-documentation \
+            --haddock-html-location='https://hackage.haskell.org/package/$pkg-$version/docs'
+
+      - name: Assemble site
+        run: |
+          mkdir -p site
+          cp docs/index.html site/
+          for pkg in arbiter-core arbiter-migrations arbiter-worker arbiter-simple arbiter-orville arbiter-hasql arbiter-servant arbiter-servant-ui; do
+            pkg_doc_dir=$(find dist-newstyle -path "*/${pkg}-*/doc/html/${pkg}" -type d 2>/dev/null | head -1)
+            if [ -n "$pkg_doc_dir" ]; then
+              cp -r "$pkg_doc_dir" "site/"
+            fi
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

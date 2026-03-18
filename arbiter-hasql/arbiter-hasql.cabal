@@ -1,0 +1,76 @@
+cabal-version: 2.2
+name:          arbiter-hasql
+version:       0.1.0.0
+synopsis:      Hasql backend for arbiter
+description:   Hasql backend for arbiter.
+license:       MIT
+author:        Joshua Miller
+maintainer:    joshua.ian.miller@pm.me
+category:      Database
+build-type:    Simple
+homepage:      https://github.com/velveteer/arbiter
+bug-reports:   https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Hasql
+    Arbiter.Hasql.Compat
+    Arbiter.Hasql.Decode
+    Arbiter.Hasql.Encode
+    Arbiter.Hasql.HasqlDb
+    Arbiter.Hasql.MonadArbiter
+
+  build-depends:
+    , arbiter-core   <0.2
+    , base           >=4.14 && <5
+    , bytestring     >=0.10 && <0.13
+    , exceptions     >=0.10 && <0.11
+    , hasql          >=1.9  && <1.11
+    , mtl            >=2.2  && <2.4
+    , resource-pool  >=0.4  && <0.6
+    , text           >=1.2  && <2.2
+    , transformers   >=0.5  && <0.7
+    , unliftio       >=0.2  && <0.3
+
+test-suite arbiter-hasql-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  other-modules:
+    Test.Arbiter.Hasql.Concurrency
+    Test.Arbiter.Hasql.Operations
+    Test.Arbiter.Hasql.TestHelpers
+    Test.Arbiter.Hasql.Worker
+
+  build-depends:
+    , aeson
+    , arbiter-core         <0.2
+    , arbiter-hasql
+    , arbiter-test-common
+    , arbiter-worker
+    , base
+    , bytestring
+    , hasql
+    , hspec                >=2.0 && <2.12
+    , postgresql-simple
+    , resource-pool
+    , text
+    , unliftio
