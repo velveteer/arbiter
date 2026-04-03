@@ -1,17 +1,18 @@
-cabal-version: 2.2
-name:          arbiter-core
-version:       0.1.0.0
-synopsis:      Core types and logic for PostgreSQL-backed job queue
+cabal-version:   2.2
+name:            arbiter-core
+version:         0.1.0.0
+synopsis:        Core types and logic for PostgreSQL-backed job queue
 description:
   Core job and dead-letter queue types, SQL templates, and monadic operations for arbiter.
 
-license:       MIT
-author:        Joshua Miller
-maintainer:    joshua.ian.miller@pm.me
-category:      Database
-build-type:    Simple
-homepage:      https://github.com/velveteer/arbiter
-bug-reports:   https://github.com/velveteer/arbiter/issues
+license:         MIT
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Database
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git

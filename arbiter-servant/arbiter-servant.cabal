@@ -1,18 +1,19 @@
-cabal-version: 2.2
-name:          arbiter-servant
-version:       0.1.0.0
-synopsis:      Servant REST API for arbiter job queue
+cabal-version:   2.2
+name:            arbiter-servant
+version:         0.1.0.0
+synopsis:        Servant REST API for arbiter job queue
 description:
   This package provides a Servant-based REST API for managing and monitoring
   arbiter job queues. Includes endpoints for job management, DLQ operations, statistics, and real-time events.
 
-license:       MIT
-author:        Joshua Miller
-maintainer:    joshua.ian.miller@pm.me
-category:      Web
-build-type:    Simple
-homepage:      https://github.com/velveteer/arbiter
-bug-reports:   https://github.com/velveteer/arbiter/issues
+license:         MIT
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Web
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git
