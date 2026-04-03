@@ -371,6 +371,40 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       void $ runM env $ HL.insertJob job2
       check env "after ReplaceDuplicate (count should still be 1)"
 
+    it "dedup ReplaceDuplicate with priority change: min_priority updated" $ \env -> do
+      let job1 =
+            (defaultJob (mkPayload "dedup-prio1"))
+              { groupKey = Just "dedup-prio-g"
+              , dedupKey = Just (ReplaceDuplicate "dup-key-prio")
+              , priority = 1
+              }
+      void $ runM env $ HL.insertJob job1
+      check env "after first insert (priority 1)"
+
+      -- Add a second job so the group has two entries
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "dedup-prio-other")) {groupKey = Just "dedup-prio-g", priority = 5}
+      check env "after second insert (priority 5)"
+
+      -- Replace first job with higher priority
+      let job2 =
+            (defaultJob (mkPayload "dedup-prio2"))
+              { groupKey = Just "dedup-prio-g"
+              , dedupKey = Just (ReplaceDuplicate "dup-key-prio")
+              , priority = 10
+              }
+      void $ runM env $ HL.insertJob job2
+      check env "after ReplaceDuplicate with priority 1 -> 10 (min_priority should be 5 now)"
+
+      -- Replace back to lower priority
+      let job3 =
+            (defaultJob (mkPayload "dedup-prio3"))
+              { groupKey = Just "dedup-prio-g"
+              , dedupKey = Just (ReplaceDuplicate "dup-key-prio")
+              , priority = 0
+              }
+      void $ runM env $ HL.insertJob job3
+      check env "after ReplaceDuplicate with priority 10 -> 0 (min_priority should be 0 now)"
+
     it "dedup ReplaceDuplicate with group_key change: old group decremented" $ \env -> do
       let job1 =
             (defaultJob (mkPayload "dedup-move1")) {groupKey = Just "dedup-old-g", dedupKey = Just (ReplaceDuplicate "dup-key-3")}

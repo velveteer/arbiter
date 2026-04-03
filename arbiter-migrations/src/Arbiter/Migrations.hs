@@ -240,7 +240,7 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "create-results-table" $ createResultsTableSQL schemaName tableName
         , script "create-groups-table" $ createGroupsTableSQL schemaName tableName
         , script "create-groups-index" $ createGroupsIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v2" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "create-reaper-seq" $ createReaperSeqSQL schemaName tableName
         ]

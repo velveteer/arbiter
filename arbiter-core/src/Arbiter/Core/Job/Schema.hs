@@ -510,6 +510,27 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
         job_count = ${groupsTbl}.job_count + EXCLUDED.job_count;
 
+      -- Step 5: Handle same-group priority changes (dedup replace within same group)
+      UPDATE ${groupsTbl} g
+      SET min_priority = sub.new_min_priority,
+          min_id = sub.new_min_id
+      FROM (
+        SELECT d.group_key, MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id
+        FROM (
+          SELECT n.group_key
+          FROM new_table n
+          JOIN old_table o ON o.id = n.id
+          WHERE n.group_key IS NOT NULL
+            AND n.group_key IS NOT DISTINCT FROM o.group_key
+            AND n.priority IS DISTINCT FROM o.priority
+        ) d
+        LEFT JOIN ${tbl} t ON t.group_key = d.group_key
+        GROUP BY d.group_key
+      ) sub
+      WHERE g.group_key = sub.group_key
+        AND (g.min_priority IS DISTINCT FROM sub.new_min_priority
+             OR g.min_id IS DISTINCT FROM sub.new_min_id);
+
       RETURN NULL;
     END;
     ${dd} LANGUAGE plpgsql;
