@@ -4,6 +4,9 @@ on:
   push:
     tags: ['v*']
 
+env:
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -53,17 +56,26 @@ jobs:
           ARBITER_TEST_CONN_STRING: "host=localhost port=5432 user=postgres password=master dbname=postgres"
         run: cabal test all
 
+      - name: Check metadata
+        run: |
+          for pkg in $RELEASE_PACKAGES; do
+            echo "Checking $pkg..."
+            cd $pkg && cabal check && cd ..
+          done
+
       - name: Package
         run: |
-          for pkg in arbiter-core arbiter-migrations arbiter-worker arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui; do
+          for pkg in $RELEASE_PACKAGES; do
             cabal sdist $pkg
           done
 
-      - name: Upload to Hackage
+      - name: Upload candidates to Hackage
         env:
           HACKAGE_USERNAME: ${{ secrets.HACKAGE_USERNAME }}
           HACKAGE_PASSWORD: ${{ secrets.HACKAGE_PASSWORD }}
         run: |
-          for tarball in dist-newstyle/sdist/*.tar.gz; do
-            cabal upload --publish --username="$HACKAGE_USERNAME" --password="$HACKAGE_PASSWORD" "$tarball"
+          for pkg in $RELEASE_PACKAGES; do
+            tarball=$(find dist-newstyle/sdist -name "${pkg}-*.tar.gz" | head -1)
+            echo "Uploading $tarball..."
+            cabal upload --username="$HACKAGE_USERNAME" --password="$HACKAGE_PASSWORD" "$tarball"
           done
