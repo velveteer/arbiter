@@ -75,6 +75,7 @@ test-suite arbiter-servant-tests
     , hspec
     , hspec-wai
     , hspec-wai-json
+    , http-types
     , postgresql-simple
     , resource-pool
     , text

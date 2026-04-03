@@ -31,11 +31,13 @@ import Data.Time (UTCTime (..), addUTCTime, getCurrentTime, picosecondsToDiffTim
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.Wai.Test (SResponse, simpleBody)
+import Network.HTTP.Types (status200, status404)
+import Network.Wai.Test (SResponse, simpleBody, simpleStatus)
 import Test.Hspec
 import Test.Hspec.Wai
 import Test.Hspec.Wai.JSON
 
+import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Servant (arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
   ( ApiJob (..)
@@ -736,6 +738,34 @@ spec connStr = do
         Ops.visibleJobs s `shouldBe` 2
         Ops.invisibleJobs s `shouldBe` 1
         Ops.oldestJobAgeSeconds s `shouldSatisfy` isJust
+
+  describe "Cron API" $ with (cleanupDb >> pure app) $ do
+    it "PATCH /api/v1/cron/schedules/:name with empty body returns 200" $ do
+      -- Seed a cron schedule directly in the DB
+      liftIO $ withResource sharedPool $ \conn ->
+        CS.upsertCronScheduleDefault conn testSchema "test-cron" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/test-cron"
+          [("Content-Type", "application/json")]
+          "{}"
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        let body = decode @CS.CronScheduleRow (simpleBody resp)
+        body `shouldSatisfy` isJust
+
+    it "PATCH /api/v1/cron/schedules/:name with non-existent name returns 404" $ do
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/does-not-exist"
+          [("Content-Type", "application/json")]
+          "{}"
+
+      liftIO $ simpleStatus resp `shouldBe` status404
 
   describe "Queues API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/queues returns list of all available queues" $ do

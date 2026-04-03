@@ -34,7 +34,7 @@ import Arbiter.Core.QueueRegistry (AllQueuesUnique, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (JobFilter (..))
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
-import Control.Exception (SomeException, bracket, catch)
+import Control.Exception (SomeException, bracket, catch, throwIO)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (toJSON)
@@ -43,7 +43,7 @@ import Data.ByteString.Builder qualified as Builder
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromJust, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Pool qualified as Pool
 import Data.String (fromString)
 import Data.Text (Text)
@@ -77,6 +77,8 @@ import Arbiter.Servant.Types
 data ArbiterServerConfig registry = ArbiterServerConfig
   { serverEnv :: SimpleEnv registry
   -- ^ The SimpleEnv containing schema and connection pool
+  , connPool :: Pool.Pool PG.Connection
+  -- ^ Connection pool for direct queries (SSE, cron)
   , enableSSE :: Bool
   -- ^ Enable Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns a single \"disabled\" event and
@@ -106,7 +108,10 @@ initArbiterServer
   -> IO (ArbiterServerConfig registry)
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
-  pure ArbiterServerConfig {serverEnv = env, enableSSE = True}
+  pool <- case connectionPool (simplePool env) of
+    Just p -> pure p
+    Nothing -> throwIO $ userError "initArbiterServer: no connection pool available"
+  pure ArbiterServerConfig {serverEnv = env, connPool = pool, enableSSE = True}
 
 -- | Wrap jobs with current timestamp for status derivation
 toApiJobs :: (MonadIO m) => [JobRead payload] -> m [ApiJob payload]
@@ -656,10 +661,9 @@ eventsServer config = Tagged $ \_req sendResponse ->
       write "data: {\"event\":\"disabled\"}\n\n"
       flush
     else do
-      let env = serverEnv config
-          connPool = fromJust (connectionPool $ simplePool env)
+      let pool = connPool config
       bracket
-        (Pool.takeResource connPool)
+        (Pool.takeResource pool)
         ( \(conn, localPool) -> do
             -- Clean up LISTEN state before returning to pool so the connection
             -- doesn't accumulate buffered notifications while idle.
@@ -668,7 +672,7 @@ eventsServer config = Tagged $ \_req sendResponse ->
             result <- (PG.execute_ conn "UNLISTEN *" >> pure True) `catch` (\(_ :: SomeException) -> pure False)
             if result
               then Pool.putResource localPool conn
-              else Pool.destroyResource connPool localPool conn
+              else Pool.destroyResource pool localPool conn
         )
         $ \(conn, _) -> do
           _ <- PG.execute_ conn $ "LISTEN " <> fromString (T.unpack Schema.eventStreamingChannel)
@@ -719,10 +723,8 @@ listCronSchedulesHandler
    . ArbiterServerConfig registry
   -> Handler CronSchedulesResponse
 listCronSchedulesHandler config = do
-  let env = serverEnv config
-      schemaName = schema env
-      connPool = fromJust (connectionPool $ simplePool env)
-  rows <- liftIO $ Pool.withResource connPool $ \conn ->
+  let schemaName = schema (serverEnv config)
+  rows <- liftIO $ Pool.withResource (connPool config) $ \conn ->
     CS.listCronSchedules conn schemaName
   pure $ CronSchedulesResponse {cronSchedules = rows}
 
@@ -734,9 +736,7 @@ updateCronScheduleHandler
   -> CronScheduleUpdate
   -> Handler CronScheduleRow
 updateCronScheduleHandler config name update = do
-  let env = serverEnv config
-      schemaName = schema env
-      connPool = fromJust (connectionPool $ simplePool env)
+  let schemaName = schema (serverEnv config)
 
   -- Validate cron expression if provided
   case update.overrideExpression of
@@ -758,12 +758,9 @@ updateCronScheduleHandler config name update = do
         Just _ -> pure ()
     _ -> pure ()
 
-  -- Apply update and read back in a single connection
-  result <- liftIO $ Pool.withResource connPool $ \conn -> do
-    rowsAffected <- CS.updateCronSchedule conn schemaName name update
-    if rowsAffected == 0
-      then pure Nothing
-      else CS.getCronScheduleByName conn schemaName name
+  result <- liftIO $ Pool.withResource (connPool config) $ \conn -> do
+    _ <- CS.updateCronSchedule conn schemaName name update
+    CS.getCronScheduleByName conn schemaName name
 
   case result of
     Nothing -> throwError err404 {errBody = "Cron schedule not found"}
