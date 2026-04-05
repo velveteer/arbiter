@@ -34,7 +34,7 @@ Install directly from GitHub:
 source-repository-package
   type: git
   location: https://github.com/velveteer/arbiter.git
-  tag: <commit-or-tag>
+  tag: <commit-sha>
   subdir:
     arbiter-core
     arbiter-worker
@@ -47,7 +47,7 @@ source-repository-package
 ```yaml
 extra-deps:
   - git: https://github.com/velveteer/arbiter.git
-    commit: <commit-or-tag>
+    commit: <commit-sha>
     subdirs:
       - arbiter-core
       - arbiter-worker
