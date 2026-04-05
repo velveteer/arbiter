@@ -20,9 +20,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
 > [!NOTE]
 >
-> The API is subject to breaking changes. A Hackage release following PVP will happen once the API has stabilized.
->
-> SQL migrations will remain backwards compatible.
+> The API is subject to breaking changes. A Hackage release following PVP is tentative.
 
 ## Installation
 

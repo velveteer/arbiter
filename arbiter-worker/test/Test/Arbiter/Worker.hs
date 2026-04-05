@@ -1179,9 +1179,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             batchHandler _conn jobs = do
-              liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
               -- Manually ack all jobs
               forM_ jobs $ \job -> void $ HL.ackJob job
+              liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
         let jobs =
@@ -1218,9 +1218,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             batchHandler _conn jobs = do
-              liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
               -- Only ack the first job, leave the second un-acked
               void $ HL.ackJob (head $ toList jobs)
+              liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
         let jobs =
