@@ -106,7 +106,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <$> pure ()
         <*> v .: "payload"
         <*> pure ()
-        <*> v .:? "groupKey" .!= Nothing
+        <*> v .:? "groupKey"
         <*> pure ()
         <*> pure Nothing
         <*> pure 0
@@ -114,8 +114,8 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> v .:? "priority" .!= 0
         <*> pure Nothing
         <*> v .:? "notVisibleUntil"
-        <*> v .:? "dedupKey" .!= Nothing
-        <*> v .:? "maxAttempts" .!= Nothing
+        <*> v .:? "dedupKey"
+        <*> v .:? "maxAttempts"
         <*> pure Nothing -- parentId: managed internally
         <*> pure False -- isRollup: managed internally
         <*> pure False -- suspended: managed internally

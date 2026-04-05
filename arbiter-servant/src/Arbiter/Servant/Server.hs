@@ -1,7 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -735,11 +734,11 @@ updateCronScheduleHandler
   -> Text
   -> CronScheduleUpdate
   -> Handler CronScheduleRow
-updateCronScheduleHandler config name update = do
+updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverlap _) = do
   let schemaName = schema (serverEnv config)
 
   -- Validate cron expression if provided
-  case update.overrideExpression of
+  case mExpr of
     Just (Just expr) ->
       case parseCronSchedule expr of
         Left err -> throwError err400 {errBody = "Invalid cron expression: " <> fromString err}
@@ -747,7 +746,7 @@ updateCronScheduleHandler config name update = do
     _ -> pure ()
 
   -- Validate overlap policy if provided
-  case update.overrideOverlap of
+  case mOverlap of
     Just (Just ov) ->
       case overlapPolicyFromText ov of
         Nothing ->

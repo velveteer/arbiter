@@ -7,6 +7,7 @@
 
 module Test.Arbiter.Servant.API (spec) where
 
+import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, defaultGroupedJob, defaultJob)
@@ -37,7 +38,6 @@ import Test.Hspec
 import Test.Hspec.Wai
 import Test.Hspec.Wai.JSON
 
-import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Servant (arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
   ( ApiJob (..)

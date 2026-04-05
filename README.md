@@ -14,20 +14,50 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - Configurable backoff, observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
+- Extensive test coverage (600+ integration tests)
 
 **[API Documentation](https://velveteer.github.io/arbiter/)**
 
-## Quick Start
+> [!NOTE]
+>
+> The API is subject to breaking changes. A Hackage release following PVP will happen once the API has stabilized.
+>
+> SQL migrations will remain backwards compatible.
 
-### Dependencies
+## Installation
 
-```cabal
-build-depends:
-  , arbiter-core
-  , arbiter-worker
-  , arbiter-simple       -- or arbiter-orville or arbiter-hasql
-  , arbiter-migrations
+Install directly from GitHub:
+
+**Cabal** — add to your `cabal.project`:
+
 ```
+source-repository-package
+  type: git
+  location: https://github.com/velveteer/arbiter.git
+  tag: <commit-or-tag>
+  subdir:
+    arbiter-core
+    arbiter-worker
+    arbiter-simple
+    arbiter-migrations
+```
+
+**Stack** — add to your `stack.yaml`:
+
+```yaml
+extra-deps:
+  - git: https://github.com/velveteer/arbiter.git
+    commit: <commit-or-tag>
+    subdirs:
+      - arbiter-core
+      - arbiter-worker
+      - arbiter-simple
+      - arbiter-migrations
+```
+
+Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on your backend.
+
+## Quick Start
 
 ### Payload Types
 
@@ -149,7 +179,7 @@ Set `useWorkerTransaction = False` for manual transaction control — you must c
 
 ### Head-of-Line Blocking
 
-- **Same group key** — processed serially. Only one visible job per group is eligible for claiming.
+- **Same group key** — processed serially. Only one visible job (or job batch) per group is eligible for claiming.
 - **No group key** — processed concurrently by any available worker.
 
 Group eligibility is maintained in a dedicated `{queue}_groups` table via statement-level AFTER triggers, with a periodic reaper to correct drift.

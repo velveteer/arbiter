@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Types and @postgresql-simple@ operations for the @cron_schedules@ table.
@@ -76,11 +75,11 @@ data CronScheduleRow = CronScheduleRow
 
 -- | Effective expression: override if set, else default.
 effectiveExpression :: CronScheduleRow -> Text
-effectiveExpression row = fromMaybe row.defaultExpression row.overrideExpression
+effectiveExpression CronScheduleRow {defaultExpression = def, overrideExpression = mOvr} = fromMaybe def mOvr
 
 -- | Effective overlap policy: override if set, else default.
 effectiveOverlap :: CronScheduleRow -> Text
-effectiveOverlap row = fromMaybe row.defaultOverlap row.overrideOverlap
+effectiveOverlap CronScheduleRow {defaultOverlap = def, overrideOverlap = mOvr} = fromMaybe def mOvr
 
 -- | Patch update for a cron schedule.
 --
@@ -194,18 +193,18 @@ getCronScheduleByName conn schemaName scheduleName = do
 --
 -- Returns the number of rows affected (0 = not found, 1 = updated).
 updateCronSchedule :: Connection -> Text -> Text -> CronScheduleUpdate -> IO Int64
-updateCronSchedule conn schemaName scheduleName upd = do
+updateCronSchedule conn schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mEnabled) = do
   let (clauses, params) =
         mconcat
-          [ case upd.overrideExpression of
+          [ case mExpr of
               Nothing -> ([], [])
               Just Nothing -> (["override_expression = NULL"], [])
               Just (Just expr) -> (["override_expression = ?"], [expr])
-          , case upd.overrideOverlap of
+          , case mOverlap of
               Nothing -> ([], [])
               Just Nothing -> (["override_overlap = NULL"], [])
               Just (Just ov) -> (["override_overlap = ?"], [ov])
-          , case upd.enabled of
+          , case mEnabled of
               Nothing -> ([], [])
               Just True -> (["enabled = TRUE"], [])
               Just False -> (["enabled = FALSE"], [])

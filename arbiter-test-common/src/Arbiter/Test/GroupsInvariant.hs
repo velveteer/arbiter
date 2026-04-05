@@ -382,7 +382,9 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       check env "after first insert (priority 1)"
 
       -- Add a second job so the group has two entries
-      void $ runM env $ HL.insertJob (defaultJob (mkPayload "dedup-prio-other")) {groupKey = Just "dedup-prio-g", priority = 5}
+      void $
+        runM env $
+          HL.insertJob (defaultJob (mkPayload "dedup-prio-other")) {groupKey = Just "dedup-prio-g", priority = 5}
       check env "after second insert (priority 5)"
 
       -- Replace first job with higher priority
