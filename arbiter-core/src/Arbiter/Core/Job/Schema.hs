@@ -347,11 +347,14 @@ groupsInsertFunction funcName groupsTbl dd =
         RETURN NULL;
       END IF;
 
+      -- ORDER BY ensures consistent lock acquisition order across concurrent
+      -- transactions to prevent deadlocks on the groups table.
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count)
       SELECT group_key, MIN(priority), MIN(id), COUNT(*)
       FROM new_table
       WHERE group_key IS NOT NULL
       GROUP BY group_key
+      ORDER BY group_key
       ON CONFLICT (group_key) DO UPDATE SET
         min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
         min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
@@ -505,6 +508,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE n.group_key IS NOT NULL
         AND o.group_key IS DISTINCT FROM n.group_key
       GROUP BY n.group_key
+      ORDER BY n.group_key
       ON CONFLICT (group_key) DO UPDATE SET
         min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
         min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),

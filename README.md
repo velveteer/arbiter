@@ -509,15 +509,15 @@ Arbiter's core is backend-agnostic via the `MonadArbiter` typeclass. Three offic
 
 If you're choosing a backend based on raw throughput:
 
-**Operational overhead** (no-op handler, 200k pre-loaded queue, 4 pools × 10 workers, PostgreSQL 17, Apple M1 Pro):
+**Operational overhead** (no-op handler, 200k pre-loaded queue, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro):
 
 | Backend | Single job | Batched (10) | Single (50k groups) | Batched (50k groups) |
 |---------|-----------|-------------|---------------------|---------------------|
-| hasql | 3,055/s | 12,111/s | 2,773/s | 11,979/s |
-| orville | 2,602/s | 9,745/s | 2,364/s | 10,083/s |
-| postgresql-simple | 1,890/s | 9,737/s | 1,652/s | 8,219/s |
+| hasql | 11,618/s | 19,991/s | 9,128/s | 19,990/s |
+| orville | 9,431/s | 19,993/s | 7,802/s | 19,993/s |
+| postgresql-simple | 6,869/s | 19,995/s | 5,957/s | 19,993/s |
 
-Batched mode processes multiple jobs per transaction. The hasql backend uses prepared statements for plan caching. Grouped workloads add overhead from triggers that maintain the groups table for head-of-line blocking — with 50k active groups, single-job throughput drops ~10% while batched mode is largely unaffected. Under high insert concurrency, prepared statement overhead narrows the gap between hasql and orville.
+Batched mode processes multiple jobs per transaction. The hasql backend uses prepared statements for plan caching. Grouped workloads add overhead from triggers that maintain the groups table for head-of-line blocking — with 50k active groups, single-job throughput drops ~21% while batched mode is largely unaffected.
 
 ### arbiter-simple (postgresql-simple)
 
