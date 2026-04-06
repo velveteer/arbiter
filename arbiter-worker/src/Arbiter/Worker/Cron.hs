@@ -48,6 +48,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
   ( UTCTime (..)
+  , addUTCTime
   , defaultTimeLocale
   , diffUTCTime
   , formatTime
@@ -186,16 +187,16 @@ processCronTick
   -> m ()
 processCronTick logCfg schemaName jobs tick = do
   -- Batch-fetch all schedule rows once; fall back to code defaults on DB error
-  rowMap <- do
+  (rowMap, dbFetchOk) <- do
     result <- tryAny $ Ops.listCronSchedules schemaName
     case result of
-      Right rows -> pure [(CS.name r, r) | r <- rows]
+      Right rows -> pure ([(CS.name r, r) | r <- rows], True)
       Left e -> do
         liftIO $
           logMessage logCfg Error $
             "Failed to fetch cron schedules from DB, using code defaults: "
               <> T.pack (show e)
-        pure []
+        pure ([], False)
 
   forM_ jobs $ \cj -> do
     let mRow = lookup (name cj) rowMap
@@ -257,14 +258,15 @@ processCronTick logCfg schemaName jobs tick = do
                       <> "' fired at "
                       <> formatMinute tick
 
-  -- Mark all schedules as checked
-  result <- tryAny $ Ops.touchCronChecked schemaName (map name jobs)
-  case result of
-    Right _ -> pure ()
-    Left e ->
-      liftIO $
-        logMessage logCfg Error $
-          "Failed to update last_checked_at: " <> T.pack (show e)
+  -- Mark all schedules as checked (only if we successfully read from DB)
+  when dbFetchOk $ do
+    result <- tryAny $ Ops.touchCronChecked schemaName (map name jobs)
+    case result of
+      Right _ -> pure ()
+      Left e ->
+        liftIO $
+          logMessage logCfg Error $
+            "Failed to update last_checked_at: " <> T.pack (show e)
 
 -- | Compute the dedup key for a cron job at the given tick time.
 --
@@ -283,7 +285,7 @@ makeDedupKeyFromParts jobName ov tick = case ov of
 -- clamped to @[0, 120_000_000]@.
 computeDelayMicros :: UTCTime -> Int
 computeDelayMicros now =
-  let nextMinute = truncateToMinute now {utctDayTime = utctDayTime now + 60}
+  let nextMinute = truncateToMinute (addUTCTime 60 now)
       delaySeconds = diffUTCTime nextMinute now
       rawMicros = ceiling (delaySeconds * 1_000_000) :: Int
    in max 0 (min 120_000_000 rawMicros)
