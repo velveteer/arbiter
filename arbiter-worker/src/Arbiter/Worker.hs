@@ -25,6 +25,7 @@ module Arbiter.Worker
     -- * Cron
   , CronJob (..)
   , OverlapPolicy (..)
+  , BackfillPolicy (..)
   , cronJob
   , initCronSchedules
   , overlapPolicyToText
@@ -100,7 +101,8 @@ import UnliftIO.STM (TBQueue, TVar)
 import Arbiter.Worker.BackoffStrategy
 import Arbiter.Worker.Config
 import Arbiter.Worker.Cron
-  ( CronJob (..)
+  ( BackfillPolicy (..)
+  , CronJob (..)
   , OverlapPolicy (..)
   , cronJob
   , initCronSchedules

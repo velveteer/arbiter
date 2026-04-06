@@ -208,7 +208,7 @@ mkDemoWorker connStr = do
             "demo-ticker"
             "* * * * *" -- every minute
             AllowOverlap
-            (\t -> defaultJob (TestMessage $ "tick:" <> fmtTime t))
+            (\_ t -> defaultJob (TestMessage $ "tick:" <> fmtTime t))
       ]
 
 mkEmailWorker :: ByteString -> IO (WorkerConfig DemoM EmailPayload ())
@@ -230,7 +230,7 @@ mkEmailWorker connStr = do
             "email-digest"
             "*/2 * * * *" -- every 2 minutes
             SkipOverlap
-            (\_ -> defaultJob (SendEmail "scheduled-digest"))
+            (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
       ]
 
 mkNotifWorker :: ByteString -> IO (WorkerConfig DemoM NotificationPayload ())
@@ -250,7 +250,7 @@ mkNotifWorker connStr = do
             "notif-broadcast"
             "*/3 * * * *" -- every 3 minutes
             AllowOverlap
-            (\t -> defaultJob (PushNotification $ "broadcast:" <> fmtTime t))
+            (\_ t -> defaultJob (PushNotification $ "broadcast:" <> fmtTime t))
       ]
 
 -- ---------------------------------------------------------------------------

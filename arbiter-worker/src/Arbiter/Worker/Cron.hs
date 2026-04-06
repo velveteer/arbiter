@@ -16,6 +16,7 @@ module Arbiter.Worker.Cron
   ( -- * Types
     CronJob (..)
   , OverlapPolicy (..)
+  , BackfillPolicy (..)
 
     -- * Smart Constructor
   , cronJob
@@ -30,10 +31,12 @@ module Arbiter.Worker.Cron
     -- * Internal
   , runCronScheduler
   , processCronTick
+  , backfillMissedTicks
   , truncateToMinute
   , formatMinute
   , makeDedupKey
   , computeDelayMicros
+  , enumMinutes
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
@@ -42,12 +45,15 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Monad (forM_, forever, void, when)
+import Control.Monad (forM_, forever, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Foldable (fold)
+import Data.List (unfoldr)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
-  ( UTCTime (..)
+  ( NominalDiffTime
+  , UTCTime (..)
   , addUTCTime
   , defaultTimeLocale
   , diffUTCTime
@@ -69,6 +75,25 @@ data OverlapPolicy
     SkipOverlap
   | -- | One job per tick. Allows concurrent execution of prior ticks.
     AllowOverlap
+  deriving stock (Eq, Generic, Show)
+
+-- | Whether to backfill missed ticks on startup.
+--
+-- When the scheduler starts (or restarts after a crash), it reads
+-- @last_checked_at@ from the @cron_schedules@ table to determine which
+-- ticks were missed. Missed ticks within the backfill window are
+-- processed in chronological order. Dedup keys ensure idempotency.
+--
+-- For 'SkipOverlap' schedules, backfill inserts at most one job
+-- (the dedup key is time-independent, so all missed ticks collapse).
+-- For 'AllowOverlap' schedules, each missed tick produces its own job.
+data BackfillPolicy
+  = -- | Do not backfill missed ticks. Default.
+    NoBackfill
+  | -- | Backfill missed ticks up to the given duration.
+    --
+    -- Example: @Backfill 86400@ backfills up to 24 hours of missed ticks.
+    Backfill NominalDiffTime
   deriving stock (Eq, Generic, Show)
 
 -- | Convert an 'OverlapPolicy' to its text representation.
@@ -95,8 +120,11 @@ data CronJob payload = CronJob
   -- ^ Parsed cron schedule (internal)
   , overlap :: OverlapPolicy
   -- ^ How to handle overlapping ticks
-  , builder :: UTCTime -> JobWrite payload
-  -- ^ Build a job for the given tick time (truncated to minute)
+  , backfill :: BackfillPolicy
+  -- ^ Whether to backfill missed ticks on startup. Default: 'NoBackfill'.
+  , builder :: Bool -> UTCTime -> JobWrite payload
+  -- ^ Build a job for the given tick time. The 'Bool' is 'True' when the
+  -- job is being backfilled (missed tick), 'False' for live ticks.
   }
   deriving stock (Generic)
 
@@ -104,33 +132,45 @@ data CronJob payload = CronJob
 --
 -- Returns @Left@ with an error message if the cron expression is invalid.
 --
--- Note: cron expressions are evaluated in __UTC__. @\"0 3 * * *\"@ fires at
--- 03:00 UTC regardless of the server's local timezone.
---
--- Example:
---
 -- @
 -- cronJob "nightly-report" "0 3 * * *" SkipOverlap
---   (\\_ -> defaultJob (GenerateReport "nightly"))
+--   (\\_backfill _tick -> defaultJob (GenerateReport "nightly"))
 -- @
+--
+-- The builder receives a backfill flag ('True' for missed ticks being
+-- replayed on startup, 'False' for live ticks) and the tick time.
+--
+-- To enable backfill, set it via record update:
+--
+-- @
+-- let Right cj = cronJob "nightly-report" "0 3 * * *" AllowOverlap
+--       (\\isBackfill tick -> (defaultJob (GenerateReport tick))
+--          { priority = if isBackfill then 10 else 0 })
+-- in cj { backfill = Backfill 86400 }  -- backfill up to 24 hours
+-- @
+--
+-- Note: cron expressions are evaluated in __UTC__. @\"0 3 * * *\"@ fires at
+-- 03:00 UTC regardless of the server's local timezone.
 cronJob
   :: Text
   -- ^ Schedule name (used in dedup keys and logging)
   -> Text
   -- ^ Cron expression (5-field: minute hour day-of-month month day-of-week)
   -> OverlapPolicy
-  -> (UTCTime -> JobWrite payload)
+  -> (Bool -> UTCTime -> JobWrite payload)
+  -- ^ Job builder. Receives backfill flag and tick time.
   -> Either String (CronJob payload)
-cronJob name expr overlap mk =
+cronJob cronName expr ov mk =
   case parseCronSchedule expr of
     Left err -> Left err
-    Right schedule ->
+    Right sched ->
       Right
         CronJob
-          { name = name
+          { name = cronName
           , cronExpression = expr
-          , schedule = schedule
-          , overlap = overlap
+          , schedule = sched
+          , overlap = ov
+          , backfill = NoBackfill
           , builder = mk
           }
 
@@ -149,16 +189,10 @@ initCronSchedules schemaName jobs logCfg = do
       (name cj)
       (cronExpression cj)
       (overlapPolicyToText (overlap cj))
-  liftIO $
-    logMessage logCfg Info $
-      "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
+  logCron logCfg Info $
+    "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
--- | Run the cron scheduler loop. Called by 'runWorkerPool' when 'cronJobs'
--- is non-empty.
---
--- On each minute boundary, checks all schedules and inserts matching jobs
--- with appropriate dedup keys. Exceptions per-schedule are caught and logged;
--- the loop continues.
+-- | Run the cron scheduler loop. Called by 'runWorkerPool' when 'cronJobs' is non-empty.
 runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
@@ -167,11 +201,72 @@ runCronScheduler
   -> m ()
 runCronScheduler logCfg schemaName jobs = do
   initCronSchedules schemaName jobs logCfg
-  liftIO $ logMessage logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
+  backfillMissedTicks logCfg schemaName jobs
+  logCron logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
   forever $ do
     waitUntilNextMinute
     now <- liftIO getCurrentTime
-    processCronTick logCfg schemaName jobs (truncateToMinute now)
+    processCronTick False logCfg schemaName jobs (truncateToMinute now)
+
+-- | Backfill missed ticks on startup for schedules with a 'Backfill' policy.
+--
+-- Reads @last_checked_at@ from the @cron_schedules@ table to determine
+-- the last time the scheduler ran. For each schedule with 'Backfill',
+-- enumerates missed ticks within the backfill window and processes them
+-- chronologically. Dedup keys ensure idempotency across multiple instances.
+backfillMissedTicks
+  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  => LogConfig
+  -> Text
+  -> [CronJob payload]
+  -> m ()
+backfillMissedTicks logCfg schemaName jobs = do
+  let backfillJobs = [(cj, w) | cj <- jobs, Backfill w <- [backfill cj]]
+  unless (null backfillJobs) $ do
+    result <- tryAny $ Ops.listCronSchedules schemaName
+    case result of
+      Left e -> logCron logCfg Error $ "Backfill: failed to read schedules: " <> T.pack (show e)
+      Right rows -> do
+        now <- liftIO getCurrentTime
+        let currentTick = truncateToMinute now
+            rowMap = [(CS.name r, r) | r <- rows]
+            plan = concatMap (planBackfill rowMap now currentTick) backfillJobs
+        unless (null plan) $ do
+          forM_ plan $ \(cj, _, ticks) ->
+            logCron logCfg Info $
+              "Backfilling "
+                <> T.pack (show (length ticks))
+                <> " missed tick(s) for '"
+                <> name cj
+                <> "'"
+          let scheduleNames = [name cj | (cj, _, _) <- plan]
+          tryLog logCfg "Backfill failed" $ withDbTransaction $ do
+            void $ Ops.touchCronChecked schemaName scheduleNames
+            forM_ plan $ \(cj, effectiveOv, ticks) ->
+              forM_ ticks $ \tick ->
+                insertCronJob True schemaName cj effectiveOv tick
+
+-- | Pure: compute which ticks need backfilling for a single schedule.
+planBackfill
+  :: [(Text, CS.CronScheduleRow)]
+  -> UTCTime
+  -> UTCTime
+  -> (CronJob payload, NominalDiffTime)
+  -> [(CronJob payload, OverlapPolicy, [UTCTime])]
+planBackfill rowMap now currentTick (cj, window) = fold $ do
+  row <- lookup (name cj) rowMap
+  lastChecked <- CS.lastCheckedAt row
+  case resolveAndParse cj (Just row) of
+    Resolved effectiveOv sched ->
+      let earliest = truncateToMinute (addUTCTime (negate window) now)
+          start = max (truncateToMinute lastChecked) earliest
+          allTicks = enumMinutes (addUTCTime 60 start) currentTick
+          matching = filter (scheduleMatches sched) allTicks
+          ticks = case effectiveOv of
+            SkipOverlap -> take 1 (reverse matching)
+            AllowOverlap -> matching
+       in pure [(cj, effectiveOv, ticks) | not (null ticks)]
+    _ -> pure []
 
 -- | Process a single cron tick at the given time.
 --
@@ -180,93 +275,102 @@ runCronScheduler logCfg schemaName jobs = do
 -- it is logged and skipped.
 processCronTick
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => LogConfig
+  => Bool
+  -- ^ Whether this is a backfill tick
+  -> LogConfig
   -> Text
   -> [CronJob payload]
   -> UTCTime
   -> m ()
-processCronTick logCfg schemaName jobs tick = do
-  -- Batch-fetch all schedule rows once; fall back to code defaults on DB error
-  (rowMap, dbFetchOk) <- do
-    result <- tryAny $ Ops.listCronSchedules schemaName
-    case result of
-      Right rows -> pure ([(CS.name r, r) | r <- rows], True)
-      Left e -> do
-        liftIO $
-          logMessage logCfg Error $
-            "Failed to fetch cron schedules from DB, using code defaults: "
-              <> T.pack (show e)
-        pure ([], False)
+processCronTick isBackfill logCfg schemaName jobs tick = do
+  (rowMap, dbFetchOk) <- fetchScheduleRows logCfg schemaName
 
-  forM_ jobs $ \cj -> do
-    let mRow = lookup (name cj) rowMap
+  forM_ jobs $ \cj ->
+    case resolveAndParse cj (lookup (name cj) rowMap) of
+      Disabled -> pure ()
+      ParseError expr err ->
+        logCron logCfg Error $
+          "Cron schedule '"
+            <> name cj
+            <> "' has invalid effective expression '"
+            <> expr
+            <> "': "
+            <> T.pack err
+      Resolved effectiveOv effectiveSched ->
+        when (scheduleMatches effectiveSched tick) $
+          tryInsertCronJob isBackfill logCfg schemaName cj effectiveOv tick
 
-    let (effectiveExpr, effectiveOv, isEnabled) = case mRow of
-          Nothing ->
-            -- No DB row yet (shouldn't happen after init, but be safe)
-            (cronExpression cj, overlap cj, True)
-          Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
-            let expr = CS.effectiveExpression row
-                ovText = CS.effectiveOverlap row
-                ov = case overlapPolicyFromText ovText of
-                  Just p -> p
-                  Nothing -> overlap cj -- fallback to code default
-             in (expr, ov, rowEnabled)
+  when dbFetchOk $
+    tryLog logCfg "Failed to update last_checked_at" $
+      Ops.touchCronChecked schemaName (map name jobs)
 
-    when isEnabled $ do
-      -- Parse the effective expression
-      case parseCronSchedule effectiveExpr of
-        Left err ->
-          liftIO $
-            logMessage logCfg Error $
-              "Cron schedule '"
-                <> name cj
-                <> "' has invalid effective expression '"
-                <> effectiveExpr
-                <> "': "
-                <> T.pack err
-        Right effectiveSched ->
-          when (scheduleMatches effectiveSched tick) $ do
-            let key = makeDedupKeyFromParts (name cj) effectiveOv tick
-                jobWrite = (builder cj tick) {dedupKey = Just (IgnoreDuplicate key)}
-            result <- tryAny $ withDbTransaction $ do
-              mJob <- HL.insertJob jobWrite
-              case mJob of
-                Just _ -> void $ Ops.touchCronLastFired schemaName (name cj)
-                Nothing -> pure ()
-              pure mJob
-            case result of
-              Left e ->
-                liftIO $
-                  logMessage logCfg Error $
-                    "Cron schedule '"
-                      <> name cj
-                      <> "' failed to insert: "
-                      <> T.pack (show e)
-              Right Nothing ->
-                liftIO $
-                  logMessage logCfg Debug $
-                    "Cron schedule '"
-                      <> name cj
-                      <> "' skipped (dedup key exists): "
-                      <> key
-              Right (Just _) ->
-                liftIO $
-                  logMessage logCfg Info $
-                    "Cron schedule '"
-                      <> name cj
-                      <> "' fired at "
-                      <> formatMinute tick
+-- | Fetch schedule rows from DB, falling back to empty on error.
+fetchScheduleRows
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => LogConfig -> Text -> m ([(Text, CS.CronScheduleRow)], Bool)
+fetchScheduleRows logCfg schemaName = do
+  result <- tryAny $ Ops.listCronSchedules schemaName
+  case result of
+    Right rows -> pure ([(CS.name r, r) | r <- rows], True)
+    Left e -> do
+      logCron logCfg Error $ "Failed to fetch cron schedules from DB, using code defaults: " <> T.pack (show e)
+      pure ([], False)
 
-  -- Mark all schedules as checked (only if we successfully read from DB)
-  when dbFetchOk $ do
-    result <- tryAny $ Ops.touchCronChecked schemaName (map name jobs)
-    case result of
-      Right _ -> pure ()
-      Left e ->
-        liftIO $
-          logMessage logCfg Error $
-            "Failed to update last_checked_at: " <> T.pack (show e)
+-- | Result of resolving a schedule's effective config.
+data Resolved
+  = Disabled
+  | ParseError Text String
+  | Resolved OverlapPolicy CronSchedule
+
+-- | Resolve effective config from code defaults + DB override and parse the expression.
+resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
+resolveAndParse cj mRow =
+  let (expr, ov, isEnabled) = case mRow of
+        Nothing -> (cronExpression cj, overlap cj, True)
+        Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
+          ( CS.effectiveExpression row
+          , maybe (overlap cj) id (overlapPolicyFromText (CS.effectiveOverlap row))
+          , rowEnabled
+          )
+   in if not isEnabled
+        then Disabled
+        else case parseCronSchedule expr of
+          Right sched -> Resolved ov sched
+          Left err -> ParseError expr err
+
+insertCronJob
+  :: (QueueOperation m registry payload)
+  => Bool -> Text -> CronJob payload -> OverlapPolicy -> UTCTime -> m ()
+insertCronJob isBackfill schemaName cj effectiveOv tick = withDbTransaction $ do
+  let key = makeDedupKeyFromParts (name cj) effectiveOv tick
+      jobWrite = (builder cj isBackfill tick) {dedupKey = Just (IgnoreDuplicate key)}
+  mJob <- HL.insertJob jobWrite
+  case mJob of
+    Just _ -> void $ Ops.touchCronLastFired schemaName (name cj)
+    Nothing -> pure ()
+
+tryInsertCronJob
+  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  => Bool -> LogConfig -> Text -> CronJob payload -> OverlapPolicy -> UTCTime -> m ()
+tryInsertCronJob isBackfill logCfg schemaName cj effectiveOv tick = do
+  result <- tryAny $ insertCronJob isBackfill schemaName cj effectiveOv tick
+  case result of
+    Left e ->
+      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> T.pack (show e)
+    Right () ->
+      logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
+
+-- | Log a cron message.
+logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()
+logCron logCfg level msg = liftIO $ logMessage logCfg level msg
+
+-- | Try an action, logging errors without re-throwing.
+tryLog :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
+tryLog logCfg prefix action = do
+  result <- tryAny action
+  case result of
+    Right _ -> pure ()
+    Left e -> logCron logCfg Error $ prefix <> ": " <> T.pack (show e)
 
 -- | Compute the dedup key for a cron job at the given tick time.
 --
@@ -306,3 +410,11 @@ truncateToMinute t =
 -- | Format a 'UTCTime' as @YYYY-MM-DDTHH:MM@ for dedup key buckets.
 formatMinute :: UTCTime -> Text
 formatMinute = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M"
+
+-- | Enumerate all minute-boundary times from @start@ through @end@ (inclusive).
+-- Both @start@ and @end@ should be truncated to minute boundaries.
+enumMinutes :: UTCTime -> UTCTime -> [UTCTime]
+enumMinutes start end =
+  unfoldr
+    (\t -> if t > end then Nothing else Just (t, addUTCTime 60 t))
+    start
