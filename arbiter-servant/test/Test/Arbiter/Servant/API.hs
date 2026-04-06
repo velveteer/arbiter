@@ -32,7 +32,7 @@ import Data.Time (UTCTime (..), addUTCTime, getCurrentTime, picosecondsToDiffTim
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.HTTP.Types (status200, status404)
+import Network.HTTP.Types (status200, status400, status404)
 import Network.Wai.Test (SResponse, simpleBody, simpleStatus)
 import Test.Hspec
 import Test.Hspec.Wai
@@ -740,10 +740,26 @@ spec connStr = do
         Ops.oldestJobAgeSeconds s `shouldSatisfy` isJust
 
   describe "Cron API" $ with (cleanupDb >> pure app) $ do
+    let seedCron name expr ov = liftIO $ runSimpleDb mkEnv $ do
+          _ <- Ops.upsertCronDefault testSchema name expr ov
+          pure ()
+
+    it "GET /api/v1/cron/schedules returns seeded schedules" $ do
+      seedCron "list-a" "0 3 * * *" "SkipOverlap"
+      seedCron "list-b" "*/5 * * * *" "AllowOverlap"
+
+      resp <- get "/api/v1/cron/schedules"
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        let body = decode @(Map.Map Text [CS.CronScheduleRow]) (simpleBody resp)
+        case body of
+          Just m -> case Map.lookup "cronSchedules" m of
+            Just rows -> length rows `shouldSatisfy` (>= 2)
+            Nothing -> fail "Missing cronSchedules key"
+          Nothing -> fail "Failed to decode response"
+
     it "PATCH /api/v1/cron/schedules/:name with empty body returns 200" $ do
-      -- Seed a cron schedule directly in the DB
-      liftIO $ withResource sharedPool $ \conn ->
-        CS.upsertCronScheduleDefault conn testSchema "test-cron" "* * * * *" "AllowOverlap"
+      seedCron "test-cron" "* * * * *" "AllowOverlap"
 
       resp <-
         request
@@ -756,6 +772,87 @@ spec connStr = do
         simpleStatus resp `shouldBe` status200
         let body = decode @CS.CronScheduleRow (simpleBody resp)
         body `shouldSatisfy` isJust
+
+    it "PATCH /api/v1/cron/schedules/:name updates expression override" $ do
+      seedCron "expr-test" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/expr-test"
+          [("Content-Type", "application/json")]
+          (encode $ object ["overrideExpression" .= ("0 3 * * *" :: Text)])
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        case decode @CS.CronScheduleRow (simpleBody resp) of
+          Just CS.CronScheduleRow {CS.overrideExpression = oe} -> oe `shouldBe` Just "0 3 * * *"
+          Nothing -> fail "Failed to decode response"
+
+    it "PATCH /api/v1/cron/schedules/:name clears override with null" $ do
+      seedCron "clear-test" "* * * * *" "AllowOverlap"
+
+      -- Set an override first
+      _ <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/clear-test"
+          [("Content-Type", "application/json")]
+          (encode $ object ["overrideExpression" .= ("0 3 * * *" :: Text)])
+
+      -- Clear it with null
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/clear-test"
+          [("Content-Type", "application/json")]
+          "{\"overrideExpression\": null}"
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        case decode @CS.CronScheduleRow (simpleBody resp) of
+          Just CS.CronScheduleRow {CS.overrideExpression = oe} -> oe `shouldBe` Nothing
+          Nothing -> fail "Failed to decode response"
+
+    it "PATCH /api/v1/cron/schedules/:name can disable a schedule" $ do
+      seedCron "disable-test" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/disable-test"
+          [("Content-Type", "application/json")]
+          (encode $ object ["enabled" .= False])
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        case decode @CS.CronScheduleRow (simpleBody resp) of
+          Just CS.CronScheduleRow {CS.enabled = en} -> en `shouldBe` False
+          Nothing -> fail "Failed to decode response"
+
+    it "PATCH /api/v1/cron/schedules/:name rejects invalid cron expression" $ do
+      seedCron "bad-expr" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/bad-expr"
+          [("Content-Type", "application/json")]
+          (encode $ object ["overrideExpression" .= ("not a cron" :: Text)])
+
+      liftIO $ simpleStatus resp `shouldBe` status400
+
+    it "PATCH /api/v1/cron/schedules/:name rejects invalid overlap policy" $ do
+      seedCron "bad-overlap" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/bad-overlap"
+          [("Content-Type", "application/json")]
+          (encode $ object ["overrideOverlap" .= ("BadPolicy" :: Text)])
+
+      liftIO $ simpleStatus resp `shouldBe` status400
 
     it "PATCH /api/v1/cron/schedules/:name with non-existent name returns 404" $ do
       resp <-

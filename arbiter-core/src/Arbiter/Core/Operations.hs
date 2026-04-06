@@ -75,6 +75,11 @@ module Arbiter.Core.Operations
   , refreshGroups
 
     -- * Cron Schedule Operations
+  , upsertCronDefault
+  , listCronSchedules
+  , getCronScheduleByName
+  , updateCronSchedule
+  , deleteStaleCronSchedules
   , touchCronLastFired
   , touchCronChecked
 
@@ -108,6 +113,7 @@ import Arbiter.Core.Codec
   , RowCodec
   , col
   , countCodec
+  , cronScheduleRowCodec
   , dlqRowCodec
   , jobRowCodec
   , ncol
@@ -117,6 +123,8 @@ import Arbiter.Core.Codec
   , pval
   , statsRowCodec
   )
+import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
+import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwParsing)
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -1584,6 +1592,110 @@ refreshGroups schemaName tableName intervalSecs = do
           void $ executeStatement (Tmpl.refreshGroupsSQL schemaName tableName) []
           void $ executeQuery (Tmpl.updateReaperSeqSQL schemaName tableName) [] int64Codec
         _ -> pure ()
+
+-- | Upsert a cron schedule's default expression and overlap policy.
+--
+-- Preserves user overrides and enabled state.
+upsertCronDefault
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> Text
+  -- ^ Schedule name
+  -> Text
+  -- ^ Default cron expression
+  -> Text
+  -- ^ Default overlap policy
+  -> m Int64
+upsertCronDefault schemaName scheduleName defaultExpr defaultOv =
+  executeStatement
+    (Tmpl.upsertCronDefaultSQL schemaName)
+    [pval CText scheduleName, pval CText defaultExpr, pval CText defaultOv]
+
+-- | List all cron schedules ordered by name.
+listCronSchedules
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> m [CronScheduleRow]
+listCronSchedules schemaName =
+  executeQuery
+    (Tmpl.listCronSchedulesSQL schemaName)
+    []
+    cronScheduleRowCodec
+
+-- | Get a single cron schedule by name.
+getCronScheduleByName
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> Text
+  -- ^ Schedule name
+  -> m (Maybe CronScheduleRow)
+getCronScheduleByName schemaName scheduleName = do
+  rows <-
+    executeQuery
+      (Tmpl.getCronScheduleByNameSQL schemaName)
+      [pval CText scheduleName]
+      cronScheduleRowCodec
+  pure $ case rows of
+    [row] -> Just row
+    _ -> Nothing
+
+-- | Update a cron schedule (patch semantics).
+--
+-- Returns the number of rows affected (0 = not found, 1 = updated).
+updateCronSchedule
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> Text
+  -- ^ Schedule name
+  -> CronScheduleUpdate
+  -> m Int64
+updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mEnabled) = do
+  let (clauses, params) =
+        mconcat
+          [ case mExpr of
+              Nothing -> ([], [])
+              Just Nothing -> (["override_expression = NULL"], [])
+              Just (Just expr) -> (["override_expression = ?"], [pval CText expr])
+          , case mOverlap of
+              Nothing -> ([], [])
+              Just Nothing -> (["override_overlap = NULL"], [])
+              Just (Just ov) -> (["override_overlap = ?"], [pval CText ov])
+          , case mEnabled of
+              Nothing -> ([], [])
+              Just True -> (["enabled = TRUE"], [])
+              Just False -> (["enabled = FALSE"], [])
+          ]
+  if null clauses
+    then pure 0
+    else do
+      let setSQL = T.intercalate ", " clauses <> ", updated_at = NOW()"
+          sql =
+            "UPDATE "
+              <> CS.cronSchedulesTable schemaName
+              <> " SET "
+              <> setSQL
+              <> " WHERE name = ?"
+      executeStatement sql (params <> [pval CText scheduleName])
+
+-- | Delete schedules whose names are not in the given list.
+--
+-- Returns the number of rows deleted. Does nothing if the list is empty.
+deleteStaleCronSchedules
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> [Text]
+  -- ^ Schedule names to keep
+  -> m Int64
+deleteStaleCronSchedules _ [] = pure 0
+deleteStaleCronSchedules schemaName names =
+  executeStatement
+    (Tmpl.deleteStaleCronSchedulesSQL schemaName)
+    [parr CText names]
 
 -- | Update @last_fired_at@ to NOW() for a cron schedule.
 touchCronLastFired

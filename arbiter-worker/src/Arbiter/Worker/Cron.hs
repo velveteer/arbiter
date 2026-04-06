@@ -40,8 +40,9 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
+import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Monad (forM_, forever, when)
+import Control.Monad (forM_, forever, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -53,7 +54,6 @@ import Data.Time
   , getCurrentTime
   , secondsToDiffTime
   )
-import Database.PostgreSQL.Simple (Connection)
 import GHC.Generics (Generic)
 import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
@@ -138,16 +138,19 @@ cronJob name expr overlap mk =
 -- Called once at scheduler startup. Upserts default_expression and
 -- default_overlap for each 'CronJob', preserving any user overrides and
 -- enabled state.
-initCronSchedules :: Connection -> Text -> [CronJob payload] -> LogConfig -> IO ()
-initCronSchedules conn schemaName jobs logCfg = do
+initCronSchedules
+  :: (MonadArbiter m)
+  => Text -> [CronJob payload] -> LogConfig -> m ()
+initCronSchedules schemaName jobs logCfg = do
   forM_ jobs $ \cj ->
-    CS.upsertCronScheduleDefault
-      conn
+    Ops.upsertCronDefault
       schemaName
       (name cj)
       (cronExpression cj)
       (overlapPolicyToText (overlap cj))
-  logMessage logCfg Info $ "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
+  liftIO $
+    logMessage logCfg Info $
+      "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
 -- | Run the cron scheduler loop. Called by 'runWorkerPool' when 'cronJobs'
 -- is non-empty.
@@ -155,23 +158,19 @@ initCronSchedules conn schemaName jobs logCfg = do
 -- On each minute boundary, checks all schedules and inserts matching jobs
 -- with appropriate dedup keys. Exceptions per-schedule are caught and logged;
 -- the loop continues.
---
--- The provided 'Connection' is used to consult the @cron_schedules@ table
--- for effective expression, overlap, and enabled state on each tick.
 runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => Connection
-  -> LogConfig
+  => LogConfig
   -> Text
   -> [CronJob payload]
   -> m ()
-runCronScheduler conn logCfg schemaName jobs = do
-  liftIO $ initCronSchedules conn schemaName jobs logCfg
+runCronScheduler logCfg schemaName jobs = do
+  initCronSchedules schemaName jobs logCfg
   liftIO $ logMessage logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
   forever $ do
     waitUntilNextMinute
     now <- liftIO getCurrentTime
-    processCronTick conn logCfg schemaName jobs (truncateToMinute now)
+    processCronTick logCfg schemaName jobs (truncateToMinute now)
 
 -- | Process a single cron tick at the given time.
 --
@@ -180,16 +179,15 @@ runCronScheduler conn logCfg schemaName jobs = do
 -- it is logged and skipped.
 processCronTick
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => Connection
-  -> LogConfig
+  => LogConfig
   -> Text
   -> [CronJob payload]
   -> UTCTime
   -> m ()
-processCronTick conn logCfg schemaName jobs tick = do
+processCronTick logCfg schemaName jobs tick = do
   -- Batch-fetch all schedule rows once; fall back to code defaults on DB error
   rowMap <- do
-    result <- tryAny . liftIO $ CS.listCronSchedules conn schemaName
+    result <- tryAny $ Ops.listCronSchedules schemaName
     case result of
       Right rows -> pure [(CS.name r, r) | r <- rows]
       Left e -> do
@@ -230,7 +228,12 @@ processCronTick conn logCfg schemaName jobs tick = do
           when (scheduleMatches effectiveSched tick) $ do
             let key = makeDedupKeyFromParts (name cj) effectiveOv tick
                 jobWrite = (builder cj tick) {dedupKey = Just (IgnoreDuplicate key)}
-            result <- tryAny $ HL.insertJob jobWrite
+            result <- tryAny $ withDbTransaction $ do
+              mJob <- HL.insertJob jobWrite
+              case mJob of
+                Just _ -> void $ Ops.touchCronLastFired schemaName (name cj)
+                Nothing -> pure ()
+              pure mJob
             case result of
               Left e ->
                 liftIO $
@@ -246,23 +249,13 @@ processCronTick conn logCfg schemaName jobs tick = do
                       <> name cj
                       <> "' skipped (dedup key exists): "
                       <> key
-              Right (Just _) -> do
+              Right (Just _) ->
                 liftIO $
                   logMessage logCfg Info $
                     "Cron schedule '"
                       <> name cj
                       <> "' fired at "
                       <> formatMinute tick
-                fireResult <- tryAny $ Ops.touchCronLastFired schemaName (name cj)
-                case fireResult of
-                  Right _ -> pure ()
-                  Left e ->
-                    liftIO $
-                      logMessage logCfg Error $
-                        "Cron schedule '"
-                          <> name cj
-                          <> "' failed to update last_fired_at: "
-                          <> T.pack (show e)
 
   -- Mark all schedules as checked
   result <- tryAny $ Ops.touchCronChecked schemaName (map name jobs)

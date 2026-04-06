@@ -33,7 +33,7 @@ import Arbiter.Core.QueueRegistry (AllQueuesUnique, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (JobFilter (..))
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
-import Control.Exception (SomeException, bracket, catch, throwIO)
+import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (toJSON)
@@ -76,8 +76,6 @@ import Arbiter.Servant.Types
 data ArbiterServerConfig registry = ArbiterServerConfig
   { serverEnv :: SimpleEnv registry
   -- ^ The SimpleEnv containing schema and connection pool
-  , connPool :: Pool.Pool PG.Connection
-  -- ^ Connection pool for direct queries (SSE, cron)
   , enableSSE :: Bool
   -- ^ Enable Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns a single \"disabled\" event and
@@ -107,10 +105,7 @@ initArbiterServer
   -> IO (ArbiterServerConfig registry)
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
-  pool <- case connectionPool (simplePool env) of
-    Just p -> pure p
-    Nothing -> throwIO $ userError "initArbiterServer: no connection pool available"
-  pure ArbiterServerConfig {serverEnv = env, connPool = pool, enableSSE = True}
+  pure ArbiterServerConfig {serverEnv = env, enableSSE = True}
 
 -- | Wrap jobs with current timestamp for status derivation
 toApiJobs :: (MonadIO m) => [JobRead payload] -> m [ApiJob payload]
@@ -659,44 +654,47 @@ eventsServer config = Tagged $ \_req sendResponse ->
     then sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
       write "data: {\"event\":\"disabled\"}\n\n"
       flush
-    else do
-      let pool = connPool config
-      bracket
-        (Pool.takeResource pool)
-        ( \(conn, localPool) -> do
-            -- Clean up LISTEN state before returning to pool so the connection
-            -- doesn't accumulate buffered notifications while idle.
-            -- If UNLISTEN fails, the connection is likely broken — destroy it
-            -- instead of returning a dead connection to the pool.
-            result <- (PG.execute_ conn "UNLISTEN *" >> pure True) `catch` (\(_ :: SomeException) -> pure False)
-            if result
-              then Pool.putResource localPool conn
-              else Pool.destroyResource pool localPool conn
-        )
-        $ \(conn, _) -> do
-          _ <- PG.execute_ conn $ "LISTEN " <> fromString (T.unpack Schema.eventStreamingChannel)
-          sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
-            -- Send immediate "connected" event
-            write "data: {\"event\":\"connected\",\"message\":\"Stream connected\"}\n\n"
-            flush
-            -- Loop: wait for notifications with a 15s keepalive heartbeat.
-            -- The heartbeat keeps Warp and any reverse proxies from timing out.
-            let go = do
-                  mNotification <- timeout 15_000_000 (getNotification conn)
-                  case mNotification of
-                    Just notification -> do
-                      let payload = notificationData notification
-                      write ("data: " <> Builder.byteString payload <> "\n\n")
-                      flush
-                      go
-                    Nothing -> do
-                      -- Timeout: send SSE comment to keep connection alive
-                      write ": keepalive\n\n"
-                      flush
-                      go
-            -- IOException from getNotification = PG connection lost
-            -- IOException from write/flush = client disconnected
-            go `catch` (\(_ :: SomeException) -> pure ())
+    else case connectionPool (simplePool (serverEnv config)) of
+      Nothing -> sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
+        write "data: {\"event\":\"error\",\"message\":\"No connection pool available\"}\n\n"
+        flush
+      Just pool ->
+        bracket
+          (Pool.takeResource pool)
+          ( \(conn, localPool) -> do
+              -- Clean up LISTEN state before returning to pool so the connection
+              -- doesn't accumulate buffered notifications while idle.
+              -- If UNLISTEN fails, the connection is likely broken — destroy it
+              -- instead of returning a dead connection to the pool.
+              result <- (PG.execute_ conn "UNLISTEN *" >> pure True) `catch` (\(_ :: SomeException) -> pure False)
+              if result
+                then Pool.putResource localPool conn
+                else Pool.destroyResource pool localPool conn
+          )
+          $ \(conn, _) -> do
+            _ <- PG.execute_ conn $ "LISTEN " <> fromString (T.unpack Schema.eventStreamingChannel)
+            sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
+              -- Send immediate "connected" event
+              write "data: {\"event\":\"connected\",\"message\":\"Stream connected\"}\n\n"
+              flush
+              -- Loop: wait for notifications with a 15s keepalive heartbeat.
+              -- The heartbeat keeps Warp and any reverse proxies from timing out.
+              let go = do
+                    mNotification <- timeout 15_000_000 (getNotification conn)
+                    case mNotification of
+                      Just notification -> do
+                        let payload = notificationData notification
+                        write ("data: " <> Builder.byteString payload <> "\n\n")
+                        flush
+                        go
+                      Nothing -> do
+                        -- Timeout: send SSE comment to keep connection alive
+                        write ": keepalive\n\n"
+                        flush
+                        go
+              -- IOException from getNotification = PG connection lost
+              -- IOException from write/flush = client disconnected
+              go `catch` (\(_ :: SomeException) -> pure ())
   where
     sseHeaders =
       [ ("Content-Type", "text/event-stream")
@@ -722,9 +720,9 @@ listCronSchedulesHandler
    . ArbiterServerConfig registry
   -> Handler CronSchedulesResponse
 listCronSchedulesHandler config = do
-  let schemaName = schema (serverEnv config)
-  rows <- liftIO $ Pool.withResource (connPool config) $ \conn ->
-    CS.listCronSchedules conn schemaName
+  let env = serverEnv config
+      schemaName = schema env
+  rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName
   pure $ CronSchedulesResponse {cronSchedules = rows}
 
 -- | Update a cron schedule
@@ -735,7 +733,8 @@ updateCronScheduleHandler
   -> CronScheduleUpdate
   -> Handler CronScheduleRow
 updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverlap _) = do
-  let schemaName = schema (serverEnv config)
+  let env = serverEnv config
+      schemaName = schema env
 
   -- Validate cron expression if provided
   case mExpr of
@@ -757,9 +756,9 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
         Just _ -> pure ()
     _ -> pure ()
 
-  result <- liftIO $ Pool.withResource (connPool config) $ \conn -> do
-    _ <- CS.updateCronSchedule conn schemaName name update
-    CS.getCronScheduleByName conn schemaName name
+  result <- liftIO $ runSimpleDb env $ do
+    _ <- Ops.updateCronSchedule schemaName name update
+    Ops.getCronScheduleByName schemaName name
 
   case result of
     Nothing -> throwError err404 {errBody = "Cron schedule not found"}

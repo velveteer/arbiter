@@ -2,11 +2,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Types and @postgresql-simple@ operations for the @cron_schedules@ table.
---
--- Since cron operations are administrative metadata (not part of job processing
--- transactions), they use @postgresql-simple@ directly via a 'Connection'
--- parameter -- no 'MonadArbiter' needed.
+-- | Types for the @cron_schedules@ table.
 --
 -- The table stores both the code-defined defaults and user overrides separately.
 -- On worker init, only the @default_*@ columns are upserted -- user overrides
@@ -20,37 +16,18 @@ module Arbiter.Core.CronSchedule
   , effectiveExpression
   , effectiveOverlap
 
-    -- * Operations
-  , upsertCronScheduleDefault
-  , listCronSchedules
-  , getCronScheduleByName
-  , updateCronSchedule
-  , deleteStaleSchedules
-
-    -- * SQL helpers
+    -- * DDL
   , cronSchedulesTable
   , createCronSchedulesTableSQL
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON, withObject, (.:?))
+import Data.Aeson (FromJSON (..), ToJSON, withObject, (.:), (.:?))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
 import Data.Time (UTCTime)
-import Database.PostgreSQL.Simple
-  ( Connection
-  , Only (..)
-  , execute
-  , query
-  , query_
-  )
-import Database.PostgreSQL.Simple.FromRow (FromRow)
-import Database.PostgreSQL.Simple.ToRow (ToRow)
-import Database.PostgreSQL.Simple.Types (In (..), Query (..))
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Schema (quoteIdentifier)
@@ -69,7 +46,7 @@ data CronScheduleRow = CronScheduleRow
   , updatedAt :: UTCTime
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, FromRow, ToJSON, ToRow)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Effective expression: override if set, else default.
 effectiveExpression :: CronScheduleRow -> Text
@@ -94,28 +71,26 @@ data CronScheduleUpdate = CronScheduleUpdate
   deriving stock (Eq, Generic, Show)
   deriving anyclass (ToJSON)
 
--- | Manual instance to distinguish missing keys from @null@ values.
+-- | Three-way patch semantics for @Maybe (Maybe a)@ fields:
 --
 -- * Key missing → @Nothing@ (don't change)
 -- * Key present with @null@ → @Just Nothing@ (reset to default)
 -- * Key present with value → @Just (Just x)@ (set override)
+--
+-- @.:?@ alone can't distinguish missing from null here (both yield
+-- @Nothing@), so we check key membership first.
 instance FromJSON CronScheduleUpdate where
   parseJSON = withObject "CronScheduleUpdate" $ \o -> do
     oe <-
       if KeyMap.member (Key.fromText "overrideExpression") o
-        then Just <$> o .:? "overrideExpression"
+        then Just <$> o .: "overrideExpression"
         else pure Nothing
     oo <-
       if KeyMap.member (Key.fromText "overrideOverlap") o
-        then Just <$> o .:? "overrideOverlap"
+        then Just <$> o .: "overrideOverlap"
         else pure Nothing
     en <- o .:? "enabled"
-    pure
-      CronScheduleUpdate
-        { overrideExpression = oe
-        , overrideOverlap = oo
-        , enabled = en
-        }
+    pure CronScheduleUpdate {overrideExpression = oe, overrideOverlap = oo, enabled = en}
 
 -- | Qualified table name for the cron_schedules table.
 cronSchedulesTable :: Text -> Text
@@ -138,97 +113,3 @@ createCronSchedulesTableSQL schemaName =
     , "  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
     , ");"
     ]
-
--- | Upsert a cron schedule's default values.
---
--- INSERT ON CONFLICT (name) DO UPDATE SET default_expression, default_overlap, updated_at.
--- Does NOT touch override_expression, override_overlap, or enabled.
-upsertCronScheduleDefault :: Connection -> Text -> Text -> Text -> Text -> IO ()
-upsertCronScheduleDefault conn schemaName scheduleName defaultExpr defaultOv = do
-  let sql =
-        Query . encodeUtf8 $
-          "INSERT INTO "
-            <> cronSchedulesTable schemaName
-            <> " (name, default_expression, default_overlap) VALUES (?, ?, ?)"
-            <> " ON CONFLICT (name) DO UPDATE SET"
-            <> " default_expression = EXCLUDED.default_expression,"
-            <> " default_overlap = EXCLUDED.default_overlap,"
-            <> " updated_at = NOW()"
-  _ <- execute conn sql (scheduleName, defaultExpr, defaultOv)
-  pure ()
-
--- | List all cron schedules.
-listCronSchedules :: Connection -> Text -> IO [CronScheduleRow]
-listCronSchedules conn schemaName =
-  query_ conn . Query . encodeUtf8 $
-    "SELECT name, default_expression, default_overlap,"
-      <> " override_expression, override_overlap, enabled,"
-      <> " last_fired_at, last_checked_at, created_at, updated_at"
-      <> " FROM "
-      <> cronSchedulesTable schemaName
-      <> " ORDER BY name"
-
--- | Get a single cron schedule by name.
-getCronScheduleByName :: Connection -> Text -> Text -> IO (Maybe CronScheduleRow)
-getCronScheduleByName conn schemaName scheduleName = do
-  rows <-
-    query
-      conn
-      ( Query . encodeUtf8 $
-          "SELECT name, default_expression, default_overlap,"
-            <> " override_expression, override_overlap, enabled,"
-            <> " last_fired_at, last_checked_at, created_at, updated_at"
-            <> " FROM "
-            <> cronSchedulesTable schemaName
-            <> " WHERE name = ?"
-      )
-      (Only scheduleName)
-  pure $ case rows of
-    [row] -> Just row
-    _ -> Nothing
-
--- | Update a cron schedule (patch semantics).
---
--- Returns the number of rows affected (0 = not found, 1 = updated).
-updateCronSchedule :: Connection -> Text -> Text -> CronScheduleUpdate -> IO Int64
-updateCronSchedule conn schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mEnabled) = do
-  let (clauses, params) =
-        mconcat
-          [ case mExpr of
-              Nothing -> ([], [])
-              Just Nothing -> (["override_expression = NULL"], [])
-              Just (Just expr) -> (["override_expression = ?"], [expr])
-          , case mOverlap of
-              Nothing -> ([], [])
-              Just Nothing -> (["override_overlap = NULL"], [])
-              Just (Just ov) -> (["override_overlap = ?"], [ov])
-          , case mEnabled of
-              Nothing -> ([], [])
-              Just True -> (["enabled = TRUE"], [])
-              Just False -> (["enabled = FALSE"], [])
-          ]
-  if null clauses
-    then pure 0
-    else do
-      let setSQL = T.intercalate ", " clauses <> ", updated_at = NOW()"
-          sql =
-            Query . encodeUtf8 $
-              "UPDATE "
-                <> cronSchedulesTable schemaName
-                <> " SET "
-                <> setSQL
-                <> " WHERE name = ?"
-      execute conn sql (params ++ [scheduleName])
-
--- | Delete schedules whose names are not in the given list.
---
--- Returns the number of rows deleted. Does nothing if the list is empty.
-deleteStaleSchedules :: Connection -> Text -> [Text] -> IO Int64
-deleteStaleSchedules _ _ [] = pure 0
-deleteStaleSchedules conn schemaName names = do
-  let sql =
-        Query . encodeUtf8 $
-          "DELETE FROM "
-            <> cronSchedulesTable schemaName
-            <> " WHERE name NOT IN ?"
-  execute conn sql (Only (In names))

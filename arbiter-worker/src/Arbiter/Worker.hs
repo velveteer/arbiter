@@ -66,14 +66,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
-import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
 import System.Environment (lookupEnv)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
-  , bracket
   , checkSTM
   , finally
   , isAsyncException
@@ -312,10 +310,7 @@ runWorkerPool config = do
           pure
             <$> ( ContT . withAsync $
                     retryOnException (workerStateVar config) (logConfig config) "Cron scheduler" $
-                      bracket
-                        (liftIO $ connectPostgreSQL (connStr config))
-                        (liftIO . close)
-                        (\conn -> runCronScheduler conn (logConfig config) sch jobs)
+                      runCronScheduler (logConfig config) sch jobs
                 )
 
     -- Spawn groups table reaper (corrects drift in job_count, min_priority, min_id)

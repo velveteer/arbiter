@@ -3,9 +3,11 @@
 
 module Test.Arbiter.Worker.Cron (spec) where
 
+import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), Job (..), JobRead, defaultJob)
+import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup (cleanupData, setupOnce)
@@ -160,7 +162,7 @@ spec connStr = do
   describe "processCronTick" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
-      it "inserts a job when the schedule matches the tick time" $ \(env, pool) -> do
+      it "inserts a job when the schedule matches the tick time" $ \env -> do
         let Right cj =
               cronJob
                 "every-min"
@@ -168,16 +170,16 @@ spec connStr = do
                 AllowOverlap
                 (\_ -> defaultJob (SimpleTask "cron-fired"))
             tick = mkTime 2025 6 15 12 0 0
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` SimpleTask "cron-fired"
         dedupKey (head jobs) `shouldBe` Just (IgnoreDuplicate "arbiter_cron:every-min:2025-06-15T12:00")
 
-      it "does not insert a job when the schedule does not match" $ \(env, pool) -> do
+      it "does not insert a job when the schedule does not match" $ \env -> do
         -- "0 3 * * *" matches only at 03:00
         let Right cj =
               cronJob
@@ -186,14 +188,14 @@ spec connStr = do
                 SkipOverlap
                 (\_ -> defaultJob (SimpleTask "should-not-fire"))
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
-      it "SkipOverlap: two ticks at different times produce only 1 job" $ \(env, pool) -> do
+      it "SkipOverlap: two ticks at different times produce only 1 job" $ \env -> do
         let Right cj =
               cronJob
                 "every-min"
@@ -202,16 +204,16 @@ spec connStr = do
                 (\_ -> defaultJob (SimpleTask "skip-test"))
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick1
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick2
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] tick1
+          processCronTick testLogConfig testSchema [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         -- Both ticks produce the same dedup key "arbiter_cron:every-min", so only 1 job
         length jobs `shouldBe` 1
 
-      it "AllowOverlap: two ticks at different times produce 2 jobs" $ \(env, pool) -> do
+      it "AllowOverlap: two ticks at different times produce 2 jobs" $ \env -> do
         let Right cj =
               cronJob
                 "every-min"
@@ -220,15 +222,15 @@ spec connStr = do
                 (\_ -> defaultJob (SimpleTask "overlap-test"))
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick1
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick2
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] tick1
+          processCronTick testLogConfig testSchema [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 2
 
-      it "only matching schedules fire when multiple are provided" $ \(env, pool) -> do
+      it "only matching schedules fire when multiple are provided" $ \env -> do
         let Right cjAlways =
               cronJob
                 "always"
@@ -242,15 +244,15 @@ spec connStr = do
                 AllowOverlap
                 (\_ -> defaultJob (SimpleTask "should-not-fire"))
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cjAlways, cjNever] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cjAlways, cjNever] tick
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cjAlways, cjNever] testLogConfig
+          processCronTick testLogConfig testSchema [cjAlways, cjNever] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` SimpleTask "always-fires"
 
-      it "cronJobMake receives the tick time" $ \(env, pool) -> do
+      it "cronJobMake receives the tick time" $ \env -> do
         let Right cj =
               cronJob
                 "time-check"
@@ -258,9 +260,9 @@ spec connStr = do
                 AllowOverlap
                 (\t -> defaultJob (SimpleTask (formatMinute t)))
             tick = mkTime 2025 6 15 14 30 0
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -270,84 +272,71 @@ spec connStr = do
   describe "initCronSchedules" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
-      it "upserts rows" $ \(_env, pool) -> do
+      it "upserts rows" $ \env -> do
         let Right cj1 = cronJob "test-a" "0 3 * * *" SkipOverlap (\_ -> defaultJob (SimpleTask "a"))
             Right cj2 = cronJob "test-b" "*/5 * * * *" AllowOverlap (\_ -> defaultJob (SimpleTask "b"))
-        withResource pool $ \conn -> do
-          -- Phase 1: Insert
-          initCronSchedules conn testSchema [cj1, cj2] testLogConfig
-          rows <- CS.listCronSchedules conn testSchema
-          length rows `shouldBe` 2
-          map CS.name rows `shouldBe` ["test-a", "test-b"]
-          map CS.defaultExpression rows `shouldBe` ["0 3 * * *", "*/5 * * * *"]
+        -- Phase 1: Insert
+        runSimpleDb env $ initCronSchedules testSchema [cj1, cj2] testLogConfig
+        rows <- runSimpleDb env $ Ops.listCronSchedules testSchema
+        length rows `shouldBe` 2
+        map CS.name rows `shouldBe` ["test-a", "test-b"]
+        map CS.defaultExpression rows `shouldBe` ["0 3 * * *", "*/5 * * * *"]
 
-          -- Phase 2: Re-upsert with modified expression — should update, not duplicate
-          let Right cj1' = cronJob "test-a" "*/10 * * * *" SkipOverlap (\_ -> defaultJob (SimpleTask "a"))
-          initCronSchedules conn testSchema [cj1', cj2] testLogConfig
-          rows2 <- CS.listCronSchedules conn testSchema
-          length rows2 `shouldBe` 2
-          map CS.defaultExpression rows2 `shouldBe` ["*/10 * * * *", "*/5 * * * *"]
+        -- Phase 2: Re-upsert with modified expression — should update, not duplicate
+        let Right cj1' = cronJob "test-a" "*/10 * * * *" SkipOverlap (\_ -> defaultJob (SimpleTask "a"))
+        runSimpleDb env $ initCronSchedules testSchema [cj1', cj2] testLogConfig
+        rows2 <- runSimpleDb env $ Ops.listCronSchedules testSchema
+        length rows2 `shouldBe` 2
+        map CS.defaultExpression rows2 `shouldBe` ["*/10 * * * *", "*/5 * * * *"]
 
-      it "skips disabled schedules" $ \(env, pool) -> do
+      it "skips disabled schedules" $ \env -> do
         let Right cj = cronJob "disabled-test" "* * * * *" AllowOverlap (\_ -> defaultJob (SimpleTask "should-skip"))
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-
-          -- Disable the schedule
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
           _ <-
-            CS.updateCronSchedule
-              conn
+            Ops.updateCronSchedule
               testSchema
               "disabled-test"
-              CS.CronScheduleUpdate
-                { CS.overrideExpression = Nothing
-                , CS.overrideOverlap = Nothing
-                , CS.enabled = Just False
+              CronScheduleUpdate
+                { overrideExpression = Nothing
+                , overrideOverlap = Nothing
+                , enabled = Just False
                 }
-
-          let tick = mkTime 2025 6 15 12 0 0
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
+          processCronTick testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
-      it "uses DB expression override over default" $ \(env, pool) -> do
+      it "uses DB expression override over default" $ \env -> do
         -- Create a schedule that fires every minute
         let Right cj = cronJob "override-test" "* * * * *" AllowOverlap (\_ -> defaultJob (SimpleTask "override"))
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
-
-          -- Override expression to "0 3 * * *" (3am only)
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
           _ <-
-            CS.updateCronSchedule
-              conn
+            Ops.updateCronSchedule
               testSchema
               "override-test"
-              CS.CronScheduleUpdate
-                { CS.overrideExpression = Just (Just "0 3 * * *")
-                , CS.overrideOverlap = Nothing
-                , CS.enabled = Nothing
+              CronScheduleUpdate
+                { overrideExpression = Just (Just "0 3 * * *")
+                , overrideOverlap = Nothing
+                , enabled = Nothing
                 }
-
           -- Tick at 12:00 should NOT fire (overridden to 3am only)
-          let tick = mkTime 2025 6 15 12 0 0
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
+          processCronTick testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
-      it "updates last_fired_at on successful fire" $ \(env, pool) -> do
+      it "updates last_fired_at on successful fire" $ \env -> do
         let Right cj = cronJob "fire-test" "* * * * *" AllowOverlap (\_ -> defaultJob (SimpleTask "fire"))
-        withResource pool $ \conn -> do
-          initCronSchedules conn testSchema [cj] testLogConfig
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronTick testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
-          let tick = mkTime 2025 6 15 12 0 0
-          runSimpleDb env $ processCronTick conn testLogConfig testSchema [cj] tick
-
-          mRow <- CS.getCronScheduleByName conn testSchema "fire-test"
-          case mRow of
-            Nothing -> expectationFailure "Expected cron schedule row to exist"
-            Just row -> CS.lastFiredAt row `shouldSatisfy` isJust
+        mRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "fire-test"
+        case mRow of
+          Nothing -> expectationFailure "Expected cron schedule row to exist"
+          Just row -> CS.lastFiredAt row `shouldSatisfy` isJust
 
 createSharedPool :: ByteString -> IO (Pool PG.Connection)
 createSharedPool connStr =
@@ -359,12 +348,11 @@ createSharedPool connStr =
         60
         5
 
-withPool :: Pool PG.Connection -> ((SimpleEnv WorkerTestRegistry, Pool PG.Connection) -> IO a) -> IO a
+withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
   let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> do
     cleanupData testSchema testTable conn
-    -- Also clean up cron_schedules table if it exists
     _ <- PG.execute_ conn "DELETE FROM arbiter_cron_test.cron_schedules" `catch` (\(_ :: PG.SqlError) -> pure 0)
     pure ()
-  action (env, sharedPool)
+  action env

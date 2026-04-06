@@ -71,6 +71,10 @@ module Arbiter.Core.SqlTemplates
   , countDLQFilteredSQL
 
     -- * Cron Schedule Operations
+  , upsertCronDefaultSQL
+  , listCronSchedulesSQL
+  , getCronScheduleByNameSQL
+  , deleteStaleCronSchedulesSQL
   , touchCronLastFiredSQL
   , touchCronCheckedSQL
   ) where
@@ -80,7 +84,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec)
+import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec, dlqRowCodec, jobRowCodec)
 import Arbiter.Core.CronSchedule (cronSchedulesTable)
 import Arbiter.Core.Job.Schema
   ( jobQueueDLQTable
@@ -1307,6 +1311,45 @@ refreshGroupsSQL schema tableName =
 -- ---------------------------------------------------------------------------
 -- Cron Schedule Operations
 -- ---------------------------------------------------------------------------
+
+allCronColumns :: Text
+allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
+
+-- | Upsert a cron schedule's default values.
+--
+-- Parameters: name, default_expression, default_overlap
+upsertCronDefaultSQL :: Text -> Text
+upsertCronDefaultSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "INSERT INTO "
+        <> tbl
+        <> " (name, default_expression, default_overlap) VALUES (?, ?, ?)"
+        <> " ON CONFLICT (name) DO UPDATE SET"
+        <> " default_expression = EXCLUDED.default_expression,"
+        <> " default_overlap = EXCLUDED.default_overlap,"
+        <> " updated_at = NOW()"
+
+-- | List all cron schedules ordered by name.
+listCronSchedulesSQL :: Text -> Text
+listCronSchedulesSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "SELECT " <> allCronColumns <> " FROM " <> tbl <> " ORDER BY name"
+
+-- | Get a single cron schedule by name.
+--
+-- Parameters: schedule name
+getCronScheduleByNameSQL :: Text -> Text
+getCronScheduleByNameSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "SELECT " <> allCronColumns <> " FROM " <> tbl <> " WHERE name = ?"
+
+-- | Delete schedules whose names are not in the given list.
+--
+-- Parameters: schedule names (text array)
+deleteStaleCronSchedulesSQL :: Text -> Text
+deleteStaleCronSchedulesSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "DELETE FROM " <> tbl <> " WHERE name <> ALL(?)"
 
 -- | Update @last_fired_at@ to NOW() for a single cron schedule.
 --

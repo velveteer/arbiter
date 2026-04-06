@@ -39,6 +39,9 @@ module Arbiter.Core.Codec
   , dlqRowCodec
   , countCodec
   , statsRowCodec
+
+    -- * Cron codecs
+  , cronScheduleRowCodec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
@@ -48,6 +51,7 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
+import Arbiter.Core.CronSchedule (CronScheduleRow (..))
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..))
 
 -- | Scalar PostgreSQL column type. The GADT tag recovers the Haskell type.
@@ -188,3 +192,21 @@ statsRowCodec =
     <$> col "total_jobs" CInt8
     <*> col "visible_jobs" CInt8
     <*> ncol "oldest_job_age_seconds" CFloat8
+
+-- ---------------------------------------------------------------------------
+-- Cron codecs
+-- ---------------------------------------------------------------------------
+
+cronScheduleRowCodec :: RowCodec CronScheduleRow
+cronScheduleRowCodec =
+  CronScheduleRow
+    <$> col "name" CText
+    <*> col "default_expression" CText
+    <*> col "default_overlap" CText
+    <*> ncol "override_expression" CText
+    <*> ncol "override_overlap" CText
+    <*> col "enabled" CBool
+    <*> ncol "last_fired_at" CTimestamptz
+    <*> ncol "last_checked_at" CTimestamptz
+    <*> col "created_at" CTimestamptz
+    <*> col "updated_at" CTimestamptz
