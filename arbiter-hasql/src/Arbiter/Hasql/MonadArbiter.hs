@@ -80,7 +80,7 @@ hasqlExecuteQuery
   -> RowCodec a
   -> m [a]
 hasqlExecuteQuery sql params codec = withConn $ \conn -> liftIO $ do
-  let stmt = S.preparable (Encode.convertPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
+  let stmt = S.unpreparable (Encode.convertPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
     Right rows -> pure rows

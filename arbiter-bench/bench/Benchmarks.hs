@@ -18,7 +18,7 @@ import Arbiter.Orville
   , orvilleRunHandlerWithConnection
   , orvilleWithDbTransaction
   )
-import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, runSimpleDb)
+import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
   ( WorkerConfig (..)
   , defaultBatchedWorkerConfig
@@ -34,7 +34,7 @@ import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Reader (ReaderT (..), asks)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Proxy (Proxy (..))
@@ -276,24 +276,26 @@ runSteadyStateTrial
   -> IO Double
 runSteadyStateTrial runM producerRunM configs producerBatchSize numProducers producerDelayUs flavor durationUs = do
   insertCounter <- newIORef (0 :: Int)
+  batchCounter <- newIORef (0 :: Int)
   let mkProducer producerId = do
         -- Stagger startup so producers don't all insert simultaneously
         when (producerDelayUs > 0) $
           threadDelay (producerId * (producerDelayUs `div` numProducers))
-        let jobs = case flavor of
-              Ungrouped ->
-                [defaultJob (BenchBatch i) | i <- [1 .. producerBatchSize]]
-              Grouped numGroups ->
-                [ defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-                | i <- [1 .. producerBatchSize]
-                ]
-              Mixed numGroups ->
-                [ if even i
-                    then defaultJob (BenchBatch i)
-                    else defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-                | i <- [1 .. producerBatchSize]
-                ]
-            go = do
+        let go = do
+              offset <- atomicModifyIORef' batchCounter (\n -> (n + producerBatchSize, n))
+              let jobs = case flavor of
+                    Ungrouped ->
+                      [defaultJob (BenchBatch i) | i <- [1 .. producerBatchSize]]
+                    Grouped numGroups ->
+                      [ defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
+                      | i <- [1 .. producerBatchSize]
+                      ]
+                    Mixed numGroups ->
+                      [ if even i
+                          then defaultJob (BenchBatch i)
+                          else defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
+                      | i <- [1 .. producerBatchSize]
+                      ]
               producerRunM $ void $ HL.insertJobsBatch_ jobs
               modifyIORef' insertCounter (+ producerBatchSize)
               when (producerDelayUs > 0) $ threadDelay producerDelayUs
@@ -379,25 +381,29 @@ setupQueue simpleEnv totalJobs flavor = do
   conn <- connectPostgreSQL benchConnStr
   cleanupData conn
 
-  runSimpleDb simpleEnv $ do
-    let jobs = case flavor of
-          Ungrouped ->
-            [defaultJob (BenchBatch i) | i <- [1 .. totalJobs]]
-          Grouped numGroups ->
-            [ defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-            | i <- [1 .. totalJobs]
-            ]
-          Mixed numGroups ->
-            [ if even i
-                then defaultJob (BenchBatch i)
-                else defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-            | i <- [1 .. totalJobs]
-            ]
-    void $ HL.insertJobsBatch_ jobs
+  let chunkSize = 50000
+      mkJobs offset = case flavor of
+        Ungrouped ->
+          [defaultJob (BenchBatch i) | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+        Grouped numGroups ->
+          [ defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
+          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          ]
+        Mixed numGroups ->
+          [ if even i
+              then defaultJob (BenchBatch i)
+              else defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
+          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          ]
+      go offset
+        | offset >= totalJobs = pure ()
+        | otherwise = do
+            runSimpleDb simpleEnv $ void $ HL.insertJobsBatch_ (mkJobs offset)
+            go (offset + chunkSize)
+  go 0
 
-  execute_ conn ("VACUUM ANALYZE " <> benchSchema <> ".bench_queue")
-  execute_ conn ("VACUUM ANALYZE " <> benchSchema <> ".bench_queue_groups")
-  execute_ conn "CHECKPOINT"
+  execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
+  execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")
   close conn
 
 -- Benchmark suites
@@ -408,12 +414,12 @@ main = do
   setupSchema
   putStrLn "Schema ready. Creating environments..."
 
-  simpleEnv <- createSimpleEnv (Proxy @BenchRegistry) benchConnStr benchSchema
+  let benchPoolConfig = PoolConfig {poolSize = 25, poolIdleTimeout = 60, poolStripes = Just 4}
+  simpleEnv <- createSimpleEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema benchPoolConfig
 
-  let hasqlPoolConfig = PoolConfig {poolSize = 25, poolIdleTimeout = 60, poolStripes = Just 1}
-  hasqlEnv <- createHasqlEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema hasqlPoolConfig
+  hasqlEnv <- createHasqlEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema benchPoolConfig
 
-  let orvilleOptions = createOrvilleConnectionOptions benchConnStr hasqlPoolConfig
+  let orvilleOptions = createOrvilleConnectionOptions benchConnStr benchPoolConfig
   orvillePool <- O.createConnectionPool orvilleOptions
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
 
@@ -554,7 +560,7 @@ mkWorkerFlavorBenches
   -> [(String, QueueFlavor)]
   -> [Benchmark]
 mkWorkerFlavorBenches statsConn simpleEnv trial pools workers flavors =
-  let numJobs = 200000
+  let numJobs = 1000000
    in flip map flavors $ \(label, flavor) ->
         let mkBench name mode =
               singleTest name $

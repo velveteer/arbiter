@@ -19,7 +19,7 @@ import Hasql.Statement qualified as S
 
 buildStatementRowCount :: Text -> Params -> S.Statement () Int64
 buildStatementRowCount sql ps =
-  S.preparable (convertPlaceholders sql) (buildEncoder ps) D.rowsAffected
+  S.unpreparable (convertPlaceholders sql) (buildEncoder ps) D.rowsAffected
 
 buildEncoder :: Params -> E.Params ()
 buildEncoder = mconcat . map encodeSomeParam

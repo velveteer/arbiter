@@ -47,10 +47,10 @@ simpleExecuteQuery
   -> m [a]
 simpleExecuteQuery sqlTemplate params codec = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
-      pgParams = map someParamToAction params
       parser = runCodec interpretNullCol codec
-  withConn $ \conn ->
-    liftIO $ PG.queryWith parser conn sql pgParams
+  withConn $ \conn -> liftIO $ case params of
+    [] -> PG.queryWith_ parser conn sql
+    _ -> PG.queryWith parser conn sql (map someParamToAction params)
 
 simpleExecuteStatement
   :: (HasSimplePool m, MonadUnliftIO m)
@@ -59,9 +59,9 @@ simpleExecuteStatement
   -> m Int64
 simpleExecuteStatement sqlTemplate params = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
-      pgParams = map someParamToAction params
-  withConn $ \conn ->
-    liftIO $ PG.execute conn sql pgParams
+  withConn $ \conn -> liftIO $ case params of
+    [] -> PG.execute_ conn sql
+    _ -> PG.execute conn sql (map someParamToAction params)
 
 interpretNullCol :: NullCol a -> RowParser a
 interpretNullCol (NotNull _ c) = colField c
