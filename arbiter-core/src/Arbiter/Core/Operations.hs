@@ -74,6 +74,10 @@ module Arbiter.Core.Operations
     -- * Groups Table Operations
   , refreshGroups
 
+    -- * Cron Schedule Operations
+  , touchCronLastFired
+  , touchCronChecked
+
     -- * Internal Operations
   , getParentStateSnapshot
   , readChildResultsRaw
@@ -1580,6 +1584,33 @@ refreshGroups schemaName tableName intervalSecs = do
           void $ executeStatement (Tmpl.refreshGroupsSQL schemaName tableName) []
           void $ executeQuery (Tmpl.updateReaperSeqSQL schemaName tableName) [] int64Codec
         _ -> pure ()
+
+-- | Update @last_fired_at@ to NOW() for a cron schedule.
+touchCronLastFired
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> Text
+  -- ^ Schedule name
+  -> m Int64
+touchCronLastFired schemaName scheduleName =
+  executeStatement
+    (Tmpl.touchCronLastFiredSQL schemaName)
+    [pval CText scheduleName]
+
+-- | Update @last_checked_at@ to NOW() for the given cron schedule names.
+touchCronChecked
+  :: (MonadArbiter m)
+  => Text
+  -- ^ PostgreSQL schema name
+  -> [Text]
+  -- ^ Schedule names
+  -> m Int64
+touchCronChecked _ [] = pure 0
+touchCronChecked schemaName names =
+  executeStatement
+    (Tmpl.touchCronCheckedSQL schemaName)
+    [parr CText names]
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

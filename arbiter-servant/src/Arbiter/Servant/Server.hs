@@ -741,7 +741,7 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
   case mExpr of
     Just (Just expr) ->
       case parseCronSchedule expr of
-        Left err -> throwError err400 {errBody = "Invalid cron expression: " <> fromString err}
+        Left _ -> throwError err400 {errBody = "Invalid cron expression"}
         Right _ -> pure ()
     _ -> pure ()
 

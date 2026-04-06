@@ -69,6 +69,10 @@ module Arbiter.Core.SqlTemplates
   , countJobsFilteredSQL
   , listDLQFilteredSQL
   , countDLQFilteredSQL
+
+    -- * Cron Schedule Operations
+  , touchCronLastFiredSQL
+  , touchCronCheckedSQL
   ) where
 
 import Data.Int (Int64)
@@ -77,6 +81,7 @@ import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec)
+import Arbiter.Core.CronSchedule (cronSchedulesTable)
 import Arbiter.Core.Job.Schema
   ( jobQueueDLQTable
   , jobQueueGroupsTable
@@ -610,7 +615,7 @@ updateJobForRetrySQL schema tableName =
         SET not_visible_until = NOW() + (? * interval '1 second'),
             last_error = ?,
             updated_at = NOW()
-        WHERE id = ? AND attempts = ?
+        WHERE id = ? AND attempts = ? AND NOT suspended
       |]
 
 -- | Promote a delayed or retrying job to be immediately visible.
@@ -1257,8 +1262,10 @@ updateReaperSeqSQL schema tableName =
    in [text|SELECT setval('${seqName}', extract(epoch FROM now())::bigint) AS result|]
 
 -- | Full recompute of the groups table from the main queue.
--- Caller must hold row locks on the groups table (via 'lockGroupsSQL')
--- to prevent trigger interleaving.
+-- Caller should first lock as many groups rows as possible via
+-- 'lockGroupsSQL' (@FOR UPDATE SKIP LOCKED@) to reduce trigger
+-- interleaving.  Rows locked by in-flight claims will be skipped
+-- and refreshed on the next reaper cycle.
 refreshGroupsSQL :: Text -> Text -> Text
 refreshGroupsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
@@ -1296,3 +1303,23 @@ refreshGroupsSQL schema tableName =
         WHERE NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = c.group_key)
         ON CONFLICT (group_key) DO NOTHING
       |]
+
+-- ---------------------------------------------------------------------------
+-- Cron Schedule Operations
+-- ---------------------------------------------------------------------------
+
+-- | Update @last_fired_at@ to NOW() for a single cron schedule.
+--
+-- Parameters: schedule name
+touchCronLastFiredSQL :: Text -> Text
+touchCronLastFiredSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "UPDATE " <> tbl <> " SET last_fired_at = NOW(), updated_at = NOW() WHERE name = ?"
+
+-- | Update @last_checked_at@ to NOW() for the given cron schedule names.
+--
+-- Parameters: schedule names (text array)
+touchCronCheckedSQL :: Text -> Text
+touchCronCheckedSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "UPDATE " <> tbl <> " SET last_checked_at = NOW() WHERE name = ANY(?)"

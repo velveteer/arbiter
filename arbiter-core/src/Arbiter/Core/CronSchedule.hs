@@ -25,9 +25,7 @@ module Arbiter.Core.CronSchedule
   , listCronSchedules
   , getCronScheduleByName
   , updateCronSchedule
-  , touchCronScheduleLastFired
   , deleteStaleSchedules
-  , touchCronSchedulesChecked
 
     -- * SQL helpers
   , cronSchedulesTable
@@ -222,18 +220,6 @@ updateCronSchedule conn schemaName scheduleName (CronScheduleUpdate mExpr mOverl
                 <> " WHERE name = ?"
       execute conn sql (params ++ [scheduleName])
 
--- | Update @last_fired_at@ to NOW().
-touchCronScheduleLastFired :: Connection -> Text -> Text -> IO ()
-touchCronScheduleLastFired conn schemaName scheduleName = do
-  let sql =
-        Query . encodeUtf8 $
-          "UPDATE "
-            <> cronSchedulesTable schemaName
-            <> " SET last_fired_at = NOW(), updated_at = NOW()"
-            <> " WHERE name = ?"
-  _ <- execute conn sql (Only scheduleName)
-  pure ()
-
 -- | Delete schedules whose names are not in the given list.
 --
 -- Returns the number of rows deleted. Does nothing if the list is empty.
@@ -246,16 +232,3 @@ deleteStaleSchedules conn schemaName names = do
             <> cronSchedulesTable schemaName
             <> " WHERE name NOT IN ?"
   execute conn sql (Only (In names))
-
--- | Update @last_checked_at@ to NOW() for the given schedule names.
-touchCronSchedulesChecked :: Connection -> Text -> [Text] -> IO ()
-touchCronSchedulesChecked _ _ [] = pure ()
-touchCronSchedulesChecked conn schemaName names = do
-  let sql =
-        Query . encodeUtf8 $
-          "UPDATE "
-            <> cronSchedulesTable schemaName
-            <> " SET last_checked_at = NOW()"
-            <> " WHERE name IN ?"
-  _ <- execute conn sql (Only (In names))
-  pure ()

@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
@@ -26,6 +27,9 @@ module Arbiter.Hasql.HasqlDb
 
     -- * Hasql Settings
   , hasqlSettings
+
+    -- * Exceptions
+  , HasqlConnectionError (..)
   ) where
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
@@ -33,6 +37,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
 import Arbiter.Core.QueueRegistry (AllQueuesUnique)
+import Control.Exception (Exception, throwIO)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks, local)
@@ -53,6 +58,11 @@ import Arbiter.Hasql.MonadArbiter
   , hasqlRunHandlerWithConnection
   , hasqlWithDbTransaction
   )
+
+-- | Thrown when a hasql connection cannot be acquired from the pool.
+newtype HasqlConnectionError = HasqlConnectionError String
+  deriving stock (Show)
+  deriving anyclass (Exception)
 
 -- | Environment for HasqlDb operations
 --
@@ -165,7 +175,7 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
               result <- Hasql.acquire (hasqlSettings connStr)
               case result of
                 Right conn -> pure conn
-                Left err -> error $ "hasql: connection failed: " <> show err
+                Left err -> throwIO $ HasqlConnectionError (show err)
           )
           Hasql.release
           (fromIntegral $ poolIdleTimeout config)

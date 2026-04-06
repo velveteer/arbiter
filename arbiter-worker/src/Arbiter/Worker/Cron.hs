@@ -40,6 +40,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
+import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (forM_, forever, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text)
@@ -230,29 +231,31 @@ processCronTick conn logCfg schemaName jobs tick = do
             let key = makeDedupKeyFromParts (name cj) effectiveOv tick
                 jobWrite = (builder cj tick) {dedupKey = Just (IgnoreDuplicate key)}
             result <- tryAny $ HL.insertJob jobWrite
-            liftIO $ case result of
+            case result of
               Left e ->
-                logMessage logCfg Error $
-                  "Cron schedule '"
-                    <> name cj
-                    <> "' failed to insert: "
-                    <> T.pack (show e)
+                liftIO $
+                  logMessage logCfg Error $
+                    "Cron schedule '"
+                      <> name cj
+                      <> "' failed to insert: "
+                      <> T.pack (show e)
               Right Nothing ->
-                logMessage logCfg Debug $
-                  "Cron schedule '"
-                    <> name cj
-                    <> "' skipped (dedup key exists): "
-                    <> key
+                liftIO $
+                  logMessage logCfg Debug $
+                    "Cron schedule '"
+                      <> name cj
+                      <> "' skipped (dedup key exists): "
+                      <> key
               Right (Just _) -> do
-                logMessage logCfg Info $
-                  "Cron schedule '"
-                    <> name cj
-                    <> "' fired at "
-                    <> formatMinute tick
-                -- Update last_fired_at
-                fireResult <- tryAny . liftIO $ CS.touchCronScheduleLastFired conn schemaName (name cj)
+                liftIO $
+                  logMessage logCfg Info $
+                    "Cron schedule '"
+                      <> name cj
+                      <> "' fired at "
+                      <> formatMinute tick
+                fireResult <- tryAny $ Ops.touchCronLastFired schemaName (name cj)
                 case fireResult of
-                  Right () -> pure ()
+                  Right _ -> pure ()
                   Left e ->
                     liftIO $
                       logMessage logCfg Error $
@@ -262,9 +265,9 @@ processCronTick conn logCfg schemaName jobs tick = do
                           <> T.pack (show e)
 
   -- Mark all schedules as checked
-  result <- tryAny . liftIO $ CS.touchCronSchedulesChecked conn schemaName (map name jobs)
+  result <- tryAny $ Ops.touchCronChecked schemaName (map name jobs)
   case result of
-    Right () -> pure ()
+    Right _ -> pure ()
     Left e ->
       liftIO $
         logMessage logCfg Error $
