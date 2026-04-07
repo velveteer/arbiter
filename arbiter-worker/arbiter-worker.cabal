@@ -3,7 +3,7 @@ name:            arbiter-worker
 version:         0.1.0.0
 synopsis:        Worker framework for arbiter
 description:
-  This package provides a highly concurrent worker framework for processing jobs from arbiter queues.
+  Concurrent worker framework for processing jobs from arbiter queues.
 
 license:         MIT
 author:          Joshua Miller

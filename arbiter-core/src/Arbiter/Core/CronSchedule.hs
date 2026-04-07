@@ -71,14 +71,8 @@ data CronScheduleUpdate = CronScheduleUpdate
   deriving stock (Eq, Generic, Show)
   deriving anyclass (ToJSON)
 
--- | Three-way patch semantics for @Maybe (Maybe a)@ fields:
---
--- * Key missing → @Nothing@ (don't change)
--- * Key present with @null@ → @Just Nothing@ (reset to default)
--- * Key present with value → @Just (Just x)@ (set override)
---
--- @.:?@ alone can't distinguish missing from null here (both yield
--- @Nothing@), so we check key membership first.
+-- @.:?@ can't distinguish missing from null for @Maybe (Maybe a)@ (both
+-- yield @Nothing@), so we check key membership first.
 instance FromJSON CronScheduleUpdate where
   parseJSON = withObject "CronScheduleUpdate" $ \o -> do
     oe <-

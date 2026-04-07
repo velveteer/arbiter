@@ -4,14 +4,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Servant server implementation for the Arbiter job queue REST API.
+-- | REST API server for the Arbiter job queue (SimpleDb backend).
 --
--- Hard-coded to use the SimpleDb backend from arbiter-simple.
---
--- __Security:__ This module provides no built-in authentication or
--- authorization. All endpoints (including job deletion, DLQ management, and
--- cron schedule updates) are publicly accessible. Add your own auth
--- middleware before exposing this to untrusted networks.
+-- __Security:__ No built-in authentication. All endpoints are publicly
+-- accessible. Add auth middleware before exposing to untrusted networks.
 module Arbiter.Servant.Server
   ( -- * Server handlers
     arbiterServer

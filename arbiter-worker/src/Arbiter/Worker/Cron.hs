@@ -2,16 +2,16 @@
 
 -- | Cron scheduler for the Arbiter worker pool.
 --
--- When 'cronJobs' is non-empty in 'WorkerConfig', 'runWorkerPool' spawns an
--- additional thread that inserts jobs based on 5-field cron expressions.
--- Uses 'IgnoreDuplicate' dedup keys for multi-instance idempotency.
+-- When 'cronJobs' is non-empty in 'WorkerConfig', 'runWorkerPool' spawns a
+-- scheduler thread that inserts jobs on 5-field cron expressions.
+-- Dedup keys prevent duplicate insertion across multiple worker instances.
 --
 -- __All cron expressions are evaluated in UTC.__ There is no local-timezone
 -- support — @\"0 3 * * *\"@ means 03:00 UTC, not 03:00 in the server's
 -- local time. Account for your timezone offset when writing expressions.
 --
--- When a connection pool and schema are provided, the scheduler consults the
--- @cron_schedules@ table for runtime overrides (expression, overlap, enabled).
+-- The scheduler consults the @cron_schedules@ table each tick for runtime
+-- overrides (expression, overlap, enabled).
 module Arbiter.Worker.Cron
   ( -- * Types
     CronJob (..)
@@ -69,7 +69,7 @@ import UnliftIO.Concurrent (threadDelay)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
 import Arbiter.Worker.Logger.Internal (logMessage)
 
--- | Determines how overlapping cron ticks are deduplicated.
+-- | How overlapping cron ticks are deduplicated.
 data OverlapPolicy
   = -- | At most one pending or running job per schedule name.
     SkipOverlap
@@ -77,16 +77,15 @@ data OverlapPolicy
     AllowOverlap
   deriving stock (Eq, Generic, Show)
 
--- | Whether to backfill missed ticks on startup.
+-- | Controls whether missed ticks are backfilled on startup.
 --
--- When the scheduler starts (or restarts after a crash), it reads
--- @last_checked_at@ from the @cron_schedules@ table to determine which
--- ticks were missed. Missed ticks within the backfill window are
--- processed in chronological order. Dedup keys ensure idempotency.
+-- On start (or restart), the scheduler reads @last_checked_at@ from the
+-- @cron_schedules@ table to find missed ticks within the backfill window,
+-- then inserts them in chronological order. Dedup keys prevent duplicates.
 --
--- For 'SkipOverlap' schedules, backfill inserts at most one job
--- (the dedup key is time-independent, so all missed ticks collapse).
--- For 'AllowOverlap' schedules, each missed tick produces its own job.
+-- With 'SkipOverlap', only the most recent missed tick is inserted
+-- (the dedup key is time-independent). With 'AllowOverlap', each missed
+-- tick produces its own job.
 data BackfillPolicy
   = -- | Do not backfill missed ticks. Default.
     NoBackfill
@@ -174,11 +173,8 @@ cronJob cronName expr ov mk =
           , builder = mk
           }
 
--- | Initialize the @cron_schedules@ table and upsert defaults for all cron jobs.
---
--- Called once at scheduler startup. Upserts default_expression and
--- default_overlap for each 'CronJob', preserving any user overrides and
--- enabled state.
+-- | Upsert default expression and overlap for each 'CronJob' into the
+-- @cron_schedules@ table. Preserves any user overrides and enabled state.
 initCronSchedules
   :: (MonadArbiter m)
   => Text -> [CronJob payload] -> LogConfig -> m ()
@@ -192,7 +188,7 @@ initCronSchedules schemaName jobs logCfg = do
   logCron logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
--- | Run the cron scheduler loop. Called by 'runWorkerPool' when 'cronJobs' is non-empty.
+-- | Scheduler entry point: upsert defaults, backfill, then loop on minute boundaries.
 runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
@@ -208,12 +204,11 @@ runCronScheduler logCfg schemaName jobs = do
     now <- liftIO getCurrentTime
     processCronTick False logCfg schemaName jobs (truncateToMinute now)
 
--- | Backfill missed ticks on startup for schedules with a 'Backfill' policy.
+-- | Backfill missed ticks for schedules with a 'Backfill' policy.
 --
--- Reads @last_checked_at@ from the @cron_schedules@ table to determine
--- the last time the scheduler ran. For each schedule with 'Backfill',
--- enumerates missed ticks within the backfill window and processes them
--- chronologically. Dedup keys ensure idempotency across multiple instances.
+-- Reads @last_checked_at@ from the @cron_schedules@ table, enumerates
+-- missed ticks within the backfill window, and inserts them atomically
+-- alongside a @last_checked_at@ checkpoint.
 backfillMissedTicks
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
@@ -246,7 +241,7 @@ backfillMissedTicks logCfg schemaName jobs = do
               forM_ ticks $ \tick ->
                 insertCronJob True schemaName cj effectiveOv tick
 
--- | Pure: compute which ticks need backfilling for a single schedule.
+-- | Compute which ticks need backfilling for a single schedule.
 planBackfill
   :: [(Text, CS.CronScheduleRow)]
   -> UTCTime
@@ -372,14 +367,11 @@ tryLog logCfg prefix action = do
     Right _ -> pure ()
     Left e -> logCron logCfg Error $ prefix <> ": " <> T.pack (show e)
 
--- | Compute the dedup key for a cron job at the given tick time.
---
--- Uses the code-defined overlap policy. If the schedule has a DB override,
--- use 'makeDedupKeyFromParts' with the effective policy instead.
+-- | Compute the dedup key for a cron job using the code-defined overlap policy.
 makeDedupKey :: CronJob payload -> UTCTime -> Text
 makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) tick
 
--- | Internal helper: compute dedup key from components.
+-- | Compute dedup key from overlap policy, schedule name, and tick time.
 makeDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
 makeDedupKeyFromParts jobName ov tick = case ov of
   SkipOverlap -> "arbiter_cron:" <> jobName

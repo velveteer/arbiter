@@ -1,4 +1,6 @@
--- | Dead Letter Queue (DLQ) job type.
+-- | Dead-letter queue types. Jobs land here after exhausting retries.
+-- Recover with 'Arbiter.Core.HighLevel.retryFromDLQ' or delete with
+-- 'Arbiter.Core.HighLevel.deleteDLQJob'.
 module Arbiter.Core.Job.DLQ
   ( DLQJob (..)
   , JobSnapshot
@@ -11,17 +13,16 @@ import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Types (Job)
 
--- | A snapshot of a job's complete state when it was moved to the DLQ.
+-- | Full job state at the time of DLQ insertion.
 type JobSnapshot payload = Job payload Int64 Text UTCTime
 
--- | Represents a job that has failed all its retry attempts and has been
--- moved to the dead-letter queue for manual inspection.
+-- | A job in the dead-letter queue.
 data DLQJob payload = DLQJob
   { dlqPrimaryKey :: Int64
-  -- ^ The primary key of the entry in the DLQ table
+  -- ^ DLQ table primary key (distinct from the original job ID in the snapshot)
   , failedAt :: UTCTime
-  -- ^ The time the job was moved to the DLQ.
+  -- ^ When the job was moved to the DLQ
   , jobSnapshot :: JobSnapshot payload
-  -- ^ The complete job state when it failed.
+  -- ^ Full job state at time of failure (payload, attempts, last_error, etc.)
   }
   deriving stock (Eq, Generic, Show)

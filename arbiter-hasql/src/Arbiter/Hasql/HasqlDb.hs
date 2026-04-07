@@ -64,9 +64,7 @@ newtype HasqlConnectionError = HasqlConnectionError String
   deriving stock (Show)
   deriving anyclass (Exception)
 
--- | Environment for HasqlDb operations
---
--- Contains both the schema name and the connection pool.
+-- | Schema name and connection pool for 'HasqlDb'.
 data HasqlEnv registry = HasqlEnv
   { schema :: Text
   -- ^ PostgreSQL schema name where job tables are located

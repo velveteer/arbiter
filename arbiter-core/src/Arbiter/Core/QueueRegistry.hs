@@ -37,10 +37,7 @@ import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVa
 -- @
 type JobPayloadRegistry = [(Symbol, Type)]
 
--- | Get the table name for a payload from the registry.
---
--- This type family looks up the table name for a given payload type in the registry,
--- providing a compile-time error if the payload is not registered.
+-- | Look up the table name for a payload type. Compile-time error if not registered.
 type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: Symbol where
   TableForPayload payload ('(table, payload) ': _) = table
   TableForPayload payload ('(_, _) ': rest) =
@@ -48,16 +45,13 @@ type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :
   TableForPayload payload '[] =
     TypeError ('Text "Payload type " ':<>: 'ShowType payload ':<>: 'Text " not found in registry")
 
--- | Ensure all queue names in a registry are unique
---
--- This prevents multiple payload types from mapping to the same queue,
--- which would cause parsing failures when workers claim jobs.
+-- | Compile-time check that no two payload types share a queue name.
 type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
   AllQueuesUnique '[] = ()
   AllQueuesUnique ('(table, _) ': rest) =
     (NotInTables table rest, AllQueuesUnique rest)
 
--- | Check that a table name is not in the remaining registry
+-- | Check that a table name doesn't appear in the rest of the registry.
 type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Constraint where
   NotInTables _ '[] = ()
   NotInTables table ('(table, _) ': _) =
@@ -70,12 +64,8 @@ type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Co
       )
   NotInTables table ('(_, _) ': rest) = NotInTables table rest
 
--- | A typeclass for converting type-level registries to runtime table lists
---
--- This allows us to extract the list of table names at runtime for operations
--- like running migrations.
+-- | Extract table names from a type-level registry at runtime (used by migrations).
 class RegistryTables (registry :: JobPayloadRegistry) where
-  -- | Get the list of table names as runtime Text values
   registryTableNames :: Proxy registry -> [Text]
 
 instance RegistryTables '[] where

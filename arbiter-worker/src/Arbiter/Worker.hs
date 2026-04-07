@@ -142,22 +142,12 @@ instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
 -- Multi-Queue Workers
 -- ---------------------------------------------------------------------------
 
--- | A worker pool bundled with its queue name from the type-level registry.
---
--- The queue name is derived from the registry at compile time, ensuring it
--- stays in sync with the type-level definition.
---
--- Use 'namedWorkerPool' to construct these, then 'runSelectedWorkerPools'
--- to run only the ones matching a runtime configuration.
---
--- Example:
+-- | A worker pool paired with its queue name (derived from the registry).
 --
 -- @
--- allWorkers :: [NamedWorkerPool (SimpleDb MyRegistry IO)]
 -- allWorkers =
---   [ namedWorkerPool emailConfig      -- name derived from registry: "email_jobs"
---   , namedWorkerPool imageConfig      -- name derived from registry: "image_jobs"
---   , namedWorkerPool notifConfig      -- name derived from registry: "notifications"
+--   [ namedWorkerPool emailConfig      -- "email_jobs"
+--   , namedWorkerPool imageConfig      -- "image_jobs"
 --   ]
 --
 -- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
@@ -184,10 +174,9 @@ namedWorkerPool cfg =
     , workerPoolConfig = cfg
     }
 
--- | Run worker pools with shared state for coordinated shutdown.
---
--- Creates shared state, passes it to setup action (for signal handlers),
--- then runs pools. Reads enabled queues from ARBITER_ENABLED_QUEUES.
+-- | Run worker pools with shared shutdown state. Filters to queues listed
+-- in @ARBITER_ENABLED_QUEUES@ (all if unset). The setup action receives the
+-- shared 'TVar' for installing signal handlers.
 runWorkerPools
   :: forall m registry
    . (MonadMask m, MonadUnliftIO m, RegistryTables registry)
@@ -452,9 +441,8 @@ handleWorkerException cfg result =
       threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
---
--- Decode failures are represented as @Left@ entries in the result map,
--- allowing the handler to process valid results while seeing failures.
+-- Decode failures appear as @Left decodeError@ — the child succeeded but
+-- its result JSON doesn't match the expected type.
 readChildResults
   :: (JobResult a, MonadArbiter m)
   => Text

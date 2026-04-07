@@ -26,21 +26,21 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import GHC.Generics (Generic)
 
--- | The core t'Job' type, representing a unit of work in the queue.
+-- | A job in the queue. Parametrized over payload, primary key, queue name,
+-- and inserted-at timestamp. See 'JobWrite' (for insertion) and 'JobRead'
+-- (returned from claims/queries).
 data Job payload key q insertedAt = Job
   { primaryKey :: key
-  -- ^ The job's primary key (unit or @Int64@).
+  -- ^ @()@ in 'JobWrite' (assigned by DB), @Int64@ in 'JobRead'.
   , payload :: payload
-  -- ^ The user-defined payload, stored as JSONB.
+  -- ^ User-defined payload, stored as JSONB.
   , queueName :: q
-  -- ^ The name of the queue (table) this job belongs to.
-  -- This is a read-only virtual field, it does not get serialized.
+  -- ^ @()@ in 'JobWrite', table name ('Text') in 'JobRead'. Not serialized.
   , groupKey :: Maybe Text
-  -- ^ An optional key for grouping jobs to be processed serially.
-  -- Jobs with the same group key are processed in order.
-  -- Use @Nothing@ for ungrouped jobs that can run in parallel.
+  -- ^ Jobs with the same group key are processed serially (head-of-line blocking).
+  -- @Nothing@ for ungrouped jobs that can run in parallel.
   , insertedAt :: insertedAt
-  -- ^ The time the job was inserted (unit or @UTCTime@).
+  -- ^ @()@ in 'JobWrite' (set by DB), @UTCTime@ in 'JobRead'.
   , updatedAt :: Maybe UTCTime
   -- ^ The time the job was last updated.
   , attempts :: Int32
@@ -59,10 +59,8 @@ data Job payload key q insertedAt = Job
   -- ^ Override the global maxAttempts config for this specific job.
   -- If @Nothing@, uses the worker config's global @maxAttempts@ value.
   , parentId :: Maybe Int64
-  -- ^ Optional parent job ID for job dependencies.
-  -- When set, this job is a child of the specified parent.
-  -- The parent is automatically suspended when acked if children exist,
-  -- and resumed for a completion round when the last child finishes.
+  -- ^ Parent job ID. Set by 'insertJobTree', not manually. When this child
+  -- is the last to complete, the parent (if a rollup finalizer) is resumed.
   , isRollup :: Bool
   -- ^ Whether this job is a rollup finalizer (has children whose results
   -- are collected). Set by 'rollup' / '<~~'. When @True@, the worker
@@ -74,10 +72,8 @@ data Job payload key q insertedAt = Job
   }
   deriving stock (Eq, Generic, Show)
 
--- | Creates an ungrouped 'JobWrite' with default values.
---
--- Jobs created with this function can be processed in parallel by multiple workers.
--- For serial processing within a group, use 'defaultGroupedJob'.
+-- | Ungrouped 'JobWrite' with default values. For serial processing within a
+-- group, use 'defaultGroupedJob'.
 defaultJob :: payload -> JobWrite payload
 defaultJob p =
   Job
@@ -99,14 +95,10 @@ defaultJob p =
     , suspended = False
     }
 
--- | Creates a grouped 'JobWrite' with default values.
---
--- Jobs with the same group key are processed serially (head-of-line blocking),
--- ensuring that only one job per group is processed at a time.
--- Use for operations that must be ordered, like processing events for a specific user.
+-- | Grouped 'JobWrite'. Jobs sharing a group key are processed serially.
 --
 -- @
--- let job = defaultGroupedJob "user-123" (MyPayload data)
+-- defaultGroupedJob "user-123" (ProcessEvent eventData)
 -- @
 defaultGroupedJob :: Text -> payload -> JobWrite payload
 defaultGroupedJob gk p =
@@ -136,17 +128,15 @@ type JobRead payload = Job payload Int64 Text UTCTime
 -- It does not yet have an ID or insertion timestamp.
 type JobWrite payload = Job payload () () ()
 
--- | Constraint for types that can be used as a job payload.
---
--- Payloads are serialized to and from JSON for storage in the database.
--- The table name is looked up from the registry via @TableForPayload@.
+-- | Payloads must round-trip through JSON for PostgreSQL JSONB storage.
 type JobPayload payload = (FromJSON payload, ToJSON payload)
 
--- | Defines the deduplication strategy for a job upon insertion.
+-- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 data DedupKey
-  = -- | On conflict, keep the existing job. Corresponds to @ON CONFLICT DO NOTHING@.
+  = -- | Skip if a job with this key exists (@DO NOTHING@).
     IgnoreDuplicate Text
-  | -- | On conflict, replace the existing job with the new one. Corresponds to @ON CONFLICT DO UPDATE@.
+  | -- | Replace the existing job with this key (@DO UPDATE@), unless it's
+    -- actively in-flight on its first attempt.
     ReplaceDuplicate Text
   deriving stock (Eq, Generic, Show)
 
@@ -223,15 +213,13 @@ data ObservabilityHooks m payload = ObservabilityHooks
   -- ^ Called periodically for a running job.
   }
 
--- | A default set of t'ObservabilityHooks' that do nothing.
---
--- This can be used as a starting point for your own custom hooks.
+-- | No-op hooks. Override fields to add observability:
 --
 -- @
 -- myHooks = defaultObservabilityHooks
 --   { onJobSuccess = \\job startTime endTime -> do
 --       let duration = diffUTCTime endTime startTime
---       logInfo $ "Job " <> show (primaryKey job) <> " succeeded in " <> show duration
+--       logInfo $ "Job " <> show (primaryKey job) <> " took " <> show duration
 --   }
 -- @
 defaultObservabilityHooks :: (Applicative m) => ObservabilityHooks m payload

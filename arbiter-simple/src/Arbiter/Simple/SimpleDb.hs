@@ -50,9 +50,7 @@ import Arbiter.Simple.MonadArbiter
   , simpleWithDbTransaction
   )
 
--- | Environment for SimpleDb operations
---
--- Contains both the schema name and the connection pool.
+-- | Schema name and connection pool for 'SimpleDb'.
 data SimpleEnv registry = SimpleEnv
   { schema :: Text
   -- ^ PostgreSQL schema name where job tables are located
@@ -125,19 +123,8 @@ inTransaction conn schemaName action =
           }
    in runSimpleDb env action
 
--- | Create a JobQueue environment with resource-pool connection pooling
---
--- Uses conservative defaults (10 connections, 300s idle timeout, 1 stripe).
---
--- For worker pools, consider using 'createSimpleEnvWithConfig' with @poolConfigForWorkers@
--- to size the pool based on worker count:
---
--- @
--- poolCfg <- poolConfigForWorkers 10
--- env <- createSimpleEnvWithConfig (Proxy @MyRegistry) connStr "arbiter" poolCfg
--- @
---
--- All job tables are created within the specified schema.
+-- | Create a 'SimpleEnv' with default pool settings (10 connections, 300s idle, 1 stripe).
+-- For workers, use 'createSimpleEnvWithConfig' with 'poolConfigForWorkers' instead.
 createSimpleEnv
   :: forall registry m
    . (AllQueuesUnique registry, MonadIO m)
@@ -151,7 +138,7 @@ createSimpleEnv
 createSimpleEnv proxy connStr schemaName =
   createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
 
--- | Control pool sizing, idle timeout, and striping.
+-- | Create a 'SimpleEnv' with custom pool settings.
 --
 -- Example:
 --

@@ -9,9 +9,8 @@
 --   * Prevent re-running completed migrations
 --   * Support incremental schema changes
 --
--- The migration history is stored in a @<schema_name>.schema_migrations@ table.
--- For example, if you use the schema name @"arbiter"@, the migration tracking
--- table will be created at @arbiter.schema_migrations@.
+-- Migration history is stored in a @schema_migrations@ table inside the
+-- target schema (e.g., @arbiter.schema_migrations@).
 module Arbiter.Migrations
   ( -- * Configuration
     MigrationConfig (..)
@@ -96,17 +95,11 @@ defaultMigrationConfig =
     , enableEventStreaming = False
     }
 
--- | Run migrations for all tables in a queue registry
+-- | Run migrations for all tables in a queue registry.
 --
--- This function creates all tables defined in the type-level registry
--- within a single PostgreSQL schema. Each payload type gets its own
--- table pair (main + DLQ) within the schema.
---
--- __Note__: This function creates the schema first (outside of migration tracking)
--- so that the @schema_migrations@ table can be placed inside the same schema.
---
--- PostgreSQL notices (like "NOTICE: relation already exists") are suppressed
--- during migration to reduce log noise.
+-- Creates tables for each payload type in the registry (main + DLQ) within
+-- a single PostgreSQL schema. The schema itself is created first, outside of
+-- migration tracking. PostgreSQL notices are suppressed during migration.
 --
 -- Example:
 --

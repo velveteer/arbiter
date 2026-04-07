@@ -3,7 +3,7 @@ name:            arbiter-migrations
 version:         0.1.0.0
 synopsis:        SQL schema migrations for arbiter
 description:
-  This package uses postgresql-migration to track and execute DDL for arbiter job queue tables.
+  Tracked DDL migrations for arbiter job queue tables via postgresql-migration.
 
 license:         MIT
 author:          Joshua Miller

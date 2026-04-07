@@ -1,4 +1,4 @@
--- | Configurable backoff strategies for job retries.
+-- | Backoff strategies for job retry delays.
 module Arbiter.Worker.BackoffStrategy
   ( BackoffStrategy (..)
   , Jitter (..)
@@ -15,17 +15,19 @@ import Data.Int (Int32)
 import Data.Time (NominalDiffTime)
 import System.Random (randomRIO)
 
--- | Exponential backoff configuration.
 data ExponentialConfig = ExponentialConfig
   { exponentialBase :: Double
+  -- ^ Multiplier per attempt (e.g., 2.0 for doubling)
   , exponentialCap :: NominalDiffTime
+  -- ^ Maximum delay in seconds
   }
   deriving stock (Eq, Show)
 
--- | Linear backoff configuration.
 data LinearConfig = LinearConfig
   { linearIncrement :: NominalDiffTime
+  -- ^ Delay added per attempt in seconds
   , linearCap :: NominalDiffTime
+  -- ^ Maximum delay in seconds
   }
   deriving stock (Eq, Show)
 
@@ -40,9 +42,7 @@ data BackoffStrategy
   | -- | User-provided function (attempts -> delay)
     Custom (Int32 -> NominalDiffTime)
 
--- | Jitter strategy to randomize backoff delays.
---
--- Prevents thundering herd when many jobs fail simultaneously and retry at the same time.
+-- | Jitter randomizes retry delays to spread out simultaneous retries.
 data Jitter
   = -- | Use exact calculated delay
     NoJitter
@@ -82,11 +82,14 @@ applyJitter jitter delay = case jitter of
     jitterAmountD <- randomRIO (0, halfD)
     pure (half + realToFrac jitterAmountD)
 
+-- | @exponentialBackoff 2 300@ — doubles each attempt, capped at 5 minutes.
 exponentialBackoff :: Double -> NominalDiffTime -> BackoffStrategy
 exponentialBackoff base cap = Exponential (ExponentialConfig base cap)
 
+-- | @linearBackoff 30 300@ — adds 30s per attempt, capped at 5 minutes.
 linearBackoff :: NominalDiffTime -> NominalDiffTime -> BackoffStrategy
 linearBackoff increment cap = Linear (LinearConfig increment cap)
 
+-- | Same delay for every retry.
 constantBackoff :: NominalDiffTime -> BackoffStrategy
 constantBackoff = Constant

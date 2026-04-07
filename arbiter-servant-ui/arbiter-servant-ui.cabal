@@ -3,8 +3,7 @@ name:            arbiter-servant-ui
 version:         0.1.0.0
 synopsis:        Embedded admin dashboard for arbiter job queue
 description:
-  This package provides a Bootstrap 5 + Alpine.js admin dashboard served from
-  embedded static files. Users opt in by depending on this package.
+  Bootstrap 5 + Alpine.js admin dashboard served from embedded static files.
 
 license:         MIT
 author:          Joshua Miller

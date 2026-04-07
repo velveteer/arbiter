@@ -2,16 +2,12 @@
 
 -- | Typed encoding and decoding for PostgreSQL queries.
 --
---   * 'RowCodec' — a free applicative that describes how to decode result rows.
---     Each backend interprets it natively (postgresql-simple positional fields,
---     hasql typed decoders, orville named marshallers).
+--   * 'RowCodec' — free applicative for decoding result rows. Each backend
+--     (postgresql-simple, hasql, orville) interprets it natively.
 --
---   * 'Params' — a list of typed parameters for query execution.
---     Each 'SomeParam' pairs a 'ParamType' with its value, letting backends
---     encode without an untyped intermediary.
+--   * 'Params' — typed parameter list for query execution.
 --
--- Both sides are built from the same 'Col' GADT, ensuring type consistency
--- between what we send and what we read back.
+-- Both use the same 'Col' GADT, keeping encode and decode types in sync.
 module Arbiter.Core.Codec
   ( -- * Column types
     Col (..)

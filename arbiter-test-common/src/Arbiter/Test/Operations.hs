@@ -1,10 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns #-}
 
--- | Parameterized operations test suite that works with any MonadArbiter implementation.
---
--- This module provides a single test suite that can be instantiated for both
--- postgresql-simple and Orville implementations, eliminating code duplication.
+-- | Parameterized operations test suite, instantiated for each 'MonadArbiter' backend.
 module Arbiter.Test.Operations
   ( operationsSpec
   ) where
@@ -33,13 +30,7 @@ import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO (MonadUnliftIO)
 
--- | Parameterized operations test suite.
---
--- This function creates a test suite that works with any MonadArbiter implementation.
--- It takes a runner function that knows how to execute monad actions for a specific
--- implementation.
---
--- The payload type must be registered in the registry and satisfy JobPayload constraints.
+-- | Build a test suite for the given 'MonadArbiter' runner.
 operationsSpec
   :: forall payload registry env m
    . ( Eq payload

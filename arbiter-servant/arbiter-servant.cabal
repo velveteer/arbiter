@@ -3,8 +3,8 @@ name:            arbiter-servant
 version:         0.1.0.0
 synopsis:        Servant REST API for arbiter job queue
 description:
-  This package provides a Servant-based REST API for managing and monitoring
-  arbiter job queues. Includes endpoints for job management, DLQ operations, statistics, and real-time events.
+  Servant-based REST API for managing and monitoring arbiter job queues.
+  Endpoints for job CRUD, DLQ operations, cron schedules, statistics, and SSE.
 
 license:         MIT
 author:          Joshua Miller

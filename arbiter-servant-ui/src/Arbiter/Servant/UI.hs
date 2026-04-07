@@ -3,13 +3,11 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Embedded admin dashboard for Arbiter.
+-- | Embedded admin dashboard (Bootstrap 5 + Alpine.js, compiled-in static files).
 --
--- Provides a Bootstrap 5 + Alpine.js admin UI served from compiled-in static files.
---
--- __Security:__ This module provides no built-in authentication. The admin
--- UI exposes full queue management (view, delete, retry jobs). Add your own
--- auth middleware before exposing this to untrusted networks.
+-- __Security:__ No built-in authentication. All queue management operations
+-- (view, delete, retry) are publicly accessible. Add auth middleware before
+-- exposing to untrusted networks.
 --
 -- = Quick Start
 --

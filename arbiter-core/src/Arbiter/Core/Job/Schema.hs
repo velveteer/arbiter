@@ -575,12 +575,8 @@ createGroupsTriggersSQL schemaName tableName =
         , "FOR EACH STATEMENT EXECUTE FUNCTION " <> funcUpdate <> "();"
         ]
 
--- | SQL to create the NOTIFY function for a specific table
---
--- This function is triggered after job insertion and sends a notification on a
--- table-specific channel. Each table gets its own function and channel for isolation.
---
--- Note: The channel name is quoted as a string literal (single quotes), not an identifier.
+-- | SQL for the per-table NOTIFY function (fires after INSERT).
+-- Channel name is quoted as a string literal, not an identifier.
 createNotifyFunctionSQL :: Text -> Text -> Text
 createNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -631,15 +627,10 @@ dropNotifyFunctionSQL schemaName tableName =
 -- Event Streaming Triggers (for admin UI / SSE)
 -- ---------------------------------------------------------------------------
 
--- | SQL to create the event streaming notification function
---
--- This is a shared function (one per schema) that fires on INSERT, UPDATE,
--- DELETE of any job table and INSERT on any DLQ table. It sends a lightweight
--- JSON event via @pg_notify@ on the @arbiter_job_events@ channel with just
--- the event type, table name, and job ID.
---
--- The function uses @TG_TABLE_NAME@ and @TG_OP@ to determine context, so it
--- works for all tables without per-table copies.
+-- | Shared event streaming function (one per schema). Fires on
+-- INSERT\/UPDATE\/DELETE of job tables and INSERT on DLQ tables. Sends a JSON
+-- event via @pg_notify@ on the @arbiter_job_events@ channel. Uses
+-- @TG_TABLE_NAME@ and @TG_OP@ so a single function covers all tables.
 createEventStreamingFunctionSQL :: Text -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName

@@ -22,10 +22,7 @@ data PoolConfig = PoolConfig
   }
   deriving stock (Eq, Show)
 
--- | Default pool configuration: 10 connections, 300s idle timeout, 1 stripe.
---
--- Conservative defaults suitable for producer-only workloads. For worker pools,
--- use 'poolConfigForWorkers' to size the pool based on worker count.
+-- | 10 connections, 300s idle timeout, 1 stripe. For workers, use 'poolConfigForWorkers'.
 defaultPoolConfig :: PoolConfig
 defaultPoolConfig =
   PoolConfig
@@ -34,10 +31,8 @@ defaultPoolConfig =
     , poolStripes = Just 1
     }
 
--- | Creates a pool configuration sized for a worker pool.
---
--- Sizing: @workerCount + 5@ connections (worker threads plus headroom for
--- dispatcher and heartbeats). Stripes set to min(capabilities, poolSize).
+-- | @workerCount + 5@ connections (headroom for dispatcher and heartbeats).
+-- Stripes set to @min(capabilities, poolSize)@.
 poolConfigForWorkers :: (MonadIO m) => Int -> m PoolConfig
 poolConfigForWorkers workerCnt = do
   caps <- liftIO getNumCapabilities

@@ -126,10 +126,8 @@ type JobOperation m registry payload =
   , MonadArbiter m
   )
 
--- | Inserts a job into the queue.
---
--- Returns @Nothing@ if a job with the same deduplication key already
--- exists (with @IgnoreDuplicate@ strategy).
+-- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
+-- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
 insertJob
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -140,13 +138,9 @@ insertJob job = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.insertJob schemaName tableName job
 
--- | Insert multiple jobs in a single batch operation.
---
--- Supports dedup keys: within the batch, duplicate keys are resolved
--- (last 'ReplaceDuplicate' wins), and against existing rows via
--- @ON CONFLICT@.
---
--- Does not validate @parentId@. Use @insertJobTree@ for parent-child relationships.
+-- | Insert multiple jobs in one round-trip. Returns only the jobs that were
+-- actually inserted (dedup'd jobs are excluded). Does not validate @parentId@ —
+-- use 'insertJobTree' for parent-child relationships.
 insertJobsBatch
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -157,6 +151,7 @@ insertJobsBatch jobs = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.insertJobsBatch schemaName tableName jobs
 
+-- | Like 'insertJobsBatch' but returns only the count of inserted rows.
 insertJobsBatch_
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -167,8 +162,8 @@ insertJobsBatch_ jobs = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.insertJobsBatch_ schemaName tableName jobs
 
--- | Claims visible jobs from the queue. At most one job per group is claimed
--- to enforce head-of-line blocking.
+-- | Claim visible jobs (at most one per group). May return fewer than the
+-- limit if groups are exhausted.
 claimNextVisibleJobs
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -200,9 +195,8 @@ claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
 
--- | Acknowledges a job as complete, permanently deleting it from the queue.
---
--- Returns 1 on success (job deleted or parent suspended), 0 if already gone.
+-- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
+-- if it's a parent with unfinished children. Returns 1 on success, 0 if gone.
 ackJob
   :: forall m registry payload
    . (JobOperation m registry payload)
@@ -310,10 +304,7 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
            in JobReclaimed jobId jobAttempts actual
   pure $ map toResult infos
 
--- | Moves a job from the main queue to the dead-letter queue (DLQ).
---
--- Returns the number of rows deleted from main queue (0 if job was already
--- claimed by another worker).
+-- | Move a job to the DLQ. Returns 0 if already claimed by another worker.
 moveToDLQ
   :: forall m registry payload
    . (JobOperation m registry payload)
@@ -340,8 +331,7 @@ listDLQJobs limit offset = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.listDLQJobs schemaName tableName limit offset
 
--- | Moves a job from the dead-letter queue back into the main queue to be retried.
---
+-- | Retry a DLQ job (re-insert into main queue with attempts reset).
 -- Returns @Nothing@ if the DLQ job no longer exists.
 retryFromDLQ
   :: forall m registry payload
@@ -379,12 +369,8 @@ deleteDLQJob dlqId = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.deleteDLQJob schemaName tableName dlqId
 
--- | Moves multiple jobs to the dead-letter queue.
---
--- Each job is moved with its own error message. Jobs that have already been
--- claimed by another worker (attempts mismatch) are silently skipped.
---
--- Returns the total number of jobs moved to DLQ.
+-- | Move multiple jobs to the DLQ. Jobs already claimed by another worker are
+-- skipped. Returns the count of jobs moved.
 moveToDLQBatch
   :: forall m registry payload
    . (JobOperation m registry payload)
@@ -510,8 +496,6 @@ getJobById jobId = do
   Ops.getJobById schemaName tableName jobId
 
 -- | Gets all jobs for a specific group key with pagination.
---
--- Useful for debugging or admin UI to see all jobs for a specific entity.
 getJobsByGroup
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -543,12 +527,7 @@ getJobsByParent pid limit offset = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.getJobsByParent schemaName tableName pid limit offset
 
--- | Gets all in-flight jobs (currently being processed by workers).
---
--- A job is considered in-flight if it has been claimed (attempts > 0) and
--- its visibility timeout hasn't expired yet.
---
--- Useful for monitoring active work and detecting stuck jobs.
+-- | Gets all in-flight jobs (claimed, visibility timeout not expired).
 getInFlightJobs
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -847,8 +826,8 @@ getDLQChildErrorsByParent parentJobId = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
--- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
--- for a rollup finalizer in a single query.
+-- | Read all child data for a rollup finalizer. Returns
+-- @(childId->result, childId->error, parentStateSnapshot, dlqPK->error)@.
 readChildResultsRaw
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -905,10 +884,8 @@ refreshGroups intervalSecs = do
 -- Job Tree DSL
 -- ---------------------------------------------------------------------------
 
--- | Insert a 'JobTree' atomically in a single transaction.
---
--- HighLevel wrapper that resolves schema/table from the registry.
--- See 'Arbiter.Core.JobTree.insertJobTree' for details.
+-- | Insert a 'JT.JobTree' atomically. Returns all inserted jobs (pre-order),
+-- or @Left@ if the root has a dedup conflict. Rolls back on any failure.
 insertJobTree
   :: forall m registry payload
    . (MonadUnliftIO m, QueueOperation m registry payload)

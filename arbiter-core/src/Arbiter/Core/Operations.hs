@@ -1066,11 +1066,8 @@ countDLQJobsByParent
 countDLQJobsByParent schemaName tableName parentJobId =
   countDLQFiltered schemaName tableName [Tmpl.FilterParentId parentJobId]
 
--- | Delete a job from the dead letter queue.
---
--- This permanently removes the job from the DLQ without retrying it.
--- If the deleted job was a child, tries to resume the parent when no
--- siblings remain in the main queue.
+-- | Delete a job from the DLQ. If the job was a child, tries to resume
+-- the parent when no siblings remain.
 deleteDLQJob
   :: (MonadArbiter m)
   => Text
@@ -1160,9 +1157,7 @@ getJobById schemaName tableName jobId = do
     [] -> pure Nothing
     (raw : _) -> Just <$> decodePayload raw
 
--- | Get all jobs for a specific group key
---
--- Useful for debugging or admin UI to see all jobs for a specific entity.
+-- | Get all jobs for a specific group key.
 getJobsByGroup
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -1180,12 +1175,7 @@ getJobsByGroup
 getJobsByGroup schemaName tableName gk =
   listJobsFiltered schemaName tableName [Tmpl.FilterGroupKey gk]
 
--- | Get all in-flight jobs (currently being processed by workers)
---
--- A job is considered in-flight if it has been claimed (attempts > 0) and
--- its visibility timeout hasn't expired yet.
---
--- Useful for monitoring active work and detecting stuck jobs.
+-- | Get all in-flight jobs (claimed, visibility timeout not expired).
 getInFlightJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
