@@ -39,7 +39,7 @@ library
     Arbiter.Servant.Types
 
   build-depends:
-    , aeson              >=2.0  && <2.3
+    , aeson              >=2.2  && <2.3
     , arbiter-core       <0.2
     , arbiter-simple     <0.2
     , arbiter-worker     <0.2
@@ -75,7 +75,6 @@ test-suite arbiter-servant-tests
     , containers
     , hspec
     , hspec-wai
-    , hspec-wai-json
     , http-types
     , postgresql-simple
     , resource-pool

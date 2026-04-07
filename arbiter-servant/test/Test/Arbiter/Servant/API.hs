@@ -16,7 +16,8 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Setup (cleanupData, setupOnce)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON, ToJSON, decode, encode, object, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, (.=))
+import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -36,7 +37,6 @@ import Network.HTTP.Types (status200, status400, status404)
 import Network.Wai.Test (SResponse, simpleBody, simpleStatus)
 import Test.Hspec
 import Test.Hspec.Wai
-import Test.Hspec.Wai.JSON
 
 import Arbiter.Servant (arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
@@ -50,6 +50,14 @@ import Arbiter.Servant.Types
   , JobsResponse (..)
   , StatsResponse (..)
   )
+
+jsonMatch :: Value -> ResponseMatcher
+jsonMatch v = ResponseMatcher 200 [] (MatchBody matcher)
+  where
+    matcher _ body = case decode body of
+      Just actual | actual == v -> Nothing
+      Just actual -> Just $ "JSON mismatch:\n  expected: " <> show v <> "\n  actual: " <> show actual
+      Nothing -> Just "Response body is not valid JSON"
 
 -- Test schema
 testSchema :: Text
@@ -107,17 +115,16 @@ spec connStr = do
   describe "Jobs API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/jobs returns empty list initially" $ do
       get "/api/v1/arbiter_servant_test/jobs"
-        `shouldRespondWith` [json|{
-          "jobs": [],
-          "jobsTotal": 0,
-          "jobsOffset": 0,
-          "jobsLimit": 50,
-          "childCounts": {},
-          "pausedParents": [],
-          "dlqChildCounts": {}
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch
+          [aesonQQ|{
+              "jobs": [],
+              "jobsTotal": 0,
+              "jobsOffset": 0,
+              "jobsLimit": 50,
+              "childCounts": {},
+              "pausedParents": [],
+              "dlqChildCounts": {}
+            }|]
 
     it "POST /api/v1/arbiter_servant_test/jobs inserts a new job" $ do
       postResp <-
@@ -125,14 +132,16 @@ spec connStr = do
           "POST"
           "/api/v1/arbiter_servant_test/jobs"
           [("Content-Type", "application/json")]
-          [json|{
-          "payload": {"tag": "TestMessage", "contents": "test message"},
-          "queueName": "arbiter_servant_test",
-          "dedupKey": {"key": "test-dedup-1", "strategy": "ignore"},
-          "groupKey": "group1",
-          "priority": 0,
-          "maxAttempts": 3
-        }|]
+          ( encode
+              [aesonQQ|{
+                "payload": {"tag": "TestMessage", "contents": "test message"},
+                "queueName": "arbiter_servant_test",
+                "dedupKey": {"key": "test-dedup-1", "strategy": "ignore"},
+                "groupKey": "group1",
+                "priority": 0,
+                "maxAttempts": 3
+              }|]
+          )
 
       -- Verify POST response contains the inserted job
       liftIO $ do
@@ -158,7 +167,11 @@ spec connStr = do
           [("Content-Type", "application/json")]
           ( encode $
               object
-                [ "payload" .= object ["tag" .= ("TestMessage" :: Text), "contents" .= ("delayed" :: Text)]
+                [ "payload"
+                    .= object
+                      [ "tag" .= ("TestMessage" :: Text)
+                      , "contents" .= ("delayed" :: Text)
+                      ]
                 , "notVisibleUntil" .= futureTime
                 ]
           )
@@ -175,12 +188,14 @@ spec connStr = do
         "POST"
         "/api/v1/arbiter_servant_test/jobs"
         [("Content-Type", "application/json")]
-        [json|{
-          "payload": {"tag": "TestMessage", "contents": "first"},
-          "queueName": "arbiter_servant_test",
-          "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
-          "priority": 0
-        }|]
+        ( encode
+            [aesonQQ|{
+              "payload": {"tag": "TestMessage", "contents": "first"},
+              "queueName": "arbiter_servant_test",
+              "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
+              "priority": 0
+            }|]
+        )
         `shouldRespondWith` 200
 
       -- Try to insert duplicate
@@ -188,12 +203,14 @@ spec connStr = do
         "POST"
         "/api/v1/arbiter_servant_test/jobs"
         [("Content-Type", "application/json")]
-        [json|{
-          "payload": {"tag": "TestMessage", "contents": "second"},
-          "queueName": "arbiter_servant_test",
-          "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
-          "priority": 0
-        }|]
+        ( encode
+            [aesonQQ|{
+              "payload": {"tag": "TestMessage", "contents": "second"},
+              "queueName": "arbiter_servant_test",
+              "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
+              "priority": 0
+            }|]
+        )
         `shouldRespondWith` 409
 
     it "POST /api/v1/arbiter_servant_test/jobs/batch inserts multiple jobs" $ do
@@ -241,10 +258,12 @@ spec connStr = do
           "POST"
           "/api/v1/arbiter_servant_test/jobs"
           [("Content-Type", "application/json")]
-          [json|{
-            "payload": {"tag": "TestMessage", "contents": "existing"},
-            "dedupKey": {"key": "batch-dedup", "strategy": "ignore"}
-          }|]
+          ( encode
+              [aesonQQ|{
+                "payload": {"tag": "TestMessage", "contents": "existing"},
+                "dedupKey": {"key": "batch-dedup", "strategy": "ignore"}
+              }|]
+          )
 
       -- Batch insert with same dedup key — should skip the duplicate
       postResp <-
@@ -462,14 +481,7 @@ spec connStr = do
   describe "DLQ API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/dlq returns empty list initially" $ do
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` [json|{
-          "dlqJobs": [],
-          "dlqTotal": 0,
-          "dlqOffset": 0,
-          "dlqLimit": 50
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
 
     it "GET /api/v1/arbiter_servant_test/dlq supports pagination" $ do
       -- Insert multiple jobs and move to DLQ
@@ -523,14 +535,7 @@ spec connStr = do
 
       -- Verify DLQ is empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` [json|{
-          "dlqJobs": [],
-          "dlqTotal": 0,
-          "dlqOffset": 0,
-          "dlqLimit": 50
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
 
     it "POST /api/v1/arbiter_servant_test/dlq/:id/retry moves job back to main queue" $ do
       -- Insert a job, then move it to DLQ
@@ -547,14 +552,7 @@ spec connStr = do
 
       -- Verify DLQ is now empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` [json|{
-          "dlqJobs": [],
-          "dlqTotal": 0,
-          "dlqOffset": 0,
-          "dlqLimit": 50
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
 
       -- Verify job is back in main queue
       liftIO $ do
@@ -577,14 +575,7 @@ spec connStr = do
 
       -- Verify DLQ is empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` [json|{
-          "dlqJobs": [],
-          "dlqTotal": 0,
-          "dlqOffset": 0,
-          "dlqLimit": 50
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
 
       -- Verify job is not in main queue either
       liftIO $ do
@@ -781,7 +772,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/expr-test"
           [("Content-Type", "application/json")]
-          (encode $ object ["overrideExpression" .= ("0 3 * * *" :: Text)])
+          (encode [aesonQQ|{"overrideExpression": "0 3 * * *"}|])
 
       liftIO $ do
         simpleStatus resp `shouldBe` status200
@@ -798,7 +789,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/clear-test"
           [("Content-Type", "application/json")]
-          (encode $ object ["overrideExpression" .= ("0 3 * * *" :: Text)])
+          (encode [aesonQQ|{"overrideExpression": "0 3 * * *"}|])
 
       -- Clear it with null
       resp <-
@@ -806,7 +797,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/clear-test"
           [("Content-Type", "application/json")]
-          "{\"overrideExpression\": null}"
+          (encode [aesonQQ|{"overrideExpression": null}|])
 
       liftIO $ do
         simpleStatus resp `shouldBe` status200
@@ -822,7 +813,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/disable-test"
           [("Content-Type", "application/json")]
-          (encode $ object ["enabled" .= False])
+          (encode [aesonQQ|{"enabled": false}|])
 
       liftIO $ do
         simpleStatus resp `shouldBe` status200
@@ -838,7 +829,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/bad-expr"
           [("Content-Type", "application/json")]
-          (encode $ object ["overrideExpression" .= ("not a cron" :: Text)])
+          (encode [aesonQQ|{"overrideExpression": "not a cron"}|])
 
       liftIO $ simpleStatus resp `shouldBe` status400
 
@@ -850,7 +841,7 @@ spec connStr = do
           "PATCH"
           "/api/v1/cron/schedules/bad-overlap"
           [("Content-Type", "application/json")]
-          (encode $ object ["overrideOverlap" .= ("BadPolicy" :: Text)])
+          (encode [aesonQQ|{"overrideOverlap": "BadPolicy"}|])
 
       liftIO $ simpleStatus resp `shouldBe` status400
 
@@ -867,8 +858,4 @@ spec connStr = do
   describe "Queues API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/queues returns list of all available queues" $ do
       get "/api/v1/queues"
-        `shouldRespondWith` [json|{
-          "queues": ["arbiter_servant_test"]
-        }|]
-          { matchStatus = 200
-          }
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "queues": ["arbiter_servant_test"] }|]
