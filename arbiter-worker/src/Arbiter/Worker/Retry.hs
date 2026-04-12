@@ -6,7 +6,6 @@ module Arbiter.Worker.Retry
   ( retryOnException
   ) where
 
-import Control.Monad (void)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, liftIO)
 import UnliftIO.Async (race)
@@ -15,7 +14,7 @@ import UnliftIO.Exception (tryAny)
 import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (logMessage)
+import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Run an action in a retry loop, surviving transient failures.
@@ -42,9 +41,8 @@ retryOnException stateVar logCfg label action = loop
           case status of
             ShuttingDown -> pure ()
             _ -> do
-              void . tryAny . liftIO $
-                logMessage logCfg Error $
-                  label <> " error (retrying): " <> T.pack (show e)
+              tryLog logCfg Error $
+                label <> " error (retrying): " <> T.pack (show e)
               sleepResult <-
                 race
                   ( liftIO . atomically $

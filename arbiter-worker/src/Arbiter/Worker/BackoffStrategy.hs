@@ -56,8 +56,7 @@ data Jitter
 calculateBackoff :: BackoffStrategy -> Int32 -> NominalDiffTime
 calculateBackoff strategy attempts = case strategy of
   Exponential (ExponentialConfig base cap) ->
-    let delay = min (realToFrac cap) (base ^ attempts)
-     in realToFrac (min (realToFrac cap :: Double) delay)
+    min cap (realToFrac (base ^ attempts))
   Linear (LinearConfig increment cap) ->
     let delay = increment * fromIntegral attempts
      in min cap delay

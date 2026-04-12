@@ -49,6 +49,7 @@ import Control.Monad (forM_, forever, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Foldable (fold)
 import Data.List (unfoldr)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
@@ -235,7 +236,7 @@ backfillMissedTicks logCfg schemaName jobs = do
                 <> name cj
                 <> "'"
           let scheduleNames = [name cj | (cj, _, _) <- plan]
-          tryLog logCfg "Backfill failed" $ withDbTransaction $ do
+          tryOrLog logCfg "Backfill failed" $ withDbTransaction $ do
             void $ Ops.touchCronChecked schemaName scheduleNames
             forM_ plan $ \(cj, effectiveOv, ticks) ->
               forM_ ticks $ \tick ->
@@ -296,7 +297,7 @@ processCronTick isBackfill logCfg schemaName jobs tick = do
           tryInsertCronJob isBackfill logCfg schemaName cj effectiveOv tick
 
   when dbFetchOk $
-    tryLog logCfg "Failed to update last_checked_at" $
+    tryOrLog logCfg "Failed to update last_checked_at" $
       Ops.touchCronChecked schemaName (map name jobs)
 
 -- | Fetch schedule rows from DB, falling back to empty on error.
@@ -324,14 +325,14 @@ resolveAndParse cj mRow =
         Nothing -> (cronExpression cj, overlap cj, True)
         Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
           ( CS.effectiveExpression row
-          , maybe (overlap cj) id (overlapPolicyFromText (CS.effectiveOverlap row))
+          , fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
           , rowEnabled
           )
-   in if not isEnabled
-        then Disabled
-        else case parseCronSchedule expr of
+   in if isEnabled
+        then case parseCronSchedule expr of
           Right sched -> Resolved ov sched
           Left err -> ParseError expr err
+        else Disabled
 
 insertCronJob
   :: (QueueOperation m registry payload)
@@ -360,8 +361,8 @@ logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()
 logCron logCfg level msg = liftIO $ logMessage logCfg level msg
 
 -- | Try an action, logging errors without re-throwing.
-tryLog :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
-tryLog logCfg prefix action = do
+tryOrLog :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
+tryOrLog logCfg prefix action = do
   result <- tryAny action
   case result of
     Right _ -> pure ()

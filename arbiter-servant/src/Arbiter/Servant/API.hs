@@ -179,9 +179,18 @@ data CronAPI mode = CronAPI
   }
   deriving stock (Generic)
 
--- | Type family to build API routes from registry
--- For registry '[ '("table1", Payload1), '("table2", Payload2) ]
--- Generates: Capture "table1" :> NamedRoutes (TableAPI Payload1) :<|> Capture "table2" :> NamedRoutes (TableAPI Payload2) :<|> queues :<|> events
+-- | Type family to build API routes from a registry.
+--
+-- For a registry @'[ '("table1", Payload1), '("table2", Payload2) ]@,
+-- generates:
+--
+-- @
+-- tableName ':>' NamedRoutes (TableAPI payload)
+--   ':<|>' NamedRoutes (TableAPI payload)
+--   ':<|>' "queues" ':>' NamedRoutes QueuesAPI
+--   ':<|>' "events" ':>' EventsAPI
+--   ':<|>' "cron" ':>' NamedRoutes CronAPI
+-- @
 type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
   RegistryToAPI '[] =
     "queues" :> NamedRoutes QueuesAPI

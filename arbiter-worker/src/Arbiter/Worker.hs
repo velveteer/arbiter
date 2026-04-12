@@ -50,7 +50,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Control.Exception (SomeException, fromException)
-import Control.Monad (forever, replicateM, void, when)
+import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
@@ -113,7 +113,7 @@ import Arbiter.Worker.Cron
 import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (logMessage, runHook, withJobContext)
+import Arbiter.Worker.Logger.Internal (runHook, tryLog, withJobContext)
 import Arbiter.Worker.Retry (retryOnException)
 import Arbiter.Worker.WorkerState
 
@@ -239,10 +239,12 @@ getEnabledQueues envVar registry = do
   mVal <- lookupEnv envVar
   case mVal of
     Nothing -> pure allQueues
-    Just val
-      | T.null (T.strip $ T.pack val) -> pure allQueues
-      | otherwise -> do
-          let requested = map T.strip $ T.splitOn "," $ T.pack val
+    Just val -> do
+      let tval = T.pack val
+      if T.null (T.strip tval)
+        then pure allQueues
+        else do
+          let requested = map T.strip $ T.splitOn "," tval
               invalid = filter (`notElem` allQueues) requested
           if null invalid
             then pure requested
@@ -306,19 +308,17 @@ runWorkerPool config = do
 
     -- Spawn groups table reaper (corrects drift in job_count, min_priority, min_id)
     reaper <-
-      pure
-        <$> ( ContT . withAsync $
-                retryOnException (workerStateVar config) (logConfig config) "Group reaper" $
-                  groupReaperLoop config (groupReaperInterval config)
-            )
+      ContT . withAsync $
+        retryOnException (workerStateVar config) (logConfig config) "Group reaper" $
+          groupReaperLoop config (groupReaperInterval config)
 
     -- Wait for any thread to exit (normal or exceptional)
-    (_, res) <- waitAnyCatch (dispatcher : cron ++ reaper ++ liveness ++ workers)
+    (_, res) <- waitAnyCatch (dispatcher : reaper : cron ++ liveness ++ workers)
 
     case res of
       Left e ->
         -- A thread crashed
-        lift . void . tryAny . liftIO $ logMessage (logConfig config) Error $ T.pack $ "Thread pool exception: " <> show e
+        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (show e)
       Right _ ->
         -- A thread exited normally
         pure ()
@@ -327,8 +327,7 @@ runWorkerPool config = do
     shutdownWorker config
 
     -- Graceful shutdown: drain the queue with optional timeout
-    lift . void . tryAny . liftIO $
-      logMessage (logConfig config) Info (T.pack "Starting graceful shutdown. Draining in-flight jobs...")
+    lift $ tryLog (logConfig config) Info "Starting graceful shutdown. Draining in-flight jobs..."
 
     -- Wait for work queue to be empty, with optional timeout
     let waitForDrain = liftIO . atomically $ do
@@ -350,14 +349,13 @@ runWorkerPool config = do
                       (,)
                         <$> readTVar busyWorkerCount
                         <*> (fromIntegral <$> lengthTBQueue workQueue)
-                  lift . void . tryAny . liftIO $
-                    logMessage (logConfig config) Info $
-                      T.pack $
-                        "Graceful shutdown: waiting for "
-                          <> show (busy :: Int)
-                          <> " busy worker(s), "
-                          <> show (qLen :: Int)
-                          <> " job(s) in queue..."
+                  lift $
+                    tryLog (logConfig config) Info $
+                      "Graceful shutdown: waiting for "
+                        <> T.pack (show (busy :: Int))
+                        <> " busy worker(s), "
+                        <> T.pack (show (qLen :: Int))
+                        <> " job(s) in queue..."
                   drainLoop
         drainLoop
         pure (Right ())
@@ -368,11 +366,9 @@ runWorkerPool config = do
 
     case drainResult of
       Right () ->
-        lift . void . tryAny . liftIO $
-          logMessage (logConfig config) Info (T.pack "All workers are now idle. Graceful shutdown complete.")
+        lift $ tryLog (logConfig config) Info "All workers are now idle. Graceful shutdown complete."
       Left () ->
-        lift . void . tryAny . liftIO $
-          logMessage (logConfig config) Warning (T.pack "Graceful shutdown timed out. Some jobs may still be in-flight.")
+        lift $ tryLog (logConfig config) Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
 
 -- | Periodically writes to a file to signal liveness.
 --
@@ -385,9 +381,7 @@ refreshLiveness logCfg healthcheckPath livenessMVar n = forever $ do
   result <- tryAny $ liftIO $ writeFile healthcheckPath ""
   case result of
     Left e ->
-      void . tryAny . liftIO $
-        logMessage logCfg Error $
-          "Liveness probe write failed: " <> T.pack (show e)
+      tryLog logCfg Error $ "Liveness probe write failed: " <> T.pack (show e)
     Right () -> pure ()
   Async.concurrently_ (MVar.takeMVar livenessMVar) (Conc.threadDelay $ n * 1_000_000)
 
@@ -435,8 +429,8 @@ handleWorkerException cfg result =
   case result of
     Right () -> pure ()
     Left (e :: SomeException) -> do
-      let msg = T.pack $ "Worker exception: " <> show e
-      void . tryAny $ logMessage cfg Error msg
+      let msg = "Worker exception: " <> T.pack (show e)
+      tryLog cfg Error msg
       when (isAsyncException e) $ throwIO e
       threadDelay 2_000_000
 
@@ -479,55 +473,42 @@ processJobsWithRetry config jobs = do
         jobs
         (logConfig config)
         (fmap livenessSignal (livenessConfig config))
-      $ if useWorkerTransaction config
-        then withDbTransaction $ do
-          schemaName <- Arb.getSchema
-          case transactionTimeout config of
-            Just timeout -> do
-              let timeoutMs = ceiling (timeout * 1000) :: Int64
-              void $ executeStatement "SET LOCAL statement_timeout = ?" [pval CInt8 timeoutMs]
-            Nothing -> pure ()
-          case handlerMode config of
-            SingleJobMode handler -> do
-              let (job :| _) = jobs
-              (childResults, dlqFailures) <-
-                if Job.isRollup job
-                  then readChildResults schemaName job
-                  else pure (Map.empty, Map.empty)
-              handlerResult <- (runHandlerWithConnection (handler childResults dlqFailures) job :: m result)
-              case (Job.parentId job, encodeJobResult handlerResult) of
-                (Just pid, Just val) ->
-                  void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
-                _ -> pure ()
-              rowsAffected <- Arb.ackJob job
-              when (rowsAffected == 0) $
-                throwJobNotFound $
-                  "Job "
-                    <> T.pack (show (Job.primaryKey job))
-                    <> " was reclaimed during processing - rolling back handler transaction"
-            BatchedJobsMode _ handler -> do
-              void (runHandlerWithConnection handler jobs :: m result)
-              rowsAffected <- Arb.ackJobsBulk (toList jobs)
-              when (rowsAffected /= fromIntegral (length jobs)) $
-                throwJobNotFound $
-                  "Expected to ack "
-                    <> T.pack (show (length jobs))
-                    <> " jobs but only "
-                    <> T.pack (show rowsAffected)
-                    <> " were deleted - rolling back handler transaction"
-        else do
-          -- Manual mode: no transaction, no automatic acking
-          schemaName' <- Arb.getSchema
-          case handlerMode config of
-            SingleJobMode handler -> do
-              let (job :| _) = jobs
-              (childResults, dlqFailures) <-
-                if Job.isRollup job
-                  then readChildResults schemaName' job
-                  else pure (Map.empty, Map.empty)
-              void (runHandlerWithConnection (handler childResults dlqFailures) job :: m result)
-            BatchedJobsMode _ handler ->
-              void (runHandlerWithConnection handler jobs :: m result)
+      $ do
+        schemaName <- Arb.getSchema
+        if useWorkerTransaction config
+          then withDbTransaction $ do
+            case transactionTimeout config of
+              Just timeout -> do
+                let timeoutMs = ceiling (timeout * 1000) :: Int64
+                void $ executeStatement "SET LOCAL statement_timeout = ?" [pval CInt8 timeoutMs]
+              Nothing -> pure ()
+            handlerResult <- runHandler config schemaName jobs
+            -- Store result for parent rollup if applicable
+            case handlerMode config of
+              SingleJobMode _ -> do
+                let (job :| _) = jobs
+                case (Job.parentId job, encodeJobResult handlerResult) of
+                  (Just pid, Just val) ->
+                    void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
+                  _ -> pure ()
+                rowsAffected <- Arb.ackJob job
+                when (rowsAffected == 0) $
+                  throwJobNotFound $
+                    "Job "
+                      <> T.pack (show (Job.primaryKey job))
+                      <> " was reclaimed during processing - rolling back handler transaction"
+              BatchedJobsMode _ _ -> do
+                rowsAffected <- Arb.ackJobsBulk (toList jobs)
+                when (rowsAffected /= fromIntegral (length jobs)) $
+                  throwJobNotFound $
+                    "Expected to ack "
+                      <> T.pack (show (length jobs))
+                      <> " jobs but only "
+                      <> T.pack (show rowsAffected)
+                      <> " were deleted - rolling back handler transaction"
+          else do
+            -- Manual mode: no transaction, no automatic acking
+            void $ runHandler config schemaName jobs
   endTime <- liftIO getCurrentTime
   case result of
     Right () ->
@@ -537,13 +518,33 @@ processJobsWithRetry config jobs = do
         mapM_ (\job -> runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime) jobs
     Left e
       | isJobGoneException e ->
-          void . tryAny . liftIO $
-            logMessage (logConfig config) Info $
-              "Job(s) no longer available, skipping retry: " <> T.pack (show e)
+          tryLog (logConfig config) Info $
+            "Job(s) no longer available, skipping retry: " <> T.pack (show e)
       | otherwise ->
           -- Update all jobs for retry or move to DLQ in a separate transaction
           withDbTransaction $
             mapM_ (handleJobFailure config hooks e maxAtts startTime endTime) jobs
+
+-- | Run the user's handler, reading child results for rollup jobs.
+runHandler
+  :: forall m registry payload result
+   . ( JobOperation m registry payload
+     , JobResult result
+     )
+  => WorkerConfig m payload result
+  -> Text
+  -> NonEmpty (Job.JobRead payload)
+  -> m result
+runHandler config schemaName jobs = case handlerMode config of
+  SingleJobMode handler -> do
+    let (job :| _) = jobs
+    (childResults, dlqFailures) <-
+      if Job.isRollup job
+        then readChildResults schemaName job
+        else pure (Map.empty, Map.empty)
+    runHandlerWithConnection (handler childResults dlqFailures) job
+  BatchedJobsMode _ handler ->
+    runHandlerWithConnection handler jobs
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.
@@ -586,10 +587,10 @@ handleJobFailure
 handleJobFailure config hooks e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
+  schemaName <- getSchema
   case failureKind of
     TreeCancelFailure -> do
       -- TreeCancel: delete the entire tree from root down (including this job)
-      schemaName <- getSchema
       deleted <- Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
       when (deleted > 0) $
         runHook cfg "onJobFailure" $
@@ -597,8 +598,7 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
     BranchCancelFailure -> do
       -- BranchCancel: cascade-delete the parent + all siblings (including this job).
       -- If no parent, just delete this job.
-      schemaName <- getSchema
-      let target = maybe (Job.primaryKey job) id (Job.parentId job)
+      let target = fromMaybe (Job.primaryKey job) (Job.parentId job)
       deleted <- Ops.cancelJobCascade schemaName (Job.queueName job) target
       when (deleted > 0) $
         runHook cfg "onJobFailure" $
@@ -608,20 +608,18 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
           -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
           -- Merges old snapshot so repeated DLQ round-trips don't lose data.
           when (Job.isRollup job) $ do
-            schemaName <- getSchema
             (results, failures, mSnapshot, _dlqFailures) <-
               Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
             let merged = Ops.mergeRawChildResults results failures mSnapshot
-            when (not (Map.null merged)) $
+            unless (Map.null merged) $
               void $
                 Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
           -- Permanent failure or max attempts reached - move to DLQ
           rowsAffected <- Arb.moveToDLQ errorMsg job
           if rowsAffected == 0
             then
-              void . tryAny . liftIO $
-                logMessage cfg Warning $
-                  "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for moving to DLQ"
+              tryLog cfg Warning $
+                "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for moving to DLQ"
             else do
               -- Successfully moved to DLQ
               runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
@@ -633,9 +631,8 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
           rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
           if rowsAffected == 0
             then
-              void . tryAny . liftIO $
-                logMessage cfg Warning $
-                  "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
+              tryLog cfg Warning $
+                "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
             else do
               -- Successfully updated for retry
               runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
@@ -651,7 +648,6 @@ groupReaperLoop
   -> m ()
 groupReaperLoop _config interval = do
   let intervalSecs = ceiling interval
-  Arb.refreshGroups @m @registry @payload intervalSecs
   forever $ do
-    liftIO $ threadDelay (intervalSecs * 1_000_000)
     Arb.refreshGroups @m @registry @payload intervalSecs
+    liftIO $ threadDelay (intervalSecs * 1_000_000)

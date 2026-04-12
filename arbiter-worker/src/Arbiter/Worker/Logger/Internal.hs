@@ -5,12 +5,13 @@
 -- This module is not part of the public API.
 module Arbiter.Worker.Logger.Internal
   ( logMessage
+  , tryLog
   , withJobContext
   , runHook
   ) where
 
 import Arbiter.Core.Job.Types qualified as Job
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Logger qualified as ML
@@ -71,6 +72,10 @@ runWithDestination dest ctx level msg = case dest of
     logAt Warning = ML.logWarnN
     logAt Error = ML.logErrorN
 
+-- | Log a message, swallowing any exceptions from the logging infrastructure.
+tryLog :: (MonadUnliftIO m) => LogConfig -> LogLevel -> Text -> m ()
+tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
+
 -- | Run an observability hook, catching and logging any exceptions.
 runHook
   :: (MonadUnliftIO m)
@@ -83,5 +88,5 @@ runHook
 runHook cfg hookName action = do
   result <- tryAny action
   case result of
-    Left e -> liftIO $ logMessage cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> T.pack (show e)
+    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> T.pack (show e)
     Right _ -> pure ()

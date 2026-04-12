@@ -9,7 +9,7 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.QueueRegistry (TableForPayload)
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Foldable (traverse_)
@@ -26,7 +26,7 @@ import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..))
 import Arbiter.Worker.Logger (LogLevel (..))
-import Arbiter.Worker.Logger.Internal (logMessage)
+import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.NotificationListener (withNotificationLoop)
 
 -- | Run the dispatcher loop
@@ -85,7 +85,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
           Arb.claimNextVisibleJobsBatched batchSize freeWorkers (visibilityTimeout config)
       case eJobs of
         Left e -> do
-          void . Ex.tryAny $ liftIO $ logMessage (logConfig config) Error $ T.pack $ "Dispatcher exception: " <> show e
+          tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (show e)
         Right batches -> do
           STM.atomically $ traverse_ (STM.writeTBQueue workQueue) batches
           traverse_ (flip MVar.tryPutMVar ()) mLivenessMVar

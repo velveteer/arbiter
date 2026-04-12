@@ -9,6 +9,7 @@ import Control.Applicative (Alternative ((<|>)))
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, void)
 import Data.ByteString.Char8 qualified as BSC
+import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -70,7 +71,7 @@ withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger action =
         (mainLoop ctx action)
         (notificationLoop ctx)
   where
-    logCfg = maybe defaultLogConfig id mLogCfg
+    logCfg = fromMaybe defaultLogConfig mLogCfg
 
 mainLoop :: (MonadUnliftIO m) => ListenerCtx -> Action m a -> m ()
 mainLoop ctx action = loop
