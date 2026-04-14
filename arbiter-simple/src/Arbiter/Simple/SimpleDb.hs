@@ -38,7 +38,6 @@ import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import UnliftIO (MonadUnliftIO)
 

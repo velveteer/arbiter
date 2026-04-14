@@ -46,7 +46,6 @@ import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
 import Hasql.Connection qualified as Hasql
 import UnliftIO (MonadUnliftIO)
 

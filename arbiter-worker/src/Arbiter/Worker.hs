@@ -32,7 +32,6 @@ module Arbiter.Worker
   , overlapPolicyFromText
   ) where
 
-import Arbiter.Core.Codec (Col (..), pval)
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
