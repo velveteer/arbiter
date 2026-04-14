@@ -138,7 +138,7 @@ assertGroupsConsistent conn schemaName tableName ctx = do
   actual <- readGroupsTable conn schemaName tableName
   expected <- computeExpectedGroups conn schemaName tableName
   let toMap = Map.fromList . map (\g -> (gsGroupKey g, (gsJobCount g, gsMinPriority g, gsMinId g)))
-      -- Filter out empty groups from actual — they're harmless leftovers
+      -- Filter out empty groups from actual - they're harmless leftovers
       actualNonEmpty = Map.filter (\(c, _, _) -> c > 0) (toMap actual)
       expectedFull = toMap expected
   when (actualNonEmpty /= expectedFull) $
@@ -544,7 +544,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 999 WHERE group_key = 'seq-g'"
 
-      -- First refresh with large interval — runs because sequence is 0
+      -- First refresh with large interval - runs because sequence is 0
       void $ runM env $ HL.refreshGroups @m @registry @payload 300
       check env "after first refreshGroups (should correct drift)"
 
@@ -553,7 +553,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 888 WHERE group_key = 'seq-g'"
 
-      -- Second refresh with same large interval — should skip (just ran)
+      -- Second refresh with same large interval - should skip (just ran)
       void $ runM env $ HL.refreshGroups @m @registry @payload 300
 
       -- Verify drift was NOT corrected (reaper skipped)
@@ -570,7 +570,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
     it "refreshGroups: runs when interval elapsed" $ \env -> do
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "elapsed1")) {groupKey = Just "elapsed-g"}
 
-      -- Run with interval 0 — always runs
+      -- Run with interval 0 - always runs
       void $ runM env $ HL.refreshGroups @m @registry @payload 0
 
       -- Corrupt
@@ -578,7 +578,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 777 WHERE group_key = 'elapsed-g'"
 
-      -- Run again with interval 0 — should run again
+      -- Run again with interval 0 - should run again
       void $ runM env $ HL.refreshGroups @m @registry @payload 0
       check env "after refreshGroups with interval 0 (should always correct)"
 
@@ -627,14 +627,14 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       [jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       check env "after claiming job A"
 
-      -- Cancel the other job (non-in-flight) — should NOT clear in_flight_until
+      -- Cancel the other job (non-in-flight) - should NOT clear in_flight_until
       void $ runM env $ HL.cancelJob @m @registry @payload (primaryKey jobB)
       check env "after cancelling non-in-flight job B"
 
       -- Insert a new job so there's something to claim
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "ift-c")) {groupKey = Just "ift-cancel-g"}
 
-      -- Try to claim — should get nothing (group still blocked by in-flight job)
+      -- Try to claim - should get nothing (group still blocked by in-flight job)
       blocked <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       length blocked `shouldBe` 0
 
@@ -749,7 +749,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       [_jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       check env "after claim with suspended sibling"
 
-      -- Resume job B — should NOT clear in_flight_until from job A's claim
+      -- Resume job B - should NOT clear in_flight_until from job A's claim
       void $ runM env $ HL.resumeJob @m @registry @payload (primaryKey jobB)
       check env "after resume (in_flight_until should still reflect job A)"
 
@@ -762,7 +762,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       -- Wait for it to expire
       threadDelay 2_000_000
 
-      -- Insert a new job in same group — INSERT trigger should clear expired in_flight_until
+      -- Insert a new job in same group - INSERT trigger should clear expired in_flight_until
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "exp-b")) {groupKey = Just "exp-g"}
       check env "after insert clears expired in_flight_until"
 

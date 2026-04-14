@@ -47,6 +47,8 @@ import Arbiter.Core.Job.Schema
   , createReaperSeqSQL
   , createResultsTableSQL
   , createSchemaSQL
+  , SchemaName
+  , TableName
   )
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Control.Exception (bracket, try)
@@ -82,7 +84,7 @@ data MigrationConfig = MigrationConfig
   -- ^ Whether to create event streaming triggers for the admin UI.
   -- When enabled, every INSERT\/UPDATE\/DELETE on job tables fires an enriched
   -- JSON event via @pg_notify@ on the @arbiter_job_events@ channel.
-  -- This adds overhead to every row operation — disable for maximum throughput.
+  -- This adds overhead to every row operation - disable for maximum throughput.
   -- Default: 'False'
   }
   deriving stock (Eq, Show)
@@ -124,8 +126,8 @@ runMigrationsForRegistry
   -- ^ Proxy for the job payload registry
   -> ByteString
   -- ^ Database connection string
-  -> Text
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -> SchemaName
+  -- ^ Schema name
   -> MigrationConfig
   -- ^ Migration configuration
   -> IO (MigrationResult String)
@@ -138,10 +140,10 @@ runMigrationsForRegistry proxy connStr schemaName config = do
 runMigrationsTrackedForTables
   :: ByteString
   -- ^ Database connection string
-  -> Text
+  -> SchemaName
   -- ^ Schema name
-  -> [Text]
-  -- ^ List of table names to create
+  -> [TableName]
+  -- ^ Table names to create
   -> MigrationConfig
   -- ^ Migration configuration
   -> IO (MigrationResult String)
@@ -208,9 +210,9 @@ runMigrationsTrackedForTables connStr schemaName tableNames config =
 -- This creates migrations for one table and its DLQ within a schema.
 -- Each table gets its own set of migrations with unique version identifiers.
 jobQueueMigrationsForTable
-  :: Text
+  :: SchemaName
   -- ^ Schema name
-  -> Text
+  -> TableName
   -- ^ Table name
   -> MigrationConfig
   -- ^ Migration configuration

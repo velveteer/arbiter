@@ -33,6 +33,7 @@ module Arbiter.Hasql.HasqlDb
   ) where
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
@@ -66,8 +67,8 @@ newtype HasqlConnectionError = HasqlConnectionError String
 
 -- | Schema name and connection pool for 'HasqlDb'.
 data HasqlEnv registry = HasqlEnv
-  { schema :: Text
-  -- ^ PostgreSQL schema name where job tables are located
+  { schema :: SchemaName
+  -- ^ Schema name
   , hasqlPool :: HasqlConnectionPool
   -- ^ The connection pool state
   }
@@ -120,8 +121,8 @@ runHasqlDb env action = runReaderT (unHasqlDb action) env
 inTransaction
   :: forall registry m a
    . Hasql.Connection
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> HasqlDb registry m a
   -> m a
 inTransaction conn schemaName action =
@@ -147,8 +148,8 @@ createHasqlEnv
   => Proxy registry
   -> ByteString
   -- ^ PostgreSQL connection string
-  -> Text
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -> SchemaName
+  -- ^ Schema name
   -> m (HasqlEnv registry)
 createHasqlEnv proxy connStr schemaName =
   createHasqlEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
@@ -160,8 +161,8 @@ createHasqlEnvWithConfig
   => Proxy registry
   -> ByteString
   -- ^ PostgreSQL connection string
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> PoolConfig
   -> m (HasqlEnv registry)
 createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
@@ -190,8 +191,8 @@ createHasqlEnvWithPool
    . (AllQueuesUnique registry)
   => Proxy registry
   -> Pool Hasql.Connection
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> HasqlEnv registry
 createHasqlEnvWithPool _proxy connPool schemaName =
   HasqlEnv

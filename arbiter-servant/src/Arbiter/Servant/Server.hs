@@ -336,7 +336,7 @@ promoteJobHandler tableName config jobId = do
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
             | suspended job ->
-                pure (Left err409 {errBody = "Job is suspended — use resume endpoint"})
+                pure (Left err409 {errBody = "Job is suspended - use resume endpoint"})
             | otherwise ->
                 pure (Left err409 {errBody = "Job is already visible"})
 
@@ -436,7 +436,7 @@ suspendJobHandler tableName config jobId = do
             | suspended job ->
                 pure (Left err409 {errBody = "Job is already suspended"})
             | otherwise ->
-                pure (Left err409 {errBody = "Job is in-flight — cannot suspend"})
+                pure (Left err409 {errBody = "Job is in-flight - cannot suspend"})
 
   case result of
     Left err -> throwError err
@@ -633,7 +633,7 @@ queuesServer registryProxy =
     { listQueues = pure $ QueuesResponse {queues = registryTableNames registryProxy}
     }
 
--- | Events server — raw WAI application for SSE streaming.
+-- | Events server - raw WAI application for SSE streaming.
 --
 -- Uses WAI 'responseStream' with explicit flush after every event so the
 -- browser receives data immediately.  Sends a @: keepalive@ comment every
@@ -660,7 +660,7 @@ eventsServer config = Tagged $ \_req sendResponse ->
           ( \(conn, localPool) -> do
               -- Clean up LISTEN state before returning to pool so the connection
               -- doesn't accumulate buffered notifications while idle.
-              -- If UNLISTEN fails, the connection is likely broken — destroy it
+              -- If UNLISTEN fails, the connection is likely broken - destroy it
               -- instead of returning a dead connection to the pool.
               result <- (PG.execute_ conn "UNLISTEN *" >> pure True) `catch` (\(_ :: SomeException) -> pure False)
               if result

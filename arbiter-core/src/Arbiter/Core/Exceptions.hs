@@ -50,12 +50,12 @@ data JobException
   deriving stock (Show, Typeable)
   deriving anyclass (Exception)
 
--- | Transient failure — the job will be retried with backoff.
+-- | Transient failure - the job will be retried with backoff.
 newtype JobRetryableException = JobRetryableException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
--- | Permanent failure — the job goes straight to the DLQ, no retries.
+-- | Permanent failure - the job goes straight to the DLQ, no retries.
 newtype JobPermanentException = JobPermanentException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)

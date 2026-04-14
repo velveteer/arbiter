@@ -139,7 +139,7 @@ insertJob job = do
   Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns only the jobs that were
--- actually inserted (dedup'd jobs are excluded). Does not validate @parentId@ —
+-- actually inserted (dedup'd jobs are excluded). Does not validate @parentId@ -
 -- use 'insertJobTree' for parent-child relationships.
 insertJobsBatch
   :: forall m registry payload
@@ -222,7 +222,7 @@ ackJobsBatch jobs@(firstJob : _) = do
 
 -- | Bulk ack for standalone jobs (no parent, no tree logic).
 --
--- A single DELETE with unnest — one round trip for N jobs.
+-- A single DELETE with unnest - one round trip for N jobs.
 -- Only valid for jobs claimed in 'BatchedJobsMode'.
 --
 -- Returns the number of rows deleted.
@@ -543,7 +543,7 @@ getInFlightJobs limit offset = do
 
 -- | Cancels (deletes) a job by ID.
 --
--- Returns 0 if the job has children — use 'cancelJobCascade' to delete
+-- Returns 0 if the job has children - use 'cancelJobCascade' to delete
 -- a parent and all its descendants.
 cancelJob
   :: forall m registry payload

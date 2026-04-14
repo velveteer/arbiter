@@ -68,7 +68,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 
 -- | Internal exception used to abort a tree insertion transaction.
--- Not exported — caught and converted to @Left@ by 'insertJobTree'.
+-- Not exported - caught and converted to @Left@ by 'insertJobTree'.
 newtype TreeInsertFailed = TreeInsertFailed Text
   deriving stock (Show, Typeable)
   deriving anyclass (Exception)
@@ -86,7 +86,7 @@ data JobTree payload
 -- Smart constructors
 -- ---------------------------------------------------------------------------
 
--- | A single job (leaf node) — a terminal node with no children.
+-- | A single job (leaf node) - a terminal node with no children.
 leaf :: JobWrite payload -> JobTree payload
 leaf = Leaf
 
@@ -129,7 +129,7 @@ parent <~~ children = Finalizer (parent {isRollup = True}) (fmap Leaf children)
 --
 -- Returns a flat 'NonEmpty' list of all inserted jobs (pre-order: root first).
 -- Returns @Left errMsg@ if any insertion fails (e.g. dedup conflict on root,
--- phantom parent). The entire transaction is rolled back on failure — no
+-- phantom parent). The entire transaction is rolled back on failure - no
 -- partial trees are committed.
 insertJobTree
   :: forall m payload

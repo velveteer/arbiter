@@ -26,6 +26,7 @@ module Arbiter.Simple.SimpleDb
   ) where
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
@@ -52,8 +53,8 @@ import Arbiter.Simple.MonadArbiter
 
 -- | Schema name and connection pool for 'SimpleDb'.
 data SimpleEnv registry = SimpleEnv
-  { schema :: Text
-  -- ^ PostgreSQL schema name where job tables are located
+  { schema :: SchemaName
+  -- ^ Schema name
   , simplePool :: SimpleConnectionPool
   -- ^ The connection pool state
   }
@@ -106,8 +107,8 @@ runSimpleDb env action = runReaderT (unSimpleDb action) env
 inTransaction
   :: forall registry m a
    . Connection
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> SimpleDb registry m a
   -> m a
 inTransaction conn schemaName action =
@@ -132,8 +133,8 @@ createSimpleEnv
   -- ^ Type-level job payload registry
   -> ByteString
   -- ^ PostgreSQL connection string
-  -> Text
-  -- ^ PostgreSQL schema name (e.g., "arbiter", "public")
+  -> SchemaName
+  -- ^ Schema name
   -> m (SimpleEnv registry)
 createSimpleEnv proxy connStr schemaName =
   createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
@@ -157,8 +158,8 @@ createSimpleEnvWithConfig
   -- ^ Type-level job payload registry
   -> ByteString
   -- ^ PostgreSQL connection string
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> PoolConfig
   -- ^ Pool configuration
   -> m (SimpleEnv registry)
@@ -186,8 +187,8 @@ createSimpleEnvWithPool
   -- ^ Type-level job payload registry
   -> Pool Connection
   -- ^ User-provided connection pool
-  -> Text
-  -- ^ PostgreSQL schema name
+  -> SchemaName
+  -- ^ Schema name
   -> SimpleEnv registry
 createSimpleEnvWithPool _proxy connPool schemaName =
   SimpleEnv

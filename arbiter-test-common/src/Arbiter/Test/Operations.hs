@@ -139,7 +139,7 @@ operationsSpec mkMessage runM = do
       void $ runM env (HL.insertJob (defaultGroupedJob "fairness-single-b" (mkMessage "G2")))
       void $ runM env (HL.insertJob (defaultJob (mkMessage "U3")))
 
-      -- Claim only 3 out of 5 — should get the 3 with lowest IDs (FIFO)
+      -- Claim only 3 out of 5 - should get the 3 with lowest IDs (FIFO)
       claimed <- runM env (HL.claimNextVisibleJobs 3 60) :: IO [JobRead payload]
 
       length claimed `shouldBe` 3
@@ -789,7 +789,7 @@ operationsSpec mkMessage runM = do
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.updateJobForRetry 5 "Simulated failure" (head claimed))
 
-      -- Batch insert with ReplaceDuplicate — should succeed because last_error IS NOT NULL
+      -- Batch insert with ReplaceDuplicate - should succeed because last_error IS NOT NULL
       let batchJobs =
             [ (defaultJob (mkMessage "FreshReplacement"))
                 { dedupKey = Just (ReplaceDuplicate "batch-backoff-key")
@@ -1206,7 +1206,7 @@ operationsSpec mkMessage runM = do
         void $ runM env (HL.insertJob (defaultJob (mkMessage (T.pack $ "U" <> show i))))
       void $ runM env (HL.insertJob (defaultGroupedJob "spaced-group" (mkMessage "G3")))
 
-      -- Claim with batchSize=3 — should get all 3 group members despite
+      -- Claim with batchSize=3 - should get all 3 group members despite
       -- them being spread across IDs 1, 5, 10 (with ungrouped in between)
       batches <- claimBatched env 3 10 :: IO [NonEmpty (JobRead payload)]
 
@@ -1525,7 +1525,7 @@ operationsSpec mkMessage runM = do
               (defaultJob (mkMessage "PauseParent"))
               (JT.leaf (defaultJob (mkMessage "PauseChild1")) :| [JT.leaf (defaultJob (mkMessage "PauseChild2"))])
 
-      -- Children start unsuspended — pause them
+      -- Children start unsuspended - pause them
       paused <- runM env (HL.pauseChildren @m @registry @payload (primaryKey parent))
       paused `shouldBe` 2
 
@@ -1555,7 +1555,7 @@ operationsSpec mkMessage runM = do
       claimedChild <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimedChild `shouldBe` 1
 
-      -- Move child to DLQ — parent wakes (no more children in main queue)
+      -- Move child to DLQ - parent wakes (no more children in main queue)
       void $ runM env (HL.moveToDLQ "Child failed" (head claimedChild))
 
       -- Parent should be resumed (not suspended)
@@ -1750,7 +1750,7 @@ operationsSpec mkMessage runM = do
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
 
-      -- Try to suspend — should fail (0 rows)
+      -- Try to suspend - should fail (0 rows)
       n <- runM env (HL.suspendJob @m @registry @payload (primaryKey inserted))
       n `shouldBe` 0
 
@@ -1852,7 +1852,7 @@ operationsSpec mkMessage runM = do
       -- Pause children (makes them suspended)
       _ <- runM env (HL.pauseChildren @m @registry @payload (primaryKey parent))
 
-      -- Cancel cascade — should delete parent + all suspended children
+      -- Cancel cascade - should delete parent + all suspended children
       deleted <- runM env (HL.cancelJobCascade @m @registry @payload (primaryKey parent))
       deleted `shouldBe` 3
 
@@ -1872,7 +1872,7 @@ operationsSpec mkMessage runM = do
 
       assertSuspended env (primaryKey parent)
 
-      -- Cancel the child (non-cascade) — should resume the parent
+      -- Cancel the child (non-cascade) - should resume the parent
       deleted <- runM env (HL.cancelJob @m @registry @payload (primaryKey child))
       deleted `shouldBe` 1
 
@@ -2097,17 +2097,17 @@ operationsSpec mkMessage runM = do
               (defaultJob (mkMessage "DLQRecoveryParent"))
               (JT.leaf (defaultJob (mkMessage "DLQRecoveryChild")) :| [])
 
-      -- Claim and DLQ the child — parent wakes (no children in main queue)
+      -- Claim and DLQ the child - parent wakes (no children in main queue)
       [c] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "child failed" c)
 
-      -- Retry from DLQ — child re-inserted into main queue
+      -- Retry from DLQ - child re-inserted into main queue
       dlqJobs <- dlqAll env
       Just retried <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
       parentId retried `shouldBe` Just (primaryKey parent)
 
       -- Both parent (woken earlier) and retried child are claimable.
-      -- Claiming parent first is harmless — ack's suspend CTE re-suspends it.
+      -- Claiming parent first is harmless - ack's suspend CTE re-suspends it.
       claimed <- claimJobs env 2
       length claimed `shouldBe` 2
 
@@ -2136,14 +2136,14 @@ operationsSpec mkMessage runM = do
       [c2] <- claimJobs env 1
       void $ runM env (HL.ackJob c2)
 
-      -- Parent woke — claim it, DLQ it → both parent and child1 in DLQ
+      -- Parent woke - claim it, DLQ it → both parent and child1 in DLQ
       [p] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "parent failed" p)
 
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 2
 
-      -- Retry child1 from DLQ — should auto-retry parent too
+      -- Retry child1 from DLQ - should auto-retry parent too
       let child1Dlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "AutoRetryChild1") dlqJobs
       Just retriedChild <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey child1Dlq))
       suspended retriedChild `shouldBe` False
@@ -2174,14 +2174,14 @@ operationsSpec mkMessage runM = do
       length claimed `shouldBe` 2
       forM_ claimed $ \j -> void $ runM env (HL.moveToDLQ "child failed" j)
 
-      -- Parent woke — claim it, DLQ it → all three in DLQ
+      -- Parent woke - claim it, DLQ it → all three in DLQ
       [p] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "parent failed" p)
 
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 3
 
-      -- Retry parent from DLQ — should auto-retry both children AND come back suspended
+      -- Retry parent from DLQ - should auto-retry both children AND come back suspended
       let parentDlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "SuspFinParent") dlqJobs
       Just retriedParent <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey parentDlq))
       suspended retriedParent `shouldBe` True
@@ -2189,7 +2189,7 @@ operationsSpec mkMessage runM = do
       dlqAfter <- dlqAll env
       length dlqAfter `shouldBe` 0
 
-      -- Claim and ack both children — parent still suspended until last child acked
+      -- Claim and ack both children - parent still suspended until last child acked
       claimedChildren <- claimJobs env 2
       length claimedChildren `shouldBe` 2
       void $ runM env (HL.ackJob (head claimedChildren))
@@ -2213,14 +2213,14 @@ operationsSpec mkMessage runM = do
       length claimed `shouldBe` 2
       forM_ claimed $ \j -> void $ runM env (HL.moveToDLQ "child failed" j)
 
-      -- Parent woke — claim it, DLQ it → all three in DLQ
+      -- Parent woke - claim it, DLQ it → all three in DLQ
       [p] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "parent failed" p)
 
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 3
 
-      -- Retry just child1 — should auto-retry parent (suspended) AND sibling child2
+      -- Retry just child1 - should auto-retry parent (suspended) AND sibling child2
       let child1Dlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "SibRetryChild1") dlqJobs
       Just retriedChild1 <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey child1Dlq))
       suspended retriedChild1 `shouldBe` False
@@ -2253,7 +2253,7 @@ operationsSpec mkMessage runM = do
       [p] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "parent failed" p)
 
-      -- Retry parent from DLQ — should come back NOT suspended (no DLQ'd children)
+      -- Retry parent from DLQ - should come back NOT suspended (no DLQ'd children)
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 1
       Just retriedParent <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
@@ -2325,12 +2325,12 @@ operationsSpec mkMessage runM = do
       length children `shouldBe` 3
       let [c1, c2, c3] = children
 
-      -- Cancel 2 of 3 children — parent should NOT be woken yet
+      -- Cancel 2 of 3 children - parent should NOT be woken yet
       deleted <- runM env (HL.cancelJobsBatch @m @registry @payload [primaryKey c1, primaryKey c2])
       deleted `shouldBe` 2
       assertSuspended env (primaryKey parent)
 
-      -- Cancel the last child — parent should be resumed
+      -- Cancel the last child - parent should be resumed
       deleted2 <- runM env (HL.cancelJobsBatch @m @registry @payload [primaryKey c3])
       deleted2 `shouldBe` 1
       assertNotSuspended env (primaryKey parent)
@@ -2347,7 +2347,7 @@ operationsSpec mkMessage runM = do
       length claimedChildren `shouldBe` 2
       void $ runM env (HL.ackJob (head claimedChildren))
 
-      -- Move second child to DLQ — parent wakes (no children in main queue)
+      -- Move second child to DLQ - parent wakes (no children in main queue)
       void $ runM env (HL.moveToDLQ "child2 failed" (claimedChildren !! 1))
       assertNotSuspended env (primaryKey parent)
 
@@ -2366,7 +2366,7 @@ operationsSpec mkMessage runM = do
       [c1] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "child1 failed" c1)
 
-      -- Delete the DLQ'd child — parent should NOT wake (child2, child3 still in main queue)
+      -- Delete the DLQ'd child - parent should NOT wake (child2, child3 still in main queue)
       dlqJobs <- dlqAll env
       deleted <- runM env (HL.deleteDLQJob @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
       deleted `shouldBe` 1
@@ -2418,11 +2418,11 @@ operationsSpec mkMessage runM = do
       claimed <- claimJobs env 2
       length claimed `shouldBe` 2
 
-      -- Move first child to DLQ (parent stays suspended — sibling still in main queue)
+      -- Move first child to DLQ (parent stays suspended - sibling still in main queue)
       void $ runM env (HL.moveToDLQ "child1 failed" (head claimed))
       assertSuspended env (primaryKey parent)
 
-      -- Ack second child (last one in main queue) — parent wakes
+      -- Ack second child (last one in main queue) - parent wakes
       void $ runM env (HL.ackJob (claimed !! 1))
       assertNotSuspended env (primaryKey parent)
 
@@ -2443,7 +2443,7 @@ operationsSpec mkMessage runM = do
       -- Move first child to DLQ
       void $ runM env (HL.moveToDLQ "child1 failed" (head claimed))
 
-      -- Cancel the second child (non-DLQ) — parent wakes (no children in main queue)
+      -- Cancel the second child (non-DLQ) - parent wakes (no children in main queue)
       deleted <- runM env (HL.cancelJob @m @registry @payload (primaryKey (claimed !! 1)))
       deleted `shouldBe` 1
 
@@ -2459,7 +2459,7 @@ operationsSpec mkMessage runM = do
                 (JT.leaf (defaultJob (mkMessage "DedupParentChild")) NE.:| [])
             )
 
-      -- Try to replace — blocked because child rows exist
+      -- Try to replace - blocked because child rows exist
       let replacement = (defaultJob (mkMessage "DedupParentReplacement")) {dedupKey = Just (ReplaceDuplicate "parent-dedup-key")}
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
@@ -2482,7 +2482,7 @@ operationsSpec mkMessage runM = do
       [c] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "child failed" c)
 
-      -- Try to replace parent — blocked because DLQ child row exists
+      -- Try to replace parent - blocked because DLQ child row exists
       let replacement = (defaultJob (mkMessage "DedupDLQParentRepl")) {dedupKey = Just (ReplaceDuplicate "dlq-dedup-key")}
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
@@ -2720,14 +2720,14 @@ operationsSpec mkMessage runM = do
 
   describe "Nested rollup with <~~ operator" $ do
     it "builds a 3-level tree with correct structure" $ \env -> do
-      --  root (rollup — aggregates section results)
-      --  ├── section-1 (finalizer — waits for its mappers)
+      --  root (rollup - aggregates section results)
+      --  ├── section-1 (finalizer - waits for its mappers)
       --  │   ├── mapper-1a  (leaf)
       --  │   └── mapper-1b  (leaf)
       --  ├── section-2 (finalizer)
       --  │   ├── mapper-2a  (leaf)
       --  │   └── mapper-2b  (leaf)
-      --  └── mapper-solo    (leaf — direct child of root)
+      --  └── mapper-solo    (leaf - direct child of root)
       Right allJobs <-
         runM env $
           HL.insertJobTree $
@@ -2745,13 +2745,13 @@ operationsSpec mkMessage runM = do
       length jobs `shouldBe` 8
       let [root, sec1, m1a, m1b, sec2, m2a, m2b, solo] = jobs
 
-      -- Root is a rollup — suspended with isRollup
+      -- Root is a rollup - suspended with isRollup
       payload root `shouldBe` mkMessage "root: compile report"
       suspended root `shouldBe` True
       isRollup root `shouldBe` True
       parentId root `shouldBe` Nothing
 
-      -- Section finalizers — suspended, parented to root, rollup enabled
+      -- Section finalizers - suspended, parented to root, rollup enabled
       suspended sec1 `shouldBe` True
       parentId sec1 `shouldBe` Just (primaryKey root)
       isRollup sec1 `shouldBe` True
@@ -2760,7 +2760,7 @@ operationsSpec mkMessage runM = do
       parentId sec2 `shouldBe` Just (primaryKey root)
       isRollup sec2 `shouldBe` True
 
-      -- Leaf mappers — not suspended, parented to their section
+      -- Leaf mappers - not suspended, parented to their section
       forM_ [m1a, m1b] $ \m -> do
         suspended m `shouldBe` False
         parentId m `shouldBe` Just (primaryKey sec1)
@@ -2769,7 +2769,7 @@ operationsSpec mkMessage runM = do
         suspended m `shouldBe` False
         parentId m `shouldBe` Just (primaryKey sec2)
 
-      -- Solo mapper — not suspended, parented directly to root
+      -- Solo mapper - not suspended, parented directly to root
       suspended solo `shouldBe` False
       parentId solo `shouldBe` Just (primaryKey root)
 
@@ -2827,11 +2827,11 @@ operationsSpec mkMessage runM = do
 
     it "nested rollup: section finalizers aggregate then root merges" $ \env -> do
       -- Two-level rollup:
-      --   root (rollup) — merges section results
-      --   ├── section-1 (rollup) — merges mapper results
+      --   root (rollup) - merges section results
+      --   ├── section-1 (rollup) - merges mapper results
       --   │   ├── mapper-1a  → ["sales", "growth"]
       --   │   └── mapper-1b  → ["revenue"]
-      --   └── section-2 (rollup) — merges mapper results
+      --   └── section-2 (rollup) - merges mapper results
       --       ├── mapper-2a  → ["forecast"]
       --       └── mapper-2b  → ["trend", "outlook"]
       Right allJobs <-
@@ -2889,7 +2889,7 @@ operationsSpec mkMessage runM = do
       -- Step 8: Read root's results table
       rootResultMap <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey root)
 
-      -- Root merges section results — all 6 words present
+      -- Root merges section results - all 6 words present
       let finalMerged = foldMap decode (Map.elems rootResultMap)
       length finalMerged `shouldBe` 6
       finalMerged
@@ -2963,7 +2963,7 @@ operationsSpec mkMessage runM = do
       -- Insert result
       void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v1")
 
-      -- Insert again with different value — should overwrite, not fail
+      -- Insert again with different value - should overwrite, not fail
       void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v2")
 
       -- Verify latest value
@@ -3052,7 +3052,7 @@ operationsSpec mkMessage runM = do
       void $ runM env $ HL.persistParentState @m @registry @payload (primaryKey parent) (Aeson.toJSON mergedSnap)
       void $ runM env $ HL.moveToDLQ "test-err" parentJob
 
-      -- Retry from DLQ — snapshot should be preserved in parent_state column
+      -- Retry from DLQ - snapshot should be preserved in parent_state column
       dlqJobs <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
       let dlqJob = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "DLQRetryParent") dlqJobs
       Just retried <- runM env $ HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey dlqJob)
@@ -3246,10 +3246,10 @@ operationsSpec mkMessage runM = do
       -- Mid-parent still suspended (one child remains)
       assertSuspended env (primaryKey midParent)
 
-      -- Cascade DLQ on grandparent — should snapshot mid-parent's results first
+      -- Cascade DLQ on grandparent - should snapshot mid-parent's results first
       void $ runM env (HL.moveToDLQ "Admin cascade" grandparent)
 
-      -- 3 in DLQ (grandparent, mid-parent, child2 — child1 was already acked)
+      -- 3 in DLQ (grandparent, mid-parent, child2 - child1 was already acked)
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 3
 
@@ -3257,7 +3257,7 @@ operationsSpec mkMessage runM = do
       let gpDLQ = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "SnapGrandparent") dlqJobs
       Just retriedGP <- runM env $ HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey gpDLQ)
 
-      -- DLQ should be empty — whole tree retried
+      -- DLQ should be empty - whole tree retried
       dlqAfter <- dlqAll env
       length dlqAfter `shouldBe` 0
 
@@ -3287,7 +3287,7 @@ operationsSpec mkMessage runM = do
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 3
 
-      -- Retry from a CHILD — should recover the whole tree
+      -- Retry from a CHILD - should recover the whole tree
       let child1DLQ = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "NLevelRetryChild1") dlqJobs
       Just retried <- runM env $ HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey child1DLQ)
 
@@ -3326,7 +3326,7 @@ operationsSpec mkMessage runM = do
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 4
 
-      -- Retry from a LEAF — should recover the entire 3-level tree
+      -- Retry from a LEAF - should recover the entire 3-level tree
       let leafDLQ = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "3LRetryLeaf1") dlqJobs
       Just retried <- runM env $ HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey leafDLQ)
 
@@ -3422,7 +3422,7 @@ operationsSpec mkMessage runM = do
       -- Parent is still in main queue (suspended, other child still exists)
       assertSuspended env (primaryKey parent)
 
-      -- retryFromDLQ on child1 — parent is in main queue, so ancestor walk stops
+      -- retryFromDLQ on child1 - parent is in main queue, so ancestor walk stops
       dlqJobs <- dlqAll env
       length dlqJobs `shouldBe` 1
       Just retried <- runM env $ HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs))

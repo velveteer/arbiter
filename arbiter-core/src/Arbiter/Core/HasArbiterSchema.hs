@@ -11,5 +11,5 @@ import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 -- | Links a monad to a schema name and registry. The fundep @m -> registry@
 -- lets the high-level API resolve table names from payload types at compile time.
 class (Monad m) => HasArbiterSchema m (registry :: JobPayloadRegistry) | m -> registry where
-  -- | The PostgreSQL schema name (e.g., @"arbiter"@).
+  -- | The schema name for this monad's Arbiter tables.
   getSchema :: m SchemaName

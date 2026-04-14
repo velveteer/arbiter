@@ -265,7 +265,7 @@ spec connStr = do
               }|]
           )
 
-      -- Batch insert with same dedup key — should skip the duplicate
+      -- Batch insert with same dedup key - should skip the duplicate
       postResp <-
         request
           "POST"
@@ -310,7 +310,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "g3" (TestMessage "msg3"))
         pure ()
 
-      -- Request with limit=2 — should return 2 jobs but report total of 3
+      -- Request with limit=2 - should return 2 jobs but report total of 3
       resp <- get "/api/v1/arbiter_servant_test/jobs?limit=2"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
@@ -325,7 +325,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "groupB" (TestMessage "msg2"))
         pure ()
 
-      -- Filter by group key — should return only groupA job
+      -- Filter by group key - should return only groupA job
       resp <- get "/api/v1/arbiter_servant_test/jobs?group_key=groupA"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
@@ -348,7 +348,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
         pure $ primaryKey parent
 
-      -- List jobs — the parent should appear with dlqChildCounts showing 1
+      -- List jobs - the parent should appear with dlqChildCounts showing 1
       resp <- get "/api/v1/arbiter_servant_test/jobs"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
@@ -420,7 +420,7 @@ spec connStr = do
       post "/api/v1/arbiter_servant_test/jobs/99999/move-to-dlq" "" `shouldRespondWith` 404
 
     it "POST /api/v1/arbiter_servant_test/jobs/:id/pause-children pauses children" $ do
-      -- Insert a finalizer tree — parent suspended, children unsuspended
+      -- Insert a finalizer tree - parent suspended, children unsuspended
       parentId <- liftIO $ do
         Right (parent :| _children) <-
           runSimpleDb mkEnv $
@@ -494,7 +494,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" job3
         pure ()
 
-      -- Get with limit — should return 2 jobs out of 3 total
+      -- Get with limit - should return 2 jobs out of 3 total
       limitResp <- get "/api/v1/arbiter_servant_test/dlq?limit=2"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody limitResp
@@ -502,7 +502,7 @@ spec connStr = do
         dlqTotal body `shouldBe` 3
         length (dlqJobs body) `shouldBe` 2
 
-      -- Get with offset — should return 2 remaining jobs
+      -- Get with offset - should return 2 remaining jobs
       offsetResp <- get "/api/v1/arbiter_servant_test/dlq?offset=1"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody offsetResp
@@ -600,13 +600,13 @@ spec connStr = do
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
-        -- Cancel parent (cascade) — removes the suspended parent
+        -- Cancel parent (cascade) - removes the suspended parent
         _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @_ @ServantTestRegistry @ServantTestPayload (primaryKey parent)
         -- Get DLQ job ID
         dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
         pure $ dlqPrimaryKey (head dlqs)
 
-      -- Retry should return 409 — parent is gone
+      -- Retry should return 409 - parent is gone
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/dlq/" <> T.pack (show dlqId) <> "/retry") ""
         `shouldRespondWith` 409
 

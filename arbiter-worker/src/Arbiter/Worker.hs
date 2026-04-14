@@ -373,7 +373,7 @@ runWorkerPool config = do
 -- | Periodically writes to a file to signal liveness.
 --
 -- Requires both a signal (from dispatcher or heartbeat) and a minimum delay
--- before writing — proof of work, rate-limited. If neither the dispatcher
+-- before writing - proof of work, rate-limited. If neither the dispatcher
 -- nor heartbeat signals (e.g., broken DB connection, deadlocked dispatcher),
 -- the file goes stale and the process should be restarted.
 refreshLiveness :: (MonadUnliftIO m) => LogConfig -> FilePath -> MVar.MVar () -> Int -> m ()
@@ -435,7 +435,7 @@ handleWorkerException cfg result =
       threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
--- Decode failures appear as @Left decodeError@ — the child succeeded but
+-- Decode failures appear as @Left decodeError@ - the child succeeded but
 -- its result JSON doesn't match the expected type.
 readChildResults
   :: (JobResult a, MonadArbiter m)

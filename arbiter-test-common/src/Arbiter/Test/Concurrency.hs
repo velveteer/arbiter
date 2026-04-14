@@ -704,7 +704,7 @@ groupsConsistencyStressSpec schemaName tableName mkPayload runM withConn = do
         void $ runM env $ HL.insertJob (defaultJob (mkPayload "det-a")) {groupKey = Just "detector-test"}
         void $ runM env $ HL.insertJob (defaultJob (mkPayload "det-b")) {groupKey = Just "detector-test"}
 
-        -- Claim one job normally — puts it in-flight
+        -- Claim one job normally - puts it in-flight
         [claimed] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
 
         -- Force the second job in-flight with a raw UPDATE, bypassing the claim CTE.
@@ -1034,7 +1034,7 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
                 atomicModifyIORef' doneCountRef (\n -> (n + 1, ()))
             )
             <> [ do
-                   -- Background refresher — runs until all workers have finished
+                   -- Background refresher - runs until all workers have finished
                    let refreshLoop = do
                          doneCount <- readIORef doneCountRef
                          if doneCount >= numWorkers

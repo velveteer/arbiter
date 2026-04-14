@@ -5,7 +5,7 @@
 
 An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
-- Transactional job processing — jobs and database operations commit together
+- Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
 - FIFO head-of-line blocking per group key
 - Concurrent worker pools with `LISTEN/NOTIFY` and polling fallback
@@ -26,7 +26,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
 Install directly from GitHub:
 
-**Cabal** — add to your `cabal.project`:
+**Cabal** - add to your `cabal.project`:
 
 ```
 source-repository-package
@@ -40,7 +40,7 @@ source-repository-package
     arbiter-migrations
 ```
 
-**Stack** — add to your `stack.yaml`:
+**Stack** - add to your `stack.yaml`:
 
 ```yaml
 extra-deps:
@@ -86,7 +86,7 @@ type AppRegistry =
    ]
 ```
 
-The registry is enforced at compile time — each payload type maps to exactly one table, and duplicate table names are a type error.
+The registry is enforced at compile time - each payload type maps to exactly one table, and duplicate table names are a type error.
 
 ### Migrations
 
@@ -120,14 +120,14 @@ import Data.Proxy (Proxy (..))
 env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
 
 ArbS.runSimpleDb env $ do
-  -- Ungrouped — processed concurrently by any available worker
+  -- Ungrouped - processed concurrently by any available worker
   _ <- Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 
-  -- Grouped — jobs with the same group key are processed serially (FIFO)
+  -- Grouped - jobs with the same group key are processed serially (FIFO)
   _ <- Arb.insertJob (Arb.defaultGroupedJob "user-42" $ SendReceipt "alice@example.com" 1001)
 ```
 
-`insertJob` returns `Maybe (JobRead payload)` — `Nothing` when a dedup key causes the insert to be skipped.
+`insertJob` returns `Maybe (JobRead payload)` - `Nothing` when a dedup key causes the insert to be skipped.
 
 ### Processing Jobs
 
@@ -167,28 +167,28 @@ Handlers run inside a database transaction by default. If the handler succeeds, 
 
 The default job lifecycle:
 
-1. **Claim** — the job becomes invisible to other workers; attempt count increments.
+1. **Claim** - the job becomes invisible to other workers; attempt count increments.
 2. **Begin transaction.**
-3. **Run handler** — the handler receives the active database connection.
-4. **On success** — the job is deleted (ack) and all database work commits atomically.
-5. **On failure** — the transaction rolls back; a separate transaction updates the job for retry or moves it to the DLQ.
+3. **Run handler** - the handler receives the active database connection.
+4. **On success** - the job is deleted (ack) and all database work commits atomically.
+5. **On failure** - the transaction rolls back; a separate transaction updates the job for retry or moves it to the DLQ.
 
-Set `useWorkerTransaction = False` for manual transaction control — you must call `ackJob` yourself in this mode.
+Set `useWorkerTransaction = False` for manual transaction control - you must call `ackJob` yourself in this mode.
 
 ### Head-of-Line Blocking
 
-- **Same group key** — processed serially. Only one visible job (or job batch) per group is eligible for claiming.
-- **No group key** — processed concurrently by any available worker.
+- **Same group key** - processed serially. Only one visible job (or job batch) per group is eligible for claiming.
+- **No group key** - processed concurrently by any available worker.
 
 Group eligibility is maintained in a dedicated `{queue}_groups` table via statement-level AFTER triggers, with a periodic reaper to correct drift.
 
 ### Worker Pool Internals
 
-1. **Dispatcher** — claims jobs via `LISTEN/NOTIFY` with polling fallback.
-2. **N worker threads** — pull from a shared in-memory queue.
-3. **Heartbeat** — extends visibility timeouts for in-flight jobs.
-4. **Cron** — inserts scheduled jobs on tick.
-5. **Reaper** — periodically corrects drift in the groups table.
+1. **Dispatcher** - claims jobs via `LISTEN/NOTIFY` with polling fallback.
+2. **N worker threads** - pull from a shared in-memory queue.
+3. **Heartbeat** - extends visibility timeouts for in-flight jobs.
+4. **Cron** - inserts scheduled jobs on tick.
+5. **Reaper** - periodically corrects drift in the groups table.
 
 ## Job Features
 
@@ -261,12 +261,12 @@ config <- Worker.defaultRollupWorkerConfig connStr 4 handler
 
 Tree-scoped cancellation:
 
-- `throwTreeCancel` — cancels the entire tree (root and all descendants).
-- `throwBranchCancel` — DLQs the current child, then cascade-cancels the parent and all siblings.
+- `throwTreeCancel` - cancels the entire tree (root and all descendants).
+- `throwBranchCancel` - DLQs the current child, then cascade-cancels the parent and all siblings.
 
 ### Recipe: Chunked Data Migration
 
-Use a job tree to replace a staging table. Each child job carries its chunk of row IDs — the tree tracks completion and the finalizer runs when all chunks are processed:
+Use a job tree to replace a staging table. Each child job carries its chunk of row IDs - the tree tracks completion and the finalizer runs when all chunks are processed:
 
 ```haskell
 {-# LANGUAGE OverloadedLists #-}
@@ -385,7 +385,7 @@ Signals.installHandler Signals.sigINT (Signals.Catch $ Worker.shutdownWorker con
 ArbS.runSimpleDb env $ Worker.runWorkerPool config
 ```
 
-Multi-queue — all pools share a single shutdown signal:
+Multi-queue - all pools share a single shutdown signal:
 
 ```haskell
 emailConfig <- Worker.defaultWorkerConfig connStr 3 processEmail
@@ -440,8 +440,8 @@ config { Worker.jitter = NoJitter }
 
 ### Other Options
 
-- **Logging** — structured JSON to stderr, fast-logger, or a custom callback
-- **Liveness probes** — file-based health check; Kubernetes example:
+- **Logging** - structured JSON to stderr, fast-logger, or a custom callback
+- **Liveness probes** - file-based health check; Kubernetes example:
   ```yaml
   livenessProbe:
     exec:
@@ -449,8 +449,8 @@ config { Worker.jitter = NoJitter }
     initialDelaySeconds: 30
     periodSeconds: 60
   ```
-- **Pool sizing** — `poolConfigForWorkers` auto-sizes based on worker count
-- **Pause/resume** — at worker, job, or tree level
+- **Pool sizing** - `poolConfigForWorkers` auto-sizes based on worker count
+- **Pause/resume** - at worker, job, or tree level
 
 ## REST API and Admin UI
 
@@ -564,7 +564,7 @@ See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-si
 
 ### arbiter-orville (orville-postgresql)
 
-Integrates with `orville-postgresql`. Handlers do not receive a connection parameter — Orville manages connections and transactions internally. Requires a custom monad with `MonadOrville` and `HasArbiterSchema` instances.
+Integrates with `orville-postgresql`. Handlers do not receive a connection parameter - Orville manages connections and transactions internally. Requires a custom monad with `MonadOrville` and `HasArbiterSchema` instances.
 
 See the [arbiter-orville haddocks](https://velveteer.github.io/arbiter/arbiter-orville/Arbiter-Orville.html)
 

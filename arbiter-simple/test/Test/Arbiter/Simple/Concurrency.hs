@@ -80,7 +80,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
             inTransaction @SimpleConcurrencyTestRegistry connSlow testSchema $
               HL.insertJob ((defaultJob (TestMessage "SlowPod")) {groupKey = Just "serialize"})
 
-          -- Pod 2 insert + concurrent claims + Pod 1 commit — all concurrent.
+          -- Pod 2 insert + concurrent claims + Pod 1 commit - all concurrent.
           -- Without groups trigger serialization, Pod 2 could commit first and
           -- be claimed before Pod 1's transaction commits.
           results <-
@@ -101,7 +101,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           let allClaimed = concat results
           -- Any claimed job from this group must be Pod 1's (lower id).
           -- Pod 2's job being claimed first would mean it committed before
-          -- Pod 1 — a serialization failure.
+          -- Pod 1 - a serialization failure.
           forM_ allClaimed $ \j ->
             when (groupKey j == Just "serialize" && primaryKey j /= primaryKey jobA) $
               atomicModifyIORef' violationsRef (\n -> (n + 1, ()))

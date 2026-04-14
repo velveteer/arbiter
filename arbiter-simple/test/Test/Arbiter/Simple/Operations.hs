@@ -157,7 +157,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           inTransaction @SimpleOpsTestRegistry connA testSchema $
             HL.insertJob (defaultJob (TestMessage "JobA")) {groupKey = Just "g1"}
 
-        -- B tries to insert same group — BLOCKS on groups table upsert until A commits
+        -- B tries to insert same group - BLOCKS on groups table upsert until A commits
         asyncB <- async $ do
           _ <- PG.execute_ connB "BEGIN"
           Just job <-

@@ -74,7 +74,7 @@ adminApplication = serveStaticApp $ \fp -> pure (lookup fp staticFiles)
 
 -- | Dev-mode WAI Application serving static files from disk.
 --
--- Reads files on every request — no recompile needed for HTML\/JS\/CSS changes.
+-- Reads files on every request - no recompile needed for HTML\/JS\/CSS changes.
 devAdminApplication :: FilePath -> Application
 devAdminApplication dir = serveStaticApp $ \fp ->
   (Just <$> BS.readFile (dir </> fp)) `catch` (\(_ :: IOException) -> pure Nothing)
@@ -126,7 +126,7 @@ contentTypeHeader path
   | ".ico" `isSuffixOf` path = ("Content-Type", "image/x-icon")
   | otherwise = ("Content-Type", "application/octet-stream")
 
--- | Dev-mode Servant server for 'AdminUI' — serves from disk.
+-- | Dev-mode Servant server for 'AdminUI' - serves from disk.
 adminUIServerDev :: FilePath -> Server AdminUI
 adminUIServerDev dir = Tagged (devAdminApplication dir)
 

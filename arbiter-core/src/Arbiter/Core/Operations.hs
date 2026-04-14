@@ -223,7 +223,7 @@ insertJobUnsafe
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> JobWrite payload
@@ -279,7 +279,7 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
 --   @not_visible_until > NOW()@, and @last_error IS NULL@ (i.e., the job is
 --   being processed for the first time). Jobs that have previously failed
 --   (@last_error IS NOT NULL@) can always be replaced, even if currently
---   in-flight on a retry attempt — this is by design, so that a fresh
+--   in-flight on a retry attempt - this is by design, so that a fresh
 --   replacement takes priority over a failing job.
 --
 -- @parentId@ is validated: if set to a non-existent job ID, returns @Nothing@.
@@ -289,7 +289,7 @@ insertJob
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> JobWrite payload
@@ -316,15 +316,15 @@ insertJob schemaName tableName job = do
 -- occurrence is kept (last writer wins), consistent with sequential
 -- 'insertJob' calls.
 --
--- Does not validate @parentId@ — callers must ensure referenced parents
+-- Does not validate @parentId@ - callers must ensure referenced parents
 -- exist. For parent-child trees, use @insertJobTree@ instead.
 insertJobsBatch
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> [JobWrite payload]
   -- ^ Jobs to insert
   -> m [JobRead payload]
@@ -380,7 +380,7 @@ insertJobsBatch_ schemaName tableName jobs = withDbTransaction $ do
 insertResult
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -404,7 +404,7 @@ insertResult schemaName tableName parentJobId childId result =
 getResultsByParent
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -424,7 +424,7 @@ getResultsByParent schemaName tableName parentJobId = do
 getDLQChildErrorsByParent
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -442,7 +442,7 @@ getDLQChildErrorsByParent schemaName tableName parentJobId = do
 persistParentState
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -537,9 +537,9 @@ claimNextVisibleJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int
   -- ^ Maximum number of jobs to claim
   -> NominalDiffTime
@@ -550,15 +550,15 @@ claimNextVisibleJobs schemaName tableName maxJobs timeout = withDbTransaction $ 
   rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
   mapM decodePayload rawJobs
 
--- | Batched variant of 'claimNextVisibleJobs' — claims up to @batchSize@ jobs
+-- | Batched variant of 'claimNextVisibleJobs' - claims up to @batchSize@ jobs
 -- per group, across up to @maxBatches@ groups.
 claimNextVisibleJobsBatched
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int
   -- ^ Batch size per group (how many jobs to claim from each group)
   -> Int
@@ -597,9 +597,9 @@ ackJob
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> JobRead payload
   -> m Int64
 ackJob schemaName tableName job = withDbTransaction $ ackJobInner schemaName tableName job
@@ -646,9 +646,9 @@ ackJobsBatch
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> [JobRead payload]
   -> m Int64
 ackJobsBatch _ _ [] = pure 0
@@ -657,7 +657,7 @@ ackJobsBatch schemaName tableName jobs =
 
 -- | Bulk ack for standalone jobs (no parent, no tree logic).
 --
--- A single DELETE with unnest — one round trip for N jobs.
+-- A single DELETE with unnest - one round trip for N jobs.
 -- Only valid for jobs claimed in 'BatchedJobsMode', which guarantees
 -- @parent_id IS NULL AND parent_state IS NULL@.
 --
@@ -666,9 +666,9 @@ ackJobsBulk
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> [JobRead payload]
   -> m Int64
 ackJobsBulk _ _ [] = pure 0
@@ -687,9 +687,9 @@ setVisibilityTimeout
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> NominalDiffTime
   -- ^ Timeout in seconds
   -> JobRead payload
@@ -722,9 +722,9 @@ setVisibilityTimeoutBatch
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> NominalDiffTime
   -- ^ Timeout in seconds
   -> [JobRead payload]
@@ -748,9 +748,9 @@ updateJobForRetry
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> NominalDiffTime
   -- ^ Backoff timeout in seconds
   -> Text
@@ -774,9 +774,9 @@ moveToDLQ
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Text
   -- ^ Error message (the final error that caused the DLQ move)
   -> JobRead payload
@@ -806,7 +806,7 @@ moveToDLQ schemaName tableName errorMsg job = withDbTransaction $ do
 cascadeChildrenToDLQ
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -825,7 +825,7 @@ cascadeChildrenToDLQ schemaName tableName parentJobId errorMsg =
 snapshotDescendantRollups
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -854,9 +854,9 @@ moveToDLQBatch
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> [(JobRead payload, Text)]
   -- ^ List of (job, error message) pairs
   -> m Int64
@@ -884,14 +884,14 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
 -- * Dead Letter Queue Operations
 
 -- | Retry a job from the DLQ (re-inserts with attempts reset to 0).
--- The dedup_key is NOT restored — retried jobs won't conflict with new dedup inserts.
+-- The dedup_key is NOT restored - retried jobs won't conflict with new dedup inserts.
 retryFromDLQ
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int64
   -- ^ DLQ job ID
   -> m (Maybe (JobRead payload))
@@ -933,7 +933,7 @@ listJobsFiltered
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> [Tmpl.JobFilter]
@@ -954,7 +954,7 @@ listJobsFiltered schemaName tableName filters limit offset = do
 countJobsFiltered
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> [Tmpl.JobFilter]
@@ -972,7 +972,7 @@ listDLQFiltered
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> [Tmpl.JobFilter]
@@ -993,7 +993,7 @@ listDLQFiltered schemaName tableName filters limit offset = do
 countDLQFiltered
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> [Tmpl.JobFilter]
@@ -1024,9 +1024,9 @@ listDLQJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int
   -- ^ Limit
   -> Int
@@ -1041,7 +1041,7 @@ listDLQJobsByParent
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -1066,9 +1066,9 @@ countDLQJobsByParent schemaName tableName parentJobId =
 deleteDLQJob
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int64
   -- ^ DLQ job ID
   -> m Int64
@@ -1095,9 +1095,9 @@ deleteDLQJob schemaName tableName dlqId = withDbTransaction $ do
 deleteDLQJobsBatch
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> [Int64]
   -- ^ DLQ job IDs
   -> m Int64
@@ -1121,9 +1121,9 @@ listJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int
   -- ^ Limit
   -> Int
@@ -1136,9 +1136,9 @@ getJobById
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int64
   -- ^ Job ID
   -> m (Maybe (JobRead payload))
@@ -1157,9 +1157,9 @@ getJobsByGroup
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Text
   -- ^ Group key to filter by
   -> Int
@@ -1175,9 +1175,9 @@ getInFlightJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int
   -- ^ Limit
   -> Int
@@ -1188,7 +1188,7 @@ getInFlightJobs schemaName tableName =
 
 -- | Cancels (deletes) a job by ID.
 --
--- Returns 0 if the job has children — use 'cancelJobCascade' to delete
+-- Returns 0 if the job has children - use 'cancelJobCascade' to delete
 -- a parent and all its descendants.
 --
 -- If the deleted job was a child and no siblings remain, the parent is
@@ -1236,7 +1236,7 @@ cancelJobInner schemaName tableName jobId = do
 --
 -- Each job gets full wake-parent logic (same as 'cancelJob').
 -- Wrapped in a transaction so that cancelling multiple children of the
--- same parent sees a consistent view — the last cancel's CTE correctly
+-- same parent sees a consistent view - the last cancel's CTE correctly
 -- detects no remaining siblings and resumes the parent.
 -- Returns the total number of jobs deleted.
 cancelJobsBatch
@@ -1259,9 +1259,9 @@ cancelJobsBatch schemaName tableName jobIds =
 promoteJob
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> Int64
   -- ^ Job ID
   -> m Int64
@@ -1289,9 +1289,9 @@ data QueueStats = QueueStats
 getQueueStats
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name (e.g., "arbiter")
+  -- ^ Schema name
   -> TableName
-  -- ^ Table name (e.g., "email_jobs")
+  -- ^ Table name
   -> m QueueStats
 getQueueStats schemaName tableName = do
   rows <-
@@ -1473,7 +1473,7 @@ cancelJobCascade schemaName tableName jobId = withDbTransaction $ do
 -- | Cancel an entire job tree by walking up from any node to the root,
 -- then cascade-deleting everything from the root down.
 --
--- Unlike 'cancelJobCascade', this does NOT call 'tryResumeParent' — the root
+-- Unlike 'cancelJobCascade', this does NOT call 'tryResumeParent' - the root
 -- by definition has no parent. Returns the total number of jobs deleted.
 cancelJobTree
   :: (MonadArbiter m)
@@ -1539,7 +1539,7 @@ resumeJob schemaName tableName jobId =
 refreshGroups
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int
@@ -1576,7 +1576,7 @@ refreshGroups schemaName tableName intervalSecs = do
 upsertCronDefault
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> Text
   -- ^ Schedule name
   -> Text
@@ -1593,7 +1593,7 @@ upsertCronDefault schemaName scheduleName defaultExpr defaultOv =
 listCronSchedules
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> m [CronScheduleRow]
 listCronSchedules schemaName =
   executeQuery
@@ -1605,7 +1605,7 @@ listCronSchedules schemaName =
 getCronScheduleByName
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> Text
   -- ^ Schedule name
   -> m (Maybe CronScheduleRow)
@@ -1625,7 +1625,7 @@ getCronScheduleByName schemaName scheduleName = do
 updateCronSchedule
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> Text
   -- ^ Schedule name
   -> CronScheduleUpdate
@@ -1664,7 +1664,7 @@ updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mE
 deleteStaleCronSchedules
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> [Text]
   -- ^ Schedule names to keep
   -> m Int64
@@ -1678,7 +1678,7 @@ deleteStaleCronSchedules schemaName names =
 touchCronLastFired
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> Text
   -- ^ Schedule name
   -> m Int64
@@ -1691,7 +1691,7 @@ touchCronLastFired schemaName scheduleName =
 touchCronChecked
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> [Text]
   -- ^ Schedule names
   -> m Int64
@@ -1706,7 +1706,7 @@ touchCronChecked schemaName names =
 readChildResultsRaw
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64
@@ -1738,7 +1738,7 @@ readChildResultsRaw schemaName tableName parentJobId = do
 getParentStateSnapshot
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ PostgreSQL schema name
+  -- ^ Schema name
   -> TableName
   -- ^ Table name
   -> Int64

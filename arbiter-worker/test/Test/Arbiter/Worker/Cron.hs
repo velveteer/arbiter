@@ -312,7 +312,7 @@ spec connStr = do
         map CS.name rows `shouldBe` ["test-a", "test-b"]
         map CS.defaultExpression rows `shouldBe` ["0 3 * * *", "*/5 * * * *"]
 
-        -- Phase 2: Re-upsert with modified expression — should update, not duplicate
+        -- Phase 2: Re-upsert with modified expression - should update, not duplicate
         let Right cj1' = cronJob "test-a" "*/10 * * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "a"))
         runSimpleDb env $ initCronSchedules testSchema [cj1', cj2] testLogConfig
         rows2 <- runSimpleDb env $ Ops.listCronSchedules testSchema

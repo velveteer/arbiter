@@ -49,7 +49,7 @@ withNotificationLoop
   -> STM.TVar WorkerState
   -- ^ Signal for worker state (Running, Paused, ShuttingDown)
   -> NominalDiffTime
-  -- ^ Poll delay in seconds — action fires on this interval if no
+  -- ^ Poll delay in seconds - action fires on this interval if no
   -- notifications are received. Also serves as the liveness heartbeat.
   -> Maybe LogConfig
   -- ^ Optional log configuration for internal errors

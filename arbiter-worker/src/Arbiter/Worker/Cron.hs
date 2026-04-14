@@ -7,7 +7,7 @@
 -- Dedup keys prevent duplicate insertion across multiple worker instances.
 --
 -- __All cron expressions are evaluated in UTC.__ There is no local-timezone
--- support — @\"0 3 * * *\"@ means 03:00 UTC, not 03:00 in the server's
+-- support - @\"0 3 * * *\"@ means 03:00 UTC, not 03:00 in the server's
 -- local time. Account for your timezone offset when writing expressions.
 --
 -- The scheduler consults the @cron_schedules@ table each tick for runtime
@@ -109,7 +109,7 @@ overlapPolicyFromText _ = Nothing
 
 -- | A cron schedule definition.
 --
--- Use 'cronJob' to construct — it parses the cron expression eagerly,
+-- Use 'cronJob' to construct - it parses the cron expression eagerly,
 -- so invalid expressions are caught at construction time.
 data CronJob payload = CronJob
   { name :: Text

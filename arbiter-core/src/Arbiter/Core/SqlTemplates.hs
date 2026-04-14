@@ -234,16 +234,16 @@ insertJobReplaceSQL schema tableName =
 -- @ReplaceDuplicate@ update the existing row (unless actively in-flight).
 --
 -- Parameters (10 arrays):
---   1. payloads           — jsonb[]
---   2. group_keys         — text[] (with NULLs)
---   3. priorities         — int[]
---   4. dedup_keys         — text[] (with NULLs)
---   5. dedup_strategies   — text[] (with NULLs)
---   6. max_attempts       — int[] (with NULLs)
---   7. parent_ids         — bigint[] (with NULLs)
---   8. parent_states      — jsonb[] (with NULLs)
---   9. suspended          — boolean[]
---  10. not_visible_untils — timestamptz[] (with NULLs)
+--   1. payloads           - jsonb[]
+--   2. group_keys         - text[] (with NULLs)
+--   3. priorities         - int[]
+--   4. dedup_keys         - text[] (with NULLs)
+--   5. dedup_strategies   - text[] (with NULLs)
+--   6. max_attempts       - int[] (with NULLs)
+--   7. parent_ids         - bigint[] (with NULLs)
+--   8. parent_states      - jsonb[] (with NULLs)
+--   9. suspended          - boolean[]
+--  10. not_visible_untils - timestamptz[] (with NULLs)
 insertJobsBatchSQL :: Text -> Text -> Text
 insertJobsBatchSQL schema tableName =
   let columns = jobColumns Nothing
@@ -309,14 +309,14 @@ insertJobsBatchBase schema tableName returning =
 --
 -- The groups table row lock provides two guarantees:
 --
---   1. @SKIP LOCKED@ — groups currently being claimed by an in-flight
+--   1. @SKIP LOCKED@ - groups currently being claimed by an in-flight
 --      transaction are skipped (no contention).
---   2. @EPQ re-evaluation@ — in READ COMMITTED, @FOR UPDATE@ re-evaluates
+--   2. @EPQ re-evaluation@ - in READ COMMITTED, @FOR UPDATE@ re-evaluates
 --      the WHERE clause against committed state. If a concurrent claim
 --      committed and the trigger updated @in_flight_until@, we see the
 --      fresh value and correctly skip the group.
 --
--- No @?@ parameters — all values are interpolated.
+-- No @?@ parameters - all values are interpolated.
 claimJobsSQL :: SchemaName -> TableName -> Int -> Int -> Text
 claimJobsSQL schema tableName maxJobs timeoutSeconds =
   let tbl = jobQueueTable schema tableName
@@ -389,7 +389,7 @@ claimJobsSQL schema tableName maxJobs timeoutSeconds =
 -- concurrency control (see 'claimJobsSQL' for details on the EPQ
 -- re-evaluation mechanism).
 -- Excludes tree jobs (@parent_id IS NULL AND parent_state IS NULL@).
--- No @?@ parameters — all values are interpolated.
+-- No @?@ parameters - all values are interpolated.
 claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> Int -> Text
 claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName
@@ -672,7 +672,7 @@ moveToDLQSQL schema tableName =
 
 -- | SQL template for retrying a job from DLQ (tree-aware)
 --
--- Tree-aware retry behavior — retrying any member of a DLQ'd tree recovers
+-- Tree-aware retry behavior - retrying any member of a DLQ'd tree recovers
 -- the entire tree in a single operation:
 --
 -- 1. If the target is a child whose parent is in the DLQ (not in main queue),
@@ -685,7 +685,7 @@ moveToDLQSQL schema tableName =
 --    back as @suspended = FALSE@ (runs immediately with snapshot data).
 --
 -- 3. Refuses to retry if the tree root's parent_id references a job that no
---    longer exists in the main queue — prevents creating orphaned children.
+--    longer exists in the main queue - prevents creating orphaned children.
 --
 -- Retried rollup finalizers get @suspended = TRUE@ when they have children
 -- being retried alongside them. @dedup_key@ and @dedup_strategy@ are
@@ -809,7 +809,7 @@ getJobByIdSQL schema tableName =
 
 -- | SQL template for canceling (deleting) a job by ID.
 --
--- Refuses to delete a job that has children — use 'cancelJobCascadeSQL' instead.
+-- Refuses to delete a job that has children - use 'cancelJobCascadeSQL' instead.
 --
 -- If the deleted job was a child and no siblings remain in the queue,
 -- resumes the parent for its completion round.
@@ -963,7 +963,7 @@ deleteDLQJobsBatchSQL schema tableName =
 --
 -- Only affects children that are currently claimable (not in-flight, not already suspended).
 -- In-flight children are left alone so their visibility timeout can expire
--- normally if the worker crashes — pausing them would break crash recovery.
+-- normally if the worker crashes - pausing them would break crash recovery.
 --
 -- Parameters: parent_id
 pauseChildrenSQL :: Text -> Text -> Text
@@ -1126,7 +1126,7 @@ suspendJobSQL schema tableName =
 --
 -- Refuses to resume a rollup finalizer that still has children in the main
 -- queue, preventing premature handler execution. Children in the DLQ are
--- considered terminal — the finalizer's handler receives DLQ errors via
+-- considered terminal - the finalizer's handler receives DLQ errors via
 -- 'readChildResultsSQL' and can decide how to handle them.
 --
 -- Parameters: job_id

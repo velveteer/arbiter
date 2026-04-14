@@ -254,7 +254,7 @@ mkNotifWorker connStr = do
       ]
 
 -- ---------------------------------------------------------------------------
--- Pipeline worker — rollup demo
+-- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
 mkPipelineWorker :: ByteString -> IO (WorkerConfig DemoM PipelinePayload [Text])
@@ -282,7 +282,7 @@ mkPipelineWorker connStr = do
               <> show (primaryKey job)
               <> " \""
               <> T.unpack label
-              <> "\" — merged ("
+              <> "\" - merged ("
               <> show (length childResults)
               <> " items): "
               <> show childResults

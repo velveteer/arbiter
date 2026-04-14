@@ -31,7 +31,7 @@ import Arbiter.Worker.Logger.Internal (runHook)
 --
 -- Uses 'race' to coordinate the heartbeat and action threads. If the heartbeat
 -- detects a stolen job, its exception propagates out (cancelling the action).
--- If the action completes first, the heartbeat is cancelled cleanly — no stale
+-- If the action completes first, the heartbeat is cancelled cleanly - no stale
 -- async exceptions can leak into the worker loop.
 --
 -- The heartbeat distinguishes between:
@@ -68,7 +68,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg mLiveness
 
 -- | Heartbeat loop that extends visibility for all jobs at regular intervals
 --
--- Runs forever, so the return type is 'Void' — it can only exit by throwing.
+-- Runs forever, so the return type is 'Void' - it can only exit by throwing.
 -- Uses batch operations for detailed per-job status. Only throws on stolen jobs
 -- (another worker reclaimed the job). Jobs that were already acked/canceled by
 -- the handler are silently ignored.

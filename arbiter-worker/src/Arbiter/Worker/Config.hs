@@ -55,15 +55,15 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 data HandlerMode m payload result
   = -- | Claim 1 job per group. The handler receives:
     --
-    -- 1. @Map childJobId (Either decodeError result)@ — child results for
+    -- 1. @Map childJobId (Either decodeError result)@ - child results for
     --    rollup finalizers. @Left@ means the child succeeded but its result
     --    couldn't be decoded into @result@. Empty for non-rollup jobs.
-    -- 2. @Map dlqPrimaryKey errorMsg@ — children that failed and were DLQ'd.
+    -- 2. @Map dlqPrimaryKey errorMsg@ - children that failed and were DLQ'd.
     --    Empty for non-rollup jobs.
     SingleJobMode (Map Int64 (Either Text result) -> Map Int64 Text -> JobHandler m payload result)
   | -- | Batched mode: claim up to N jobs per group, handler receives batch.
     --
-    -- __Rollup interaction:__ Batched mode has no rollup awareness — child results
+    -- __Rollup interaction:__ Batched mode has no rollup awareness - child results
     -- are not passed to the handler. Use 'SingleJobMode' for rollup finalizers.
     BatchedJobsMode Int (BatchedJobHandler m payload result)
 
@@ -96,7 +96,7 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Job handler and claiming strategy. Set by the @default*WorkerConfig@ helpers.
   , pollInterval :: NominalDiffTime
   -- ^ Polling interval in __seconds__ (fallback when no NOTIFY received).
-  -- Also serves as the liveness heartbeat — the dispatcher signals the
+  -- Also serves as the liveness heartbeat - the dispatcher signals the
   -- liveness probe after each poll cycle. Default: 5 seconds.
   , visibilityTimeout :: NominalDiffTime
   -- ^ Duration in __seconds__ a claimed job stays invisible to other workers.
@@ -118,11 +118,11 @@ data WorkerConfig m payload result = WorkerConfig
   -- * __True (Automatic)__: Handler runs in a transaction with automatic
   -- acking and rollback. Heartbeat prevents job reclaim during processing.
   -- Cannot control commit timing. If the ack fails then all database work is
-  -- rolled back — this means 'BatchedJobsMode' can have a large blast radius
+  -- rolled back - this means 'BatchedJobsMode' can have a large blast radius
   -- because the batch is acked atomically. Default: True.
   --
   -- * __False (Manual)__: Full transaction control. Handler must explicitly ack jobs.
-  -- Child results are __not__ automatically stored in the results table —
+  -- Child results are __not__ automatically stored in the results table -
   -- the handler must call 'Arbiter.Core.HighLevel.insertResult' to make
   -- results visible to the rollup finalizer.
   , transactionTimeout :: Maybe NominalDiffTime

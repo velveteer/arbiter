@@ -1594,7 +1594,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 , maxAttempts = 1 -- Go to DLQ after first failure
                 }
 
-        -- Phase 1: Run workers — children succeed, reducer fails → DLQ
+        -- Phase 1: Run workers - children succeed, reducer fails → DLQ
         withAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->
           waitUntil 10_000 $ do
             dlqJobs <- runSimpleDb env $ HL.listDLQJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
@@ -1605,7 +1605,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let reducerDlq = filter (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "dlq-reducer") dlqJobs
         length reducerDlq `shouldBe` 1
 
-        -- Phase 2: Retry from DLQ — reducer should see preserved results from snapshot
+        -- Phase 2: Retry from DLQ - reducer should see preserved results from snapshot
         let dlqId = DLQ.dlqPrimaryKey (head reducerDlq)
         mRetried <- runSimpleDb env $ HL.retryFromDLQ @_ @WorkerTestRegistry @WorkerTestPayload dlqId
         case mRetried of
@@ -1645,7 +1645,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                         :| [defaultJob (SimpleTask "recover-child-fail")]
                     )
 
-        -- Phase 1: Worker runs — child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
+        -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
           runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
 
@@ -1674,7 +1674,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           Nothing -> expectationFailure "retryFromDLQ returned Nothing"
           Just retried -> payload retried `shouldBe` SimpleTask "recover-child-fail"
 
-        -- Phase 3: Run workers again — child-fail still fails, goes back to DLQ,
+        -- Phase 3: Run workers again - child-fail still fails, goes back to DLQ,
         -- but reducer wakes with partial results from snapshot
         withAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->
           waitUntil 15_000 $ not . null <$> readIORef finalResultRef

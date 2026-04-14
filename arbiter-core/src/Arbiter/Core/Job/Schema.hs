@@ -74,10 +74,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
--- | PostgreSQL schema name (e.g., @"arbiter"@).
+-- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
 
--- | Unqualified table name within a schema (e.g., @"email_jobs"@).
+-- | Unqualified table name within a schema, e.g. @"email_jobs"@.
 type TableName = Text
 
 -- | Quote a PostgreSQL identifier (schema name, table name, column name).
@@ -317,7 +317,7 @@ createGroupsTableSQL schemaName tableName =
 -- | SQL to create a ranking index on the groups table.
 --
 -- Non-partial so that @UPDATE SET job_count@, @in_flight_until@ etc. never
--- change indexed columns — enabling HOT updates on every ack and claim.
+-- change indexed columns - enabling HOT updates on every ack and claim.
 createGroupsIndexSQL :: Text -> Text -> Text
 createGroupsIndexSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
@@ -433,7 +433,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         RETURN NULL;
       END IF;
 
-      -- Step 1: Fast path — extend in_flight_until when not_visible_until increases (claim, retry)
+      -- Step 1: Fast path - extend in_flight_until when not_visible_until increases (claim, retry)
       UPDATE ${groupsTbl} g
       SET in_flight_until = GREATEST(g.in_flight_until, sub.new_ift)
       FROM (
@@ -449,7 +449,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ) sub
       WHERE g.group_key = sub.group_key;
 
-      -- Step 2: Full rescan — recompute in_flight_until when not_visible_until decreases or suspended changes
+      -- Step 2: Full rescan - recompute in_flight_until when not_visible_until decreases or suspended changes
       UPDATE ${groupsTbl} g
       SET in_flight_until = sub.new_ift
       FROM (
@@ -475,7 +475,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE g.group_key = sub.group_key
         AND g.in_flight_until IS DISTINCT FROM sub.new_ift;
 
-      -- Step 3: Handle group_key changes (dedup replace) — remove from old group
+      -- Step 3: Handle group_key changes (dedup replace) - remove from old group
       UPDATE ${groupsTbl} g
       SET job_count = g.job_count - sub.cnt,
           min_priority = COALESCE(sub.new_min_priority, g.min_priority),
@@ -510,7 +510,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
             AND o.group_key IS DISTINCT FROM n.group_key
         );
 
-      -- Step 4: Handle group_key changes — add to new group
+      -- Step 4: Handle group_key changes - add to new group
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count)
       SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*)
       FROM new_table n
