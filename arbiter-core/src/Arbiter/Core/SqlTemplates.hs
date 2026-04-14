@@ -87,7 +87,9 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec, dlqRowCodec, jobRowCodec)
 import Arbiter.Core.CronSchedule (cronSchedulesTable)
 import Arbiter.Core.Job.Schema
-  ( jobQueueDLQTable
+  ( SchemaName
+  , TableName
+  , jobQueueDLQTable
   , jobQueueGroupsTable
   , jobQueueReaperSeq
   , jobQueueResultsTable
@@ -166,7 +168,6 @@ jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
 
--- | RETURNING clause with job columns
 -- | SQL template for inserting a job
 --
 -- Parameters (in order):
@@ -316,7 +317,7 @@ insertJobsBatchBase schema tableName returning =
 --      fresh value and correctly skip the group.
 --
 -- No @?@ parameters — all values are interpolated.
-claimJobsSQL :: Text -> Text -> Int -> Int -> Text
+claimJobsSQL :: SchemaName -> TableName -> Int -> Int -> Text
 claimJobsSQL schema tableName maxJobs timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -389,7 +390,7 @@ claimJobsSQL schema tableName maxJobs timeoutSeconds =
 -- re-evaluation mechanism).
 -- Excludes tree jobs (@parent_id IS NULL AND parent_state IS NULL@).
 -- No @?@ parameters — all values are interpolated.
-claimJobsBatchedSQL :: Text -> Text -> Int -> Int -> Int -> Text
+claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> Int -> Text
 claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName

@@ -360,10 +360,12 @@ All jobs in a batch succeed or fail together.
 
 ```haskell
 myHooks = Arb.defaultObservabilityHooks
-  { onJobSuccess = \job claimedAt completedAt ->
-      liftIO $ recordHistogram "jobs.duration" (diffUTCTime completedAt claimedAt)
+  { onJobSuccess = \job startTime endTime ->
+      liftIO $ recordHistogram "jobs.duration" (diffUTCTime endTime startTime)
   , onJobFailedAndMovedToDLQ = \err job ->
       liftIO $ sendAlert $ "Job " <> show (Arb.primaryKey job) <> " moved to DLQ: " <> err
+  , onJobHeartbeat = \job now startTime ->
+      liftIO $ recordGauge "jobs.running_duration" (realToFrac $ diffUTCTime now startTime)
   }
 
 config <- Worker.defaultWorkerConfig connStr 5 handler
@@ -491,7 +493,7 @@ Per-queue endpoints under `/api/v1/:table/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `jobs` | List jobs (params: `limit`, `offset`, `group_key`, `parent_id`) |
+| `GET` | `jobs` | List jobs (params: `limit`, `offset`, `group_key`, `parent_id`, `suspended`) |
 | `POST` | `jobs` | Insert a job |
 | `POST` | `jobs/batch` | Insert multiple jobs |
 | `GET` | `jobs/:id` | Get job by ID |
@@ -500,10 +502,13 @@ Per-queue endpoints under `/api/v1/:table/`:
 | `POST` | `jobs/:id/move-to-dlq` | Move job to dead-letter queue |
 | `POST` | `jobs/:id/suspend` | Suspend job |
 | `POST` | `jobs/:id/resume` | Resume suspended job |
+| `POST` | `jobs/:id/pause-children` | Pause all visible children of a job |
+| `POST` | `jobs/:id/resume-children` | Resume all suspended children |
 | `GET` | `jobs/in-flight` | List currently claimed jobs |
 | `GET` | `dlq` | List DLQ entries |
 | `POST` | `dlq/:id/retry` | Retry from DLQ |
 | `DELETE` | `dlq/:id` | Delete from DLQ |
+| `POST` | `dlq/batch-delete` | Batch delete multiple DLQ entries |
 | `GET` | `stats` | Queue statistics |
 
 Global endpoints under `/api/v1/`:

@@ -3,8 +3,12 @@
 
 -- | SQL generation functions for job queue schemas. No database execution happens here.
 module Arbiter.Core.Job.Schema
-  ( -- * Schema Creation
-    createSchemaSQL
+  ( -- * Name Types
+    SchemaName
+  , TableName
+
+    -- * Schema Creation
+  , createSchemaSQL
   , defaultSchemaName
 
     -- * Table Creation SQL
@@ -70,6 +74,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
+-- | PostgreSQL schema name (e.g., @"arbiter"@).
+type SchemaName = Text
+
+-- | Unqualified table name within a schema (e.g., @"email_jobs"@).
+type TableName = Text
+
 -- | Quote a PostgreSQL identifier (schema name, table name, column name).
 --
 -- This escapes double quotes by doubling them and wraps the identifier in quotes.
@@ -81,14 +91,14 @@ quoteIdentifier ident =
 -- | Default PostgreSQL schema name for Arbiter tables
 --
 -- Using a dedicated schema prevents namespace pollution in the user's public schema.
-defaultSchemaName :: Text
+defaultSchemaName :: SchemaName
 defaultSchemaName = "arbiter"
 
 -- | Generate notification channel name for a table
 --
 -- Each table gets its own NOTIFY channel for job insertions.
 -- Example: notificationChannelForTable "email_jobs" -> "email_jobs_created"
-notificationChannelForTable :: Text -> Text
+notificationChannelForTable :: TableName -> Text
 notificationChannelForTable tableName = tableName <> "_created"
 
 -- | Channel name used by the event streaming (SSE) system.
@@ -96,11 +106,11 @@ eventStreamingChannel :: Text
 eventStreamingChannel = "arbiter_job_events"
 
 -- | Per-table NOTIFY trigger function name.
-notifyFunctionName :: Text -> Text
+notifyFunctionName :: TableName -> Text
 notifyFunctionName tableName = "notify_" <> tableName <> "_created"
 
 -- | Per-table NOTIFY trigger name.
-notifyTriggerName :: Text -> Text
+notifyTriggerName :: TableName -> Text
 notifyTriggerName tableName = tableName <> "_notify_trigger"
 
 -- | Shared event streaming trigger function name (one per schema).
@@ -108,19 +118,19 @@ eventStreamingFunctionName :: Text
 eventStreamingFunctionName = "notify_job_event"
 
 -- | Per-table event streaming trigger name.
-eventStreamingTriggerName :: Text -> Text
+eventStreamingTriggerName :: TableName -> Text
 eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 
 -- | Per-table DLQ event streaming trigger name.
-eventStreamingDLQTriggerName :: Text -> Text
+eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
 
 -- | Qualified table name: @jobQueueTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs"@
-jobQueueTable :: Text -> Text -> Text
+jobQueueTable :: SchemaName -> TableName -> Text
 jobQueueTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
 
 -- | Qualified DLQ table name: @jobQueueDLQTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_dlq"@
-jobQueueDLQTable :: Text -> Text -> Text
+jobQueueDLQTable :: SchemaName -> TableName -> Text
 jobQueueDLQTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_dlq")
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
@@ -143,7 +153,7 @@ createReaperSeqSQL schemaName tableName =
    in "CREATE SEQUENCE IF NOT EXISTS " <> seqName <> " START WITH 0 MINVALUE 0;"
 
 -- | SQL to create the schema for Arbiter tables
-createSchemaSQL :: Text -> Text
+createSchemaSQL :: SchemaName -> Text
 createSchemaSQL schemaName =
   "CREATE SCHEMA IF NOT EXISTS " <> quoteIdentifier schemaName <> ";"
 
@@ -631,7 +641,7 @@ dropNotifyFunctionSQL schemaName tableName =
 -- INSERT\/UPDATE\/DELETE of job tables and INSERT on DLQ tables. Sends a JSON
 -- event via @pg_notify@ on the @arbiter_job_events@ channel. Uses
 -- @TG_TABLE_NAME@ and @TG_OP@ so a single function covers all tables.
-createEventStreamingFunctionSQL :: Text -> Text
+createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
    in T.unlines
