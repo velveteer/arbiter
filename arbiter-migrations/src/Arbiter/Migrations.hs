@@ -27,7 +27,9 @@ module Arbiter.Migrations
 
 import Arbiter.Core.CronSchedule (createCronSchedulesTableSQL)
 import Arbiter.Core.Job.Schema
-  ( createDLQFailedAtIndexSQL
+  ( SchemaName
+  , TableName
+  , createDLQFailedAtIndexSQL
   , createDLQGroupKeyIndexSQL
   , createDLQParentIdIndexSQL
   , createDedupKeyIndexSQL
@@ -47,8 +49,6 @@ import Arbiter.Core.Job.Schema
   , createReaperSeqSQL
   , createResultsTableSQL
   , createSchemaSQL
-  , SchemaName
-  , TableName
   )
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Control.Exception (bracket, try)

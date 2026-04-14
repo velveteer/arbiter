@@ -84,9 +84,6 @@ data LivenessConfig = LivenessConfig
   }
 
 -- | Configuration for a worker pool.
---
--- __Time units:__ All time-related fields use 'NominalDiffTime' (seconds).
--- Sub-second precision is supported (e.g., @0.1@ for 100ms).
 data WorkerConfig m payload result = WorkerConfig
   { connStr :: ByteString
   -- ^ PostgreSQL connection string (used for LISTEN/NOTIFY).
@@ -99,11 +96,10 @@ data WorkerConfig m payload result = WorkerConfig
   -- Also serves as the liveness heartbeat - the dispatcher signals the
   -- liveness probe after each poll cycle. Default: 5 seconds.
   , visibilityTimeout :: NominalDiffTime
-  -- ^ Duration in __seconds__ a claimed job stays invisible to other workers.
-  -- Must be greater than 'heartbeatInterval'. Sub-second values are
-  -- rounded up to the nearest second. Default: 60.
-  , heartbeatInterval :: Int
-  -- ^ Interval in __seconds__ for extending visibility timeout during processing.
+  -- ^ How long a claimed job stays invisible to other workers.
+  -- Must be greater than 'heartbeatInterval'. Default: 60.
+  , heartbeatInterval :: NominalDiffTime
+  -- ^ Interval for extending visibility timeout during processing.
   -- Must be less than 'visibilityTimeout' to prevent job reclaim. Default: 30.
   , maxAttempts :: Int32
   -- ^ Max retries before moving to DLQ (used when job's maxAttempts is Nothing).
@@ -125,9 +121,6 @@ data WorkerConfig m payload result = WorkerConfig
   -- Child results are __not__ automatically stored in the results table -
   -- the handler must call 'Arbiter.Core.HighLevel.insertResult' to make
   -- results visible to the rollup finalizer.
-  , transactionTimeout :: Maybe NominalDiffTime
-  -- ^ Transaction statement timeout in __seconds__. Only applies when
-  -- useWorkerTransaction is True. Default: Nothing (no timeout).
   , observabilityHooks :: ObservabilityHooks m payload
   -- ^ Callbacks for metrics or tracing. Default: no-op hooks.
   , workerStateVar :: TVar WorkerState
@@ -249,7 +242,6 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter
       , useWorkerTransaction = True
-      , transactionTimeout = Nothing
       , observabilityHooks = defaultObservabilityHooks
       , workerStateVar = shutdownTVar
       , livenessConfig = Just (LivenessConfig livenessFile livenessMVar 60)

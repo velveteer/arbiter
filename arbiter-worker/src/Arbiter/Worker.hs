@@ -477,11 +477,6 @@ processJobsWithRetry config jobs = do
         schemaName <- Arb.getSchema
         if useWorkerTransaction config
           then withDbTransaction $ do
-            case transactionTimeout config of
-              Just timeout -> do
-                let timeoutMs = ceiling (timeout * 1000) :: Int64
-                void $ executeStatement "SET LOCAL statement_timeout = ?" [pval CInt8 timeoutMs]
-              Nothing -> pure ()
             handlerResult <- runHandler config schemaName jobs
             -- Store result for parent rollup if applicable
             case handlerMode config of

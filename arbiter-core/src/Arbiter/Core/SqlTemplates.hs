@@ -82,6 +82,7 @@ module Arbiter.Core.SqlTemplates
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (NominalDiffTime)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec, dlqRowCodec, jobRowCodec)
@@ -317,14 +318,14 @@ insertJobsBatchBase schema tableName returning =
 --      fresh value and correctly skip the group.
 --
 -- No @?@ parameters - all values are interpolated.
-claimJobsSQL :: SchemaName -> TableName -> Int -> Int -> Text
+claimJobsSQL :: SchemaName -> TableName -> Int -> NominalDiffTime -> Text
 claimJobsSQL schema tableName maxJobs timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       columns = jobColumns Nothing
       overfetch = T.pack (show (maxJobs * 10))
       limit = T.pack (show maxJobs)
-      timeout = T.pack (show timeoutSeconds)
+      timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
    in [text|
   WITH
     eligible_groups AS (
@@ -390,14 +391,14 @@ claimJobsSQL schema tableName maxJobs timeoutSeconds =
 -- re-evaluation mechanism).
 -- Excludes tree jobs (@parent_id IS NULL AND parent_state IS NULL@).
 -- No @?@ parameters - all values are interpolated.
-claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> Int -> Text
+claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> NominalDiffTime -> Text
 claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       columns = jobColumns Nothing
       bs = T.pack (show batchSize)
       mb = T.pack (show maxBatches)
-      timeout = T.pack (show timeoutSeconds)
+      timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
       ungroupedLimit = T.pack (show (maxBatches * batchSize))
       overfetch = T.pack (show (maxBatches * 10))
    in [text|

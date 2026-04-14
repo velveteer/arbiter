@@ -15,6 +15,7 @@ import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.QueueRegistry (TableForPayload)
+import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
@@ -232,6 +233,25 @@ operationsSpec mkMessage runM = do
       -- Should be able to re-claim job now
       claimed' <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed' `shouldBe` 1
+
+    it "supports fractional timeouts" $ \env -> do
+      let job = defaultJob (mkMessage "fractional-timeout")
+      void $ runM env (HL.insertJob job)
+
+      -- Claim with fractional visibility timeout (0.5 seconds)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 0.5) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+
+      -- Extend with fractional timeout
+      result <- runM env (HL.setVisibilityTimeout 0.5 (head claimed))
+      result `shouldBe` 1
+
+      -- Wait for it to expire
+      threadDelay 600_000
+
+      -- Should be claimable again
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
 
   describe "ackJobsBatch" $ do
     it "removes multiple jobs in a single operation" $ \env -> do

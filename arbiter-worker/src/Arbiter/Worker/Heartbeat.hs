@@ -48,10 +48,10 @@ withJobsHeartbeat
      )
   => ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
-  -> Int
-  -- ^ Heartbeat interval in seconds (e.g., 30)
   -> NominalDiffTime
-  -- ^ Visibility timeout in seconds (e.g., 60)
+  -- ^ Heartbeat interval
+  -> NominalDiffTime
+  -- ^ Visibility timeout
   -> UTCTime
   -- ^ Start time (for calculating elapsed time in heartbeat hook)
   -> NonEmpty (JobRead payload)
@@ -79,10 +79,10 @@ heartbeatLoop
      )
   => ObservabilityHooks m payload
   -- ^ Observability hooks
-  -> Int
-  -- ^ Interval in seconds
   -> NominalDiffTime
-  -- ^ Timeout in seconds
+  -- ^ Heartbeat interval
+  -> NominalDiffTime
+  -- ^ Visibility timeout
   -> UTCTime
   -- ^ Start time
   -> NonEmpty (JobRead payload)
@@ -94,7 +94,7 @@ heartbeatLoop
   -> m Void
 heartbeatLoop hooks intervalSecs timeoutSecs startTime jobs logCfg mLivenessMVar = forever $ do
   -- Wait for the interval
-  liftIO $ threadDelay (intervalSecs * 1_000_000)
+  liftIO $ threadDelay (ceiling (intervalSecs * 1_000_000))
 
   -- Extend visibility and get detailed status for each job
   results <- Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)

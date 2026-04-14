@@ -546,7 +546,7 @@ claimNextVisibleJobs
   -- ^ Visibility timeout in seconds
   -> m [JobRead payload]
 claimNextVisibleJobs schemaName tableName maxJobs timeout = withDbTransaction $ do
-  let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs (ceiling timeout)
+  let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs timeout
   rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
   mapM decodePayload rawJobs
 
@@ -570,7 +570,7 @@ claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout
   | batchSize < 1 = pure []
   | maxBatches < 1 = pure []
   | otherwise = withDbTransaction $ do
-      let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches (ceiling timeout)
+      let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches timeout
       rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
       jobs <- mapM decodePayload rawJobs
       let sorted = sortOn groupKey jobs
@@ -698,7 +698,7 @@ setVisibilityTimeout
 setVisibilityTimeout schemaName tableName timeout job =
   executeStatement
     (Tmpl.setVisibilityTimeoutSQL schemaName tableName)
-    [ pval CInt8 (ceiling timeout)
+    [ pval CFloat8 (realToFrac timeout)
     , pval CInt8 (primaryKey job)
     , pval CInt4 (attempts job)
     ]
@@ -734,7 +734,7 @@ setVisibilityTimeoutBatch _ _ _ [] = pure []
 setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
   let valuesPlaceholder = T.intercalate "," $ replicate (length jobs) "(?,?)"
       jobParams = concatMap (\job -> [pval CInt8 (primaryKey job), pval CInt4 (attempts job)]) jobs
-      params = jobParams <> [pval CInt8 (ceiling timeout)]
+      params = jobParams <> [pval CFloat8 (realToFrac timeout)]
 
   executeQuery
     (Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesPlaceholder)
