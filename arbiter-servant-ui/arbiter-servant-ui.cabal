@@ -1,4 +1,4 @@
-cabal-version:   2.2
+cabal-version:   2.4
 name:            arbiter-servant-ui
 version:         0.1.0.0
 synopsis:        Embedded admin dashboard for arbiter job queue
@@ -11,6 +11,14 @@ maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
+extra-source-files:
+  static/favicon.ico
+  static/index.html
+  static/css/*.css
+  static/js/*.js
+  static/vendor/*.css
+  static/vendor/*.js
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
