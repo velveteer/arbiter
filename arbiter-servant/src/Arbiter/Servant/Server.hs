@@ -25,7 +25,7 @@ import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (AllQueuesUnique, RegistryTables (..))
+import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (JobFilter (..))
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
@@ -69,7 +69,7 @@ import Arbiter.Servant.API
 import Arbiter.Servant.Types
 
 -- | Configuration for the API server
-data ArbiterServerConfig registry = ArbiterServerConfig
+data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverEnv :: SimpleEnv registry
   -- ^ The SimpleEnv containing schema and connection pool
   , enableSSE :: Bool

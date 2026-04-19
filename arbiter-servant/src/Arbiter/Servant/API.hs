@@ -16,6 +16,7 @@ module Arbiter.Servant.API
   , CronAPI (..)
   ) where
 
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
@@ -211,4 +212,5 @@ type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
 --   * @\/api\/v1\/:tableName\/jobs\/...@ for each table in registry
 --   * @\/api\/v1\/queues@ - list all available queues
 --   * @\/api\/v1\/events\/stream@ - real-time job updates (SSE)
+type ArbiterAPI :: JobPayloadRegistry -> Type
 type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry

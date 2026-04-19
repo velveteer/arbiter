@@ -37,7 +37,7 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
-import Arbiter.Core.QueueRegistry (AllQueuesUnique)
+import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry)
 import Control.Exception (Exception, throwIO)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -65,7 +65,7 @@ newtype HasqlConnectionError = HasqlConnectionError String
   deriving anyclass (Exception)
 
 -- | Schema name and connection pool for 'HasqlDb'.
-data HasqlEnv registry = HasqlEnv
+data HasqlEnv (registry :: JobPayloadRegistry) = HasqlEnv
   { schema :: SchemaName
   -- ^ Schema name
   , hasqlPool :: HasqlConnectionPool
@@ -73,7 +73,7 @@ data HasqlEnv registry = HasqlEnv
   }
 
 -- | Hasql database monad for Arbiter.
-newtype HasqlDb registry m a = HasqlDb {unHasqlDb :: ReaderT (HasqlEnv registry) m a}
+newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb {unHasqlDb :: ReaderT (HasqlEnv registry) m a}
   deriving newtype
     ( Applicative
     , Functor

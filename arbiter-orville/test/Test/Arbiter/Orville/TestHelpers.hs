@@ -11,6 +11,7 @@ module Test.Arbiter.Orville.TestHelpers
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.Test.Setup qualified as TestSetup
 import Control.Monad (void)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
@@ -33,7 +34,7 @@ import Arbiter.Orville.MonadArbiter
   )
 
 -- Test environment combining schema name, table name, and OrvilleState
-data OrvilleTestEnv registry = OrvilleTestEnv
+data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
   { testSchema :: Text
   , testTableName :: Text
   , testConnStr :: ByteString
@@ -41,7 +42,7 @@ data OrvilleTestEnv registry = OrvilleTestEnv
   }
 
 -- | Test monad that provides both OrvilleState and ArbiterEnv
-newtype TestOrville registry a = TestOrville {unTestOrville :: ReaderT (OrvilleTestEnv registry) IO a}
+newtype TestOrville (registry :: JobPayloadRegistry) a = TestOrville {unTestOrville :: ReaderT (OrvilleTestEnv registry) IO a}
   deriving newtype
     (Applicative, Functor, Monad, MonadCatch, MonadFail, MonadIO, MonadMask, MonadThrow, MonadUnliftIO, O.MonadOrville)
 

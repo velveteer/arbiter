@@ -30,7 +30,7 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
-import Arbiter.Core.QueueRegistry (AllQueuesUnique)
+import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks, local)
@@ -51,7 +51,7 @@ import Arbiter.Simple.MonadArbiter
   )
 
 -- | Schema name and connection pool for 'SimpleDb'.
-data SimpleEnv registry = SimpleEnv
+data SimpleEnv (registry :: JobPayloadRegistry) = SimpleEnv
   { schema :: SchemaName
   -- ^ Schema name
   , simplePool :: SimpleConnectionPool
@@ -59,7 +59,7 @@ data SimpleEnv registry = SimpleEnv
   }
 
 -- | Simple database monad using postgresql-simple.
-newtype SimpleDb registry m a = SimpleDb {unSimpleDb :: ReaderT (SimpleEnv registry) m a}
+newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: ReaderT (SimpleEnv registry) m a}
   deriving newtype
     ( Applicative
     , Functor
