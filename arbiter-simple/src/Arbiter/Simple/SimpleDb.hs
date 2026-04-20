@@ -1,3 +1,4 @@
+{-# LANGUAGE RequiredTypeArguments #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
@@ -37,7 +38,6 @@ import Control.Monad.Reader (MonadReader, asks, local)
 import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
-import Data.Proxy (Proxy (..))
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import UnliftIO (MonadUnliftIO)
 
@@ -126,17 +126,17 @@ inTransaction conn schemaName action =
 -- | Create a 'SimpleEnv' with default pool settings (10 connections, 300s idle, 1 stripe).
 -- For workers, use 'createSimpleEnvWithConfig' with 'poolConfigForWorkers' instead.
 createSimpleEnv
-  :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
-  => Proxy registry
-  -- ^ Type-level job payload registry
-  -> ByteString
+  :: forall m
+  -- Type-level job payload registry
+   . forall registry
+  ->(AllQueuesUnique registry, MonadIO m)
+  => ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
   -- ^ Schema name
   -> m (SimpleEnv registry)
-createSimpleEnv proxy connStr schemaName =
-  createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
+createSimpleEnv (type registry) connStr schemaName =
+  createSimpleEnvWithConfig (type registry) connStr schemaName PC.defaultPoolConfig
 
 -- | Create a 'SimpleEnv' with custom pool settings.
 --
@@ -148,21 +148,21 @@ createSimpleEnv proxy connStr schemaName =
 --       , poolIdleTimeout = 120
 --       , poolStripes = Just 4
 --       }
--- env <- createSimpleEnvWithConfig (Proxy @MyRegistry) "host=localhost dbname=mydb" "arbiter" config
+-- env <- createSimpleEnvWithConfig (type MyRegistry) "host=localhost dbname=mydb" "arbiter" config
 -- @
 createSimpleEnvWithConfig
-  :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
-  => Proxy registry
-  -- ^ Type-level job payload registry
-  -> ByteString
+  :: forall m
+  -- Type-level job payload registry
+   . forall registry
+  ->(AllQueuesUnique registry, MonadIO m)
+  => ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
   -- ^ Schema name
   -> PoolConfig
   -- ^ Pool configuration
   -> m (SimpleEnv registry)
-createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
+createSimpleEnvWithConfig (type _registry) connStr schemaName config = liftIO $ do
   let stripes = poolStripes config
   connPool <-
     newPool $
@@ -180,16 +180,15 @@ createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
 
 -- | Create a SimpleEnv with a user-provided connection pool
 createSimpleEnvWithPool
+  -- Type-level job payload registry
   :: forall registry
-   . (AllQueuesUnique registry)
-  => Proxy registry
-  -- ^ Type-level job payload registry
-  -> Pool Connection
+  ->(AllQueuesUnique registry)
+  => Pool Connection
   -- ^ User-provided connection pool
   -> SchemaName
   -- ^ Schema name
   -> SimpleEnv registry
-createSimpleEnvWithPool _proxy connPool schemaName =
+createSimpleEnvWithPool (type _registry) connPool schemaName =
   SimpleEnv
     { schema = schemaName
     , simplePool = SimpleConnectionPool {connectionPool = Just connPool, activeConn = Nothing, transactionDepth = 0}

@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Entry point for running a worker pool that fetches and executes jobs.
@@ -47,7 +49,7 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), TableForPayload)
 import Control.Exception (SomeException, fromException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.Catch (MonadMask)
@@ -66,7 +68,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
-import GHC.TypeLits (symbolVal)
+import GHC.TypeLits (symbolVal, KnownSymbol, Symbol)
 import System.Directory (removeFile)
 import System.Environment (lookupEnv)
 import UnliftIO
@@ -149,7 +151,7 @@ instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
 --   , namedWorkerPool imageConfig      -- "image_jobs"
 --   ]
 --
--- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
+-- main = runWorkerPools (type MyRegistry) allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
   = forall registry payload result.
@@ -169,7 +171,7 @@ namedWorkerPool
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
-    { workerPoolName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+    { workerPoolName = T.pack $ symVal (type (TableForPayload payload registry))
     , workerPoolConfig = cfg
     }
 
@@ -177,16 +179,16 @@ namedWorkerPool cfg =
 -- in @ARBITER_ENABLED_QUEUES@ (all if unset). The setup action receives the
 -- shared 'TVar' for installing signal handlers.
 runWorkerPools
-  :: forall m registry
+  :: forall registry
+  ->forall m
    . (MonadMask m, MonadUnliftIO m, RegistryTables registry)
-  => Proxy registry
-  -> [NamedWorkerPool m]
+  => [NamedWorkerPool m]
   -> (TVar WorkerState -> IO ())
   -> m ()
-runWorkerPools registry pools setup = do
+runWorkerPools (type registry) pools setup = do
   sharedState <- liftIO newWorkerState
   liftIO $ setup sharedState
-  enabled <- liftIO $ getEnabledQueues "ARBITER_ENABLED_QUEUES" registry
+  enabled <- liftIO $ getEnabledQueues (type registry) "ARBITER_ENABLED_QUEUES"
   runSelectedWorkerPools sharedState enabled pools
 
 -- | Run only the worker pools whose names appear in the enabled list.
@@ -216,24 +218,24 @@ runSelectedWorkerPools sharedState enabled pools =
 --
 -- @
 -- -- With ENABLED_QUEUES="email_jobs,notifications"
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
+-- queues <- getEnabledQueues "ENABLED_QUEUES" (type MyRegistry)
 -- -- Returns: ["email_jobs", "notifications"]
 --
 -- -- With ENABLED_QUEUES unset or empty
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
+-- queues <- getEnabledQueues "ENABLED_QUEUES" (type MyRegistry)
 -- -- Returns: all queues from registry
 --
 -- -- With ENABLED_QUEUES="email_jobs,invalid_queue"
 -- -- Throws error: "Unknown queue names: invalid_queue"
 -- @
 getEnabledQueues
-  :: (RegistryTables registry)
+  -- Registry
+  :: forall (registry :: JobPayloadRegistry)
+  ->(RegistryTables registry)
   => String
   -- ^ Environment variable name
-  -> Proxy registry
-  -- ^ Registry proxy
   -> IO [Text]
-getEnabledQueues envVar registry = do
+getEnabledQueues (type registry) envVar = do
   let allQueues = registryTableNames registry
   mVal <- lookupEnv envVar
   case mVal of
@@ -645,3 +647,6 @@ groupReaperLoop _config interval = do
   forever $ do
     Arb.refreshGroups @m @registry @payload intervalSecs
     liftIO $ threadDelay (intervalSecs * 1_000_000)
+
+symVal :: forall (s :: Symbol) -> (KnownSymbol s) => String
+symVal (type s) = symbolVal (Proxy :: Proxy s)

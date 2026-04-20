@@ -8,7 +8,6 @@ import Arbiter.Test.Setup (setupOnce)
 import Data.ByteString (ByteString)
 import Data.Maybe (fromJust)
 import Data.Pool (Pool, withResource)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple qualified as PG
 import Test.Hspec
@@ -28,7 +27,7 @@ testTable = "arbiter_simple_groups_test"
 withCleanup
   :: Pool PG.Connection -> (SimpleEnv SimpleGITestRegistry -> IO a) -> IO a
 withCleanup sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @SimpleGITestRegistry) sharedPool testSchema
+  let env = createSimpleEnvWithPool (type SimpleGITestRegistry) sharedPool testSchema
   cleanupSimpleTest env testSchema testTable
   action env
 

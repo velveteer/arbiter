@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | REST API server for the Arbiter job queue (SimpleDb backend).
@@ -94,27 +95,26 @@ serverPoolConfig =
 -- @enableEventStreaming = True@ to set up the database triggers for SSE.
 initArbiterServer
   :: forall registry
-   . (AllQueuesUnique registry)
-  => Proxy registry
-  -> ByteString
+  ->(AllQueuesUnique registry)
+  => ByteString
   -> Text
   -> IO (ArbiterServerConfig registry)
-initArbiterServer _proxy connStr schemaName = do
-  env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
+initArbiterServer (type registry) connStr schemaName = do
+  env <- createSimpleEnvWithConfig (type registry) connStr schemaName serverPoolConfig
   pure ArbiterServerConfig {serverEnv = env, enableSSE = True}
 
 -- | Wrap jobs with current timestamp for status derivation
-toApiJobs :: (MonadIO m) => [JobRead payload] -> m [ApiJob payload]
+toApiJobs :: forall payload m. (MonadIO m) => [JobRead payload] -> m [ApiJob payload]
 toApiJobs jobs = do
   now <- liftIO getCurrentTime
   pure $ map (`ApiJob` now) jobs
 
-toApiJob :: (MonadIO m) => JobRead payload -> m (ApiJob payload)
+toApiJob :: forall payload m. (MonadIO m) => JobRead payload -> m (ApiJob payload)
 toApiJob job = do
   now <- liftIO getCurrentTime
   pure $ ApiJob job now
 
-toApiDLQJobs :: (MonadIO m) => [DLQ.DLQJob payload] -> m [ApiDLQJob payload]
+toApiDLQJobs :: forall payload m. (MonadIO m) => [DLQ.DLQJob payload] -> m [ApiDLQJob payload]
 toApiDLQJobs jobs = do
   now <- liftIO getCurrentTime
   pure $ map (`ApiDLQJob` now) jobs
@@ -610,12 +610,13 @@ getStatsHandler tableName config = do
 
 -- | Table API handlers for a specific table
 tableServer
-  :: forall registry payload
-   . (JobPayload payload)
+  :: forall payload
+   . forall registry
+  ->(JobPayload payload)
   => Text -- table
   -> ArbiterServerConfig registry
   -> TableAPI payload (AsServerT Handler)
-tableServer table config =
+tableServer (type registry) table config =
   TableAPI
     { jobs = jobsServer @registry @payload table config
     , dlq = dlqServer @registry @payload table config
@@ -625,12 +626,11 @@ tableServer table config =
 -- | Queues API handler
 queuesServer
   :: forall registry
-   . (RegistryTables registry)
-  => Proxy registry
-  -> QueuesAPI (AsServerT Handler)
-queuesServer registryProxy =
+  ->(RegistryTables registry)
+  => QueuesAPI (AsServerT Handler)
+queuesServer (type registry) =
   QueuesAPI
-    { listQueues = pure $ QueuesResponse {queues = registryTableNames registryProxy}
+    { listQueues = pure $ QueuesResponse {queues = registryTableNames registry}
     }
 
 -- | Events server - raw WAI application for SSE streaming.
@@ -766,40 +766,43 @@ class BuildServer registry (reg :: [(Symbol, Type)]) where
 
 -- Base case: empty registry, just queues, events, and cron endpoints
 instance
-  (RegistryTables registry)
+  forall registry
+   . (RegistryTables registry)
   => BuildServer registry '[]
   where
   buildServer config =
-    queuesServer @registry (Proxy @registry)
+    queuesServer registry
       :<|> eventsServer config
       :<|> cronServer config
 
 -- Single table case: table endpoints :<|> queues :<|> events :<|> cron endpoints
 instance
-  ( JobPayload payload
-  , KnownSymbol tableName
-  , RegistryTables registry
-  )
+  forall payload tableName registry
+   . ( JobPayload payload
+     , KnownSymbol tableName
+     , RegistryTables registry
+     )
   => BuildServer registry ('(tableName, payload) ': '[])
   where
   buildServer config =
-    let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
-          :<|> queuesServer @registry (Proxy @registry)
+    let tableName = T.pack $ symVal (type tableName)
+     in tableServer (type registry) tableName config
+          :<|> queuesServer (type registry)
           :<|> eventsServer config
           :<|> cronServer config
 
 -- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
 instance
-  ( BuildServer registry (nextTable ': moreRest)
-  , JobPayload payload
-  , KnownSymbol tableName
-  )
+  forall payload tableName registry nextTable moreRest
+   . ( BuildServer registry (nextTable ': moreRest)
+     , JobPayload payload
+     , KnownSymbol tableName
+     )
   => BuildServer registry ('(tableName, payload) ': (nextTable ': moreRest))
   where
   buildServer config =
-    let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
+    let tableName = T.pack $ symVal (type tableName)
+     in tableServer (type registry) tableName config
           :<|> buildServer @registry @(nextTable ': moreRest) config
 
 -- | Complete Arbiter server at @\/api\/v1\/...@
@@ -837,3 +840,6 @@ runArbiterAPI port config = do
   putStrLn $ "Starting Arbiter API server on port " <> show port
   let settings = setPort port $ setTimeout 0 defaultSettings
   runSettings settings (arbiterApp config)
+
+symVal :: forall (s :: Symbol) -> (KnownSymbol s) => String
+symVal (type s) = symbolVal (Proxy :: Proxy s)

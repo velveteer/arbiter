@@ -37,7 +37,6 @@ import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Tagged (Tagged (..))
 import Data.Text (Text)
@@ -363,7 +362,7 @@ setupSchema :: IO ()
 setupSchema = do
   conn <- connectPostgreSQL benchConnStr
   execute_ conn $ "DROP SCHEMA IF EXISTS " <> benchSchema <> " CASCADE"
-  res <- runMigrationsForRegistry (Proxy @BenchRegistry) benchConnStr benchSchema defaultMigrationConfig
+  res <- runMigrationsForRegistry (type BenchRegistry) benchConnStr benchSchema defaultMigrationConfig
   case res of
     MigrationSuccess -> pure ()
     MigrationError err -> die $ "Migration failed: " <> err
@@ -415,9 +414,9 @@ main = do
   putStrLn "Schema ready. Creating environments..."
 
   let benchPoolConfig = PoolConfig {poolSize = 25, poolIdleTimeout = 60, poolStripes = Just 4}
-  simpleEnv <- createSimpleEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema benchPoolConfig
+  simpleEnv <- createSimpleEnvWithConfig (type BenchRegistry) benchConnStr benchSchema benchPoolConfig
 
-  hasqlEnv <- createHasqlEnvWithConfig (Proxy @BenchRegistry) benchConnStr benchSchema benchPoolConfig
+  hasqlEnv <- createHasqlEnvWithConfig (type BenchRegistry) benchConnStr benchSchema benchPoolConfig
 
   let orvilleOptions = createOrvilleConnectionOptions benchConnStr benchPoolConfig
   orvillePool <- O.createConnectionPool orvilleOptions
@@ -436,7 +435,7 @@ main = do
       <> show (trialDurationUs `div` 1_000_000)
       <> "s per trial)..."
 
-  producerEnv <- createSimpleEnv (Proxy @BenchRegistry) benchConnStr benchSchema
+  producerEnv <- createSimpleEnv (type BenchRegistry) benchConnStr benchSchema
 
   let simpleRun :: RunM SimpleM
       simpleRun = runSimpleDb simpleEnv

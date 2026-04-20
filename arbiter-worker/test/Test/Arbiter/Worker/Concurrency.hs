@@ -27,7 +27,6 @@ import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
-import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
@@ -72,7 +71,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO $ createSharedPool connStr
   let getEnv = do
-        let env = createSimpleEnvWithPool (Proxy @WorkerConcurrencyTestRegistry) sharedPool testSchema
+        let env = createSimpleEnvWithPool (type WorkerConcurrencyTestRegistry) sharedPool testSchema
         withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
         pure env
 

@@ -33,7 +33,6 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (fromJust, fromMaybe)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
-import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -1790,7 +1789,7 @@ createSharedPool connStr =
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  let env = createSimpleEnvWithPool (type WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
   action env
 

@@ -4,11 +4,10 @@
 --
 -- @
 -- import Arbiter.Hasql
--- import Data.Proxy (Proxy (..))
 --
 -- main :: IO ()
 -- main = do
---   env <- createHasqlEnv (Proxy \@MyRegistry) connStr "arbiter"
+--   env <- createHasqlEnv (type MyRegistry) connStr "arbiter"
 --   runHasqlDb env $ do
 --     insertJob (defaultJob myPayload)
 -- @

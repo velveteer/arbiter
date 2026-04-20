@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | High-level API for job queue operations.
@@ -91,15 +92,16 @@ module Arbiter.Core.HighLevel
   ) where
 
 import Data.Aeson (Value)
+import Data.Data (Proxy (..))
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
+import GHC.Exts (Symbol)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
@@ -135,7 +137,7 @@ insertJob
   -> m (Maybe (JobRead payload))
 insertJob job = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns only the jobs that were
@@ -148,7 +150,7 @@ insertJobsBatch
   -> m [JobRead payload]
 insertJobsBatch jobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.insertJobsBatch schemaName tableName jobs
 
 -- | Like 'insertJobsBatch' but returns only the count of inserted rows.
@@ -159,7 +161,7 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ jobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.insertJobsBatch_ schemaName tableName jobs
 
 -- | Claim visible jobs (at most one per group). May return fewer than the
@@ -174,7 +176,7 @@ claimNextVisibleJobs
   -> m [JobRead payload]
 claimNextVisibleJobs limit timeout = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.claimNextVisibleJobs schemaName tableName limit timeout
 
 -- | Claims multiple jobs per group. Unlike 'claimNextVisibleJobs', this can
@@ -192,7 +194,7 @@ claimNextVisibleJobsBatched
   -> m [NonEmpty (JobRead payload)]
 claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
 
 -- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
@@ -328,7 +330,7 @@ listDLQJobs
   -> m [DLQ.DLQJob payload]
 listDLQJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.listDLQJobs schemaName tableName limit offset
 
 -- | Retry a DLQ job (re-insert into main queue with attempts reset).
@@ -341,7 +343,7 @@ retryFromDLQ
   -> m (Maybe (JobRead payload))
 retryFromDLQ dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.retryFromDLQ schemaName tableName dlqId
 
 -- | Check whether a DLQ job exists by ID.
@@ -352,7 +354,7 @@ dlqJobExists
   -> m Bool
 dlqJobExists dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.dlqJobExists schemaName tableName dlqId
 
 -- | Permanently deletes a job from the dead-letter queue.
@@ -366,7 +368,7 @@ deleteDLQJob
   -> m Int64
 deleteDLQJob dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.deleteDLQJob schemaName tableName dlqId
 
 -- | Move multiple jobs to the DLQ. Jobs already claimed by another worker are
@@ -394,7 +396,7 @@ deleteDLQJobsBatch
   -> m Int64
 deleteDLQJobsBatch dlqIds = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.deleteDLQJobsBatch schemaName tableName dlqIds
 
 -- ---------------------------------------------------------------------------
@@ -416,7 +418,7 @@ listJobsFiltered
   -> m [JobRead payload]
 listJobsFiltered filters limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.listJobsFiltered schemaName tableName filters limit offset
 
 -- | Counts jobs with composable filters.
@@ -428,7 +430,7 @@ countJobsFiltered
   -> m Int64
 countJobsFiltered filters = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countJobsFiltered schemaName tableName filters
 
 -- | Lists DLQ jobs with composable filters.
@@ -446,7 +448,7 @@ listDLQFiltered
   -> m [DLQ.DLQJob payload]
 listDLQFiltered filters limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.listDLQFiltered schemaName tableName filters limit offset
 
 -- | Counts DLQ jobs with composable filters.
@@ -458,7 +460,7 @@ countDLQFiltered
   -> m Int64
 countDLQFiltered filters = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countDLQFiltered schemaName tableName filters
 
 -- ---------------------------------------------------------------------------
@@ -478,7 +480,7 @@ listJobs
   -> m [JobRead payload]
 listJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.listJobs schemaName tableName limit offset
 
 -- | Gets a single job by its ID.
@@ -492,7 +494,7 @@ getJobById
   -> m (Maybe (JobRead payload))
 getJobById jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getJobById schemaName tableName jobId
 
 -- | Gets all jobs for a specific group key with pagination.
@@ -508,7 +510,7 @@ getJobsByGroup
   -> m [JobRead payload]
 getJobsByGroup groupKey limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getJobsByGroup schemaName tableName groupKey limit offset
 
 -- | Gets all jobs for a specific parent ID with pagination.
@@ -524,7 +526,7 @@ getJobsByParent
   -> m [JobRead payload]
 getJobsByParent pid limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getJobsByParent schemaName tableName pid limit offset
 
 -- | Gets all in-flight jobs (claimed, visibility timeout not expired).
@@ -538,7 +540,7 @@ getInFlightJobs
   -> m [JobRead payload]
 getInFlightJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getInFlightJobs schemaName tableName limit offset
 
 -- | Cancels (deletes) a job by ID.
@@ -553,7 +555,7 @@ cancelJob
   -> m Int64
 cancelJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.cancelJob schemaName tableName jobId
 
 -- | Cancels (deletes) multiple jobs by ID.
@@ -567,7 +569,7 @@ cancelJobsBatch
   -> m Int64
 cancelJobsBatch jobIds = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.cancelJobsBatch schemaName tableName jobIds
 
 -- | Promote a delayed or retrying job to be immediately visible.
@@ -582,7 +584,7 @@ promoteJob
   -> m Int64
 promoteJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.promoteJob schemaName tableName jobId
 
 -- | Gets statistics about the job queue.
@@ -592,7 +594,7 @@ getQueueStats
   => m Ops.QueueStats
 getQueueStats = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getQueueStats schemaName tableName
 
 -- ---------------------------------------------------------------------------
@@ -606,7 +608,7 @@ countJobs
   => m Int64
 countJobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countJobs schemaName tableName
 
 -- | Counts jobs matching a group key.
@@ -618,7 +620,7 @@ countJobsByGroup
   -> m Int64
 countJobsByGroup groupKey = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countJobsByGroup schemaName tableName groupKey
 
 -- | Counts jobs matching a parent ID.
@@ -630,7 +632,7 @@ countJobsByParent
   -> m Int64
 countJobsByParent pid = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countJobsByParent schemaName tableName pid
 
 -- | Counts in-flight jobs (currently being processed by workers).
@@ -640,7 +642,7 @@ countInFlightJobs
   => m Int64
 countInFlightJobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countInFlightJobs schemaName tableName
 
 -- | Counts jobs in the dead-letter queue.
@@ -650,7 +652,7 @@ countDLQJobs
   => m Int64
 countDLQJobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countDLQJobs schemaName tableName
 
 -- | Counts children for a batch of potential parent IDs.
@@ -663,7 +665,7 @@ countChildrenBatch
   -> m (Map Int64 (Int64, Int64))
 countChildrenBatch ids = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countChildrenBatch schemaName tableName ids
 
 -- | Count how many children of a parent are in the DLQ.
@@ -688,7 +690,7 @@ countDLQChildrenBatch
   -> m (Map Int64 Int64)
 countDLQChildrenBatch ids = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.countDLQChildrenBatch schemaName tableName ids
 
 -- ---------------------------------------------------------------------------
@@ -710,7 +712,7 @@ pauseChildren
   -> m Int64
 pauseChildren parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.pauseChildren schemaName tableName parentJobId
 
 -- | Resume all suspended children of a parent job.
@@ -724,7 +726,7 @@ resumeChildren
   -> m Int64
 resumeChildren parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.resumeChildren schemaName tableName parentJobId
 
 -- | Cancel a job and all its descendants recursively.
@@ -738,7 +740,7 @@ cancelJobCascade
   -> m Int64
 cancelJobCascade jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.cancelJobCascade schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -758,7 +760,7 @@ suspendJob
   -> m Int64
 suspendJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.suspendJob schemaName tableName jobId
 
 -- | Resume a suspended job, making it claimable again.
@@ -772,7 +774,7 @@ resumeJob
   -> m Int64
 resumeJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.resumeJob schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -797,7 +799,7 @@ insertResult
   -> m Int64
 insertResult parentJobId childId result = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.insertResult schemaName tableName parentJobId childId result
 
 -- | Get all child results for a parent from the results table.
@@ -809,7 +811,7 @@ getResultsByParent
   -> m (Map Int64 Value)
 getResultsByParent parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getResultsByParent schemaName tableName parentJobId
 
 -- | Get DLQ child errors for a parent.
@@ -823,7 +825,7 @@ getDLQChildErrorsByParent
   -> m (Map Int64 Text)
 getDLQChildErrorsByParent parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
@@ -836,7 +838,7 @@ readChildResultsRaw
   -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
 readChildResultsRaw parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.readChildResultsRaw schemaName tableName parentJobId
 
 -- | Snapshot results into @parent_state@ before DLQ move.
@@ -848,7 +850,7 @@ persistParentState
   -> m Int64
 persistParentState jobId state = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.persistParentState schemaName tableName jobId state
 
 -- | Read raw @parent_state@ snapshot from the DB.
@@ -859,7 +861,7 @@ getParentStateSnapshot
   -> m (Maybe Value)
 getParentStateSnapshot jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.getParentStateSnapshot schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -877,7 +879,7 @@ refreshGroups
   -> m ()
 refreshGroups intervalSecs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   Ops.refreshGroups schemaName tableName intervalSecs
 
 -- ---------------------------------------------------------------------------
@@ -893,5 +895,8 @@ insertJobTree
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree tree = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  let tableName = T.pack $ symVal (type (TableForPayload payload registry))
   JT.insertJobTree schemaName tableName tree
+
+symVal :: forall (s :: Symbol) -> (KnownSymbol s) => String
+symVal (type s) = symbolVal (Proxy :: Proxy s)

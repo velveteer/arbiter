@@ -1,4 +1,9 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RequiredTypeArguments #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
 
 -- | Versioned, tracked migrations for job queue schemas.
 --
@@ -50,11 +55,10 @@ import Arbiter.Core.Job.Schema
   , createResultsTableSQL
   , createSchemaSQL
   )
-import Arbiter.Core.QueueRegistry (RegistryTables (..))
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
 import Control.Exception (bracket, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -114,17 +118,16 @@ defaultMigrationConfig =
 -- main :: IO ()
 -- main = do
 --   result <- runMigrationsForRegistry
---               (Proxy @AppRegistry)
+--               (type AppRegistry)
 --               "host=localhost dbname=mydb"
 --               "arbiter"
 --               defaultMigrationConfig
 -- @
 runMigrationsForRegistry
-  :: forall registry
-   . (RegistryTables registry)
-  => Proxy registry
-  -- ^ Proxy for the job payload registry
-  -> ByteString
+  -- job payload registry
+  :: forall (registry :: JobPayloadRegistry)
+  -> (RegistryTables registry)
+  => ByteString
   -- ^ Database connection string
   -> SchemaName
   -- ^ Schema name
@@ -132,8 +135,8 @@ runMigrationsForRegistry
   -- ^ Migration configuration
   -> IO (MigrationResult String)
   -- ^ Migration results
-runMigrationsForRegistry proxy connStr schemaName config = do
-  let tables = registryTableNames proxy
+runMigrationsForRegistry (type registry) connStr schemaName config = do
+  let tables = registryTableNames registry
   runMigrationsTrackedForTables connStr schemaName tables config
 
 -- | Run migrations for multiple tables within a single schema.
