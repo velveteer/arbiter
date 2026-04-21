@@ -14,7 +14,6 @@ import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Maybe (fromJust)
 import Data.Pool (withResource)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Test.Hspec
 
@@ -34,7 +33,7 @@ testTable = "arbiter_hasql_ops_test"
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   sharedPool <- runIO (createHasqlPool 5 connStr)
-  let mkEnv = createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema
+  let mkEnv = createHasqlEnvWithPool (type HasqlOpsTestRegistry) sharedPool testSchema
   around (\action -> cleanupHasqlTest connStr testSchema testTable >> action mkEnv) $ do
     operationsSpec @TestPayload TestMessage runHasqlDb
 

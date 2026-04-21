@@ -20,7 +20,6 @@ import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL)
@@ -52,7 +51,7 @@ createSharedPool connStr =
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  let env = createSimpleEnvWithPool (type WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
   action env
 

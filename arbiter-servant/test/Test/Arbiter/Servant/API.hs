@@ -25,7 +25,6 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Pool (withResource)
 import Data.Pool qualified as Pool
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -104,13 +103,13 @@ spec :: ByteString -> Spec
 spec connStr = do
   runIO (setupOnce connStr testSchema testTable False)
   sharedPool <- runIO (createSharedPool connStr)
-  serverConfig <- runIO (initArbiterServer (Proxy @ServantTestRegistry) connStr testSchema)
+  serverConfig <- runIO (initArbiterServer (type ServantTestRegistry) connStr testSchema)
   let app = arbiterApp @ServantTestRegistry serverConfig
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
 
-  let mkEnv = createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema
+  let mkEnv = createSimpleEnvWithPool (type ServantTestRegistry) sharedPool testSchema
 
   describe "Jobs API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/jobs returns empty list initially" $ do

@@ -12,12 +12,11 @@
 --
 -- @
 -- import Arbiter.Servant
--- import Data.Proxy (Proxy(..))
 --
 -- main :: IO ()
 -- main = do
 --   -- Create server config (creates its own pool and registers event triggers)
---   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
+--   config <- initArbiterServer (type MyRegistry) connStr "public"
 --
 --   -- Start API server on port 8080
 --   runArbiterAPI 8080 config

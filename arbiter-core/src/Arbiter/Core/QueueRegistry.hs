@@ -1,4 +1,9 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RequiredTypeArguments #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Type-level utilities for job queue registry validation.
@@ -66,11 +71,14 @@ type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Co
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class RegistryTables (registry :: JobPayloadRegistry) where
-  registryTableNames :: Proxy registry -> [Text]
+  registryTableNames :: forall (t :: JobPayloadRegistry) -> (t ~ registry) => [Text]
 
 instance RegistryTables '[] where
   registryTableNames _ = []
 
 instance (KnownSymbol table, RegistryTables rest) => RegistryTables ('(table, payload) ': rest) where
-  registryTableNames _ =
-    T.pack (symbolVal (Proxy @table)) : registryTableNames (Proxy @rest)
+  registryTableNames (type _) =
+    T.pack (symVal (type table)) : registryTableNames (type rest)
+
+symVal :: forall (s :: Symbol) -> (KnownSymbol s) => String
+symVal (type s) = symbolVal (Proxy :: Proxy s)

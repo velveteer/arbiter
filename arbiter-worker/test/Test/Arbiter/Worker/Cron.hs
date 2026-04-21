@@ -16,7 +16,6 @@ import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Maybe (isJust)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time
   ( UTCTime (..)
@@ -446,7 +445,7 @@ createSharedPool connStr =
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  let env = createSimpleEnvWithPool (type WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> do
     cleanupData testSchema testTable conn
     _ <- PG.execute_ conn "DELETE FROM arbiter_cron_test.cron_schedules" `catch` (\(_ :: PG.SqlError) -> pure 0)

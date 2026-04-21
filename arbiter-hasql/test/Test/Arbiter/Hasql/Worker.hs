@@ -20,7 +20,6 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -47,7 +46,7 @@ testTable = "arbiter_hasql_worker_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False >> createHasqlPool 10 connStr) $ beforeWith (\pool -> cleanupHasqlTest connStr workerTestSchemaName testTable >> pure pool) $ do
-  let mkEnv pool = createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName
+  let mkEnv pool = createHasqlEnvWithPool (type HasqlWorkerTestRegistry) pool workerTestSchemaName
 
   describe "Worker Pool" $ do
     it "processes jobs successfully" $ \pool -> do

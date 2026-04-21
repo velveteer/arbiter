@@ -4,11 +4,10 @@
 --
 -- @
 -- import Arbiter.Simple
--- import Data.Proxy (Proxy (..))
 --
 -- main :: IO ()
 -- main = do
---   env <- createSimpleEnv (Proxy @MyRegistry) connStr "public"
+--   env <- createSimpleEnv (type MyRegistry) connStr "public"
 --   runSimpleDb env $ do
 --     insertJob (defaultJob myPayload)
 -- @

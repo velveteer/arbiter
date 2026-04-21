@@ -31,7 +31,6 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -112,7 +111,7 @@ main = do
   putStrLn "Running migrations..."
   migrationResult <-
     runMigrationsForRegistry
-      (Proxy @DemoRegistry)
+      (type DemoRegistry)
       connStr
       schema
       defaultMigrationConfig {enableEventStreaming = True}
@@ -121,7 +120,7 @@ main = do
     MigrationError err -> die $ "Migration failed: " <> err
 
   -- Create worker environment (its own pool)
-  workerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
+  workerEnv <- createSimpleEnv (type DemoRegistry) connStr schema
 
   -- Seed demo data
   putStrLn "Seeding pipeline (rollup) demo..."
@@ -130,7 +129,7 @@ main = do
   -- Create server config (own connection pool for admin API)
   putStrLn ""
   putStrLn "Setting up server..."
-  serverConfig <- initArbiterServer (Proxy @DemoRegistry) connStr schema
+  serverConfig <- initArbiterServer (type DemoRegistry) connStr schema
   putStrLn "Server ready"
 
   -- Create worker configs with cron jobs
@@ -180,7 +179,7 @@ main = do
         void $ Signals.installHandler Signals.sigINT handler Nothing
 
   race_
-    (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
+    (runSimpleDb workerEnv $ runWorkerPools (type DemoRegistry) workers installSignals)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------

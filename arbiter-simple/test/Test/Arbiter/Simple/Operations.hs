@@ -15,7 +15,6 @@ import Data.ByteString (ByteString)
 import Data.Maybe (fromJust)
 import Data.Pool (withResource)
 import Data.Pool qualified as Pool
-import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple qualified as PG
 import Test.Hspec
@@ -36,7 +35,7 @@ testTable = "arbiter_simple_test"
 withCleanup
   :: Pool.Pool PG.Connection -> (SimpleEnv SimpleOpsTestRegistry -> IO a) -> IO a
 withCleanup sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @SimpleOpsTestRegistry) sharedPool testSchema
+  let env = createSimpleEnvWithPool (type SimpleOpsTestRegistry) sharedPool testSchema
   cleanupSimpleTest env testSchema testTable
   action env
 

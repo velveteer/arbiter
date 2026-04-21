@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 
 module Arbiter.Worker.Dispatcher
   ( runDispatcher
@@ -18,7 +19,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
-import GHC.TypeLits (symbolVal)
+import GHC.TypeLits (symbolVal, KnownSymbol, Symbol)
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
 import UnliftIO.MVar qualified as MVar
@@ -62,7 +63,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
   throttleRef <- liftIO $ newIORef Nothing
 
   let
-    tableNameVal = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+    tableNameVal = T.pack $ symVal (type (TableForPayload payload registry))
 
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do
@@ -145,3 +146,6 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
     (Just $ logConfig config)
     workerFinishedTrigger
     (const claimOnWakeup)
+
+symVal :: forall (s :: Symbol) -> (KnownSymbol s) => String
+symVal (type s) = symbolVal (Proxy :: Proxy s)

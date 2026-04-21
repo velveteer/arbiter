@@ -18,10 +18,9 @@ dependencies:
 
 ```haskell
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 
 import Arbiter.Servant
-import Data.Proxy (Proxy(..))
 
 -- Define your job types
 data EmailJob = SendEmail { to :: Text, subject :: Text, body :: Text }
@@ -31,6 +30,6 @@ type MyRegistry = '[ '("email_jobs", EmailJob) ]
 
 main :: IO ()
 main = do
-  config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
+  config <- initArbiterServer (type MyRegistry) connStr "public"
   runArbiterAPI 8080 config
 ```

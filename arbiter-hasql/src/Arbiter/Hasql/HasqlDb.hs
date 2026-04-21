@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
+{-# LANGUAGE RequiredTypeArguments #-}
 
 -- | Hasql database monad for Arbiter.
 --
@@ -45,7 +46,6 @@ import Control.Monad.Reader (MonadReader, asks, local)
 import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
-import Data.Proxy (Proxy (..))
 import Hasql.Connection qualified as Hasql
 import UnliftIO (MonadUnliftIO)
 
@@ -142,10 +142,10 @@ inTransaction conn schemaName action =
 -- For worker pools, consider using 'createHasqlEnvWithConfig' with @poolConfigForWorkers@
 -- to size the pool based on worker count.
 createHasqlEnv
-  :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
-  => Proxy registry
-  -> ByteString
+  :: forall m
+   . forall registry
+  -> (AllQueuesUnique registry, MonadIO m)
+  => ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
   -- ^ Schema name
@@ -155,10 +155,10 @@ createHasqlEnv proxy connStr schemaName =
 
 -- | Create a HasqlEnv with custom pool configuration.
 createHasqlEnvWithConfig
-  :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
-  => Proxy registry
-  -> ByteString
+  :: forall m
+   . forall registry
+  -> (AllQueuesUnique registry, MonadIO m)
+  => ByteString
   -- ^ PostgreSQL connection string
   -> SchemaName
   -- ^ Schema name
@@ -187,9 +187,8 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
 -- | Create a HasqlEnv with a user-provided connection pool.
 createHasqlEnvWithPool
   :: forall registry
-   . (AllQueuesUnique registry)
-  => Proxy registry
-  -> Pool Hasql.Connection
+  -> (AllQueuesUnique registry)
+  => Pool Hasql.Connection
   -> SchemaName
   -- ^ Schema name
   -> HasqlEnv registry
