@@ -401,30 +401,6 @@ ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry)
 
 The dispatcher stops claiming, in-flight jobs drain within `gracefulShutdownTimeout`, and the process exits.
 
-### Claim Throttling
-
-Token bucket rate limiter. The `IO` action is called each dispatch cycle, so it can adapt dynamically:
-
-```haskell
--- Static: match a known API rate limit
-config { Worker.claimThrottle = Just (pure (100, 1)) }  -- 100 jobs per second
-
--- Adaptive: back off on 429s
-rateLimitVar <- newTVarIO (100, 1)
-
-let handler conn job = do
-      result <- liftIO $ callExternalAPI (Arb.payload job)
-      case result of
-        RateLimited retryAfter -> do
-          liftIO $ atomically $ writeTVar rateLimitVar (10, retryAfter)
-          Arb.throwRetryable "Rate limited"
-        OK -> do
-          liftIO $ atomically $ writeTVar rateLimitVar (100, 1)
-          pure ()
-
-config { Worker.claimThrottle = Just (atomically $ readTVar rateLimitVar) }
-```
-
 ### Backoff Strategies
 
 ```haskell

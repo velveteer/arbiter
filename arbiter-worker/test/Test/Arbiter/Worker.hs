@@ -1346,66 +1346,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           length g1Batch `shouldBe` 1
           head g1Batch `shouldMatchList` [SimpleTask "G1-1", SimpleTask "G1-2"]
 
-    describe "Claim Throttle" $ do
-      it "claimThrottle limits claim rate" $ \env -> do
-        completedRef <- newIORef (0 :: Int)
-
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = do
-              liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
-              pure ()
-
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-
-        let throttledConfig =
-              config
-                { workerCount = 10
-                , pollInterval = 0.1
-                , claimThrottle = Just (pure (2, 1)) -- max 2 claims per 1 second
-                }
-
-        withAsync (runSimpleDb env $ runWorkerPool throttledConfig) $ \_ -> do
-          -- Wait for startup claim to pass (finds nothing)
-          threadDelay 500_000
-
-          -- Insert 10 jobs with distinct groups so they can run concurrently
-          let jobs =
-                map
-                  ( \i ->
-                      (defaultJob (SimpleTask (T.pack $ "Throttled-" <> show @Int i)))
-                        { groupKey = Just (T.pack $ "tg" <> show i)
-                        }
-                  )
-                  [1 .. 10]
-
-          void $ runSimpleDb env $ HL.insertJobsBatch jobs
-
-          startTime <- getCurrentTime
-
-          -- Wait for all 10 jobs to complete, with a deadline to avoid hanging
-          let deadline = 15 -- seconds
-              waitForCompletion = do
-                completed <- readIORef completedRef
-                now <- getCurrentTime
-                let elapsed = diffUTCTime now startTime
-                if completed >= 10
-                  then pure ()
-                  else
-                    if elapsed > deadline
-                      then expectationFailure $ "Timed out after " <> show elapsed <> "s with only " <> show completed <> " jobs completed"
-                      else threadDelay 200_000 >> waitForCompletion
-          waitForCompletion
-
-          endTime <- getCurrentTime
-          let elapsed = diffUTCTime endTime startTime
-
-          -- 10 jobs at 2/second = 5 windows. First is immediate, 4 more at 1s each.
-          -- Lower bound: throttle is actually slowing things down
-          elapsed `shouldSatisfy` (>= 4)
-          -- Upper bound: throttle isn't broken/stalling (10s is generous)
-          elapsed `shouldSatisfy` (< 10)
-
     describe "Fan-out/fan-in with rollup" $ do
       it "worker auto-appends handler results; finalizer reads merged state" $ \env -> do
         finalResultRef <- newIORef ([] :: [Text])

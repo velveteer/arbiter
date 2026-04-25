@@ -136,12 +136,6 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Logging configuration. Arbiter outputs structured JSON logs with job
   -- context automatically included. Use this to control log level, destination,
   -- and inject additional context (e.g., trace IDs). Default: Info level to stdout.
-  , claimThrottle :: Maybe (IO (Int, NominalDiffTime))
-  -- ^ Optional claim rate limiter. The @IO@ action returns
-  -- @(maxClaims, window)@: at most @maxClaims@ jobs will be claimed
-  -- per @window@ duration. The action is called each claim cycle, so
-  -- limits can be adjusted dynamically.
-  -- Default: @Nothing@ (no throttling).
   , cronJobs :: [CronJob payload]
   -- ^ Cron schedules. When non-empty, the worker pool spawns a scheduler
   -- thread that inserts jobs on cron expressions. The @cron_schedules@
@@ -247,7 +241,6 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , livenessConfig = Just (LivenessConfig livenessFile livenessMVar 60)
       , gracefulShutdownTimeout = Just 30
       , logConfig = defaultLogConfig
-      , claimThrottle = Nothing
       , cronJobs = []
       , groupReaperInterval = 300
       }

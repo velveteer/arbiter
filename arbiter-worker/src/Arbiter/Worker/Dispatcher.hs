@@ -9,15 +9,11 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.QueueRegistry (TableForPayload)
-import Control.Monad (when)
-import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Foldable (traverse_)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
-import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import GHC.TypeLits (symbolVal)
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
@@ -59,8 +55,6 @@ runDispatcher
   -- ^ Worker finished signal
   -> m ()
 runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar workerFinishedVar = do
-  throttleRef <- liftIO $ newIORef Nothing
-
   let
     tableNameVal = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
 
@@ -90,43 +84,13 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
           STM.atomically $ traverse_ (STM.writeTBQueue workQueue) batches
           traverse_ (flip MVar.tryPutMVar ()) mLivenessMVar
 
-    -- Apply throttle limits, returning the number of jobs allowed to claim
-    applyThrottle :: IORef (Maybe (Int, UTCTime)) -> Int -> IO Int
-    applyThrottle ref freeWorkers = case claimThrottle config of
-      Nothing -> pure freeWorkers
-      Just getThrottle -> do
-        (maxClaims, window) <- getThrottle
-        now <- getCurrentTime
-        -- Ensure we have a valid window with available tokens
-        (tokens, windowStart) <-
-          readIORef ref >>= \case
-            Nothing ->
-              -- First cycle: start a fresh window
-              pure (maxClaims, now)
-            Just (tokens, windowStart)
-              | now >= addUTCTime window windowStart ->
-                  -- Window expired: reset
-                  pure (maxClaims, now)
-              | tokens > 0 ->
-                  -- Budget remains
-                  pure (tokens, windowStart)
-              | otherwise ->
-                  -- Budget exhausted: skip this cycle, next wakeup will re-check
-                  pure (0, windowStart)
-        -- Spend from budget
-        let allowed = min freeWorkers tokens
-        writeIORef ref (Just (tokens - allowed, windowStart))
-        pure allowed
-
     -- Claim jobs on wakeup if workers are available
     claimOnWakeup :: m ()
     claimOnWakeup = do
       mFree <- STM.atomically getFreeWorkers
       case mFree of
         Nothing -> pure ()
-        Just freeWorkers -> do
-          allowed <- liftIO $ applyThrottle throttleRef freeWorkers
-          when (allowed > 0) $ claimAndEnqueue allowed
+        Just freeWorkers -> claimAndEnqueue freeWorkers
 
   -- Claim on startup
   claimOnWakeup
