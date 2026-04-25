@@ -41,7 +41,7 @@ import Data.Text qualified as T
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as S
-import UnliftIO (MonadUnliftIO, mask, onException, throwIO, withRunInIO)
+import UnliftIO (MonadUnliftIO, mask, onException, withRunInIO)
 import UnliftIO.Exception (SomeException, try)
 
 import Arbiter.Hasql.Compat qualified as Compat
@@ -125,16 +125,16 @@ hasqlWithDbTransaction action = do
       pure a
 
 beginCommitOrRollback :: forall a. Hasql.Connection -> IO a -> IO a
-beginCommitOrRollback conn action = do
+beginCommitOrRollback conn action = mask $ \restore -> do
   Compat.runSQL conn "BEGIN"
-  eitherResult <- try action :: IO (Either SomeException a)
-  case eitherResult of
-    Right result -> do
-      Compat.runSQL conn "COMMIT"
-      pure result
-    Left exc -> do
+  result <- restore action `onException` rollbackSafely
+  Compat.runSQL conn "COMMIT"
+  pure result
+  where
+    rollbackSafely :: IO ()
+    rollbackSafely = do
       _ <- try (Compat.runSQL conn "ROLLBACK") :: IO (Either SomeException ())
-      throwIO exc
+      pure ()
 
 -- | Invoke a handler by passing the active hasql connection.
 --
