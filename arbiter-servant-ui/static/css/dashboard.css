@@ -501,6 +501,15 @@
   transition: transform 0.15s;
 }
 
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable:hover {
+  color: var(--arb-teal-on-bg);
+}
+
 /* ---- Scrollbar (Webkit, dark only) ---- */
 [data-bs-theme="dark"] ::-webkit-scrollbar {
   width: 8px;

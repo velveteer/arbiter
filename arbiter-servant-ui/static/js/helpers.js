@@ -120,7 +120,7 @@ function withPagination(component, loadMethod) {
 // ---------------------------------------------------------------------------
 
 /** Keys managed by tab components — cleared on tab switch. */
-const _filterKeys = ['group_key', 'parent_id', 'suspended', 'in_flight'];
+const _filterKeys = ['group_key', 'parent_id', 'suspended', 'in_flight', 'sort_by', 'sort_dir'];
 
 function readFiltersFromUrl() {
   const p = new URLSearchParams(location.search);
@@ -129,6 +129,8 @@ function readFiltersFromUrl() {
     parentId: p.get('parent_id') || '',
     suspended: p.get('suspended') || '',
     inFlight: p.get('in_flight') === 'true',
+    sortBy: p.get('sort_by') || '',
+    sortDir: p.get('sort_dir') || '',
   };
 }
 
@@ -139,6 +141,8 @@ function writeFiltersToUrl(filters) {
   if (filters.parentId) url.searchParams.set('parent_id', filters.parentId);
   if (filters.suspended) url.searchParams.set('suspended', filters.suspended);
   if (filters.inFlight) url.searchParams.set('in_flight', 'true');
+  if (filters.sortBy) url.searchParams.set('sort_by', filters.sortBy);
+  if (filters.sortDir) url.searchParams.set('sort_dir', filters.sortDir);
   history.replaceState(null, '', url);
 }
 

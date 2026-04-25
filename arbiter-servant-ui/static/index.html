@@ -145,10 +145,11 @@
         <button class="btn btn-sm" :class="showInFlight ? 'btn-primary' : 'btn-outline-primary'" @click="toggleInFlight()">
           <span x-text="showInFlight ? 'In-Flight' : 'All Jobs'"></span>
         </button>
-        <button class="btn btn-sm" :class="viewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
+        <button class="btn btn-sm" :class="effectiveViewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
           @click="toggleViewMode()"
-          :title="viewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
-          <span x-text="viewMode === 'tree' ? 'Tree' : 'Flat'"></span>
+          :disabled="showInFlight"
+          :title="showInFlight ? 'In-Flight always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
+          <span x-text="effectiveViewMode === 'tree' ? 'Tree' : 'Flat'"></span>
         </button>
         <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm">
           + Insert Job
@@ -232,16 +233,16 @@
           </colgroup>
           <thead>
             <tr>
-              <th>ID</th>
+              <th class="sortable" @click="toggleSort('id')">ID<span x-text="sortIndicator('id')"></span></th>
               <th>Payload</th>
-              <th>Group</th>
-              <th>Parent</th>
+              <th class="sortable" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
+              <th class="sortable" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
               <th>Children</th>
-              <th>Priority</th>
-              <th>Attempts</th>
+              <th class="sortable" @click="toggleSort('priority')">Priority<span x-text="sortIndicator('priority')"></span></th>
+              <th class="sortable" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
               <th>Status</th>
-              <th>Inserted At</th>
-              <th>Not Visible Until</th>
+              <th class="sortable" @click="toggleSort('inserted_at')">Inserted At<span x-text="sortIndicator('inserted_at')"></span></th>
+              <th class="sortable" @click="toggleSort('not_visible_until')">Not Visible Until<span x-text="sortIndicator('not_visible_until')"></span></th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -466,13 +467,13 @@
           </colgroup>
           <thead>
             <tr>
-              <th>DLQ ID</th>
-              <th>Job ID</th>
-              <th>Parent</th>
-              <th>Group</th>
+              <th class="sortable" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
+              <th class="sortable" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
+              <th class="sortable" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
+              <th class="sortable" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
               <th>Payload</th>
-              <th>Failed At</th>
-              <th>Attempts</th>
+              <th class="sortable" @click="toggleSort('failed_at')">Failed At<span x-text="sortIndicator('failed_at')"></span></th>
+              <th class="sortable" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
               <th>Last Error</th>
               <th>Actions</th>
             </tr>

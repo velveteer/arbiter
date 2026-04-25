@@ -18,6 +18,12 @@ module Arbiter.Core.Job.Types
     -- * Observability
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
+  , ClaimTime
+  , CurrentTime
+  , StartTime
+  , EndTime
+  , ErrorMsg
+  , BackoffDelay
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
@@ -162,6 +168,13 @@ instance FromJSON DedupKey where
       "replace" -> pure $ ReplaceDuplicate key
       _ -> fail $ "Unknown dedup strategy: " <> show strategy
 
+type ClaimTime = UTCTime
+type CurrentTime = UTCTime
+type StartTime = UTCTime
+type EndTime = UTCTime
+type ErrorMsg = Text
+type BackoffDelay = NominalDiffTime
+
 -- | A set of callbacks invoked at key points in the job lifecycle.
 --
 -- Use these hooks to integrate with metrics, logging, or tracing systems.
@@ -171,53 +184,43 @@ data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed
       :: (JobPayload payload)
       => JobRead payload
-      -> UTCTime
-      -- \^ Claim time.
+      -> ClaimTime
       -> m ()
   -- ^ Called immediately after a job is claimed by a worker.
   , onJobSuccess
       :: (JobPayload payload)
       => JobRead payload
-      -> UTCTime
-      -- \^ Start time.
-      -> UTCTime
-      -- \^ End time.
+      -> StartTime
+      -> EndTime
       -> m ()
   -- ^ Called after a job handler succeeds. Use @diffUTCTime@ on the timestamps
   -- to calculate job duration.
   , onJobFailure
       :: (JobPayload payload)
       => JobRead payload
-      -> Text
-      -- \^ Error message.
-      -> UTCTime
-      -- \^ Start time.
-      -> UTCTime
-      -- \^ End time.
+      -> ErrorMsg
+      -> StartTime
+      -> EndTime
       -> m ()
   -- ^ Called after a job handler fails. Use @diffUTCTime@ on the timestamps
   -- to calculate job duration.
   , onJobRetry
       :: (JobPayload payload)
       => JobRead payload
-      -> NominalDiffTime
-      -- \^ The backoff delay until the job becomes visible again.
+      -> BackoffDelay
       -> m ()
   -- ^ Called when a failed job is successfully scheduled for retry.
   , onJobFailedAndMovedToDLQ
       :: (JobPayload payload)
-      => Text
-      -- \^ Error message.
+      => ErrorMsg
       -> JobRead payload
       -> m ()
   -- ^ Called when a job is successfully moved to the dead-letter queue.
   , onJobHeartbeat
       :: (JobPayload payload)
       => JobRead payload
-      -> UTCTime
-      -- \^ Current time.
-      -> UTCTime
-      -- \^ Start time.
+      -> CurrentTime
+      -> StartTime
       -> m ()
   -- ^ Called periodically for a running job.
   }

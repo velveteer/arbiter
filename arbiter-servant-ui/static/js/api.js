@@ -17,7 +17,10 @@ const ArbiterAPI = {
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`${res.status}: ${text}`);
+      const err = new Error(`${res.status}: ${text}`);
+      err.status = res.status;
+      err.body = text;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -29,12 +32,15 @@ const ArbiterAPI = {
   },
 
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, suspended, rootsOnly } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, suspended, rootsOnly, inFlight, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (suspended !== undefined && suspended !== '') qs += `&suspended=${suspended}`;
     if (rootsOnly) qs += `&roots_only=true`;
+    if (inFlight) qs += `&in_flight=true`;
+    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
+    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/jobs${qs}`);
   },
 
@@ -47,12 +53,6 @@ const ArbiterAPI = {
       method: 'POST',
       body: JSON.stringify(body),
     });
-  },
-
-  getInFlightJobs(table, { limit = 50, offset = 0, parentId } = {}) {
-    let qs = `?limit=${limit}&offset=${offset}`;
-    if (parentId) qs += `&parent_id=${parentId}`;
-    return this._fetch(`/${table}/jobs/in-flight${qs}`);
   },
 
   cancelJob(table, id) {
@@ -84,10 +84,12 @@ const ArbiterAPI = {
   },
 
   // DLQ
-  listDLQ(table, { limit = 50, offset = 0, parentId, groupKey } = {}) {
+  listDLQ(table, { limit = 50, offset = 0, parentId, groupKey, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
+    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
+    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/dlq${qs}`);
   },
 

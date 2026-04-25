@@ -110,6 +110,7 @@ import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.SqlTemplates qualified as Tmpl
 
 -- | Constraints for queue operations (requires table name lookup from registry).
 type QueueOperation m registry payload =
@@ -539,7 +540,7 @@ getInFlightJobs
 getInFlightJobs limit offset = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.getInFlightJobs schemaName tableName limit offset
+  Ops.listJobsFiltered schemaName tableName [Tmpl.FilterInFlight] limit offset
 
 -- | Cancels (deletes) a job by ID.
 --
@@ -641,7 +642,7 @@ countInFlightJobs
 countInFlightJobs = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.countInFlightJobs schemaName tableName
+  Ops.countJobsFiltered schemaName tableName [Tmpl.FilterInFlight]
 
 -- | Counts jobs in the dead-letter queue.
 countDLQJobs

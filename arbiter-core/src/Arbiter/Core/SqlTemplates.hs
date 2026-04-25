@@ -66,10 +66,18 @@ module Arbiter.Core.SqlTemplates
 
     -- * Filtered Query Operations
   , JobFilter (..)
+  , JobSortColumn (..)
+  , DLQSortColumn (..)
+  , SortDir (..)
   , listJobsFilteredSQL
   , countJobsFilteredSQL
   , listDLQFilteredSQL
   , countDLQFilteredSQL
+  , buildJobsOrderBy
+  , buildDLQOrderBy
+  , jobSortColumnName
+  , dlqSortColumnName
+  , sortDirSql
 
     -- * Cron Schedule Operations
   , upsertCronDefaultSQL
@@ -81,6 +89,7 @@ module Arbiter.Core.SqlTemplates
   ) where
 
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -111,18 +120,78 @@ data JobFilter
   | FilterRootsOnly
   deriving stock (Eq, Show)
 
--- | Generic SQL for listing jobs with dynamic WHERE clause.
+-- | Sortable columns on the main jobs table. Closed enum so the SQL builder
+-- only ever sees a value that round-trips with 'jobSortColumnName'.
+data JobSortColumn
+  = JsId
+  | JsPriority
+  | JsAttempts
+  | JsInsertedAt
+  | JsNotVisibleUntil
+  | JsGroupKey
+  | JsParentId
+  | JsLastAttemptedAt
+  deriving stock (Bounded, Enum, Eq, Show)
+
+-- | Underlying SQL column name for a 'JobSortColumn'.
+jobSortColumnName :: JobSortColumn -> Text
+jobSortColumnName = \case
+  JsId -> "id"
+  JsPriority -> "priority"
+  JsAttempts -> "attempts"
+  JsInsertedAt -> "inserted_at"
+  JsNotVisibleUntil -> "not_visible_until"
+  JsGroupKey -> "group_key"
+  JsParentId -> "parent_id"
+  JsLastAttemptedAt -> "last_attempted_at"
+
+-- | Sortable columns on the DLQ table. @DlqId@ is the DLQ primary key
+-- (distinct from the original job id, which is @DlqJobId@).
+data DLQSortColumn
+  = DlqId
+  | DlqFailedAt
+  | DlqJobId
+  | DlqPriority
+  | DlqAttempts
+  | DlqInsertedAt
+  | DlqGroupKey
+  | DlqParentId
+  | DlqLastAttemptedAt
+  deriving stock (Bounded, Enum, Eq, Show)
+
+dlqSortColumnName :: DLQSortColumn -> Text
+dlqSortColumnName = \case
+  DlqId -> "id"
+  DlqFailedAt -> "failed_at"
+  DlqJobId -> "job_id"
+  DlqPriority -> "priority"
+  DlqAttempts -> "attempts"
+  DlqInsertedAt -> "inserted_at"
+  DlqGroupKey -> "group_key"
+  DlqParentId -> "parent_id"
+  DlqLastAttemptedAt -> "last_attempted_at"
+
+-- | Sort direction.
+data SortDir = SortAsc | SortDesc
+  deriving stock (Bounded, Enum, Eq, Show)
+
+sortDirSql :: SortDir -> Text
+sortDirSql SortAsc = "ASC"
+sortDirSql SortDesc = "DESC"
+
+-- | Generic SQL for listing jobs with dynamic WHERE and ORDER BY clauses.
 --
--- Parameters (appended after filter params): limit, offset
-listJobsFilteredSQL :: Text -> Text -> Text -> Text
-listJobsFilteredSQL schema tableName whereClause =
+-- @orderBy@ must be produced by 'buildJobsOrderBy'. Caller params (appended
+-- after filter params): limit, offset.
+listJobsFilteredSQL :: Text -> Text -> Text -> Text -> Text
+listJobsFilteredSQL schema tableName whereClause orderBy =
   let tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
    in [text|
         SELECT ${columns}
         FROM ${tbl}
         ${whereClause}
-        ORDER BY id DESC LIMIT ? OFFSET ?
+        ORDER BY ${orderBy} LIMIT ? OFFSET ?
       |]
 
 -- | Generic SQL for counting jobs with dynamic WHERE clause.
@@ -131,20 +200,86 @@ countJobsFilteredSQL schema tableName whereClause =
   let tbl = jobQueueTable schema tableName
    in [text|SELECT COUNT(*) FROM ${tbl} ${whereClause}|]
 
--- | Generic SQL for listing DLQ jobs with dynamic WHERE clause.
+-- | Generic SQL for listing DLQ jobs with dynamic WHERE and ORDER BY clauses.
 --
--- Parameters (appended after filter params): limit, offset
-listDLQFilteredSQL :: Text -> Text -> Text -> Text
-listDLQFilteredSQL schema tableName whereClause =
+-- @orderBy@ must be produced by 'buildDLQOrderBy'. Caller params (appended
+-- after filter params): limit, offset.
+listDLQFilteredSQL :: Text -> Text -> Text -> Text -> Text
+listDLQFilteredSQL schema tableName whereClause orderBy =
   let dlqTbl = jobQueueDLQTable schema tableName
       columns = T.intercalate ", " allDLQColumns
    in [text|
         SELECT ${columns}
         FROM ${dlqTbl}
         ${whereClause}
-        ORDER BY failed_at DESC
+        ORDER BY ${orderBy}
         LIMIT ? OFFSET ?
       |]
+
+-- | How NULLs in a sort column should order relative to non-NULL values.
+data NullsBehavior
+  = -- | Column is NOT NULL; emit no NULLS clause.
+    NullsNotApplicable
+  | -- | NULL is unmodelled / "absent"; always sort last.
+    NullsAsAbsent
+  | -- | NULL semantically represents "minimum" for the column's domain
+    -- (e.g. @not_visible_until IS NULL@ means visible now, @last_attempted_at IS NULL@
+    -- means never attempted = earliest). NULLS FIRST when ASC, NULLS LAST when DESC.
+    NullsAsMinimum
+
+nullsClause :: NullsBehavior -> SortDir -> Text
+nullsClause NullsNotApplicable _ = ""
+nullsClause NullsAsAbsent _ = " NULLS LAST"
+nullsClause NullsAsMinimum SortAsc = " NULLS FIRST"
+nullsClause NullsAsMinimum SortDesc = " NULLS LAST"
+
+jobColumnNulls :: JobSortColumn -> NullsBehavior
+jobColumnNulls = \case
+  JsId -> NullsNotApplicable
+  JsPriority -> NullsNotApplicable
+  JsAttempts -> NullsNotApplicable
+  JsInsertedAt -> NullsNotApplicable
+  JsNotVisibleUntil -> NullsAsMinimum
+  JsGroupKey -> NullsAsAbsent
+  JsParentId -> NullsAsAbsent
+  JsLastAttemptedAt -> NullsAsMinimum
+
+dlqColumnNulls :: DLQSortColumn -> NullsBehavior
+dlqColumnNulls = \case
+  DlqId -> NullsNotApplicable
+  DlqFailedAt -> NullsNotApplicable
+  DlqJobId -> NullsNotApplicable
+  DlqInsertedAt -> NullsNotApplicable
+  DlqPriority -> NullsNotApplicable
+  DlqAttempts -> NullsNotApplicable
+  DlqGroupKey -> NullsAsAbsent
+  DlqParentId -> NullsAsAbsent
+  DlqLastAttemptedAt -> NullsAsMinimum
+
+-- | Build the ORDER BY clause for the jobs table from a typed sort spec.
+-- Defaults are @id DESC@. NULL placement is column-specific (see
+-- 'jobColumnNulls'). A stable @id@ tie-breaker in the same direction as the
+-- primary sort is appended when sorting by anything other than @id@.
+buildJobsOrderBy :: Maybe JobSortColumn -> Maybe SortDir -> Text
+buildJobsOrderBy mCol mDir =
+  let col = fromMaybe JsId mCol
+      dir = fromMaybe SortDesc mDir
+      dirText = sortDirSql dir
+      primaryNulls = nullsClause (jobColumnNulls col) dir
+      tieBreaker = if col == JsId then "" else ", id " <> dirText
+   in jobSortColumnName col <> " " <> dirText <> primaryNulls <> tieBreaker
+
+-- | Build the ORDER BY clause for the DLQ table. Defaults are
+-- @failed_at DESC@. NULL semantics as in 'buildJobsOrderBy' but using
+-- 'dlqColumnNulls'.
+buildDLQOrderBy :: Maybe DLQSortColumn -> Maybe SortDir -> Text
+buildDLQOrderBy mCol mDir =
+  let col = fromMaybe DlqFailedAt mCol
+      dir = fromMaybe SortDesc mDir
+      dirText = sortDirSql dir
+      primaryNulls = nullsClause (dlqColumnNulls col) dir
+      tieBreaker = if col == DlqId then "" else ", id " <> dirText
+   in dlqSortColumnName col <> " " <> dirText <> primaryNulls <> tieBreaker
 
 -- | Generic SQL for counting DLQ jobs with dynamic WHERE clause.
 countDLQFilteredSQL :: Text -> Text -> Text -> Text

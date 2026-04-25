@@ -362,20 +362,20 @@ spec connStr = do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         Map.lookup parentId (dlqChildCounts body) `shouldBe` Just 1
 
-    it "GET /api/v1/arbiter_servant_test/jobs/in-flight returns empty list when no jobs are claimed" $ do
-      resp <- get "/api/v1/arbiter_servant_test/jobs/in-flight"
+    it "GET /api/v1/arbiter_servant_test/jobs?in_flight returns empty list when no jobs are claimed" $ do
+      resp <- get "/api/v1/arbiter_servant_test/jobs?in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         jobsTotal body `shouldBe` 0
         jobs body `shouldBe` []
 
-    it "GET /api/v1/arbiter_servant_test/jobs/in-flight returns claimed jobs" $ do
+    it "GET /api/v1/arbiter_servant_test/jobs?in_flight returns claimed jobs" $ do
       liftIO $ do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "in-flight test"))
         _ <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         pure ()
 
-      resp <- get "/api/v1/arbiter_servant_test/jobs/in-flight"
+      resp <- get "/api/v1/arbiter_servant_test/jobs?in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         jobsTotal body `shouldBe` 1

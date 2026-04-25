@@ -34,8 +34,10 @@ module Arbiter.Core.Operations
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
   , listJobsFiltered
+  , listJobsFilteredOrdered
   , countJobsFiltered
   , listDLQFiltered
+  , listDLQFilteredOrdered
   , countDLQFiltered
 
     -- * Admin Operations
@@ -43,7 +45,6 @@ module Arbiter.Core.Operations
   , getJobById
   , getJobByDedupKey
   , getJobsByGroup
-  , getInFlightJobs
   , cancelJob
   , cancelJobsBatch
   , promoteJob
@@ -53,7 +54,6 @@ module Arbiter.Core.Operations
     -- * Count Operations
   , countJobs
   , countJobsByGroup
-  , countInFlightJobs
   , countDLQJobs
 
     -- * Parent-Child Operations
@@ -932,6 +932,35 @@ dlqJobExists schemaName tableName dlqId = do
 -- Filtered Query Operations
 -- ---------------------------------------------------------------------------
 
+-- | List jobs with composable filters and an explicit sort spec.
+--
+-- @Nothing@ for both sort args yields the default ordering (@id DESC@).
+listJobsFilteredOrdered
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> TableName
+  -- ^ Table name
+  -> [Tmpl.JobFilter]
+  -- ^ Composable filters
+  -> Maybe Tmpl.JobSortColumn
+  -- ^ Sort column (defaults to 'Tmpl.JsId')
+  -> Maybe Tmpl.SortDir
+  -- ^ Sort direction (defaults to 'Tmpl.SortDesc')
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [JobRead payload]
+listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset = do
+  let (whereClause, filterParams) = buildWhereClause filters
+      orderBy = Tmpl.buildJobsOrderBy mSortBy mSortDir
+      sql = Tmpl.listJobsFilteredSQL schemaName tableName whereClause orderBy
+      params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
+  rawJobs <- executeQuery sql params (jobRowCodec tableName)
+  mapM decodePayload rawJobs
+
 -- | List jobs with composable filters.
 --
 -- Returns jobs ordered by ID (descending, newest first).
@@ -949,12 +978,8 @@ listJobsFiltered
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobsFiltered schemaName tableName filters limit offset = do
-  let (whereClause, filterParams) = buildWhereClause filters
-      sql = Tmpl.listJobsFilteredSQL schemaName tableName whereClause
-      params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
-  rawJobs <- executeQuery sql params (jobRowCodec tableName)
-  mapM decodePayload rawJobs
+listJobsFiltered schemaName tableName filters =
+  listJobsFilteredOrdered schemaName tableName filters Nothing Nothing
 
 -- | Count jobs with composable filters.
 countJobsFiltered
@@ -970,6 +995,36 @@ countJobsFiltered schemaName tableName filters = do
   let (whereClause, filterParams) = buildWhereClause filters
       sql = Tmpl.countJobsFilteredSQL schemaName tableName whereClause
   queryCountStrict "countJobsFiltered" sql filterParams
+
+-- | List DLQ jobs with composable filters and an explicit sort spec.
+--
+-- @Nothing@ for both sort args yields the default ordering
+-- (@failed_at DESC@).
+listDLQFilteredOrdered
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> TableName
+  -- ^ Table name
+  -> [Tmpl.JobFilter]
+  -- ^ Composable filters
+  -> Maybe Tmpl.DLQSortColumn
+  -- ^ Sort column (defaults to 'Tmpl.DlqFailedAt')
+  -> Maybe Tmpl.SortDir
+  -- ^ Sort direction (defaults to 'Tmpl.SortDesc')
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [DLQ.DLQJob payload]
+listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset = do
+  let (whereClause, filterParams) = buildWhereClause filters
+      orderBy = Tmpl.buildDLQOrderBy mSortBy mSortDir
+      sql = Tmpl.listDLQFilteredSQL schemaName tableName whereClause orderBy
+      params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
+  rawRows <- executeQuery sql params (dlqRowCodec tableName)
+  mapM decodeDLQRow rawRows
 
 -- | List DLQ jobs with composable filters.
 --
@@ -988,12 +1043,8 @@ listDLQFiltered
   -> Int
   -- ^ Offset
   -> m [DLQ.DLQJob payload]
-listDLQFiltered schemaName tableName filters limit offset = do
-  let (whereClause, filterParams) = buildWhereClause filters
-      sql = Tmpl.listDLQFilteredSQL schemaName tableName whereClause
-      params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
-  rawRows <- executeQuery sql params (dlqRowCodec tableName)
-  mapM decodeDLQRow rawRows
+listDLQFiltered schemaName tableName filters =
+  listDLQFilteredOrdered schemaName tableName filters Nothing Nothing
 
 -- | Count DLQ jobs with composable filters.
 countDLQFiltered
@@ -1194,22 +1245,6 @@ getJobsByGroup
 getJobsByGroup schemaName tableName gk =
   listJobsFiltered schemaName tableName [Tmpl.FilterGroupKey gk]
 
--- | Get all in-flight jobs (claimed, visibility timeout not expired).
-getInFlightJobs
-  :: forall m payload
-   . (JobPayload payload, MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
-  -> TableName
-  -- ^ Table name
-  -> Int
-  -- ^ Limit
-  -> Int
-  -- ^ Offset
-  -> m [JobRead payload]
-getInFlightJobs schemaName tableName =
-  listJobsFiltered schemaName tableName [Tmpl.FilterInFlight]
-
 -- | Cancels (deletes) a job by ID.
 --
 -- Returns 0 if the job has children - use 'cancelJobCascade' to delete
@@ -1343,13 +1378,6 @@ countJobsByGroup
   => SchemaName -> TableName -> Text -> m Int64
 countJobsByGroup schemaName tableName gk =
   countJobsFiltered schemaName tableName [Tmpl.FilterGroupKey gk]
-
--- | Count in-flight jobs
-countInFlightJobs
-  :: (MonadArbiter m)
-  => SchemaName -> TableName -> m Int64
-countInFlightJobs schemaName tableName =
-  countJobsFiltered schemaName tableName [Tmpl.FilterInFlight]
 
 -- | Count DLQ jobs
 countDLQJobs

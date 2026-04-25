@@ -22,18 +22,24 @@ document.addEventListener('alpine:init', () => {
     refreshMode: '5s',
     _refreshTimer: null,
     pendingChanges: 0,
+    sortBy: '',
+    sortDir: '',
+
+    get effectiveViewMode() {
+      return this.showInFlight ? 'flat' : this.viewMode;
+    },
 
     get _topLevelHiddenCount() {
-      if (this.viewMode !== 'tree' || this._appliedParentId) return 0;
+      if (this.effectiveViewMode !== 'tree' || this._appliedParentId) return 0;
       return this.jobs.filter(j => j.parentId).length;
     },
 
     get displayJobs() {
       const result = [];
+      const treeHideChildren = this.effectiveViewMode === 'tree';
       const flatten = (jobs, depth, parentCounts) => {
         for (const job of jobs) {
-          // In tree mode, hide children at the top level — they show via expand
-          if (depth === 0 && this.viewMode === 'tree' && job.parentId && !this._appliedParentId) {
+          if (depth === 0 && treeHideChildren && job.parentId && !this._appliedParentId) {
             continue;
           }
           const key = job.primaryKey;
@@ -48,13 +54,17 @@ document.addEventListener('alpine:init', () => {
           const expanded = this.expandedParents[key];
           if (expanded && expanded.jobs) {
             flatten(expanded.jobs, depth + 1, expanded);
-            if (childCount > expanded.jobs.length) {
+            // Truncation is measured against the expansion's own filtered
+            // total (jobsTotal), not the unfiltered child count, so an active
+            // filter doesn't produce misleading "X of Y" labels.
+            const expandedTotal = expanded.total ?? expanded.jobs.length;
+            if (expanded.jobs.length > 0 && expandedTotal > expanded.jobs.length) {
               result.push({
                 _isMoreRow: true,
                 _depth: depth + 1,
                 _parentKey: key,
                 _shown: expanded.jobs.length,
-                _total: childCount,
+                _total: expandedTotal,
                 primaryKey: '__more_' + key,
               });
             }
@@ -90,9 +100,12 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.listJobs(queue, {
           parentId: id, limit: 50,
           suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
+          sortBy: this.sortBy || undefined,
+          sortDir: this.sortDir || undefined,
         });
         this.expandedParents[id] = {
           jobs: data.jobs || [],
+          total: data.jobsTotal || 0,
           childCounts: data.childCounts || {},
           dlqChildCounts: data.dlqChildCounts || {},
           pausedParents: data.pausedParents || [],
@@ -146,6 +159,8 @@ document.addEventListener('alpine:init', () => {
         parentId: this._appliedParentId,
         suspended: this.suspendedFilter,
         inFlight: this.showInFlight,
+        sortBy: this.sortBy,
+        sortDir: this.sortDir,
       });
     },
 
@@ -158,6 +173,8 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = f.parentId;
         this.suspendedFilter = f.suspended;
         this.showInFlight = f.inFlight;
+        this.sortBy = f.sortBy;
+        this.sortDir = f.sortDir;
       }
       trackTabActive(this, '#tab-jobs', {
         onShow: () => { this.loadJobs(); this._startTimer(); },
@@ -173,6 +190,8 @@ document.addEventListener('alpine:init', () => {
           this.showInFlight = false;
           this._appliedGroupKey = '';
           this._appliedParentId = '';
+          this.sortBy = '';
+          this.sortDir = '';
           if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
         },
       });
@@ -183,6 +202,8 @@ document.addEventListener('alpine:init', () => {
         this.showInFlight = false;
         this._appliedGroupKey = '';
         this._appliedParentId = '';
+        this.sortBy = '';
+        this.sortDir = '';
         if (this.active) this._resetView();
       });
       window.addEventListener('sse-reconnect', () => {
@@ -227,24 +248,18 @@ document.addEventListener('alpine:init', () => {
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
       const startingPending = this.pendingChanges;
       try {
-        let data;
-        if (this.showInFlight) {
-          data = await ArbiterAPI.getInFlightJobs(queue, {
-            limit: this.limit,
-            offset: this.offset,
-            parentId: pid || undefined,
-          });
-        } else {
-          const rootsOnly = this.viewMode === 'tree' && !pid;
-          data = await ArbiterAPI.listJobs(queue, {
-            limit: this.limit,
-            offset: this.offset,
-            groupKey: gk || undefined,
-            parentId: pid || undefined,
-            suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
-            rootsOnly,
-          });
-        }
+        const rootsOnly = !this.showInFlight && this.viewMode === 'tree' && !pid;
+        const data = await ArbiterAPI.listJobs(queue, {
+          limit: this.limit,
+          offset: this.offset,
+          groupKey: gk || undefined,
+          parentId: pid || undefined,
+          suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
+          rootsOnly,
+          inFlight: this.showInFlight || undefined,
+          sortBy: this.sortBy || undefined,
+          sortDir: this.sortDir || undefined,
+        });
         if (seq !== this._loadSeq) return;
         const jobs = data.jobs || [];
         this._appliedGroupKey = gk;
@@ -286,11 +301,14 @@ document.addEventListener('alpine:init', () => {
               const d = await ArbiterAPI.listJobs(queue, {
                 parentId: id, limit: 50,
                 suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
+                sortBy: this.sortBy || undefined,
+                sortDir: this.sortDir || undefined,
               });
               // Only update if still expanded (user may have collapsed during fetch)
               if (this.expandedParents[id]) {
                 this.expandedParents[id] = {
                   jobs: d.jobs || [],
+                  total: d.jobsTotal || 0,
                   childCounts: d.childCounts || {},
                   dlqChildCounts: d.dlqChildCounts || {},
                   pausedParents: d.pausedParents || [],
@@ -324,6 +342,29 @@ document.addEventListener('alpine:init', () => {
     toggleViewMode() {
       this.viewMode = this.viewMode === 'tree' ? 'flat' : 'tree';
       this._resetView();
+    },
+
+    toggleSort(col) {
+      if (this.sortBy !== col) {
+        this.sortBy = col;
+        this.sortDir = 'desc';
+      } else if (this.sortDir === 'desc') {
+        this.sortDir = 'asc';
+      } else {
+        this.sortBy = '';
+        this.sortDir = '';
+      }
+      // Sort changes don't invalidate which parents are expanded -- just
+      // re-fetch top-level + each expansion under the new sort. Reset offset
+      // so the user lands on page 1 of the new ordering.
+      this.offset = 0;
+      this.loadJobs();
+      this._startTimer();
+    },
+
+    sortIndicator(col) {
+      if (this.sortBy !== col) return ' ↕';
+      return this.sortDir === 'asc' ? ' ▲' : ' ▼';
     },
 
     applyFilter() {

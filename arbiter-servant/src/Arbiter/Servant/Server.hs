@@ -26,7 +26,7 @@ import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry, RegistryTables (..))
-import Arbiter.Core.SqlTemplates (JobFilter (..))
+import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
 import Control.Exception (SomeException, bracket, catch)
@@ -139,7 +139,6 @@ jobsServer table config =
     , insertJob = insertJobHandler @registry @payload table config
     , insertJobsBatch = insertJobsBatchHandler @registry @payload table config
     , getJob = getJobHandler @registry @payload table config
-    , getInFlightJobs = getInFlightJobsHandler @registry @payload table config
     , cancelJob = cancelJobHandler @registry table config
     , promoteJob = promoteJobHandler @registry @payload table config
     , moveToDLQ = moveToDLQHandler @registry @payload table config
@@ -161,8 +160,11 @@ listJobsHandler
   -> Maybe Int64
   -> Maybe Bool
   -> Bool
+  -> Bool
+  -> Maybe JobSortColumn
+  -> Maybe SortDir
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended rootsOnly = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended rootsOnly inFlight mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -172,10 +174,11 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended r
           , FilterParentId <$> mParentId
           , FilterSuspended <$> mSuspended
           , FilterRootsOnly <$ guard rootsOnly
+          , FilterInFlight <$ guard inFlight
           ]
 
   (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do
-    j <- Ops.listJobsFiltered schemaName tableName filters limit offset
+    j <- Ops.listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countJobsFiltered schemaName tableName filters
     -- Only query child/DLQ counts if any returned job could be a parent.
     -- All parents are rollup finalizers (isRollup = True), so we
@@ -261,50 +264,6 @@ getJobHandler tableName config jobId = do
     Just j -> do
       aj <- toApiJob j
       pure $ JobResponse {job = aj}
-
--- | Get all in-flight (invisible) jobs
-getInFlightJobsHandler
-  :: forall registry payload
-   . (JobPayload payload)
-  => Text
-  -> ArbiterServerConfig registry
-  -> Maybe Int
-  -> Maybe Int
-  -> Maybe Int64
-  -> Handler (JobsResponse payload)
-getInFlightJobsHandler tableName config mLimit mOffset mParentId = do
-  let (limit, offset) = validatePagination mLimit mOffset
-      env = serverEnv config
-      schemaName = schema env
-      filters =
-        FilterInFlight : catMaybes [FilterParentId <$> mParentId]
-
-  (jobs, total, combined, dlqCounts) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
-    j <- Ops.listJobsFiltered schemaName tableName filters limit offset
-    c <- Ops.countJobsFiltered schemaName tableName filters
-    let jobIds = map primaryKey j
-        hasParents = any isRollup j
-    if null j || not hasParents
-      then pure (j, c, Map.empty, Map.empty)
-      else do
-        cc <- Ops.countChildrenBatch schemaName tableName jobIds
-        dc <- Ops.countDLQChildrenBatch schemaName tableName jobIds
-        pure (j, c, cc, dc)
-
-  let childCounts = fmap fst combined
-      pausedParents = Map.keys $ Map.filter (\(t, p) -> p == t) combined
-
-  apiJobs <- toApiJobs jobs
-  pure $
-    JobsResponse
-      { jobs = apiJobs
-      , jobsTotal = fromIntegral total
-      , jobsOffset = offset
-      , jobsLimit = limit
-      , childCounts = childCounts
-      , pausedParents = pausedParents
-      , dlqChildCounts = dlqCounts
-      }
 
 -- | Cancel a job (delete it from the queue)
 cancelJobHandler
@@ -510,8 +469,10 @@ listDLQHandler
   -> Maybe Int
   -> Maybe Int64
   -> Maybe Text
+  -> Maybe DLQSortColumn
+  -> Maybe SortDir
   -> Handler (DLQResponse payload)
-listDLQHandler tableName config mLimit mOffset mParentId mGroupKey = do
+listDLQHandler tableName config mLimit mOffset mParentId mGroupKey mSortBy mSortDir = do
   let (limit, offset) = validatePagination mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -522,7 +483,7 @@ listDLQHandler tableName config mLimit mOffset mParentId mGroupKey = do
           ]
 
   (dlqJobs, total) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
-    j <- Ops.listDLQFiltered schemaName tableName filters limit offset
+    j <- Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countDLQFiltered schemaName tableName filters
     pure (j, c)
 

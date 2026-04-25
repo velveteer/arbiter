@@ -15,6 +15,8 @@ document.addEventListener('alpine:init', () => {
     refreshMode: '5s',
     _refreshTimer: null,
     pendingChanges: 0,
+    sortBy: '',
+    sortDir: '',
 
     get hasUnappliedFilters() {
       return this.groupKeyFilter !== this._appliedGroupKey
@@ -25,6 +27,8 @@ document.addEventListener('alpine:init', () => {
       writeFiltersToUrl({
         groupKey: this._appliedGroupKey,
         parentId: this._appliedParentId,
+        sortBy: this.sortBy,
+        sortDir: this.sortDir,
       });
     },
 
@@ -35,6 +39,8 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = f.groupKey;
         this.parentIdFilter = f.parentId;
         this._appliedParentId = f.parentId;
+        this.sortBy = f.sortBy;
+        this.sortDir = f.sortDir;
       }
       trackTabActive(this, '#tab-dlq', {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
@@ -47,6 +53,8 @@ document.addEventListener('alpine:init', () => {
           this.parentIdFilter = '';
           this._appliedGroupKey = '';
           this._appliedParentId = '';
+          this.sortBy = '';
+          this.sortDir = '';
           if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
         },
       });
@@ -55,6 +63,8 @@ document.addEventListener('alpine:init', () => {
         this.parentIdFilter = '';
         this._appliedGroupKey = '';
         this._appliedParentId = '';
+        this.sortBy = '';
+        this.sortDir = '';
         if (this.active) this._resetView();
       });
       window.addEventListener('sse-reconnect', () => {
@@ -101,6 +111,8 @@ document.addEventListener('alpine:init', () => {
           offset: this.offset,
           parentId: pid || undefined,
           groupKey: gk || undefined,
+          sortBy: this.sortBy || undefined,
+          sortDir: this.sortDir || undefined,
         });
         if (seq !== this._loadSeq) return;
         this._appliedGroupKey = gk;
@@ -168,6 +180,24 @@ document.addEventListener('alpine:init', () => {
       this.parentIdFilter = String(id);
       this.groupKeyFilter = '';
       this._resetView({ groupKey: '', parentId: String(id) });
+    },
+
+    toggleSort(col) {
+      if (this.sortBy !== col) {
+        this.sortBy = col;
+        this.sortDir = 'desc';
+      } else if (this.sortDir === 'desc') {
+        this.sortDir = 'asc';
+      } else {
+        this.sortBy = '';
+        this.sortDir = '';
+      }
+      this._resetView();
+    },
+
+    sortIndicator(col) {
+      if (this.sortBy !== col) return ' ↕';
+      return this.sortDir === 'asc' ? ' ▲' : ' ▼';
     },
 
     viewDetail(job) {

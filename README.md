@@ -493,7 +493,7 @@ Per-queue endpoints under `/api/v1/:table/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `jobs` | List jobs (params: `limit`, `offset`, `group_key`, `parent_id`, `suspended`) |
+| `GET` | `jobs` | List jobs |
 | `POST` | `jobs` | Insert a job |
 | `POST` | `jobs/batch` | Insert multiple jobs |
 | `GET` | `jobs/:id` | Get job by ID |
@@ -504,7 +504,6 @@ Per-queue endpoints under `/api/v1/:table/`:
 | `POST` | `jobs/:id/resume` | Resume suspended job |
 | `POST` | `jobs/:id/pause-children` | Pause all visible children of a job |
 | `POST` | `jobs/:id/resume-children` | Resume all suspended children |
-| `GET` | `jobs/in-flight` | List currently claimed jobs |
 | `GET` | `dlq` | List DLQ entries |
 | `POST` | `dlq/:id/retry` | Retry from DLQ |
 | `DELETE` | `dlq/:id` | Delete from DLQ |

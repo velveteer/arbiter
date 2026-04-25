@@ -1,5 +1,7 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Servant API type definitions for Arbiter job queue admin interface.
 --
@@ -17,18 +19,45 @@ module Arbiter.Servant.API
   ) where
 
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
+import Arbiter.Core.SqlTemplates
+  ( DLQSortColumn
+  , JobSortColumn
+  , SortDir
+  , dlqSortColumnName
+  , jobSortColumnName
+  , sortDirSql
+  )
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 import GHC.TypeLits (Symbol)
 import Servant.API
 
 import Arbiter.Servant.Types
 
+-- | Case-insensitive lookup of an enum value by its canonical name.
+parseEnum :: (Bounded a, Enum a) => (a -> Text) -> Text -> Either Text a
+parseEnum toName t =
+  let lower = T.toLower t
+      table = [(T.toLower (toName x), x) | x <- [minBound .. maxBound]]
+   in case lookup lower table of
+        Just x -> Right x
+        Nothing -> Left $ "unknown value: " <> t
+
+instance FromHttpApiData JobSortColumn where
+  parseQueryParam = parseEnum jobSortColumnName
+
+instance FromHttpApiData DLQSortColumn where
+  parseQueryParam = parseEnum dlqSortColumnName
+
+instance FromHttpApiData SortDir where
+  parseQueryParam = parseEnum sortDirSql
+
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B&roots_only
+  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B&roots_only&in_flight&sort_by=...&sort_dir=...
     listJobs
       :: mode
         :- QueryParam "limit" Int
@@ -37,6 +66,9 @@ data JobsAPI payload mode = JobsAPI
           :> QueryParam "parent_id" Int64
           :> QueryParam "suspended" Bool
           :> QueryFlag "roots_only"
+          :> QueryFlag "in_flight"
+          :> QueryParam "sort_by" JobSortColumn
+          :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
   , -- POST /:table/jobs (insert new job)
     insertJob
@@ -54,14 +86,6 @@ data JobsAPI payload mode = JobsAPI
       :: mode
         :- Capture "id" Int64
           :> Get '[JSON] (JobResponse payload)
-  , -- GET /:table/jobs/in-flight?limit=N&offset=N&parent_id=N
-    getInFlightJobs
-      :: mode
-        :- "in-flight"
-          :> QueryParam "limit" Int
-          :> QueryParam "offset" Int
-          :> QueryParam "parent_id" Int64
-          :> Get '[JSON] (JobsResponse payload)
   , -- DELETE /:table/jobs/:id (cancel job)
     cancelJob
       :: mode
@@ -108,13 +132,15 @@ data JobsAPI payload mode = JobsAPI
 
 -- | DLQ API routes - manage failed jobs in a specific table
 data DLQAPI payload mode = DLQAPI
-  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&group_key=X
+  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&group_key=X&sort_by=...&sort_dir=...
     listDLQ
       :: mode
         :- QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> QueryParam "parent_id" Int64
           :> QueryParam "group_key" Text
+          :> QueryParam "sort_by" DLQSortColumn
+          :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
   , -- POST /:table/dlq/:id/retry (move back to main queue)
     retryFromDLQ
