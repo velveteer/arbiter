@@ -45,7 +45,7 @@ library
     , arbiter-worker     <0.2
     , base               >=4.14 && <5
     , bytestring         >=0.10 && <0.13
-    , containers         >=0.6  && <0.8
+    , containers         >=0.6  && <0.9
     , cron               >=0.7  && <0.8
     , http-types         >=0.12 && <0.13
     , postgresql-simple  >=0.6  && <0.8
@@ -53,7 +53,7 @@ library
     , servant            >=0.19 && <0.21
     , servant-server     >=0.19 && <0.21
     , text               >=1.2  && <2.2
-    , time               >=1.9  && <1.15
+    , time               >=1.9  && <1.16
     , wai                >=3.2  && <3.3
     , warp               >=3.3  && <3.5
 
