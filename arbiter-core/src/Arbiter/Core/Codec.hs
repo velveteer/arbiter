@@ -43,7 +43,6 @@ module Arbiter.Core.Codec
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
 import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
-import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
@@ -142,7 +141,7 @@ jobRowCodec queueName =
     <*> dedupKeyCodec
     <*> ncol "max_attempts" CInt4
     <*> ncol "parent_id" CInt8
-    <*> (isJust <$> ncol "parent_state" CJsonb)
+    <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
 
 dedupKeyCodec :: RowCodec (Maybe DedupKey)
@@ -176,7 +175,7 @@ jobRowCodecWithJobId queueName =
     <*> dedupKeyCodec
     <*> ncol "max_attempts" CInt4
     <*> ncol "parent_id" CInt8
-    <*> (isJust <$> ncol "parent_state" CJsonb)
+    <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
 
 countCodec :: RowCodec Int64

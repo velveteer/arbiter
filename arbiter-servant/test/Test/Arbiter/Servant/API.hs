@@ -182,36 +182,44 @@ spec connStr = do
         payload j `shouldBe` TestMessage "delayed"
         notVisibleUntil j `shouldBe` Just futureTime
 
-    it "POST /api/v1/arbiter_servant_test/jobs rejects duplicate dedup key" $ do
-      -- Insert first job
-      request
-        "POST"
-        "/api/v1/arbiter_servant_test/jobs"
-        [("Content-Type", "application/json")]
-        ( encode
-            [aesonQQ|{
-              "payload": {"tag": "TestMessage", "contents": "first"},
-              "queueName": "arbiter_servant_test",
-              "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
-              "priority": 0
-            }|]
-        )
-        `shouldRespondWith` 200
+    it "POST /api/v1/arbiter_servant_test/jobs returns existing job on IgnoreDuplicate hit" $ do
+      firstResp <-
+        request
+          "POST"
+          "/api/v1/arbiter_servant_test/jobs"
+          [("Content-Type", "application/json")]
+          ( encode
+              [aesonQQ|{
+                "payload": {"tag": "TestMessage", "contents": "first"},
+                "queueName": "arbiter_servant_test",
+                "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
+                "priority": 0
+              }|]
+          )
+      firstId <- liftIO $ do
+        body :: JobResponse ServantTestPayload <- decodeBody firstResp
+        let j = unApiJob (job body)
+        payload j `shouldBe` TestMessage "first"
+        pure (primaryKey j)
 
-      -- Try to insert duplicate
-      request
-        "POST"
-        "/api/v1/arbiter_servant_test/jobs"
-        [("Content-Type", "application/json")]
-        ( encode
-            [aesonQQ|{
-              "payload": {"tag": "TestMessage", "contents": "second"},
-              "queueName": "arbiter_servant_test",
-              "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
-              "priority": 0
-            }|]
-        )
-        `shouldRespondWith` 409
+      dupResp <-
+        request
+          "POST"
+          "/api/v1/arbiter_servant_test/jobs"
+          [("Content-Type", "application/json")]
+          ( encode
+              [aesonQQ|{
+                "payload": {"tag": "TestMessage", "contents": "second"},
+                "queueName": "arbiter_servant_test",
+                "dedupKey": {"key": "duplicate-key", "strategy": "ignore"},
+                "priority": 0
+              }|]
+          )
+      liftIO $ do
+        body :: JobResponse ServantTestPayload <- decodeBody dupResp
+        let j = unApiJob (job body)
+        primaryKey j `shouldBe` firstId
+        payload j `shouldBe` TestMessage "first"
 
     it "POST /api/v1/arbiter_servant_test/jobs/batch inserts multiple jobs" $ do
       postResp <-

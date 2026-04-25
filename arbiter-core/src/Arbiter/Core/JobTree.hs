@@ -49,6 +49,7 @@ module Arbiter.Core.JobTree
 
 import Control.Exception (Exception)
 import Control.Monad (when)
+import Data.Aeson (Object, Value (..))
 import Data.Either (partitionEithers)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -105,7 +106,14 @@ leaf = Leaf
 -- @
 rollup :: JobWrite payload -> NonEmpty (JobTree payload) -> JobTree payload
 rollup parent children =
-  Finalizer (parent {isRollup = True}) children
+  Finalizer (parent {parentState = Just emptyState}) children
+
+-- | An empty rollup snapshot @{}@. The DB stores this on insert for any
+-- rollup finalizer; presence-of-non-null is the canonical signal of
+-- rollup-ness, and the value is overwritten with merged child results
+-- before a DLQ move.
+emptyState :: Value
+emptyState = Object (mempty :: Object)
 
 -- ---------------------------------------------------------------------------
 -- Operators
@@ -119,7 +127,7 @@ rollup parent children =
 infixr 6 <~~
 
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
-parent <~~ children = Finalizer (parent {isRollup = True}) (fmap Leaf children)
+parent <~~ children = Finalizer (parent {parentState = Just emptyState}) (fmap Leaf children)
 
 -- ---------------------------------------------------------------------------
 -- Interpreter

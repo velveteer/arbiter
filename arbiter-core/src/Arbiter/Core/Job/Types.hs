@@ -7,6 +7,7 @@ module Arbiter.Core.Job.Types
   , JobWrite
   , defaultJob
   , defaultGroupedJob
+  , isRollup
 
     -- * Type Constraints
   , JobPayload
@@ -19,9 +20,10 @@ module Arbiter.Core.Job.Types
   , defaultObservabilityHooks
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Int (Int32, Int64)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import GHC.Generics (Generic)
@@ -61,16 +63,23 @@ data Job payload key q insertedAt = Job
   , parentId :: Maybe Int64
   -- ^ Parent job ID. Set by 'insertJobTree', not manually. When this child
   -- is the last to complete, the parent (if a rollup finalizer) is resumed.
-  , isRollup :: Bool
-  -- ^ Whether this job is a rollup finalizer (has children whose results
-  -- are collected). Set by 'rollup' / '<~~'. When @True@, the worker
-  -- passes child results as a typed argument to the handler.
+  , parentState :: Maybe Value
+  -- ^ Snapshot of accumulated child results for rollup finalizers. The
+  -- engine sets this to an empty object on insert when the job is a
+  -- rollup finalizer, and overwrites it with the final results map before
+  -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
+  -- results table. 'isRollup' is derived from whether this is non-null.
   , suspended :: Bool
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
   -- or operator-paused jobs.
   }
   deriving stock (Eq, Generic, Show)
+
+-- | A rollup finalizer is any job whose 'parentState' snapshot is present
+-- (an empty object on insert; the merged child results before a DLQ move).
+isRollup :: Job p k q t -> Bool
+isRollup = isJust . parentState
 
 -- | Ungrouped 'JobWrite' with default values. For serial processing within a
 -- group, use 'defaultGroupedJob'.
@@ -91,7 +100,7 @@ defaultJob p =
     , dedupKey = Nothing
     , maxAttempts = Nothing
     , parentId = Nothing
-    , isRollup = False
+    , parentState = Nothing
     , suspended = False
     }
 
@@ -117,7 +126,7 @@ defaultGroupedJob gk p =
     , dedupKey = Nothing
     , maxAttempts = Nothing
     , parentId = Nothing
-    , isRollup = False
+    , parentState = Nothing
     , suspended = False
     }
 

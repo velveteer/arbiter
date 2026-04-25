@@ -11,7 +11,7 @@ module Arbiter.Servant.Types
 
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite)
+import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
 import Arbiter.Core.Operations (QueueStats)
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
@@ -30,8 +30,8 @@ data ApiJob payload = ApiJob
 -- | Write-side job type for REST API insertion.
 --
 -- Accepts @payload@, @groupKey@, @priority@, @notVisibleUntil@, @dedupKey@,
--- and @maxAttempts@. Fields like @parentId@, @isRollup@, and @suspended@ are
--- managed internally and cannot be set through the REST API.
+-- and @maxAttempts@. Fields like @parentId@, @parentState@, and @suspended@
+-- are managed internally and cannot be set through the REST API.
 newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
   deriving newtype (Eq, Show)
 
@@ -60,6 +60,7 @@ instance (ToJSON payload) => ToJSON (ApiJob payload) where
       , "dedupKey" .= dedupKey job
       , "maxAttempts" .= maxAttempts job
       , "parentId" .= parentId job
+      , "parentState" .= parentState job
       , "isRollup" .= isRollup job
       , "suspended" .= suspended job
       , "status" .= jobStatus now job
@@ -83,7 +84,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .: "dedupKey"
         <*> v .: "maxAttempts"
         <*> v .:? "parentId" .!= Nothing
-        <*> v .:? "isRollup" .!= False
+        <*> v .:? "parentState" .!= Nothing
         <*> v .:? "suspended" .!= False
     -- Use insertedAt as fallback for now (status is recomputed server-side anyway)
     pure $ ApiJob job (insertedAt job)
@@ -117,7 +118,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> v .:? "dedupKey"
         <*> v .:? "maxAttempts"
         <*> pure Nothing -- parentId: managed internally
-        <*> pure False -- isRollup: managed internally
+        <*> pure Nothing -- parentState: managed internally
         <*> pure False -- suspended: managed internally
 
 data ApiDLQJob payload = ApiDLQJob

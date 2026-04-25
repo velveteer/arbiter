@@ -23,6 +23,7 @@ module Arbiter.Core.SqlTemplates
 
     -- * Admin Operations
   , getJobByIdSQL
+  , getJobByDedupKeySQL
   , cancelJobSQL
   , promoteJobSQL
   , getQueueStatsSQL
@@ -806,6 +807,23 @@ getJobByIdSQL schema tableName =
         SELECT ${columns}
         FROM ${tbl}
         WHERE id = ?
+      |]
+
+-- | SQL template for fetching a job by its dedup_key.
+--
+-- The partial unique index on @dedup_key@ guarantees at most one row.
+--
+-- Parameters: dedup_key
+--
+-- Returns: Single job row if found
+getJobByDedupKeySQL :: Text -> Text -> Text
+getJobByDedupKeySQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      columns = jobColumns Nothing
+   in [text|
+        SELECT ${columns}
+        FROM ${tbl}
+        WHERE dedup_key = ?
       |]
 
 -- | SQL template for canceling (deleting) a job by ID.

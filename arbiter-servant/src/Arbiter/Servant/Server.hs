@@ -21,7 +21,7 @@ module Arbiter.Servant.Server
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead)
+import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobRead, isRollup)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
@@ -214,12 +214,15 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let env = serverEnv config
       schemaName = schema env
 
-  mJob <- liftIO $ runSimpleDb env $ Ops.insertJob schemaName tableName jobWrite
+  mJob <- liftIO $ runSimpleDb env $ do
+    inserted <- Ops.insertJob schemaName tableName jobWrite
+    case (inserted, dedupKey jobWrite) of
+      (Just j, _) -> pure (Just j)
+      (Nothing, Just (IgnoreDuplicate k)) -> Ops.getJobByDedupKey schemaName tableName k
+      _ -> pure Nothing
   case mJob of
-    Nothing -> throwError err409 {errBody = "Job insert failed (duplicate dedup key)"}
-    Just j -> do
-      aj <- toApiJob j
-      pure $ JobResponse {job = aj}
+    Just j -> JobResponse <$> toApiJob j
+    Nothing -> throwError err409 {errBody = "Replace blocked: existing job is in-flight on first attempt or has children"}
 
 -- | Insert multiple jobs in a single batch operation
 insertJobsBatchHandler
@@ -265,15 +268,18 @@ getInFlightJobsHandler
   -> ArbiterServerConfig registry
   -> Maybe Int
   -> Maybe Int
+  -> Maybe Int64
   -> Handler (JobsResponse payload)
-getInFlightJobsHandler tableName config mLimit mOffset = do
+getInFlightJobsHandler tableName config mLimit mOffset mParentId = do
   let (limit, offset) = validatePagination mLimit mOffset
       env = serverEnv config
       schemaName = schema env
+      filters =
+        FilterInFlight : catMaybes [FilterParentId <$> mParentId]
 
   (jobs, total, combined, dlqCounts) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
-    j <- Ops.getInFlightJobs schemaName tableName limit offset
-    c <- Ops.countInFlightJobs schemaName tableName
+    j <- Ops.listJobsFiltered schemaName tableName filters limit offset
+    c <- Ops.countJobsFiltered schemaName tableName filters
     let jobIds = map primaryKey j
         hasParents = any isRollup j
     if null j || not hasParents

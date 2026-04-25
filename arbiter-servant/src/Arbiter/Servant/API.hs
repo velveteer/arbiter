@@ -53,12 +53,13 @@ data JobsAPI payload mode = JobsAPI
       :: mode
         :- Capture "id" Int64
           :> Get '[JSON] (JobResponse payload)
-  , -- GET /:table/jobs/in-flight?limit=N&offset=N
+  , -- GET /:table/jobs/in-flight?limit=N&offset=N&parent_id=N
     getInFlightJobs
       :: mode
         :- "in-flight"
           :> QueryParam "limit" Int
           :> QueryParam "offset" Int
+          :> QueryParam "parent_id" Int64
           :> Get '[JSON] (JobsResponse payload)
   , -- DELETE /:table/jobs/:id (cancel job)
     cancelJob

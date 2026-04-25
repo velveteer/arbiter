@@ -41,6 +41,7 @@ module Arbiter.Core.Operations
     -- * Admin Operations
   , listJobs
   , getJobById
+  , getJobByDedupKey
   , getJobsByGroup
   , getInFlightJobs
   , cancelJob
@@ -134,6 +135,7 @@ import Arbiter.Core.Job.Types
   , JobPayload
   , JobRead
   , JobWrite
+  , isRollup
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.SqlTemplates qualified as Tmpl
@@ -234,8 +236,6 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
         Just (IgnoreDuplicate k) -> (Tmpl.insertJobSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "ignore"))
         Just (ReplaceDuplicate k) -> (Tmpl.insertJobReplaceSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "replace"))
 
-      parentStateVal = if isRollup job then Just (Object mempty) else Nothing
-
       params =
         [ pval CJsonb (toJSON $ payload job)
         , pnul CText (groupKey job)
@@ -246,7 +246,7 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
         , dedupStrategyParam
         , pnul CInt4 (maxAttempts job)
         , pnul CInt8 (parentId job)
-        , pnul CJsonb parentStateVal
+        , pnul CJsonb (parentState job)
         , pval CBool (suspended job)
         , pnul CTimestamptz (notVisibleUntil job)
         ]
@@ -265,10 +265,15 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
 --
 -- __Ordering and concurrency__
 --
--- Jobs are claimed in ID order (lowest ID first within a priority level).
--- Concurrent inserts to the same group are serialized at the trigger level:
--- the AFTER INSERT trigger's @ON CONFLICT DO UPDATE@ on the groups table
--- takes a row-level lock, preventing out-of-order commits within a group.
+-- Standalone (ungrouped) jobs are claimed in @(priority ASC, id ASC)@ order.
+-- Grouped jobs are claimed one-per-group, with the head of each group chosen
+-- by @(attempts DESC, priority ASC, id ASC)@. The @attempts DESC@ prefix
+-- prioritises a chronically-failing job so it either succeeds or reaches
+-- @maxAttempts@ and moves to the DLQ, rather than starving fresh jobs behind
+-- it indefinitely. Concurrent inserts to the same group are serialized at
+-- the trigger level: the AFTER INSERT trigger's @ON CONFLICT DO UPDATE@ on
+-- the groups table takes a row-level lock, preventing out-of-order commits
+-- within a group.
 --
 -- __Deduplication__
 --
@@ -498,7 +503,7 @@ buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
             , colDedupStrategies = f ds (colDedupStrategies cols)
             , colMaxAttempts = f (maxAttempts job) (colMaxAttempts cols)
             , colParentIds = f (parentId job) (colParentIds cols)
-            , colParentStates = f (if isRollup job then Just (Object mempty) else Nothing) (colParentStates cols)
+            , colParentStates = f (parentState job) (colParentStates cols)
             , colSuspended = f (suspended job) (colSuspended cols)
             , colNotVisibleUntils = f (notVisibleUntil job) (colNotVisibleUntils cols)
             }
@@ -1147,6 +1152,24 @@ getJobById schemaName tableName jobId = do
     executeQuery
       (Tmpl.getJobByIdSQL schemaName tableName)
       [pval CInt8 jobId]
+      (jobRowCodec tableName)
+  case rawJobs of
+    [] -> pure Nothing
+    (raw : _) -> Just <$> decodePayload raw
+
+-- | Get a single job by its dedup key.
+getJobByDedupKey
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Text
+  -> m (Maybe (JobRead payload))
+getJobByDedupKey schemaName tableName key = do
+  rawJobs <-
+    executeQuery
+      (Tmpl.getJobByDedupKeySQL schemaName tableName)
+      [pval CText key]
       (jobRowCodec tableName)
   case rawJobs of
     [] -> pure Nothing

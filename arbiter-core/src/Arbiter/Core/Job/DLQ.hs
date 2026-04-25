@@ -23,6 +23,8 @@ data DLQJob payload = DLQJob
   , failedAt :: UTCTime
   -- ^ When the job was moved to the DLQ
   , jobSnapshot :: JobSnapshot payload
-  -- ^ Full job state at time of failure (payload, attempts, last_error, etc.)
+  -- ^ Full job state at time of failure (payload, attempts, last_error, etc.).
+  -- For DLQ'd rollup finalizers, 'parentState' on the snapshot carries the
+  -- accumulated child results captured before the cascade delete.
   }
   deriving stock (Eq, Generic, Show)
