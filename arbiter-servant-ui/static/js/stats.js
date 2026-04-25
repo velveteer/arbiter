@@ -54,13 +54,17 @@ document.addEventListener('alpine:init', () => {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
       this.loading = true;
+      this._loadSeq = (this._loadSeq || 0) + 1;
+      const seq = this._loadSeq;
       try {
         const data = await ArbiterAPI.getStats(queue);
+        if (seq !== this._loadSeq) return;
         this.stats = data.stats;
       } catch (e) {
+        if (seq !== this._loadSeq) return;
         console.error('Failed to load stats:', e);
       } finally {
-        this.loading = false;
+        if (seq === this._loadSeq) this.loading = false;
       }
     },
   }));

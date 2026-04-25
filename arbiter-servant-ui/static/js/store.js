@@ -75,17 +75,25 @@ document.addEventListener('alpine:init', () => {
       if (this.eventSource) {
         this.eventSource.close();
       }
+      if (this._sseHandshakeTimer) clearTimeout(this._sseHandshakeTimer);
+      this._sseHandshakeTimer = setTimeout(() => {
+        if (!this._hasConnected && !this.sseDisabled) {
+          this._startPolling();
+          this._startRefreshTimer();
+        }
+      }, 3000);
       this.eventSource = ArbiterAPI.connectSSE(
         (event) => {
           this.connected = true;
           try {
             const data = JSON.parse(event.data);
             if (data.event === 'disabled') {
-              // SSE disabled on the server — close and don't reconnect
               this.eventSource.close();
               this.eventSource = null;
               this.connected = false;
               this.sseDisabled = true;
+              this._startPolling();
+              this._startRefreshTimer();
               return;
             }
             if (data.event === 'connected') {

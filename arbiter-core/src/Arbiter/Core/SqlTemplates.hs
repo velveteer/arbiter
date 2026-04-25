@@ -108,6 +108,7 @@ data JobFilter
   | FilterParentId Int64
   | FilterSuspended Bool
   | FilterInFlight
+  | FilterRootsOnly
   deriving stock (Eq, Show)
 
 -- | Generic SQL for listing jobs with dynamic WHERE clause.
@@ -771,6 +772,16 @@ retryFromDLQSQL schema tableName =
                  END
           FROM deleted d
           RETURNING *
+        ),
+        -- Re-suspend any rollup parents already in the main queue that just
+        -- got fresh children re-inserted under them.
+        parent_resuspend AS (
+          UPDATE ${tbl}
+          SET suspended = TRUE, updated_at = NOW()
+          WHERE parent_state IS NOT NULL
+            AND id IN (SELECT DISTINCT parent_id FROM inserted WHERE parent_id IS NOT NULL)
+            AND NOT suspended
+            AND NOT (attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
         )
         SELECT ${columns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
@@ -978,34 +989,59 @@ deleteDLQJobsBatchSQL schema tableName =
 -- Job Dependency Operations
 -- ---------------------------------------------------------------------------
 
--- | Pause all visible children of a parent job (set suspended = TRUE).
+-- | Pause all claimable jobs in a parent's subtree (set suspended = TRUE).
 --
--- Only affects children that are currently claimable (not in-flight, not already suspended).
--- In-flight children are left alone so their visibility timeout can expire
--- normally if the worker crashes - pausing them would break crash recovery.
+-- Walks the descendant tree and pauses every job that is currently
+-- claimable (not in-flight, not already suspended). Naturally-suspended
+-- rollup finalizers in the tree are left alone (they're already suspended
+-- waiting for their own children). In-flight children are left alone so
+-- their visibility timeout can expire normally if the worker crashes -
+-- pausing them would break crash recovery.
 --
 -- Parameters: parent_id
 pauseChildrenSQL :: Text -> Text -> Text
 pauseChildrenSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|
+        WITH RECURSIVE descendants AS (
+          SELECT id FROM ${tbl} WHERE parent_id = ?
+          UNION ALL
+          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+        )
         UPDATE ${tbl}
         SET suspended = TRUE, updated_at = NOW()
-        WHERE parent_id = ?
+        WHERE id IN (SELECT id FROM descendants)
           AND NOT suspended
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       |]
 
--- | Resume all suspended children of a parent job.
+-- | Resume user-paused jobs in a parent's subtree (set suspended = FALSE).
+--
+-- Walks the descendant tree and resumes every suspended job that is NOT a
+-- naturally-suspended rollup finalizer. A rollup is "naturally suspended"
+-- when it has children still in the main queue - it should stay suspended
+-- until those children complete, otherwise its handler would run with an
+-- incomplete view of child results. Resuming the rollup's children directly
+-- is correct: the rollup will wake itself when they finish.
 --
 -- Parameters: parent_id
 resumeChildrenSQL :: Text -> Text -> Text
 resumeChildrenSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|
-        UPDATE ${tbl}
+        WITH RECURSIVE descendants AS (
+          SELECT id FROM ${tbl} WHERE parent_id = ?
+          UNION ALL
+          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+        )
+        UPDATE ${tbl} t
         SET suspended = FALSE, updated_at = NOW()
-        WHERE parent_id = ? AND suspended = TRUE
+        WHERE t.id IN (SELECT id FROM descendants)
+          AND t.suspended = TRUE
+          AND NOT (
+            t.parent_state IS NOT NULL
+            AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = t.id)
+          )
       |]
 
 -- | Cancel a job and all its descendants recursively.

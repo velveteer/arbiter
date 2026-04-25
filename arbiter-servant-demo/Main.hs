@@ -31,6 +31,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
@@ -90,7 +91,7 @@ main :: IO ()
 main = do
   -- Get config from environment or use defaults
   connStr <-
-    maybe "host=localhost port=54322 user=postgres password=master dbname=postgres" BS.pack
+    maybe "host=localhost port=54324 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- maybe "arbiter_demo" id <$> lookupEnv "SCHEMA"
   portStr <- maybe "8080" id <$> lookupEnv "PORT"
@@ -312,9 +313,13 @@ seedPipelineJobs env schemaName = runSimpleDb env $ do
     JT.insertJobTree schemaName "pipeline" $
       agg
         "final-report"
-        [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
-        , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
-        ]
+        ( NE.fromList $
+            NE.take 300 $
+              NE.cycle
+                [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
+                , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
+                ]
+        )
   liftIO $ do
     putStrLn $
       "  Created 3-level pipeline: root=#"

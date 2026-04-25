@@ -30,7 +30,7 @@ import Arbiter.Core.SqlTemplates (JobFilter (..))
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
 import Control.Exception (SomeException, bracket, catch)
-import Control.Monad (void, when)
+import Control.Monad (guard, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
@@ -160,8 +160,9 @@ listJobsHandler
   -> Maybe Text
   -> Maybe Int64
   -> Maybe Bool
+  -> Bool
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended rootsOnly = liftIO $ do
   let (limit, offset) = validatePagination mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -170,6 +171,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended =
           [ FilterGroupKey <$> mGroupKey
           , FilterParentId <$> mParentId
           , FilterSuspended <$> mSuspended
+          , FilterRootsOnly <$ guard rootsOnly
           ]
 
   (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do

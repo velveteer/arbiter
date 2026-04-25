@@ -146,7 +146,7 @@
           <span x-text="showInFlight ? 'In-Flight' : 'All Jobs'"></span>
         </button>
         <button class="btn btn-sm" :class="viewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
-          @click="viewMode = viewMode === 'tree' ? 'flat' : 'tree'"
+          @click="toggleViewMode()"
           :title="viewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
           <span x-text="viewMode === 'tree' ? 'Tree' : 'Flat'"></span>
         </button>
@@ -195,7 +195,9 @@
             </div>
           </div>
           <div class="mt-2 d-flex align-items-center gap-2">
-            <button class="btn btn-primary btn-sm" @click="submitInsert()">Insert</button>
+            <button class="btn btn-primary btn-sm" @click="submitInsert()" :disabled="inserting">
+              <span x-text="inserting ? 'Inserting…' : 'Insert'"></span>
+            </button>
             <small class="alert alert-danger mb-0 inline-error" x-show="insertError" x-text="insertError"></small>
           </div>
         </div>
@@ -246,22 +248,38 @@
           <tbody>
             <template x-for="job in displayJobs" :key="String(job.primaryKey) + '-' + job._depth">
               <tr :class="job._depth > 0 ? 'child-row' : ''">
-                <td class="text-truncate"
-                  :style="job._depth ? 'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)' : ''"
-                  x-text="job.primaryKey"></td>
-                <td class="text-truncate" :title="JSON.stringify(job.payload)"
-                  x-text="truncate(job.payload)"></td>
-                <td class="text-truncate" x-text="job.groupKey || '-'"></td>
-                <td>
-                  <template x-if="job.parentId">
-                    <a href="#" class="text-decoration-none"
-                      @click.prevent="filterByParent(job.parentId)"
-                      x-text="job.parentId"></a>
-                  </template>
-                  <template x-if="!job.parentId">
-                    <span>-</span>
-                  </template>
-                </td>
+                <template x-if="job._isMoreRow">
+                  <td colspan="11" class="text-center text-muted small fst-italic"
+                    :style="'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)'">
+                    Showing <span x-text="job._shown"></span> of <span x-text="job._total"></span> children of #<span x-text="job._parentKey"></span> &mdash;
+                    <a href="#" @click.prevent="filterByParent(job._parentKey)">view all</a>
+                  </td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate"
+                    :style="job._depth ? 'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)' : ''"
+                    x-text="job.primaryKey"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate" :title="JSON.stringify(job.payload)"
+                    x-text="truncate(job.payload)"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate" x-text="job.groupKey || '-'"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td>
+                    <template x-if="job.parentId">
+                      <a href="#" class="text-decoration-none"
+                        @click.prevent="filterByParent(job.parentId)"
+                        x-text="job.parentId"></a>
+                    </template>
+                    <template x-if="!job.parentId">
+                      <span>-</span>
+                    </template>
+                  </td>
+                </template>
+                <template x-if="!job._isMoreRow">
                 <td>
                   <template x-if="job._childCount || job._dlqChildCount">
                     <span class="d-inline-flex gap-1 flex-wrap align-items-center">
@@ -283,33 +301,44 @@
                     <span>-</span>
                   </template>
                 </td>
-                <td x-text="job.priority"></td>
-                <td x-text="job.attempts"></td>
-                <td>
-                  <span class="badge"
-                    :class="{
-                      'bg-warning-subtle text-warning-emphasis': job.status === 'suspended',
-                      'bg-primary-subtle text-primary-emphasis': job.status === 'in_flight',
-                      'bg-secondary-subtle text-secondary-emphasis': job.status === 'scheduled',
-                      'bg-success-subtle text-success-emphasis': job.status === 'ready',
-                    }"
-                    x-text="job.status"></span>
-                </td>
-                <td class="text-truncate" :title="job.insertedAt" x-text="job.insertedAt ? new Date(job.insertedAt).toLocaleString() : '-'"></td>
-                <td class="text-truncate" x-text="job.notVisibleUntil ? new Date(job.notVisibleUntil).toLocaleString() : '-'"></td>
-                <td>
-                  <div class="d-inline-flex gap-1 flex-nowrap">
-                    <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
-                    <button class="btn btn-outline-success btn-sm" @click="promoteJob(job.primaryKey)" title="Promote"
-                      x-show="job.status === 'scheduled'">Promote</button>
-                    <button class="btn btn-outline-danger btn-sm" @click="cancelJob(job.primaryKey, job._childCount)" title="Cancel">Cancel</button>
-                    <button class="btn btn-outline-secondary btn-sm" @click="moveToDLQ(job.primaryKey)" title="Move to DLQ">DLQ</button>
-                    <button class="btn btn-sm text-nowrap"
-                      :class="isPaused(job) ? 'btn-outline-info' : 'btn-outline-warning'"
-                      @click="togglePause(job)"
-                      x-text="isPaused(job) ? 'Resume' : 'Pause'"></button>
-                  </div>
-                </td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td x-text="job.priority"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td x-text="job.attempts"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td>
+                    <span class="badge"
+                      :class="{
+                        'bg-warning-subtle text-warning-emphasis': job.status === 'suspended',
+                        'bg-primary-subtle text-primary-emphasis': job.status === 'in_flight',
+                        'bg-secondary-subtle text-secondary-emphasis': job.status === 'scheduled',
+                        'bg-success-subtle text-success-emphasis': job.status === 'ready',
+                      }"
+                      x-text="job.status"></span>
+                  </td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate" :title="job.insertedAt" x-text="job.insertedAt ? new Date(job.insertedAt).toLocaleString() : '-'"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate" x-text="job.notVisibleUntil ? new Date(job.notVisibleUntil).toLocaleString() : '-'"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td>
+                    <div class="d-inline-flex gap-1 flex-nowrap">
+                      <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
+                      <button class="btn btn-outline-success btn-sm" @click="promoteJob(job.primaryKey)" title="Promote"
+                        x-show="job.status === 'scheduled'">Promote</button>
+                      <button class="btn btn-outline-danger btn-sm" @click="cancelJob(job.primaryKey, job._childCount, job._dlqChildCount)" title="Cancel">Cancel</button>
+                      <button class="btn btn-outline-secondary btn-sm" @click="moveToDLQ(job.primaryKey, job._childCount)" title="Move to DLQ">DLQ</button>
+                      <button class="btn btn-outline-warning btn-sm" @click="pauseAction(job)" :title="job._childCount > 0 ? 'Pause descendants' : 'Suspend'">Pause</button>
+                      <button class="btn btn-outline-info btn-sm" @click="resumeAction(job)" :title="job._childCount > 0 ? 'Resume descendants' : 'Resume'">Resume</button>
+                    </div>
+                  </td>
+                </template>
               </tr>
             </template>
             <tr x-show="displayJobs.length === 0">
@@ -357,27 +386,19 @@
                 <dt class="col-sm-4">Dedup Key</dt>
                 <dd class="col-sm-8" x-text="selectedJob?.dedupKey ? selectedJob.dedupKey.key + ' (' + selectedJob.dedupKey.strategy + ')' : '-'"></dd>
                 <dt class="col-sm-4">Inserted At</dt>
-                <dd class="col-sm-8" x-text="selectedJob?.insertedAt"></dd>
+                <dd class="col-sm-8" x-text="formatTime(selectedJob?.insertedAt, '-')"></dd>
                 <dt class="col-sm-4">Updated At</dt>
-                <dd class="col-sm-8" x-text="selectedJob?.updatedAt || '-'"></dd>
+                <dd class="col-sm-8" x-text="formatTime(selectedJob?.updatedAt, '-')"></dd>
                 <dt class="col-sm-4">Last Attempted At</dt>
-                <dd class="col-sm-8" x-text="selectedJob?.lastAttemptedAt || '-'"></dd>
+                <dd class="col-sm-8" x-text="formatTime(selectedJob?.lastAttemptedAt, '-')"></dd>
                 <dt class="col-sm-4">Not Visible Until</dt>
-                <dd class="col-sm-8" x-text="selectedJob?.notVisibleUntil || '-'"></dd>
+                <dd class="col-sm-8" x-text="formatTime(selectedJob?.notVisibleUntil, '-')"></dd>
                 <dt class="col-sm-4">Last Error</dt>
                 <dd class="col-sm-8" x-text="selectedJob?.lastError || '-'"></dd>
                 <dt class="col-sm-4">Payload</dt>
                 <dd class="col-sm-8">
                   <pre class="payload-display p-2 rounded" x-text="formatJson(selectedJob?.payload)"></pre>
                 </dd>
-                <template x-if="selectedJob?.parentState != null">
-                  <dt class="col-sm-4">Child Results</dt>
-                </template>
-                <template x-if="selectedJob?.parentState != null">
-                  <dd class="col-sm-8">
-                    <pre class="payload-display p-2 rounded" x-text="formatJson(selectedJob?.parentState)"></pre>
-                  </dd>
-                </template>
               </dl>
             </div>
           </div>
@@ -515,7 +536,7 @@
                 <dt class="col-sm-4">DLQ ID</dt>
                 <dd class="col-sm-8" x-text="selectedDLQJob?.dlqPrimaryKey"></dd>
                 <dt class="col-sm-4">Failed At</dt>
-                <dd class="col-sm-8" x-text="selectedDLQJob?.failedAt"></dd>
+                <dd class="col-sm-8" x-text="formatTime(selectedDLQJob?.failedAt, '-')"></dd>
                 <dt class="col-sm-4">Original Job ID</dt>
                 <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.primaryKey"></dd>
                 <dt class="col-sm-4">Parent ID</dt>
@@ -701,6 +722,7 @@
                 <td>
                   <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" :checked="s.enabled"
+                      :disabled="isBusy(s.name)"
                       @change="toggleEnabled(s)">
                   </div>
                 </td>

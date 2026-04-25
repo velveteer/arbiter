@@ -22,34 +22,46 @@ document.addEventListener('alpine:init', () => {
     refreshMode: '5s',
     _refreshTimer: null,
     pendingChanges: 0,
-    _hiddenChildren: 0,
+
+    get _topLevelHiddenCount() {
+      if (this.viewMode !== 'tree' || this._appliedParentId) return 0;
+      return this.jobs.filter(j => j.parentId).length;
+    },
 
     get displayJobs() {
       const result = [];
-      let hiddenCount = 0;
       const flatten = (jobs, depth, parentCounts) => {
         for (const job of jobs) {
           // In tree mode, hide children at the top level — they show via expand
           if (depth === 0 && this.viewMode === 'tree' && job.parentId && !this._appliedParentId) {
-            hiddenCount++;
             continue;
           }
           const key = job.primaryKey;
           const cc = parentCounts?.childCounts || this.childCounts;
           const dc = parentCounts?.dlqChildCounts || this.dlqChildCounts;
+          const childCount = cc[key] || 0;
           result.push(Object.assign({}, job, {
             _depth: depth,
-            _childCount: cc[key] || 0,
+            _childCount: childCount,
             _dlqChildCount: dc[key] || 0,
           }));
           const expanded = this.expandedParents[key];
           if (expanded && expanded.jobs) {
             flatten(expanded.jobs, depth + 1, expanded);
+            if (childCount > expanded.jobs.length) {
+              result.push({
+                _isMoreRow: true,
+                _depth: depth + 1,
+                _parentKey: key,
+                _shown: expanded.jobs.length,
+                _total: childCount,
+                primaryKey: '__more_' + key,
+              });
+            }
           }
         }
       };
       flatten(this.jobs, 0, null);
-      this._hiddenChildren = hiddenCount;
       return result;
     },
 
@@ -59,7 +71,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     get displayTotal() {
-      return Math.max(0, this.total - this._hiddenChildren);
+      return Math.max(0, this.total - this._topLevelHiddenCount);
     },
 
     isExpanded(id) {
@@ -76,7 +88,7 @@ document.addEventListener('alpine:init', () => {
       const queue = Alpine.store('app').selectedQueue;
       try {
         const data = await ArbiterAPI.listJobs(queue, {
-          parentId: id, limit: 200,
+          parentId: id, limit: 50,
           suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
         });
         this.expandedParents[id] = {
@@ -90,38 +102,27 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    isPaused(job) {
-      if (job._childCount > 0) {
-        return this._isPausedParent(job.primaryKey);
-      }
-      return job.suspended;
-    },
-
-    _isPausedParent(id) {
-      // Check top-level pausedParents and any expanded parent's pausedParents
-      if (this.pausedParents.includes(id)) return true;
-      for (const exp of Object.values(this.expandedParents)) {
-        if (exp.pausedParents && exp.pausedParents.includes(id)) return true;
-      }
-      return false;
-    },
-
-    async togglePause(job) {
+    async pauseAction(job) {
       const queue = Alpine.store('app').selectedQueue;
-      const id = job.primaryKey;
       try {
         if (job._childCount > 0) {
-          if (this._isPausedParent(id)) {
-            await ArbiterAPI.resumeChildren(queue, id);
-          } else {
-            await ArbiterAPI.pauseChildren(queue, id);
-          }
+          await ArbiterAPI.pauseChildren(queue, job.primaryKey);
         } else {
-          if (job.suspended) {
-            await ArbiterAPI.resumeJob(queue, id);
-          } else {
-            await ArbiterAPI.suspendJob(queue, id);
-          }
+          await ArbiterAPI.suspendJob(queue, job.primaryKey);
+        }
+        this.loadJobs();
+      } catch (e) {
+        showToast('Failed: ' + e.message);
+      }
+    },
+
+    async resumeAction(job) {
+      const queue = Alpine.store('app').selectedQueue;
+      try {
+        if (job._childCount > 0) {
+          await ArbiterAPI.resumeChildren(queue, job.primaryKey);
+        } else {
+          await ArbiterAPI.resumeJob(queue, job.primaryKey);
         }
         this.loadJobs();
       } catch (e) {
@@ -137,6 +138,7 @@ document.addEventListener('alpine:init', () => {
     insertDedupStrategy: 'ignore',
     insertPriority: 0,
     insertError: '',
+    inserting: false,
 
     _syncFiltersToUrl() {
       writeFiltersToUrl({
@@ -160,29 +162,39 @@ document.addEventListener('alpine:init', () => {
       trackTabActive(this, '#tab-jobs', {
         onShow: () => { this.loadJobs(); this._startTimer(); },
         onHide: () => {
+          this._loadSeq = (this._loadSeq || 0) + 1;
+          this._detailSeq = (this._detailSeq || 0) + 1;
+          const modalEl = document.getElementById('jobDetailModal');
+          if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
           clearFiltersFromUrl();
-          if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
-        },
-      });
-      window.addEventListener('queue-changed', () => {
-        if (this.active) {
           this.groupKeyFilter = '';
           this.parentIdFilter = '';
           this.suspendedFilter = '';
           this.showInFlight = false;
           this._appliedGroupKey = '';
           this._appliedParentId = '';
-          this._resetView();
-        }
+          if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
+        },
+      });
+      window.addEventListener('queue-changed', () => {
+        this.groupKeyFilter = '';
+        this.parentIdFilter = '';
+        this.suspendedFilter = '';
+        this.showInFlight = false;
+        this._appliedGroupKey = '';
+        this._appliedParentId = '';
+        if (this.active) this._resetView();
       });
       window.addEventListener('sse-reconnect', () => {
         if (this.active) this.loadJobs();
       });
       window.addEventListener('sse-event', (e) => {
         const queue = Alpine.store('app').selectedQueue;
+        const relevantTypes = this.showInFlight
+          ? ['job_updated', 'job_deleted']
+          : ['job_inserted', 'job_updated', 'job_deleted'];
         const count = e.detail.filter(evt =>
-          evt.table === queue &&
-          ['job_inserted', 'job_updated', 'job_deleted'].includes(evt.event)
+          evt.table === queue && relevantTypes.includes(evt.event)
         ).length;
         if (count > 0) this.pendingChanges += count;
       });
@@ -209,48 +221,70 @@ document.addEventListener('alpine:init', () => {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
       this.loading = true;
-      // Snapshot filters: explicit overrides (from applyFilter) or current applied (for auto-refresh)
+      this._loadSeq = (this._loadSeq || 0) + 1;
+      const seq = this._loadSeq;
       const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
+      const startingPending = this.pendingChanges;
       try {
         let data;
         if (this.showInFlight) {
           data = await ArbiterAPI.getInFlightJobs(queue, {
             limit: this.limit,
             offset: this.offset,
+            parentId: pid || undefined,
           });
         } else {
+          const rootsOnly = this.viewMode === 'tree' && !pid;
           data = await ArbiterAPI.listJobs(queue, {
             limit: this.limit,
             offset: this.offset,
             groupKey: gk || undefined,
             parentId: pid || undefined,
             suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
+            rootsOnly,
           });
         }
-        let jobs = data.jobs || [];
-        // Client-side parent filter for in-flight view
-        if (this.showInFlight && pid) {
-          jobs = jobs.filter(j => String(j.parentId) === pid);
-        }
-        // Update applied state + data atomically (no flash)
+        if (seq !== this._loadSeq) return;
+        const jobs = data.jobs || [];
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this.jobs = jobs;
-        this.total = this.showInFlight && pid ? jobs.length : (data.jobsTotal || 0);
+        this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
         this.dlqChildCounts = data.dlqChildCounts || {};
         this.pausedParents = data.pausedParents || [];
-        this.pendingChanges = 0;
+        this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
 
-        // Refresh any currently expanded parents
+        if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
+          this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
+          this.loadJobs();
+          return;
+        }
+
+        const reachable = new Set();
+        const collect = (rows) => {
+          for (const j of rows) {
+            const k = String(j.primaryKey);
+            reachable.add(k);
+            const exp = this.expandedParents[j.primaryKey];
+            if (exp?.jobs) collect(exp.jobs);
+          }
+        };
+        collect(jobs);
+        const kept = {};
+        for (const [eid, eData] of Object.entries(this.expandedParents)) {
+          if (reachable.has(String(eid))) kept[eid] = eData;
+        }
+        this.expandedParents = kept;
+
         const expandedIds = Object.keys(this.expandedParents);
         if (expandedIds.length > 0) {
           const refreshes = expandedIds.map(async (id) => {
             try {
               const d = await ArbiterAPI.listJobs(queue, {
-                parentId: id, limit: 200,
+                parentId: id, limit: 50,
                 suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
               });
               // Only update if still expanded (user may have collapsed during fetch)
@@ -272,10 +306,13 @@ document.addEventListener('alpine:init', () => {
           await Promise.all(refreshes);
         }
       } catch (e) {
+        if (seq !== this._loadSeq) return;
         console.error('Failed to load jobs:', e);
       } finally {
-        this.loading = false;
-        this.loaded = true;
+        if (seq === this._loadSeq) {
+          this.loading = false;
+          this.loaded = true;
+        }
       }
     },
 
@@ -284,8 +321,19 @@ document.addEventListener('alpine:init', () => {
       this._resetView();
     },
 
+    toggleViewMode() {
+      this.viewMode = this.viewMode === 'tree' ? 'flat' : 'tree';
+      this._resetView();
+    },
+
     applyFilter() {
-      this._resetView({ groupKey: this.groupKeyFilter, parentId: this.parentIdFilter });
+      const trimmed = this.parentIdFilter.trim();
+      if (trimmed && !/^\d+$/.test(trimmed)) {
+        showToast('Parent ID must be a positive integer', 'warning');
+        return;
+      }
+      this.parentIdFilter = trimmed;
+      this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
     },
 
     filterByParent(id) {
@@ -301,15 +349,23 @@ document.addEventListener('alpine:init', () => {
       this._startTimer();
     },
 
-    async cancelJob(id, childCount) {
+    async cancelJob(id, childCount, dlqChildCount) {
       const queue = Alpine.store('app').selectedQueue;
-      const msg = childCount > 0
-        ? `Cancel this job and its ${childCount} children?`
+      const parts = [];
+      if (childCount > 0) parts.push(`${childCount} active children`);
+      if (dlqChildCount > 0) parts.push(`${dlqChildCount} DLQ entries (will be orphaned)`);
+      const msg = parts.length > 0
+        ? `Cancel this job and ${parts.join(' + ')}?`
         : 'Cancel this job?';
       if (!confirm(msg)) return;
       try {
         await ArbiterAPI.cancelJob(queue, id);
-        this.loadJobs();
+        if (String(id) === this._appliedParentId) {
+          this.parentIdFilter = '';
+          this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
+        } else {
+          this.loadJobs();
+        }
       } catch (e) {
         showToast('Failed to cancel: ' + e.message);
       }
@@ -325,9 +381,12 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async moveToDLQ(id) {
+    async moveToDLQ(id, childCount) {
       const queue = Alpine.store('app').selectedQueue;
-      if (!confirm('Move this job to DLQ?')) return;
+      const msg = childCount > 0
+        ? `Move this job and its ${childCount} children to the DLQ?`
+        : 'Move this job to DLQ?';
+      if (!confirm(msg)) return;
       try {
         await ArbiterAPI.moveToDLQ(queue, id);
         this.loadJobs();
@@ -338,16 +397,22 @@ document.addEventListener('alpine:init', () => {
 
     async viewDetail(id) {
       const queue = Alpine.store('app').selectedQueue;
+      this._detailSeq = (this._detailSeq || 0) + 1;
+      const seq = this._detailSeq;
       try {
         const data = await ArbiterAPI.getJob(queue, id);
+        if (seq !== this._detailSeq) return;
         this.selectedJob = data.job;
         bootstrap.Modal.getOrCreateInstance(document.getElementById('jobDetailModal')).show();
       } catch (e) {
+        if (seq !== this._detailSeq) return;
+        this.selectedJob = null;
         showToast('Failed to load job: ' + e.message);
       }
     },
 
     async submitInsert() {
+      if (this.inserting) return;
       const queue = Alpine.store('app').selectedQueue;
       this.insertError = '';
 
@@ -367,6 +432,7 @@ document.addEventListener('alpine:init', () => {
         }
       }
 
+      this.inserting = true;
       try {
         const body = { payload };
         if (this.insertGroupKey) body.groupKey = this.insertGroupKey;
@@ -380,8 +446,11 @@ document.addEventListener('alpine:init', () => {
         this.insertDedupKey = '';
         this.insertDedupStrategy = 'ignore';
         this.insertPriority = 0;
+        this.loadJobs();
       } catch (e) {
         this.insertError = e.message;
+      } finally {
+        this.inserting = false;
       }
     },
   }, 'loadJobs'));

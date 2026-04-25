@@ -91,7 +91,7 @@ module Arbiter.Core.Operations
   ) where
 
 import Control.Monad (foldM, void, when)
-import Data.Aeson (FromJSON, Result (..), ToJSON, Value (Object), fromJSON, toJSON)
+import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
 import Data.Foldable (for_, toList)
 import Data.Functor qualified as Functor
 import Data.Int (Int32, Int64)
@@ -198,6 +198,7 @@ filterToClause (Tmpl.FilterParentId pid) = ("parent_id = ?", [pval CInt8 pid])
 filterToClause (Tmpl.FilterSuspended b) = ("suspended = ?", [pval CBool b])
 filterToClause Tmpl.FilterInFlight =
   ("attempts > 0 AND NOT suspended AND not_visible_until IS NOT NULL AND not_visible_until > NOW()", [])
+filterToClause Tmpl.FilterRootsOnly = ("parent_id IS NULL", [])
 
 -- | Execute a count/rows-affected query returning a single Int64.
 -- Returns 0 if the result set is empty or unexpected.

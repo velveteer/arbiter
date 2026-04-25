@@ -28,7 +28,7 @@ import Arbiter.Servant.Types
 
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B
+  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B&roots_only
     listJobs
       :: mode
         :- QueryParam "limit" Int
@@ -36,6 +36,7 @@ data JobsAPI payload mode = JobsAPI
           :> QueryParam "group_key" Text
           :> QueryParam "parent_id" Int64
           :> QueryParam "suspended" Bool
+          :> QueryFlag "roots_only"
           :> Get '[JSON] (JobsResponse payload)
   , -- POST /:table/jobs (insert new job)
     insertJob

@@ -29,11 +29,12 @@ const ArbiterAPI = {
   },
 
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, suspended } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, suspended, rootsOnly } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (suspended !== undefined && suspended !== '') qs += `&suspended=${suspended}`;
+    if (rootsOnly) qs += `&roots_only=true`;
     return this._fetch(`/${table}/jobs${qs}`);
   },
 
@@ -48,8 +49,10 @@ const ArbiterAPI = {
     });
   },
 
-  getInFlightJobs(table, { limit = 50, offset = 0 } = {}) {
-    return this._fetch(`/${table}/jobs/in-flight?limit=${limit}&offset=${offset}`);
+  getInFlightJobs(table, { limit = 50, offset = 0, parentId } = {}) {
+    let qs = `?limit=${limit}&offset=${offset}`;
+    if (parentId) qs += `&parent_id=${parentId}`;
+    return this._fetch(`/${table}/jobs/in-flight${qs}`);
   },
 
   cancelJob(table, id) {

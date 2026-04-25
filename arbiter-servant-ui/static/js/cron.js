@@ -14,6 +14,7 @@ document.addEventListener('alpine:init', () => {
     actionError: '',
     refreshInterval: null,
     active: false,
+    busyRows: {},
 
     init() {
       trackTabActive(this, '#tab-cron', {
@@ -26,18 +27,23 @@ document.addEventListener('alpine:init', () => {
         },
       });
 
-      document.addEventListener('visibilitychange', () => {
+      this._visibilityHandler = () => {
         if (document.hidden) {
           this.stopPolling();
         } else if (this.active) {
           this.loadSchedules();
           this.startPolling();
         }
-      });
+      };
+      document.addEventListener('visibilitychange', this._visibilityHandler);
     },
 
     destroy() {
       this.stopPolling();
+      if (this._visibilityHandler) {
+        document.removeEventListener('visibilitychange', this._visibilityHandler);
+        this._visibilityHandler = null;
+      }
     },
 
     startPolling() {
@@ -54,14 +60,22 @@ document.addEventListener('alpine:init', () => {
 
     async loadSchedules() {
       this.loading = true;
+      this._loadSeq = (this._loadSeq || 0) + 1;
+      const seq = this._loadSeq;
       try {
         const data = await ArbiterAPI.listCronSchedules();
+        if (seq !== this._loadSeq) return;
         this.schedules = data.cronSchedules || [];
       } catch (e) {
+        if (seq !== this._loadSeq) return;
         console.error('Failed to load cron schedules:', e);
       } finally {
-        this.loading = false;
+        if (seq === this._loadSeq) this.loading = false;
       }
+    },
+
+    isBusy(name) {
+      return !!this.busyRows[name];
     },
 
     effectiveExpression(s) {
@@ -105,6 +119,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async saveEdit() {
+      const name = this.editingName;
+      if (this.busyRows[name]) return;
       const body = {};
       if (this.editingField === 'expression') {
         body.overrideExpression = this.editValue || null;
@@ -112,16 +128,22 @@ document.addEventListener('alpine:init', () => {
         body.overrideOverlap = this.editValue || null;
       }
 
+      this.busyRows = { ...this.busyRows, [name]: true };
       try {
-        await ArbiterAPI.updateCronSchedule(this.editingName, body);
+        await ArbiterAPI.updateCronSchedule(name, body);
         this.cancelEdit();
-        this.loadSchedules();
+        await this.loadSchedules();
       } catch (e) {
         this.saveError = e.message;
+      } finally {
+        const next = { ...this.busyRows };
+        delete next[name];
+        this.busyRows = next;
       }
     },
 
     async resetToDefault(name, field) {
+      if (this.busyRows[name]) return;
       this.actionError = '';
       const body = {};
       if (field === 'expression') {
@@ -130,23 +152,35 @@ document.addEventListener('alpine:init', () => {
         body.overrideOverlap = null;
       }
 
+      this.busyRows = { ...this.busyRows, [name]: true };
       try {
         await ArbiterAPI.updateCronSchedule(name, body);
-        this.loadSchedules();
+        await this.loadSchedules();
       } catch (e) {
         this.actionError = 'Failed to reset: ' + e.message;
+      } finally {
+        const next = { ...this.busyRows };
+        delete next[name];
+        this.busyRows = next;
       }
     },
 
     async toggleEnabled(schedule) {
+      const name = schedule.name;
+      if (this.busyRows[name]) return;
       this.actionError = '';
+      this.busyRows = { ...this.busyRows, [name]: true };
       try {
-        await ArbiterAPI.updateCronSchedule(schedule.name, {
+        await ArbiterAPI.updateCronSchedule(name, {
           enabled: !schedule.enabled,
         });
-        this.loadSchedules();
+        await this.loadSchedules();
       } catch (e) {
         this.actionError = 'Failed to toggle: ' + e.message;
+      } finally {
+        const next = { ...this.busyRows };
+        delete next[name];
+        this.busyRows = next;
       }
     },
   }));

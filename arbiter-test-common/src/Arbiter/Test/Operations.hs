@@ -1563,6 +1563,53 @@ operationsSpec mkMessage runM = do
       claimedPayloads `shouldContain` [mkMessage "PauseChild1"]
       claimedPayloads `shouldContain` [mkMessage "PauseChild2"]
 
+    it "pause/resume children descends through naturally-suspended rollups" $ \env -> do
+      -- Tree: Grandparent → Parent (rollup) → [Leaf1, Leaf2]
+      -- Parent is naturally suspended (waiting for Leaf1, Leaf2). pauseChildren(GP)
+      -- should pause Leaf1, Leaf2 (the actual work) without disturbing Parent.
+      -- resumeChildren(GP) should resume Leaf1, Leaf2 only -- not Parent, because
+      -- Parent still has children in main queue and would run prematurely.
+      Right (grandparent :| rest) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "NestedGP"))
+              ( JT.rollup
+                  (defaultJob (mkMessage "NestedParent"))
+                  (JT.leaf (defaultJob (mkMessage "NestedLeaf1")) :| [JT.leaf (defaultJob (mkMessage "NestedLeaf2"))])
+                  :| []
+              )
+
+      let parent = head rest
+
+      -- Pause grandparent's subtree: should pause the leaves (the only claimable work).
+      paused <- runM env (HL.pauseChildren @m @registry @payload (primaryKey grandparent))
+      paused `shouldBe` 2
+
+      -- Nothing should be claimable now.
+      noneClaimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
+      length noneClaimed `shouldBe` 0
+
+      -- Parent should still be suspended (naturally so -- not touched by pause).
+      Just parentAfterPause <- runM env (HL.getJobById @m @registry @payload (primaryKey parent))
+      suspended parentAfterPause `shouldBe` True
+
+      -- Resume grandparent's subtree: should resume the leaves only.
+      -- The naturally-suspended Parent rollup must NOT be resumed, otherwise its
+      -- handler would run with no child results.
+      resumed <- runM env (HL.resumeChildren @m @registry @payload (primaryKey grandparent))
+      resumed `shouldBe` 2
+
+      -- Parent should still be suspended.
+      Just parentAfterResume <- runM env (HL.getJobById @m @registry @payload (primaryKey parent))
+      suspended parentAfterResume `shouldBe` True
+
+      -- Leaves should be claimable.
+      claimedLeaves <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
+      let leafPayloads = map payload claimedLeaves
+      leafPayloads `shouldContain` [mkMessage "NestedLeaf1"]
+      leafPayloads `shouldContain` [mkMessage "NestedLeaf2"]
+
     it "moveToDLQ on only child wakes parent" $ \env -> do
       Right (parent :| _children) <-
         runM env $
@@ -2121,21 +2168,31 @@ operationsSpec mkMessage runM = do
       [c] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "child failed" c)
 
-      -- Retry from DLQ - child re-inserted into main queue
+      -- Retry from DLQ: the child is re-inserted, and the rollup parent
+      -- (which had been woken when its last child was DLQ'd) is re-suspended
+      -- so its handler can't run with a now-incomplete view of children.
       dlqJobs <- dlqAll env
       Just retried <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
       parentId retried `shouldBe` Just (primaryKey parent)
 
-      -- Both parent (woken earlier) and retried child are claimable.
-      -- Claiming parent first is harmless - ack's suspend CTE re-suspends it.
+      -- Only the retried child should be claimable; the parent is suspended
+      -- again because it has a child in the main queue.
+      Just parentAfterRetry <- runM env (HL.getJobById @m @registry @payload (primaryKey parent))
+      suspended parentAfterRetry `shouldBe` True
+
       claimed <- claimJobs env 2
-      length claimed `shouldBe` 2
+      length claimed `shouldBe` 1
+      payload (head claimed) `shouldBe` mkMessage "DLQRecoveryChild"
 
-      -- Ack both: parent gets re-suspended (has child), child gets deleted
-      forM_ claimed $ \j -> void $ runM env (HL.ackJob j)
-
-      -- Parent should be resumed again (child ack woke it)
+      -- Ack the child: parent wakes naturally because no more children.
+      void $ runM env (HL.ackJob (head claimed))
       assertNotSuspended env (primaryKey parent)
+
+      -- Parent is now claimable for its completion round.
+      claimedParent <- claimJobs env 1
+      length claimedParent `shouldBe` 1
+      primaryKey (head claimedParent) `shouldBe` primaryKey parent
+      void $ runM env (HL.ackJob (head claimedParent))
 
     it "retryFromDLQ auto-retries parent from DLQ when retrying child" $ \env -> do
       Right (parent :| _children) <-

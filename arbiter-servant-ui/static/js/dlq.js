@@ -39,18 +39,23 @@ document.addEventListener('alpine:init', () => {
       trackTabActive(this, '#tab-dlq', {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
         onHide: () => {
+          this._loadSeq = (this._loadSeq || 0) + 1;
+          const modalEl = document.getElementById('dlqDetailModal');
+          if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
           clearFiltersFromUrl();
-          if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
-        },
-      });
-      window.addEventListener('queue-changed', () => {
-        if (this.active) {
           this.groupKeyFilter = '';
           this.parentIdFilter = '';
           this._appliedGroupKey = '';
           this._appliedParentId = '';
-          this._resetView();
-        }
+          if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
+        },
+      });
+      window.addEventListener('queue-changed', () => {
+        this.groupKeyFilter = '';
+        this.parentIdFilter = '';
+        this._appliedGroupKey = '';
+        this._appliedParentId = '';
+        if (this.active) this._resetView();
       });
       window.addEventListener('sse-reconnect', () => {
         if (this.active) this.loadDLQ();
@@ -85,8 +90,11 @@ document.addEventListener('alpine:init', () => {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
       this.loading = true;
+      this._loadSeq = (this._loadSeq || 0) + 1;
+      const seq = this._loadSeq;
       const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
+      const startingPending = this.pendingChanges;
       try {
         const data = await ArbiterAPI.listDLQ(queue, {
           limit: this.limit,
@@ -94,17 +102,28 @@ document.addEventListener('alpine:init', () => {
           parentId: pid || undefined,
           groupKey: gk || undefined,
         });
+        if (seq !== this._loadSeq) return;
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this.dlqJobs = data.dlqJobs || [];
         this.total = data.dlqTotal || 0;
-        this.pendingChanges = 0;
+        this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
+
+        // Clamp offset if past last page (e.g. after a delete dropped the total).
+        if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
+          this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
+          this.loadDLQ();
+          return;
+        }
       } catch (e) {
+        if (seq !== this._loadSeq) return;
         console.error('Failed to load DLQ:', e);
       } finally {
-        this.loading = false;
-        this.loaded = true;
+        if (seq === this._loadSeq) {
+          this.loading = false;
+          this.loaded = true;
+        }
       }
     },
 
@@ -136,7 +155,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     applyFilter() {
-      this._resetView({ groupKey: this.groupKeyFilter, parentId: this.parentIdFilter });
+      const trimmed = this.parentIdFilter.trim();
+      if (trimmed && !/^\d+$/.test(trimmed)) {
+        showToast('Parent ID must be a positive integer', 'warning');
+        return;
+      }
+      this.parentIdFilter = trimmed;
+      this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
     },
 
     filterByParent(id) {
