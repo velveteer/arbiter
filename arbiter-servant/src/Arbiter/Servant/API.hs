@@ -49,11 +49,21 @@ parseEnum toName t =
 instance FromHttpApiData JobSortColumn where
   parseQueryParam = parseEnum jobSortColumnName
 
+instance ToHttpApiData JobSortColumn where
+  toUrlPiece = jobSortColumnName
+
 instance FromHttpApiData DLQSortColumn where
   parseQueryParam = parseEnum dlqSortColumnName
 
+instance ToHttpApiData DLQSortColumn where
+  toUrlPiece = dlqSortColumnName
+
 instance FromHttpApiData SortDir where
   parseQueryParam = parseEnum sortDirSql
+
+instance ToHttpApiData SortDir where
+  toUrlPiece = sortDirSql
+
 
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
