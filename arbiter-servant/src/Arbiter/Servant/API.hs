@@ -49,6 +49,9 @@ parseEnum toName t =
 instance FromHttpApiData JobSortColumn where
   parseQueryParam = parseEnum jobSortColumnName
 
+instance ToHttpApiData JobSortColumn where
+  toUrlPiece = jobSortColumnName
+
 instance FromHttpApiData DLQSortColumn where
   parseQueryParam = parseEnum dlqSortColumnName
 
