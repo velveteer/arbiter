@@ -11,6 +11,7 @@
 module Arbiter.Servant.Server
   ( -- * Server handlers
     arbiterServer
+  , arbiterServerHoisted
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
@@ -778,6 +779,18 @@ arbiterServer
   => ArbiterServerConfig registry
   -> ServerT (ArbiterAPI registry) Handler
 arbiterServer = buildServer @registry @registry
+
+-- | Hoisted server for integration into a route tree using a custom monad.
+arbiterServerHoisted
+  :: forall registry m
+   . ( BuildServer registry registry
+     , HasServer (ArbiterAPI registry) '[]
+     )
+  => (forall x. Handler x -> m x)
+  -> ArbiterServerConfig registry
+  -> ServerT (ArbiterAPI registry) m
+arbiterServerHoisted nt config =
+  hoistServer (Proxy @(ArbiterAPI registry)) nt (arbiterServer config)
 
 -- | Convert to WAI Application
 arbiterApp
