@@ -30,7 +30,9 @@ module Arbiter.Servant.UI
   ( -- * Servant integration
     AdminUI
   , adminUIServer
+  , adminUIServerHoisted
   , adminUIServerDev
+  , adminUIServerDevHoisted
 
     -- * Standalone WAI app
   , adminApplication
@@ -65,6 +67,10 @@ type AdminUI = Raw
 -- | Servant server for 'AdminUI'
 adminUIServer :: Server AdminUI
 adminUIServer = Tagged adminApplication
+
+-- | Hoisted variant for integration into a route tree using a custom monad.
+adminUIServerHoisted :: forall m. (forall x. Handler x -> m x) -> ServerT AdminUI m
+adminUIServerHoisted nt = hoistServer (Proxy @AdminUI) nt adminUIServer
 
 -- | Standalone WAI Application serving embedded static files.
 --
@@ -129,6 +135,11 @@ contentTypeHeader path
 -- | Dev-mode Servant server for 'AdminUI' - serves from disk.
 adminUIServerDev :: FilePath -> Server AdminUI
 adminUIServerDev dir = Tagged (devAdminApplication dir)
+
+-- | Hoisted dev-mode variant for integration into a route tree using a custom monad.
+adminUIServerDevHoisted
+  :: forall m. (forall x. Handler x -> m x) -> FilePath -> ServerT AdminUI m
+adminUIServerDevHoisted nt dir = hoistServer (Proxy @AdminUI) nt (adminUIServerDev dir)
 
 -- | Combine arbiterApp with admin UI
 --

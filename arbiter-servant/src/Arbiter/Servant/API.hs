@@ -64,7 +64,6 @@ instance FromHttpApiData SortDir where
 instance ToHttpApiData SortDir where
   toUrlPiece = sortDirSql
 
-
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
   { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B&roots_only&in_flight&sort_by=...&sort_dir=...
