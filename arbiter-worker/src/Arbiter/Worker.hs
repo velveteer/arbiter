@@ -61,11 +61,13 @@ import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Pool qualified as Pool
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
+import Database.PostgreSQL.Simple qualified as PS
 import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
 import System.Environment (lookupEnv)
@@ -267,11 +269,19 @@ runWorkerPool config = do
   let workerCap = workerCount config
       mLiveness = livenessConfig config
       mLivenessSignal = fmap livenessSignal mLiveness
+      heartbeatPoolSize = max 1 (workerCap `div` 2)
 
   -- Create shared state
   workQueue <- liftIO $ newTBQueueIO (fromIntegral workerCap)
   busyWorkerCount <- liftIO $ newTVarIO 0
   workerFinishedVar <- liftIO $ newTVarIO False
+  heartbeatPool <-
+    liftIO . Pool.newPool $
+      Pool.defaultPoolConfig
+        (PS.connectPostgreSQL (connStr config))
+        PS.close
+        300
+        heartbeatPoolSize
 
   evalContT $ do
     -- Spawn liveness probe
@@ -291,7 +301,7 @@ runWorkerPool config = do
     -- Spawn workers
     workers <-
       replicateM workerCap . ContT . withAsync $
-        workerLoop config workQueue busyWorkerCount workerFinishedVar
+        workerLoop config heartbeatPool workQueue busyWorkerCount workerFinishedVar
 
     -- Spawn cron scheduler (only when cronJobs is non-empty)
     cron <-
@@ -393,13 +403,15 @@ workerLoop
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
+  -> Pool.Pool PS.Connection
+  -- ^ Dedicated heartbeat connection pool
   -> TBQueue (NonEmpty (Job.JobRead payload))
   -> TVar Int
   -- ^ Busy worker count
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
+workerLoop config heartbeatPool workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
   -- Read batch from queue (singleton in single mode, multiple in batched mode)
   jobBatch <- atomically $ do
     batch <- readTBQueue workQueue
@@ -419,7 +431,7 @@ workerLoop config workQueue busyCount workerFinishedVar = forever $ mask $ \unma
         (\job -> runHook (logConfig config) "onJobClaimed" $ Job.onJobClaimed (observabilityHooks config) job currentTime)
         jobBatch
       -- Unmask for actual job processing (allow cancellation during work)
-      result <- trySyncOrAsync $ unmask $ processJobsWithRetry config jobBatch
+      result <- trySyncOrAsync $ unmask $ processJobsWithRetry config heartbeatPool jobBatch
       liftIO $ handleWorkerException (logConfig config) result
 
 -- | Common exception handling for worker loops
@@ -455,9 +467,10 @@ processJobsWithRetry
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
+  -> Pool.Pool PS.Connection
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config jobs = do
+processJobsWithRetry config heartbeatPool jobs = do
   let hooks = observabilityHooks config
       -- Use minimum maxAttempts across all jobs in the batch
       maxAtts = minimum $ map (\job -> fromMaybe (maxAttempts config) (Job.maxAttempts job)) (toList jobs)
@@ -471,7 +484,7 @@ processJobsWithRetry config jobs = do
         (visibilityTimeout config)
         startTime
         jobs
-        (connStr config)
+        heartbeatPool
         schemaName
         (logConfig config)
         (fmap livenessSignal (livenessConfig config))

@@ -15,15 +15,15 @@ import Arbiter.Simple
 import Control.Concurrent.MVar qualified as MVar
 import Control.Monad (forever, unless)
 import Control.Monad.IO.Class (liftIO)
-import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
 import Data.List.NonEmpty (NonEmpty)
+import Data.Pool (Pool, withResource)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
 import Database.PostgreSQL.Simple qualified as PS
-import UnliftIO (MonadUnliftIO, bracket)
+import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (race)
 import UnliftIO.Concurrent (threadDelay)
 
@@ -61,8 +61,8 @@ withJobsHeartbeat
   -- ^ Start time (for calculating elapsed time in heartbeat hook)
   -> NonEmpty (JobRead payload)
   -- ^ The job(s) being processed
-  -> ByteString
-  -- ^ Postgres connection string for the dedicated heartbeat connection
+  -> Pool PS.Connection
+  -- ^ Dedicated heartbeat connection pool (separate from the worker pool)
   -> Text
   -- ^ Schema name
   -> LogConfig
@@ -72,15 +72,13 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs connStr schemaName logCfg mLivenessMVar action =
+withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatPool schemaName logCfg mLivenessMVar action =
   either absurd id <$> race heartbeatThread action
   where
     heartbeatThread =
       retryOnExceptionForever logCfg "Heartbeat" 3 $
-        bracket
-          (liftIO (PS.connectPostgreSQL connStr))
-          (liftIO . PS.close)
-          (\conn -> forever (tick conn))
+        withRunInIO $ \run ->
+          withResource heartbeatPool $ \conn -> run (forever (tick conn))
 
     tick conn = do
       liftIO $ threadDelay (ceiling (intervalSecs * 1_000_000))
