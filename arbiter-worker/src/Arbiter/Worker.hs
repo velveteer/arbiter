@@ -462,6 +462,7 @@ processJobsWithRetry config jobs = do
       -- Use minimum maxAttempts across all jobs in the batch
       maxAtts = minimum $ map (\job -> fromMaybe (maxAttempts config) (Job.maxAttempts job)) (toList jobs)
   startTime <- liftIO getCurrentTime
+  schemaName <- Arb.getSchema
   result <-
     tryAny
       $ withJobsHeartbeat
@@ -470,10 +471,11 @@ processJobsWithRetry config jobs = do
         (visibilityTimeout config)
         startTime
         jobs
+        (connStr config)
+        schemaName
         (logConfig config)
         (fmap livenessSignal (livenessConfig config))
       $ do
-        schemaName <- Arb.getSchema
         if useWorkerTransaction config
           then withDbTransaction $ do
             handlerResult <- runHandler config schemaName jobs

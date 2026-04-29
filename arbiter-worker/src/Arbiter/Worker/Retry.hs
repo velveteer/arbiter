@@ -1,13 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Retry combinator for worker infrastructure threads (notification listener,
+-- | Retry combinators for worker infrastructure threads (notification listener,
 -- cron scheduler, etc.) that should survive transient database failures.
 module Arbiter.Worker.Retry
   ( retryOnException
+  , retryOnExceptionForever
   ) where
 
+import Arbiter.Core.Exceptions (JobException)
+import Control.Monad (forever)
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, liftIO)
+import Data.Time (NominalDiffTime)
+import UnliftIO (MonadUnliftIO, fromException, liftIO, throwIO)
 import UnliftIO.Async (race)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
@@ -55,3 +59,26 @@ retryOnException stateVar logCfg label action = loop
               case sleepResult of
                 Left () -> pure ()
                 Right () -> loop
+
+-- | Like 'retryOnException' but never returns on its own, even if the worker
+-- is shutting down. 'JobException' values still propagate.
+retryOnExceptionForever
+  :: (MonadUnliftIO m)
+  => LogConfig
+  -> T.Text
+  -- ^ Label for log messages
+  -> NominalDiffTime
+  -- ^ Delay between retries on transient failure
+  -> m a
+  -- ^ Action to run (typically itself a forever loop)
+  -> m b
+retryOnExceptionForever logCfg label delay action = forever $ do
+  result <- tryAny action
+  case result of
+    Right _ -> pure ()
+    Left e
+      | Just (_ :: JobException) <- fromException e -> throwIO e
+      | otherwise -> do
+          tryLog logCfg Error $
+            label <> " error (retrying): " <> T.pack (show e)
+          liftIO $ threadDelay (ceiling (delay * 1_000_000))

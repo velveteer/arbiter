@@ -191,6 +191,52 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             -- But never exceeded the worker count
             maxActive `shouldSatisfy` (<= 3)
 
+      it "heartbeat keeps lease alive when worker pool is saturated" $ \env -> do
+        -- Pool of size 1: handler's withDbTransaction takes the only slot,
+        -- heartbeat thread blocks on withResource forever.
+        starvedPool <-
+          newPool $
+            setNumStripes (Just 1) $
+              defaultPoolConfig (connectPostgreSQL connStr) close 300 1
+        let starvedEnv = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) starvedPool testSchema
+
+        void $ runSimpleDb starvedEnv $ HL.insertJob (defaultJob (SimpleTask "starve-me"))
+
+        handlerStartedMV <- MVar.newEmptyMVar
+
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = liftIO $ do
+              void $ MVar.tryPutMVar handlerStartedMV ()
+              threadDelay 10_000_000 -- well past visibilityTimeout
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb starvedEnv $ defaultWorkerConfig connStr 1 handler
+
+        withAsync
+          ( runSimpleDb starvedEnv $
+              runWorkerPool
+                ( config
+                    { workerCount = 1
+                    , visibilityTimeout = 3
+                    , heartbeatInterval = 1
+                    , pollInterval = 0.1
+                    , jitter = NoJitter
+                    }
+                )
+          )
+          $ \_ -> do
+            MVar.takeMVar handlerStartedMV
+            threadDelay 4_500_000 -- past the 3s lease
+            reclaimed <-
+              runSimpleDb env $
+                HL.claimNextVisibleJobs
+                  @(SimpleDb WorkerTestRegistry IO)
+                  @WorkerTestRegistry
+                  @WorkerTestPayload
+                  1
+                  3
+
+            length reclaimed `shouldBe` 0
+
       it "retries failed jobs up to max attempts" $ \env -> do
         -- Track attempts per job
         attemptsRef <- newIORef (0 :: Int)
