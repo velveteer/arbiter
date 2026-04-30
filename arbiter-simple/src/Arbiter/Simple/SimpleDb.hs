@@ -1,5 +1,4 @@
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | Simple database monad for Arbiter with postgresql-simple backend.
 --
@@ -30,7 +29,7 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
-import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks, local)
@@ -127,7 +126,7 @@ inTransaction conn schemaName action =
 -- For workers, use 'createSimpleEnvWithConfig' with 'poolConfigForWorkers' instead.
 createSimpleEnv
   :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
+   . (MonadIO m)
   => Proxy registry
   -- ^ Type-level job payload registry
   -> ByteString
@@ -152,7 +151,7 @@ createSimpleEnv proxy connStr schemaName =
 -- @
 createSimpleEnvWithConfig
   :: forall registry m
-   . (AllQueuesUnique registry, MonadIO m)
+   . (MonadIO m)
   => Proxy registry
   -- ^ Type-level job payload registry
   -> ByteString
@@ -181,8 +180,7 @@ createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
 -- | Create a SimpleEnv with a user-provided connection pool
 createSimpleEnvWithPool
   :: forall registry
-   . (AllQueuesUnique registry)
-  => Proxy registry
+   . Proxy registry
   -- ^ Type-level job payload registry
   -> Pool Connection
   -- ^ User-provided connection pool

@@ -26,7 +26,7 @@ import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobRead, isR
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (AllQueuesUnique, JobPayloadRegistry, RegistryTables (..))
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText)
@@ -95,8 +95,7 @@ serverPoolConfig =
 -- @enableEventStreaming = True@ to set up the database triggers for SSE.
 initArbiterServer
   :: forall registry
-   . (AllQueuesUnique registry)
-  => Proxy registry
+   . Proxy registry
   -> ByteString
   -> Text
   -> IO (ArbiterServerConfig registry)

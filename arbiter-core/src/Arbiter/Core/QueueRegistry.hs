@@ -1,5 +1,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 
 -- | Type-level utilities for job queue registry validation.
 --
@@ -65,12 +66,12 @@ type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Co
   NotInTables table ('(_, _) ': rest) = NotInTables table rest
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
-class RegistryTables (registry :: JobPayloadRegistry) where
+class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
   registryTableNames :: Proxy registry -> [Text]
 
 instance RegistryTables '[] where
   registryTableNames _ = []
 
-instance (KnownSymbol table, RegistryTables rest) => RegistryTables ('(table, payload) ': rest) where
+instance (KnownSymbol table, NotInTables table rest, RegistryTables rest) => RegistryTables ('(table, payload) ': rest) where
   registryTableNames _ =
     T.pack (symbolVal (Proxy @table)) : registryTableNames (Proxy @rest)

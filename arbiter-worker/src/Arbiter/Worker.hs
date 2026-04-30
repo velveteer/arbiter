@@ -47,7 +47,9 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.PoolConfig qualified as PoolConfig
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Simple qualified as Simple
 import Control.Exception (SomeException, fromException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.Catch (MonadMask)
@@ -61,13 +63,11 @@ import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
-import Data.Pool qualified as Pool
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
-import Database.PostgreSQL.Simple qualified as PS
 import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
 import System.Environment (lookupEnv)
@@ -269,19 +269,20 @@ runWorkerPool config = do
   let workerCap = workerCount config
       mLiveness = livenessConfig config
       mLivenessSignal = fmap livenessSignal mLiveness
-      heartbeatPoolSize = max 1 (workerCap `div` 2)
 
   -- Create shared state
   workQueue <- liftIO $ newTBQueueIO (fromIntegral workerCap)
   busyWorkerCount <- liftIO $ newTVarIO 0
   workerFinishedVar <- liftIO $ newTVarIO False
-  heartbeatPool <-
-    liftIO . Pool.newPool $
-      Pool.defaultPoolConfig
-        (PS.connectPostgreSQL (connStr config))
-        PS.close
-        300
-        heartbeatPoolSize
+
+  -- Dedicated heartbeat env
+  schemaName <- Arb.getSchema
+  heartbeatEnv <-
+    Simple.createSimpleEnvWithConfig
+      (Proxy @registry)
+      (connStr config)
+      schemaName
+      PoolConfig.defaultPoolConfig {PoolConfig.poolSize = max 1 (workerCap `div` 2)}
 
   evalContT $ do
     -- Spawn liveness probe
@@ -301,7 +302,7 @@ runWorkerPool config = do
     -- Spawn workers
     workers <-
       replicateM workerCap . ContT . withAsync $
-        workerLoop config heartbeatPool workQueue busyWorkerCount workerFinishedVar
+        workerLoop config heartbeatEnv workQueue busyWorkerCount workerFinishedVar
 
     -- Spawn cron scheduler (only when cronJobs is non-empty)
     cron <-
@@ -403,15 +404,14 @@ workerLoop
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
-  -> Pool.Pool PS.Connection
-  -- ^ Dedicated heartbeat connection pool
+  -> Simple.SimpleEnv registry
   -> TBQueue (NonEmpty (Job.JobRead payload))
   -> TVar Int
   -- ^ Busy worker count
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config heartbeatPool workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
+workerLoop config heartbeatEnv workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
   -- Read batch from queue (singleton in single mode, multiple in batched mode)
   jobBatch <- atomically $ do
     batch <- readTBQueue workQueue
@@ -431,7 +431,7 @@ workerLoop config heartbeatPool workQueue busyCount workerFinishedVar = forever 
         (\job -> runHook (logConfig config) "onJobClaimed" $ Job.onJobClaimed (observabilityHooks config) job currentTime)
         jobBatch
       -- Unmask for actual job processing (allow cancellation during work)
-      result <- trySyncOrAsync $ unmask $ processJobsWithRetry config heartbeatPool jobBatch
+      result <- trySyncOrAsync $ unmask $ processJobsWithRetry config heartbeatEnv jobBatch
       liftIO $ handleWorkerException (logConfig config) result
 
 -- | Common exception handling for worker loops
@@ -467,10 +467,10 @@ processJobsWithRetry
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
-  -> Pool.Pool PS.Connection
+  -> Simple.SimpleEnv registry
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config heartbeatPool jobs = do
+processJobsWithRetry config heartbeatEnv jobs = do
   let hooks = observabilityHooks config
       -- Use minimum maxAttempts across all jobs in the batch
       maxAtts = minimum $ map (\job -> fromMaybe (maxAttempts config) (Job.maxAttempts job)) (toList jobs)
@@ -484,8 +484,7 @@ processJobsWithRetry config heartbeatPool jobs = do
         (visibilityTimeout config)
         startTime
         jobs
-        heartbeatPool
-        schemaName
+        heartbeatEnv
         (logConfig config)
         (fmap livenessSignal (livenessConfig config))
       $ do

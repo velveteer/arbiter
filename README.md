@@ -180,16 +180,6 @@ Set `useWorkerTransaction = False` for manual transaction control - you must cal
 - **Same group key** - processed serially. Only one visible job (or job batch) per group is eligible for claiming.
 - **No group key** - processed concurrently by any available worker.
 
-Group eligibility is maintained in a dedicated `{queue}_groups` table via statement-level AFTER triggers, with a periodic reaper to correct drift.
-
-### Worker Pool Internals
-
-1. **Dispatcher** - claims jobs via `LISTEN/NOTIFY` with polling fallback.
-2. **N worker threads** - pull from a shared in-memory queue.
-3. **Heartbeat** - extends visibility timeouts for in-flight jobs.
-4. **Cron** - inserts scheduled jobs on tick.
-5. **Reaper** - periodically corrects drift in the groups table.
-
 ## Job Features
 
 ### Deduplication

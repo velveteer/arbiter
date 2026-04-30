@@ -7,23 +7,16 @@ module Arbiter.Worker.Heartbeat
 import Arbiter.Core.Exceptions (throwJobStolen)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, ObservabilityHooks (..))
-import Arbiter.Simple
-  ( SimpleConnectionPool (..)
-  , SimpleEnv (..)
-  , runSimpleDb
-  )
+import Arbiter.Simple (SimpleEnv, runSimpleDb)
 import Control.Concurrent.MVar qualified as MVar
 import Control.Monad (forever, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList, traverse_)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Pool (Pool, withResource)
-import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
-import Database.PostgreSQL.Simple qualified as PS
-import UnliftIO (MonadUnliftIO, withRunInIO)
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async (race)
 import UnliftIO.Concurrent (threadDelay)
 
@@ -49,7 +42,7 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 --
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
-  :: forall m payload a
+  :: forall registry m payload a
    . (JobPayload payload, MonadUnliftIO m)
   => ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
@@ -61,10 +54,8 @@ withJobsHeartbeat
   -- ^ Start time (for calculating elapsed time in heartbeat hook)
   -> NonEmpty (JobRead payload)
   -- ^ The job(s) being processed
-  -> Pool PS.Connection
-  -- ^ Dedicated heartbeat connection pool (separate from the worker pool)
-  -> Text
-  -- ^ Schema name
+  -> SimpleEnv registry
+  -- ^ Dedicated heartbeat env (own connection pool, separate from worker pool)
   -> LogConfig
   -- ^ Log configuration
   -> Maybe (MVar.MVar ())
@@ -72,18 +63,17 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatPool schemaName logCfg mLivenessMVar action =
+withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatEnv logCfg mLivenessMVar action =
   either absurd id <$> race heartbeatThread action
   where
     heartbeatThread =
       retryOnExceptionForever logCfg "Heartbeat" 3 $
-        withRunInIO $ \run ->
-          withResource heartbeatPool $ \conn -> run (forever (tick conn))
+        forever tick
 
-    tick conn = do
+    tick = do
       liftIO $ threadDelay (ceiling (intervalSecs * 1_000_000))
       results <-
-        runSimpleDb (envFor conn) $
+        runSimpleDb heartbeatEnv $
           Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
       traverse_ (\mv -> liftIO $ MVar.tryPutMVar mv ()) mLivenessMVar
       let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
@@ -101,14 +91,3 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatPool sc
               onJobHeartbeat hooks job currentTime startTime
         )
         activeJobs
-
-    envFor conn =
-      SimpleEnv
-        { schema = schemaName
-        , simplePool =
-            SimpleConnectionPool
-              { connectionPool = Nothing
-              , activeConn = Just conn
-              , transactionDepth = 0
-              }
-        }

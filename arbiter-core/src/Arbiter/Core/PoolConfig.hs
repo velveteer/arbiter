@@ -31,7 +31,7 @@ defaultPoolConfig =
     , poolStripes = Just 1
     }
 
--- | @workerCount + 5@ connections (headroom for dispatcher and heartbeats).
+-- | @workerCount + 5@ connections.
 -- Stripes set to @min(capabilities, poolSize)@.
 poolConfigForWorkers :: (MonadIO m) => Int -> m PoolConfig
 poolConfigForWorkers workerCnt = do

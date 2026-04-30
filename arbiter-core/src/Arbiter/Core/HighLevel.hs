@@ -1,5 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | High-level API for job queue operations.
 --
