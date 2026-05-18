@@ -1635,11 +1635,17 @@ upsertCronDefault
   -- ^ Default cron expression
   -> Text
   -- ^ Default overlap policy
+  -> Maybe Text
+  -- ^ Default IANA tz name (@Nothing@ = UTC).
   -> m Int64
-upsertCronDefault schemaName scheduleName defaultExpr defaultOv =
+upsertCronDefault schemaName scheduleName defaultExpr defaultOv defaultTz =
   executeStatement
     (Tmpl.upsertCronDefaultSQL schemaName)
-    [pval CText scheduleName, pval CText defaultExpr, pval CText defaultOv]
+    [ pval CText scheduleName
+    , pval CText defaultExpr
+    , pval CText defaultOv
+    , pnul CText defaultTz
+    ]
 
 -- | List all cron schedules ordered by name.
 listCronSchedules
@@ -1682,7 +1688,7 @@ updateCronSchedule
   -- ^ Schedule name
   -> CronScheduleUpdate
   -> m Int64
-updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mEnabled) = do
+updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mTz mEnabled) = do
   let (clauses, params) =
         mconcat
           [ case mExpr of
@@ -1693,6 +1699,10 @@ updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mE
               Nothing -> ([], [])
               Just Nothing -> (["override_overlap = NULL"], [])
               Just (Just ov) -> (["override_overlap = ?"], [pval CText ov])
+          , case mTz of
+              Nothing -> ([], [])
+              Just Nothing -> (["override_timezone = NULL"], [])
+              Just (Just tz) -> (["override_timezone = ?"], [pval CText tz])
           , case mEnabled of
               Nothing -> ([], [])
               Just True -> (["enabled = TRUE"], [])

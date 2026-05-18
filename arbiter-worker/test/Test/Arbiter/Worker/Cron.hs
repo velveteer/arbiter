@@ -27,6 +27,7 @@ import Data.Time
   )
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
+import System.Cron (parseCronSchedule)
 import Test.Hspec
   ( Spec
   , around
@@ -36,6 +37,7 @@ import Test.Hspec
   , it
   , runIO
   , shouldBe
+  , shouldNotBe
   , shouldSatisfy
   )
 
@@ -45,12 +47,16 @@ import Arbiter.Worker.Cron
   , OverlapPolicy (..)
   , computeDelayMicros
   , cronJob
+  , cronJobInTimezone
   , enumMinutes
   , enumerateCatchUpTicks
   , formatMinute
+  , formatMinuteInTimezone
   , initCronSchedules
   , makeDedupKey
+  , matchesInTimezone
   , processCronCatchUp
+  , resolveTZ
   , truncateToMinute
   )
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
@@ -134,6 +140,120 @@ spec connStr = do
       let Right cj = cronJob "nightly" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
           tick = mkTime 2025 6 15 3 0 0
       makeDedupKey cj tick `shouldBe` "arbiter_cron:nightly:2025-06-15T03:00"
+
+  describe "timezone handling" $ do
+    it "cronJobInTimezone rejects an unknown Olson name" $ do
+      let result =
+            cronJobInTimezone
+              "test"
+              "Made/Up_Zone"
+              "0 3 * * *"
+              SkipOverlap
+              (\_ _ -> defaultJob (SimpleTask "x"))
+      case result of
+        Left _ -> pure ()
+        Right _ -> expectationFailure "Expected Left for invalid timezone"
+
+    it "cronJobInTimezone accepts a real Olson name and sets the field" $ do
+      let result =
+            cronJobInTimezone
+              "ny"
+              "America/New_York"
+              "0 3 * * *"
+              SkipOverlap
+              (\_ _ -> defaultJob (SimpleTask "x"))
+      case result of
+        Right cj -> timezone cj `shouldBe` Just "America/New_York"
+        Left err -> expectationFailure $ "Expected Right, got: " <> err
+
+    it "resolveTZ knows UTC and Etc/UTC" $ do
+      case resolveTZ "UTC" of
+        Just _ -> pure ()
+        Nothing -> expectationFailure "Expected UTC to resolve"
+      case resolveTZ "Etc/UTC" of
+        Just _ -> pure ()
+        Nothing -> expectationFailure "Expected Etc/UTC to resolve"
+
+    it "matchesInTimezone with Nothing == scheduleMatches in UTC" $ do
+      let Right sched = parseCronSchedule "0 3 * * *"
+          tick = mkTime 2025 6 15 3 0 0
+      matchesInTimezone Nothing sched tick `shouldBe` True
+
+    it "DST spring-forward: '30 2 * * *' in America/New_York does not fire on the gap day" $ do
+      -- On 2025-03-09 in NY, clocks jump 02:00 EST -> 03:00 EDT. Local 02:30
+      -- does not exist that day. The UTC minute that would correspond to
+      -- 02:30 local maps to 03:30 EDT instead. Cron must not fire.
+      let Right sched = parseCronSchedule "30 2 * * *"
+          tz = Just "America/New_York"
+          -- Walk every UTC minute on 2025-03-09 (and a buffer on either
+          -- side) checking that none match locally to 02:30 NY.
+          ticks =
+            [ mkTime 2025 3 9 h m 0
+            | h <- [0 .. 23]
+            , m <- [0 .. 59]
+            ]
+          matches = filter (matchesInTimezone tz sched) ticks
+      matches `shouldBe` []
+
+    it "DST spring-forward: same expression fires normally on a non-DST day" $ do
+      -- Sanity check that the matcher fires on a normal day.
+      let Right sched = parseCronSchedule "30 2 * * *"
+          tz = Just "America/New_York"
+          ticks =
+            [ mkTime 2025 3 10 h m 0
+            | h <- [0 .. 23]
+            , m <- [0 .. 59]
+            ]
+          matches = filter (matchesInTimezone tz sched) ticks
+      length matches `shouldBe` 1
+
+    it "DST fall-back: '30 1 * * *' in America/New_York matches twice in UTC" $ do
+      -- On 2025-11-02 in NY, clocks fall back 02:00 EDT -> 01:00 EST. Local
+      -- 01:30 happens twice: once as EDT (05:30 UTC) and once as EST
+      -- (06:30 UTC). Both UTC ticks should match locally, and the local-minute
+      -- dedup key collapses them to a single fire.
+      let Right sched = parseCronSchedule "30 1 * * *"
+          tz = Just "America/New_York"
+          ticks =
+            [ mkTime 2025 11 2 h m 0
+            | h <- [0 .. 23]
+            , m <- [0 .. 59]
+            ]
+          matches = filter (matchesInTimezone tz sched) ticks
+      length matches `shouldBe` 2
+      -- Both matches format to the same local minute, so AllowOverlap dedup
+      -- blocks the second insert.
+      map (formatMinuteInTimezone tz) matches
+        `shouldBe` ["2025-11-02T01:30", "2025-11-02T01:30"]
+
+    it "two schedules in different zones produce different UTC fire times" $ do
+      let Right sched = parseCronSchedule "0 9 * * *"
+          tzNy = Just "America/New_York"
+          tzBerlin = Just "Europe/Berlin"
+          day = [mkTime 2025 6 15 h m 0 | h <- [0 .. 23], m <- [0 .. 59]]
+          fireNy = filter (matchesInTimezone tzNy sched) day
+          fireBerlin = filter (matchesInTimezone tzBerlin sched) day
+      length fireNy `shouldBe` 1
+      length fireBerlin `shouldBe` 1
+      -- NY 09:00 EDT = 13:00 UTC; Berlin 09:00 CEST = 07:00 UTC. Different.
+      fireNy `shouldNotBe` fireBerlin
+
+    it "UTC default behavior unchanged when timezone is Nothing" $ do
+      let Right sched = parseCronSchedule "0 3 * * *"
+          tick = mkTime 2025 6 15 3 0 0
+          nonMatch = mkTime 2025 6 15 8 0 0
+      matchesInTimezone Nothing sched tick `shouldBe` True
+      matchesInTimezone Nothing sched nonMatch `shouldBe` False
+
+    it "formatMinuteInTimezone with Nothing == formatMinute" $ do
+      let t = mkTime 2025 6 15 12 30 0
+      formatMinuteInTimezone Nothing t `shouldBe` formatMinute t
+
+    it "formatMinuteInTimezone formats the local minute" $ do
+      -- 2025-06-15T12:30 UTC = 08:30 in America/New_York (EDT, UTC-4)
+      let t = mkTime 2025 6 15 12 30 0
+      formatMinuteInTimezone (Just "America/New_York") t
+        `shouldBe` "2025-06-15T08:30"
 
   describe "computeDelayMicros" $ do
     it "normal case: 15s before next minute" $ do
@@ -361,6 +481,7 @@ spec connStr = do
               CronScheduleUpdate
                 { overrideExpression = Nothing
                 , overrideOverlap = Nothing
+                , overrideTimezone = Nothing
                 , enabled = Just False
                 }
           processCronCatchUp testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
@@ -380,6 +501,7 @@ spec connStr = do
               CronScheduleUpdate
                 { overrideExpression = Just (Just "0 3 * * *")
                 , overrideOverlap = Nothing
+                , overrideTimezone = Nothing
                 , enabled = Nothing
                 }
           -- Tick at 12:00 should NOT fire (overridden to 3am only)

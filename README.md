@@ -304,9 +304,17 @@ Right nightlyReport = Cron.cronJob
     { Arb.priority = case kind of Cron.Replay -> 10; Cron.Live -> 0 })
 let nightlyWithBackfill = nightlyReport { Cron.backfill = Cron.Backfill 86400 }
 
+-- in a specific timezone (validated at construction)
+Right marketOpen = Cron.cronJobInTimezone
+  "market-open"
+  "America/New_York"    -- IANA tz name
+  "30 9 * * 1-5"        -- 09:30 local, Mon-Fri (DST-aware)
+  Cron.SkipOverlap
+  (\_kind tick -> Arb.defaultJob (OpeningBell tick))
+
 config <- Worker.defaultWorkerConfig connStr 4 processEmail
 let configWithCron = config
-      { Worker.cronJobs = [healthCheck, nightlyWithBackfill] }
+      { Worker.cronJobs = [healthCheck, nightlyWithBackfill, marketOpen] }
 ```
 
 | Policy | Behavior |
@@ -317,10 +325,20 @@ let configWithCron = config
 The builder receives a `TickKind` (`Live` for the current minute, `Replay`
 for any catch-up tick) and the tick time.
 
-Expressions are evaluated in UTC. `BackfillPolicy` controls replay of missed
-ticks both on startup (after downtime) and mid-flight (after scheduler
-delays). The `cron_schedules` table (editable via REST API) supports runtime
-overrides for expression, overlap, and enabled.
+**Timezones.** Expressions default to UTC. Use `cronJobInTimezone` with an
+[IANA name](https://www.iana.org/time-zones) like `America/New_York` to run
+in local time instead. DST is handled the way you'd expect: a schedule like
+`30 2 * * *` quietly skips itself on the spring-forward day (when 02:30
+doesn't exist locally), and a schedule like `30 1 * * *` fires once on the
+fall-back day (when 01:30 happens twice).
+
+**Backfill.** `BackfillPolicy` replays missed minutes after downtime or
+scheduler pauses, bounded by a duration you specify.
+
+**Runtime overrides.** The `cron_schedules` table holds the live config and
+is editable via the REST API or admin UI. You can change a schedule's
+expression, overlap, timezone, or enabled state without redeploying.
+Clearing an override (setting it to `null`) falls back to the value in code.
 
 ### Error Handling
 

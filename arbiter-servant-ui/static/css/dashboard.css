@@ -92,8 +92,8 @@
   max-width: 200px;
 }
 
-/* Inline error alerts sized to match btn-sm */
 .inline-error {
+  display: inline-block;
   padding: .25rem .5rem;
   font-size: .875rem;
   line-height: 1.5;
@@ -112,6 +112,39 @@
   border-bottom: 1px dashed var(--arb-text-muted);
   opacity: 0.8;
   padding-bottom: 1px;
+}
+
+.tz-combobox-panel {
+  position: fixed;
+  z-index: 1050;
+  min-width: 240px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: .25rem;
+  box-shadow: 0 .25rem .75rem rgba(0, 0, 0, .15);
+  padding: 0 0 .25rem;
+}
+.tz-group-header {
+  font-size: .7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+  padding: .25rem .75rem;
+  background: var(--bs-tertiary-bg);
+  position: sticky;
+  top: 0;
+}
+.tz-option {
+  padding: .25rem .75rem;
+  font-size: .875rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tz-option:hover,
+.tz-option.tz-highlighted {
+  background: var(--bs-primary-bg-subtle);
 }
 
 .editable-cell:hover {

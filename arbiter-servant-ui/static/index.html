@@ -640,18 +640,20 @@
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
-            <col style="width: 18%">
-            <col style="width: 24%">
             <col style="width: 14%">
-            <col style="width: 8%">
-            <col style="width: 18%">
-            <col style="width: 18%">
+            <col style="width: 22%">
+            <col style="width: 12%">
+            <col style="width: 14%">
+            <col style="width: 6%">
+            <col style="width: 16%">
+            <col style="width: 16%">
           </colgroup>
           <thead>
             <tr>
               <th>Name</th>
               <th>Expression</th>
               <th>Overlap Policy</th>
+              <th>Timezone</th>
               <th>Enabled</th>
               <th>Last Fired At</th>
               <th>Last Checked</th>
@@ -674,7 +676,7 @@
                   </template>
                   <template x-if="!(editingName === s.name && editingField === 'expression')">
                     <div class="d-flex flex-column gap-0">
-                      <div class="d-flex align-items-center gap-1">
+                      <div class="d-flex flex-wrap align-items-center gap-1">
                         <span class="editable-cell" @click="startEdit(s.name, 'expression', effectiveExpression(s))"
                           x-text="effectiveExpression(s)"></span>
                         <template x-if="isOverridden(s, 'expression')">
@@ -704,7 +706,7 @@
                     </div>
                   </template>
                   <template x-if="!(editingName === s.name && editingField === 'overlap')">
-                    <div class="d-flex align-items-center gap-1">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
                       <span class="editable-cell" @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
                         x-text="effectiveOverlap(s)"></span>
                       <template x-if="isOverridden(s, 'overlap')">
@@ -717,6 +719,52 @@
                     </div>
                   </template>
                   <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'overlap' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Timezone (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'timezone'">
+                    <div class="d-flex gap-1 align-items-center">
+                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
+                        placeholder="Type to search…" autocomplete="off"
+                        x-model="editValue"
+                        @keydown.down.prevent="tzMove(1)"
+                        @keydown.up.prevent="tzMove(-1)"
+                        @keydown.enter.prevent="tzCommit()"
+                        @keydown.escape.prevent="cancelEdit()">
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                      <div class="tz-combobox-panel" x-show="tzGrouped().length > 0"
+                        :style="`top: ${tzPos.top}px; left: ${tzPos.left}px;`">
+                        <template x-for="group in tzGrouped()" :key="group.name">
+                          <div>
+                            <div class="tz-group-header" x-text="group.name"></div>
+                            <template x-for="zone in group.zones" :key="zone">
+                              <div class="tz-option"
+                                :class="{ 'tz-highlighted': zone === tzHighlight }"
+                                @mousedown.prevent="editValue = zone; tzHighlight = null; saveEdit()"
+                                @mouseover="tzHighlight = zone"
+                                x-text="zone"></div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'timezone')">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
+                      <span class="editable-cell" @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        x-text="effectiveTimezone(s) || 'UTC'"></span>
+                      <template x-if="isOverridden(s, 'timezone')">
+                        <span class="d-inline-flex align-items-center gap-1">
+                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                            @click="resetToDefault(s.name, 'timezone')" title="Reset to default">reset</button>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'timezone' && saveError" x-text="saveError"></small>
                 </td>
 
                 <!-- Enabled toggle -->
@@ -733,7 +781,7 @@
               </tr>
             </template>
             <tr x-show="schedules.length === 0 && !loading">
-              <td colspan="6" class="text-muted text-center">No cron schedules configured.</td>
+              <td colspan="7" class="text-muted text-center">No cron schedules configured.</td>
             </tr>
           </tbody>
         </table>

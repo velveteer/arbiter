@@ -1506,18 +1506,20 @@ refreshGroupsSQL schema tableName =
 allCronColumns :: Text
 allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
 
--- | Upsert a cron schedule's default values.
+-- | Upsert a cron schedule's default values. @override_*@ columns are
+-- preserved on conflict.
 --
--- Parameters: name, default_expression, default_overlap
+-- Parameters: name, default_expression, default_overlap, default_timezone
 upsertCronDefaultSQL :: Text -> Text
 upsertCronDefaultSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "INSERT INTO "
         <> tbl
-        <> " (name, default_expression, default_overlap) VALUES (?, ?, ?)"
+        <> " (name, default_expression, default_overlap, default_timezone) VALUES (?, ?, ?, ?)"
         <> " ON CONFLICT (name) DO UPDATE SET"
         <> " default_expression = EXCLUDED.default_expression,"
         <> " default_overlap = EXCLUDED.default_overlap,"
+        <> " default_timezone = EXCLUDED.default_timezone,"
         <> " updated_at = NOW()"
 
 -- | List all cron schedules ordered by name.

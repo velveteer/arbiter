@@ -198,8 +198,10 @@ cronScheduleRowCodec =
     <$> col "name" CText
     <*> col "default_expression" CText
     <*> col "default_overlap" CText
+    <*> ncol "default_timezone" CText
     <*> ncol "override_expression" CText
     <*> ncol "override_overlap" CText
+    <*> ncol "override_timezone" CText
     <*> col "enabled" CBool
     <*> ncol "last_fired_at" CTimestamptz
     <*> ncol "last_checked_at" CTimestamptz

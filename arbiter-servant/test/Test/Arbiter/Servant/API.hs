@@ -739,7 +739,7 @@ spec connStr = do
 
   describe "Cron API" $ with (cleanupDb >> pure app) $ do
     let seedCron name expr ov = liftIO $ runSimpleDb mkEnv $ do
-          _ <- Ops.upsertCronDefault testSchema name expr ov
+          _ <- Ops.upsertCronDefault testSchema name expr ov Nothing
           pure ()
 
     it "GET /api/v1/cron/schedules returns seeded schedules" $ do
@@ -837,6 +837,35 @@ spec connStr = do
           "/api/v1/cron/schedules/bad-expr"
           [("Content-Type", "application/json")]
           (encode [aesonQQ|{"overrideExpression": "not a cron"}|])
+
+      liftIO $ simpleStatus resp `shouldBe` status400
+
+    it "PATCH /api/v1/cron/schedules/:name updates timezone override" $ do
+      seedCron "tz-test" "0 9 * * *" "SkipOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/tz-test"
+          [("Content-Type", "application/json")]
+          (encode [aesonQQ|{"overrideTimezone": "America/New_York"}|])
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status200
+        case decode @CS.CronScheduleRow (simpleBody resp) of
+          Just CS.CronScheduleRow {CS.overrideTimezone = ot} ->
+            ot `shouldBe` Just "America/New_York"
+          Nothing -> fail "Failed to decode response"
+
+    it "PATCH /api/v1/cron/schedules/:name rejects invalid timezone" $ do
+      seedCron "bad-tz" "* * * * *" "AllowOverlap"
+
+      resp <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/bad-tz"
+          [("Content-Type", "application/json")]
+          (encode [aesonQQ|{"overrideTimezone": "Made/Up_Zone"}|])
 
       liftIO $ simpleStatus resp `shouldBe` status400
 

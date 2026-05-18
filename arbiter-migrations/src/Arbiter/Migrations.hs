@@ -25,7 +25,7 @@ module Arbiter.Migrations
   , MigrationResult (..)
   ) where
 
-import Arbiter.Core.CronSchedule (createCronSchedulesTableSQL)
+import Arbiter.Core.CronSchedule (addTimezoneColumnSQL, createCronSchedulesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
@@ -184,6 +184,9 @@ runMigrationsTrackedForTables connStr schemaName tableNames config =
           [ MigrationScript
               "create-cron-schedules"
               (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
+          , MigrationScript
+              "cron-schedules-add-timezone"
+              (encodeUtf8 $ addTimezoneColumnSQL schemaName)
           ]
             <> [ MigrationScript
                    "create-event-streaming-function"

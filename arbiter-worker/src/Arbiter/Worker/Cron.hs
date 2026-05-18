@@ -6,12 +6,11 @@
 -- scheduler thread that inserts jobs on 5-field cron expressions.
 -- Dedup keys prevent duplicate insertion across multiple worker instances.
 --
--- __All cron expressions are evaluated in UTC.__ There is no local-timezone
--- support - @\"0 3 * * *\"@ means 03:00 UTC, not 03:00 in the server's
--- local time. Account for your timezone offset when writing expressions.
+-- Expressions default to UTC. Pass an IANA tz name (e.g. @\"America\/New_York\"@)
+-- to 'cronJobInTimezone' to evaluate in local time instead.
 --
 -- The scheduler consults the @cron_schedules@ table each tick for runtime
--- overrides (expression, overlap, enabled).
+-- overrides (expression, overlap, timezone, enabled).
 module Arbiter.Worker.Cron
   ( -- * Types
     CronJob (..)
@@ -19,12 +18,16 @@ module Arbiter.Worker.Cron
   , BackfillPolicy (..)
   , TickKind (..)
 
-    -- * Smart Constructor
+    -- * Smart Constructors
   , cronJob
+  , cronJobInTimezone
 
     -- * Helpers
   , overlapPolicyToText
   , overlapPolicyFromText
+  , resolveTZ
+  , matchesInTimezone
+  , formatMinuteInTimezone
 
     -- * Internal
   , runCronScheduler
@@ -47,9 +50,10 @@ import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (forM_, forever, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (unfoldr)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Time
   ( NominalDiffTime
   , UTCTime (..)
@@ -58,8 +62,12 @@ import Data.Time
   , diffUTCTime
   , formatTime
   , getCurrentTime
+  , localTimeToUTC
   , secondsToDiffTime
+  , utc
   )
+import Data.Time.Zones (TZ, utcToLocalTimeTZ)
+import Data.Time.Zones.All (fromTZName, tzByLabel)
 import GHC.Generics (Generic)
 import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
@@ -101,8 +109,8 @@ overlapPolicyFromText _ = Nothing
 
 -- | A cron schedule definition.
 --
--- Use 'cronJob' to construct - it parses the cron expression eagerly,
--- so invalid expressions are caught at construction time.
+-- Use 'cronJob' to construct (eagerly parses the cron expression). For a
+-- non-UTC timezone, use 'cronJobInTimezone' (also validates the tz name).
 data CronJob payload = CronJob
   { name :: Text
   -- ^ Human-readable name for logging and dedup keys
@@ -114,6 +122,9 @@ data CronJob payload = CronJob
   -- ^ How to handle overlapping ticks
   , backfill :: BackfillPolicy
   -- ^ How to replay missed ticks, at startup and mid-flight. Default: 'NoBackfill'.
+  , timezone :: Maybe Text
+  -- ^ IANA tz name (e.g. @\"America\/New_York\"@). 'Nothing' means UTC.
+  -- The @override_timezone@ DB column wins if set.
   , builder :: TickKind -> UTCTime -> JobWrite payload
   -- ^ Build a job for the given tick time. 'Replay' is passed for any tick
   -- whose minute is not the current scheduler minute (startup or mid-flight
@@ -164,8 +175,54 @@ cronJob cronName expr ov mk =
           , schedule = sched
           , overlap = ov
           , backfill = NoBackfill
+          , timezone = Nothing
           , builder = mk
           }
+
+-- | Like 'cronJob' but evaluated in a specific timezone. The tz name is
+-- validated eagerly against the bundled @tzdata@ database.
+cronJobInTimezone
+  :: Text
+  -- ^ Schedule name
+  -> Text
+  -- ^ IANA tz name (e.g. @\"America\/New_York\"@)
+  -> Text
+  -- ^ Cron expression (5-field)
+  -> OverlapPolicy
+  -> (TickKind -> UTCTime -> JobWrite payload)
+  -> Either String (CronJob payload)
+cronJobInTimezone cronName tzName expr ov mk =
+  case resolveTZ tzName of
+    Nothing -> Left $ "Unknown timezone: " <> T.unpack tzName
+    Just _ -> fmap (\cj -> cj {timezone = Just tzName}) (cronJob cronName expr ov mk)
+
+-- | Look up an IANA tz name in the bundled @tzdata@ database.
+resolveTZ :: Text -> Maybe TZ
+resolveTZ name = fmap tzByLabel (fromTZName (encodeUtf8 name))
+
+-- | Match a cron schedule against a UTC tick, evaluated in @tz@.
+-- 'Nothing' means UTC. An unknown tz name returns 'False'.
+matchesInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Bool
+matchesInTimezone Nothing sched t = scheduleMatches sched t
+matchesInTimezone (Just tzName) sched t =
+  case resolveTZ tzName of
+    Nothing -> False
+    Just tz ->
+      let local = utcToLocalTimeTZ tz t
+          asUtc = localTimeToUTC utc local
+       in scheduleMatches sched asUtc
+
+-- | Format a UTC tick as @YYYY-MM-DDTHH:MM@ in the given timezone.
+-- DST fall-back maps two UTC instants to the same local minute, so dedup
+-- keys built from this collapse to a single fire.
+formatMinuteInTimezone :: Maybe Text -> UTCTime -> Text
+formatMinuteInTimezone Nothing t = formatMinute t
+formatMinuteInTimezone (Just tzName) t =
+  case resolveTZ tzName of
+    Nothing -> formatMinute t
+    Just tz ->
+      let local = utcToLocalTimeTZ tz t
+       in T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" local)
 
 -- | Upsert default expression and overlap for each 'CronJob' into the
 -- @cron_schedules@ table. Preserves any user overrides and enabled state.
@@ -179,6 +236,7 @@ initCronSchedules schemaName jobs logCfg = do
       (name cj)
       (cronExpression cj)
       (overlapPolicyToText (overlap cj))
+      (timezone cj)
   logCron logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
@@ -235,24 +293,32 @@ processCronCatchUp logCfg schemaName jobs now = do
               <> expr
               <> "': "
               <> T.pack err
-        Effective effectiveOv sched -> do
+        InvalidTimezone tzName ->
+          logCron logCfg Error $
+            "Cron schedule '"
+              <> name cj
+              <> "' has unknown timezone '"
+              <> tzName
+              <> "'"
+        Effective effectiveOv sched effectiveTz -> do
           let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
-              ticksToFire = pickTicksToFire sched effectiveOv ticksInWindow
+              ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
               replayCount = length (filter (/= currentTick) ticksToFire)
           when (replayCount > 0) $
             logCron logCfg Info $
               "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
           forM_ ticksToFire $ \t ->
-            void $ tryInsertCronJob logCfg schemaName cj effectiveOv (tickKindFor currentTick t) t
+            void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
 
 -- | 'Live' for @currentTick@, 'Replay' otherwise.
 tickKindFor :: UTCTime -> UTCTime -> TickKind
 tickKindFor currentTick t = if t == currentTick then Live else Replay
 
 -- | 'SkipOverlap' keeps the most recent match. 'AllowOverlap' keeps all.
-pickTicksToFire :: CronSchedule -> OverlapPolicy -> [UTCTime] -> [UTCTime]
-pickTicksToFire sched ov ticks =
-  let matching = filter (scheduleMatches sched) ticks
+-- Match evaluation uses the supplied timezone ('Nothing' = UTC).
+pickTicksToFire :: CronSchedule -> Maybe Text -> OverlapPolicy -> [UTCTime] -> [UTCTime]
+pickTicksToFire sched tz ov ticks =
+  let matching = filter (matchesInTimezone tz sched) ticks
    in case ov of
         SkipOverlap -> take 1 (reverse matching)
         AllowOverlap -> matching
@@ -289,21 +355,25 @@ fetchScheduleRows logCfg schemaName = do
 data Resolved
   = Disabled
   | ParseError Text String
-  | Effective OverlapPolicy CronSchedule
+  | InvalidTimezone Text
+  | Effective OverlapPolicy CronSchedule (Maybe Text)
 
 resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
 resolveAndParse cj mRow =
-  let (expr, ov, isEnabled) = case mRow of
-        Nothing -> (cronExpression cj, overlap cj, True)
+  let (expr, ov, tz, isEnabled) = case mRow of
+        Nothing -> (cronExpression cj, overlap cj, timezone cj, True)
         Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
           ( CS.effectiveExpression row
           , fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
+          , CS.effectiveTimezone row
           , rowEnabled
           )
    in if isEnabled
         then case parseCronSchedule expr of
-          Right sched -> Effective ov sched
           Left err -> ParseError expr err
+          Right sched -> case tz of
+            Just tzName | isNothing (resolveTZ tzName) -> InvalidTimezone tzName
+            _ -> Effective ov sched tz
         else Disabled
 
 -- | Attempt to insert a single cron-tick job. Returns 'False' on any failure
@@ -314,10 +384,10 @@ resolveAndParse cj mRow =
 -- with a watermark advance to that tick.
 tryInsertCronJob
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m Bool
-tryInsertCronJob logCfg schemaName cj effectiveOv kind tick = do
+  => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m Bool
+tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
   result <- tryAny . withDbTransaction $ do
-    let key = makeDedupKeyFromParts (name cj) effectiveOv tick
+    let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
         jobWrite = (builder cj kind tick) {dedupKey = Just (IgnoreDuplicate key)}
     mJob <- HL.insertJob jobWrite
     case mJob of
@@ -344,15 +414,16 @@ tryOrLog logCfg prefix action = do
     Right _ -> pure ()
     Left e -> logCron logCfg Error $ prefix <> ": " <> T.pack (show e)
 
--- | Compute the dedup key for a cron job using the code-defined overlap policy.
+-- | Dedup key for a cron job, from its code-defined overlap and timezone.
 makeDedupKey :: CronJob payload -> UTCTime -> Text
-makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) tick
+makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) (timezone cj) tick
 
--- | Compute dedup key from overlap policy, schedule name, and tick time.
-makeDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
-makeDedupKeyFromParts jobName ov tick = case ov of
+-- | For 'AllowOverlap', the key includes the tick formatted in the schedule's
+-- timezone, so DST fall-back fires once instead of twice.
+makeDedupKeyFromParts :: Text -> OverlapPolicy -> Maybe Text -> UTCTime -> Text
+makeDedupKeyFromParts jobName ov tz tick = case ov of
   SkipOverlap -> "arbiter_cron:" <> jobName
-  AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinute tick
+  AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinuteInTimezone tz tick
 
 -- | Compute the delay in microseconds until the next minute boundary,
 -- clamped to @[0, 120_000_000]@.

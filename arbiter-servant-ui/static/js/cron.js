@@ -15,6 +15,9 @@ document.addEventListener('alpine:init', () => {
     refreshInterval: null,
     active: false,
     busyRows: {},
+    tzList: [],
+    tzHighlight: null,
+    tzPos: { top: 0, left: 0 },
 
     init() {
       trackTabActive(this, '#tab-cron', {
@@ -36,6 +39,65 @@ document.addEventListener('alpine:init', () => {
         }
       };
       document.addEventListener('visibilitychange', this._visibilityHandler);
+
+      this.populateTimezones();
+    },
+
+    populateTimezones() {
+      if (this.tzList.length > 0) return;
+      if (typeof Intl.supportedValuesOf !== 'function') {
+        this.tzList = ['UTC'];
+        return;
+      }
+      this.tzList = Intl.supportedValuesOf('timeZone').slice().sort();
+    },
+
+    tzFiltered() {
+      const q = (this.editValue || '').toLowerCase().trim();
+      if (!q) return this.tzList;
+      return this.tzList.filter((z) => z.toLowerCase().includes(q));
+    },
+
+    tzGrouped() {
+      const groups = new Map();
+      for (const z of this.tzFiltered()) {
+        const slash = z.indexOf('/');
+        const region = slash === -1 ? 'Other' : z.slice(0, slash);
+        if (!groups.has(region)) groups.set(region, []);
+        groups.get(region).push(z);
+      }
+      return Array.from(groups, ([name, zones]) => ({ name, zones }));
+    },
+
+    tzMove(delta) {
+      const list = this.tzFiltered();
+      if (list.length === 0) {
+        this.tzHighlight = null;
+        return;
+      }
+      const idx = list.indexOf(this.tzHighlight);
+      let next = idx + delta;
+      if (next < 0) next = list.length - 1;
+      if (next >= list.length) next = 0;
+      this.tzHighlight = list[next];
+      this.$nextTick(() => {
+        const el = document.querySelector('.tz-option.tz-highlighted');
+        if (el) el.scrollIntoView({ block: 'nearest' });
+      });
+    },
+
+    tzCommit() {
+      if (this.tzHighlight) {
+        this.editValue = this.tzHighlight;
+      }
+      this.saveEdit();
+    },
+
+    updateTzPos() {
+      const input = document.getElementById('inline-edit-input');
+      if (!input) return;
+      const r = input.getBoundingClientRect();
+      this.tzPos = { top: r.bottom + 4, left: r.left };
     },
 
     destroy() {
@@ -94,9 +156,14 @@ document.addEventListener('alpine:init', () => {
       return s.overrideOverlap || s.defaultOverlap;
     },
 
+    effectiveTimezone(s) {
+      return s.overrideTimezone || s.defaultTimezone || '';
+    },
+
     isOverridden(s, field) {
       if (field === 'expression') return s.overrideExpression !== null;
       if (field === 'overlap') return s.overrideOverlap !== null;
+      if (field === 'timezone') return s.overrideTimezone !== null;
       return false;
     },
 
@@ -105,9 +172,16 @@ document.addEventListener('alpine:init', () => {
       this.editingField = field;
       this.editValue = currentValue;
       this.saveError = '';
+      this.tzHighlight = null;
       this.$nextTick(() => {
         const input = document.getElementById('inline-edit-input');
         if (input) input.focus();
+        if (field === 'timezone') {
+          this.updateTzPos();
+          this._tzReposition = () => this.updateTzPos();
+          window.addEventListener('scroll', this._tzReposition, true);
+          window.addEventListener('resize', this._tzReposition);
+        }
       });
     },
 
@@ -116,6 +190,12 @@ document.addEventListener('alpine:init', () => {
       this.editingField = null;
       this.editValue = '';
       this.saveError = '';
+      this.tzHighlight = null;
+      if (this._tzReposition) {
+        window.removeEventListener('scroll', this._tzReposition, true);
+        window.removeEventListener('resize', this._tzReposition);
+        this._tzReposition = null;
+      }
     },
 
     async saveEdit() {
@@ -126,6 +206,8 @@ document.addEventListener('alpine:init', () => {
         body.overrideExpression = this.editValue || null;
       } else if (this.editingField === 'overlap') {
         body.overrideOverlap = this.editValue || null;
+      } else if (this.editingField === 'timezone') {
+        body.overrideTimezone = this.editValue ? this.editValue.trim() : null;
       }
 
       this.busyRows = { ...this.busyRows, [name]: true };
@@ -150,6 +232,8 @@ document.addEventListener('alpine:init', () => {
         body.overrideExpression = null;
       } else if (field === 'overlap') {
         body.overrideOverlap = null;
+      } else if (field === 'timezone') {
+        body.overrideTimezone = null;
       }
 
       this.busyRows = { ...this.busyRows, [name]: true };

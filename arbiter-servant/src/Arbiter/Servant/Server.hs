@@ -29,7 +29,7 @@ import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
-import Arbiter.Worker.Cron (overlapPolicyFromText)
+import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (guard, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -697,7 +697,7 @@ updateCronScheduleHandler
   -> Text
   -> CronScheduleUpdate
   -> Handler CronScheduleRow
-updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverlap _) = do
+updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
   let env = serverEnv config
       schemaName = schema env
 
@@ -717,6 +717,18 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
           throwError
             err400
               { errBody = "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
+              }
+        Just _ -> pure ()
+    _ -> pure ()
+
+  -- Validate timezone if provided
+  case mTz of
+    Just (Just tzName) ->
+      case resolveTZ tzName of
+        Nothing ->
+          throwError
+            err400
+              { errBody = "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
               }
         Just _ -> pure ()
     _ -> pure ()

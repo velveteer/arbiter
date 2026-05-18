@@ -201,10 +201,20 @@ runSelectedWorkerPools sharedState enabled pools =
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
     [] -> pure ()
     selected -> evalContT $ do
-      asyncs <- for selected $ \(NamedWorkerPool _ cfg) ->
-        let cfg' = cfg {workerStateVar = sharedState}
+      asyncs <- for selected $ \(NamedWorkerPool name cfg) ->
+        let cfg' =
+              cfg
+                { workerStateVar = sharedState
+                , logConfig = withPoolContext name (logConfig cfg)
+                }
          in ContT $ \k -> Async.withAsync (runWorkerPool cfg') k
       lift $ mapM_ Async.waitCatch asyncs
+
+-- | Inject the pool name into log context. User-supplied pairs come after
+-- so they win on key collision.
+withPoolContext :: Text -> LogConfig -> LogConfig
+withPoolContext poolName lc =
+  lc {additionalContext = (("pool" .= poolName) :) <$> additionalContext lc}
 
 -- | Get enabled queues from an environment variable.
 --
