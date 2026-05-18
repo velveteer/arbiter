@@ -34,7 +34,6 @@ import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Network.HTTP.Types (status200, status400, status404)
-import Network.Wai.Test (SResponse, simpleBody, simpleStatus)
 import Test.Hspec
 import Test.Hspec.Wai
 

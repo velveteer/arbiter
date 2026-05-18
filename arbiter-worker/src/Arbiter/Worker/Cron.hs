@@ -44,11 +44,10 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Monad (forM, forM_, forever, void, when)
+import Control.Monad (forM_, forever, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (unfoldr)
 import Data.Maybe (fromMaybe)
-import Data.Monoid (All (..), Ap (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time

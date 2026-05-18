@@ -80,4 +80,3 @@ test-suite arbiter-servant-tests
     , resource-pool
     , text
     , time
-    , wai-extra

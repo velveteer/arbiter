@@ -435,7 +435,7 @@ spec connStr = do
           lastChecked = mkTime 2025 6 15 9 0 0
           ticks = enumerateCatchUpTicks (Backfill 90) (Just lastChecked) currentTick
       ticks `shouldSatisfy` elem currentTick
-      ticks `shouldSatisfy` all ((== 0) . (`mod` 60) . floor . utctDayTime)
+      ticks `shouldSatisfy` all ((== (0 :: Int)) . (`mod` 60) . floor . utctDayTime)
 
   describe "processCronCatchUp" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
     sharedPool <- runIO (createSharedPool connStr)
