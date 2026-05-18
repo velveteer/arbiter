@@ -203,24 +203,11 @@ runCronScheduler logCfg schemaName jobs = do
     now <- liftIO getCurrentTime
     processCronCatchUp logCfg schemaName jobs now
 
--- | Scheduler catch-up step. Used at startup and on every loop iteration.
---
--- For each schedule, fires every minute between its @last_checked_at@ and
--- @now@ that matches the cron expression, bounded by the schedule's
--- 'BackfillPolicy'. Per-schedule @last_checked_at@ is advanced only for
--- schedules whose inserts all succeeded, so a transient failure causes
--- a re-attempt on the next call (the dedup key blocks duplicates).
---
--- The 'BackfillPolicy' authoritatively bounds catch-up at both startup and
--- mid-flight. 'NoBackfill' processes only @currentTick@ on each call, so a
--- scheduler delay or GC pause silently drops the minutes it slept through.
--- 'Backfill' @W@ catches up to @W@ worth of missed minutes.
---
--- The 'TickKind' passed to the builder is 'Replay' for any tick other than
--- @currentTick@ (regardless of startup vs mid-flight), 'Live' otherwise.
---
--- For 'SkipOverlap' schedules, only the most recent matching tick is
--- attempted. Older matches would dedup-conflict on the time-independent key.
+-- | Scheduler catch-up step. Fires every matching minute in the
+-- 'BackfillPolicy' window. The watermark advances to @currentTick@ after
+-- processing regardless of which inserts succeeded. Failed inserts are
+-- logged but not retried (retrying would risk re-firing sibling ticks
+-- whose jobs have already been processed).
 processCronCatchUp
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
@@ -232,19 +219,16 @@ processCronCatchUp
 processCronCatchUp logCfg schemaName jobs now = do
   (rowMap, dbFetchOk) <- fetchScheduleRows logCfg schemaName
   let currentTick = truncateToMinute now
-  results <- forM jobs (processOne rowMap currentTick)
-  let succeededNames = [n | (n, True) <- results]
-  -- Watermark is 'currentTick', not DB NOW(), so a slow iteration cannot
-  -- leapfrog 'last_checked_at' past minutes that were never evaluated.
-  when (dbFetchOk && not (null succeededNames)) $
+  forM_ jobs (processOne rowMap currentTick)
+  when (dbFetchOk && not (null jobs)) $
     tryOrLog logCfg "Failed to update last_checked_at" $
-      Ops.touchCronChecked schemaName currentTick succeededNames
+      Ops.touchCronChecked schemaName currentTick (map name jobs)
   where
     processOne rowMap currentTick cj = do
       let mRow = lookup (name cj) rowMap
       case resolveAndParse cj mRow of
-        Disabled -> pure (name cj, True)
-        ParseError expr err -> do
+        Disabled -> pure ()
+        ParseError expr err ->
           logCron logCfg Error $
             "Cron schedule '"
               <> name cj
@@ -252,7 +236,6 @@ processCronCatchUp logCfg schemaName jobs now = do
               <> expr
               <> "': "
               <> T.pack err
-          pure (name cj, True)
         Effective effectiveOv sched -> do
           let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
               ticksToFire = pickTicksToFire sched effectiveOv ticksInWindow
@@ -260,21 +243,14 @@ processCronCatchUp logCfg schemaName jobs now = do
           when (replayCount > 0) $
             logCron logCfg Info $
               "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
-          -- One failed insert flips 'ok' to False so 'last_checked_at' is
-          -- held back. Remaining ticks still run (dedup blocks duplicates).
-          ok <- allSucceedM (fireOne currentTick cj effectiveOv) ticksToFire
-          pure (name cj, ok)
+          forM_ ticksToFire $ \t ->
+            void $ tryInsertCronJob logCfg schemaName cj effectiveOv (tickKindFor currentTick t) t
 
-    fireOne currentTick cj effectiveOv t =
-      tryInsertCronJob logCfg schemaName cj effectiveOv (tickKindFor currentTick t) t
-
--- | 'Live' if @t == currentTick@, 'Replay' otherwise.
+-- | 'Live' for @currentTick@, 'Replay' otherwise.
 tickKindFor :: UTCTime -> UTCTime -> TickKind
 tickKindFor currentTick t = if t == currentTick then Live else Replay
 
--- | Filter the catch-up window down to the ticks we actually want to fire.
--- 'SkipOverlap' keeps only the most recent matching tick. 'AllowOverlap'
--- keeps all matches.
+-- | 'SkipOverlap' keeps the most recent match. 'AllowOverlap' keeps all.
 pickTicksToFire :: CronSchedule -> OverlapPolicy -> [UTCTime] -> [UTCTime]
 pickTicksToFire sched ov ticks =
   let matching = filter (scheduleMatches sched) ticks
@@ -282,20 +258,12 @@ pickTicksToFire sched ov ticks =
         SkipOverlap -> take 1 (reverse matching)
         AllowOverlap -> matching
 
--- | Run a 'Bool'-returning action for each element and conjunct the results.
--- Every action runs (no short-circuit). Equivalent to @and \<$> mapM f xs@
--- but without the intermediate list.
-allSucceedM :: (Applicative m, Foldable t) => (a -> m Bool) -> t a -> m Bool
-allSucceedM f = fmap getAll . getAp . foldMap (Ap . fmap All . f)
-
--- | Compute the minutes to evaluate on a single 'processCronCatchUp' call.
---
--- The 'BackfillPolicy' bounds the catch-up window. 'NoBackfill' returns
--- just @currentTick@ so missed minutes are silently dropped. 'Backfill' @W@
--- returns every minute in @[last_checked + 1, currentTick]@, clipped to
--- the last @W@ seconds. With no @last_checked_at@ (a brand-new schedule),
--- only @currentTick@ is returned regardless of policy.
+-- | Minutes to evaluate for a 'processCronCatchUp' call. Returns @[]@ when
+-- the watermark is already at or past @currentTick@ (preventing re-fires
+-- after job processing).
 enumerateCatchUpTicks :: BackfillPolicy -> Maybe UTCTime -> UTCTime -> [UTCTime]
+enumerateCatchUpTicks _ (Just lastChecked) currentTick
+  | truncateToMinute lastChecked >= currentTick = []
 enumerateCatchUpTicks NoBackfill _ currentTick = [currentTick]
 enumerateCatchUpTicks _ Nothing currentTick = [currentTick]
 enumerateCatchUpTicks (Backfill window) (Just lastChecked) currentTick =
@@ -341,6 +309,10 @@ resolveAndParse cj mRow =
 
 -- | Attempt to insert a single cron-tick job. Returns 'False' on any failure
 -- (logged), 'True' on successful insert or a dedup-blocked no-op.
+--
+-- The insert and the per-tick @last_checked_at@ advance are atomic. If
+-- either fails the other rolls back, so a successful fire is always paired
+-- with a watermark advance to that tick.
 tryInsertCronJob
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m Bool
@@ -352,6 +324,7 @@ tryInsertCronJob logCfg schemaName cj effectiveOv kind tick = do
     case mJob of
       Just _ -> void $ Ops.touchCronLastFired schemaName (name cj)
       Nothing -> pure ()
+    void $ Ops.touchCronChecked schemaName tick [name cj]
   case result of
     Left e -> do
       logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> T.pack (show e)

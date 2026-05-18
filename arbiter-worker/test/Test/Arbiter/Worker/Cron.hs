@@ -12,7 +12,7 @@ import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup (cleanupData, setupOnce)
 import Control.Exception (catch)
-import Control.Monad (void)
+import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Maybe (isJust)
@@ -300,11 +300,9 @@ spec connStr = do
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` SimpleTask "2025-06-15T14:30"
 
-      it "advances last_checked_at only for schedules whose insert succeeded" $ \env -> do
-        -- Two schedules. The 'good' builder yields a normal job. The 'bad'
-        -- builder produces a bottom payload that throws when the job is
-        -- forced, simulating an insert-time failure. Only 'good' should
-        -- have last_checked_at advanced.
+      it "advances last_checked_at for all schedules, including failed inserts" $ \env -> do
+        -- Failed inserts are logged but not retried. Watermark moves forward
+        -- so the next iteration doesn't re-fire siblings that succeeded.
         let Right good =
               cronJob
                 "good-1"
@@ -325,10 +323,10 @@ spec connStr = do
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema
         let getRow n = lookup n [(CS.name r, r) | r <- rows]
         case getRow "good-1" of
-          Just row -> CS.lastCheckedAt row `shouldSatisfy` isJust
+          Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "good-1 schedule missing"
         case getRow "bad-1" of
-          Just row -> CS.lastCheckedAt row `shouldBe` Nothing
+          Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "bad-1 schedule missing"
 
   -- DB integration tests for cron schedule management
@@ -542,6 +540,29 @@ spec connStr = do
         case lookup "monotonic" [(CS.name r, r) | r <- rows] of
           Just row -> CS.lastCheckedAt row `shouldBe` Just later
           Nothing -> expectationFailure "monotonic schedule missing"
+
+      it "does not re-fire ticks whose jobs were already processed" $ \env -> do
+        -- After firing and processing the live tick, a second call at the
+        -- same minute must not produce a duplicate (the dedup row is gone
+        -- once the job is acked, so the watermark is what protects us).
+        let Right cj =
+              cronJob
+                "no-duplicate"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "once"))
+            tick = mkTime 2025 6 15 12 0 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronCatchUp testLogConfig testSchema [cj] tick
+
+        claimed <- runSimpleDb env $ HL.claimNextVisibleJobs 100 60 :: IO [JobRead WorkerTestPayload]
+        length claimed `shouldBe` 1
+        runSimpleDb env $ forM_ claimed $ \j -> void $ HL.ackJob j
+
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] tick
+        afterRetry <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
+        afterRetry `shouldBe` []
 
 createSharedPool :: ByteString -> IO (Pool PG.Connection)
 createSharedPool connStr =
