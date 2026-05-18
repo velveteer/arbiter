@@ -1739,19 +1739,24 @@ touchCronLastFired schemaName scheduleName =
     (Tmpl.touchCronLastFiredSQL schemaName)
     [pval CText scheduleName]
 
--- | Update @last_checked_at@ to NOW() for the given cron schedule names.
+-- | Advance @last_checked_at@ to the supplied watermark for the given cron
+-- schedule names. The watermark must be the minute boundary the scheduler
+-- finished evaluating, not @NOW()@. A wrapping @GREATEST@ in the SQL keeps
+-- the column monotonic when concurrent worker pools race.
 touchCronChecked
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
+  -> UTCTime
+  -- ^ Watermark (the minute the scheduler is advancing to)
   -> [Text]
   -- ^ Schedule names
   -> m Int64
-touchCronChecked _ [] = pure 0
-touchCronChecked schemaName names =
+touchCronChecked _ _ [] = pure 0
+touchCronChecked schemaName watermark names =
   executeStatement
     (Tmpl.touchCronCheckedSQL schemaName)
-    [parr CText names]
+    [pval CTimestamptz watermark, parr CText names]
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

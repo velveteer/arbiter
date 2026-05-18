@@ -293,15 +293,15 @@ Right healthCheck = Cron.cronJob
   "health-check"        -- unique name
   "*/5 * * * *"         -- every 5 minutes (UTC)
   Cron.SkipOverlap      -- skip tick if previous job is still pending/running
-  (\_ tick -> Arb.defaultJob (RunHealthCheck tick))
+  (\_kind tick -> Arb.defaultJob (RunHealthCheck tick))
 
--- with backfill: catch up on missed ticks after downtime
+-- with backfill: catch up on missed ticks after downtime or scheduler delays
 Right nightlyReport = Cron.cronJob
   "nightly-report"
   "0 3 * * *"           -- 03:00 UTC daily
   Cron.AllowOverlap     -- each tick produces its own job
-  (\isBackfill tick -> (Arb.defaultJob (GenerateReport tick))
-    { Arb.priority = if isBackfill then 10 else 0 })
+  (\kind tick -> (Arb.defaultJob (GenerateReport tick))
+    { Arb.priority = case kind of Cron.Replay -> 10; Cron.Live -> 0 })
 let nightlyWithBackfill = nightlyReport { Cron.backfill = Cron.Backfill 86400 }
 
 config <- Worker.defaultWorkerConfig connStr 4 processEmail
@@ -314,7 +314,13 @@ let configWithCron = config
 | `SkipOverlap` | At most one pending/running job per schedule. |
 | `AllowOverlap` | One job per tick. Multiple ticks can run concurrently. |
 
-Expressions are evaluated in UTC. Set `backfill` to replay missed ticks on startup. The `cron_schedules` table (editable via REST API) supports runtime overrides for expression, overlap, and enabled.
+The builder receives a `TickKind` (`Live` for the current minute, `Replay`
+for any catch-up tick) and the tick time.
+
+Expressions are evaluated in UTC. `BackfillPolicy` controls replay of missed
+ticks both on startup (after downtime) and mid-flight (after scheduler
+delays). The `cron_schedules` table (editable via REST API) supports runtime
+overrides for expression, overlap, and enabled.
 
 ### Error Handling
 

@@ -13,6 +13,7 @@ import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup (cleanupData, setupOnce)
 import Control.Exception (catch)
 import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Maybe (isJust)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
@@ -21,6 +22,7 @@ import Data.Text (Text)
 import Data.Time
   ( UTCTime (..)
   , fromGregorian
+  , getCurrentTime
   , secondsToDiffTime
   )
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
@@ -41,14 +43,14 @@ import Arbiter.Worker.Cron
   ( BackfillPolicy (..)
   , CronJob (..)
   , OverlapPolicy (..)
-  , backfillMissedTicks
   , computeDelayMicros
   , cronJob
   , enumMinutes
+  , enumerateCatchUpTicks
   , formatMinute
   , initCronSchedules
   , makeDedupKey
-  , processCronTick
+  , processCronCatchUp
   , truncateToMinute
   )
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
@@ -202,7 +204,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] tick
+          processCronCatchUp testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -220,7 +222,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] tick
+          processCronCatchUp testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -236,8 +238,8 @@ spec connStr = do
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] tick1
-          processCronTick False testLogConfig testSchema [cj] tick2
+          processCronCatchUp testLogConfig testSchema [cj] tick1
+          processCronCatchUp testLogConfig testSchema [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         -- Both ticks produce the same dedup key "arbiter_cron:every-min", so only 1 job
@@ -254,8 +256,8 @@ spec connStr = do
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] tick1
-          processCronTick False testLogConfig testSchema [cj] tick2
+          processCronCatchUp testLogConfig testSchema [cj] tick1
+          processCronCatchUp testLogConfig testSchema [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 2
@@ -276,7 +278,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
         runSimpleDb env $ do
           initCronSchedules testSchema [cjAlways, cjNever] testLogConfig
-          processCronTick False testLogConfig testSchema [cjAlways, cjNever] tick
+          processCronCatchUp testLogConfig testSchema [cjAlways, cjNever] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -292,11 +294,42 @@ spec connStr = do
             tick = mkTime 2025 6 15 14 30 0
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] tick
+          processCronCatchUp testLogConfig testSchema [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` SimpleTask "2025-06-15T14:30"
+
+      it "advances last_checked_at only for schedules whose insert succeeded" $ \env -> do
+        -- Two schedules. The 'good' builder yields a normal job. The 'bad'
+        -- builder produces a bottom payload that throws when the job is
+        -- forced, simulating an insert-time failure. Only 'good' should
+        -- have last_checked_at advanced.
+        let Right good =
+              cronJob
+                "good-1"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "ok"))
+            Right bad =
+              cronJob
+                "bad-1"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> error "intentional builder failure")
+            tick = mkTime 2025 6 15 12 0 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema [good, bad] testLogConfig
+          processCronCatchUp testLogConfig testSchema [good, bad] tick
+
+        rows <- runSimpleDb env $ Ops.listCronSchedules testSchema
+        let getRow n = lookup n [(CS.name r, r) | r <- rows]
+        case getRow "good-1" of
+          Just row -> CS.lastCheckedAt row `shouldSatisfy` isJust
+          Nothing -> expectationFailure "good-1 schedule missing"
+        case getRow "bad-1" of
+          Just row -> CS.lastCheckedAt row `shouldBe` Nothing
+          Nothing -> expectationFailure "bad-1 schedule missing"
 
   -- DB integration tests for cron schedule management
   describe "initCronSchedules" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
@@ -332,7 +365,7 @@ spec connStr = do
                 , overrideOverlap = Nothing
                 , enabled = Just False
                 }
-          processCronTick False testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
+          processCronCatchUp testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -352,7 +385,7 @@ spec connStr = do
                 , enabled = Nothing
                 }
           -- Tick at 12:00 should NOT fire (overridden to 3am only)
-          processCronTick False testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
+          processCronCatchUp testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -361,78 +394,154 @@ spec connStr = do
         let Right cj = cronJob "fire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "fire"))
         runSimpleDb env $ do
           initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
+          processCronCatchUp testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
 
         mRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "fire-test"
         case mRow of
           Nothing -> expectationFailure "Expected cron schedule row to exist"
           Just row -> CS.lastFiredAt row `shouldSatisfy` isJust
 
-  describe "backfillMissedTicks" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
+  describe "enumerateCatchUpTicks" $ do
+    it "NoBackfill returns only the current tick" $ do
+      let lastChecked = mkTime 2025 6 15 9 0 0
+          currentTick = mkTime 2025 6 15 12 0 0
+      enumerateCatchUpTicks NoBackfill (Just lastChecked) currentTick
+        `shouldBe` [currentTick]
+
+    it "Backfill with no last_checked_at returns only the current tick" $ do
+      let currentTick = mkTime 2025 6 15 12 0 0
+      enumerateCatchUpTicks (Backfill 3600) Nothing currentTick
+        `shouldBe` [currentTick]
+
+    it "Backfill includes the window cutoff minute when lastChecked predates the window" $ do
+      -- currentTick = 12:00, window = 60s. Window cutoff = 11:59.
+      -- lastChecked is 3 hours ago (way before the window). The 11:59
+      -- minute has never been processed, so it must be included.
+      let currentTick = mkTime 2025 6 15 12 0 0
+          lastChecked = mkTime 2025 6 15 9 0 0
+      enumerateCatchUpTicks (Backfill 60) (Just lastChecked) currentTick
+        `shouldSatisfy` elem (mkTime 2025 6 15 11 59 0)
+
+    it "Backfill skips lastChecked itself when it is inside the window" $ do
+      -- lastChecked is inside the window. We already processed lastChecked,
+      -- so the catch-up starts at lastChecked + 1.
+      let currentTick = mkTime 2025 6 15 12 0 0
+          lastChecked = mkTime 2025 6 15 11 59 0
+          ticks = enumerateCatchUpTicks (Backfill 120) (Just lastChecked) currentTick
+      ticks `shouldSatisfy` notElem lastChecked
+      ticks `shouldSatisfy` elem currentTick
+
+    it "Backfill with a non-minute-multiple window still includes the live tick" $ do
+      -- Regression: 90s window puts windowFloor mid-minute, dropping currentTick.
+      let currentTick = mkTime 2025 6 15 12 0 0
+          lastChecked = mkTime 2025 6 15 9 0 0
+          ticks = enumerateCatchUpTicks (Backfill 90) (Just lastChecked) currentTick
+      ticks `shouldSatisfy` elem currentTick
+      ticks `shouldSatisfy` all ((== 0) . (`mod` 60) . floor . utctDayTime)
+
+  describe "processCronCatchUp" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
-      it "backfills missed ticks for AllowOverlap schedule" $ \env -> do
-        let Right cj =
-              cronJob "backfill-allow" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "backfilled"))
-            cj' = cj {backfill = Backfill 3600}
-        runSimpleDb env $ do
-          initCronSchedules testSchema [cj'] testLogConfig
-          processCronTick False testLogConfig testSchema [cj'] (mkTime 2025 6 15 12 0 0)
+      it "fires every missed minute for schedules with Backfill policy" $ \env -> do
+        -- Simulate a scheduler wake-up after a 5-minute gap. last_checked_at
+        -- is 5 minutes in the past. With Backfill 600 (10 min window) the
+        -- catch-up must fire a job for each missed minute so we do not
+        -- silently drop ticks during GC pauses or scheduler delays.
+        let Right base =
+              cronJob
+                "catchup-backfill"
+                "* * * * *"
+                AllowOverlap
+                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
+            cj = base {backfill = Backfill 600}
+        runSimpleDb env $ initCronSchedules testSchema [cj] testLogConfig
 
-        -- Backdate last_checked_at to 5 minutes ago
         withResource sharedPool $ \conn ->
           void $
             PG.execute
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_checked_at = NOW() - interval '5 minutes' WHERE name = ?"
-              (PG.Only ("backfill-allow" :: Text))
+              (PG.Only ("catchup-backfill" :: Text))
 
-        runSimpleDb env $ backfillMissedTicks testLogConfig testSchema [cj']
+        now <- runSimpleDb env $ liftIO getCurrentTime
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
-        -- Should have multiple backfilled jobs (the original tick + backfilled ones)
-        length jobs `shouldSatisfy` (> 1)
+        -- Expect at least 5 missed minutes plus the current one.
+        length jobs `shouldSatisfy` (>= 5)
 
-      it "does not backfill for NoBackfill schedule" $ \env -> do
-        let Right cj = cronJob "no-backfill" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "should-not-backfill"))
-        runSimpleDb env $ do
-          initCronSchedules testSchema [cj] testLogConfig
-          processCronTick False testLogConfig testSchema [cj] (mkTime 2025 6 15 12 0 0)
+      it "does not replay missed minutes for NoBackfill schedules" $ \env -> do
+        -- NoBackfill is the user's declaration that stale ticks should not
+        -- be replayed. Even with a stale last_checked_at, only the current
+        -- minute fires.
+        let Right cj =
+              cronJob
+                "catchup-nobackfill"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "no-replay"))
+        runSimpleDb env $ initCronSchedules testSchema [cj] testLogConfig
 
-        -- Backdate last_checked_at
         withResource sharedPool $ \conn ->
           void $
             PG.execute
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_checked_at = NOW() - interval '5 minutes' WHERE name = ?"
-              (PG.Only ("no-backfill" :: Text))
+              (PG.Only ("catchup-nobackfill" :: Text))
 
-        runSimpleDb env $ backfillMissedTicks testLogConfig testSchema [cj]
+        now <- runSimpleDb env $ liftIO getCurrentTime
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
-      it "respects backfill window limit" $ \env -> do
-        let Right cj =
-              cronJob "backfill-window" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "windowed"))
-            cj' = cj {backfill = Backfill 120}
-        runSimpleDb env $ do
-          initCronSchedules testSchema [cj'] testLogConfig
-          processCronTick False testLogConfig testSchema [cj'] (mkTime 2025 6 15 12 0 0)
+      it "fires only the current minute when last_checked_at is null" $ \env -> do
+        -- Fresh schedule with no last_checked_at must not retroactively
+        -- replay ticks from before it existed, regardless of policy.
+        let Right base =
+              cronJob
+                "fresh"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "fresh"))
+            cj = base {backfill = Backfill 3600}
+        runSimpleDb env $ initCronSchedules testSchema [cj] testLogConfig
 
-        -- Backdate last_checked_at to 10 minutes ago (beyond 2 min window)
-        withResource sharedPool $ \conn ->
-          void $
-            PG.execute
-              conn
-              "UPDATE arbiter_cron_test.cron_schedules SET last_checked_at = NOW() - interval '10 minutes' WHERE name = ?"
-              (PG.Only ("backfill-window" :: Text))
-
-        runSimpleDb env $ backfillMissedTicks testLogConfig testSchema [cj']
+        now <- runSimpleDb env $ liftIO getCurrentTime
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
-        -- Window is 2 minutes, so at most ~2 backfilled jobs + the original
-        length jobs `shouldSatisfy` (<= 4)
+        length jobs `shouldBe` 1
+
+      it "sets last_checked_at to currentTick, not wall-clock NOW()" $ \env -> do
+        -- Slow-processing regression. Watermark must equal the 'now' passed in.
+        let Right cj =
+              cronJob "watermark" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+            currentTickPast = mkTime 2025 6 15 12 0 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronCatchUp testLogConfig testSchema [cj] currentTickPast
+
+        rows <- runSimpleDb env $ Ops.listCronSchedules testSchema
+        case lookup "watermark" [(CS.name r, r) | r <- rows] of
+          Just row -> CS.lastCheckedAt row `shouldBe` Just currentTickPast
+          Nothing -> expectationFailure "watermark schedule missing"
+
+      it "does not advance last_checked_at backwards" $ \env -> do
+        -- GREATEST guard for concurrent pools with skewed clocks.
+        let Right cj =
+              cronJob "monotonic" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+            later = mkTime 2025 6 15 12 5 0
+            earlier = mkTime 2025 6 15 12 0 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema [cj] testLogConfig
+          processCronCatchUp testLogConfig testSchema [cj] later
+          processCronCatchUp testLogConfig testSchema [cj] earlier
+
+        rows <- runSimpleDb env $ Ops.listCronSchedules testSchema
+        case lookup "monotonic" [(CS.name r, r) | r <- rows] of
+          Just row -> CS.lastCheckedAt row `shouldBe` Just later
+          Nothing -> expectationFailure "monotonic schedule missing"
 
 createSharedPool :: ByteString -> IO (Pool PG.Connection)
 createSharedPool connStr =

@@ -1550,10 +1550,16 @@ touchCronLastFiredSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "UPDATE " <> tbl <> " SET last_fired_at = NOW(), updated_at = NOW() WHERE name = ?"
 
--- | Update @last_checked_at@ to NOW() for the given cron schedule names.
+-- | Set @last_checked_at@ to the caller-supplied watermark for the given
+-- schedule names. The watermark must be the minute boundary the scheduler
+-- finished evaluating (not DB @NOW()@) so a slow iteration cannot leapfrog
+-- @last_checked_at@ past minutes it never tested. 'GREATEST' guards against
+-- backward motion under concurrent worker pools with skewed clocks.
 --
--- Parameters: schedule names (text array)
+-- Parameters: watermark timestamp, schedule names (text array)
 touchCronCheckedSQL :: Text -> Text
 touchCronCheckedSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET last_checked_at = NOW() WHERE name = ANY(?)"
+   in "UPDATE "
+        <> tbl
+        <> " SET last_checked_at = GREATEST(last_checked_at, ?) WHERE name = ANY(?)"
