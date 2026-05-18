@@ -5,9 +5,6 @@ module Arbiter.Core.PoolConfig
   , poolConfigForWorkers
   ) where
 
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import GHC.Conc (getNumCapabilities)
-
 -- | Connection pool configuration.
 data PoolConfig = PoolConfig
   { poolSize :: Int
@@ -31,17 +28,19 @@ defaultPoolConfig =
     , poolStripes = Just 1
     }
 
--- | @workerCount + 5@ connections.
--- Stripes set to @min(capabilities, poolSize)@.
-poolConfigForWorkers :: (MonadIO m) => Int -> m PoolConfig
-poolConfigForWorkers workerCnt = do
-  caps <- liftIO getNumCapabilities
-  let size = workerCnt + 5
-  -- Ensure stripes doesn't exceed pool size (resource-pool requirement)
-  let stripes = min caps size
-  pure
-    PoolConfig
-      { poolSize = size
-      , poolIdleTimeout = 300
-      , poolStripes = Just stripes
-      }
+-- | Pool sized for a worker pool of @workerCnt@ threads.
+--
+-- Returns a single-stripe pool with @2 * workerCnt@ connections (floor of 2).
+--
+-- A single stripe is intentional. @Data.Pool.withResource@ pins each thread
+-- to one stripe based on its capability and does not search other stripes
+-- when its own is exhausted. With multiple stripes, threads from the same
+-- worker pool can cluster on one stripe and starve it of free connections
+-- even when other stripes are idle.
+poolConfigForWorkers :: Int -> PoolConfig
+poolConfigForWorkers workerCnt =
+  PoolConfig
+    { poolSize = max 2 (2 * workerCnt)
+    , poolIdleTimeout = 300
+    , poolStripes = Just 1
+    }

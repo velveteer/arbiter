@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -35,8 +36,10 @@ module Arbiter.Worker
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
+  , JobNotFoundException (..)
   , JobPermanentException (..)
   , JobRetryableException (..)
+  , JobStolenException
   , ParsingException (..)
   , TreeCancelException (..)
   , throwJobNotFound
@@ -47,9 +50,7 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.PoolConfig qualified as PoolConfig
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
-import Arbiter.Simple qualified as Simple
 import Control.Exception (SomeException, fromException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.Catch (MonadMask)
@@ -76,7 +77,6 @@ import UnliftIO
   , atomically
   , checkSTM
   , finally
-  , isAsyncException
   , isEmptyTBQueue
   , lengthTBQueue
   , mask
@@ -87,7 +87,6 @@ import UnliftIO
   , readTVar
   , throwIO
   , tryAny
-  , trySyncOrAsync
   , waitAnyCatch
   , withAsync
   , writeTVar
@@ -275,15 +274,6 @@ runWorkerPool config = do
   busyWorkerCount <- liftIO $ newTVarIO 0
   workerFinishedVar <- liftIO $ newTVarIO False
 
-  -- Dedicated heartbeat env
-  schemaName <- Arb.getSchema
-  heartbeatEnv <-
-    Simple.createSimpleEnvWithConfig
-      (Proxy @registry)
-      (connStr config)
-      schemaName
-      PoolConfig.defaultPoolConfig {PoolConfig.poolSize = max 1 (workerCap `div` 2)}
-
   evalContT $ do
     -- Spawn liveness probe
     liveness <-
@@ -299,10 +289,14 @@ runWorkerPool config = do
       ContT . withAsync $
         runDispatcher config workerCap workQueue busyWorkerCount mLivenessSignal workerFinishedVar
 
-    -- Spawn workers
+    -- Spawn workers. The worker loop already swallows per-job failures via
+    -- 'tryAny', so anything reaching this layer is an exception in the loop's
+    -- own scaffolding (queue read, hook, context setup, etc.). Retry the
+    -- worker rather than collapsing the whole pool.
     workers <-
       replicateM workerCap . ContT . withAsync $
-        workerLoop config heartbeatEnv workQueue busyWorkerCount workerFinishedVar
+        retryOnException (workerStateVar config) (logConfig config) "Worker" $
+          workerLoop config workQueue busyWorkerCount workerFinishedVar
 
     -- Spawn cron scheduler (only when cronJobs is non-empty)
     cron <-
@@ -320,7 +314,7 @@ runWorkerPool config = do
     reaper <-
       ContT . withAsync $
         retryOnException (workerStateVar config) (logConfig config) "Group reaper" $
-          groupReaperLoop config (groupReaperInterval config)
+          groupReaperLoop @m @registry @payload (groupReaperInterval config)
 
     -- Wait for any thread to exit (normal or exceptional)
     (_, res) <- waitAnyCatch (dispatcher : reaper : cron ++ liveness ++ workers)
@@ -404,15 +398,16 @@ workerLoop
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
-  -> Simple.SimpleEnv registry
   -> TBQueue (NonEmpty (Job.JobRead payload))
   -> TVar Int
   -- ^ Busy worker count
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config heartbeatEnv workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
-  -- Read batch from queue (singleton in single mode, multiple in batched mode)
+workerLoop config workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
+  -- Read batch from queue (singleton in single mode, multiple in batched mode).
+  -- The outer mask covers the window between the atomic claim (which
+  -- increments busyCount) and entering the finally block that decrements it.
   jobBatch <- atomically $ do
     batch <- readTBQueue workQueue
     modifyTVar' busyCount (+ 1)
@@ -430,20 +425,15 @@ workerLoop config heartbeatEnv workQueue busyCount workerFinishedVar = forever $
       mapM_
         (\job -> runHook (logConfig config) "onJobClaimed" $ Job.onJobClaimed (observabilityHooks config) job currentTime)
         jobBatch
-      -- Unmask for actual job processing (allow cancellation during work)
-      result <- trySyncOrAsync $ unmask $ processJobsWithRetry config heartbeatEnv jobBatch
-      liftIO $ handleWorkerException (logConfig config) result
-
--- | Common exception handling for worker loops
-handleWorkerException :: LogConfig -> Either SomeException () -> IO ()
-handleWorkerException cfg result =
-  case result of
-    Right () -> pure ()
-    Left (e :: SomeException) -> do
-      let msg = "Worker exception: " <> T.pack (show e)
-      tryLog cfg Error msg
-      when (isAsyncException e) $ throwIO e
-      threadDelay 2_000_000
+      -- Unmask for actual job processing (allow cancellation during work).
+      -- tryAny catches synchronous failures and rethrows async exceptions, so
+      -- shutdown still propagates. threadDelay below is interruptible.
+      result <- tryAny $ unmask $ processJobsWithRetry config jobBatch
+      case result of
+        Right () -> pure ()
+        Left e -> do
+          tryLog (logConfig config) Error $ "Worker exception: " <> T.pack (show e)
+          threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
 -- Decode failures appear as @Left decodeError@ - the child succeeded but
@@ -467,10 +457,9 @@ processJobsWithRetry
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
-  -> Simple.SimpleEnv registry
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config heartbeatEnv jobs = do
+processJobsWithRetry config jobs = do
   let hooks = observabilityHooks config
       -- Use minimum maxAttempts across all jobs in the batch
       maxAtts = minimum $ map (\job -> fromMaybe (maxAttempts config) (Job.maxAttempts job)) (toList jobs)
@@ -484,7 +473,6 @@ processJobsWithRetry config heartbeatEnv jobs = do
         (visibilityTimeout config)
         startTime
         jobs
-        heartbeatEnv
         (logConfig config)
         (fmap livenessSignal (livenessConfig config))
       $ do
@@ -557,26 +545,28 @@ runHandler config schemaName jobs = case handlerMode config of
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.
 isJobGoneException :: SomeException -> Bool
-isJobGoneException e = case fromException e of
-  Just (JobNotFound _) -> True
-  Just (JobStolen _) -> True
-  _ -> False
+isJobGoneException e =
+  case (fromException e :: Maybe JobNotFoundException, fromException e :: Maybe JobStolenException) of
+    (Just _, _) -> True
+    (_, Just _) -> True
+    _ -> False
 
 -- | Classify a handler exception into an error message and failure disposition.
 --
--- Note: 'JobNotFound' and 'JobStolen' are intercepted by 'isJobGoneException'
--- before reaching 'handleJobFailure', so they never arrive here.
+-- Note: 'JobNotFoundException' and 'JobStolenException' are intercepted by
+-- 'isJobGoneException' before reaching 'handleJobFailure', so they never
+-- arrive here.
 data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure
   deriving stock (Eq)
 
 classifyException :: SomeException -> (T.Text, FailureKind)
-classifyException e = case fromException e of
-  Just (Retryable (JobRetryableException msg)) -> (msg, RetryFailure)
-  Just (Permanent (JobPermanentException msg)) -> (msg, PermanentFailure)
-  Just (TreeCancel (TreeCancelException msg)) -> (msg, TreeCancelFailure)
-  Just (BranchCancel (BranchCancelException msg)) -> (msg, BranchCancelFailure)
-  Just (ParseFailure (ParsingException msg)) -> (msg, PermanentFailure)
-  _ -> (T.pack $ show e, RetryFailure) -- Unknown or non-JobException: treat as retryable
+classifyException e
+  | Just (Retryable (JobRetryableException msg)) <- fromException e = (msg, RetryFailure)
+  | Just (Permanent (JobPermanentException msg)) <- fromException e = (msg, PermanentFailure)
+  | Just (TreeCancel (TreeCancelException msg)) <- fromException e = (msg, TreeCancelFailure)
+  | Just (BranchCancel (BranchCancelException msg)) <- fromException e = (msg, BranchCancelFailure)
+  | Just (ParsingException msg) <- fromException e = (msg, PermanentFailure)
+  | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
 
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
@@ -647,14 +637,13 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
 
 groupReaperLoop
-  :: forall m registry payload result
+  :: forall m registry payload
    . ( MonadUnliftIO m
      , QueueOperation m registry payload
      )
-  => WorkerConfig m payload result
-  -> NominalDiffTime
+  => NominalDiffTime
   -> m ()
-groupReaperLoop _config interval = do
+groupReaperLoop interval = do
   let intervalSecs = ceiling interval
   forever $ do
     Arb.refreshGroups @m @registry @payload intervalSecs

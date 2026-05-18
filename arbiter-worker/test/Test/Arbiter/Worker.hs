@@ -18,7 +18,15 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (BatchedJobHandler, JobHandler)
-import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithPool, runSimpleDb)
+import Arbiter.Core.PoolConfig (PoolConfig, poolConfigForWorkers)
+import Arbiter.Simple
+  ( SimpleConnectionPool (..)
+  , SimpleDb
+  , SimpleEnv (..)
+  , createSimpleEnvWithConfig
+  , createSimpleEnvWithPool
+  , runSimpleDb
+  )
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, execute_, setupOnce)
@@ -191,51 +199,53 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             -- But never exceeded the worker count
             maxActive `shouldSatisfy` (<= 3)
 
-      it "heartbeat keeps lease alive when worker pool is saturated" $ \env -> do
-        -- Pool of size 1: handler's withDbTransaction takes the only slot,
-        -- heartbeat thread blocks on withResource forever.
-        starvedPool <-
-          newPool $
-            setNumStripes (Just 1) $
-              defaultPoolConfig (connectPostgreSQL connStr) close 300 1
-        let starvedEnv = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) starvedPool testSchema
+      let runSaturationScenario :: PoolConfig -> SimpleEnv WorkerTestRegistry -> IO Int
+          runSaturationScenario poolCfg checkEnv = do
+            let workerCnt = 10
+            workerEnv <-
+              createSimpleEnvWithConfig
+                (Proxy @WorkerTestRegistry)
+                connStr
+                testSchema
+                poolCfg
 
-        void $ runSimpleDb starvedEnv $ HL.insertJob (defaultJob (SimpleTask "starve-me"))
+            let jobNames = ["long-" <> T.pack (show i) | i <- [1 .. workerCnt]]
+            runSimpleDb workerEnv $
+              forM_ jobNames $ \name ->
+                void $ HL.insertJob (defaultJob (SimpleTask name))
 
-        handlerStartedMV <- MVar.newEmptyMVar
+            let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+                handler _conn _job = liftIO $ threadDelay 10_000_000 -- well past visibilityTimeout
+            config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+              runSimpleDb workerEnv $ defaultWorkerConfig connStr workerCnt handler
 
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = liftIO $ do
-              void $ MVar.tryPutMVar handlerStartedMV ()
-              threadDelay 10_000_000 -- well past visibilityTimeout
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb starvedEnv $ defaultWorkerConfig connStr 1 handler
+            withAsync
+              ( runSimpleDb workerEnv $
+                  runWorkerPool
+                    ( config
+                        { workerCount = workerCnt
+                        , visibilityTimeout = 3
+                        , heartbeatInterval = 1
+                        , pollInterval = 0.1
+                        , jitter = NoJitter
+                        }
+                    )
+              )
+              $ \_ -> do
+                threadDelay 8_000_000 -- past the 3s lease
+                reclaimed <-
+                  runSimpleDb checkEnv $
+                    HL.claimNextVisibleJobs
+                      @(SimpleDb WorkerTestRegistry IO)
+                      @WorkerTestRegistry
+                      @WorkerTestPayload
+                      workerCnt
+                      3
+                pure (length reclaimed)
 
-        withAsync
-          ( runSimpleDb starvedEnv $
-              runWorkerPool
-                ( config
-                    { workerCount = 1
-                    , visibilityTimeout = 3
-                    , heartbeatInterval = 1
-                    , pollInterval = 0.1
-                    , jitter = NoJitter
-                    }
-                )
-          )
-          $ \_ -> do
-            MVar.takeMVar handlerStartedMV
-            threadDelay 4_500_000 -- past the 3s lease
-            reclaimed <-
-              runSimpleDb env $
-                HL.claimNextVisibleJobs
-                  @(SimpleDb WorkerTestRegistry IO)
-                  @WorkerTestRegistry
-                  @WorkerTestPayload
-                  1
-                  3
-
-            length reclaimed `shouldBe` 0
+      it "heartbeat keeps leases alive when every worker holds a long transaction" $ \env -> do
+        reclaimed <- runSaturationScenario (poolConfigForWorkers 10) env
+        reclaimed `shouldBe` 0
 
       it "retries failed jobs up to max attempts" $ \env -> do
         -- Track attempts per job

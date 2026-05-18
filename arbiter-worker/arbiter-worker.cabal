@@ -49,7 +49,6 @@ library
   build-depends:
     , aeson               >=2.0  && <2.3
     , arbiter-core        <0.2
-    , arbiter-simple      <0.2
     , base                >=4.14 && <5
     , bytestring          >=0.10 && <0.13
     , containers          >=0.6  && <0.9

@@ -7,11 +7,16 @@ module Arbiter.Worker.Retry
   , retryOnExceptionForever
   ) where
 
-import Arbiter.Core.Exceptions (JobException)
+import Arbiter.Core.Exceptions
+  ( JobException
+  , JobNotFoundException
+  , JobStolenException
+  )
 import Control.Monad (forever)
+import Data.Maybe (isJust)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, fromException, liftIO, throwIO)
+import UnliftIO (MonadUnliftIO, SomeException, fromException, liftIO, throwIO)
 import UnliftIO.Async (race)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
@@ -61,7 +66,10 @@ retryOnException stateVar logCfg label action = loop
                 Right () -> loop
 
 -- | Like 'retryOnException' but never returns on its own, even if the worker
--- is shutting down. 'JobException' values still propagate.
+-- is shutting down. Job signals propagate so they reach the worker layer
+-- where they have semantic meaning ('JobException' user decisions,
+-- 'JobStolenException' and 'JobNotFoundException' reclaim signals).
+-- Everything else (including transient DB errors) is retried.
 retryOnExceptionForever
   :: (MonadUnliftIO m)
   => LogConfig
@@ -77,8 +85,14 @@ retryOnExceptionForever logCfg label delay action = forever $ do
   case result of
     Right _ -> pure ()
     Left e
-      | Just (_ :: JobException) <- fromException e -> throwIO e
+      | isJobSignal e -> throwIO e
       | otherwise -> do
           tryLog logCfg Error $
             label <> " error (retrying): " <> T.pack (show e)
           liftIO $ threadDelay (ceiling (delay * 1_000_000))
+
+isJobSignal :: SomeException -> Bool
+isJobSignal e =
+  isJust (fromException e :: Maybe JobException)
+    || isJust (fromException e :: Maybe JobStolenException)
+    || isJust (fromException e :: Maybe JobNotFoundException)

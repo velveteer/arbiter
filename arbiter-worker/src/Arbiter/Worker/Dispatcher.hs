@@ -88,9 +88,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
     claimOnWakeup :: m ()
     claimOnWakeup = do
       mFree <- STM.atomically getFreeWorkers
-      case mFree of
-        Nothing -> pure ()
-        Just freeWorkers -> claimAndEnqueue freeWorkers
+      traverse_ claimAndEnqueue mFree
 
   -- Claim on startup
   claimOnWakeup

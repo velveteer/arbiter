@@ -1,16 +1,25 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
--- | Exceptions that job handlers throw to signal failure.
+-- | Exceptions thrown by job handlers and by the worker engine.
 --
--- Using these types lets a handler control whether a failed job is retried
--- or moved directly to the dead-letter queue.
+-- 'JobException' is the user-facing decision sum. A handler throws one of
+-- these to signal how a failed job should be processed (retry, DLQ, cancel
+-- the tree or branch).
+--
+-- The engine-internal exceptions ('ParsingException', 'InternalException',
+-- 'JobNotFoundException', 'JobStolenException') are thrown directly as
+-- their own types, not wrapped in any sum. They are handled by the worker's
+-- retry combinators and classifier, and are not part of the surface API
+-- that user handlers throw.
 module Arbiter.Core.Exceptions
-  ( -- * Job Processing Exceptions
+  ( -- * User-facing job decisions
     JobException (..)
   , JobRetryableException (..)
   , JobPermanentException (..)
   , TreeCancelException (..)
   , BranchCancelException (..)
+
+    -- * Engine-internal signals
   , ParsingException (..)
   , InternalException (..)
   , JobNotFoundException (..)
@@ -28,25 +37,21 @@ module Arbiter.Core.Exceptions
   ) where
 
 import Control.Exception (Exception)
-import Control.Exception qualified as E
-import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as UE
 
--- | Caught by the worker to decide retry vs DLQ vs cancellation.
+-- | Decisions a handler can signal by throwing. Caught by the worker to
+-- decide retry vs DLQ vs cancellation.
 data JobException
   = Retryable JobRetryableException
   | Permanent JobPermanentException
-  | ParseFailure ParsingException
   | -- | Deletes the entire job tree from root to leaves.
     TreeCancel TreeCancelException
   | -- | Cascade-deletes the parent and all siblings.
     BranchCancel BranchCancelException
-  | JobNotFound JobNotFoundException
-  | JobStolen JobStolenException
   deriving stock (Show, Typeable)
   deriving anyclass (Exception)
 
@@ -60,12 +65,6 @@ newtype JobPermanentException = JobPermanentException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwRetryable :: (MonadUnliftIO m) => Text -> m a
-throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
-
-throwPermanent :: (MonadUnliftIO m) => Text -> m a
-throwPermanent msg = UE.throwIO (Permanent (JobPermanentException msg))
-
 -- | Cancels an entire job tree from root to leaves.
 -- Use when a failure invalidates all work in the tree.
 newtype TreeCancelException = TreeCancelException Text
@@ -78,39 +77,49 @@ newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwTreeCancel :: (MonadUnliftIO m) => Text -> m a
-throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
-
-throwBranchCancel :: (MonadUnliftIO m) => Text -> m a
-throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
-
--- | Row decoding failure (internal).
+-- | Row decoding failure (engine-internal). Classified as a permanent failure
+-- by the worker.
 newtype ParsingException = ParsingException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwParsing :: (MonadIO m) => Text -> m a
-throwParsing msg = liftIO $ E.throwIO (ParseFailure (ParsingException msg))
-
+-- | Generic engine-internal failure (e.g. missing connection, bad params).
 newtype InternalException = InternalException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwInternal :: (MonadIO m) => Text -> m a
-throwInternal msg = liftIO $ E.throwIO (InternalException msg)
-
--- | Job was deleted or reclaimed between claim and ack (internal).
+-- | Job was deleted or reclaimed between claim and ack. The worker recognizes
+-- this signal via 'Arbiter.Worker.isJobGoneException' and skips retry/DLQ.
 newtype JobNotFoundException = JobNotFoundException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwJobNotFound :: (MonadUnliftIO m) => Text -> m a
-throwJobNotFound msg = UE.throwIO (JobNotFound (JobNotFoundException msg))
-
--- | Heartbeat detected another worker reclaimed the job (internal).
+-- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
+-- combinator propagates this signal so the worker can stop duplicate work.
 newtype JobStolenException = JobStolenException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
-throwJobStolen :: (MonadUnliftIO m) => Text -> m a
-throwJobStolen msg = UE.throwIO (JobStolen (JobStolenException msg))
+throwRetryable :: (MonadIO m) => Text -> m a
+throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
+
+throwPermanent :: (MonadIO m) => Text -> m a
+throwPermanent msg = UE.throwIO (Permanent (JobPermanentException msg))
+
+throwTreeCancel :: (MonadIO m) => Text -> m a
+throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
+
+throwBranchCancel :: (MonadIO m) => Text -> m a
+throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
+
+throwParsing :: (MonadIO m) => Text -> m a
+throwParsing msg = UE.throwIO (ParsingException msg)
+
+throwInternal :: (MonadIO m) => Text -> m a
+throwInternal msg = UE.throwIO (InternalException msg)
+
+throwJobNotFound :: (MonadIO m) => Text -> m a
+throwJobNotFound msg = UE.throwIO (JobNotFoundException msg)
+
+throwJobStolen :: (MonadIO m) => Text -> m a
+throwJobStolen msg = UE.throwIO (JobStolenException msg)

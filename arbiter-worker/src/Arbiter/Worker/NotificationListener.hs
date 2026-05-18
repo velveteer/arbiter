@@ -5,8 +5,6 @@ module Arbiter.Worker.NotificationListener
   ) where
 
 import Arbiter.Core.Job.Schema (quoteIdentifier)
-import Control.Applicative (Alternative ((<|>)))
-import Control.Concurrent (threadDelay)
 import Control.Monad (forever, void)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Maybe (fromMaybe)
@@ -16,7 +14,7 @@ import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.Simple qualified as PS
 import Database.PostgreSQL.Simple.Notification qualified as PS
 import UnliftIO (MonadUnliftIO, liftIO)
-import UnliftIO.Async (Concurrently (..), race_)
+import UnliftIO.Async (race_)
 import UnliftIO.Exception (bracket)
 import UnliftIO.STM qualified as STM
 
@@ -73,71 +71,75 @@ withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger action =
   where
     logCfg = fromMaybe defaultLogConfig mLogCfg
 
-mainLoop :: (MonadUnliftIO m) => ListenerCtx -> Action m a -> m ()
-mainLoop ctx action = loop
-  where
-    loop = do
-      status <- STM.readTVarIO $ lcProcessStatus ctx
-
-      -- check status first so there is no race if the process wants to shut down
-      case status of
-        ShuttingDown -> pure ()
-        Paused -> do
-          -- When paused, wait for state to change to Running or ShuttingDown
-          newStatus <- STM.atomically $ do
-            s <- STM.readTVar (lcProcessStatus ctx)
-            case s of
-              Paused -> STM.retrySTM -- Block until state changes
-              _ -> pure s
-          case newStatus of
-            ShuttingDown -> pure ()
-            _ -> loop
-        Running -> do
-          -- Cancel waiting for a notification when the app shuts down or paused.
-          -- There is also an optional timer that, if it expires, fires the
-          -- action even if no notification has been received. This provides
-          -- assurance that we won't miss anything.
-          command <-
-            runConcurrently $
-              Concurrently (checkStateChange ctx)
-                <|> Concurrently (waitForNotification $ lcNotificationVar ctx)
-                <|> Concurrently (messageWaitTimer ctx)
-                <|> Concurrently (waitForWakeTrigger ctx)
-
-          case command of
-            Halt -> pure ()
-            PauseCmd -> loop -- Go back to top, will re-check state
-            NotificationRecv n -> action (Just n) *> loop
-            -- run the action even though there was no message
-            TimerExpired -> action Nothing *> loop
-
 data Command
   = Halt
   | PauseCmd
   | NotificationRecv PS.Notification
   | TimerExpired
 
--- | Blocks until the process status changes from Running to Paused or ShuttingDown.
--- Returns the appropriate command when state changes.
-checkStateChange :: (MonadUnliftIO m) => ListenerCtx -> m Command
-checkStateChange ctx =
-  STM.atomically $ do
-    status <- STM.readTVar (lcProcessStatus ctx)
-    case status of
-      ShuttingDown -> pure Halt
-      Paused -> pure PauseCmd
-      Running -> STM.retrySTM -- Block until state changes
+-- | The main wait/dispatch loop.
+--
+-- Each iteration registers a fresh poll-delay timer and then awaits — in a
+-- single 'atomically' — any of: a state change away from 'Running', an
+-- inbound notification, the poll timer expiring, or the optional wake
+-- trigger firing. Paused state suspends the loop until state changes.
+mainLoop :: (MonadUnliftIO m) => ListenerCtx -> Action m a -> m ()
+mainLoop ctx action = loop
+  where
+    pollMicros = round (lcPollDelay ctx * 1_000_000)
 
--- | Block until a notification is received from the notification TVar.
--- Then block until the result is True.
-waitForNotification :: (MonadUnliftIO m) => STM.TVar (Maybe PS.Notification) -> m Command
-waitForNotification notificationVar = STM.atomically $ do
-  mNotificationVar <- STM.readTVar notificationVar
-  case mNotificationVar of
-    Just n -> do
-      STM.writeTVar notificationVar Nothing
-      pure $ NotificationRecv n
-    Nothing -> STM.retrySTM
+    loop = do
+      cmd <- nextCommand
+      case cmd of
+        Halt -> pure ()
+        PauseCmd -> awaitUnpause >> loop
+        NotificationRecv n -> action (Just n) *> loop
+        TimerExpired -> action Nothing *> loop
+
+    nextCommand = do
+      delayVar <- STM.registerDelay pollMicros
+      STM.atomically $ do
+        status <- STM.readTVar (lcProcessStatus ctx)
+        case status of
+          ShuttingDown -> pure Halt
+          Paused -> pure PauseCmd
+          Running ->
+            consumeNotification
+              `STM.orElse` timerExpired delayVar
+              `STM.orElse` waitWakeTrigger
+              `STM.orElse` watchStateChange
+
+    -- Block until we're either ShuttingDown or back to Running.
+    awaitUnpause =
+      STM.atomically $ do
+        s <- STM.readTVar (lcProcessStatus ctx)
+        case s of
+          Paused -> STM.retrySTM
+          _ -> pure ()
+
+    consumeNotification = do
+      mNotif <- STM.readTVar (lcNotificationVar ctx)
+      case mNotif of
+        Just n -> do
+          STM.writeTVar (lcNotificationVar ctx) Nothing
+          pure (NotificationRecv n)
+        Nothing -> STM.retrySTM
+
+    timerExpired delayVar = do
+      isExpired <- STM.readTVar delayVar
+      if isExpired then pure TimerExpired else STM.retrySTM
+
+    waitWakeTrigger = case lcWakeTrigger ctx of
+      Nothing -> STM.retrySTM
+      Just trigger -> trigger >> pure TimerExpired
+
+    -- Wake when status leaves Running so we can re-check at the top.
+    watchStateChange = do
+      s <- STM.readTVar (lcProcessStatus ctx)
+      case s of
+        ShuttingDown -> pure Halt
+        Paused -> pure PauseCmd
+        Running -> STM.retrySTM
 
 -- Block on receiving a Postgres notification. When a notification is received,
 -- add it to the notification var and loop.
@@ -145,23 +147,6 @@ notificationLoop :: (MonadUnliftIO m) => ListenerCtx -> m ()
 notificationLoop ctx = forever $ do
   n <- liftIO $ PS.getNotification (lcConnection ctx)
   void . STM.atomically $ STM.swapTVar (lcNotificationVar ctx) (Just n)
-
--- | Blocks for the duration of the poll delay.
-messageWaitTimer :: (MonadUnliftIO m) => ListenerCtx -> m Command
-messageWaitTimer ctx = do
-  let microSecs = round (lcPollDelay ctx * 1_000_000)
-  delay <- STM.registerDelay microSecs
-  STM.atomically $ do
-    isExpired <- STM.readTVar delay
-    if isExpired
-      then pure TimerExpired
-      else STM.retrySTM
-
--- | Blocks until the wake trigger fires, or forever if no trigger is configured.
-waitForWakeTrigger :: (MonadUnliftIO m) => ListenerCtx -> m Command
-waitForWakeTrigger ctx = case lcWakeTrigger ctx of
-  Nothing -> liftIO $ forever $ threadDelay maxBound
-  Just trigger -> STM.atomically $ trigger >> pure TimerExpired
 
 connectToDb :: String -> IO PS.Connection
 connectToDb = PS.connectPostgreSQL . BSC.pack

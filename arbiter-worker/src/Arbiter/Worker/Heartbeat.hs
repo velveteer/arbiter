@@ -5,9 +5,9 @@ module Arbiter.Worker.Heartbeat
   ) where
 
 import Arbiter.Core.Exceptions (throwJobStolen)
+import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
-import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, ObservabilityHooks (..))
-import Arbiter.Simple (SimpleEnv, runSimpleDb)
+import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
 import Control.Concurrent.MVar qualified as MVar
 import Control.Monad (forever, unless)
 import Control.Monad.IO.Class (liftIO)
@@ -24,15 +24,11 @@ import Arbiter.Worker.Logger (LogConfig)
 import Arbiter.Worker.Logger.Internal (runHook)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
 
--- | Run an action with a heartbeat that extends visibility timeout for all jobs
+-- | Run an action with a heartbeat that extends visibility timeout for all jobs.
 --
--- The heartbeat runs in a separate thread and extends the visibility timeout at
--- regular intervals, preventing long-running jobs from becoming visible and being
--- claimed by another worker.
---
--- Uses 'race' to coordinate the heartbeat and action threads. If the heartbeat
--- detects a stolen job, its exception propagates out (cancelling the action).
--- If the action completes first, the heartbeat is cancelled cleanly.
+-- The heartbeat runs in a separate thread spawned via 'race' and extends the
+-- visibility timeout at regular intervals, preventing long-running jobs from
+-- becoming visible and being claimed by another worker.
 --
 -- The heartbeat distinguishes between:
 --
@@ -43,7 +39,9 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
   :: forall registry m payload a
-   . (JobPayload payload, MonadUnliftIO m)
+   . ( JobOperation m registry payload
+     , MonadUnliftIO m
+     )
   => ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
   -> NominalDiffTime
@@ -54,8 +52,6 @@ withJobsHeartbeat
   -- ^ Start time (for calculating elapsed time in heartbeat hook)
   -> NonEmpty (JobRead payload)
   -- ^ The job(s) being processed
-  -> SimpleEnv registry
-  -- ^ Dedicated heartbeat env (own connection pool, separate from worker pool)
   -> LogConfig
   -- ^ Log configuration
   -> Maybe (MVar.MVar ())
@@ -63,7 +59,7 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatEnv logCfg mLivenessMVar action =
+withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg mLivenessMVar action =
   either absurd id <$> race heartbeatThread action
   where
     heartbeatThread =
@@ -72,9 +68,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs heartbeatEnv log
 
     tick = do
       liftIO $ threadDelay (ceiling (intervalSecs * 1_000_000))
-      results <-
-        runSimpleDb heartbeatEnv $
-          Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
+      results <- Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
       traverse_ (\mv -> liftIO $ MVar.tryPutMVar mv ()) mLivenessMVar
       let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
       unless (null stolenJobs) $
