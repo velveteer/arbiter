@@ -30,11 +30,11 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race_)
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT (..), asks)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
-import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Proxy (Proxy (..))
@@ -67,6 +67,9 @@ trialCount = 10
 
 trialDurationUs :: Int
 trialDurationUs = 10_000_000
+
+steadyStateWarmupUs :: Int
+steadyStateWarmupUs = 2_000_000
 
 data BenchPayload
   = BenchMessage Int
@@ -253,10 +256,9 @@ runWorkerTrial runM configs totalJobs durationUs = do
       elapsed = realToFrac (diffUTCTime end start) :: Double
   pure (fromIntegral processed / elapsed)
 
--- | Steady-state trial: a producer inserts jobs continuously while workers consume.
---
--- The producer inserts in batches to keep the queue fed. Measures how many jobs
--- are fully processed (inserted + claimed + acked) during the trial.
+-- | Steady-state trial. Producers insert continuously while workers consume.
+-- Workers increment a counter per job, decoupling throughput from queue
+-- depth at trial boundaries.
 runSteadyStateTrial
   :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadMask m, MonadUnliftIO m)
   => RunM m
@@ -264,6 +266,8 @@ runSteadyStateTrial
   -> RunM SimpleM
   -- ^ Runner for producers (separate pool)
   -> [WorkerConfig m BenchPayload ()]
+  -> IORef Int
+  -- ^ Counter that handlers increment per job processed
   -> Int
   -- ^ Batch size for producer inserts
   -> Int
@@ -274,11 +278,9 @@ runSteadyStateTrial
   -> Int
   -- ^ Trial duration (microseconds)
   -> IO Double
-runSteadyStateTrial runM producerRunM configs producerBatchSize numProducers producerDelayUs flavor durationUs = do
-  insertCounter <- newIORef (0 :: Int)
+runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize numProducers producerDelayUs flavor durationUs = do
   batchCounter <- newIORef (0 :: Int)
   let mkProducer producerId = do
-        -- Stagger startup so producers don't all insert simultaneously
         when (producerDelayUs > 0) $
           threadDelay (producerId * (producerDelayUs `div` numProducers))
         let go = do
@@ -297,11 +299,12 @@ runSteadyStateTrial runM producerRunM configs producerBatchSize numProducers pro
                       | i <- [1 .. producerBatchSize]
                       ]
               producerRunM $ void $ HL.insertJobsBatch_ jobs
-              modifyIORef' insertCounter (+ producerBatchSize)
               when (producerDelayUs > 0) $ threadDelay producerDelayUs
               go
          in go
-  start <- getCurrentTime
+  t0 <- getCurrentTime
+  startRef <- newIORef t0
+  endRef <- newIORef t0
   race_
     ( mapConcurrently_
         id
@@ -309,50 +312,63 @@ runSteadyStateTrial runM producerRunM configs producerBatchSize numProducers pro
             <> [mkProducer i | i <- [0 .. numProducers - 1]]
         )
     )
-    (threadDelay durationUs)
-  end <- getCurrentTime
-  remaining <- runM (HL.countJobs @_ @BenchRegistry @BenchPayload)
-  inserted <- readIORef insertCounter
-  let processed = fromIntegral inserted - remaining
-      elapsed = realToFrac (diffUTCTime end start) :: Double
+    ( do
+        threadDelay steadyStateWarmupUs
+        writeIORef processedCounter 0
+        getCurrentTime >>= writeIORef startRef
+        threadDelay durationUs
+        getCurrentTime >>= writeIORef endRef
+    )
+  processed <- readIORef processedCounter
+  start <- readIORef startRef
+  end <- readIORef endRef
+  let elapsed = realToFrac (diffUTCTime end start) :: Double
   pure (fromIntegral processed / elapsed)
 
 simpleSteadyStateTrial
   :: RunM SimpleM -> RunM SimpleM -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO Double
 simpleSteadyStateTrial runM producerRunM durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) _job -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Connection) _job ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\(_conn :: Connection) _jobs -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM configs producerBatchSize 10 50_000 flavor durationUs
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \(_conn :: Connection) jobs ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
 hasqlSteadyStateTrial
   :: RunM HasqlM -> RunM SimpleM -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO Double
 hasqlSteadyStateTrial runM producerRunM durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) _job -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Hasql.Connection) _job ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <-
-        runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\(_conn :: Hasql.Connection) _jobs -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM configs producerBatchSize 10 50_000 flavor durationUs
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \(_conn :: Hasql.Connection) jobs ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
 orvilleSteadyStateTrial
   :: RunM OrvilleM -> RunM SimpleM -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO Double
 orvilleSteadyStateTrial runM producerRunM durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\_job -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \_job ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\_jobs -> pure ())
-      pure c {pollInterval = 1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM configs producerBatchSize 10 50_000 flavor durationUs
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs ->
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
 -- Setup
 

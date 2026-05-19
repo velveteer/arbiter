@@ -519,17 +519,17 @@ If you're choosing a backend based on raw throughput:
 
 | Backend | Single job | Batched (10) | Single (50k groups) | Batched (50k groups) |
 |---------|-----------|-------------|---------------------|---------------------|
-| hasql | 9,874/s | 29,290/s | 6,623/s | 59,254/s |
-| orville | 9,640/s | 24,583/s | 6,464/s | 54,780/s |
-| postgresql-simple | 7,417/s | 28,419/s | 5,453/s | 50,231/s |
+| hasql | 10,011/s | 30,745/s | 6,592/s | 60,074/s |
+| orville | 9,717/s | 27,048/s | 6,471/s | 55,655/s |
+| postgresql-simple | 7,626/s | 28,143/s | 5,761/s | 51,769/s |
 
 **Steady-state throughput** (10 concurrent producers):
 
 | Backend | Single job | Batched (10) | Single (groups) | Batched (groups) |
 |---------|-----------|-------------|---------------------|---------------------|
-| hasql | 8,780/s | 19,081/s | 6,271/s | 17,543/s |
-| orville | 7,626/s | 18,786/s | 6,197/s | 16,265/s |
-| postgresql-simple | 5,172/s | 19,168/s | 3,467/s | 15,551/s |
+| hasql | 8,121/s | 19,123/s | 6,287/s | 18,129/s |
+| orville | 8,672/s | 19,142/s | 6,269/s | 18,084/s |
+| postgresql-simple | 7,041/s | 18,815/s | 5,711/s | 15,295/s |
 
 ### arbiter-simple (postgresql-simple)
 

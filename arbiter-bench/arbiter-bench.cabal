@@ -32,7 +32,7 @@ benchmark benchmarks
   type:           exitcode-stdio-1.0
   hs-source-dirs: bench
   main-is:        Benchmarks.hs
-  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:    -threaded -rtsopts "-with-rtsopts=-N -A128m"
   build-depends:
     , aeson               >=2.0
     , arbiter-core
