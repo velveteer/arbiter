@@ -7,6 +7,7 @@
 -- imports from this module and never uses CPP directly.
 module Arbiter.Hasql.Compat
   ( runSQL
+  , connectionInTransaction
   , hasqlSettings
   , HasqlSettings
   ) where
@@ -17,6 +18,7 @@ import Data.ByteString (ByteString)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
+import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import UnliftIO (MonadUnliftIO)
@@ -43,6 +45,31 @@ runScript = Session.script
 runScript :: T.Text -> Session.Session ()
 runScript = Session.sql
 #endif
+
+-- | Returns 'True' if the connection is in a transaction block (valid or
+-- aborted) and 'False' if it is idle. Used to skip a redundant @ROLLBACK@
+-- when hasql has already cleaned up after an interrupted session.
+connectionInTransaction :: Hasql.Connection -> IO Bool
+#if MIN_VERSION_hasql(1,10,0)
+connectionInTransaction conn = do
+  result <- Hasql.use conn $ Session.onLibpqConnection $ \pq -> do
+    status <- LibPQ.transactionStatus pq
+    pure (Right (txStatusNeedsRollback status), pq)
+  case result of
+    Right inTx -> pure inTx
+    Left _ -> pure False
+#else
+connectionInTransaction conn =
+  Hasql.withLibPQConnection conn $ \pq -> do
+    status <- LibPQ.transactionStatus pq
+    pure (txStatusNeedsRollback status)
+#endif
+
+-- | Only @TransInTrans@ and @TransInError@ accept a @ROLLBACK@ without warning.
+txStatusNeedsRollback :: LibPQ.TransactionStatus -> Bool
+txStatusNeedsRollback LibPQ.TransInTrans = True
+txStatusNeedsRollback LibPQ.TransInError = True
+txStatusNeedsRollback _ = False
 
 -- | Convert a connection string ByteString to hasql settings.
 hasqlSettings :: ByteString -> HasqlSettings

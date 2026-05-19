@@ -32,6 +32,7 @@ module Arbiter.Hasql.MonadArbiter
 import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.MonadArbiter (Params)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Int (Int64)
@@ -133,8 +134,10 @@ beginCommitOrRollback conn action = mask $ \restore -> do
   where
     rollbackSafely :: IO ()
     rollbackSafely = do
-      _ <- try (Compat.runSQL conn "ROLLBACK") :: IO (Either SomeException ())
-      pure ()
+      inTx <- Compat.connectionInTransaction conn
+      when inTx $ do
+        _ <- try (Compat.runSQL conn "ROLLBACK") :: IO (Either SomeException ())
+        pure ()
 
 -- | Invoke a handler by passing the active hasql connection.
 --
