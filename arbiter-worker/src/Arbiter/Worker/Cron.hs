@@ -387,12 +387,12 @@ tryInsertCronJob
   => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m Bool
 tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
   result <- tryAny . withDbTransaction $ do
-    let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
-        jobWrite = (builder cj kind tick) {dedupKey = Just (IgnoreDuplicate key)}
-    mJob <- HL.insertJob jobWrite
-    case mJob of
-      Just _ -> void $ Ops.touchCronLastFired schemaName (name cj)
-      Nothing -> pure ()
+    -- Gate first: another pool may have already fired this minute.
+    fired <- Ops.tryFireCronGate schemaName (name cj) tick
+    when fired $ do
+      let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
+          jobWrite = (builder cj kind tick) {dedupKey = Just (IgnoreDuplicate key)}
+      void $ HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cj]
   case result of
     Left e -> do

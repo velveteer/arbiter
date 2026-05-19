@@ -686,6 +686,37 @@ spec connStr = do
         afterRetry <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         afterRetry `shouldBe` []
 
+      it "gate prevents double-fire when last_fired_at already covers the minute" $ \env -> do
+        -- Simulates a fast pool that already fired and acked 12:00.
+        -- A slow pool retrying the same minute would double-fire without the gate.
+        let Right cj = cronJob "skew-race" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "skew"))
+            tick = mkTime 2025 6 15 12 0 0
+        runSimpleDb env $ initCronSchedules testSchema [cj] testLogConfig
+        withResource sharedPool $ \conn ->
+          void $
+            PG.execute
+              conn
+              "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
+              (tick, "skew-race" :: Text)
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] tick
+        jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
+        length jobs `shouldBe` 0
+
+      it "gate lets the next minute through after firing the previous one" $ \env -> do
+        let Right cj = cronJob "skew-advance" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "advance"))
+            tickPrev = mkTime 2025 6 15 12 0 0
+            tickNext = mkTime 2025 6 15 12 1 0
+        runSimpleDb env $ initCronSchedules testSchema [cj] testLogConfig
+        withResource sharedPool $ \conn ->
+          void $
+            PG.execute
+              conn
+              "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
+              (tickPrev, "skew-advance" :: Text)
+        runSimpleDb env $ processCronCatchUp testLogConfig testSchema [cj] tickNext
+        jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
+        length jobs `shouldBe` 1
+
 createSharedPool :: ByteString -> IO (Pool PG.Connection)
 createSharedPool connStr =
   newPool $

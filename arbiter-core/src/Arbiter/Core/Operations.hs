@@ -83,6 +83,7 @@ module Arbiter.Core.Operations
   , deleteStaleCronSchedules
   , touchCronLastFired
   , touchCronChecked
+  , tryFireCronGate
 
     -- * Internal Operations
   , getParentStateSnapshot
@@ -1767,6 +1768,24 @@ touchCronChecked schemaName watermark names =
   executeStatement
     (Tmpl.touchCronCheckedSQL schemaName)
     [pval CTimestamptz watermark, parr CText names]
+
+-- | Claim a minute floor for a schedule. 'True' = caller proceeds with the
+-- insert. 'False' = another pool already fired this minute, skip.
+tryFireCronGate
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> Text
+  -- ^ Schedule name
+  -> UTCTime
+  -- ^ Minute floor for the tick being attempted
+  -> m Bool
+tryFireCronGate schemaName scheduleName minuteFloor = do
+  rows <-
+    executeStatement
+      (Tmpl.tryFireCronGateSQL schemaName)
+      [pval CTimestamptz minuteFloor, pval CText scheduleName, pval CTimestamptz minuteFloor]
+  pure (rows > 0)
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

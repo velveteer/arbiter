@@ -86,6 +86,7 @@ module Arbiter.Core.SqlTemplates
   , deleteStaleCronSchedulesSQL
   , touchCronLastFiredSQL
   , touchCronCheckedSQL
+  , tryFireCronGateSQL
   ) where
 
 import Data.Int (Int64)
@@ -1565,3 +1566,16 @@ touchCronCheckedSQL schemaName =
    in "UPDATE "
         <> tbl
         <> " SET last_checked_at = GREATEST(last_checked_at, ?) WHERE name = ANY(?)"
+
+-- | Fire-once-per-minute gate. Advances @last_fired_at@ to the minute floor
+-- only if the existing value is strictly less. 0 rows = another pool won.
+--
+-- Parameters: minute floor, schedule name, minute floor
+tryFireCronGateSQL :: Text -> Text
+tryFireCronGateSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "UPDATE "
+        <> tbl
+        <> " SET last_fired_at = GREATEST(last_fired_at, ?), updated_at = NOW()"
+        <> " WHERE name = ?"
+        <> " AND (last_fired_at IS NULL OR last_fired_at < ?)"
