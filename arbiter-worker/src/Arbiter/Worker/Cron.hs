@@ -329,13 +329,14 @@ data TickOutcome = NotLeader | Ran
 tickKindFor :: UTCTime -> UTCTime -> TickKind
 tickKindFor currentTick t = if t == currentTick then Live else Replay
 
--- | 'SkipOverlap' keeps the most recent match. 'AllowOverlap' keeps all.
+-- | 'SkipOverlap' keeps the oldest match so a catch-up handler starts from
+-- the earliest unprocessed checkpoint. 'AllowOverlap' keeps all.
 -- Match evaluation uses the supplied timezone ('Nothing' = UTC).
 pickTicksToFire :: CronSchedule -> Maybe Text -> OverlapPolicy -> [UTCTime] -> [UTCTime]
 pickTicksToFire sched tz ov ticks =
   let matching = filter (matchesInTimezone tz sched) ticks
    in case ov of
-        SkipOverlap -> take 1 (reverse matching)
+        SkipOverlap -> take 1 matching
         AllowOverlap -> matching
 
 -- | Minutes to evaluate for a 'processCronCatchUp' call. Returns @[]@ when
