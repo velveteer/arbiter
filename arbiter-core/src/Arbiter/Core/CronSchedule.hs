@@ -24,7 +24,18 @@ module Arbiter.Core.CronSchedule
   ) where
 
 import Control.Applicative ((<|>))
-import Data.Aeson (FromJSON (..), ToJSON, withObject, (.:), (.:?))
+import Data.Aeson
+  ( FromJSON (..)
+  , ToJSON (..)
+  , defaultOptions
+  , genericToEncoding
+  , genericToJSON
+  , omitNothingFields
+  , withObject
+  , (.:)
+  , (.:?)
+  )
+import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Maybe (fromMaybe)
@@ -82,7 +93,13 @@ data CronScheduleUpdate = CronScheduleUpdate
   , enabled :: Maybe Bool
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (ToJSON)
+
+updateOptions :: Aeson.Options
+updateOptions = defaultOptions {omitNothingFields = True}
+
+instance ToJSON CronScheduleUpdate where
+  toJSON = genericToJSON updateOptions
+  toEncoding = genericToEncoding updateOptions
 
 -- @.:?@ can't distinguish missing from null for @Maybe (Maybe a)@ (both
 -- yield @Nothing@), so we check key membership first.

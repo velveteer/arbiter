@@ -733,7 +733,7 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
         Just _ -> pure ()
     _ -> pure ()
 
-  result <- liftIO $ runSimpleDb env $ do
+  result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
     _ <- Ops.updateCronSchedule schemaName name update
     Ops.getCronScheduleByName schemaName name
 

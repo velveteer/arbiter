@@ -87,6 +87,7 @@ module Arbiter.Core.SqlTemplates
   , touchCronLastFiredSQL
   , touchCronCheckedSQL
   , tryFireCronGateSQL
+  , tryAcquireCronLeaderSQL
   ) where
 
 import Data.Int (Int64)
@@ -1545,13 +1546,11 @@ deleteStaleCronSchedulesSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "DELETE FROM " <> tbl <> " WHERE name <> ALL(?)"
 
--- | Update @last_fired_at@ to NOW() for a single cron schedule.
---
--- Parameters: schedule name
+-- | Set @last_fired_at@ to NOW() for a schedule.
 touchCronLastFiredSQL :: Text -> Text
 touchCronLastFiredSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET last_fired_at = NOW(), updated_at = NOW() WHERE name = ?"
+   in "UPDATE " <> tbl <> " SET last_fired_at = NOW() WHERE name = ?"
 
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
 -- schedule names. The watermark must be the minute boundary the scheduler
@@ -1576,6 +1575,10 @@ tryFireCronGateSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "UPDATE "
         <> tbl
-        <> " SET last_fired_at = GREATEST(last_fired_at, ?), updated_at = NOW()"
+        <> " SET last_fired_at = GREATEST(last_fired_at, ?)"
         <> " WHERE name = ?"
         <> " AND (last_fired_at IS NULL OR last_fired_at < ?)"
+
+-- | Per-(schema, name) transaction-scoped advisory lock for cron scheduling.
+tryAcquireCronLeaderSQL :: Text
+tryAcquireCronLeaderSQL = "SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?))"

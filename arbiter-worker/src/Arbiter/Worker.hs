@@ -317,7 +317,7 @@ runWorkerPool config = do
           pure
             <$> ( ContT . withAsync $
                     retryOnException (workerStateVar config) (logConfig config) "Cron scheduler" $
-                      runCronScheduler (logConfig config) sch jobs
+                      runCronScheduler (workerStateVar config) (logConfig config) sch jobs
                 )
 
     -- Spawn groups table reaper (corrects drift in job_count, min_priority, min_id)

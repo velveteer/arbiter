@@ -47,7 +47,8 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Monad (forM_, forever, void, when)
+import Control.Concurrent.STM (retry)
+import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (unfoldr)
 import Data.Maybe (fromMaybe, isNothing)
@@ -70,11 +71,11 @@ import Data.Time.Zones (TZ, utcToLocalTimeTZ)
 import Data.Time.Zones.All (fromTZName, tzByLabel)
 import GHC.Generics (Generic)
 import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
-import UnliftIO (MonadUnliftIO, liftIO, tryAny)
-import UnliftIO.Concurrent (threadDelay)
+import UnliftIO (MonadUnliftIO, TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (logMessage)
+import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | How overlapping cron ticks are deduplicated.
 data OverlapPolicy
@@ -116,8 +117,6 @@ data CronJob payload = CronJob
   -- ^ Human-readable name for logging and dedup keys
   , cronExpression :: Text
   -- ^ Original cron expression text (for DB storage)
-  , schedule :: CronSchedule
-  -- ^ Parsed cron schedule (internal)
   , overlap :: OverlapPolicy
   -- ^ How to handle overlapping ticks
   , backfill :: BackfillPolicy
@@ -167,12 +166,11 @@ cronJob
 cronJob cronName expr ov mk =
   case parseCronSchedule expr of
     Left err -> Left err
-    Right sched ->
+    Right _ ->
       Right
         CronJob
           { name = cronName
           , cronExpression = expr
-          , schedule = sched
           , overlap = ov
           , backfill = NoBackfill
           , timezone = Nothing
@@ -240,31 +238,34 @@ initCronSchedules schemaName jobs logCfg = do
   logCron logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
--- | Scheduler entry point: upsert defaults, run one catch-up pass at startup,
--- then loop on minute boundaries.
+-- | Scheduler entry point. Exits cleanly when the worker state becomes
+-- 'ShuttingDown' so graceful shutdown stops creating new jobs.
 runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => LogConfig
+  => TVar WorkerState
+  -> LogConfig
   -> Text
   -> [CronJob payload]
   -> m ()
-runCronScheduler logCfg schemaName jobs = do
+runCronScheduler stateVar logCfg schemaName jobs = do
   initCronSchedules schemaName jobs logCfg
-  -- Startup catch-up is the same code path as mid-flight. 'BackfillPolicy'
-  -- bounds the window. 'NoBackfill' processes only the current minute.
   startupNow <- liftIO getCurrentTime
-  processCronCatchUp logCfg schemaName jobs startupNow
+  shuttingDown <- isShuttingDown stateVar
+  unless shuttingDown $
+    processCronCatchUp logCfg schemaName jobs startupNow
   logCron logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
-  forever $ do
-    waitUntilNextMinute
-    now <- liftIO getCurrentTime
-    processCronCatchUp logCfg schemaName jobs now
+  loop
+  where
+    loop = do
+      stop <- waitUntilNextMinuteOrShutdown stateVar
+      unless stop $ do
+        now <- liftIO getCurrentTime
+        processCronCatchUp logCfg schemaName jobs now
+        loop
 
--- | Scheduler catch-up step. Fires every matching minute in the
--- 'BackfillPolicy' window. The watermark advances to @currentTick@ after
--- processing regardless of which inserts succeeded. Failed inserts are
--- logged but not retried (retrying would risk re-firing sibling ticks
--- whose jobs have already been processed).
+-- | Scheduler catch-up step. Each cron is processed in its own transaction.
+-- Backfill schedules hold a per-(schema, name) advisory lock so concurrent
+-- pools can't interleave gate updates across a backfill window.
 processCronCatchUp
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
@@ -274,41 +275,55 @@ processCronCatchUp
   -- ^ Current wall-clock time
   -> m ()
 processCronCatchUp logCfg schemaName jobs now = do
-  (rowMap, dbFetchOk) <- fetchScheduleRows logCfg schemaName
   let currentTick = truncateToMinute now
-  forM_ jobs (processOne rowMap currentTick)
-  when (dbFetchOk && not (null jobs)) $
-    tryOrLog logCfg "Failed to update last_checked_at" $
-      Ops.touchCronChecked schemaName currentTick (map name jobs)
+  forM_ jobs (processOneCron currentTick)
   where
-    processOne rowMap currentTick cj = do
-      let mRow = lookup (name cj) rowMap
-      case resolveAndParse cj mRow of
-        Disabled -> pure ()
-        ParseError expr err ->
-          logCron logCfg Error $
-            "Cron schedule '"
-              <> name cj
-              <> "' has invalid effective expression '"
-              <> expr
-              <> "': "
-              <> T.pack err
-        InvalidTimezone tzName ->
-          logCron logCfg Error $
-            "Cron schedule '"
-              <> name cj
-              <> "' has unknown timezone '"
-              <> tzName
-              <> "'"
-        Effective effectiveOv sched effectiveTz -> do
-          let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
-              ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
-              replayCount = length (filter (/= currentTick) ticksToFire)
-          when (replayCount > 0) $
-            logCron logCfg Info $
-              "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
-          forM_ ticksToFire $ \t ->
-            void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
+    processOneCron currentTick cj = do
+      outcome <- tryAny . withDbTransaction $ do
+        haveLeader <- case backfill cj of
+          NoBackfill -> pure True
+          Backfill _ -> Ops.tryAcquireCronLeader schemaName (name cj)
+        if not haveLeader
+          then pure NotLeader
+          else do
+            mRow <- Ops.getCronScheduleByName schemaName (name cj)
+            processOne mRow currentTick cj
+            void $ Ops.touchCronChecked schemaName currentTick [name cj]
+            pure Ran
+      case outcome of
+        Left e ->
+          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> T.pack (show e)
+        Right NotLeader ->
+          logCron logCfg Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
+        Right Ran -> pure ()
+    processOne mRow currentTick cj = case resolveAndParse cj mRow of
+      Disabled -> pure ()
+      ParseError expr err ->
+        logCron logCfg Error $
+          "Cron schedule '"
+            <> name cj
+            <> "' has invalid effective expression '"
+            <> expr
+            <> "': "
+            <> T.pack err
+      InvalidTimezone tzName ->
+        logCron logCfg Error $
+          "Cron schedule '"
+            <> name cj
+            <> "' has unknown timezone '"
+            <> tzName
+            <> "'"
+      Effective effectiveOv sched effectiveTz -> do
+        let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
+            ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
+            replayCount = length (filter (/= currentTick) ticksToFire)
+        when (replayCount > 0) $
+          logCron logCfg Info $
+            "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
+        forM_ ticksToFire $ \t ->
+          void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
+
+data TickOutcome = NotLeader | Ran
 
 -- | 'Live' for @currentTick@, 'Replay' otherwise.
 tickKindFor :: UTCTime -> UTCTime -> TickKind
@@ -337,18 +352,6 @@ enumerateCatchUpTicks (Backfill window) (Just lastChecked) currentTick =
       windowFloor = truncateToMinute (addUTCTime (negate window) currentTick)
       startMinute = max (addUTCTime 60 truncatedLast) windowFloor
    in enumMinutes startMinute currentTick
-
--- | Fetch schedule rows from DB, falling back to empty on error.
-fetchScheduleRows
-  :: (MonadArbiter m, MonadUnliftIO m)
-  => LogConfig -> Text -> m ([(Text, CS.CronScheduleRow)], Bool)
-fetchScheduleRows logCfg schemaName = do
-  result <- tryAny $ Ops.listCronSchedules schemaName
-  case result of
-    Right rows -> pure ([(CS.name r, r) | r <- rows], True)
-    Left e -> do
-      logCron logCfg Error $ "Failed to fetch cron schedules from DB, using code defaults: " <> T.pack (show e)
-      pure ([], False)
 
 -- | Result of resolving a schedule's effective config (code defaults +
 -- runtime DB overrides).
@@ -402,17 +405,9 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
       pure True
 
--- | Log a cron message.
+-- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()
-logCron logCfg level msg = liftIO $ logMessage logCfg level msg
-
--- | Try an action, logging errors without re-throwing.
-tryOrLog :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
-tryOrLog logCfg prefix action = do
-  result <- tryAny action
-  case result of
-    Right _ -> pure ()
-    Left e -> logCron logCfg Error $ prefix <> ": " <> T.pack (show e)
+logCron logCfg level msg = liftIO $ tryLog logCfg level msg
 
 -- | Dedup key for a cron job, from its code-defined overlap and timezone.
 makeDedupKey :: CronJob payload -> UTCTime -> Text
@@ -434,11 +429,27 @@ computeDelayMicros now =
       rawMicros = ceiling (delaySeconds * 1_000_000) :: Int
    in max 0 (min 120_000_000 rawMicros)
 
--- | Sleep until the next minute boundary (:00 seconds).
-waitUntilNextMinute :: (MonadIO m) => m ()
-waitUntilNextMinute = liftIO $ do
+-- | Wait for either the next minute boundary or a shutdown signal. Returns
+-- 'True' if the shutdown signal arrived first.
+waitUntilNextMinuteOrShutdown :: (MonadIO m) => TVar WorkerState -> m Bool
+waitUntilNextMinuteOrShutdown stateVar = liftIO $ do
   now <- getCurrentTime
-  threadDelay (computeDelayMicros now)
+  timerVar <- registerDelay (computeDelayMicros now)
+  atomically $ do
+    st <- readTVar stateVar
+    case st of
+      ShuttingDown -> pure True
+      _ -> do
+        timedOut <- readTVar timerVar
+        if timedOut then pure False else retry
+
+-- | Snapshot of the current 'WorkerState' for use outside STM.
+isShuttingDown :: (MonadIO m) => TVar WorkerState -> m Bool
+isShuttingDown stateVar = do
+  st <- readTVarIO stateVar
+  pure $ case st of
+    ShuttingDown -> True
+    _ -> False
 
 -- | Truncate a 'UTCTime' to the current minute (zero out seconds).
 truncateToMinute :: UTCTime -> UTCTime

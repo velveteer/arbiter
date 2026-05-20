@@ -84,6 +84,7 @@ module Arbiter.Core.Operations
   , touchCronLastFired
   , touchCronChecked
   , tryFireCronGate
+  , tryAcquireCronLeader
 
     -- * Internal Operations
   , getParentStateSnapshot
@@ -1786,6 +1787,23 @@ tryFireCronGate schemaName scheduleName minuteFloor = do
       (Tmpl.tryFireCronGateSQL schemaName)
       [pval CTimestamptz minuteFloor, pval CText scheduleName, pval CTimestamptz minuteFloor]
   pure (rows > 0)
+
+-- | Try to acquire the (schema, name) cron leader lock. Must be inside a transaction.
+tryAcquireCronLeader
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Schedule name
+  -> m Bool
+tryAcquireCronLeader schemaName scheduleName = do
+  rows <-
+    executeQuery
+      Tmpl.tryAcquireCronLeaderSQL
+      [pval CText schemaName, pval CText scheduleName]
+      boolCodec
+  pure $ case rows of
+    (True : _) -> True
+    _ -> False
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.
