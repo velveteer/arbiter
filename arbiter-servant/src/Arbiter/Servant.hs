@@ -1,12 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
--- | Servant REST API for Arbiter job queue administration.
---
--- Includes endpoints for:
---
--- * Job management (list, get, cancel, promote)
--- * Dead letter queue operations (list, retry, delete)
--- * Queue statistics and monitoring
+-- | Servant REST API for Arbiter job queue administration. See 'ArbiterAPI'
+-- for the route tree.
 --
 -- = Quick Start
 --

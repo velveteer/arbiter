@@ -217,18 +217,9 @@ data CronAPI mode = CronAPI
   }
   deriving stock (Generic)
 
--- | Type family to build API routes from a registry.
---
--- For a registry @'[ '("table1", Payload1), '("table2", Payload2) ]@,
--- generates:
---
--- @
--- tableName ':>' NamedRoutes (TableAPI payload)
---   ':<|>' NamedRoutes (TableAPI payload)
---   ':<|>' "queues" ':>' NamedRoutes QueuesAPI
---   ':<|>' "events" ':>' EventsAPI
---   ':<|>' "cron" ':>' NamedRoutes CronAPI
--- @
+-- | Generates a 'TableAPI' route for each entry in the registry, followed by
+-- the shared 'QueuesAPI', 'EventsAPI', and 'CronAPI' routes. The expansion is
+-- in the equations below.
 type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
   RegistryToAPI '[] =
     "queues" :> NamedRoutes QueuesAPI
@@ -242,12 +233,9 @@ type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
   RegistryToAPI ('(tableName, payload) ': rest) =
     (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
 
--- | Top-level Arbiter API
---
--- Routes are generated from the registry:
---
---   * @\/api\/v1\/:tableName\/jobs\/...@ for each table in registry
---   * @\/api\/v1\/queues@ - list all available queues
---   * @\/api\/v1\/events\/stream@ - real-time job updates (SSE)
+-- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
+-- prefix is generated from the registry; see 'RegistryToAPI' for the shape
+-- and the per-route data types ('TableAPI', 'QueuesAPI', 'EventsAPI',
+-- 'CronAPI') for what each one exposes.
 type ArbiterAPI :: JobPayloadRegistry -> Type
 type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry
