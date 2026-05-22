@@ -391,13 +391,19 @@ runWorkerPool config = do
 -- nor heartbeat signals (e.g., broken DB connection, deadlocked dispatcher),
 -- the file goes stale and the process should be restarted.
 refreshLiveness :: (MonadUnliftIO m) => LogConfig -> FilePath -> MVar.MVar () -> Int -> m ()
-refreshLiveness logCfg healthcheckPath livenessMVar n = forever $ do
-  result <- tryAny $ liftIO $ writeFile healthcheckPath ""
-  case result of
-    Left e ->
-      tryLog logCfg Error $ "Liveness probe write failed: " <> T.pack (show e)
-    Right () -> pure ()
-  Async.concurrently_ (MVar.takeMVar livenessMVar) (Conc.threadDelay $ n * 1_000_000)
+refreshLiveness logCfg healthcheckPath livenessMVar n = do
+  MVar.takeMVar livenessMVar
+  writeProbe
+  forever $ do
+    Async.concurrently_ (MVar.takeMVar livenessMVar) (Conc.threadDelay $ n * 1_000_000)
+    writeProbe
+  where
+    writeProbe = do
+      result <- tryAny $ liftIO $ writeFile healthcheckPath ""
+      case result of
+        Left e ->
+          tryLog logCfg Error $ "Liveness probe write failed: " <> T.pack (show e)
+        Right () -> pure ()
 
 -- | Main loop for a single worker thread.
 workerLoop

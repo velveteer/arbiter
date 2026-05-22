@@ -53,10 +53,13 @@ withNotificationLoop
   -- ^ Optional log configuration for internal errors
   -> Maybe (STM.STM ())
   -- ^ Optional wake trigger (e.g., worker finished signal)
-  -> Action m ()
-  -- ^ Action to run
   -> m ()
-withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger action =
+  -- ^ Action to run once after LISTEN is established, before entering the
+  -- main loop. Lets callers do an initial claim without racing NOTIFYs.
+  -> Action m ()
+  -- ^ Action to run on each main-loop iteration
+  -> m ()
+withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger onReady action =
   retryOnException pSt logCfg "Notification listener"
     $ bracket
       (liftIO $ connectToDb connStr)
@@ -65,6 +68,7 @@ withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger action =
       nVar <- STM.newTVarIO Nothing
       let ctx = ListenerCtx pSt polDel nVar conn mWakeTrigger
       liftIO $ subscribeToChannel (lcConnection ctx) channel
+      onReady
       race_
         (mainLoop ctx action)
         (notificationLoop ctx)

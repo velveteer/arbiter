@@ -90,9 +90,6 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
       mFree <- STM.atomically getFreeWorkers
       traverse_ claimAndEnqueue mFree
 
-  -- Claim on startup
-  claimOnWakeup
-
   -- The notification loop wakes on DB notifications, poll timer, or worker completion
   let notificationChannel = T.unpack $ Schema.notificationChannelForTable tableNameVal
       workerFinishedTrigger = Just $ do
@@ -106,4 +103,5 @@ runDispatcher config workerCapacity workQueue busyWorkerCount mLivenessMVar work
     (pollInterval config)
     (Just $ logConfig config)
     workerFinishedTrigger
+    claimOnWakeup
     (const claimOnWakeup)
