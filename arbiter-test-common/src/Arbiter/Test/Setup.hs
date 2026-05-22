@@ -55,6 +55,7 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ Schema.createDLQFailedAtIndexSQL schemaName tableName
   void $ execute_ conn $ Schema.createDedupKeyIndexSQL schemaName tableName
   void $ execute_ conn $ Cron.createCronSchedulesTableSQL schemaName
+  void $ execute_ conn $ Cron.addTimezoneColumnSQL schemaName
   when (setupEnableRankingIndexes config) $ do
     void $ execute_ conn $ Schema.createJobQueueGroupKeyIndexSQL schemaName tableName
     void $ execute_ conn $ Schema.createJobQueueUngroupedRankingIndexSQL schemaName tableName
