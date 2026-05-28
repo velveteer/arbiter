@@ -1581,4 +1581,4 @@ tryFireCronGateSQL schemaName =
 
 -- | Per-(schema, name) transaction-scoped advisory lock for cron scheduling.
 tryAcquireCronLeaderSQL :: Text
-tryAcquireCronLeaderSQL = "SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?))"
+tryAcquireCronLeaderSQL = "SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?)) AS result"
