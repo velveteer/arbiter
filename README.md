@@ -167,11 +167,11 @@ Handlers run inside a database transaction by default. If the handler succeeds, 
 
 The default job lifecycle:
 
-1. **Claim** - the job becomes invisible to other workers; attempt count increments.
+1. **Claim** - the job becomes invisible to other workers. Attempt count increments.
 2. **Begin transaction.**
 3. **Run handler** - the handler receives the active database connection.
 4. **On success** - the job is deleted (ack) and all database work commits atomically.
-5. **On failure** - the transaction rolls back; a separate transaction updates the job for retry or moves it to the DLQ.
+5. **On failure** - the transaction rolls back. A separate transaction updates the job for retry or moves it to the DLQ.
 
 Set `useWorkerTransaction = False` for manual transaction control - you must call `ackJob` yourself in this mode.
 
@@ -196,7 +196,7 @@ job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-1
 
 ### Job Trees (Fan-out/Fan-in)
 
-Children run in parallel; a finalizer collects their results when all complete.
+Children run in parallel. Parents run when all of their children are acked or DLQ'd.
 
 ```haskell
 import Arbiter.Core.JobTree ((<~~))
@@ -204,6 +204,7 @@ import Arbiter.Core.JobTree qualified as JT
 
 data PipelinePayload
   = ProcessChunk Text
+  | AggregateSection Text
   | Aggregate
   deriving stock (Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -220,31 +221,36 @@ Multi-level trees use `rollup` and `leaf`:
 
 ```haskell
 myTree = JT.rollup (Arb.defaultJob Aggregate)
-  [ JT.rollup (Arb.defaultJob (ProcessChunk "section-1"))
+  [ JT.rollup (Arb.defaultJob (AggregateSection "section-1"))
       [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1a"))
       , JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1b"))
       ]
-  , JT.rollup (Arb.defaultJob (ProcessChunk "section-2"))
+  , JT.rollup (Arb.defaultJob (AggregateSection "section-2"))
       [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-2a"))
       ]
   ]
 ```
 
-The finalizer handler receives the monoidal merge of all child results, plus a map of DLQ'd child failures. Results are cleaned up via `ON DELETE CASCADE` when the finalizer is acked.
+Every parent (intermediate or root) receives the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up via `ON DELETE CASCADE` when the parent is acked.
 
 ```haskell
 handler
-  :: [Text]                   -- merged child results (empty for children, populated for finalizer)
-  -> Map Int64 Text           -- DLQ failures (empty for children, populated for finalizer)
+  :: [Text]         -- merged results of immediate children (empty for leaves)
+  -> Map Int64 Text -- DLQ'd immediate children (empty for leaves)
   -> Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
-handler childResults dlqFailures conn job =
+handler childResults dlqFailures _conn job =
   case Arb.payload job of
-    -- Children return a result. childResults/dlqFailures are empty here.
     ProcessChunk name -> pure ["processed: " <> name]
-    -- Finalizer receives the monoidal merge of all child results.
-    Aggregate
-      | not (null dlqFailures) -> Arb.throwPermanent "Some children failed"
-      | otherwise -> pure childResults
+    AggregateSection name
+      | not (null dlqFailures) ->
+        -- results are merged into the DLQ'd job
+        Arb.throwPermanent $ name <> ": has failed children"
+      | otherwise ->
+        -- do something with childResults
+        processSection childResults
+    Aggregate ->
+      -- report final results
+      sendToS3 childResults
 
 config <- Worker.defaultRollupWorkerConfig connStr 4 handler
 ```
@@ -343,10 +349,10 @@ Clearing an override (setting it to `null`) falls back to the value in code.
 ### Error Handling
 
 ```haskell
-Arb.throwRetryable "API timeout"          -- retry with backoff
-Arb.throwPermanent "Invalid payload"      -- move to DLQ immediately
-Arb.throwTreeCancel "Pipeline aborted"    -- cancel entire tree
-Arb.throwBranchCancel "Subtask failed"    -- cancel current branch
+Arb.throwRetryable "API timeout"       -- retry with backoff
+Arb.throwPermanent "Invalid payload"   -- move to DLQ immediately
+Arb.throwTreeCancel "Pipeline aborted" -- cancel entire tree
+Arb.throwBranchCancel "Subtask failed" -- cancel current branch
 ```
 
 Any unrecognized exception is treated as retryable. Jobs have a configurable `maxAttempts` (default: 10). After exhausting attempts, the job moves to the DLQ.
@@ -368,7 +374,7 @@ batchHandler conn jobs = do
   liftIO $ bulkProcess conn urls
 ```
 
-All jobs in a batch succeed or fail together.
+All jobs in a batch succeed or fail together. Hooks will still fire individually for each job in the batch.
 
 ### Observability Hooks
 
@@ -431,7 +437,7 @@ config { Worker.jitter = NoJitter }
 ### Other Options
 
 - **Logging** - structured JSON to stderr, fast-logger, or a custom callback
-- **Liveness probes** - file-based health check; Kubernetes example:
+- **Liveness probes** - file-based health check. Kubernetes example:
   ```yaml
   livenessProbe:
     exec:

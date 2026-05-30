@@ -53,18 +53,12 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 --   or is retried together. Uses minimum maxAttempts across batch.
 --   Handler receives @NonEmpty (JobRead payload)@.
 data HandlerMode m payload result
-  = -- | Claim 1 job per group. The handler receives:
-    --
-    -- 1. @Map childJobId (Either decodeError result)@ - child results for
-    --    rollup finalizers. @Left@ means the child succeeded but its result
-    --    couldn't be decoded into @result@. Empty for non-rollup jobs.
-    -- 2. @Map dlqPrimaryKey errorMsg@ - children that failed and were DLQ'd.
-    --    Empty for non-rollup jobs.
+  = -- | Claim 1 job per group. Handler receives a map of immediate child
+    -- results (with @Left@ for decode failures) and a map of immediate
+    -- DLQ'd children. Both are empty for jobs with no children.
     SingleJobMode (Map Int64 (Either Text result) -> Map Int64 Text -> JobHandler m payload result)
   | -- | Batched mode: claim up to N jobs per group, handler receives batch.
-    --
-    -- __Rollup interaction:__ Batched mode has no rollup awareness - child results
-    -- are not passed to the handler. Use 'SingleJobMode' for rollup finalizers.
+    -- Has no rollup awareness. Use 'SingleJobMode' for rollup parents.
     BatchedJobsMode Int (BatchedJobHandler m payload result)
 
 -- | File-based liveness probe configuration.
@@ -175,7 +169,7 @@ defaultBatchedWorkerConfig
 defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
   mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
 
--- | Create a t'WorkerConfig' for rollup finalizers. See 'mergedRollupHandler'.
+-- | Create a t'WorkerConfig' for rollup parents (intermediate or root). See 'mergedRollupHandler'.
 defaultRollupWorkerConfig
   :: (MonadArbiter n, MonadIO m, Monoid result)
   => ByteString
@@ -191,18 +185,10 @@ defaultRollupWorkerConfig connStrVal workerCnt handler =
 singleJobMode :: JobHandler m payload result -> HandlerMode m payload result
 singleJobMode handler = SingleJobMode (\_ _ -> handler)
 
--- | Handler for rollup finalizers. Child results are merged via 'Monoid'.
---
--- The handler receives two arguments before the job:
---
--- 1. The @mappend@-fold of all child results. Children whose results
---    couldn't be decoded into the expected type contribute 'mempty'
---    (the raw JSON is still in the results table). Use 'SingleJobMode'
---    directly to inspect per-child decode failures via the @Left@ entries.
--- 2. A map of DLQ failures (@dlqPrimaryKey -> errorMessage@) for children
---    that failed and were moved to the DLQ.
---
--- For non-rollup jobs both arguments are empty.
+-- | Handler for rollup parents (intermediate or root). Child results are
+-- 'Monoid'-merged (decode failures contribute 'mempty'). Both args are empty
+-- for jobs with no children. Use 'SingleJobMode' to inspect per-child decode
+-- failures.
 mergedRollupHandler
   :: (Monoid result) => (result -> Map Int64 Text -> JobHandler m payload result) -> HandlerMode m payload result
 mergedRollupHandler handler = SingleJobMode $ \results dlqFailures -> handler (mergeChildResults results) dlqFailures
