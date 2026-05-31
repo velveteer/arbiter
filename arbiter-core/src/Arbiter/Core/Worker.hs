@@ -1,0 +1,98 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | Types and DDL for the @arbiter_workers@ table.
+module Arbiter.Core.Worker
+  ( WorkerRow (..)
+  , WorkerHealth (..)
+  , workerHealthFromText
+  , arbiterWorkersTable
+  , createWorkersTableSQL
+  , addClaimedByColumnSQL
+  ) where
+
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
+import Data.Aeson qualified as Aeson
+import Data.Int (Int32)
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Time (UTCTime)
+import Data.UUID.Types (UUID)
+import GHC.Generics (Generic)
+
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable, quoteIdentifier)
+
+-- | Heartbeat-derived health of a worker, orthogonal to its 'paused' flag.
+data WorkerHealth
+  = Live
+  | Stale
+  | Draining
+  deriving stock (Eq, Generic, Show)
+
+instance ToJSON WorkerHealth where
+  toJSON = \case
+    Live -> Aeson.String "live"
+    Stale -> Aeson.String "stale"
+    Draining -> Aeson.String "draining"
+
+instance FromJSON WorkerHealth where
+  parseJSON = withText "WorkerHealth" $ \t -> case t of
+    "live" -> pure Live
+    "stale" -> pure Stale
+    "draining" -> pure Draining
+    other -> fail $ "unknown worker health: " <> T.unpack other
+
+-- | Decode the @health@ SQL token into a 'WorkerHealth'.
+workerHealthFromText :: Text -> WorkerHealth
+workerHealthFromText = \case
+  "stale" -> Stale
+  "draining" -> Draining
+  _ -> Live
+
+-- | A row in the worker registry. One row per running worker pool.
+data WorkerRow = WorkerRow
+  { workerId :: UUID
+  , queueName :: Text
+  , hostName :: Maybe Text
+  , workerCount :: Maybe Int32
+  , startedAt :: UTCTime
+  , lastHeartbeat :: UTCTime
+  , shuttingDown :: Bool
+  , paused :: Bool
+  , staleThresholdSecs :: Double
+  , metadata :: Maybe Value
+  , health :: WorkerHealth
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Qualified table name for the arbiter_workers table.
+arbiterWorkersTable :: SchemaName -> Text
+arbiterWorkersTable schemaName = quoteIdentifier schemaName <> ".arbiter_workers"
+
+-- | DDL for the @arbiter_workers@ table.
+createWorkersTableSQL :: SchemaName -> Text
+createWorkersTableSQL schemaName =
+  T.unlines
+    [ "CREATE TABLE IF NOT EXISTS " <> arbiterWorkersTable schemaName <> " ("
+    , "  worker_id UUID PRIMARY KEY,"
+    , "  queue_name TEXT NOT NULL,"
+    , "  host_name TEXT,"
+    , "  worker_count INT,"
+    , "  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  shutting_down BOOLEAN NOT NULL DEFAULT FALSE,"
+    , "  paused BOOLEAN NOT NULL DEFAULT FALSE,"
+    , "  stale_threshold_secs DOUBLE PRECISION NOT NULL DEFAULT 300,"
+    , "  metadata JSONB"
+    , ");"
+    ]
+
+-- | Idempotent migration adding the @claimed_by@ column to a queue's job and DLQ tables.
+addClaimedByColumnSQL :: SchemaName -> TableName -> Text
+addClaimedByColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
+    ]

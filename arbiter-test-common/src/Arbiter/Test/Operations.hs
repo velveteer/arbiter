@@ -27,6 +27,7 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), addUTCTime, getCurrentTime, picosecondsToDiffTime)
+import Data.UUID.Types qualified as UUID
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO (MonadUnliftIO)
@@ -146,7 +147,7 @@ operationsSpec mkMessage runM = do
       length claimed `shouldBe` 3
       let ungroupedCount = length $ filter (\j -> groupKey j == Nothing) claimed
       let groupedCount = length $ filter (\j -> groupKey j /= Nothing) claimed
-      -- U1 (id=1), G1 (id=2), U2 (id=3) claimed; G2 (id=4) and U3 (id=5) left
+      -- U1 (id=1), G1 (id=2), U2 (id=3) claimed. G2 (id=4) and U3 (id=5) left
       ungroupedCount `shouldBe` 2
       groupedCount `shouldBe` 1
       map payload claimed `shouldBe` [mkMessage "U1", mkMessage "G1", mkMessage "U2"]
@@ -639,7 +640,7 @@ operationsSpec mkMessage runM = do
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
-      -- The conflicting job is skipped; only the 2 new ones are returned
+      -- The conflicting job is skipped. Only the 2 new ones are returned
       length inserted `shouldBe` 2
       map payload inserted `shouldMatchList` [mkMessage "New1", mkMessage "New2"]
 
@@ -746,7 +747,7 @@ operationsSpec mkMessage runM = do
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
-      -- The in-flight job should NOT be replaced; only "Other" is inserted
+      -- The in-flight job should NOT be replaced. Only "Other" is inserted
       length inserted `shouldBe` 1
       payload (head inserted) `shouldBe` mkMessage "Other"
 
@@ -847,6 +848,17 @@ operationsSpec mkMessage runM = do
       Just updated <- runM env (HL.getJobById @m @registry @payload (primaryKey claimedJob))
       lastError updated `shouldBe` Just "Something went wrong"
       attempts updated `shouldBe` 1 -- attempts unchanged by updateJobForRetry
+    it "clears claimed_by on retry" $ \env -> do
+      void $ runM env (HL.insertJob (defaultJob (mkMessage "retry-clears-claimed-by")))
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 UUID.nil) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+      let claimedJob = head claimed
+      claimedBy claimedJob `shouldBe` Just UUID.nil
+
+      void $ runM env (HL.updateJobForRetry 5 "boom" claimedJob)
+
+      Just updated <- runM env (HL.getJobById @m @registry @payload (primaryKey claimedJob))
+      claimedBy updated `shouldBe` Nothing
   describe "Dead Letter Queue Operations" $ do
     it "moveToDLQ moves failed job to DLQ and removes from main queue" $ \env -> do
       let job = (defaultJob (mkMessage "Failed")) {groupKey = Just "dlq-move-test"}
@@ -2175,7 +2187,7 @@ operationsSpec mkMessage runM = do
       Just retried <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
       parentId retried `shouldBe` Just (primaryKey parent)
 
-      -- Only the retried child should be claimable; the parent is suspended
+      -- Only the retried child should be claimable. The parent is suspended
       -- again because it has a child in the main queue.
       Just parentAfterRetry <- runM env (HL.getJobById @m @registry @payload (primaryKey parent))
       suspended parentAfterRetry `shouldBe` True

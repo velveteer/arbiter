@@ -120,6 +120,7 @@ colFieldDef name CBool = O.booleanField (T.unpack name)
 colFieldDef name CTimestamptz = O.utcTimestampField (T.unpack name)
 colFieldDef name CJsonb = O.fieldOfType jsonbValue (T.unpack name)
 colFieldDef name CFloat8 = O.doubleField (T.unpack name)
+colFieldDef name CUuid = O.uuidField (T.unpack name)
 
 jsonbValue :: O.SqlType Value
 jsonbValue =

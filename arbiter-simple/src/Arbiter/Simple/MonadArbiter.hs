@@ -75,6 +75,7 @@ colField CBool = field
 colField CTimestamptz = field
 colField CJsonb = field
 colField CFloat8 = field
+colField CUuid = field
 
 colFieldNullable :: Col a -> RowParser (Maybe a)
 colFieldNullable CInt4 = field
@@ -84,6 +85,7 @@ colFieldNullable CBool = field
 colFieldNullable CTimestamptz = field
 colFieldNullable CJsonb = field
 colFieldNullable CFloat8 = field
+colFieldNullable CUuid = field
 
 simpleWithDbTransaction
   :: (HasSimplePool m, MonadUnliftIO m)
@@ -162,3 +164,4 @@ withColToField CBool r = r
 withColToField CTimestamptz r = r
 withColToField CJsonb r = r
 withColToField CFloat8 r = r
+withColToField CUuid r = r

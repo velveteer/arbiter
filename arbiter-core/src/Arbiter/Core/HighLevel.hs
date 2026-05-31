@@ -1,4 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 -- | High-level API for job queue operations.
 --
@@ -14,7 +16,9 @@ module Arbiter.Core.HighLevel
   , insertJobsBatch
   , insertJobsBatch_
   , claimNextVisibleJobs
+  , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
+  , claimNextVisibleJobsBatchedAs
   , ackJob
   , ackJobsBatch
   , ackJobsBulk
@@ -47,6 +51,7 @@ module Arbiter.Core.HighLevel
   , getInFlightJobs
   , cancelJob
   , cancelJobsBatch
+  , forceCancelJob
   , promoteJob
   , Ops.QueueStats (..)
   , getQueueStats
@@ -80,7 +85,27 @@ module Arbiter.Core.HighLevel
   , getParentStateSnapshot
 
     -- * Groups Table Operations
-  , refreshGroups
+  , refreshAllGroups
+
+    -- * Worker Registry Operations
+  , registerWorker
+  , heartbeatWorker
+  , setWorkerPaused
+  , markWorkerShuttingDown
+  , deregisterWorker
+  , listWorkers
+  , sweepStaleWorkers
+  , WorkerRow (..)
+
+    -- * Queue Operations
+  , ensureQueue
+  , setQueuePaused
+  , getQueue
+  , listQueues
+  , QueueRow (..)
+
+    -- * Global Gate
+  , runGated
 
     -- * Job Tree DSL
   , insertJobTree
@@ -99,6 +124,7 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
+import Data.UUID.Types (UUID)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
@@ -108,8 +134,10 @@ import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.SqlTemplates qualified as Tmpl
+import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
 type QueueOperation m registry payload =
@@ -177,6 +205,21 @@ claimNextVisibleJobs limit timeout = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.claimNextVisibleJobs schemaName tableName limit timeout
 
+-- | Variant of 'claimNextVisibleJobs' that stamps @claimed_by@ on every claimed
+-- row. Used by the worker dispatcher for claim attribution.
+claimNextVisibleJobsAs
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int
+  -> NominalDiffTime
+  -> UUID
+  -- ^ Worker UUID stamped on each claimed row.
+  -> m [JobRead payload]
+claimNextVisibleJobsAs limit timeout workerId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
+
 -- | Claims multiple jobs per group. Unlike 'claimNextVisibleJobs', this can
 -- claim up to @batchSize@ jobs from each group while still respecting
 -- head-of-line blocking between batches.
@@ -195,6 +238,22 @@ claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
 
+-- | Variant of 'claimNextVisibleJobsBatched' that stamps @claimed_by@ on every
+-- claimed row.
+claimNextVisibleJobsBatchedAs
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int
+  -> Int
+  -> NominalDiffTime
+  -> UUID
+  -- ^ Worker UUID stamped on each claimed row.
+  -> m [NonEmpty (JobRead payload)]
+claimNextVisibleJobsBatchedAs batchSize maxGroups timeout workerId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.claimNextVisibleJobsBatchedAs schemaName tableName batchSize maxGroups timeout workerId
+
 -- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
 -- if it's a parent with unfinished children. Returns 1 on success, 0 if gone.
 ackJob
@@ -204,7 +263,7 @@ ackJob
   -> m Int64
 ackJob job = do
   schemaName <- getSchema
-  let tableName = queueName job
+  let tableName = job.queueName
   Ops.ackJob schemaName tableName job
 
 -- | Acknowledges multiple jobs as complete. All jobs must be from the same
@@ -217,7 +276,7 @@ ackJobsBatch
 ackJobsBatch [] = pure 0
 ackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = queueName firstJob
+  let tableName = firstJob.queueName
   Ops.ackJobsBatch schemaName tableName jobs
 
 -- | Bulk ack for standalone jobs (no parent, no tree logic).
@@ -234,7 +293,7 @@ ackJobsBulk
 ackJobsBulk [] = pure 0
 ackJobsBulk jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = queueName firstJob
+  let tableName = firstJob.queueName
   Ops.ackJobsBulk schemaName tableName jobs
 
 -- | Marks a failed job for retry at a later time.
@@ -251,7 +310,7 @@ updateJobForRetry
   -> m Int64
 updateJobForRetry delay errorMsg job = do
   schemaName <- getSchema
-  let tableName = queueName job
+  let tableName = job.queueName
   Ops.updateJobForRetry schemaName tableName delay errorMsg job
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
@@ -266,7 +325,7 @@ setVisibilityTimeout
   -> m Int64
 setVisibilityTimeout timeout job = do
   schemaName <- getSchema
-  let tableName = queueName job
+  let tableName = job.queueName
   Ops.setVisibilityTimeout schemaName tableName timeout job
 
 -- | Result of setting visibility timeout for a single job in a batch.
@@ -293,7 +352,7 @@ setVisibilityTimeoutBatch
 setVisibilityTimeoutBatch _ [] = pure []
 setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = queueName firstJob
+  let tableName = firstJob.queueName
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
       toResult info = case info of
@@ -314,7 +373,7 @@ moveToDLQ
   -> m Int64
 moveToDLQ errorMsg job = do
   schemaName <- getSchema
-  let tableName = queueName job
+  let tableName = job.queueName
   Ops.moveToDLQ schemaName tableName errorMsg job
 
 -- | Lists jobs in the dead-letter queue with pagination.
@@ -380,7 +439,7 @@ moveToDLQBatch
 moveToDLQBatch [] = pure 0
 moveToDLQBatch jobsWithErrors@((firstJob, _) : _) = do
   schemaName <- getSchema
-  let tableName = queueName firstJob
+  let tableName = firstJob.queueName
   Ops.moveToDLQBatch schemaName tableName jobsWithErrors
 
 -- | Permanently deletes multiple jobs from the dead-letter queue.
@@ -555,6 +614,19 @@ cancelJob jobId = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.cancelJob schemaName tableName jobId
+
+-- | Force-cancel a job and its descendants, also interrupting any handlers
+-- currently running the deleted jobs via NOTIFY on the cancel channel.
+forceCancelJob
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int64
+  -- ^ Root job ID
+  -> m Int64
+forceCancelJob jobId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.forceCancelJob schemaName tableName jobId
 
 -- | Cancels (deletes) multiple jobs by ID.
 --
@@ -866,19 +938,172 @@ getParentStateSnapshot jobId = do
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Full recompute of the groups table from the main queue.
+-- | Schema-wide groups-table refresh. Iterates all registered queues and
+-- corrects drift in @job_count@, @min_priority@, @min_id@, and
+-- @in_flight_until@ for each. Returns the queue names that failed.
 --
--- Corrects any drift in job_count, min_priority, min_id, and in_flight_until.
-refreshGroups
-  :: forall m registry payload
-   . (QueueOperation m registry payload)
-  => Int
-  -- ^ Minimum interval between runs (seconds)
-  -> m ()
-refreshGroups intervalSecs = do
+-- Intended for the reaper loop, which wraps it in 'Ops.runGated' so only
+-- one pool runs it per interval.
+refreshAllGroups
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
+  => m [Text]
+refreshAllGroups = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.refreshGroups schemaName tableName intervalSecs
+  Ops.refreshAllGroups schemaName (registryTableNames (Proxy @registry))
+
+-- ---------------------------------------------------------------------------
+-- Worker Registry Operations
+-- ---------------------------------------------------------------------------
+
+-- | Register a worker pool. See 'Ops.registerWorker'.
+registerWorker
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => UUID
+  -> Text
+  -- ^ Queue name
+  -> Maybe Text
+  -- ^ Host name
+  -> Maybe Int32
+  -- ^ Worker thread count
+  -> NominalDiffTime
+  -- ^ Stale threshold seconds
+  -> Maybe Value
+  -- ^ Extra JSONB metadata
+  -> m (Maybe Bool)
+registerWorker workerId queue host threads staleThreshold metadata = do
+  schemaName <- getSchema
+  Ops.registerWorker schemaName workerId queue host threads staleThreshold metadata
+
+-- | Bump a worker's heartbeat. See 'Ops.heartbeatWorker'.
+heartbeatWorker
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => UUID
+  -> m (Maybe Bool)
+heartbeatWorker workerId = do
+  schemaName <- getSchema
+  Ops.heartbeatWorker schemaName workerId
+
+-- | Set the @paused@ flag for a registered worker.
+setWorkerPaused
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => UUID
+  -> Bool
+  -> m Int64
+setWorkerPaused workerId p = do
+  schemaName <- getSchema
+  Ops.setWorkerPaused schemaName workerId p
+
+-- | Mark a worker as gracefully draining.
+markWorkerShuttingDown
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => UUID
+  -> m Int64
+markWorkerShuttingDown workerId = do
+  schemaName <- getSchema
+  Ops.markWorkerShuttingDown schemaName workerId
+
+-- | Remove a worker row.
+deregisterWorker
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => UUID
+  -> m Int64
+deregisterWorker workerId = do
+  schemaName <- getSchema
+  Ops.deregisterWorker schemaName workerId
+
+-- | List workers, optionally scoped to a queue and a heartbeat-age threshold.
+listWorkers
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Maybe Text
+  -- ^ Queue name. 'Nothing' returns workers from all queues.
+  -> Maybe NominalDiffTime
+  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
+  -> m [WorkerRow]
+listWorkers mQueue mLiveSecs = do
+  schemaName <- getSchema
+  Ops.listWorkers schemaName mQueue mLiveSecs
+
+-- | Delete worker rows older than each row's own @stale_threshold_secs@.
+sweepStaleWorkers
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => m Int64
+sweepStaleWorkers = do
+  schemaName <- getSchema
+  Ops.sweepStaleWorkers schemaName
+
+-- ---------------------------------------------------------------------------
+-- Queue Operations
+-- ---------------------------------------------------------------------------
+
+-- | Insert an @arbiter_queues@ row with defaults if one doesn't already exist.
+ensureQueue
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Queue name
+  -> m Int64
+ensureQueue queue = do
+  schemaName <- getSchema
+  Ops.ensureQueue schemaName queue
+
+-- | Set the queue's @paused@ flag. Fans out a NOTIFY to each registered worker
+-- on the queue.
+setQueuePaused
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Queue name
+  -> Bool
+  -> m Int64
+setQueuePaused queue p = do
+  schemaName <- getSchema
+  Ops.setQueuePaused schemaName queue p
+
+-- | Get the queue's row. 'Nothing' if absent.
+getQueue
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Queue name
+  -> m (Maybe QueueRow)
+getQueue queue = do
+  schemaName <- getSchema
+  Ops.getQueue schemaName queue
+
+-- | List all queues registered in this schema.
+listQueues
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => m [QueueRow]
+listQueues = do
+  schemaName <- getSchema
+  Ops.listQueues schemaName
+
+-- ---------------------------------------------------------------------------
+-- Global Gate
+-- ---------------------------------------------------------------------------
+
+-- | Run @work@ at most once per @interval@ across every worker pool sharing
+-- the same schema. See 'Ops.runGated'.
+runGated
+  :: forall m registry a
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Task identifier
+  -> NominalDiffTime
+  -> m a
+  -> m (Maybe a)
+runGated task interval work = do
+  schemaName <- getSchema
+  Ops.runGated schemaName task interval work
 
 -- ---------------------------------------------------------------------------
 -- Job Tree DSL

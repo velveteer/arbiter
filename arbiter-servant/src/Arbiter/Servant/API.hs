@@ -16,6 +16,7 @@ module Arbiter.Servant.API
   , QueuesAPI (..)
   , EventsAPI
   , CronAPI (..)
+  , WorkersAPI (..)
   ) where
 
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
@@ -31,6 +32,7 @@ import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 import GHC.TypeLits (Symbol)
 import Servant.API
@@ -100,6 +102,12 @@ data JobsAPI payload mode = JobsAPI
       :: mode
         :- Capture "id" Int64
           :> DeleteNoContent
+  , -- POST /:table/jobs/:id/force-cancel (cascade-delete + interrupt running handler)
+    forceCancelJob
+      :: mode
+        :- Capture "id" Int64
+          :> "force-cancel"
+          :> PostNoContent
   , -- POST /:table/jobs/:id/promote
     promoteJob
       :: mode
@@ -194,6 +202,24 @@ data QueuesAPI mode = QueuesAPI
     listQueues
       :: mode
         :- Get '[JSON] QueuesResponse
+  , -- GET /queues/:queue/details
+    getDetails
+      :: mode
+        :- Capture "queue" Text
+          :> "details"
+          :> Get '[JSON] (Maybe QueueRow)
+  , -- POST /queues/:queue/pause
+    pauseQueue
+      :: mode
+        :- Capture "queue" Text
+          :> "pause"
+          :> PostNoContent
+  , -- POST /queues/:queue/resume
+    resumeQueue
+      :: mode
+        :- Capture "queue" Text
+          :> "resume"
+          :> PostNoContent
   }
   deriving stock (Generic)
 
@@ -203,9 +229,12 @@ type EventsAPI = "stream" :> Raw
 -- | Cron API routes - manage cron schedules
 data CronAPI mode = CronAPI
   { -- GET /cron/schedules
+    --
+    -- Optional @?queue=name@ scopes the result to a single queue.
     listSchedules
       :: mode
         :- "schedules"
+          :> QueryParam "queue" Text
           :> Get '[JSON] CronSchedulesResponse
   , -- PATCH /cron/schedules/:name
     updateSchedule
@@ -217,25 +246,53 @@ data CronAPI mode = CronAPI
   }
   deriving stock (Generic)
 
--- | Generates a 'TableAPI' route for each entry in the registry, followed by
--- the shared 'QueuesAPI', 'EventsAPI', and 'CronAPI' routes. The expansion is
--- in the equations below.
+-- | Workers API routes - view the registry and pause/resume individual workers
+data WorkersAPI mode = WorkersAPI
+  { -- GET /workers
+    --
+    -- Optional @?queue=name@ scopes the result to a single queue.
+    -- Optional @?live=seconds@ filters to workers whose last_heartbeat is
+    -- within the given threshold (otherwise all rows are returned).
+    listWorkers
+      :: mode
+        :- QueryParam "queue" Text
+          :> QueryParam "live" Double
+          :> Get '[JSON] WorkersResponse
+  , -- POST /workers/:id/pause
+    --
+    -- Sets the worker's @paused@ flag.
+    pauseWorker
+      :: mode
+        :- Capture "id" UUID
+          :> "pause"
+          :> PostNoContent
+  , -- POST /workers/:id/resume
+    resumeWorker
+      :: mode
+        :- Capture "id" UUID
+          :> "resume"
+          :> PostNoContent
+  }
+  deriving stock (Generic)
+
+-- | Generates a 'TableAPI' route per registry entry, followed by the shared
+-- top-level routes. See the equations below for the exact expansion.
 type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
   RegistryToAPI '[] =
     "queues" :> NamedRoutes QueuesAPI
       :<|> "events" :> EventsAPI
       :<|> "cron" :> NamedRoutes CronAPI
+      :<|> "workers" :> NamedRoutes WorkersAPI
   RegistryToAPI ('(tableName, payload) ': '[]) =
     tableName :> NamedRoutes (TableAPI payload)
       :<|> "queues" :> NamedRoutes QueuesAPI
       :<|> "events" :> EventsAPI
       :<|> "cron" :> NamedRoutes CronAPI
+      :<|> "workers" :> NamedRoutes WorkersAPI
   RegistryToAPI ('(tableName, payload) ': rest) =
     (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
--- prefix is generated from the registry; see 'RegistryToAPI' for the shape
--- and the per-route data types ('TableAPI', 'QueuesAPI', 'EventsAPI',
--- 'CronAPI') for what each one exposes.
+-- prefix is generated from the registry; see 'RegistryToAPI' for the shape.
 type ArbiterAPI :: JobPayloadRegistry -> Type
 type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry

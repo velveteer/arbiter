@@ -38,6 +38,7 @@ module Arbiter.Core.SqlTemplates
   , resumeChildrenSQL
   , cancelJobCascadeSQL
   , cancelJobTreeSQL
+  , forceCancelJobSQL
   , tryWakeAncestorSQL
   , suspendJobSQL
   , resumeJobSQL
@@ -61,8 +62,6 @@ module Arbiter.Core.SqlTemplates
     -- * Groups Table Operations
   , lockGroupsSQL
   , refreshGroupsSQL
-  , checkReaperSeqSQL
-  , updateReaperSeqSQL
 
     -- * Filtered Query Operations
   , JobFilter (..)
@@ -83,11 +82,33 @@ module Arbiter.Core.SqlTemplates
   , upsertCronDefaultSQL
   , listCronSchedulesSQL
   , getCronScheduleByNameSQL
-  , deleteStaleCronSchedulesSQL
   , touchCronLastFiredSQL
   , touchCronCheckedSQL
   , tryFireCronGateSQL
   , tryAcquireCronLeaderSQL
+
+    -- * Worker Registry Operations
+  , upsertWorkerSQL
+  , heartbeatWorkerSQL
+  , setWorkerPausedSQL
+  , markWorkerShuttingDownSQL
+  , deleteWorkerSQL
+  , listWorkersSQL
+  , deleteStaleWorkersSQL
+  , workerColumnList
+
+    -- * Queue Operations
+  , ensureQueueSQL
+  , setQueuePausedSQL
+  , getQueueSQL
+  , listQueuesSQL
+  , queueColumnList
+
+    -- * Global Gate Operations
+  , ensureGateRowSQL
+  , checkGateSQL
+  , tryClaimGateSQL
+  , bumpGateSQL
   ) where
 
 import Data.Int (Int64)
@@ -95,19 +116,32 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
+import Data.UUID.Types (UUID)
+import Data.UUID.Types qualified as UUID
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec, dlqRowCodec, jobRowCodec)
+import Arbiter.Core.Codec
+  ( codecColumns
+  , cronScheduleRowCodec
+  , dlqRowCodec
+  , jobRowCodec
+  , queueRowCodec
+  , workerRowCodec
+  )
 import Arbiter.Core.CronSchedule (cronSchedulesTable)
+import Arbiter.Core.Gates (arbiterGatesTable)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , cancelNotifyChannel
   , jobQueueDLQTable
   , jobQueueGroupsTable
-  , jobQueueReaperSeq
   , jobQueueResultsTable
   , jobQueueTable
+  , pauseNotifyChannelPrefix
   )
+import Arbiter.Core.Queues (arbiterQueuesTable)
+import Arbiter.Core.Worker (arbiterWorkersTable)
 
 -- ---------------------------------------------------------------------------
 -- Filtered Query Operations
@@ -457,14 +491,15 @@ insertJobsBatchBase schema tableName returning =
 --      fresh value and correctly skip the group.
 --
 -- No @?@ parameters - all values are interpolated.
-claimJobsSQL :: SchemaName -> TableName -> Int -> NominalDiffTime -> Text
-claimJobsSQL schema tableName maxJobs timeoutSeconds =
+claimJobsSQL :: SchemaName -> TableName -> Int -> NominalDiffTime -> Maybe UUID -> Text
+claimJobsSQL schema tableName maxJobs timeoutSeconds mWorkerId =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       columns = jobColumns Nothing
       overfetch = T.pack (show (maxJobs * 10))
       limit = T.pack (show maxJobs)
       timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
+      claimedBy = uuidLiteral mWorkerId
    in [text|
   WITH
     eligible_groups AS (
@@ -515,7 +550,8 @@ claimJobsSQL schema tableName maxJobs timeoutSeconds =
       SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
           attempts = j.attempts + 1,
           last_attempted_at = NOW(),
-          updated_at = NOW()
+          updated_at = NOW(),
+          claimed_by = ${claimedBy}
       FROM locked l
       WHERE j.id = l.id
       RETURNING j.*
@@ -530,8 +566,8 @@ claimJobsSQL schema tableName maxJobs timeoutSeconds =
 -- re-evaluation mechanism).
 -- Excludes tree jobs (@parent_id IS NULL AND parent_state IS NULL@).
 -- No @?@ parameters - all values are interpolated.
-claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> NominalDiffTime -> Text
-claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
+claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
+claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorkerId =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       columns = jobColumns Nothing
@@ -540,6 +576,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
       timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
       ungroupedLimit = T.pack (show (maxBatches * batchSize))
       overfetch = T.pack (show (maxBatches * 10))
+      claimedBy = uuidLiteral mWorkerId
    in [text|
   WITH
     eligible_groups AS (
@@ -643,7 +680,8 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds =
       SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
           attempts = j.attempts + 1,
           last_attempted_at = NOW(),
-          updated_at = NOW()
+          updated_at = NOW(),
+          claimed_by = ${claimedBy}
       FROM locked l
       WHERE j.id = l.id
       RETURNING j.*
@@ -759,7 +797,8 @@ updateJobForRetrySQL schema tableName =
         UPDATE ${tbl}
         SET not_visible_until = NOW() + (? * interval '1 second'),
             last_error = ?,
-            updated_at = NOW()
+            updated_at = NOW(),
+            claimed_by = NULL
         WHERE id = ? AND attempts = ? AND NOT suspended
       |]
 
@@ -1181,23 +1220,57 @@ resumeChildrenSQL schema tableName =
           )
       |]
 
+-- | Recursive CTE binding @descendants@ to a job id and all its descendants.
+-- Shared by the cascade-delete templates. Binds one @?@ (the root job id).
+descendantsCte :: Text -> Text
+descendantsCte tbl =
+  [text|
+    WITH RECURSIVE descendants AS (
+      SELECT id FROM ${tbl} WHERE id = ?
+      UNION ALL
+      SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+    )
+  |]
+
 -- | Cancel a job and all its descendants recursively.
 --
 -- Parameters: job_id
 cancelJobCascadeSQL :: Text -> Text -> Text
 cancelJobCascadeSQL schema tableName =
   let tbl = jobQueueTable schema tableName
+      cte = descendantsCte tbl
    in [text|
-        WITH RECURSIVE descendants AS (
-          SELECT id FROM ${tbl} WHERE id = ?
-          UNION ALL
-          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
-        ),
+        ${cte},
         deleted AS (
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
           RETURNING id
         )
         SELECT count(*) FROM deleted
+      |]
+
+-- | Cascade-delete like 'cancelJobCascadeSQL', plus a per-row cancel NOTIFY for each deleted claimed job.
+-- Parameters: job_id
+forceCancelJobSQL :: SchemaName -> TableName -> Text
+forceCancelJobSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      cte = descendantsCte tbl
+      chan = T.replace "'" "''" (cancelNotifyChannel schema tableName)
+   in [text|
+        ${cte},
+        deleted AS (
+          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          RETURNING id, claimed_by
+        ),
+        notif AS (
+          SELECT pg_notify(
+            '${chan}',
+            json_build_object('worker_id', d.claimed_by, 'job_id', d.id)::text
+          )
+          FROM deleted d
+          WHERE d.claimed_by IS NOT NULL
+        )
+        SELECT count(*)::int8 FROM deleted
+        WHERE (SELECT count(*) FROM notif) >= 0
       |]
 
 -- | Cancel an entire job tree by walking up from any node to the root,
@@ -1448,16 +1521,6 @@ lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
    in [text|SELECT 1::bigint AS result FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
 
-checkReaperSeqSQL :: Text -> Text -> Text
-checkReaperSeqSQL schema tableName =
-  let seqName = jobQueueReaperSeq schema tableName
-   in [text|SELECT last_value AS result FROM ${seqName}|]
-
-updateReaperSeqSQL :: Text -> Text -> Text
-updateReaperSeqSQL schema tableName =
-  let seqName = jobQueueReaperSeq schema tableName
-   in [text|SELECT setval('${seqName}', extract(epoch FROM now())::bigint) AS result|]
-
 -- | Full recompute of the groups table from the main queue.
 -- Caller should first lock as many groups rows as possible via
 -- 'lockGroupsSQL' (@FOR UPDATE SKIP LOCKED@) to reduce trigger
@@ -1508,27 +1571,31 @@ refreshGroupsSQL schema tableName =
 allCronColumns :: Text
 allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
 
--- | Upsert a cron schedule's default values. @override_*@ columns are
--- preserved on conflict.
---
--- Parameters: name, default_expression, default_overlap, default_timezone
+-- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
+-- Parameters: name, queue_name, default_expression, default_overlap, default_timezone
 upsertCronDefaultSQL :: Text -> Text
 upsertCronDefaultSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "INSERT INTO "
         <> tbl
-        <> " (name, default_expression, default_overlap, default_timezone) VALUES (?, ?, ?, ?)"
+        <> " (name, queue_name, default_expression, default_overlap, default_timezone) VALUES (?, ?, ?, ?, ?)"
         <> " ON CONFLICT (name) DO UPDATE SET"
+        <> " queue_name = EXCLUDED.queue_name,"
         <> " default_expression = EXCLUDED.default_expression,"
         <> " default_overlap = EXCLUDED.default_overlap,"
         <> " default_timezone = EXCLUDED.default_timezone,"
         <> " updated_at = NOW()"
 
--- | List all cron schedules ordered by name.
+-- | List cron schedules ordered by name, optionally filtered by queue.
+-- Parameters: queue_name (NULL = all queues)
 listCronSchedulesSQL :: Text -> Text
 listCronSchedulesSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "SELECT " <> allCronColumns <> " FROM " <> tbl <> " ORDER BY name"
+   in [text|
+        SELECT ${allCronColumns} FROM ${tbl}
+        WHERE ?::text IS NULL OR queue_name = ?::text
+        ORDER BY name
+      |]
 
 -- | Get a single cron schedule by name.
 --
@@ -1537,14 +1604,6 @@ getCronScheduleByNameSQL :: Text -> Text
 getCronScheduleByNameSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "SELECT " <> allCronColumns <> " FROM " <> tbl <> " WHERE name = ?"
-
--- | Delete schedules whose names are not in the given list.
---
--- Parameters: schedule names (text array)
-deleteStaleCronSchedulesSQL :: Text -> Text
-deleteStaleCronSchedulesSQL schemaName =
-  let tbl = cronSchedulesTable schemaName
-   in "DELETE FROM " <> tbl <> " WHERE name <> ALL(?)"
 
 -- | Set @last_fired_at@ to NOW() for a schedule.
 touchCronLastFiredSQL :: Text -> Text
@@ -1579,6 +1638,252 @@ tryFireCronGateSQL schemaName =
         <> " WHERE name = ?"
         <> " AND (last_fired_at IS NULL OR last_fired_at < ?)"
 
--- | Per-(schema, name) transaction-scoped advisory lock for cron scheduling.
+-- | Per-(schema, queue, name) transaction-scoped advisory lock for cron.
+-- Parameters: schema, queue, name.
 tryAcquireCronLeaderSQL :: Text
-tryAcquireCronLeaderSQL = "SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?)) AS result"
+tryAcquireCronLeaderSQL =
+  "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
+
+-- ---------------------------------------------------------------------------
+-- Worker Registry Operations
+-- ---------------------------------------------------------------------------
+
+-- | Worker SELECT columns from the codec, with @health@ rendered as a computed expression.
+workerColumnList :: Text
+workerColumnList = T.intercalate ", " (map render (codecColumns workerRowCodec))
+  where
+    render "health" = workerHealthCaseSQL <> " AS health"
+    render c = c
+
+-- | Heartbeat-derived health, computed against the DB clock.
+workerHealthCaseSQL :: Text
+workerHealthCaseSQL =
+  "CASE WHEN last_heartbeat < NOW() - stale_threshold_secs * interval '1 second' THEN 'stale' WHEN shutting_down THEN 'draining' ELSE 'live' END"
+
+-- | Render a 'Maybe UUID' as a SQL literal: NULL or 'uuid-text'::uuid.
+uuidLiteral :: Maybe UUID -> Text
+uuidLiteral Nothing = "NULL"
+uuidLiteral (Just u) = "'" <> UUID.toText u <> "'::uuid"
+
+-- | Upsert a worker registration and return its effective paused state (worker OR queue).
+-- Parameters: worker_id, queue_name, host_name, worker_count, stale_threshold_secs, metadata
+upsertWorkerSQL :: SchemaName -> Text
+upsertWorkerSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+      qmTbl = arbiterQueuesTable schemaName
+   in [text|
+        WITH upserted AS (
+          INSERT INTO ${tbl}
+            (worker_id, queue_name, host_name, worker_count, stale_threshold_secs, metadata, started_at, last_heartbeat, shutting_down)
+          VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW(), FALSE)
+          ON CONFLICT (worker_id) DO UPDATE
+            SET queue_name = EXCLUDED.queue_name,
+                host_name = EXCLUDED.host_name,
+                worker_count = EXCLUDED.worker_count,
+                stale_threshold_secs = EXCLUDED.stale_threshold_secs,
+                metadata = EXCLUDED.metadata,
+                last_heartbeat = NOW(),
+                shutting_down = FALSE
+          RETURNING queue_name, paused
+        )
+        SELECT u.paused OR COALESCE(qm.paused, FALSE) AS effective_paused
+        FROM upserted u
+        LEFT JOIN ${qmTbl} qm ON qm.queue_name = u.queue_name
+      |]
+
+-- | Bump last_heartbeat and return the worker's effective paused state (worker OR queue).
+-- Parameters: worker_id
+heartbeatWorkerSQL :: SchemaName -> Text
+heartbeatWorkerSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+      qmTbl = arbiterQueuesTable schemaName
+   in [text|
+        WITH updated AS (
+          UPDATE ${tbl} SET last_heartbeat = NOW()
+          WHERE worker_id = ?
+          RETURNING queue_name, paused
+        )
+        SELECT updated.paused OR COALESCE(qm.paused, FALSE) AS effective_paused
+        FROM updated
+        LEFT JOIN ${qmTbl} qm ON qm.queue_name = updated.queue_name
+      |]
+
+-- | Set @paused@ for a worker and NOTIFY its effective pause state.
+-- Parameters: paused, worker_id
+setWorkerPausedSQL :: SchemaName -> Text
+setWorkerPausedSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+      qmTbl = arbiterQueuesTable schemaName
+      chanPrefix = pauseNotifyChannelPrefix schemaName
+   in [text|
+        WITH updated AS (
+          UPDATE ${tbl} SET paused = ? WHERE worker_id = ?
+          RETURNING worker_id, queue_name, paused
+        ),
+        notif AS (
+          SELECT pg_notify(
+            LEFT('${chanPrefix}' || u.queue_name, 63),
+            json_build_object(
+              'worker_id', u.worker_id,
+              'paused', u.paused OR COALESCE(qm.paused, FALSE)
+            )::text
+          )
+          FROM updated u
+          LEFT JOIN ${qmTbl} qm ON qm.queue_name = u.queue_name
+        )
+        SELECT count(*)::int8 AS count FROM updated
+        WHERE (SELECT count(*) FROM notif) >= 0
+      |]
+
+-- | Mark a worker as gracefully draining.
+-- Parameters: worker_id
+markWorkerShuttingDownSQL :: SchemaName -> Text
+markWorkerShuttingDownSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+   in "UPDATE " <> tbl <> " SET shutting_down = TRUE, last_heartbeat = NOW() WHERE worker_id = ?"
+
+-- | Remove a worker row outright (clean shutdown, rather than waiting for the stale-sweeper).
+-- Parameters: worker_id
+deleteWorkerSQL :: SchemaName -> Text
+deleteWorkerSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+   in "DELETE FROM " <> tbl <> " WHERE worker_id = ?"
+
+-- | List workers, with NULL parameters short-circuiting the corresponding filter.
+-- Parameters: queue_name (NULL = any queue), live_threshold_seconds (NULL = no heartbeat filter)
+listWorkersSQL :: SchemaName -> Text
+listWorkersSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+      cols = workerColumnList
+   in [text|
+        WITH filt AS (SELECT ?::text AS queue, ?::float8 AS live_secs)
+        SELECT ${cols} FROM ${tbl}, filt
+        WHERE (filt.queue IS NULL OR queue_name = filt.queue)
+          AND (filt.live_secs IS NULL
+               OR last_heartbeat > NOW() - filt.live_secs * interval '1 second')
+        ORDER BY queue_name, started_at DESC
+      |]
+
+-- | Delete worker rows older than their own @stale_threshold_secs@.
+deleteStaleWorkersSQL :: SchemaName -> Text
+deleteStaleWorkersSQL schemaName =
+  let tbl = arbiterWorkersTable schemaName
+   in [text|
+        DELETE FROM ${tbl}
+        WHERE last_heartbeat < NOW() - (stale_threshold_secs * interval '1 second')
+      |]
+
+-- ---------------------------------------------------------------------------
+-- Queue Operations
+-- ---------------------------------------------------------------------------
+
+queueColumnList :: Text
+queueColumnList = T.intercalate ", " (codecColumns queueRowCodec)
+
+-- | Insert an arbiter_queues row with defaults if one doesn't already exist.
+--
+-- Parameters: queue_name
+ensureQueueSQL :: SchemaName -> Text
+ensureQueueSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+   in [text|
+        INSERT INTO ${tbl} (queue_name) VALUES (?)
+        ON CONFLICT (queue_name) DO NOTHING
+      |]
+
+-- | Upsert the queue's paused flag and fan one NOTIFY per worker in the queue.
+-- @paused_at@ is set on first pause, cleared on resume, untouched on re-pause.
+-- Parameters: queue_name, paused, paused (repeated for the CASE expression)
+setQueuePausedSQL :: SchemaName -> Text
+setQueuePausedSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+      wTbl = arbiterWorkersTable schemaName
+      chanPrefix = pauseNotifyChannelPrefix schemaName
+   in [text|
+        WITH upsert AS (
+          INSERT INTO ${tbl} (queue_name, paused, paused_at)
+            VALUES (?, ?, CASE WHEN ?::boolean THEN NOW() ELSE NULL END)
+          ON CONFLICT (queue_name) DO UPDATE
+            SET paused = EXCLUDED.paused,
+                paused_at = CASE
+                  WHEN EXCLUDED.paused AND NOT arbiter_queues.paused THEN NOW()
+                  WHEN NOT EXCLUDED.paused THEN NULL
+                  ELSE arbiter_queues.paused_at
+                END,
+                updated_at = NOW()
+          RETURNING queue_name, paused
+        ),
+        notif AS (
+          SELECT pg_notify(
+            LEFT('${chanPrefix}' || w.queue_name, 63),
+            json_build_object(
+              'worker_id', w.worker_id,
+              'paused', w.paused OR u.paused
+            )::text
+          )
+          FROM upsert u
+          JOIN ${wTbl} w ON w.queue_name = u.queue_name
+        )
+        SELECT count(*)::int8 AS count FROM upsert
+        WHERE (SELECT count(*) FROM notif) >= 0
+      |]
+
+-- | Get the arbiter_queues row for a single queue.
+--
+-- Parameters: queue_name
+getQueueSQL :: SchemaName -> Text
+getQueueSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+      cols = queueColumnList
+   in [text|SELECT ${cols} FROM ${tbl} WHERE queue_name = ?|]
+
+-- | List all arbiter_queues rows.
+listQueuesSQL :: SchemaName -> Text
+listQueuesSQL schemaName =
+  let tbl = arbiterQueuesTable schemaName
+      cols = queueColumnList
+   in [text|SELECT ${cols} FROM ${tbl} ORDER BY queue_name|]
+
+-- ---------------------------------------------------------------------------
+-- Global Gate Operations
+-- ---------------------------------------------------------------------------
+
+-- | Idempotently create the gate row for a task. Parameters: task_name.
+ensureGateRowSQL :: SchemaName -> Text
+ensureGateRowSQL schemaName =
+  let tbl = arbiterGatesTable schemaName
+   in [text|
+        INSERT INTO ${tbl} (task_name) VALUES (?)
+        ON CONFLICT (task_name) DO NOTHING
+      |]
+
+-- | Cheap read-only pre-transaction check: TRUE if last_run_at is older than the interval.
+-- Parameters: interval seconds, task_name.
+checkGateSQL :: SchemaName -> Text
+checkGateSQL schemaName =
+  let tbl = arbiterGatesTable schemaName
+   in [text|
+        SELECT (last_run_at < NOW() - (?::double precision * interval '1 second'))
+          AS result
+        FROM ${tbl}
+        WHERE task_name = ?
+      |]
+
+-- | Atomically claim the gate row iff the interval elapsed and no concurrent tx holds it.
+-- Parameters: task_name, interval seconds.
+tryClaimGateSQL :: SchemaName -> Text
+tryClaimGateSQL schemaName =
+  let tbl = arbiterGatesTable schemaName
+   in [text|
+        SELECT 1::bigint AS result FROM ${tbl}
+        WHERE task_name = ?
+          AND last_run_at < NOW() - (?::double precision * interval '1 second')
+        FOR UPDATE SKIP LOCKED
+      |]
+
+-- | Bump last_run_at to NOW(), inside the claim transaction so it commits with the task's work.
+-- Parameters: task_name.
+bumpGateSQL :: SchemaName -> Text
+bumpGateSQL schemaName =
+  let tbl = arbiterGatesTable schemaName
+   in [text|UPDATE ${tbl} SET last_run_at = NOW() WHERE task_name = ?|]

@@ -32,6 +32,7 @@ import Data.Int (Int32, Int64)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
+import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
 -- | A job in the queue. Parametrized over payload, primary key, queue name,
@@ -79,6 +80,8 @@ data Job payload key q insertedAt = Job
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
   -- or operator-paused jobs.
+  , claimedBy :: Maybe UUID
+  -- ^ Worker pool UUID that last claimed this job.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -108,6 +111,7 @@ defaultJob p =
     , parentId = Nothing
     , parentState = Nothing
     , suspended = False
+    , claimedBy = Nothing
     }
 
 -- | Grouped 'JobWrite'. Jobs sharing a group key are processed serially.
@@ -134,6 +138,7 @@ defaultGroupedJob gk p =
     , parentId = Nothing
     , parentState = Nothing
     , suspended = False
+    , claimedBy = Nothing
     }
 
 -- | A type alias for a job that has been read from the database.

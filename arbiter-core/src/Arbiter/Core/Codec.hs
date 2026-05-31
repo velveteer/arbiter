@@ -38,6 +38,12 @@ module Arbiter.Core.Codec
 
     -- * Cron codecs
   , cronScheduleRowCodec
+
+    -- * Worker codecs
+  , workerRowCodec
+
+    -- * Queue codecs
+  , queueRowCodec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
@@ -45,9 +51,12 @@ import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
+import Data.UUID.Types (UUID)
 
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..))
+import Arbiter.Core.Queues (QueueRow (..))
+import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
 
 -- | Scalar PostgreSQL column type. The GADT tag recovers the Haskell type.
 data Col a where
@@ -58,6 +67,7 @@ data Col a where
   CTimestamptz :: Col UTCTime
   CJsonb :: Col Value
   CFloat8 :: Col Double
+  CUuid :: Col UUID
 
 -- | A named column with nullability. Carries the column name for
 -- backends that use name-based decoding (e.g. orville).
@@ -143,6 +153,7 @@ jobRowCodec queueName =
     <*> ncol "parent_id" CInt8
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
+    <*> ncol "claimed_by" CUuid
 
 dedupKeyCodec :: RowCodec (Maybe DedupKey)
 dedupKeyCodec = toDedupKey <$> ncol "dedup_key" CText <*> ncol "dedup_strategy" CText
@@ -177,6 +188,7 @@ jobRowCodecWithJobId queueName =
     <*> ncol "parent_id" CInt8
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
+    <*> ncol "claimed_by" CUuid
 
 countCodec :: RowCodec Int64
 countCodec = col "count" CInt8
@@ -196,6 +208,7 @@ cronScheduleRowCodec :: RowCodec CronScheduleRow
 cronScheduleRowCodec =
   CronScheduleRow
     <$> col "name" CText
+    <*> col "queue_name" CText
     <*> col "default_expression" CText
     <*> col "default_overlap" CText
     <*> ncol "default_timezone" CText
@@ -205,5 +218,38 @@ cronScheduleRowCodec =
     <*> col "enabled" CBool
     <*> ncol "last_fired_at" CTimestamptz
     <*> ncol "last_checked_at" CTimestamptz
+    <*> col "created_at" CTimestamptz
+    <*> col "updated_at" CTimestamptz
+
+-- ---------------------------------------------------------------------------
+-- Worker codecs
+-- ---------------------------------------------------------------------------
+
+workerRowCodec :: RowCodec WorkerRow
+workerRowCodec =
+  WorkerRow
+    <$> col "worker_id" CUuid
+    <*> col "queue_name" CText
+    <*> ncol "host_name" CText
+    <*> ncol "worker_count" CInt4
+    <*> col "started_at" CTimestamptz
+    <*> col "last_heartbeat" CTimestamptz
+    <*> col "shutting_down" CBool
+    <*> col "paused" CBool
+    <*> col "stale_threshold_secs" CFloat8
+    <*> ncol "metadata" CJsonb
+    <*> (workerHealthFromText <$> col "health" CText)
+
+-- ---------------------------------------------------------------------------
+-- Queue codecs
+-- ---------------------------------------------------------------------------
+
+queueRowCodec :: RowCodec QueueRow
+queueRowCodec =
+  QueueRow
+    <$> col "queue_name" CText
+    <*> col "paused" CBool
+    <*> ncol "paused_at" CTimestamptz
+    <*> ncol "metadata" CJsonb
     <*> col "created_at" CTimestamptz
     <*> col "updated_at" CTimestamptz

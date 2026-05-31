@@ -31,7 +31,7 @@ import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, 
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
 import Control.Exception (SomeException, bracket, catch)
-import Control.Monad (guard, void, when)
+import Control.Monad (guard, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
@@ -46,6 +46,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.UUID.Types (UUID)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
@@ -66,6 +67,7 @@ import Arbiter.Servant.API
   , RegistryToAPI
   , StatsAPI (..)
   , TableAPI (..)
+  , WorkersAPI (..)
   )
 import Arbiter.Servant.Types
 
@@ -140,6 +142,7 @@ jobsServer table config =
     , insertJobsBatch = insertJobsBatchHandler @registry @payload table config
     , getJob = getJobHandler @registry @payload table config
     , cancelJob = cancelJobHandler @registry table config
+    , forceCancelJob = forceCancelJobHandler @registry table config
     , promoteJob = promoteJobHandler @registry @payload table config
     , moveToDLQ = moveToDLQHandler @registry @payload table config
     , pauseChildren = pauseChildrenHandler @registry table config
@@ -277,6 +280,22 @@ cancelJobHandler tableName config jobId = do
       schemaName = schema env
 
   rowsAffected <- liftIO $ runSimpleDb env $ Ops.cancelJobCascade schemaName tableName jobId
+  if rowsAffected > 0
+    then pure NoContent
+    else throwError err404 {errBody = "Job not found"}
+
+-- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
+forceCancelJobHandler
+  :: forall registry
+   . Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> Handler NoContent
+forceCancelJobHandler tableName config jobId = do
+  let env = serverEnv config
+      schemaName = schema env
+
+  rowsAffected <- liftIO $ runSimpleDb env $ Ops.forceCancelJob schemaName tableName jobId
   if rowsAffected > 0
     then pure NoContent
     else throwError err404 {errBody = "Job not found"}
@@ -596,11 +615,44 @@ queuesServer
   :: forall registry
    . (RegistryTables registry)
   => Proxy registry
+  -> ArbiterServerConfig registry
   -> QueuesAPI (AsServerT Handler)
-queuesServer registryProxy =
-  QueuesAPI
-    { listQueues = pure $ QueuesResponse {queues = registryTableNames registryProxy}
-    }
+queuesServer registryProxy config =
+  let known = registryTableNames registryProxy
+   in QueuesAPI
+        { listQueues = pure $ QueuesResponse {queues = known}
+        , getDetails = getQueueDetailsHandler config
+        , pauseQueue = setQueuePausedHandler config known True
+        , resumeQueue = setQueuePausedHandler config known False
+        }
+
+-- | Get a queue's operator config.
+getQueueDetailsHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Handler (Maybe QueueRow)
+getQueueDetailsHandler config queue = do
+  let env = serverEnv config
+      schemaName = schema env
+  liftIO $ runSimpleDb env $ Ops.getQueue schemaName queue
+
+-- | Flip the @paused@ flag for a queue, validated against the registry. The
+-- @arbiter_queues@ row is created lazily on first pause.
+setQueuePausedHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> [Text]
+  -> Bool
+  -> Text
+  -> Handler NoContent
+setQueuePausedHandler config knownQueues p queue = do
+  unless (queue `elem` knownQueues) $
+    throwError err404 {errBody = "Unknown queue"}
+  let env = serverEnv config
+      schemaName = schema env
+  void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
+  pure NoContent
 
 -- | Events server - raw WAI application for SSE streaming.
 --
@@ -679,15 +731,16 @@ cronServer config =
     , updateSchedule = updateCronScheduleHandler config
     }
 
--- | List all cron schedules
+-- | List cron schedules, optionally scoped to a queue.
 listCronSchedulesHandler
   :: forall registry
    . ArbiterServerConfig registry
+  -> Maybe Text
   -> Handler CronSchedulesResponse
-listCronSchedulesHandler config = do
+listCronSchedulesHandler config mQueue = do
   let env = serverEnv config
       schemaName = schema env
-  rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName
+  rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName mQueue
   pure $ CronSchedulesResponse {cronSchedules = rows}
 
 -- | Update a cron schedule
@@ -741,6 +794,47 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
     Nothing -> throwError err404 {errBody = "Cron schedule not found"}
     Just row -> pure row
 
+-- | Workers API handlers
+workersServer
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> WorkersAPI (AsServerT Handler)
+workersServer config =
+  WorkersAPI
+    { listWorkers = listWorkersHandler config
+    , pauseWorker = setWorkerPausedHandler config True
+    , resumeWorker = setWorkerPausedHandler config False
+    }
+
+-- | List workers, optionally scoped to a queue and/or to recent heartbeats.
+listWorkersHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Maybe Text
+  -> Maybe Double
+  -> Handler WorkersResponse
+listWorkersHandler config mQueue mLiveSecs = do
+  let env = serverEnv config
+      schemaName = schema env
+  rows <- liftIO $ runSimpleDb env $ Ops.listWorkers schemaName mQueue (realToFrac <$> mLiveSecs)
+  pure $ WorkersResponse {workers = rows}
+
+-- | Set a worker's @paused@ flag. The worker reconciles its local state on
+-- the next heartbeat.
+setWorkerPausedHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Bool
+  -> UUID
+  -> Handler NoContent
+setWorkerPausedHandler config p wid = do
+  let env = serverEnv config
+      schemaName = schema env
+  n <- liftIO $ runSimpleDb env $ Ops.setWorkerPaused schemaName wid p
+  if n == 0
+    then throwError err404 {errBody = "Worker not found"}
+    else pure NoContent
+
 -- | Type class to build server implementations for registry entries
 class BuildServer registry (reg :: [(Symbol, Type)]) where
   buildServer :: ArbiterServerConfig registry -> ServerT (RegistryToAPI reg) Handler
@@ -751,9 +845,10 @@ instance
   => BuildServer registry '[]
   where
   buildServer config =
-    queuesServer @registry (Proxy @registry)
+    queuesServer @registry (Proxy @registry) config
       :<|> eventsServer config
       :<|> cronServer config
+      :<|> workersServer config
 
 -- Single table case: table endpoints :<|> queues :<|> events :<|> cron endpoints
 instance
@@ -766,9 +861,10 @@ instance
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @tableName)
      in tableServer @registry @payload tableName config
-          :<|> queuesServer @registry (Proxy @registry)
+          :<|> queuesServer @registry (Proxy @registry) config
           :<|> eventsServer config
           :<|> cronServer config
+          :<|> workersServer config
 
 -- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
 instance

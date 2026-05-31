@@ -21,6 +21,7 @@ module Arbiter.Core.CronSchedule
   , cronSchedulesTable
   , createCronSchedulesTableSQL
   , addTimezoneColumnSQL
+  , addQueueNameColumnSQL
   ) where
 
 import Control.Applicative ((<|>))
@@ -49,6 +50,7 @@ import Arbiter.Core.Job.Schema (quoteIdentifier)
 -- | A row from the @cron_schedules@ table.
 data CronScheduleRow = CronScheduleRow
   { name :: Text
+  , queueName :: Text
   , defaultExpression :: Text
   , defaultOverlap :: Text
   , defaultTimezone :: Maybe Text
@@ -149,3 +151,9 @@ addTimezoneColumnSQL schemaName =
     [ "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS default_timezone TEXT;"
     , "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS override_timezone TEXT;"
     ]
+
+addQueueNameColumnSQL :: Text -> Text
+addQueueNameColumnSQL schemaName =
+  "ALTER TABLE "
+    <> cronSchedulesTable schemaName
+    <> " ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'pre-migration';"

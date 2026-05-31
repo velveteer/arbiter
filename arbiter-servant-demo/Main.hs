@@ -197,7 +197,7 @@ mkDemoWorker connStr = do
     cfg
       { cronJobs = demoCrons
       , pollInterval = 10
-      , livenessConfig = Nothing
+      , livenessFile = Nothing
       }
   where
     handler _conn job = liftIO $ do
@@ -219,7 +219,7 @@ mkEmailWorker connStr = do
     cfg
       { cronJobs = emailCrons
       , pollInterval = 10
-      , livenessConfig = Nothing
+      , livenessFile = Nothing
       }
   where
     handler _conn job = liftIO $ do
@@ -241,7 +241,7 @@ mkNotifWorker connStr = do
     cfg
       { cronJobs = notifCrons
       , pollInterval = 2
-      , livenessConfig = Nothing
+      , livenessFile = Nothing
       }
   where
     handler _conn job = liftIO $ putStrLn $ "[notifications] Processed: " <> show (payload job)
@@ -261,7 +261,7 @@ mkNotifWorker connStr = do
 mkPipelineWorker :: ByteString -> IO (WorkerConfig DemoM PipelinePayload [Text])
 mkPipelineWorker connStr = do
   cfg <- defaultRollupWorkerConfig connStr 3 handler
-  pure cfg {pollInterval = 2, livenessConfig = Nothing}
+  pure cfg {pollInterval = 2, livenessFile = Nothing}
   where
     handler childResults _dlqFailures _conn job = case payload job of
       ProcessChunk chunkName -> do

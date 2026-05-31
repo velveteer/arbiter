@@ -1,109 +1,107 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Postgres LISTEN/NOTIFY plumbing: a multi-channel listener thread, and a
+-- pause-aware consumer loop the dispatcher drives off it.
 module Arbiter.Worker.NotificationListener
-  ( withNotificationLoop
+  ( ChannelHandler
+  , runMultiChannelListener
+  , runNotificationConsumer
   ) where
 
 import Arbiter.Core.Job.Schema (quoteIdentifier)
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import Data.ByteString.Char8 qualified as BSC
-import Data.Maybe (fromMaybe)
+import Data.Foldable (for_, traverse_)
+import Data.Map.Strict qualified as Map
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.Simple qualified as PS
 import Database.PostgreSQL.Simple.Notification qualified as PS
 import UnliftIO (MonadUnliftIO, liftIO)
-import UnliftIO.Async (race_)
-import UnliftIO.Exception (bracket)
+import UnliftIO.Exception (bracket, tryAny)
+import UnliftIO.STM (TVar)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Logger (LogConfig, defaultLogConfig)
-import Arbiter.Worker.Retry (retryOnException)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
+import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
-data ListenerCtx
-  = ListenerCtx
-  { lcProcessStatus :: STM.TVar WorkerState
-  , lcPollDelay :: NominalDiffTime
-  , lcNotificationVar :: STM.TVar (Maybe PS.Notification)
-  , lcConnection :: PS.Connection
-  , lcWakeTrigger :: Maybe (STM.STM ())
-  }
+type ChannelHandler m = PS.Notification -> m ()
 
 type Action m a = Maybe PS.Notification -> m a
 
--- | Runs the provided action when a notification is received on the specified
--- channel or when the poll delay timer expires. Forks a linked thread that listens
--- for Postgres notifications and communicates with the handler loop via a TVar.
--- If the connection is lost, automatically reconnects with backoff. Only exits
--- when the worker state is set to 'ShuttingDown' or an async exception is received.
-withNotificationLoop
+-- | LISTEN on every registered channel and dispatch notifications.
+runMultiChannelListener
   :: (MonadUnliftIO m)
-  => String
-  -- ^ Postgres connection string
-  -> String
-  -- ^ Notification channel name (e.g., "email_jobs_created")
-  -> STM.TVar WorkerState
-  -- ^ Signal for worker state (Running, Paused, ShuttingDown)
-  -> NominalDiffTime
-  -- ^ Poll delay in seconds - action fires on this interval if no
-  -- notifications are received. Also serves as the liveness heartbeat.
-  -> Maybe LogConfig
-  -- ^ Optional log configuration for internal errors
-  -> Maybe (STM.STM ())
-  -- ^ Optional wake trigger (e.g., worker finished signal)
+  => BSC.ByteString
+  -> [(String, ChannelHandler m)]
+  -> LogConfig
+  -> TVar Bool
+  -- ^ Set to True once every channel is subscribed.
   -> m ()
-  -- ^ Action to run once after LISTEN is established, before entering the
-  -- main loop. Lets callers do an initial claim without racing NOTIFYs.
-  -> Action m ()
-  -- ^ Action to run on each main-loop iteration
-  -> m ()
-withNotificationLoop connStr channel pSt polDel mLogCfg mWakeTrigger onReady action =
-  retryOnException pSt logCfg "Notification listener"
-    $ bracket
-      (liftIO $ connectToDb connStr)
-      (liftIO . PS.close)
+runMultiChannelListener connStr handlers logCfg ready =
+  bracket
+    (liftIO $ PS.connectPostgreSQL connStr)
+    (liftIO . PS.close)
     $ \conn -> do
-      nVar <- STM.newTVarIO Nothing
-      let ctx = ListenerCtx pSt polDel nVar conn mWakeTrigger
-      liftIO $ subscribeToChannel (lcConnection ctx) channel
-      onReady
-      race_
-        (mainLoop ctx action)
-        (notificationLoop ctx)
+      for_ (Map.keys handlerMap) (liftIO . subscribe conn)
+      STM.atomically $ STM.writeTVar ready True
+      forever $ do
+        n <- liftIO $ PS.getNotification conn
+        let chan = BSC.unpack (PS.notificationChannel n)
+        traverse_ (dispatch n) (Map.lookup chan handlerMap)
   where
-    logCfg = fromMaybe defaultLogConfig mLogCfg
+    handlerMap = Map.fromList handlers
 
-data Command
-  = Halt
-  | PauseCmd
-  | NotificationRecv PS.Notification
-  | TimerExpired
+    dispatch n h = do
+      result <- tryAny (h n)
+      case result of
+        Right () -> pure ()
+        Left e ->
+          tryLog logCfg Warning $
+            "Channel handler exception: " <> T.pack (show e)
 
--- | The main wait/dispatch loop.
---
--- Each iteration registers a fresh poll-delay timer and then awaits — in a
--- single 'atomically' — any of: a state change away from 'Running', an
--- inbound notification, the poll timer expiring, or the optional wake
--- trigger firing. Paused state suspends the loop until state changes.
-mainLoop :: (MonadUnliftIO m) => ListenerCtx -> Action m a -> m ()
-mainLoop ctx action = loop
+    subscribe conn channel =
+      void $
+        PS.execute_
+          conn
+          (fromString ("LISTEN " <> T.unpack (quoteIdentifier (T.pack channel))))
+
+-- | Loop until 'ShuttingDown'. Per iteration wait on notification, poll timer,
+-- wake trigger, or state change. Fires @action Nothing@ once at startup if the
+-- state is 'Running', so callers don't have to wait for the first event.
+runNotificationConsumer
+  :: (MonadUnliftIO m)
+  => STM.STM WorkerState
+  -> NominalDiffTime
+  -> STM.TVar (Maybe PS.Notification)
+  -> Maybe (STM.STM ())
+  -> Action m ()
+  -> m ()
+runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
+  st <- STM.atomically readState
+  when (st == Running) (action Nothing)
+  loop
   where
-    pollMicros = round (lcPollDelay ctx * 1_000_000)
+    pollMicros = round (polDel * 1_000_000)
 
     loop = do
       cmd <- nextCommand
       case cmd of
         Halt -> pure ()
-        PauseCmd -> awaitUnpause >> loop
+        PauseCmd -> do
+          next <- awaitUnpause
+          case next of
+            Halt -> pure ()
+            _ -> action Nothing *> loop
         NotificationRecv n -> action (Just n) *> loop
         TimerExpired -> action Nothing *> loop
 
     nextCommand = do
       delayVar <- STM.registerDelay pollMicros
       STM.atomically $ do
-        status <- STM.readTVar (lcProcessStatus ctx)
+        status <- readState
         case status of
           ShuttingDown -> pure Halt
           Paused -> pure PauseCmd
@@ -113,19 +111,19 @@ mainLoop ctx action = loop
               `STM.orElse` waitWakeTrigger
               `STM.orElse` watchStateChange
 
-    -- Block until we're either ShuttingDown or back to Running.
     awaitUnpause =
       STM.atomically $ do
-        s <- STM.readTVar (lcProcessStatus ctx)
+        s <- readState
         case s of
           Paused -> STM.retrySTM
-          _ -> pure ()
+          ShuttingDown -> pure Halt
+          Running -> pure TimerExpired
 
     consumeNotification = do
-      mNotif <- STM.readTVar (lcNotificationVar ctx)
+      mNotif <- STM.readTVar notifVar
       case mNotif of
         Just n -> do
-          STM.writeTVar (lcNotificationVar ctx) Nothing
+          STM.writeTVar notifVar Nothing
           pure (NotificationRecv n)
         Nothing -> STM.retrySTM
 
@@ -133,31 +131,19 @@ mainLoop ctx action = loop
       isExpired <- STM.readTVar delayVar
       if isExpired then pure TimerExpired else STM.retrySTM
 
-    waitWakeTrigger = case lcWakeTrigger ctx of
+    waitWakeTrigger = case mWakeTrigger of
       Nothing -> STM.retrySTM
       Just trigger -> trigger >> pure TimerExpired
 
-    -- Wake when status leaves Running so we can re-check at the top.
     watchStateChange = do
-      s <- STM.readTVar (lcProcessStatus ctx)
+      s <- readState
       case s of
         ShuttingDown -> pure Halt
         Paused -> pure PauseCmd
         Running -> STM.retrySTM
 
--- Block on receiving a Postgres notification. When a notification is received,
--- add it to the notification var and loop.
-notificationLoop :: (MonadUnliftIO m) => ListenerCtx -> m ()
-notificationLoop ctx = forever $ do
-  n <- liftIO $ PS.getNotification (lcConnection ctx)
-  void . STM.atomically $ STM.swapTVar (lcNotificationVar ctx) (Just n)
-
-connectToDb :: String -> IO PS.Connection
-connectToDb = PS.connectPostgreSQL . BSC.pack
-
--- | Issue a LISTEN command to the database for a specific notification channel.
-subscribeToChannel :: PS.Connection -> String -> IO ()
-subscribeToChannel conn channel =
-  void . PS.execute_ conn . fromString $
-    T.unpack $
-      "LISTEN " <> quoteIdentifier (T.pack channel)
+data Command
+  = Halt
+  | PauseCmd
+  | NotificationRecv PS.Notification
+  | TimerExpired

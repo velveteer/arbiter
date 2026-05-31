@@ -44,6 +44,7 @@ module Arbiter.Worker.Cron
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
+import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
@@ -226,12 +227,13 @@ formatMinuteInTimezone (Just tzName) t =
 -- @cron_schedules@ table. Preserves any user overrides and enabled state.
 initCronSchedules
   :: (MonadArbiter m)
-  => Text -> [CronJob payload] -> LogConfig -> m ()
-initCronSchedules schemaName jobs logCfg = do
+  => SchemaName -> Text -> [CronJob payload] -> LogConfig -> m ()
+initCronSchedules schemaName queueName jobs logCfg = do
   forM_ jobs $ \cj ->
     Ops.upsertCronDefault
       schemaName
       (name cj)
+      queueName
       (cronExpression cj)
       (overlapPolicyToText (overlap cj))
       (timezone cj)
@@ -244,15 +246,17 @@ runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => TVar WorkerState
   -> LogConfig
+  -> SchemaName
   -> Text
+  -- ^ Queue name (recorded on each schedule row).
   -> [CronJob payload]
   -> m ()
-runCronScheduler stateVar logCfg schemaName jobs = do
-  initCronSchedules schemaName jobs logCfg
+runCronScheduler stateVar logCfg schemaName queueName jobs = do
+  initCronSchedules schemaName queueName jobs logCfg
   startupNow <- liftIO getCurrentTime
   shuttingDown <- isShuttingDown stateVar
   unless shuttingDown $
-    processCronCatchUp logCfg schemaName jobs startupNow
+    processCronCatchUp logCfg schemaName queueName jobs startupNow
   logCron logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
   loop
   where
@@ -260,21 +264,22 @@ runCronScheduler stateVar logCfg schemaName jobs = do
       stop <- waitUntilNextMinuteOrShutdown stateVar
       unless stop $ do
         now <- liftIO getCurrentTime
-        processCronCatchUp logCfg schemaName jobs now
+        processCronCatchUp logCfg schemaName queueName jobs now
         loop
 
--- | Scheduler catch-up step. Each cron is processed in its own transaction.
--- Backfill schedules hold a per-(schema, name) advisory lock so concurrent
--- pools can't interleave gate updates across a backfill window.
+-- | Scheduler catch-up step. Each cron runs in its own transaction.
+-- Backfill schedules hold a per-(schema, queue, name) advisory lock.
 processCronCatchUp
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig
   -> Text
+  -> Text
+  -- ^ Queue name
   -> [CronJob payload]
   -> UTCTime
   -- ^ Current wall-clock time
   -> m ()
-processCronCatchUp logCfg schemaName jobs now = do
+processCronCatchUp logCfg schemaName queueName jobs now = do
   let currentTick = truncateToMinute now
   forM_ jobs (processOneCron currentTick)
   where
@@ -282,7 +287,7 @@ processCronCatchUp logCfg schemaName jobs now = do
       outcome <- tryAny . withDbTransaction $ do
         haveLeader <- case backfill cj of
           NoBackfill -> pure True
-          Backfill _ -> Ops.tryAcquireCronLeader schemaName (name cj)
+          Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cj)
         if not haveLeader
           then pure NotLeader
           else do

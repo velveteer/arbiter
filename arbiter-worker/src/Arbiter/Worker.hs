@@ -47,6 +47,8 @@ import Arbiter.Core.Exceptions
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
+import Arbiter.Core.Job.Schema (SchemaName)
+import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
@@ -59,7 +61,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
-import Data.Foldable (toList)
+import Data.Foldable (toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -75,11 +77,12 @@ import System.Environment (lookupEnv)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
+  , bracket
   , checkSTM
   , finally
   , isEmptyTBQueue
   , lengthTBQueue
-  , mask
+  , mask_
   , modifyTVar'
   , newTBQueueIO
   , newTVarIO
@@ -88,17 +91,21 @@ import UnliftIO
   , throwIO
   , tryAny
   , waitAnyCatch
-  , withAsync
   , writeTVar
   )
-import UnliftIO.Async (race)
 import UnliftIO.Async qualified as Async
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.Concurrent qualified as Conc
-import UnliftIO.MVar qualified as MVar
 import UnliftIO.STM (TBQueue, TVar)
+import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy
+import Arbiter.Worker.ChannelHandlers
+  ( JobForceCancelled (..)
+  , RunningJobs
+  , handleCancelNotif
+  , handlePauseNotif
+  , withRegisteredJobs
+  )
 import Arbiter.Worker.Config
 import Arbiter.Worker.Cron
   ( BackfillPolicy (..)
@@ -114,14 +121,15 @@ import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (runHook, tryLog, withJobContext)
-import Arbiter.Worker.Retry (retryOnException)
+import Arbiter.Worker.NotificationListener (runMultiChannelListener)
+import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
 
 -- ---------------------------------------------------------------------------
 -- Job Result
 -- ---------------------------------------------------------------------------
 
--- | Handler result types. @()@ is fire-and-forget; any @(ToJSON a, FromJSON a)@
+-- | Handler result types. @()@ is fire-and-forget. any @(ToJSON a, FromJSON a)@
 -- is stored in the results table when the job has a parent and decoded when
 -- read by a rollup finalizer.
 class JobResult a where
@@ -154,7 +162,7 @@ instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
 -- @
 data NamedWorkerPool m
   = forall registry payload result.
-  (JobResult result, QueueOperation m registry payload) =>
+  (JobResult result, QueueOperation m registry payload, RegistryTables registry) =>
   NamedWorkerPool
   { workerPoolName :: Text
   -- ^ Queue name from the type-level registry
@@ -165,7 +173,7 @@ data NamedWorkerPool m
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
   :: forall m registry payload result
-   . (JobResult result, QueueOperation m registry payload)
+   . (JobResult result, QueueOperation m registry payload, RegistryTables registry)
   => WorkerConfig m payload result
   -> NamedWorkerPool m
 namedWorkerPool cfg =
@@ -271,139 +279,204 @@ runWorkerPool
      , MonadMask m
      , MonadUnliftIO m
      , QueueOperation m registry payload
+     , RegistryTables registry
      )
   => WorkerConfig m payload result
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
-      mLiveness = livenessConfig config
-      mLivenessSignal = fmap livenessSignal mLiveness
+      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
 
-  -- Create shared state
-  workQueue <- liftIO $ newTBQueueIO (fromIntegral workerCap)
-  busyWorkerCount <- liftIO $ newTVarIO 0
-  workerFinishedVar <- liftIO $ newTVarIO False
+  schemaName <- getSchema
+  workQueue <- newTBQueueIO (fromIntegral workerCap)
+  busyWorkerCount <- newTVarIO 0
+  workerFinishedVar <- newTVarIO False
+  runningJobs <- STM.newTVarIO Map.empty
+
+  registerResult <- tryAny (registerSelf config schemaName queueName)
+  case registerResult of
+    Left e -> warnEx (logConfig config) "Worker registry insert failed" e
+    Right mPaused ->
+      traverse_ (atomically . writeTVar (pauseVar config)) mPaused
+
+  dispatcherNotifVar <- STM.newTVarIO Nothing
+  let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
+      pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
+      cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
+      handlers =
+        [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
+        , (pauseChannel, handlePauseNotif config)
+        , (cancelChannel, handleCancelNotif config runningJobs)
+        ]
+
+  listenerReady <- STM.newTVarIO False
 
   evalContT $ do
-    -- Spawn liveness probe
-    liveness <-
-      case mLiveness of
-        Just lc ->
-          fmap pure <$> ContT . withAsync $
-            refreshLiveness (logConfig config) (livenessPath lc) (livenessSignal lc) (livenessInterval lc)
-              `finally` void (tryAny . liftIO $ removeFile (livenessPath lc))
-        Nothing -> pure []
-
-    -- Spawn dispatcher
+    withLivenessFile config
+    listener <-
+      spawnRetried (workerStateVar config) (logConfig config) "Multi-channel listener" $
+        runMultiChannelListener (connStr config) handlers (logConfig config) listenerReady
+    lift . atomically $
+      (readTVar listenerReady >>= checkSTM)
+        `STM.orElse` void (Async.waitCatchSTM listener)
+    heartbeat <-
+      spawnRetried (workerStateVar config) (logConfig config) "Worker heartbeat" $
+        heartbeatLoop config schemaName queueName
     dispatcher <-
-      ContT . withAsync $
-        runDispatcher config workerCap workQueue busyWorkerCount mLivenessSignal workerFinishedVar
-
-    -- Spawn workers. The worker loop already swallows per-job failures via
-    -- 'tryAny', so anything reaching this layer is an exception in the loop's
-    -- own scaffolding (queue read, hook, context setup, etc.). Retry the
-    -- worker rather than collapsing the whole pool.
+      spawnRetried (workerStateVar config) (logConfig config) "Dispatcher" $
+        runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
     workers <-
-      replicateM workerCap . ContT . withAsync $
-        retryOnException (workerStateVar config) (logConfig config) "Worker" $
-          workerLoop config workQueue busyWorkerCount workerFinishedVar
-
-    -- Spawn cron scheduler (only when cronJobs is non-empty)
+      replicateM workerCap $
+        spawnRetried (workerStateVar config) (logConfig config) "Worker thread" $
+          workerLoop config runningJobs workQueue busyWorkerCount workerFinishedVar
     cron <-
-      case cronJobs config of
-        [] -> pure []
-        jobs -> do
-          sch <- lift getSchema
-          pure
-            <$> ( ContT . withAsync $
-                    retryOnException (workerStateVar config) (logConfig config) "Cron scheduler" $
-                      runCronScheduler (workerStateVar config) (logConfig config) sch jobs
-                )
-
-    -- Spawn groups table reaper (corrects drift in job_count, min_priority, min_id)
+      spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
+        runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
-      ContT . withAsync $
-        retryOnException (workerStateVar config) (logConfig config) "Group reaper" $
-          groupReaperLoop @m @registry @payload (groupReaperInterval config)
+      spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
+        reaperLoop (logConfig config) (reaperInterval config)
 
-    -- Wait for any thread to exit (normal or exceptional)
-    (_, res) <- waitAnyCatch (dispatcher : reaper : cron ++ liveness ++ workers)
-
+    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : cron : workers)
     case res of
       Left e ->
-        -- A thread crashed
         lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (show e)
-      Right _ ->
-        -- A thread exited normally
-        pure ()
+      Right _ -> pure ()
 
-    -- Set shutdown state if not already set
-    shutdownWorker config
+    lift $ shutdownPool config schemaName workQueue busyWorkerCount
 
-    -- Graceful shutdown: drain the queue with optional timeout
-    lift $ tryLog (logConfig config) Info "Starting graceful shutdown. Draining in-flight jobs..."
+-- | Remove the liveness file when the pool exits, after the drain.
+withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
+withLivenessFile config = case livenessFile config of
+  Nothing -> pure ()
+  Just path -> ContT $ \k ->
+    bracket
+      (pure ())
+      (\_ -> void . tryAny . liftIO . removeFile $ path)
+      (\_ -> k ())
 
-    -- Wait for work queue to be empty, with optional timeout
-    let waitForDrain = liftIO . atomically $ do
-          qEmpty <- isEmptyTBQueue workQueue
-          checkSTM qEmpty
-          busy <- readTVar busyWorkerCount
-          checkSTM (busy == 0)
+-- | Re-insert the worker's registry row from the config + schema/queue.
+-- Returns the effective paused state so the caller can seed 'pauseVar'.
+registerSelf :: (MonadArbiter m) => WorkerConfig n payload result -> SchemaName -> Text -> m (Maybe Bool)
+registerSelf config schemaName queueName =
+  Ops.registerWorker
+    schemaName
+    (workerId config)
+    queueName
+    (workerHost config)
+    (Just (fromIntegral (workerCount config)))
+    (workerStaleThreshold config)
+    (workerMetadata config)
 
-    drainResult <- case gracefulShutdownTimeout config of
-      Nothing -> do
-        -- No timeout: wait indefinitely, log progress every 10 seconds
-        let drainLoop = do
-              drainOrTick <- lift $ race (liftIO $ threadDelay 10_000_000) waitForDrain
-              case drainOrTick of
-                Right () -> pure ()
-                Left () -> do
-                  (busy, qLen) <-
-                    liftIO . atomically $
-                      (,)
-                        <$> readTVar busyWorkerCount
-                        <*> (fromIntegral <$> lengthTBQueue workQueue)
-                  lift $
-                    tryLog (logConfig config) Info $
-                      "Graceful shutdown: waiting for "
-                        <> T.pack (show (busy :: Int))
-                        <> " busy worker(s), "
-                        <> T.pack (show (qLen :: Int))
-                        <> " job(s) in queue..."
-                  drainLoop
-        drainLoop
-        pure (Right ())
-      Just timeoutSecs -> do
-        -- Race between draining and timeout
-        let timeoutMicros = ceiling (timeoutSecs * 1_000_000)
-        lift $ race (liftIO $ threadDelay timeoutMicros) waitForDrain
+-- | Mark shutting-down, drain, then deregister. All DB
+-- writes are best-effort and logged on failure.
+shutdownPool
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => WorkerConfig n payload result
+  -> SchemaName
+  -> TBQueue a
+  -> TVar Int
+  -> m ()
+shutdownPool config schemaName workQueue busyCount = do
+  shutdownWorker config
+  let wid = workerId config
+      logCfg = logConfig config
+  tryWarn logCfg "Failed to mark worker shutting down" (Ops.markWorkerShuttingDown schemaName wid)
+  drainPool logCfg (gracefulShutdownTimeout config) workQueue busyCount
+  tryWarn logCfg "Failed to deregister worker" (Ops.deregisterWorker schemaName wid)
 
-    case drainResult of
-      Right () ->
-        lift $ tryLog (logConfig config) Info "All workers are now idle. Graceful shutdown complete."
-      Left () ->
-        lift $ tryLog (logConfig config) Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
-
--- | Periodically writes to a file to signal liveness.
---
--- Requires both a signal (from dispatcher or heartbeat) and a minimum delay
--- before writing - proof of work, rate-limited. If neither the dispatcher
--- nor heartbeat signals (e.g., broken DB connection, deadlocked dispatcher),
--- the file goes stale and the process should be restarted.
-refreshLiveness :: (MonadUnliftIO m) => LogConfig -> FilePath -> MVar.MVar () -> Int -> m ()
-refreshLiveness logCfg healthcheckPath livenessMVar n = do
-  MVar.takeMVar livenessMVar
-  writeProbe
-  forever $ do
-    Async.concurrently_ (MVar.takeMVar livenessMVar) (Conc.threadDelay $ n * 1_000_000)
-    writeProbe
+-- | Wait for the work queue to drain and all worker threads to go idle,
+-- optionally bounded by a timeout. Logs the entry, periodic progress (every
+-- 10s) when no timeout is set, and the result.
+drainPool
+  :: (MonadUnliftIO m)
+  => LogConfig
+  -> Maybe NominalDiffTime
+  -> TBQueue a
+  -> TVar Int
+  -> m ()
+drainPool logCfg mTimeout workQueue busyCount = do
+  tryLog logCfg Info "Starting graceful shutdown. Draining in-flight jobs..."
+  result <- case mTimeout of
+    Nothing -> Right () <$ drainLoop
+    Just timeoutSecs ->
+      Async.race (threadDelay $ ceiling (timeoutSecs * 1_000_000)) waitForDrain
+  case result of
+    Right () -> tryLog logCfg Info "All workers are now idle. Graceful shutdown complete."
+    Left () -> tryLog logCfg Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
   where
-    writeProbe = do
-      result <- tryAny $ liftIO $ writeFile healthcheckPath ""
-      case result of
-        Left e ->
-          tryLog logCfg Error $ "Liveness probe write failed: " <> T.pack (show e)
+    waitForDrain = atomically $ do
+      qEmpty <- isEmptyTBQueue workQueue
+      checkSTM qEmpty
+      busy <- readTVar busyCount
+      checkSTM (busy == 0)
+    drainLoop = do
+      drainOrTick <- Async.race (threadDelay 10_000_000) waitForDrain
+      case drainOrTick of
         Right () -> pure ()
+        Left () -> do
+          (busy, qLen) <-
+            atomically $
+              (,)
+                <$> readTVar busyCount
+                <*> (fromIntegral <$> lengthTBQueue workQueue)
+          tryLog logCfg Info $
+            "Graceful shutdown: waiting for "
+              <> T.pack (show (busy :: Int))
+              <> " busy worker(s), "
+              <> T.pack (show (qLen :: Int))
+              <> " job(s) in queue..."
+          drainLoop
+
+-- | Ticks at @pollInterval@, gated by a proof-of-work signal unless paused.
+-- Each tick bumps @arbiter_workers.last_heartbeat@, reconciles the registry
+-- @paused@ flag into local state, and re-registers if the sweeper deleted
+-- the row.
+heartbeatLoop
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => WorkerConfig n payload result
+  -> SchemaName
+  -> Text
+  -- ^ Queue name (used when the row needs re-registering).
+  -> m ()
+heartbeatLoop config schemaName queueName = do
+  tick
+  forever $ throttledWait *> tick
+  where
+    logCfg = logConfig config
+    sig = heartbeatSignal config
+    readShuttingDown = (== ShuttingDown) <$> STM.readTVar (workerStateVar config)
+    cadenceMicros = ceiling (workerHeartbeatInterval config * 1_000_000)
+    throttledWait = do
+      delayVar <- STM.registerDelay cadenceMicros
+      atomically $ do
+        STM.readTVar delayVar >>= checkSTM
+        paused <- STM.readTVar (pauseVar config)
+        unless paused $ STM.takeTMVar sig
+    tick = do
+      traverse_
+        (\path -> tryWarn logCfg "Liveness probe write failed" (liftIO $ writeFile path ""))
+        (livenessFile config)
+      result <- tryAny $ Ops.heartbeatWorker schemaName (workerId config)
+      case result of
+        Left e -> warnEx logCfg "Worker registry heartbeat failed" e
+        Right Nothing -> reregister
+        Right (Just rp) -> reconcile rp
+    reregister = do
+      shutting <- STM.atomically readShuttingDown
+      unless shutting $ do
+        tryLog logCfg Warning "Worker registry row missing, re-registering"
+        tryWarn logCfg "Worker re-registration failed" (registerSelf config schemaName queueName)
+    reconcile rp =
+      STM.atomically $ do
+        shutting <- readShuttingDown
+        unless shutting $ STM.writeTVar (pauseVar config) rp
+
+-- | Run @act@. On exception, log a warning under @label@ and continue.
+tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
+tryWarn logCfg label act = tryAny act >>= either (warnEx logCfg label) (const (pure ()))
+
+warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
+warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (show e)
 
 -- | Main loop for a single worker thread.
 workerLoop
@@ -414,42 +487,49 @@ workerLoop
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
+  -> RunningJobs
+  -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
   -> TVar Int
   -- ^ Busy worker count
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config workQueue busyCount workerFinishedVar = forever $ mask $ \unmask -> do
-  -- Read batch from queue (singleton in single mode, multiple in batched mode).
-  -- The outer mask covers the window between the atomic claim (which
-  -- increments busyCount) and entering the finally block that decrements it.
+workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
+  -- Mask covers the window between the atomic claim (which increments
+  -- busyCount) and entering the finally block that decrements it.
   jobBatch <- atomically $ do
     batch <- readTBQueue workQueue
     modifyTVar' busyCount (+ 1)
     pure batch
 
+  let jobIds = map Job.primaryKey (toList jobBatch)
+      claimHook now job =
+        runHook (logConfig config) "onJobClaimed" $
+          Job.onJobClaimed (observabilityHooks config) job now
+
   flip
     finally
     ( atomically $ do
         modifyTVar' busyCount (subtract 1)
+        modifyTVar' runningJobs $ \m -> foldl' (flip Map.delete) m jobIds
         writeTVar workerFinishedVar True
     )
     $ withJobContext jobBatch
     $ do
       currentTime <- liftIO getCurrentTime
-      mapM_
-        (\job -> runHook (logConfig config) "onJobClaimed" $ Job.onJobClaimed (observabilityHooks config) job currentTime)
-        jobBatch
-      -- Unmask for actual job processing (allow cancellation during work).
-      -- tryAny catches synchronous failures and rethrows async exceptions, so
-      -- shutdown still propagates. threadDelay below is interruptible.
-      result <- tryAny $ unmask $ processJobsWithRetry config jobBatch
+      mapM_ (claimHook currentTime) jobBatch
+      result <- withRegisteredJobs runningJobs jobIds (processJobsWithRetry config jobBatch)
       case result of
         Right () -> pure ()
-        Left e -> do
-          tryLog (logConfig config) Error $ "Worker exception: " <> T.pack (show e)
-          threadDelay 2_000_000
+        Left e
+          | Just JobForceCancelled <- fromException e ->
+              tryLog (logConfig config) Info $
+                "Job(s) force-cancelled: " <> T.pack (show jobIds)
+          | Just Async.AsyncCancelled <- fromException e -> throwIO e
+          | otherwise -> do
+              tryLog (logConfig config) Error $ "Worker exception: " <> T.pack (show e)
+              threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
 -- Decode failures appear as @Left decodeError@ - the child succeeded but
@@ -485,12 +565,12 @@ processJobsWithRetry config jobs = do
     tryAny
       $ withJobsHeartbeat
         hooks
-        (heartbeatInterval config)
+        (jobHeartbeatInterval config)
         (visibilityTimeout config)
         startTime
         jobs
         (logConfig config)
-        (fmap livenessSignal (livenessConfig config))
+        (heartbeatSignal config)
       $ do
         if useWorkerTransaction config
           then withDbTransaction $ do
@@ -652,15 +732,22 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
               runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
 
-groupReaperLoop
-  :: forall m registry payload
-   . ( MonadUnliftIO m
-     , QueueOperation m registry payload
-     )
-  => NominalDiffTime
+-- | Refreshes the groups tables (schema-wide) and sweeps stale worker
+-- registry rows (schema-wide). Both gated via 'Ops.runGated' so only one
+-- pool runs each task per interval.
+reaperLoop
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
+  => LogConfig
+  -> NominalDiffTime
+  -- ^ How often this loop runs.
   -> m ()
-groupReaperLoop interval = do
+reaperLoop logCfg interval = do
   let intervalSecs = ceiling interval
+      queues = registryTableNames (Proxy @registry)
+  schemaName <- Arb.getSchema
   forever $ do
-    Arb.refreshGroups @m @registry @payload intervalSecs
-    liftIO $ threadDelay (intervalSecs * 1_000_000)
+    mFailed <- Ops.runGated schemaName "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
+    traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
+    void $ Ops.runGated schemaName "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
+    threadDelay (intervalSecs * 1_000_000)

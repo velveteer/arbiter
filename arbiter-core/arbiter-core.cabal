@@ -37,6 +37,7 @@ library
     Arbiter.Core.Codec
     Arbiter.Core.CronSchedule
     Arbiter.Core.Exceptions
+    Arbiter.Core.Gates
     Arbiter.Core.HasArbiterSchema
     Arbiter.Core.HighLevel
     Arbiter.Core.Job.DLQ
@@ -46,8 +47,10 @@ library
     Arbiter.Core.MonadArbiter
     Arbiter.Core.Operations
     Arbiter.Core.PoolConfig
+    Arbiter.Core.Queues
     Arbiter.Core.QueueRegistry
     Arbiter.Core.SqlTemplates
+    Arbiter.Core.Worker
 
   build-depends:
     , aeson               >=2.0  && <2.3
@@ -60,3 +63,4 @@ library
     , text                >=1.2  && <2.2
     , time                >=1.9  && <1.16
     , unliftio            >=0.2  && <0.3
+    , uuid-types          >=1.0  && <1.1

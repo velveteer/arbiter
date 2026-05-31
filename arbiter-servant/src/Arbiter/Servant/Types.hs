@@ -7,6 +7,8 @@ module Arbiter.Servant.Types
   ( module Arbiter.Servant.Types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
+  , QueueRow (..)
+  , WorkerRow (..)
   ) where
 
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
@@ -14,6 +16,8 @@ import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
 import Arbiter.Core.Operations (QueueStats)
+import Arbiter.Core.Queues (QueueRow (..))
+import Arbiter.Core.Worker (WorkerRow (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -63,6 +67,7 @@ instance (ToJSON payload) => ToJSON (ApiJob payload) where
       , "parentState" .= parentState job
       , "isRollup" .= isRollup job
       , "suspended" .= suspended job
+      , "claimedBy" .= Arb.claimedBy job
       , "status" .= jobStatus now job
       ]
 
@@ -86,7 +91,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .:? "parentId" .!= Nothing
         <*> v .:? "parentState" .!= Nothing
         <*> v .:? "suspended" .!= False
-    -- Use insertedAt as fallback for now (status is recomputed server-side anyway)
+        <*> v .:? "claimedBy" .!= Nothing
     pure $ ApiJob job (insertedAt job)
 
 instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
@@ -120,6 +125,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> pure Nothing -- parentId: managed internally
         <*> pure Nothing -- parentState: managed internally
         <*> pure False -- suspended: managed internally
+        <*> pure Nothing -- claimedBy: managed internally
 
 data ApiDLQJob payload = ApiDLQJob
   { unApiDLQJob :: DLQ.DLQJob payload
@@ -222,6 +228,13 @@ data BatchDeleteResponse = BatchDeleteResponse
 -- | Cron schedules response
 data CronSchedulesResponse = CronSchedulesResponse
   { cronSchedules :: [CronScheduleRow]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Worker registry response
+data WorkersResponse = WorkersResponse
+  { workers :: [WorkerRow]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

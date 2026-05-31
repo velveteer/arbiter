@@ -494,6 +494,7 @@ Per-queue endpoints under `/api/v1/:table/`:
 | `POST` | `jobs/batch` | Insert multiple jobs |
 | `GET` | `jobs/:id` | Get job by ID |
 | `DELETE` | `jobs/:id` | Cancel job (cascade-deletes children) |
+| `POST` | `jobs/:id/force-cancel` | Cascade-delete and interrupt the running handler |
 | `POST` | `jobs/:id/promote` | Make a delayed job immediately visible |
 | `POST` | `jobs/:id/move-to-dlq` | Move job to dead-letter queue |
 | `POST` | `jobs/:id/suspend` | Suspend job |
@@ -511,9 +512,15 @@ Global endpoints under `/api/v1/`:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `queues` | List all registered queues |
+| `GET` | `queues/:queue/details` | Get queue override details |
+| `POST` | `queues/:queue/pause` | Pause a queue (all workers stop claiming) |
+| `POST` | `queues/:queue/resume` | Resume a paused queue |
 | `GET` | `events/stream` | SSE stream for real-time notifications |
 | `GET` | `cron/schedules` | List cron schedules |
 | `PATCH` | `cron/schedules/:name` | Override cron expression at runtime |
+| `GET` | `workers` | List registered workers |
+| `POST` | `workers/:id/pause` | Pause a single worker pool |
+| `POST` | `workers/:id/resume` | Resume a single worker pool |
 
 ## Backend Integration
 

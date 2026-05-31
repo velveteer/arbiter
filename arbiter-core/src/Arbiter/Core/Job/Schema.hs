@@ -37,6 +37,10 @@ module Arbiter.Core.Job.Schema
     -- * Notification Channel Helpers
   , notificationChannelForTable
   , eventStreamingChannel
+  , pauseNotifyChannel
+  , pauseNotifyChannelPrefix
+  , cancelNotifyChannel
+  , cancelNotifyChannelPrefix
 
     -- * Trigger / Function Name Helpers
   , notifyFunctionName
@@ -50,10 +54,6 @@ module Arbiter.Core.Job.Schema
   , jobQueueDLQTable
   , jobQueueResultsTable
   , jobQueueGroupsTable
-  , jobQueueReaperSeq
-
-    -- * Reaper Coordination
-  , createReaperSeqSQL
 
     -- * Results Table
   , createResultsTableSQL
@@ -105,6 +105,29 @@ notificationChannelForTable tableName = tableName <> "_created"
 eventStreamingChannel :: Text
 eventStreamingChannel = "arbiter_job_events"
 
+-- | Prefix for per-queue pause NOTIFY channels. The full channel name appends
+-- the queue. Exported so SQL templates can build the channel dynamically from
+-- @queue_name@ returned by a CTE.
+pauseNotifyChannelPrefix :: SchemaName -> Text
+pauseNotifyChannelPrefix schemaName = "arbiter_pause_" <> schemaName <> "_"
+
+-- | Per-queue NOTIFY channel for pause/resume changes. Workers LISTEN on the
+-- channel for their own queue to reconcile faster than the heartbeat poll
+-- cadence.
+pauseNotifyChannel :: SchemaName -> Text -> Text
+pauseNotifyChannel schemaName queueName =
+  T.take 63 $ pauseNotifyChannelPrefix schemaName <> queueName
+
+-- | Prefix for per-queue cancel NOTIFY channels. See 'cancelNotifyChannel'.
+cancelNotifyChannelPrefix :: SchemaName -> Text
+cancelNotifyChannelPrefix schemaName = "arbiter_cancel_" <> schemaName <> "_"
+
+-- | Per-queue NOTIFY channel for force-cancel signals. The payload identifies
+-- the target worker and job. Only the matching worker reacts.
+cancelNotifyChannel :: SchemaName -> Text -> Text
+cancelNotifyChannel schemaName queueName =
+  T.take 63 $ cancelNotifyChannelPrefix schemaName <> queueName
+
 -- | Per-table NOTIFY trigger function name.
 notifyFunctionName :: TableName -> Text
 notifyFunctionName tableName = "notify_" <> tableName <> "_created"
@@ -140,17 +163,6 @@ jobQueueResultsTable schemaName tableName = quoteIdentifier schemaName <> "." <>
 -- | Qualified groups table name: @jobQueueGroupsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_groups"@
 jobQueueGroupsTable :: Text -> Text -> Text
 jobQueueGroupsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_groups")
-
--- | Qualified reaper sequence name.
-jobQueueReaperSeq :: Text -> Text -> Text
-jobQueueReaperSeq schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_reaper_seq")
-
--- | SQL to create the reaper coordination sequence.
--- Stores the epoch (seconds) of the last reaper run.
-createReaperSeqSQL :: Text -> Text -> Text
-createReaperSeqSQL schemaName tableName =
-  let seqName = jobQueueReaperSeq schemaName tableName
-   in "CREATE SEQUENCE IF NOT EXISTS " <> seqName <> " START WITH 0 MINVALUE 0;"
 
 -- | SQL to create the schema for Arbiter tables
 createSchemaSQL :: SchemaName -> Text

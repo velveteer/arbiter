@@ -51,3 +51,4 @@ library
     , text               >=1.2  && <2.2
     , time               >=1.9  && <1.16
     , unliftio           >=0.2  && <0.3
+    , uuid-types         >=1.0  && <1.1

@@ -13,7 +13,9 @@ module Arbiter.Core.Operations
   , getDLQChildErrorsByParent
   , persistParentState
   , claimNextVisibleJobs
+  , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
+  , claimNextVisibleJobsBatchedAs
   , ackJob
   , ackJobsBatch
   , ackJobsBulk
@@ -67,24 +69,43 @@ module Arbiter.Core.Operations
   , resumeChildren
   , cancelJobCascade
   , cancelJobTree
+  , forceCancelJob
 
     -- * Suspend/Resume Operations
   , suspendJob
   , resumeJob
 
     -- * Groups Table Operations
-  , refreshGroups
+  , refreshGroupsForQueue
+  , refreshAllGroups
 
     -- * Cron Schedule Operations
   , upsertCronDefault
   , listCronSchedules
   , getCronScheduleByName
   , updateCronSchedule
-  , deleteStaleCronSchedules
   , touchCronLastFired
   , touchCronChecked
   , tryFireCronGate
   , tryAcquireCronLeader
+
+    -- * Worker Registry Operations
+  , registerWorker
+  , heartbeatWorker
+  , setWorkerPaused
+  , markWorkerShuttingDown
+  , deregisterWorker
+  , listWorkers
+  , sweepStaleWorkers
+
+    -- * Queue Operations
+  , ensureQueue
+  , setQueuePaused
+  , getQueue
+  , listQueues
+
+    -- * Global Gate Operations
+  , runGated
 
     -- * Internal Operations
   , getParentStateSnapshot
@@ -101,14 +122,16 @@ import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
+import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
+import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
@@ -124,13 +147,15 @@ import Arbiter.Core.Codec
   , pnarr
   , pnul
   , pval
+  , queueRowCodec
   , statsRowCodec
+  , workerRowCodec
   )
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwParsing)
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueTable)
+import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
   ( DedupKey (IgnoreDuplicate, ReplaceDuplicate)
   , Job (..)
@@ -140,7 +165,9 @@ import Arbiter.Core.Job.Types
   , isRollup
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.SqlTemplates qualified as Tmpl
+import Arbiter.Core.Worker (WorkerRow)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => Job Value Int64 Text UTCTime -> m (JobRead payload)
 decodePayload job = case fromJSON (payload job) of
@@ -541,44 +568,89 @@ emptyColumns = mempty
 
 -- | Claim up to @maxJobs@ visible jobs, respecting head-of-line blocking
 -- (one job per group). Uses a single-CTE claim with the groups table.
+-- Leaves @claimed_by@ NULL.
 claimNextVisibleJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ Schema name
   -> TableName
-  -- ^ Table name
   -> Int
-  -- ^ Maximum number of jobs to claim
   -> NominalDiffTime
-  -- ^ Visibility timeout in seconds
   -> m [JobRead payload]
-claimNextVisibleJobs schemaName tableName maxJobs timeout = withDbTransaction $ do
-  let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs timeout
+claimNextVisibleJobs schemaName tableName maxJobs timeout =
+  claimJobs schemaName tableName maxJobs timeout Nothing
+
+-- | 'claimNextVisibleJobs' with claim attribution. Stamps the given worker
+-- UUID onto every claimed row's @claimed_by@ column.
+claimNextVisibleJobsAs
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int
+  -> NominalDiffTime
+  -> UUID
+  -> m [JobRead payload]
+claimNextVisibleJobsAs schemaName tableName maxJobs timeout workerId =
+  claimJobs schemaName tableName maxJobs timeout (Just workerId)
+
+claimJobs
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int
+  -> NominalDiffTime
+  -> Maybe UUID
+  -> m [JobRead payload]
+claimJobs schemaName tableName maxJobs timeout mWorkerId = withDbTransaction $ do
+  let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs timeout mWorkerId
   rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
   mapM decodePayload rawJobs
 
 -- | Batched variant of 'claimNextVisibleJobs' - claims up to @batchSize@ jobs
--- per group, across up to @maxBatches@ groups.
+-- per group, across up to @maxBatches@ groups. Leaves @claimed_by@ NULL.
 claimNextVisibleJobsBatched
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
-  -- ^ Schema name
   -> TableName
-  -- ^ Table name
   -> Int
-  -- ^ Batch size per group (how many jobs to claim from each group)
   -> Int
-  -- ^ Maximum number of groups/batches to claim
   -> NominalDiffTime
-  -- ^ Visibility timeout in seconds
   -> m [NonEmpty (JobRead payload)]
-claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout
+claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout =
+  claimJobsBatched schemaName tableName batchSize maxBatches timeout Nothing
+
+-- | 'claimNextVisibleJobsBatched' with claim attribution.
+claimNextVisibleJobsBatchedAs
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int
+  -> Int
+  -> NominalDiffTime
+  -> UUID
+  -> m [NonEmpty (JobRead payload)]
+claimNextVisibleJobsBatchedAs schemaName tableName batchSize maxBatches timeout workerId =
+  claimJobsBatched schemaName tableName batchSize maxBatches timeout (Just workerId)
+
+claimJobsBatched
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int
+  -> Int
+  -> NominalDiffTime
+  -> Maybe UUID
+  -> m [NonEmpty (JobRead payload)]
+claimJobsBatched schemaName tableName batchSize maxBatches timeout mWorkerId
   | batchSize < 1 = pure []
   | maxBatches < 1 = pure []
   | otherwise = withDbTransaction $ do
-      let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches timeout
+      let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches timeout mWorkerId
       rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
       jobs <- mapM decodePayload rawJobs
       let sorted = sortOn groupKey jobs
@@ -1503,7 +1575,21 @@ cancelJobCascade
   -> Int64
   -- ^ Root job ID
   -> m Int64
-cancelJobCascade schemaName tableName jobId = withDbTransaction $ do
+cancelJobCascade = cascadeDeleteJob Tmpl.cancelJobCascadeSQL
+
+-- | Transactional wrapper for cascade-delete SQL: read the root's parent,
+-- run the supplied delete template, and wake the parent for a completion
+-- round if anything was deleted. 'cancelJobCascade' and 'forceCancelJob'
+-- share this shell and differ only in the SQL template they pass in.
+cascadeDeleteJob
+  :: (MonadArbiter m)
+  => (SchemaName -> TableName -> Text)
+  -- ^ Cascade-delete SQL template (param: job_id, returns deleted count).
+  -> SchemaName
+  -> TableName
+  -> Int64
+  -> m Int64
+cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
   parentRows <-
     executeQuery
       (Tmpl.getParentIdSQL schemaName tableName)
@@ -1513,10 +1599,7 @@ cancelJobCascade schemaName tableName jobId = withDbTransaction $ do
         [Just pid] -> Just pid
         _ -> Nothing
 
-  deleted <-
-    queryCount
-      (Tmpl.cancelJobCascadeSQL schemaName tableName)
-      [pval CInt8 jobId]
+  deleted <- queryCount (mkSql schemaName tableName) [pval CInt8 jobId]
 
   when (deleted > 0) $
     for_ rootParentId $
@@ -1543,6 +1626,20 @@ cancelJobTree schemaName tableName jobId =
     "cancelJobTree"
     (Tmpl.cancelJobTreeSQL schemaName tableName)
     [pval CInt8 jobId]
+
+-- | Cascade-cancel like 'cancelJobCascade', but also fans pg_notify messages
+-- to the queue's cancel channel for every deleted in-flight job. Workers
+-- async-cancel the matching handler thread on receipt.
+forceCancelJob
+  :: (MonadArbiter m)
+  => Text
+  -- ^ Schema name
+  -> TableName
+  -- ^ Table name
+  -> Int64
+  -- ^ Root job ID
+  -> m Int64
+forceCancelJob = cascadeDeleteJob Tmpl.forceCancelJobSQL
 
 -- ---------------------------------------------------------------------------
 -- Suspend/Resume Operations
@@ -1586,47 +1683,41 @@ resumeJob schemaName tableName jobId =
 
 -- | Full recompute of the groups table from the main queue.
 --
--- Corrects any drift in job_count, min_priority, min_id, and in_flight_until.
--- Checks the reaper sequence to skip if a recent run occurred within the
--- given interval. Uses an advisory lock to serialize concurrent attempts,
--- then locks all groups rows to prevent trigger interleaving.
-refreshGroups
+-- Locks the groups rows currently free (FOR UPDATE SKIP LOCKED) to avoid
+-- fighting with live job claims, then rewrites the table. The caller is
+-- responsible for any cross-pool coordination (see 'runGated' and
+-- 'refreshAllGroups').
+refreshGroupsForQueue
   :: (MonadArbiter m)
   => SchemaName
-  -- ^ Schema name
   -> TableName
-  -- ^ Table name
-  -> Int
-  -- ^ Minimum interval between runs (seconds)
   -> m ()
-refreshGroups schemaName tableName intervalSecs = do
-  seqResult <- executeQuery (Tmpl.checkReaperSeqSQL schemaName tableName) [] int64Codec
-  case seqResult of
-    [lastEpoch] -> do
-      nowResult <- executeQuery "SELECT extract(epoch FROM now())::bigint AS result" [] int64Codec
-      case nowResult of
-        [nowEpoch]
-          | nowEpoch - lastEpoch < fromIntegral intervalSecs -> pure ()
-        _ -> doRefresh
-    _ -> doRefresh
+refreshGroupsForQueue schemaName tableName = withDbTransaction $ do
+  void $ executeQuery (Tmpl.lockGroupsSQL schemaName tableName) [] int64Codec
+  void $ executeStatement (Tmpl.refreshGroupsSQL schemaName tableName) []
+
+-- | Schema-wide groups-table refresh. Refreshes each given queue in its own
+-- savepoint, so one queue's failure is isolated and the rest still commit.
+-- Wrap in 'runGated' so only one pool runs it per interval. Returns the queue
+-- names that failed.
+refreshAllGroups
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => SchemaName
+  -> [TableName]
+  -> m [Text]
+refreshAllGroups schemaName queues = do
+  outcomes <- traverse refreshOne queues
+  pure (catMaybes outcomes)
   where
-    doRefresh = withDbTransaction $ do
-      let tbl = jobQueueTable schemaName tableName
-      acquired <-
-        executeQuery
-          "SELECT pg_try_advisory_xact_lock(hashtextextended(?, ?)) AS result"
-          [pval CText tbl, pval CInt8 2]
-          boolCodec
-      case acquired of
-        [True] -> do
-          void $ executeQuery (Tmpl.lockGroupsSQL schemaName tableName) [] int64Codec
-          void $ executeStatement (Tmpl.refreshGroupsSQL schemaName tableName) []
-          void $ executeQuery (Tmpl.updateReaperSeqSQL schemaName tableName) [] int64Codec
-        _ -> pure ()
+    refreshOne queue = do
+      result <- tryAny (refreshGroupsForQueue schemaName queue)
+      pure (either (const (Just queue)) (const Nothing) result)
 
 -- | Upsert a cron schedule's default expression and overlap policy.
 --
--- Preserves user overrides and enabled state.
+-- Preserves user overrides and enabled state. @queue_name@ is overwritten on
+-- conflict so a row whose @queue_name@ is @"pre-migration"@ heals to the live
+-- queue on the next scheduler startup.
 upsertCronDefault
   :: (MonadArbiter m)
   => SchemaName
@@ -1634,31 +1725,36 @@ upsertCronDefault
   -> Text
   -- ^ Schedule name
   -> Text
+  -- ^ Queue name
+  -> Text
   -- ^ Default cron expression
   -> Text
   -- ^ Default overlap policy
   -> Maybe Text
   -- ^ Default IANA tz name (@Nothing@ = UTC).
   -> m Int64
-upsertCronDefault schemaName scheduleName defaultExpr defaultOv defaultTz =
+upsertCronDefault schemaName scheduleName queueName defaultExpr defaultOv defaultTz =
   executeStatement
     (Tmpl.upsertCronDefaultSQL schemaName)
     [ pval CText scheduleName
+    , pval CText queueName
     , pval CText defaultExpr
     , pval CText defaultOv
     , pnul CText defaultTz
     ]
 
--- | List all cron schedules ordered by name.
+-- | List cron schedules ordered by name, optionally filtered by queue.
 listCronSchedules
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
+  -> Maybe Text
+  -- ^ Queue filter. 'Nothing' returns schedules for all queues.
   -> m [CronScheduleRow]
-listCronSchedules schemaName =
+listCronSchedules schemaName mQueue =
   executeQuery
     (Tmpl.listCronSchedulesSQL schemaName)
-    []
+    [pnul CText mQueue, pnul CText mQueue]
     cronScheduleRowCodec
 
 -- | Get a single cron schedule by name.
@@ -1722,22 +1818,6 @@ updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mT
               <> " WHERE name = ?"
       executeStatement sql (params <> [pval CText scheduleName])
 
--- | Delete schedules whose names are not in the given list.
---
--- Returns the number of rows deleted. Does nothing if the list is empty.
-deleteStaleCronSchedules
-  :: (MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
-  -> [Text]
-  -- ^ Schedule names to keep
-  -> m Int64
-deleteStaleCronSchedules _ [] = pure 0
-deleteStaleCronSchedules schemaName names =
-  executeStatement
-    (Tmpl.deleteStaleCronSchedulesSQL schemaName)
-    [parr CText names]
-
 -- | Update @last_fired_at@ to NOW() for a cron schedule.
 touchCronLastFired
   :: (MonadArbiter m)
@@ -1788,22 +1868,249 @@ tryFireCronGate schemaName scheduleName minuteFloor = do
       [pval CTimestamptz minuteFloor, pval CText scheduleName, pval CTimestamptz minuteFloor]
   pure (rows > 0)
 
--- | Try to acquire the (schema, name) cron leader lock. Must be inside a transaction.
+-- | Try to acquire the (schema, queue, name) cron leader lock. Must be inside a transaction.
 tryAcquireCronLeader
   :: (MonadArbiter m)
   => SchemaName
   -> Text
+  -- ^ Queue name
+  -> Text
   -- ^ Schedule name
   -> m Bool
-tryAcquireCronLeader schemaName scheduleName = do
+tryAcquireCronLeader schemaName queueName scheduleName = do
   rows <-
     executeQuery
       Tmpl.tryAcquireCronLeaderSQL
-      [pval CText schemaName, pval CText scheduleName]
+      [pval CText schemaName, pval CText queueName, pval CText scheduleName]
       boolCodec
   pure $ case rows of
     (True : _) -> True
     _ -> False
+
+-- ---------------------------------------------------------------------------
+-- Worker Registry Operations
+-- ---------------------------------------------------------------------------
+
+-- | Register a worker pool in the @arbiter_workers@ table, or refresh its metadata
+-- if already registered. Bumps @last_heartbeat@ and clears @shutting_down@
+-- either way. Returns the worker's effective paused state so callers can seed
+-- local state without a second round-trip.
+registerWorker
+  :: (MonadArbiter m)
+  => SchemaName
+  -> UUID
+  -- ^ Worker pool UUID
+  -> Text
+  -- ^ Queue name
+  -> Maybe Text
+  -- ^ Host name
+  -> Maybe Int32
+  -- ^ Worker thread count
+  -> NominalDiffTime
+  -- ^ Stale threshold in seconds (recorded on the row so the UI can compute liveness).
+  -> Maybe Value
+  -- ^ Extra JSONB metadata
+  -> m (Maybe Bool)
+registerWorker schemaName workerId queue host threads staleThreshold metadata = do
+  rows <-
+    executeQuery
+      (Tmpl.upsertWorkerSQL schemaName)
+      [ pval CUuid workerId
+      , pval CText queue
+      , pnul CText host
+      , pnul CInt4 threads
+      , pval CFloat8 (realToFrac staleThreshold)
+      , pnul CJsonb metadata
+      ]
+      (col "effective_paused" CBool)
+  pure $ listToMaybe rows
+
+-- | Bump @last_heartbeat@ for a registered worker and return the effective
+-- paused state (per-worker OR per-queue). 'Nothing' if no row exists for the
+-- given UUID.
+heartbeatWorker
+  :: (MonadArbiter m)
+  => SchemaName
+  -> UUID
+  -- ^ Worker pool UUID
+  -> m (Maybe Bool)
+heartbeatWorker schemaName workerId = do
+  rows <-
+    executeQuery
+      (Tmpl.heartbeatWorkerSQL schemaName)
+      [pval CUuid workerId]
+      (col "effective_paused" CBool)
+  pure $ listToMaybe rows
+
+-- | Set the @paused@ flag for a registered worker.
+setWorkerPaused
+  :: (MonadArbiter m)
+  => SchemaName
+  -> UUID
+  -> Bool
+  -> m Int64
+setWorkerPaused schemaName workerId p =
+  queryCount
+    (Tmpl.setWorkerPausedSQL schemaName)
+    [pval CBool p, pval CUuid workerId]
+
+-- | Mark a worker as gracefully draining. The row is left in place so the UI
+-- can distinguish drained workers from ones that vanished.
+markWorkerShuttingDown
+  :: (MonadArbiter m)
+  => SchemaName
+  -> UUID
+  -> m Int64
+markWorkerShuttingDown schemaName workerId =
+  executeStatement
+    (Tmpl.markWorkerShuttingDownSQL schemaName)
+    [pval CUuid workerId]
+
+-- | Remove a worker row outright.
+deregisterWorker
+  :: (MonadArbiter m)
+  => SchemaName
+  -> UUID
+  -> m Int64
+deregisterWorker schemaName workerId =
+  executeStatement
+    (Tmpl.deleteWorkerSQL schemaName)
+    [pval CUuid workerId]
+
+-- | List workers with optional filters: scope to a single queue, restrict to
+-- recent heartbeats, both, or neither.
+listWorkers
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Maybe Text
+  -- ^ Queue name. 'Nothing' returns workers from all queues.
+  -> Maybe NominalDiffTime
+  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
+  -> m [WorkerRow]
+listWorkers schemaName mQueue mLiveSecs =
+  executeQuery
+    (Tmpl.listWorkersSQL schemaName)
+    [pnul CText mQueue, pnul CFloat8 (realToFrac <$> mLiveSecs)]
+    workerRowCodec
+
+-- | Delete worker rows (including paused ones) whose @last_heartbeat@ is older
+-- than each row's own @stale_threshold_secs@.
+sweepStaleWorkers
+  :: (MonadArbiter m)
+  => SchemaName
+  -> m Int64
+sweepStaleWorkers schemaName =
+  executeStatement (Tmpl.deleteStaleWorkersSQL schemaName) []
+
+-- ---------------------------------------------------------------------------
+-- Queue Operations
+-- ---------------------------------------------------------------------------
+
+-- | Insert an arbiter_queues row with defaults if one doesn't already exist.
+ensureQueue
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Queue name
+  -> m Int64
+ensureQueue schemaName queue =
+  executeStatement
+    (Tmpl.ensureQueueSQL schemaName)
+    [pval CText queue]
+
+-- | Set the queue's @paused@ flag, creating the row if missing.
+setQueuePaused
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Queue name
+  -> Bool
+  -> m Int64
+setQueuePaused schemaName queue p =
+  queryCount
+    (Tmpl.setQueuePausedSQL schemaName)
+    [pval CText queue, pval CBool p, pval CBool p]
+
+-- | Get the arbiter_queues row for a single queue. 'Nothing' if absent.
+getQueue
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Queue name
+  -> m (Maybe QueueRow)
+getQueue schemaName queue = do
+  rows <-
+    executeQuery
+      (Tmpl.getQueueSQL schemaName)
+      [pval CText queue]
+      queueRowCodec
+  pure $ listToMaybe rows
+
+-- | List all arbiter_queues rows, ordered by queue name.
+listQueues
+  :: (MonadArbiter m)
+  => SchemaName
+  -> m [QueueRow]
+listQueues schemaName =
+  executeQuery (Tmpl.listQueuesSQL schemaName) [] queueRowCodec
+
+-- ---------------------------------------------------------------------------
+-- Global Gate Operations
+-- ---------------------------------------------------------------------------
+
+-- | Run @work@ at most once per @interval@ across every worker pool sharing
+-- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@
+-- claimed via @SELECT FOR UPDATE SKIP LOCKED@, so the interval check and the
+-- mutual exclusion happen in one statement. Returns @Just@ the work's result
+-- if it ran, @Nothing@ if either the gate said "too recent" or another pool
+-- was already running the task.
+runGated
+  :: (MonadArbiter m)
+  => SchemaName
+  -> Text
+  -- ^ Task identifier (used as the gate row key).
+  -> NominalDiffTime
+  -- ^ Minimum interval between runs, in seconds.
+  -> m a
+  -- ^ Work to perform when this caller wins the gate.
+  -> m (Maybe a)
+runGated schemaName task interval work = do
+  _ <-
+    executeStatement
+      (Tmpl.ensureGateRowSQL schemaName)
+      [pval CText task]
+  gateOpen <- checkGateOuter
+  if not gateOpen
+    then pure Nothing
+    else withDbTransaction $ do
+      claimed <- tryClaimGate
+      if not claimed
+        then pure Nothing
+        else do
+          r <- work
+          _ <-
+            executeStatement
+              (Tmpl.bumpGateSQL schemaName)
+              [pval CText task]
+          pure (Just r)
+  where
+    intervalSecs = realToFrac interval :: Double
+
+    checkGateOuter = do
+      rows <-
+        executeQuery
+          (Tmpl.checkGateSQL schemaName)
+          [pval CFloat8 intervalSecs, pval CText task]
+          boolCodec
+      pure $ fromMaybe True (listToMaybe rows)
+
+    tryClaimGate = do
+      rows <-
+        executeQuery
+          (Tmpl.tryClaimGateSQL schemaName)
+          [pval CText task, pval CFloat8 intervalSecs]
+          int64Codec
+      pure $ not (null rows)
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

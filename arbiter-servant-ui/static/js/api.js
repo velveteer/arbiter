@@ -59,6 +59,10 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/jobs/${id}`, { method: 'DELETE' });
   },
 
+  forceCancelJob(table, id) {
+    return this._fetch(`/${table}/jobs/${id}/force-cancel`, { method: 'POST' });
+  },
+
   promoteJob(table, id) {
     return this._fetch(`/${table}/jobs/${id}/promote`, { method: 'POST' });
   },
@@ -101,14 +105,22 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/dlq/${id}`, { method: 'DELETE' });
   },
 
+  deleteDLQBatch(table, ids) {
+    return this._fetch(`/${table}/dlq/batch-delete`, {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  },
+
   // Stats
   getStats(table) {
     return this._fetch(`/${table}/stats`);
   },
 
   // Cron
-  listCronSchedules() {
-    return this._fetch('/cron/schedules');
+  listCronSchedules({ queue } = {}) {
+    const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';
+    return this._fetch(`/cron/schedules${qs}`);
   },
 
   updateCronSchedule(name, body) {
@@ -116,6 +128,36 @@ const ArbiterAPI = {
       method: 'PATCH',
       body: JSON.stringify(body),
     });
+  },
+
+  // Queue details (pause/resume)
+  getQueueDetails(queue) {
+    return this._fetch(`/queues/${encodeURIComponent(queue)}/details`);
+  },
+
+  pauseQueue(queue) {
+    return this._fetch(`/queues/${encodeURIComponent(queue)}/pause`, { method: 'POST' });
+  },
+
+  resumeQueue(queue) {
+    return this._fetch(`/queues/${encodeURIComponent(queue)}/resume`, { method: 'POST' });
+  },
+
+  // Workers
+  listWorkers({ queue, liveSecs } = {}) {
+    const params = new URLSearchParams();
+    if (queue) params.set('queue', queue);
+    if (liveSecs != null) params.set('live', String(liveSecs));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this._fetch(`/workers${qs}`);
+  },
+
+  pauseWorker(workerId) {
+    return this._fetch(`/workers/${encodeURIComponent(workerId)}/pause`, { method: 'POST' });
+  },
+
+  resumeWorker(workerId) {
+    return this._fetch(`/workers/${encodeURIComponent(workerId)}/resume`, { method: 'POST' });
   },
 
   // SSE

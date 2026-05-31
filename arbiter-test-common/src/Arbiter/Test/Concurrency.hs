@@ -17,7 +17,7 @@ import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
 import Arbiter.Core.MonadArbiter (MonadArbiter)
-import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, replicateM, replicateM_, void, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
@@ -32,6 +32,7 @@ import Data.Text qualified as T
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_)
 
 import Arbiter.Test.GroupsInvariant (assertGroupsConsistent)
@@ -823,6 +824,8 @@ inFlightConcurrencySpec
      , JobPayload payload
      , KnownSymbol (TableForPayload payload registry)
      , MonadArbiter m
+     , MonadUnliftIO m
+     , RegistryTables registry
      )
   => Text
   -> Text
@@ -1006,7 +1009,7 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
         removeHolDetector conn schemaName tableName
       check env "after claim+ack storm (all in_flight_until should be NULL)"
 
-    it "refreshGroups during concurrent operations" $ \env -> do
+    it "refreshAllGroups during concurrent operations" $ \env -> do
       -- 10 groups x 5 jobs
       let numGroups = 10 :: Int
           jobsPerGroup = 5
@@ -1019,8 +1022,8 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
             HL.insertJobsBatch
               (replicate jobsPerGroup $ (defaultJob (mkPayload "refresh")) {groupKey = Just groupName})
 
-      -- Workers drain while background thread runs refreshGroups in a loop.
-      -- Workers signal completion via a counter; refresher stops when all workers are done.
+      -- Workers drain while background thread runs refreshAllGroups in a loop.
+      -- Workers signal completion via a counter. Refresher stops when all workers are done.
       doneCountRef <- newIORef (0 :: Int)
 
       _ <-
@@ -1040,13 +1043,13 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
                          if doneCount >= numWorkers
                            then pure ()
                            else do
-                             void $ runM env $ HL.refreshGroups @m @registry @payload 0
+                             void $ runM env $ HL.refreshAllGroups @m @registry
                              threadDelay 50_000
                              refreshLoop
                    refreshLoop
                ]
 
-      check env "after refreshGroups during concurrent operations"
+      check env "after refreshAllGroups during concurrent operations"
 
     it "no orphaned jobs under concurrent insert + claim" $ \env -> do
       let numGroups = 20 :: Int
