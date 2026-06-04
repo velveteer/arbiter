@@ -153,6 +153,20 @@
   border-bottom-color: var(--arb-teal-dim);
 }
 
+/* Click-to-toggle column cell. Reuses editable-cell idiom: dashed underline + hover hint. */
+.format-toggle-cell {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--arb-text-muted);
+  opacity: 0.8;
+  padding-bottom: 1px;
+}
+
+.format-toggle-cell:hover {
+  opacity: 1;
+  color: var(--arb-teal-on-bg);
+  border-bottom-color: var(--arb-teal-dim);
+}
+
 /* SSE status dot */
 .sse-dot {
   width: 8px;
@@ -392,9 +406,19 @@
   color: #34d399;
 }
 
+[data-bs-theme="light"] .badge.bg-success {
+  background-color: #d1fae5 !important;
+  color: #065f46;
+}
+
 .badge.bg-danger {
   background-color: #991b1b !important;
   color: #fca5a5;
+}
+
+[data-bs-theme="light"] .badge.bg-danger {
+  background-color: #fee2e2 !important;
+  color: #991b1b;
 }
 
 .badge.bg-primary {
@@ -402,9 +426,19 @@
   color: #c4b5fd;
 }
 
+[data-bs-theme="light"] .badge.bg-primary {
+  background-color: #ede9fe !important;
+  color: #5b21b6;
+}
+
 .badge.bg-warning {
   background-color: var(--arb-gold-dim) !important;
   color: #fcd34d;
+}
+
+[data-bs-theme="light"] .badge.bg-warning {
+  background-color: #fef3c7 !important;
+  color: #92400e;
 }
 
 .badge.bg-secondary {
@@ -415,6 +449,19 @@
 .badge.bg-info {
   background-color: rgba(0, 212, 255, 0.15) !important;
   color: var(--arb-teal-on-bg);
+}
+
+/* Paused state badge: readable in both modes (used by navbar + worker rows). */
+[data-bs-theme="light"] .paused-badge {
+  background-color: #fde68a;
+  color: #78350f;
+  border: 1px solid #f59e0b;
+}
+
+[data-bs-theme="dark"] .paused-badge {
+  background-color: #422006;
+  color: #fde68a;
+  border: 1px solid #d97706;
 }
 
 /* ---- Unapplied filter indicator ---- */
@@ -524,10 +571,6 @@
   border-left: 2px solid var(--arb-teal-dim);
 }
 
-.child-row td {
-  opacity: 0.9;
-}
-
 .expand-arrow {
   font-size: 0.65rem;
   color: var(--arb-teal-on-bg);
@@ -541,6 +584,11 @@ th.sortable {
 
 th.sortable:hover {
   color: var(--arb-teal-on-bg);
+}
+
+/* Let dropdowns escape; our tables are fixed-width and never overflow. */
+.table-responsive {
+  overflow: visible;
 }
 
 /* ---- Scrollbar (Webkit, dark only) ---- */
@@ -560,4 +608,9 @@ th.sortable:hover {
 
 [data-bs-theme="dark"] ::-webkit-scrollbar-thumb:hover {
   background: var(--arb-purple-dim);
+}
+
+.navbar-brand {
+  font-family: 'Electrolize', sans-serif;
+  letter-spacing: 0.08em;
 }

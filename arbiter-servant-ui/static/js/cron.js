@@ -30,6 +30,11 @@ document.addEventListener('alpine:init', () => {
         },
       });
 
+      this.$watch('$store.app.selectedQueue', () => {
+        this.schedules = [];
+        if (this.active) this.loadSchedules();
+      });
+
       this._visibilityHandler = () => {
         if (document.hidden) {
           this.stopPolling();
@@ -121,11 +126,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadSchedules() {
+      const queue = this.$store.app.selectedQueue;
+      if (!queue) {
+        this.schedules = [];
+        return;
+      }
       this.loading = true;
       this._loadSeq = (this._loadSeq || 0) + 1;
       const seq = this._loadSeq;
       try {
-        const data = await ArbiterAPI.listCronSchedules();
+        const data = await ArbiterAPI.listCronSchedules({ queue });
         if (seq !== this._loadSeq) return;
         this.schedules = data.cronSchedules || [];
       } catch (e) {

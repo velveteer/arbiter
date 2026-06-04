@@ -8,6 +8,8 @@ document.addEventListener('alpine:init', () => {
     loading: false,
     active: false,
     selectedDLQJob: null,
+    selected: {},
+    bulkBusy: false,
     parentIdFilter: '',
     groupKeyFilter: '',
     _appliedParentId: '',
@@ -55,6 +57,7 @@ document.addEventListener('alpine:init', () => {
           this._appliedParentId = '';
           this.sortBy = '';
           this.sortDir = '';
+          this.selected = {};
           if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
         },
       });
@@ -65,6 +68,7 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = '';
         this.sortBy = '';
         this.sortDir = '';
+        this.selected = {};
         if (this.active) this._resetView();
       });
       window.addEventListener('sse-reconnect', () => {
@@ -119,6 +123,13 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = pid;
         this.dlqJobs = data.dlqJobs || [];
         this.total = data.dlqTotal || 0;
+        // Drop selections for rows no longer on the current page (deleted, retried, paged away).
+        const present = new Set(this.dlqJobs.map(j => String(j.dlqPrimaryKey)));
+        const pruned = {};
+        for (const id of Object.keys(this.selected)) {
+          if (this.selected[id] && present.has(id)) pruned[id] = true;
+        }
+        this.selected = pruned;
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
 
@@ -136,6 +147,73 @@ document.addEventListener('alpine:init', () => {
           this.loading = false;
           this.loaded = true;
         }
+      }
+    },
+
+    isSelected(id) {
+      return !!this.selected[id];
+    },
+
+    toggleSelect(id) {
+      const next = { ...this.selected };
+      if (next[id]) delete next[id]; else next[id] = true;
+      this.selected = next;
+    },
+
+    get selectedIds() {
+      return Object.keys(this.selected).filter(k => this.selected[k]).map(Number);
+    },
+
+    get selectedCount() {
+      return this.selectedIds.length;
+    },
+
+    get allSelected() {
+      return this.dlqJobs.length > 0 && this.dlqJobs.every(j => this.selected[j.dlqPrimaryKey]);
+    },
+
+    toggleSelectAll() {
+      if (this.allSelected) {
+        this.selected = {};
+      } else {
+        const next = {};
+        for (const j of this.dlqJobs) next[j.dlqPrimaryKey] = true;
+        this.selected = next;
+      }
+    },
+
+    async bulkRetry() {
+      const ids = this.selectedIds;
+      if (ids.length === 0 || this.bulkBusy) return;
+      if (!confirm(`Retry ${ids.length} DLQ ${ids.length === 1 ? 'entry' : 'entries'}?`)) return;
+      const queue = Alpine.store('app').selectedQueue;
+      this.bulkBusy = true;
+      // No batch-retry endpoint, so retry each entry individually, capped at 5
+      // concurrent requests so a large selection doesn't flood the server.
+      const results = await mapLimit(ids, 5, id => ArbiterAPI.retryFromDLQ(queue, id));
+      this.bulkBusy = false;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      this.selected = {};
+      this.loadDLQ();
+      if (failed > 0) showToast(`${failed} of ${ids.length} retries failed`);
+      else showToast(`Retried ${ids.length} ${ids.length === 1 ? 'entry' : 'entries'}`, 'success');
+    },
+
+    async bulkDelete() {
+      const ids = this.selectedIds;
+      if (ids.length === 0 || this.bulkBusy) return;
+      if (!confirm(`Permanently delete ${ids.length} DLQ ${ids.length === 1 ? 'entry' : 'entries'}?`)) return;
+      const queue = Alpine.store('app').selectedQueue;
+      this.bulkBusy = true;
+      try {
+        const res = await ArbiterAPI.deleteDLQBatch(queue, ids);
+        this.selected = {};
+        this.loadDLQ();
+        showToast(`Deleted ${res?.deleted ?? ids.length} ${(res?.deleted ?? ids.length) === 1 ? 'entry' : 'entries'}`, 'success');
+      } catch (e) {
+        showToast('Failed to delete: ' + e.message);
+      } finally {
+        this.bulkBusy = false;
       }
     },
 
@@ -169,9 +247,15 @@ document.addEventListener('alpine:init', () => {
     applyFilter() {
       const trimmed = this.parentIdFilter.trim();
       if (trimmed && !/^\d+$/.test(trimmed)) {
-        showToast('Parent ID must be a positive integer', 'warning');
+        // Auto-apply fires this from both Enter and change/blur; only warn once per value.
+        if (this._lastInvalidParentId !== trimmed) {
+          showToast('Parent ID must be a positive integer', 'warning');
+          this._lastInvalidParentId = trimmed;
+        }
         return;
       }
+      this._lastInvalidParentId = null;
+      if (trimmed === this._appliedParentId && this.groupKeyFilter === this._appliedGroupKey) return;
       this.parentIdFilter = trimmed;
       this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
     },

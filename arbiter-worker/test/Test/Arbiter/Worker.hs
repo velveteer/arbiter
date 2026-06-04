@@ -4,6 +4,7 @@
 
 module Test.Arbiter.Worker (spec) where
 
+import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwBranchCancel, throwPermanent, throwRetryable, throwTreeCancel)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -18,7 +19,10 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (BatchedJobHandler, JobHandler)
+import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig, poolConfigForWorkers)
+import Arbiter.Core.Queues qualified as Q
+import Arbiter.Core.Worker qualified as WR
 import Arbiter.Simple
   ( SimpleConnectionPool (..)
   , SimpleDb
@@ -36,16 +40,17 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Maybe (fromJust, fromMaybe)
+import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
+import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute, query)
 import Database.PostgreSQL.Simple qualified as PG
 import System.Directory qualified as Dir
@@ -66,18 +71,18 @@ import Test.Hspec
   )
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
-import UnliftIO.MVar qualified as MVar
 
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
-  ( LivenessConfig (..)
-  , WorkerConfig (..)
+  ( WorkerConfig (..)
   , defaultBatchedWorkerConfig
   , defaultRollupWorkerConfig
   , defaultWorkerConfig
+  , getWorkerState
   , shutdownWorker
   )
+import Arbiter.Worker.WorkerState (WorkerState (..))
 
 type WorkerTestRegistry = '[ '("arbiter_worker_test", WorkerTestPayload)]
 
@@ -225,7 +230,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     ( config
                         { workerCount = workerCnt
                         , visibilityTimeout = 3
-                        , heartbeatInterval = 1
+                        , jobHeartbeatInterval = 1
                         , pollInterval = 0.1
                         , jitter = NoJitter
                         }
@@ -712,7 +717,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 { observabilityHooks = hooks
                 , workerCount = 1
                 , pollInterval = 0.1
-                , heartbeatInterval = 1 -- 1 second heartbeat
+                , jobHeartbeatInterval = 1 -- 1 second heartbeat
                 }
 
         -- Insert a job
@@ -869,9 +874,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
     describe "Liveness Probe" $ do
       it "creates a health check file when liveness is enabled" $ \env -> do
-        -- Create liveness MVar and run worker pool briefly
-        livenessMVar <- MVar.newMVar ()
-
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ threadDelay 500_000
 
@@ -883,7 +885,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
         let configWithLiveness =
               config
-                { livenessConfig = Just (LivenessConfig livenessPath livenessMVar 1) -- 1 second interval
+                { livenessFile = Just livenessPath
                 , workerCount = 1
                 , pollInterval = 0.1
                 }
@@ -1163,7 +1165,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               config
                 { observabilityHooks = hooks
                 , pollInterval = 0.050
-                , heartbeatInterval = 1 -- 1 second heartbeat
+                , jobHeartbeatInterval = 1 -- 1 second heartbeat
                 }
 
         threadDelay 100_000
@@ -1771,6 +1773,450 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let allPayloads = [SimpleTask "bc-root", SimpleTask "bc-mid", SimpleTask "bc-leaf1", SimpleTask "bc-leaf2"]
         forM_ allPayloads $ \p ->
           map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]
+
+    describe "Worker Registry" $ do
+      it "registers, stamps claimed_by, and reconciles pause from the registry" $ \env -> do
+        processedRef <- newIORef (0 :: Int)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job =
+              liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 2 handler
+        let config = baseConfig {workerCount = 2, pollInterval = 0.1}
+            wid = workerId config
+
+        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "first"))
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ (>= 1) <$> readIORef processedRef
+
+          rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+          map WR.workerId rows `shouldContain` [wid]
+          map WR.queueName rows `shouldContain` [testTable]
+
+          -- Pause so the worker doesn't race us for the next claim.
+          void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
+          waitUntil 5_000 $ (== Paused) <$> getWorkerState config
+
+          -- Insert and manually claim to read back claimed_by.
+          void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "attribution"))
+          claimed <-
+            runSimpleDb env $
+              Ops.claimNextVisibleJobsAs @_ @WorkerTestPayload testSchema testTable 1 60 wid
+          case claimed of
+            (j : _) -> claimedBy j `shouldBe` Just wid
+            [] -> expectationFailure "expected a job to be claimable for the claimed_by assertion"
+
+          void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid False
+          waitUntil 5_000 $ (== Running) <$> getWorkerState config
+
+      it "re-registers if the registry row is swept out from under it" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config =
+              baseConfig
+                { workerCount = 1
+                , pollInterval = 0.1
+                , workerHeartbeatInterval = 0.2
+                }
+            wid = workerId config
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ do
+            rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+            pure $ wid `elem` map WR.workerId rows
+
+          _ <- runSimpleDb env $ Ops.deregisterWorker testSchema wid
+          rowsAfterDelete <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+          map WR.workerId rowsAfterDelete `shouldNotContain` [wid]
+
+          -- Insert a job so the dispatcher signals the heartbeat MVar.
+          void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "wake"))
+
+          waitUntil 5_000 $ do
+            rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+            pure $ wid `elem` map WR.workerId rows
+
+      it "paused worker keeps heartbeating and survives the sweeper" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config =
+              baseConfig
+                { workerCount = 1
+                , pollInterval = 0.1
+                , workerHeartbeatInterval = 0.2
+                , workerStaleThreshold = 1
+                }
+            wid = workerId config
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ do
+            rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+            pure $ wid `elem` map WR.workerId rows
+
+          void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
+          waitUntil 5_000 $ (== Paused) <$> getWorkerState config
+
+          -- Sit past stale_threshold_secs while paused.
+          threadDelay 2_000_000
+          void $ runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+
+          rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+          map WR.workerId rows `shouldContain` [wid]
+
+    describe "Queue pause" $ do
+      it "stamps paused_at on first pause and clears it on resume" $ \env -> do
+        void $ runSimpleDb env $ Ops.ensureQueue testSchema testTable
+        void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+        Just row1 <- runSimpleDb env $ Ops.getQueue testSchema testTable
+        Q.paused row1 `shouldBe` True
+        Q.pausedAt row1 `shouldSatisfy` isJust
+
+        void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable False
+        Just row2 <- runSimpleDb env $ Ops.getQueue testSchema testTable
+        Q.paused row2 `shouldBe` False
+        Q.pausedAt row2 `shouldBe` Nothing
+
+      it "preserves paused_at on idempotent re-pause" $ \env -> do
+        void $ runSimpleDb env $ Ops.ensureQueue testSchema testTable
+        void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+        Just first <- runSimpleDb env $ Ops.getQueue testSchema testTable
+        let original = Q.pausedAt first
+        original `shouldSatisfy` isJust
+
+        threadDelay 1_100_000 -- 1.1s so NOW() would differ if the SQL bumped it
+        void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+        Just second <- runSimpleDb env $ Ops.getQueue testSchema testTable
+        Q.pausedAt second `shouldBe` original
+
+      it "lists workers filtered by liveness across all queues" $ \env -> do
+        liveWid <- liftIO UUID.nextRandom
+        staleWid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema liveWid testTable Nothing (Just 1) 300 Nothing
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema staleWid testTable Nothing (Just 1) 300 Nothing
+
+        -- Age both rows past the query threshold, then bump only the live row.
+        threadDelay 1_200_000
+        void $ runSimpleDb env $ Ops.heartbeatWorker testSchema liveWid
+
+        -- No liveness filter returns both rows.
+        allRows <- runSimpleDb env $ Ops.listWorkers testSchema Nothing Nothing
+        let allIds = map WR.workerId allRows
+        allIds `shouldSatisfy` (liveWid `elem`)
+        allIds `shouldSatisfy` (staleWid `elem`)
+
+        -- Queueless live filter at 1s threshold keeps the freshly-heartbeated row only.
+        liveOnly <- runSimpleDb env $ Ops.listWorkers testSchema Nothing (Just 1)
+        let liveIds = map WR.workerId liveOnly
+        liveIds `shouldSatisfy` (liveWid `elem`)
+        liveIds `shouldSatisfy` (staleWid `notElem`)
+
+      it "propagates queue pause to local pauseVar via heartbeat reconcile" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config = baseConfig {workerCount = 1, pollInterval = 0.1}
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ (== Running) <$> getWorkerState config
+
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+          waitUntil 5_000 $ (== Paused) <$> getWorkerState config
+
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable False
+          waitUntil 5_000 $ (== Running) <$> getWorkerState config
+
+      it "propagates queue pause via NOTIFY at steady state under one pollInterval" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config = baseConfig {workerCount = 1, pollInterval = 5.0}
+
+            -- Steady-state toggles must complete via NOTIFY since the next
+            -- heartbeat tick is one pollInterval away.
+            timed paused = do
+              let expected = if paused then Paused else Running
+              start <- getCurrentTime
+              void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable paused
+              waitUntil 5_000 $ (== expected) <$> getWorkerState config
+              elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+              elapsed `shouldSatisfy` (< 1.0)
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 10_000 $ (== Running) <$> getWorkerState config
+          timed True
+          timed False
+          timed True
+          timed False
+
+      it "claims immediately on unpause without waiting another poll cycle" $ \env -> do
+        processedRef <- newIORef (0 :: Int)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job =
+              liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config = baseConfig {workerCount = 1, pollInterval = 2.0}
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 10_000 $ (== Running) <$> getWorkerState config
+
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+          waitUntil 5_000 $ (== Paused) <$> getWorkerState config
+
+          void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "post-resume"))
+
+          start <- getCurrentTime
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable False
+          waitUntil 10_000 $ (>= 1) <$> readIORef processedRef
+          elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+          elapsed `shouldSatisfy` (< 3.0)
+
+      it "setWorkerPaused only targets the addressed worker" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
+            cfgB = baseB {workerCount = 1, pollInterval = 5.0}
+            widA = workerId cfgA
+            widB = workerId cfgB
+
+        withAsync (runSimpleDb env $ runWorkerPool cfgA) $ \_ ->
+          withAsync (runSimpleDb env $ runWorkerPool cfgB) $ \_ -> do
+            -- Wait on the registry rows; getWorkerState reads only TVars and
+            -- would return Running before the workers have actually registered.
+            waitUntil 10_000 $ do
+              rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+              let ids = map WR.workerId rows
+              pure (widA `elem` ids && widB `elem` ids)
+
+            start <- getCurrentTime
+            void $ runSimpleDb env $ Ops.setWorkerPaused testSchema widA True
+            waitUntil 5_000 $ (== Paused) <$> getWorkerState cfgA
+            elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+            elapsed `shouldSatisfy` (< 1.0)
+
+            stateB <- getWorkerState cfgB
+            stateB `shouldBe` Running
+
+      it "setQueuePaused fans out to every worker in the queue" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
+            cfgB = baseB {workerCount = 1, pollInterval = 5.0}
+            widA = workerId cfgA
+            widB = workerId cfgB
+
+        withAsync (runSimpleDb env $ runWorkerPool cfgA) $ \_ ->
+          withAsync (runSimpleDb env $ runWorkerPool cfgB) $ \_ -> do
+            waitUntil 10_000 $ do
+              rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+              let ids = map WR.workerId rows
+              pure (widA `elem` ids && widB `elem` ids)
+
+            start <- getCurrentTime
+            void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+            waitUntil 5_000 $ (== Paused) <$> getWorkerState cfgA
+            waitUntil 5_000 $ (== Paused) <$> getWorkerState cfgB
+            elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+            elapsed `shouldSatisfy` (< 1.0)
+
+    describe "Force cancel" $ do
+      it "interrupts a long-running handler and removes the job" $ \env -> do
+        startedRef <- newIORef False
+        completedRef <- newIORef False
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = do
+              liftIO $ writeIORef startedRef True
+              liftIO $ threadDelay 30_000_000
+              liftIO $ writeIORef completedRef True
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config = baseConfig {workerCount = 1, pollInterval = 0.2}
+
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "long"))
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ readIORef startedRef
+
+          start <- getCurrentTime
+          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          n `shouldBe` 1
+
+          -- Handler should be interrupted well before its 30s sleep finishes.
+          waitUntil 5_000 $ do
+            mJob <- runSimpleDb env $ HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload (primaryKey job)
+            pure (isNothing mJob)
+          elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+          elapsed `shouldSatisfy` (< 3.0)
+
+          -- The handler must not have run to completion.
+          completed <- readIORef completedRef
+          completed `shouldBe` False
+
+          -- And it should not have produced a DLQ entry.
+          dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          dlqJobs `shouldBe` []
+
+      it "interrupts a CPU-bound handler (no DB I/O)" $ \env -> do
+        -- Handler runs a tight IORef-bumping loop with NO blocking I/O. We
+        -- probe whether the loop stops after force-cancel by sampling the
+        -- counter twice. Under a masked child, async exceptions only land at
+        -- interruptible points (STM retry, threadDelay, libpq) - the loop
+        -- below has none, so a masked child keeps incrementing forever.
+        startedRef <- newIORef False
+        counterRef <- newIORef (0 :: Int)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = do
+              liftIO $ writeIORef startedRef True
+              let go = do
+                    atomicModifyIORef' counterRef (\n -> (n + 1, ()))
+                    go
+              liftIO go
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        let config = baseConfig {workerCount = 1, pollInterval = 0.2}
+
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "cpu"))
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ readIORef startedRef
+          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          n `shouldBe` 1
+          -- Let cancellation propagate.
+          threadDelay 500_000
+          c1 <- readIORef counterRef
+          threadDelay 500_000
+          c2 <- readIORef counterRef
+          -- Counter must freeze: if the handler is still alive, it would
+          -- bump millions of times in 500ms.
+          c2 `shouldBe` c1
+
+    describe "Sweeper" $ do
+      it "deletes a stale unpaused worker row" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        threadDelay 1_500_000
+        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        n `shouldSatisfy` (>= 1)
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        map WR.workerId rows `shouldNotContain` [wid]
+
+      it "deletes a stale paused worker row" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
+        threadDelay 1_500_000
+        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        n `shouldSatisfy` (>= 1)
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        map WR.workerId rows `shouldNotContain` [wid]
+
+      it "deletes a stale shutting-down worker row" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void $ runSimpleDb env $ Ops.markWorkerShuttingDown testSchema wid
+        threadDelay 1_500_000
+        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        n `shouldSatisfy` (>= 1)
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        map WR.workerId rows `shouldNotContain` [wid]
+
+      it "preserves paused state across re-registration" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
+        -- Re-register with different metadata to confirm upsert touches the row.
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable (Just "fresh-host") (Just 1) 300 Nothing
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        case filter ((== wid) . WR.workerId) rows of
+          [row] -> do
+            WR.paused row `shouldBe` True
+            WR.hostName row `shouldBe` Just "fresh-host"
+          _ -> expectationFailure "expected exactly one row for the worker"
+
+    describe "Worker health" $ do
+      it "reports a freshly-registered worker as live" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        case filter ((== wid) . WR.workerId) rows of
+          [row] -> WR.health row `shouldBe` WR.Live
+          _ -> expectationFailure "expected exactly one row for the worker"
+
+      it "reports a worker past its stale threshold as stale" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        threadDelay 1_500_000
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        case filter ((== wid) . WR.workerId) rows of
+          [row] -> WR.health row `shouldBe` WR.Stale
+          _ -> expectationFailure "expected exactly one row for the worker"
+
+      it "reports a fresh shutting-down worker as draining" $ \env -> do
+        wid <- liftIO UUID.nextRandom
+        void $
+          runSimpleDb env $
+            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        void $ runSimpleDb env $ Ops.markWorkerShuttingDown testSchema wid
+        rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+        case filter ((== wid) . WR.workerId) rows of
+          [row] -> WR.health row `shouldBe` WR.Draining
+          _ -> expectationFailure "expected exactly one row for the worker"
+
+    describe "Cron queue filter" $ do
+      it "filters cron schedules by queue" $ \env -> do
+        let otherQueue = "other_queue"
+        runSimpleDb env $ do
+          void $ Ops.upsertCronDefault testSchema "cron-here" testTable "* * * * *" "AllowOverlap" Nothing
+          void $ Ops.upsertCronDefault testSchema "cron-elsewhere" otherQueue "* * * * *" "AllowOverlap" Nothing
+
+        hereOnly <- runSimpleDb env $ Ops.listCronSchedules testSchema (Just testTable)
+        map CS.name hereOnly `shouldContain` ["cron-here"]
+        map CS.name hereOnly `shouldNotContain` ["cron-elsewhere"]
+
+        elsewhereOnly <- runSimpleDb env $ Ops.listCronSchedules testSchema (Just otherQueue)
+        map CS.name elsewhereOnly `shouldContain` ["cron-elsewhere"]
+        map CS.name elsewhereOnly `shouldNotContain` ["cron-here"]
+
+        all_ <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
+        map CS.name all_ `shouldSatisfy` (\ns -> "cron-here" `elem` ns && "cron-elsewhere" `elem` ns)
 
 -- Helper to create a connection with data cleanup
 -- Create shared pool for all tests (5 connections)

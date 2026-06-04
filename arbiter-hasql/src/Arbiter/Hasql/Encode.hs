@@ -40,6 +40,7 @@ colEncoder CBool = E.bool
 colEncoder CTimestamptz = E.timestamptz
 colEncoder CJsonb = E.jsonb
 colEncoder CFloat8 = E.float8
+colEncoder CUuid = E.uuid
 
 convertPlaceholders :: Text -> Text
 convertPlaceholders sql =

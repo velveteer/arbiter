@@ -20,3 +20,4 @@ colValue CBool = D.bool
 colValue CTimestamptz = D.timestamptz
 colValue CJsonb = D.jsonb
 colValue CFloat8 = D.float8
+colValue CUuid = D.uuid

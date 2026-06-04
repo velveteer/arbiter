@@ -203,7 +203,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             config
               { pollInterval = 0.1
               , visibilityTimeout = 2
-              , heartbeatInterval = 1
+              , jobHeartbeatInterval = 1
               }
 
       withAsync
@@ -296,7 +296,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               { workerCount = 1
               , pollInterval = 0.1
               , visibilityTimeout = 2 -- 2 seconds
-              , heartbeatInterval = 1 -- 1 second heartbeat
+              , jobHeartbeatInterval = 1 -- 1 second heartbeat
               }
 
       withAsync

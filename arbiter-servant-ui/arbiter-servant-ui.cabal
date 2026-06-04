@@ -18,6 +18,8 @@ extra-source-files:
   static/js/*.js
   static/vendor/*.css
   static/vendor/*.js
+  static/vendor/fonts/*.css
+  static/vendor/fonts/*.woff2
 
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues

@@ -11,6 +11,7 @@ document.addEventListener('alpine:init', () => {
     eventSource: null,
     events: [],
     maxEvents: 200,
+    _eventSeq: 0,
     _eventBuffer: [],
     _flushScheduled: false,
     _hasConnected: false,
@@ -110,6 +111,7 @@ document.addEventListener('alpine:init', () => {
             this._eventBuffer.push({
               ...data,
               receivedAt: new Date().toISOString(),
+              _seq: ++this._eventSeq,
             });
             this._scheduleFlush();
           } catch (e) {

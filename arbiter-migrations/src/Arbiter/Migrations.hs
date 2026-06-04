@@ -25,7 +25,8 @@ module Arbiter.Migrations
   , MigrationResult (..)
   ) where
 
-import Arbiter.Core.CronSchedule (addTimezoneColumnSQL, createCronSchedulesTableSQL)
+import Arbiter.Core.CronSchedule (addQueueNameColumnSQL, addTimezoneColumnSQL, createCronSchedulesTableSQL)
+import Arbiter.Core.Gates (createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
@@ -46,11 +47,12 @@ import Arbiter.Core.Job.Schema
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
   , createParentIdIndexSQL
-  , createReaperSeqSQL
   , createResultsTableSQL
   , createSchemaSQL
   )
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
+import Arbiter.Core.Queues (createQueuesTableSQL)
+import Arbiter.Core.Worker (addClaimedByColumnSQL, createWorkersTableSQL)
 import Control.Exception (bracket, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
@@ -187,6 +189,18 @@ runMigrationsTrackedForTables connStr schemaName tableNames config =
           , MigrationScript
               "cron-schedules-add-timezone"
               (encodeUtf8 $ addTimezoneColumnSQL schemaName)
+          , MigrationScript
+              "cron-schedules-add-queue-name"
+              (encodeUtf8 $ addQueueNameColumnSQL schemaName)
+          , MigrationScript
+              "create-arbiter-workers"
+              (encodeUtf8 $ createWorkersTableSQL schemaName)
+          , MigrationScript
+              "create-arbiter-queues"
+              (encodeUtf8 $ createQueuesTableSQL schemaName)
+          , MigrationScript
+              "create-arbiter-gates"
+              (encodeUtf8 $ createGatesTableSQL schemaName)
           ]
             <> [ MigrationScript
                    "create-event-streaming-function"
@@ -240,7 +254,7 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "create-groups-index" $ createGroupsIndexSQL schemaName tableName
         , script "create-groups-trigger-functions-v3" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
-        , script "create-reaper-seq" $ createReaperSeqSQL schemaName tableName
+        , script "add-claimed-by-column" $ addClaimedByColumnSQL schemaName tableName
         ]
       notifyTriggers
         | enableNotifications config =

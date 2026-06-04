@@ -36,12 +36,16 @@ module Arbiter.Servant
   , DLQAPI (..)
   , StatsAPI (..)
   , CronAPI (..)
+  , WorkersAPI (..)
 
     -- * Request Types
   , ApiJobWrite (..)
 
     -- * Response Types
   , QueuesResponse (..)
+  , QueueRow (..)
+  , WorkersResponse (..)
+  , WorkerRow (..)
   , JobResponse (..)
   , JobsResponse (..)
   , DLQResponse (..)

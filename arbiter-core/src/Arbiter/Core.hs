@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+
 -- | Re-exports commonly used Arbiter functionality.
 module Arbiter.Core
   ( -- * Core types

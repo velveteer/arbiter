@@ -11,30 +11,30 @@ module Arbiter.Worker.Config
   , mergedRollupHandler
   , mergeChildResults
   , HandlerMode (..)
-  , LivenessConfig (..)
 
     -- * Worker State
   , WorkerState (..)
-  , pauseWorker
-  , resumeWorker
   , shutdownWorker
   , getWorkerState
+  , readEffectiveState
   ) where
 
 import Arbiter.Core.Job.Types (ObservabilityHooks, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (BatchedJobHandler, JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Aeson (Value, (.=))
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import Data.UUID (toString)
+import Data.UUID (UUID, toString)
 import Data.UUID.V4 qualified as UUID
+import Network.HostName (getHostName)
 import System.Directory (getTemporaryDirectory)
-import UnliftIO.MVar (MVar, newEmptyMVar)
-import UnliftIO.STM (TVar, newTVarIO)
+import UnliftIO.STM (TMVar, TVar, newEmptyTMVarIO, newTVarIO)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
@@ -53,35 +53,13 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 --   or is retried together. Uses minimum maxAttempts across batch.
 --   Handler receives @NonEmpty (JobRead payload)@.
 data HandlerMode m payload result
-  = -- | Claim 1 job per group. The handler receives:
-    --
-    -- 1. @Map childJobId (Either decodeError result)@ - child results for
-    --    rollup finalizers. @Left@ means the child succeeded but its result
-    --    couldn't be decoded into @result@. Empty for non-rollup jobs.
-    -- 2. @Map dlqPrimaryKey errorMsg@ - children that failed and were DLQ'd.
-    --    Empty for non-rollup jobs.
+  = -- | Claim 1 job per group. Handler receives a map of immediate child
+    -- results (with @Left@ for decode failures) and a map of immediate
+    -- DLQ'd children. Both are empty for jobs with no children.
     SingleJobMode (Map Int64 (Either Text result) -> Map Int64 Text -> JobHandler m payload result)
   | -- | Batched mode: claim up to N jobs per group, handler receives batch.
-    --
-    -- __Rollup interaction:__ Batched mode has no rollup awareness - child results
-    -- are not passed to the handler. Use 'SingleJobMode' for rollup finalizers.
+    -- Has no rollup awareness. Use 'SingleJobMode' for rollup parents.
     BatchedJobsMode Int (BatchedJobHandler m payload result)
-
--- | File-based liveness probe configuration.
---
--- The probe file is touched when the dispatcher claims jobs or the heartbeat
--- extends visibility, proving the worker is actively functioning. A timeout
--- fallback ensures the probe still updates during idle periods (no jobs to
--- process). If the file goes stale, the worker should be restarted.
-data LivenessConfig = LivenessConfig
-  { livenessPath :: FilePath
-  -- ^ Path to the health check file
-  , livenessSignal :: MVar ()
-  -- ^ MVar pulsed by the dispatcher after each claim cycle and by the
-  -- heartbeat after each successful visibility extension
-  , livenessInterval :: Int
-  -- ^ Seconds between health file writes
-  }
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload result = WorkerConfig
@@ -92,15 +70,18 @@ data WorkerConfig m payload result = WorkerConfig
   , handlerMode :: HandlerMode m payload result
   -- ^ Job handler and claiming strategy. Set by the @default*WorkerConfig@ helpers.
   , pollInterval :: NominalDiffTime
-  -- ^ Polling interval in __seconds__ (fallback when no NOTIFY received).
-  -- Also serves as the liveness heartbeat - the dispatcher signals the
-  -- liveness probe after each poll cycle. Default: 5 seconds.
+  -- ^ Cadence floor in seconds for the dispatcher poll.
+  -- Default: 5.
   , visibilityTimeout :: NominalDiffTime
   -- ^ How long a claimed job stays invisible to other workers.
-  -- Must be greater than 'heartbeatInterval'. Default: 60.
-  , heartbeatInterval :: NominalDiffTime
-  -- ^ Interval for extending visibility timeout during processing.
+  -- Must be greater than 'jobHeartbeatInterval'. Default: 60.
+  , jobHeartbeatInterval :: NominalDiffTime
+  -- ^ Interval for extending a job's visibility timeout during processing.
   -- Must be less than 'visibilityTimeout' to prevent job reclaim. Default: 30.
+  , workerHeartbeatInterval :: NominalDiffTime
+  -- ^ Cadence for bumping @arbiter_workers.last_heartbeat@, the optional
+  -- liveness file, and reconciling pause state from the DB. Must be well below
+  -- 'workerStaleThreshold'. Default: 10.
   , maxAttempts :: Int32
   -- ^ Max retries before moving to DLQ (used when job's maxAttempts is Nothing).
   -- Default: 10.
@@ -124,10 +105,14 @@ data WorkerConfig m payload result = WorkerConfig
   , observabilityHooks :: ObservabilityHooks m payload
   -- ^ Callbacks for metrics or tracing. Default: no-op hooks.
   , workerStateVar :: TVar WorkerState
-  -- ^ Worker state (Running, Paused, ShuttingDown). Managed internally.
-  , livenessConfig :: Maybe LivenessConfig
-  -- ^ File-based liveness probe configuration. Default: writes to
-  -- @\/tmp\/arbiter-worker-\<uuid\>@ every 60 seconds.
+  -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
+  -- Shared across pools in multi-pool setups.
+  , pauseVar :: TVar Bool
+  -- ^ Per-pool pause flag.
+  , livenessFile :: Maybe FilePath
+  -- ^ When set, the heartbeat loop touches this file at the
+  -- 'workerHeartbeatInterval` cadence. Useful for file-based liveness probes.
+  -- Default: @\/tmp\/arbiter-worker-\<workerId\>@.
   , gracefulShutdownTimeout :: Maybe NominalDiffTime
   -- ^ Maximum time in __seconds__ to wait for in-flight jobs during graceful
   -- shutdown. If @Nothing@, waits indefinitely. If @Just n@, force-exits after
@@ -137,14 +122,28 @@ data WorkerConfig m payload result = WorkerConfig
   -- context automatically included. Use this to control log level, destination,
   -- and inject additional context (e.g., trace IDs). Default: Info level to stdout.
   , cronJobs :: [CronJob payload]
-  -- ^ Cron schedules. When non-empty, the worker pool spawns a scheduler
+  -- ^ Cron schedules. The worker pool spawns a scheduler
   -- thread that inserts jobs on cron expressions. The @cron_schedules@
-  -- table is consulted for runtime overrides (expression, overlap, enabled).
+  -- table is consulted for runtime overrides.
   -- Default: @[]@.
-  , groupReaperInterval :: NominalDiffTime
-  -- ^ How often to recompute the groups table (correct drift in
-  -- job_count, min_priority, min_id, in_flight_until).
+  , reaperInterval :: NominalDiffTime
+  -- ^ How often the reaper runs. Default: @300@ (5 minutes).
+  , workerId :: UUID
+  -- ^ Identity for this pool. Auto-minted by 'defaultWorkerConfig'.
+  -- Note: this is not a stable identifier by default,
+  -- i.e. it will not persist across worker restarts.
+  , workerHost :: Maybe Text
+  -- ^ Hostname recorded in the worker registry. Default: auto-generated.
+  , workerMetadata :: Maybe Value
+  -- ^ Arbitrary JSONB metadata for the worker registry row (image tag,
+  -- git SHA, deploy id, etc.). Default: 'Nothing'.
+  , workerStaleThreshold :: NominalDiffTime
+  -- ^ Workers whose @last_heartbeat@ is older than this are swept from the
+  -- registry by 'reaperInterval'. Must be well above the heartbeat cadence
+  -- ('workerHeartbeatInterval', or 'jobHeartbeatInterval' while busy).
   -- Default: @300@ (5 minutes).
+  , heartbeatSignal :: TMVar ()
+  -- ^ Worker-level proof-of-work signal pulsed by the dispatcher and per-job heartbeats.
   }
 
 -- | Create a t'WorkerConfig' with default settings.
@@ -175,7 +174,7 @@ defaultBatchedWorkerConfig
 defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
   mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
 
--- | Create a t'WorkerConfig' for rollup finalizers. See 'mergedRollupHandler'.
+-- | Create a t'WorkerConfig' for rollup parents (intermediate or root). See 'mergedRollupHandler'.
 defaultRollupWorkerConfig
   :: (MonadArbiter n, MonadIO m, Monoid result)
   => ByteString
@@ -191,18 +190,10 @@ defaultRollupWorkerConfig connStrVal workerCnt handler =
 singleJobMode :: JobHandler m payload result -> HandlerMode m payload result
 singleJobMode handler = SingleJobMode (\_ _ -> handler)
 
--- | Handler for rollup finalizers. Child results are merged via 'Monoid'.
---
--- The handler receives two arguments before the job:
---
--- 1. The @mappend@-fold of all child results. Children whose results
---    couldn't be decoded into the expected type contribute 'mempty'
---    (the raw JSON is still in the results table). Use 'SingleJobMode'
---    directly to inspect per-child decode failures via the @Left@ entries.
--- 2. A map of DLQ failures (@dlqPrimaryKey -> errorMessage@) for children
---    that failed and were moved to the DLQ.
---
--- For non-rollup jobs both arguments are empty.
+-- | Handler for rollup parents (intermediate or root). Child results are
+-- 'Monoid'-merged (decode failures contribute 'mempty'). Both args are empty
+-- for jobs with no children. Use 'SingleJobMode' to inspect per-child decode
+-- failures.
 mergedRollupHandler
   :: (Monoid result) => (result -> Map Int64 Text -> JobHandler m payload result) -> HandlerMode m payload result
 mergedRollupHandler handler = SingleJobMode $ \results dlqFailures -> handler (mergeChildResults results) dlqFailures
@@ -219,11 +210,13 @@ mkDefaultConfig
   -> HandlerMode n payload result
   -> m (WorkerConfig n payload result)
 mkDefaultConfig connStrVal workerCnt mode = do
-  livenessMVar <- newEmptyMVar
+  heartbeatTMVar <- liftIO newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
+  pauseTVar <- newTVarIO False
   uuid <- liftIO UUID.nextRandom
   tmpDir <- liftIO getTemporaryDirectory
-  let livenessFile = tmpDir <> "/arbiter-worker-" <> toString uuid
+  host <- liftIO getHostName
+  let livenessPath = tmpDir <> "/arbiter-worker-" <> toString uuid
   pure
     WorkerConfig
       { connStr = connStrVal
@@ -231,40 +224,30 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , handlerMode = mode
       , pollInterval = 5
       , visibilityTimeout = 60
-      , heartbeatInterval = 30
+      , jobHeartbeatInterval = 30
+      , workerHeartbeatInterval = 10
       , maxAttempts = 10
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter
       , useWorkerTransaction = True
       , observabilityHooks = defaultObservabilityHooks
       , workerStateVar = shutdownTVar
-      , livenessConfig = Just (LivenessConfig livenessFile livenessMVar 60)
+      , pauseVar = pauseTVar
+      , livenessFile = Just livenessPath
       , gracefulShutdownTimeout = Just 30
-      , logConfig = defaultLogConfig
+      , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
-      , groupReaperInterval = 300
+      , reaperInterval = 300
+      , workerId = uuid
+      , workerHost = Just (T.pack host)
+      , workerMetadata = Nothing
+      , workerStaleThreshold = 300
+      , heartbeatSignal = heartbeatTMVar
       }
 
--- | Pause the worker pool
---
--- Stops claiming new jobs. In-flight jobs will complete normally.
--- Workers will wait in paused state until resumed or shut down.
-pauseWorker :: (MonadIO m) => WorkerConfig n payload result -> m ()
-pauseWorker config = liftIO . STM.atomically $ do
-  st <- STM.readTVar (workerStateVar config)
-  case st of
-    ShuttingDown -> pure ()
-    _ -> STM.writeTVar (workerStateVar config) Paused
-
--- | Resume the worker pool from paused state
---
--- Workers will start claiming new jobs again.
-resumeWorker :: (MonadIO m) => WorkerConfig n payload result -> m ()
-resumeWorker config = liftIO . STM.atomically $ do
-  st <- STM.readTVar (workerStateVar config)
-  case st of
-    ShuttingDown -> pure ()
-    _ -> STM.writeTVar (workerStateVar config) Running
+withWorkerIdContext :: UUID -> LogConfig -> LogConfig
+withWorkerIdContext workerId lc =
+  lc {additionalContext = (("workerId" .= workerId) :) <$> additionalContext lc}
 
 -- | Initiate graceful shutdown of the worker pool
 --
@@ -272,6 +255,14 @@ resumeWorker config = liftIO . STM.atomically $ do
 shutdownWorker :: (MonadIO m) => WorkerConfig n payload result -> m ()
 shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
--- | Get the current worker state
 getWorkerState :: (MonadIO m) => WorkerConfig n payload result -> m WorkerState
-getWorkerState config = liftIO . STM.atomically $ STM.readTVar (workerStateVar config)
+getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
+
+readEffectiveState :: WorkerConfig n payload result -> STM.STM WorkerState
+readEffectiveState config = do
+  st <- STM.readTVar (workerStateVar config)
+  case st of
+    ShuttingDown -> pure ShuttingDown
+    _ -> do
+      paused <- STM.readTVar (pauseVar config)
+      pure $ if paused then Paused else st

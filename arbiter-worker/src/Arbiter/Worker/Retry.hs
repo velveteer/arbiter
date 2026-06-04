@@ -5,6 +5,7 @@
 module Arbiter.Worker.Retry
   ( retryOnException
   , retryOnExceptionForever
+  , spawnRetried
   ) where
 
 import Arbiter.Core.Exceptions
@@ -13,11 +14,12 @@ import Arbiter.Core.Exceptions
   , JobStolenException
   )
 import Control.Monad (forever)
+import Control.Monad.Trans.Cont (ContT (..))
 import Data.Maybe (isJust)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import UnliftIO (MonadUnliftIO, SomeException, fromException, liftIO, throwIO)
-import UnliftIO.Async (race)
+import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
 import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
@@ -96,3 +98,17 @@ isJobSignal e =
   isJust (fromException e :: Maybe JobException)
     || isJust (fromException e :: Maybe JobStolenException)
     || isJust (fromException e :: Maybe JobNotFoundException)
+
+-- | Spawn a thread under 'withAsync', wrapped in 'retryOnException' so
+-- transient failures restart the action instead of killing the thread.
+spawnRetried
+  :: (MonadUnliftIO m)
+  => TVar WorkerState
+  -> LogConfig
+  -> T.Text
+  -- ^ Label for log messages.
+  -> m ()
+  -- ^ Action to run.
+  -> ContT r m (Async ())
+spawnRetried stateVar logCfg label action =
+  ContT . withAsync $ retryOnException stateVar logCfg label action

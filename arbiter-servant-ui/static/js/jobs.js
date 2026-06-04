@@ -8,6 +8,7 @@ document.addEventListener('alpine:init', () => {
     groupKeyFilter: '',
     parentIdFilter: '',
     suspendedFilter: '',
+    stateFilter: '',
     _appliedGroupKey: '',
     _appliedParentId: '',
     childCounts: {},
@@ -24,6 +25,17 @@ document.addEventListener('alpine:init', () => {
     pendingChanges: 0,
     sortBy: '',
     sortDir: '',
+    notVisibleFormat: localStorage.getItem('arb.notVisibleFormat') || 'countdown',
+
+    toggleNotVisibleFormat() {
+      this.notVisibleFormat = this.notVisibleFormat === 'countdown' ? 'absolute' : 'countdown';
+      localStorage.setItem('arb.notVisibleFormat', this.notVisibleFormat);
+    },
+
+    formatNotVisible(iso) {
+      if (!iso) return '-';
+      return this.notVisibleFormat === 'countdown' ? formatCountdown(iso) : formatTime(iso);
+    },
 
     get effectiveViewMode() {
       return this.showInFlight ? 'flat' : this.viewMode;
@@ -89,6 +101,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async toggleChildren(id) {
+      this._expandSeq = this._expandSeq || {};
+      const seq = (this._expandSeq[id] || 0) + 1;
+      this._expandSeq[id] = seq;
       if (this.expandedParents[id]) {
         const copy = { ...this.expandedParents };
         delete copy[id];
@@ -103,6 +118,7 @@ document.addEventListener('alpine:init', () => {
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
+        if (this._expandSeq[id] !== seq) return;
         this.expandedParents[id] = {
           jobs: data.jobs || [],
           total: data.jobsTotal || 0,
@@ -111,6 +127,7 @@ document.addEventListener('alpine:init', () => {
           pausedParents: data.pausedParents || [],
         };
       } catch (e) {
+        if (this._expandSeq[id] !== seq) return;
         showToast('Failed to load children: ' + e.message);
       }
     },
@@ -173,6 +190,9 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = f.parentId;
         this.suspendedFilter = f.suspended;
         this.showInFlight = f.inFlight;
+        this.stateFilter = f.inFlight ? 'inflight'
+          : f.suspended === 'true' ? 'suspended'
+          : f.suspended === 'false' ? 'notsuspended' : '';
         this.sortBy = f.sortBy;
         this.sortDir = f.sortDir;
       }
@@ -188,6 +208,7 @@ document.addEventListener('alpine:init', () => {
           this.parentIdFilter = '';
           this.suspendedFilter = '';
           this.showInFlight = false;
+          this.stateFilter = '';
           this._appliedGroupKey = '';
           this._appliedParentId = '';
           this.sortBy = '';
@@ -200,6 +221,7 @@ document.addEventListener('alpine:init', () => {
         this.parentIdFilter = '';
         this.suspendedFilter = '';
         this.showInFlight = false;
+        this.stateFilter = '';
         this._appliedGroupKey = '';
         this._appliedParentId = '';
         this.sortBy = '';
@@ -248,7 +270,7 @@ document.addEventListener('alpine:init', () => {
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
       const startingPending = this.pendingChanges;
       try {
-        const rootsOnly = !this.showInFlight && this.viewMode === 'tree' && !pid;
+        const rootsOnly = !this.showInFlight && this.viewMode === 'tree' && !pid && !gk;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
           offset: this.offset,
@@ -339,6 +361,15 @@ document.addEventListener('alpine:init', () => {
       this._resetView();
     },
 
+    // Unified State dropdown -> the underlying in-flight + suspended flags.
+    applyState() {
+      this.showInFlight = this.stateFilter === 'inflight';
+      this.suspendedFilter = this.stateFilter === 'suspended' ? 'true'
+        : this.stateFilter === 'notsuspended' ? 'false'
+        : '';
+      this._resetView();
+    },
+
     toggleViewMode() {
       this.viewMode = this.viewMode === 'tree' ? 'flat' : 'tree';
       this._resetView();
@@ -370,9 +401,15 @@ document.addEventListener('alpine:init', () => {
     applyFilter() {
       const trimmed = this.parentIdFilter.trim();
       if (trimmed && !/^\d+$/.test(trimmed)) {
-        showToast('Parent ID must be a positive integer', 'warning');
+        // Auto-apply fires this from both Enter and change/blur; only warn once per value.
+        if (this._lastInvalidParentId !== trimmed) {
+          showToast('Parent ID must be a positive integer', 'warning');
+          this._lastInvalidParentId = trimmed;
+        }
         return;
       }
+      this._lastInvalidParentId = null;
+      if (trimmed === this._appliedParentId && this.groupKeyFilter === this._appliedGroupKey) return;
       this.parentIdFilter = trimmed;
       this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
     },
@@ -386,6 +423,7 @@ document.addEventListener('alpine:init', () => {
     _resetView(filterOverrides) {
       this.offset = 0;
       this.expandedParents = {};
+      this._expandSeq = {};
       this.loadJobs(filterOverrides);
       this._startTimer();
     },
@@ -409,6 +447,28 @@ document.addEventListener('alpine:init', () => {
         }
       } catch (e) {
         showToast('Failed to cancel: ' + e.message);
+      }
+    },
+
+    async forceCancelJob(id, childCount, dlqChildCount) {
+      const queue = Alpine.store('app').selectedQueue;
+      const parts = [];
+      if (childCount > 0) parts.push(`${childCount} active children`);
+      if (dlqChildCount > 0) parts.push(`${dlqChildCount} DLQ entries (will be orphaned)`);
+      const detail = parts.length > 0
+        ? ` and ${parts.join(' + ')}`
+        : '';
+      if (!confirm(`Force-cancel this job${detail}? The running handler will be interrupted.`)) return;
+      try {
+        await ArbiterAPI.forceCancelJob(queue, id);
+        if (String(id) === this._appliedParentId) {
+          this.parentIdFilter = '';
+          this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
+        } else {
+          this.loadJobs();
+        }
+      } catch (e) {
+        showToast('Failed to force-cancel: ' + e.message);
       }
     },
 

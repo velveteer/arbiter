@@ -19,10 +19,12 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree (leaf, rollup, (<~~))
 import Arbiter.Core.MonadArbiter (MonadArbiter)
-import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Data.Foldable (toList)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -33,7 +35,8 @@ import Data.Time (UTCTime, diffUTCTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
-import UnliftIO (MonadUnliftIO)
+import UnliftIO (MonadUnliftIO, liftIO)
+import UnliftIO.Async (concurrently)
 
 import Arbiter.Test.Setup (execute_)
 
@@ -103,7 +106,7 @@ computeExpectedInFlight conn schemaName tableName = do
 --
 -- Only valid in settled state (no concurrent activity). For each group with
 -- @job_count > 0@: if any job has @not_visible_until > NOW() AND NOT suspended@,
--- then @in_flight_until@ must equal the MAX; otherwise it must be NULL.
+-- then @in_flight_until@ must equal the MAX. Otherwise it must be NULL.
 assertInFlightConsistent :: PG.Connection -> Text -> Text -> String -> IO ()
 assertInFlightConsistent conn schemaName tableName ctx = do
   actual <- readGroupsInFlight conn schemaName tableName
@@ -164,6 +167,7 @@ groupsInvariantSpec
      , KnownSymbol (TableForPayload payload registry)
      , MonadArbiter m
      , MonadUnliftIO m
+     , RegistryTables registry
      )
   => Text
   -- ^ Schema name
@@ -520,7 +524,7 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       void $ runM env $ HL.deleteDLQJobsBatch @m @registry @payload (map dlqPrimaryKey dlqJobs)
       check env "after deleteDLQJobsBatch (parent may have been resumed)"
 
-    it "refreshGroups: corrects any drift" $ \env -> do
+    it "refreshAllGroups: corrects any drift" $ \env -> do
       -- Insert some grouped jobs
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "reaper1")) {groupKey = Just "reaper-g"}
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "reaper2")) {groupKey = Just "reaper-g"}
@@ -531,11 +535,11 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 999 WHERE group_key = 'reaper-g'"
 
-      -- Run refreshGroups to correct
-      void $ runM env $ HL.refreshGroups @m @registry @payload 0
-      check env "after refreshGroups (should correct drift)"
+      -- Schema-wide refresh corrects all queues' groups tables.
+      void $ runM env HL.refreshAllGroups
+      check env "after refreshAllGroups (should correct drift)"
 
-    it "refreshGroups: skips when interval not elapsed" $ \env -> do
+    it "runGated(refresh-all-groups): skips when interval not elapsed" $ \env -> do
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "seq1")) {groupKey = Just "seq-g"}
       check env "initial state"
 
@@ -544,19 +548,22 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 999 WHERE group_key = 'seq-g'"
 
-      -- First refresh with large interval - runs because sequence is 0
-      void $ runM env $ HL.refreshGroups @m @registry @payload 300
-      check env "after first refreshGroups (should correct drift)"
+      -- First call: gate row is at default (1970) so it runs.
+      void $
+        runM env $
+          Ops.runGated schemaName "refresh-all-groups" 300 (Ops.refreshAllGroups schemaName [tableName])
+      check env "after first guarded refresh (should correct drift)"
 
       -- Corrupt again
       withConn env $ \conn ->
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 888 WHERE group_key = 'seq-g'"
 
-      -- Second refresh with same large interval - should skip (just ran)
-      void $ runM env $ HL.refreshGroups @m @registry @payload 300
+      -- Second call within 300s: gate skips.
+      void $
+        runM env $
+          Ops.runGated schemaName "refresh-all-groups" 300 (Ops.refreshAllGroups schemaName [tableName])
 
-      -- Verify drift was NOT corrected (reaper skipped)
       withConn env $ \conn -> do
         [PG.Only cnt] <-
           PG.query_
@@ -567,20 +574,41 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
             )
         cnt `shouldBe` (888 :: Int)
 
-    it "refreshGroups: runs when interval elapsed" $ \env -> do
+    it "runGated: concurrent callers serialize via FOR UPDATE SKIP LOCKED" $ \env -> do
+      -- Two transactions racing on the same gate row. Exactly one runs.
+      -- The loser's SELECT FOR UPDATE SKIP LOCKED returns zero rows and
+      -- short-circuits. The 300ms work duration keeps the row locked long
+      -- enough that both callers' outer SELECT sees an open gate.
+      ranRef <- liftIO $ newIORef (0 :: Int)
+      let task = "contention-test"
+          work = do
+            liftIO $ threadDelay 300_000
+            liftIO $ atomicModifyIORef' ranRef (\n -> (n + 1, ()))
+      (a, b) <-
+        concurrently
+          (runM env $ Ops.runGated schemaName task 1 work)
+          (runM env $ Ops.runGated schemaName task 1 work)
+      ran <- readIORef ranRef
+      ran `shouldBe` 1
+      -- Exactly one Just, exactly one Nothing.
+      case (a, b) of
+        (Just (), Nothing) -> pure ()
+        (Nothing, Just ()) -> pure ()
+        _ ->
+          expectationFailure $
+            "Expected exactly one winner. Got (a, b) = " <> show (a, b)
+
+    it "refreshAllGroups: idempotent on repeated direct calls" $ \env -> do
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "elapsed1")) {groupKey = Just "elapsed-g"}
 
-      -- Run with interval 0 - always runs
-      void $ runM env $ HL.refreshGroups @m @registry @payload 0
+      void $ runM env HL.refreshAllGroups
 
-      -- Corrupt
       withConn env $ \conn ->
         execute_ conn $
           "UPDATE " <> schemaName <> ".\"" <> tableName <> "_groups\" SET job_count = 777 WHERE group_key = 'elapsed-g'"
 
-      -- Run again with interval 0 - should run again
-      void $ runM env $ HL.refreshGroups @m @registry @payload 0
-      check env "after refreshGroups with interval 0 (should always correct)"
+      void $ runM env HL.refreshAllGroups
+      check env "after second refreshAllGroups (should correct drift)"
 
     it "mixed operations sequence: groups stay consistent" $ \env -> do
       -- Insert various jobs

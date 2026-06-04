@@ -9,6 +9,7 @@
       localStorage.getItem('arbiter-theme') || 'dark');
   </script>
   <link href="vendor/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="vendor/fonts/electrolize.css">
   <link rel="stylesheet" href="css/dashboard.css">
   <style>[x-cloak] { display: none !important; }</style>
 </head>
@@ -17,7 +18,7 @@
 <!-- Navbar -->
 <nav class="navbar navbar-expand-lg">
   <div class="container-fluid">
-    <a class="navbar-brand" href="#">Arbiter Admin</a>
+    <a class="navbar-brand" href="#">A R B I T E R</a>
 
     <div class="d-flex align-items-center gap-3">
       <!-- Queue selector -->
@@ -35,14 +36,27 @@
         </ul>
       </div>
 
+      <!-- Queue pause/resume -->
+      <div x-data="queuePauseToggle" x-show="$store.app.selectedQueue" class="d-flex align-items-center gap-3">
+        <span x-show="paused" class="badge paused-badge"
+              :title="pausedAt ? formatTime(pausedAt) : ''">
+          queue paused<template x-if="pausedAgeStr"><span class="ms-1 fw-normal" x-text="'(' + pausedAgeStr + ')'"></span></template>
+        </span>
+        <button class="btn btn-sm" :class="paused ? 'btn-success' : 'btn-outline-warning'"
+                :disabled="busy" @click="toggle()"
+                x-text="paused ? 'Resume queue' : 'Pause queue'"></button>
+      </div>
+
       <!-- SSE status dot (hidden when SSE is disabled server-side) -->
-      <span class="sse-dot" x-show="!$store.app.sseDisabled"
+      <span class="sse-dot" x-show="!$store.app.sseDisabled" role="status"
         :class="$store.app.connected ? 'connected' : 'disconnected'"
-        :title="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"></span>
+        :title="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"
+        :aria-label="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"></span>
 
       <!-- Theme toggle -->
       <button class="btn btn-sm nav-theme-toggle" @click="$store.app.toggleTheme()"
-        :title="$store.app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'">
+        :title="$store.app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+        :aria-label="$store.app.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'">
         <span x-show="$store.app.theme === 'dark'">&#9788;</span>
         <span x-show="$store.app.theme !== 'dark'">&#9789;</span>
       </button>
@@ -64,12 +78,15 @@
     <li class="nav-item" role="presentation">
       <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-dlq" type="button" role="tab">DLQ</button>
     </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-cron" type="button" role="tab">Cron</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-workers" type="button" role="tab">Workers</button>
+    </li>
     <li class="nav-item tab-group-label tab-group-divider" aria-hidden="true">Global</li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-events" type="button" role="tab">Events</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-cron" type="button" role="tab">Cron</button>
     </li>
   </ul>
 
@@ -117,52 +134,59 @@
     <div class="tab-pane fade" id="tab-jobs" role="tabpanel" x-data="jobsTab">
       <!-- Toolbar -->
       <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
-        <div class="position-relative" style="max-width: 250px;">
+        <!-- Filters -->
+        <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
-            placeholder="Filter by group key..."
-            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
+            placeholder="Group key..."
+            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter"
+            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
-        <div class="position-relative" style="max-width: 180px;">
+        <div class="position-relative" style="max-width: 160px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
-            placeholder="Filter by parent ID..."
-            x-model="parentIdFilter" @keyup.enter="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
+            placeholder="Parent ID..."
+            x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter"
+            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
-        <select class="form-select form-select-sm" style="width: auto;"
-          x-model="suspendedFilter" @change="applyFilter()">
+        <select class="form-select form-select-sm" style="width: auto;" title="Filter by job state"
+          x-model="stateFilter" @change="applyState()">
           <option value="">All states</option>
-          <option value="true">Suspended</option>
-          <option value="false">Not suspended</option>
+          <option value="inflight">In-flight</option>
+          <option value="suspended">Suspended</option>
+          <option value="notsuspended">Not suspended</option>
         </select>
-        <button class="btn btn-outline-secondary btn-sm" @click="applyFilter()">Filter</button>
-        <button class="btn btn-sm" :class="showInFlight ? 'btn-primary' : 'btn-outline-primary'" @click="toggleInFlight()">
-          <span x-text="showInFlight ? 'In-Flight' : 'All Jobs'"></span>
-        </button>
+
+        <!-- View -->
         <button class="btn btn-sm" :class="effectiveViewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
           @click="toggleViewMode()"
           :disabled="showInFlight"
-          :title="showInFlight ? 'In-Flight always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
+          :title="showInFlight ? 'In-flight always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
           <span x-text="effectiveViewMode === 'tree' ? 'Tree' : 'Flat'"></span>
         </button>
-        <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm">
-          + Insert Job
-        </button>
-        <button class="btn btn-outline-secondary btn-sm" @click="loadJobs()">Refresh</button>
-        <select class="form-select form-select-sm" style="width: auto;"
-          x-model="refreshMode" @change="setRefreshMode(refreshMode)">
-          <option value="1s">1s</option>
-          <option value="5s">5s</option>
-          <option value="10s">10s</option>
-          <option value="30s">30s</option>
-          <option value="paused">Paused</option>
-        </select>
+
+        <!-- Actions -->
+        <div class="ms-auto d-flex gap-2 align-items-center">
+          <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm">+ Insert</button>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" @click="loadJobs()" title="Refresh now" aria-label="Refresh now">&#x21bb;</button>
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+              <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '1s' }" href="#" @click.prevent="setRefreshMode('1s')">Every 1s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '5s' }" href="#" @click.prevent="setRefreshMode('5s')">Every 5s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '10s' }" href="#" @click.prevent="setRefreshMode('10s')">Every 10s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '30s' }" href="#" @click.prevent="setRefreshMode('30s')">Every 30s</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === 'paused' }" href="#" @click.prevent="setRefreshMode('paused')">Off</a></li>
+            </ul>
+          </div>
+        </div>
       </div>
       <div class="text-info small mb-2" x-show="refreshMode === 'paused' && pendingChanges > 0" x-text="pendingChanges + ' changes pending'"></div>
 
@@ -228,8 +252,8 @@
             <col style="width: 6%;">
             <col style="width: 7%;">
             <col style="width: 10%;">
-            <col style="width: 9%;">
-            <col style="width: 25%;">
+            <col style="width: 17%;">
+            <col style="width: 17%;">
           </colgroup>
           <thead>
             <tr>
@@ -242,7 +266,9 @@
               <th class="sortable" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
               <th>Status</th>
               <th class="sortable" @click="toggleSort('inserted_at')">Inserted At<span x-text="sortIndicator('inserted_at')"></span></th>
-              <th class="sortable" @click="toggleSort('not_visible_until')">Not Visible Until<span x-text="sortIndicator('not_visible_until')"></span></th>
+              <th class="sortable" @click="toggleSort('not_visible_until')">
+                <span x-text="notVisibleFormat === 'countdown' ? 'Visible In' : 'Visible At'"></span><span x-text="sortIndicator('not_visible_until')"></span>
+              </th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -285,12 +311,21 @@
                   <template x-if="job._childCount || job._dlqChildCount">
                     <span class="d-inline-flex gap-1 flex-wrap align-items-center">
                       <template x-if="job._childCount">
-                        <a href="#" class="text-decoration-none d-inline-flex align-items-center gap-1"
-                          @click.prevent="toggleChildren(job.primaryKey)">
-                          <span class="expand-arrow" x-text="isExpanded(job.primaryKey) ? '\u25BC' : '\u25B6'"></span>
-                          <span class="badge bg-info-subtle text-info-emphasis"
-                            x-text="job._childCount + (job._childCount === 1 ? ' child' : ' children')"></span>
-                        </a>
+                        <span class="d-inline-flex align-items-center gap-1">
+                          <!-- Tree view: expand to nest children. Flat view already lists them as rows. -->
+                          <template x-if="effectiveViewMode === 'tree'">
+                            <a href="#" class="text-decoration-none d-inline-flex align-items-center gap-1"
+                              @click.prevent="toggleChildren(job.primaryKey)">
+                              <span class="expand-arrow" x-text="isExpanded(job.primaryKey) ? '\u25BC' : '\u25B6'"></span>
+                              <span class="badge bg-info-subtle text-info-emphasis"
+                                x-text="job._childCount + (job._childCount === 1 ? ' child' : ' children')"></span>
+                            </a>
+                          </template>
+                          <template x-if="effectiveViewMode !== 'tree'">
+                            <span class="badge bg-info-subtle text-info-emphasis"
+                              x-text="job._childCount + (job._childCount === 1 ? ' child' : ' children')"></span>
+                          </template>
+                        </span>
                       </template>
                       <template x-if="job._dlqChildCount">
                         <span class="badge bg-danger-subtle text-danger-emphasis"
@@ -322,21 +357,46 @@
                   </td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate" :title="job.insertedAt" x-text="job.insertedAt ? new Date(job.insertedAt).toLocaleString() : '-'"></td>
+                  <td class="text-truncate" :title="job.insertedAt" x-text="formatTime(job.insertedAt, '-')"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate" x-text="job.notVisibleUntil ? new Date(job.notVisibleUntil).toLocaleString() : '-'"></td>
+                  <td class="text-truncate font-monospace">
+                    <span class="format-toggle-cell"
+                          @click="toggleNotVisibleFormat()"
+                          :title="job.notVisibleUntil ? 'Click to switch format · ' + (notVisibleFormat === 'countdown' ? formatTime(job.notVisibleUntil) : formatCountdown(job.notVisibleUntil)) : 'Click to switch format'"
+                          x-text="formatNotVisible(job.notVisibleUntil)"></span>
+                  </td>
                 </template>
                 <template x-if="!job._isMoreRow">
                   <td>
                     <div class="d-inline-flex gap-1 flex-nowrap">
                       <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
-                      <button class="btn btn-outline-success btn-sm" @click="promoteJob(job.primaryKey)" title="Promote"
-                        x-show="job.status === 'scheduled'">Promote</button>
-                      <button class="btn btn-outline-danger btn-sm" @click="cancelJob(job.primaryKey, job._childCount, job._dlqChildCount)" title="Cancel">Cancel</button>
-                      <button class="btn btn-outline-secondary btn-sm" @click="moveToDLQ(job.primaryKey, job._childCount)" title="Move to DLQ">DLQ</button>
-                      <button class="btn btn-outline-warning btn-sm" @click="pauseAction(job)" :title="job._childCount > 0 ? 'Pause descendants' : 'Suspend'">Pause</button>
-                      <button class="btn btn-outline-info btn-sm" @click="resumeAction(job)" :title="job._childCount > 0 ? 'Resume descendants' : 'Resume'">Resume</button>
+                      <div class="dropdown">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                          Actions
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                          <li x-show="job.status === 'scheduled'">
+                            <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey)">Promote</a>
+                          </li>
+                          <li>
+                            <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey, job._childCount, job._dlqChildCount)">Cancel</a>
+                          </li>
+                          <li x-show="job.status === 'in_flight'">
+                            <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey, job._childCount, job._dlqChildCount)">Force Cancel</a>
+                          </li>
+                          <li>
+                            <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey, job._childCount)">Move to DLQ</a>
+                          </li>
+                          <li><hr class="dropdown-divider"></li>
+                          <li>
+                            <a class="dropdown-item" href="#" @click.prevent="pauseAction(job)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
+                          </li>
+                          <li>
+                            <a class="dropdown-item" href="#" @click.prevent="resumeAction(job)" x-text="job._childCount > 0 ? 'Resume descendants' : 'Resume'"></a>
+                          </li>
+                        </ul>
+                      </div>
                     </div>
                   </td>
                 </template>
@@ -394,6 +454,8 @@
                 <dd class="col-sm-8" x-text="formatTime(selectedJob?.lastAttemptedAt, '-')"></dd>
                 <dt class="col-sm-4">Not Visible Until</dt>
                 <dd class="col-sm-8" x-text="formatTime(selectedJob?.notVisibleUntil, '-')"></dd>
+                <dt class="col-sm-4">Claimed By</dt>
+                <dd class="col-sm-8"><code class="small" x-text="selectedJob?.claimedBy || '-'"></code></dd>
                 <dt class="col-sm-4">Last Error</dt>
                 <dd class="col-sm-8" x-text="selectedJob?.lastError || '-'"></dd>
                 <dt class="col-sm-4">Payload</dt>
@@ -410,36 +472,53 @@
     <!-- DLQ Tab -->
     <div class="tab-pane fade" id="tab-dlq" role="tabpanel" x-data="dlqTab">
       <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
-        <div class="position-relative" style="max-width: 250px;">
+        <!-- Filters -->
+        <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
-            placeholder="Filter by group key..."
-            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
+            placeholder="Group key..."
+            x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter"
+            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
-        <div class="position-relative" style="max-width: 180px;">
+        <div class="position-relative" style="max-width: 160px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
-            placeholder="Filter by parent ID..."
-            x-model="parentIdFilter" @keyup.enter="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
+            placeholder="Parent ID..."
+            x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter"
+            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
-        <button class="btn btn-outline-secondary btn-sm" @click="applyFilter()">Filter</button>
-        <button class="btn btn-outline-secondary btn-sm" @click="loadDLQ()">Refresh</button>
-        <select class="form-select form-select-sm" style="width: auto;"
-          x-model="refreshMode" @change="setRefreshMode(refreshMode)">
-          <option value="1s">1s</option>
-          <option value="5s">5s</option>
-          <option value="10s">10s</option>
-          <option value="30s">30s</option>
-          <option value="paused">Paused</option>
-        </select>
+
+        <!-- Actions -->
+        <div class="ms-auto d-flex gap-2 align-items-center">
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" @click="loadDLQ()" title="Refresh now" aria-label="Refresh now">&#x21bb;</button>
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+              <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '1s' }" href="#" @click.prevent="setRefreshMode('1s')">Every 1s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '5s' }" href="#" @click.prevent="setRefreshMode('5s')">Every 5s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '10s' }" href="#" @click.prevent="setRefreshMode('10s')">Every 10s</a></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === '30s' }" href="#" @click.prevent="setRefreshMode('30s')">Every 30s</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" :class="{ active: refreshMode === 'paused' }" href="#" @click.prevent="setRefreshMode('paused')">Off</a></li>
+            </ul>
+          </div>
+        </div>
       </div>
       <div class="text-info small mb-2" x-show="refreshMode === 'paused' && pendingChanges > 0" x-text="pendingChanges + ' changes pending'"></div>
+
+      <!-- Bulk actions (shown when rows are selected) -->
+      <div class="d-flex align-items-center gap-2 mb-2" x-show="selectedCount > 0" x-cloak>
+        <span class="small fw-semibold" x-text="selectedCount + ' selected'"></span>
+        <button class="btn btn-outline-success btn-sm" :disabled="bulkBusy" @click="bulkRetry()">Retry selected</button>
+        <button class="btn btn-outline-danger btn-sm" :disabled="bulkBusy" @click="bulkDelete()">Delete selected</button>
+        <button class="btn btn-link btn-sm text-muted text-decoration-none p-0 ms-1" @click="selected = {}">Clear</button>
+      </div>
 
       <!-- Pagination (top) -->
       <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
@@ -455,18 +534,21 @@
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
+            <col style="width: 4%;">
             <col style="width: 6%;">
             <col style="width: 6%;">
             <col style="width: 6%;">
             <col style="width: 8%;">
-            <col style="width: 18%;">
+            <col style="width: 16%;">
             <col style="width: 12%;">
-            <col style="width: 5%;">
-            <col style="width: 21%;">
+            <col style="width: 8%;">
+            <col style="width: 16%;">
             <col style="width: 18%;">
           </colgroup>
           <thead>
             <tr>
+              <th><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
+                  :checked="allSelected" @change="toggleSelectAll()"></th>
               <th class="sortable" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
               <th class="sortable" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
               <th class="sortable" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
@@ -480,7 +562,9 @@
           </thead>
           <tbody>
             <template x-for="job in dlqJobs" :key="job.dlqPrimaryKey">
-              <tr>
+              <tr :class="isSelected(job.dlqPrimaryKey) ? 'table-active' : ''">
+                <td><input class="form-check-input m-0" type="checkbox" aria-label="Select entry"
+                    :checked="isSelected(job.dlqPrimaryKey)" @change="toggleSelect(job.dlqPrimaryKey)"></td>
                 <td class="text-truncate" x-text="job.dlqPrimaryKey"></td>
                 <td class="text-truncate" x-text="job.jobSnapshot?.primaryKey ?? '-'"></td>
                 <td class="text-truncate">
@@ -495,21 +579,28 @@
                 <td class="text-truncate" x-text="job.jobSnapshot?.groupKey || '-'"></td>
                 <td class="text-truncate" :title="JSON.stringify(job.jobSnapshot?.payload)"
                   x-text="truncate(job.jobSnapshot?.payload)"></td>
-                <td class="text-truncate" x-text="job.failedAt ? new Date(job.failedAt).toLocaleString() : '-'"></td>
+                <td class="text-truncate" :title="job.failedAt" x-text="formatTime(job.failedAt, '-')"></td>
                 <td x-text="job.jobSnapshot?.attempts ?? '-'"></td>
                 <td class="text-truncate" :title="job.jobSnapshot?.lastError"
                   x-text="truncate(job.jobSnapshot?.lastError)"></td>
                 <td>
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job)" title="View">Detail</button>
-                    <button class="btn btn-outline-success btn-sm" @click="retryJob(job.dlqPrimaryKey)" title="Retry">Retry</button>
-                    <button class="btn btn-outline-danger btn-sm" @click="deleteJob(job.dlqPrimaryKey)" title="Delete">Delete</button>
+                    <div class="dropdown">
+                      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        Actions
+                      </button>
+                      <ul class="dropdown-menu dropdown-menu-end">
+                        <li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey)">Retry</a></li>
+                        <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey)">Delete</a></li>
+                      </ul>
+                    </div>
                   </div>
                 </td>
               </tr>
             </template>
             <tr x-show="dlqJobs.length === 0">
-              <td colspan="9" class="text-muted text-center">No DLQ entries.</td>
+              <td colspan="10" class="text-muted text-center">No DLQ entries.</td>
             </tr>
           </tbody>
         </table>
@@ -612,7 +703,7 @@
                 </tr>
               </thead>
               <tbody>
-                <template x-for="(evt, idx) in filteredEvents" :key="idx">
+                <template x-for="evt in filteredEvents" :key="evt._seq">
                   <tr>
                     <td x-text="formatTime(evt.receivedAt)"></td>
                     <td><span class="badge" :class="badgeClass(evt.event)" x-text="evt.event"></span></td>
@@ -632,12 +723,15 @@
 
     <!-- Cron Tab -->
     <div class="tab-pane fade" id="tab-cron" role="tabpanel" x-data="cronTab">
-      <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
-        <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
-      </div>
+      <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its cron schedules.</div>
+      <template x-if="$store.app.selectedQueue">
+        <div class="d-flex gap-2 mb-3 align-items-center">
+          <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
+          <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
+        </div>
+      </template>
 
-      <div class="table-responsive">
+      <div class="table-responsive" x-show="$store.app.selectedQueue">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
             <col style="width: 14%">
@@ -787,6 +881,115 @@
         </table>
       </div>
     </div>
+
+    <!-- Workers Tab -->
+    <div class="tab-pane fade" id="tab-workers" role="tabpanel" x-data="workersTab">
+      <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its workers.</div>
+      <template x-if="$store.app.selectedQueue">
+        <div class="d-flex gap-3 mb-3 align-items-center">
+          <button class="btn btn-outline-secondary btn-sm" @click="loadWorkers()">Refresh</button>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="workers-live-only" x-model="liveOnly" @change="persistLiveOnly()">
+            <label class="form-check-label small" for="workers-live-only">Live only</label>
+          </div>
+          <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
+        </div>
+      </template>
+
+      <div class="table-responsive" x-show="$store.app.selectedQueue">
+        <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
+          <colgroup>
+            <col style="width: 20%">
+            <col style="width: 19%">
+            <col style="width: 6%">
+            <col style="width: 11%">
+            <col style="width: 22%">
+            <col style="width: 10%">
+            <col style="width: 12%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Worker ID</th>
+              <th>Host</th>
+              <th>Threads</th>
+              <th>Last heartbeat</th>
+              <th>Metadata</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="w in displayWorkers" :key="w.workerId">
+              <tr style="cursor: pointer;" @click="showDetail(w)">
+                <td><code class="small" x-text="w.workerId"></code></td>
+                <td x-text="w.hostName ?? '-'"></td>
+                <td x-text="w.workerCount ?? '-'"></td>
+                <td><span :title="formatTime(w.lastHeartbeat)" x-text="formatAge(w.lastHeartbeat)"></span></td>
+                <td class="text-truncate small font-monospace"
+                    x-text="w.metadata ? JSON.stringify(w.metadata) : '-'"></td>
+                <td>
+                  <span :class="healthClass(w)" x-text="healthLabel(w)"></span>
+                  <template x-if="w.paused"><span class="badge paused-badge ms-1">paused</span></template>
+                </td>
+                <td @click.stop>
+                  <button class="btn btn-sm btn-outline-secondary"
+                          :disabled="isBusy(w.workerId) || w.shuttingDown"
+                          @click="togglePause(w)"
+                          x-text="w.paused ? 'Resume' : 'Pause'"></button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="displayWorkers.length === 0 && !loading">
+              <td colspan="7" class="text-muted text-center"
+                x-text="liveOnly && workers.length > 0 ? 'No live workers.' : 'No workers registered.'"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Worker Detail Modal -->
+      <div class="modal fade" id="workerDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Worker Detail</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" x-show="selectedWorker">
+              <dl class="row">
+                <dt class="col-sm-4">Worker ID</dt>
+                <dd class="col-sm-8"><code class="small" x-text="selectedWorker?.workerId"></code></dd>
+                <dt class="col-sm-4">Queue</dt>
+                <dd class="col-sm-8" x-text="selectedWorker?.queueName"></dd>
+                <dt class="col-sm-4">Host</dt>
+                <dd class="col-sm-8" x-text="selectedWorker?.hostName ?? '-'"></dd>
+                <dt class="col-sm-4">Threads</dt>
+                <dd class="col-sm-8" x-text="selectedWorker?.workerCount ?? '-'"></dd>
+                <dt class="col-sm-4">Started At</dt>
+                <dd class="col-sm-8" x-text="formatTime(selectedWorker?.startedAt, '-')"></dd>
+                <dt class="col-sm-4">Last Heartbeat</dt>
+                <dd class="col-sm-8">
+                  <span x-text="formatTime(selectedWorker?.lastHeartbeat, '-')"></span>
+                  <span class="text-muted ms-2" x-text="selectedWorker ? '(' + formatAge(selectedWorker.lastHeartbeat) + ')' : ''"></span>
+                </dd>
+                <dt class="col-sm-4">Stale Threshold</dt>
+                <dd class="col-sm-8"><span x-text="selectedWorker?.staleThresholdSecs"></span>s</dd>
+                <dt class="col-sm-4">Health</dt>
+                <dd class="col-sm-8">
+                  <span :class="selectedWorker ? healthClass(selectedWorker) : ''" x-text="selectedWorker ? healthLabel(selectedWorker) : ''"></span>
+                </dd>
+                <dt class="col-sm-4">Paused</dt>
+                <dd class="col-sm-8" x-text="selectedWorker?.paused ? 'Yes' : 'No'"></dd>
+                <dt class="col-sm-4">Metadata</dt>
+                <dd class="col-sm-8">
+                  <pre class="payload-display p-2 rounded" x-text="formatJson(selectedWorker?.metadata)"></pre>
+                </dd>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -817,6 +1020,8 @@
 <script src="js/events.js"></script>
 <script src="vendor/cronstrue.min.js"></script>
 <script src="js/cron.js"></script>
+<script src="js/workers.js"></script>
+<script src="js/queue-pause.js"></script>
 <script defer src="vendor/alpine.min.js"></script>
 </body>
 </html>

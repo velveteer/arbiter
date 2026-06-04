@@ -12,7 +12,10 @@ module Arbiter.Test.Setup
   ) where
 
 import Arbiter.Core.CronSchedule qualified as Cron
+import Arbiter.Core.Gates qualified as Gates
 import Arbiter.Core.Job.Schema qualified as Schema
+import Arbiter.Core.Queues qualified as Q
+import Arbiter.Core.Worker qualified as W
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.String (fromString)
@@ -56,6 +59,11 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ Schema.createDedupKeyIndexSQL schemaName tableName
   void $ execute_ conn $ Cron.createCronSchedulesTableSQL schemaName
   void $ execute_ conn $ Cron.addTimezoneColumnSQL schemaName
+  void $ execute_ conn $ Cron.addQueueNameColumnSQL schemaName
+  void $ execute_ conn $ W.createWorkersTableSQL schemaName
+  void $ execute_ conn $ Q.createQueuesTableSQL schemaName
+  void $ execute_ conn $ Gates.createGatesTableSQL schemaName
+  void $ execute_ conn $ W.addClaimedByColumnSQL schemaName tableName
   when (setupEnableRankingIndexes config) $ do
     void $ execute_ conn $ Schema.createJobQueueGroupKeyIndexSQL schemaName tableName
     void $ execute_ conn $ Schema.createJobQueueUngroupedRankingIndexSQL schemaName tableName
@@ -64,7 +72,6 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ Schema.createResultsTableSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTableSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsIndexSQL schemaName tableName
-  void $ execute_ conn $ Schema.createReaperSeqSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTriggerFunctionsSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTriggersSQL schemaName tableName
   when (setupEnableNotifications config) $ do
@@ -83,10 +90,14 @@ cleanupData schemaName tableName conn = do
           <> Schema.jobQueueDLQTable schemaName tableName
           <> ", "
           <> Schema.jobQueueGroupsTable schemaName tableName
+          <> ", "
+          <> W.arbiterWorkersTable schemaName
+          <> ", "
+          <> Q.arbiterQueuesTable schemaName
+          <> ", "
+          <> Gates.arbiterGatesTable schemaName
           <> " CASCADE"
       )
-  execute_ conn $
-    "DO $$ BEGIN PERFORM setval('" <> Schema.jobQueueReaperSeq schemaName tableName <> "', 0, false); END $$"
   execute_ conn "SET client_min_messages = NOTICE"
 
 execute_ :: Connection -> Text -> IO ()

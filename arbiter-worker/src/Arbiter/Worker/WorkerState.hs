@@ -17,18 +17,13 @@ newWorkerState = STM.newTVarIO Running
 signalShutdown :: TVar WorkerState -> IO ()
 signalShutdown st = STM.atomically $ STM.writeTVar st ShuttingDown
 
--- | State for worker pool coordination.
---
--- Controls whether workers claim new jobs:
---
---   * 'Running': Normal operation, claim jobs continuously
---   * 'Paused': Stop claiming new jobs, finish in-flight jobs, wait for resume
---   * 'ShuttingDown': Stop claiming new jobs, finish in-flight jobs, then exit
+-- | Effective state of a worker pool. Synthesized from two TVars on the
+-- 'Arbiter.Worker.Config.WorkerConfig': 'ShuttingDown' if the (possibly
+-- shared) shutdown TVar is set, else 'Paused' if the per-pool pause flag is
+-- set, else 'Running'. Returned by 'Arbiter.Worker.Config.getWorkerState' /
+-- 'Arbiter.Worker.Config.readEffectiveState'.
 data WorkerState
-  = -- | Normal operation
-    Running
-  | -- | Paused (stop claiming, finish in-flight, wait for resume)
-    Paused
-  | -- | Graceful shutdown in progress (drain and exit)
-    ShuttingDown
+  = Running
+  | Paused
+  | ShuttingDown
   deriving stock (Eq, Show)
