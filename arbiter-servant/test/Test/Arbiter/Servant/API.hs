@@ -10,7 +10,7 @@ module Test.Arbiter.Servant.API (spec) where
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, defaultGroupedJob, defaultJob)
+import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
@@ -40,6 +40,7 @@ import Test.Hspec.Wai
 import Arbiter.Servant (arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
   ( ApiJob (..)
+  , ApiJobWithStatus (..)
   , ApiJobWrite (..)
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
@@ -144,7 +145,7 @@ spec connStr = do
 
       -- Verify POST response contains the inserted job
       liftIO $ do
-        body :: JobResponse ServantTestPayload <- decodeBody postResp
+        body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody postResp
         let j = unApiJob (job body)
         payload j `shouldBe` TestMessage "test message"
         groupKey j `shouldBe` Just "group1"
@@ -176,7 +177,7 @@ spec connStr = do
           )
 
       liftIO $ do
-        body :: JobResponse ServantTestPayload <- decodeBody postResp
+        body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody postResp
         let j = unApiJob (job body)
         payload j `shouldBe` TestMessage "delayed"
         notVisibleUntil j `shouldBe` Just futureTime
@@ -196,7 +197,7 @@ spec connStr = do
               }|]
           )
       firstId <- liftIO $ do
-        body :: JobResponse ServantTestPayload <- decodeBody firstResp
+        body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody firstResp
         let j = unApiJob (job body)
         payload j `shouldBe` TestMessage "first"
         pure (primaryKey j)
@@ -215,7 +216,7 @@ spec connStr = do
               }|]
           )
       liftIO $ do
-        body :: JobResponse ServantTestPayload <- decodeBody dupResp
+        body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody dupResp
         let j = unApiJob (job body)
         primaryKey j `shouldBe` firstId
         payload j `shouldBe` TestMessage "first"
@@ -300,7 +301,7 @@ spec connStr = do
 
       resp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId))
       liftIO $ do
-        body :: JobResponse ServantTestPayload <- decodeBody resp
+        body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody resp
         let j = unApiJob (job body)
         payload j `shouldBe` TestMessage "get me"
         groupKey j `shouldBe` Just "group1"
@@ -339,7 +340,7 @@ spec connStr = do
         jobsTotal body `shouldBe` 1
         length (jobs body) `shouldBe` 1
         -- Verify only groupA jobs returned (not groupB)
-        forM_ (jobs body) $ \j -> groupKey (unApiJob j) `shouldBe` Just "groupA"
+        forM_ (jobs body) $ \j -> groupKey (ajwsJob j) `shouldBe` Just "groupA"
 
     it "GET /api/v1/arbiter_servant_test/jobs returns dlqChildCounts for parent with DLQ'd children" $ do
       -- Insert parent + child
@@ -361,24 +362,61 @@ spec connStr = do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         Map.lookup parentId (dlqChildCounts body) `shouldBe` Just 1
 
-    it "GET /api/v1/arbiter_servant_test/jobs?in_flight returns empty list when no jobs are claimed" $ do
-      resp <- get "/api/v1/arbiter_servant_test/jobs?in_flight"
+    it "GET /api/v1/arbiter_servant_test/jobs?status=in_flight returns empty list when no jobs are claimed" $ do
+      resp <- get "/api/v1/arbiter_servant_test/jobs?status=in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         jobsTotal body `shouldBe` 0
         jobs body `shouldBe` []
 
-    it "GET /api/v1/arbiter_servant_test/jobs?in_flight returns claimed jobs" $ do
+    it "GET /api/v1/arbiter_servant_test/jobs?status=in_flight returns claimed jobs" $ do
       liftIO $ do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "in-flight test"))
         _ <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         pure ()
 
-      resp <- get "/api/v1/arbiter_servant_test/jobs?in_flight"
+      resp <- get "/api/v1/arbiter_servant_test/jobs?status=in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         jobsTotal body `shouldBe` 1
         length (jobs body) `shouldBe` 1
+
+    it "GET /api/v1/arbiter_servant_test/jobs?status filters across all derived states" $ do
+      future <- liftIO $ truncateToMicros . addUTCTime 3600 <$> getCurrentTime
+      backoffId <- liftIO $ do
+        -- in_flight: insert then claim (the only visible job)
+        _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "inflight-job"))
+        _ <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
+        -- backoff: insert, claim, then fail into retry backoff
+        Just bj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "backoff-job"))
+        claimedB <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
+        _ <- runSimpleDb mkEnv $ HL.updateJobForRetry 60 "boom" (head claimedB)
+        -- ready
+        _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "ready-job"))
+        -- scheduled: future visibility, never attempted
+        _ <- runSimpleDb mkEnv $ HL.insertJob ((defaultJob (TestMessage "scheduled-job")) {notVisibleUntil = Just future})
+        -- suspended
+        Just sj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "suspended-job"))
+        _ <- runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable (primaryKey sj)
+        pure (primaryKey bj)
+
+      let expectOne status pay = do
+            resp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs?status=" <> status)
+            liftIO $ do
+              body :: JobsResponse ServantTestPayload <- decodeBody resp
+              jobsTotal body `shouldBe` 1
+              map (payload . ajwsJob) (jobs body) `shouldBe` [pay]
+      expectOne "ready" (TestMessage "ready-job")
+      expectOne "in_flight" (TestMessage "inflight-job")
+      expectOne "backoff" (TestMessage "backoff-job")
+      expectOne "scheduled" (TestMessage "scheduled-job")
+      expectOne "suspended" (TestMessage "suspended-job")
+
+      -- getJob returns the derived status
+      detailResp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show backoffId))
+      liftIO $ do
+        body :: JobResponse (ApiJobWithStatus ServantTestPayload) <- decodeBody detailResp
+        ajwsStatus (job body) `shouldBe` Backoff
 
     it "DELETE /api/v1/arbiter_servant_test/jobs/:id cancels a job" $ do
       -- Insert a job

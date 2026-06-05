@@ -9,6 +9,11 @@ module Arbiter.Core.Job.Types
   , defaultGroupedJob
   , isRollup
 
+    -- * Derived status
+  , JobStatus (..)
+  , jobStatusToText
+  , jobStatusFromText
+
     -- * Type Constraints
   , JobPayload
 
@@ -26,10 +31,10 @@ module Arbiter.Core.Job.Types
   , BackoffDelay
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Int (Int32, Int64)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
@@ -89,6 +94,33 @@ data Job payload key q insertedAt = Job
 -- (an empty object on insert; the merged child results before a DLQ move).
 isRollup :: Job p k q t -> Bool
 isRollup = isJust . parentState
+
+-- | Effective job status, derived (never stored) by the status SQL @CASE@ in the
+-- templates module, which is its sole definition.
+data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended
+  deriving stock (Bounded, Enum, Eq, Generic, Show)
+
+jobStatusToText :: JobStatus -> Text
+jobStatusToText Ready = "ready"
+jobStatusToText InFlight = "in_flight"
+jobStatusToText Backoff = "backoff"
+jobStatusToText Scheduled = "scheduled"
+jobStatusToText Suspended = "suspended"
+
+-- | Reverse of 'jobStatusToText' over all constructors.
+jobStatusFromTextMaybe :: Text -> Maybe JobStatus
+jobStatusFromTextMaybe t = lookup t [(jobStatusToText s, s) | s <- [minBound .. maxBound]]
+
+-- | Total reverse mapping, defaulting to 'Ready' for trusted SQL row decoding.
+jobStatusFromText :: Text -> JobStatus
+jobStatusFromText = fromMaybe Ready . jobStatusFromTextMaybe
+
+instance ToJSON JobStatus where
+  toJSON = toJSON . jobStatusToText
+
+instance FromJSON JobStatus where
+  parseJSON = withText "JobStatus" $ \t ->
+    maybe (fail ("unknown job status: " <> show t)) pure (jobStatusFromTextMaybe t)
 
 -- | Ungrouped 'JobWrite' with default values. For serial processing within a
 -- group, use 'defaultGroupedJob'.

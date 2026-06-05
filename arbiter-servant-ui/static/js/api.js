@@ -32,13 +32,12 @@ const ArbiterAPI = {
   },
 
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, suspended, rootsOnly, inFlight, sortBy, sortDir } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, status, rootsOnly, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
-    if (suspended !== undefined && suspended !== '') qs += `&suspended=${suspended}`;
+    if (status) qs += `&status=${encodeURIComponent(status)}`;
     if (rootsOnly) qs += `&roots_only=true`;
-    if (inFlight) qs += `&in_flight=true`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/jobs${qs}`);

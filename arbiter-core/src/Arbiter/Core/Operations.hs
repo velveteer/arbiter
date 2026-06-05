@@ -37,6 +37,7 @@ module Arbiter.Core.Operations
   , Tmpl.JobFilter (..)
   , listJobsFiltered
   , listJobsFilteredOrdered
+  , listJobsWithStatus
   , countJobsFiltered
   , listDLQFiltered
   , listDLQFilteredOrdered
@@ -45,6 +46,7 @@ module Arbiter.Core.Operations
     -- * Admin Operations
   , listJobs
   , getJobById
+  , getJobByIdWithStatus
   , getJobByDedupKey
   , getJobsByGroup
   , cancelJob
@@ -115,6 +117,7 @@ module Arbiter.Core.Operations
 
 import Control.Monad (foldM, void, when)
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
+import Data.Bitraversable (bitraverse)
 import Data.Foldable (for_, toList)
 import Data.Functor qualified as Functor
 import Data.Int (Int32, Int64)
@@ -161,8 +164,11 @@ import Arbiter.Core.Job.Types
   , Job (..)
   , JobPayload
   , JobRead
+  , JobStatus
   , JobWrite
   , isRollup
+  , jobStatusFromText
+  , jobStatusToText
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Queues (QueueRow)
@@ -224,10 +230,8 @@ buildWhereClause filters =
 filterToClause :: Tmpl.JobFilter -> (Text, Params)
 filterToClause (Tmpl.FilterGroupKey gk) = ("group_key = ?", [pval CText gk])
 filterToClause (Tmpl.FilterParentId pid) = ("parent_id = ?", [pval CInt8 pid])
-filterToClause (Tmpl.FilterSuspended b) = ("suspended = ?", [pval CBool b])
-filterToClause Tmpl.FilterInFlight =
-  ("attempts > 0 AND NOT suspended AND not_visible_until IS NOT NULL AND not_visible_until > NOW()", [])
 filterToClause Tmpl.FilterRootsOnly = ("parent_id IS NULL", [])
+filterToClause (Tmpl.FilterStatus s) = ("status = ?", [pval CText (jobStatusToText s)])
 
 -- | Execute a count/rows-affected query returning a single Int64.
 -- Returns 0 if the result set is empty or unexpected.
@@ -380,7 +384,7 @@ insertJobsBatch schemaName tableName jobs = withDbTransaction $ do
         ]
 
   rawJobs <- executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName) params (jobRowCodec tableName)
-  mapM decodePayload rawJobs
+  traverse decodePayload rawJobs
 
 insertJobsBatch_
   :: forall m payload
@@ -606,7 +610,7 @@ claimJobs
 claimJobs schemaName tableName maxJobs timeout mWorkerId = withDbTransaction $ do
   let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs timeout mWorkerId
   rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
-  mapM decodePayload rawJobs
+  traverse decodePayload rawJobs
 
 -- | Batched variant of 'claimNextVisibleJobs' - claims up to @batchSize@ jobs
 -- per group, across up to @maxBatches@ groups. Leaves @claimed_by@ NULL.
@@ -652,7 +656,7 @@ claimJobsBatched schemaName tableName batchSize maxBatches timeout mWorkerId
   | otherwise = withDbTransaction $ do
       let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches timeout mWorkerId
       rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
-      jobs <- mapM decodePayload rawJobs
+      jobs <- traverse decodePayload rawJobs
       let sorted = sortOn groupKey jobs
           groups = groupBy (\j1 j2 -> groupKey j1 == groupKey j2) sorted
       pure $ concatMap (chunksOfNE batchSize) $ mapMaybe NE.nonEmpty groups
@@ -733,7 +737,7 @@ ackJobsBatch
   -> m Int64
 ackJobsBatch _ _ [] = pure 0
 ackJobsBatch schemaName tableName jobs =
-  withDbTransaction $ sum <$> mapM (ackJobInner schemaName tableName) jobs
+  withDbTransaction $ sum <$> traverse (ackJobInner schemaName tableName) jobs
 
 -- | Bulk ack for standalone jobs (no parent, no tree logic).
 --
@@ -1027,13 +1031,50 @@ listJobsFilteredOrdered
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset = do
+listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
+  | any isStatusFilter filters =
+      map fst <$> listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset
+  | otherwise = do
+      let (whereClause, orderBy, params) = listQueryParts filters mSortBy mSortDir limit offset
+          sql = Tmpl.listJobsFilteredSQL schemaName tableName whereClause orderBy
+      rawJobs <- executeQuery sql params (jobRowCodec tableName)
+      traverse decodePayload rawJobs
+
+isStatusFilter :: Tmpl.JobFilter -> Bool
+isStatusFilter (Tmpl.FilterStatus _) = True
+isStatusFilter _ = False
+
+-- | Decode a job row plus its derived @status@ trailing column.
+jobRowWithStatusCodec :: TableName -> RowCodec (JobRead Value, JobStatus)
+jobRowWithStatusCodec tableName =
+  (,) <$> jobRowCodec tableName <*> (jobStatusFromText <$> col "status" CText)
+
+-- | Shared WHERE clause, ORDER BY, and limit+offset params for job listings.
+listQueryParts
+  :: [Tmpl.JobFilter] -> Maybe Tmpl.JobSortColumn -> Maybe Tmpl.SortDir -> Int -> Int -> (Text, Text, Params)
+listQueryParts filters mSortBy mSortDir limit offset =
   let (whereClause, filterParams) = buildWhereClause filters
       orderBy = Tmpl.buildJobsOrderBy mSortBy mSortDir
-      sql = Tmpl.listJobsFilteredSQL schemaName tableName whereClause orderBy
       params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
-  rawJobs <- executeQuery sql params (jobRowCodec tableName)
-  mapM decodePayload rawJobs
+   in (whereClause, orderBy, params)
+
+-- | 'listJobsFilteredOrdered' that also returns each job's derived status.
+listJobsWithStatus
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Tmpl.JobFilter]
+  -> Maybe Tmpl.JobSortColumn
+  -> Maybe Tmpl.SortDir
+  -> Int
+  -> Int
+  -> m [(JobRead payload, JobStatus)]
+listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset = do
+  let (whereClause, orderBy, params) = listQueryParts filters mSortBy mSortDir limit offset
+      sql = Tmpl.listJobsWithStatusSQL schemaName tableName whereClause orderBy
+  rows <- executeQuery sql params (jobRowWithStatusCodec tableName)
+  traverse (bitraverse decodePayload pure) rows
 
 -- | List jobs with composable filters.
 --
@@ -1098,7 +1139,7 @@ listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offse
       sql = Tmpl.listDLQFilteredSQL schemaName tableName whereClause orderBy
       params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
   rawRows <- executeQuery sql params (dlqRowCodec tableName)
-  mapM decodeDLQRow rawRows
+  traverse decodeDLQRow rawRows
 
 -- | List DLQ jobs with composable filters.
 --
@@ -1283,6 +1324,22 @@ getJobById schemaName tableName jobId = do
     [] -> pure Nothing
     (raw : _) -> Just <$> decodePayload raw
 
+-- | 'getJobById' that also returns the job's derived status.
+getJobByIdWithStatus
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int64
+  -> m (Maybe (JobRead payload, JobStatus))
+getJobByIdWithStatus schemaName tableName jobId = do
+  rows <-
+    executeQuery
+      (Tmpl.getJobByIdWithStatusSQL schemaName tableName)
+      [pval CInt8 jobId]
+      (jobRowWithStatusCodec tableName)
+  traverse (bitraverse decodePayload pure) (listToMaybe rows)
+
 -- | Get a single job by its dedup key.
 getJobByDedupKey
   :: forall m payload
@@ -1383,7 +1440,7 @@ cancelJobsBatch
   -> m Int64
 cancelJobsBatch _ _ [] = pure 0
 cancelJobsBatch schemaName tableName jobIds =
-  withDbTransaction $ sum <$> mapM (cancelJobInner schemaName tableName) jobIds
+  withDbTransaction $ sum <$> traverse (cancelJobInner schemaName tableName) jobIds
 
 -- | Promote a delayed or retrying job to be immediately visible.
 --

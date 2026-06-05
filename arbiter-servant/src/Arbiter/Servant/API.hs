@@ -19,6 +19,7 @@ module Arbiter.Servant.API
   , WorkersAPI (..)
   ) where
 
+import Arbiter.Core.Job.Types (JobStatus, jobStatusToText)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.Core.SqlTemplates
   ( DLQSortColumn
@@ -66,18 +67,23 @@ instance FromHttpApiData SortDir where
 instance ToHttpApiData SortDir where
   toUrlPiece = sortDirSql
 
+instance FromHttpApiData JobStatus where
+  parseQueryParam = parseEnum jobStatusToText
+
+instance ToHttpApiData JobStatus where
+  toUrlPiece = jobStatusToText
+
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&suspended=B&roots_only&in_flight&sort_by=...&sort_dir=...
+  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&roots_only&status=S&sort_by=...&sort_dir=...
     listJobs
       :: mode
         :- QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> QueryParam "parent_id" Int64
-          :> QueryParam "suspended" Bool
           :> QueryFlag "roots_only"
-          :> QueryFlag "in_flight"
+          :> QueryParam "status" JobStatus
           :> QueryParam "sort_by" JobSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
@@ -85,7 +91,7 @@ data JobsAPI payload mode = JobsAPI
     insertJob
       :: mode
         :- ReqBody '[JSON] (ApiJobWrite payload)
-          :> Post '[JSON] (JobResponse payload)
+          :> Post '[JSON] (JobResponse (ApiJob payload))
   , -- POST /:table/jobs/batch (insert multiple jobs)
     insertJobsBatch
       :: mode
@@ -96,7 +102,7 @@ data JobsAPI payload mode = JobsAPI
     getJob
       :: mode
         :- Capture "id" Int64
-          :> Get '[JSON] (JobResponse payload)
+          :> Get '[JSON] (JobResponse (ApiJobWithStatus payload))
   , -- DELETE /:table/jobs/:id (cancel job)
     cancelJob
       :: mode

@@ -1,8 +1,23 @@
 /**
  * Alpine component: DLQ table + retry/delete
  */
+// Ordered column registry. Order must match the table header and cell order.
+const DLQ_COLUMNS = [
+  { key: 'select', label: 'Select', weight: 4, required: true },
+  { key: 'dlqid', label: 'DLQ ID', weight: 6 },
+  { key: 'jobid', label: 'Job ID', weight: 6 },
+  { key: 'parent', label: 'Parent', weight: 6 },
+  { key: 'group', label: 'Group', weight: 8 },
+  { key: 'payload', label: 'Payload', weight: 16 },
+  { key: 'failed', label: 'Failed At', weight: 12 },
+  { key: 'attempts', label: 'Attempts', weight: 8 },
+  { key: 'error', label: 'Last Error', weight: 16 },
+  { key: 'actions', label: 'Actions', weight: 18 },
+];
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('dlqTab', () => withPagination({
+    ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols'),
     dlqJobs: [],
     total: 0,
     loading: false,
@@ -35,6 +50,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     init() {
+      this._loadColPrefs();
       const f = readFiltersFromUrl();
       if (location.hash.replace('#', '') === 'dlq') {
         this.groupKeyFilter = f.groupKey;

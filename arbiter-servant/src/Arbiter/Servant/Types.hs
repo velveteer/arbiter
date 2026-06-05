@@ -13,21 +13,25 @@ module Arbiter.Servant.Types
 
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, isRollup)
+import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
 import Arbiter.Core.Operations (QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.Worker (WorkerRow (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
+import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
-import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-data ApiJob payload = ApiJob
-  { unApiJob :: JobRead payload
-  , apiJobNow :: UTCTime
+newtype ApiJob payload = ApiJob {unApiJob :: JobRead payload}
+  deriving stock (Eq, Show)
+
+-- | A job row plus its SQL-derived status, for the list endpoint.
+data ApiJobWithStatus payload = ApiJobWithStatus
+  { ajwsJob :: JobRead payload
+  , ajwsStatus :: JobStatus
   }
   deriving stock (Eq, Show)
 
@@ -39,37 +43,34 @@ data ApiJob payload = ApiJob
 newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
   deriving newtype (Eq, Show)
 
--- | Derive the effective status of a job.
-jobStatus :: UTCTime -> JobRead payload -> Text
-jobStatus now job
-  | suspended job = "suspended"
-  | attempts job > 0, Just nvu <- notVisibleUntil job, nvu > now = "in_flight"
-  | Just nvu <- notVisibleUntil job, nvu > now = "scheduled"
-  | otherwise = "ready"
+-- | Shared JSON field list for a job row. 'ApiJobWithStatus' appends @status@.
+apiJobPairs :: (ToJSON payload) => JobRead payload -> [Pair]
+apiJobPairs job =
+  [ "primaryKey" .= primaryKey job
+  , "payload" .= payload job
+  , "queueName" .= Arb.queueName job
+  , "groupKey" .= groupKey job
+  , "insertedAt" .= insertedAt job
+  , "updatedAt" .= Arb.updatedAt job
+  , "attempts" .= attempts job
+  , "lastError" .= lastError job
+  , "priority" .= priority job
+  , "lastAttemptedAt" .= lastAttemptedAt job
+  , "notVisibleUntil" .= notVisibleUntil job
+  , "dedupKey" .= dedupKey job
+  , "maxAttempts" .= maxAttempts job
+  , "parentId" .= parentId job
+  , "parentState" .= parentState job
+  , "isRollup" .= isRollup job
+  , "suspended" .= suspended job
+  , "claimedBy" .= Arb.claimedBy job
+  ]
 
 instance (ToJSON payload) => ToJSON (ApiJob payload) where
-  toJSON (ApiJob job now) =
-    object
-      [ "primaryKey" .= primaryKey job
-      , "payload" .= payload job
-      , "queueName" .= Arb.queueName job
-      , "groupKey" .= groupKey job
-      , "insertedAt" .= insertedAt job
-      , "updatedAt" .= Arb.updatedAt job
-      , "attempts" .= attempts job
-      , "lastError" .= lastError job
-      , "priority" .= priority job
-      , "lastAttemptedAt" .= lastAttemptedAt job
-      , "notVisibleUntil" .= notVisibleUntil job
-      , "dedupKey" .= dedupKey job
-      , "maxAttempts" .= maxAttempts job
-      , "parentId" .= parentId job
-      , "parentState" .= parentState job
-      , "isRollup" .= isRollup job
-      , "suspended" .= suspended job
-      , "claimedBy" .= Arb.claimedBy job
-      , "status" .= jobStatus now job
-      ]
+  toJSON (ApiJob job) = object (apiJobPairs job)
+
+instance (ToJSON payload) => ToJSON (ApiJobWithStatus payload) where
+  toJSON (ApiJobWithStatus job status) = object (apiJobPairs job <> ["status" .= status])
 
 instance (FromJSON payload) => FromJSON (ApiJob payload) where
   parseJSON = withObject "Job" $ \v -> do
@@ -92,7 +93,13 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .:? "parentState" .!= Nothing
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy" .!= Nothing
-    pure $ ApiJob job (insertedAt job)
+    pure $ ApiJob job
+
+instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
+  parseJSON v = do
+    ApiJob job <- parseJSON v
+    status <- withObject "JobWithStatus" (\o -> o .: "status") v
+    pure $ ApiJobWithStatus job status
 
 instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
   toJSON (ApiJobWrite job) =
@@ -127,18 +134,15 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
 
-data ApiDLQJob payload = ApiDLQJob
-  { unApiDLQJob :: DLQ.DLQJob payload
-  , apiDLQNow :: UTCTime
-  }
+newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
   deriving stock (Eq, Show)
 
 instance (ToJSON payload) => ToJSON (ApiDLQJob payload) where
-  toJSON (ApiDLQJob dlq now) =
+  toJSON (ApiDLQJob dlq) =
     object
       [ "dlqPrimaryKey" .= DLQ.dlqPrimaryKey dlq
       , "failedAt" .= DLQ.failedAt dlq
-      , "jobSnapshot" .= ApiJob (DLQ.jobSnapshot dlq) now
+      , "jobSnapshot" .= ApiJob (DLQ.jobSnapshot dlq)
       ]
 
 instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
@@ -149,18 +153,19 @@ instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
         <$> v .: "dlqPrimaryKey"
         <*> v .: "failedAt"
         <*> pure (unApiJob apiJob)
-    pure $ ApiDLQJob dlq (apiJobNow apiJob)
+    pure $ ApiDLQJob dlq
 
--- | Response wrapper for job operations
-data JobResponse payload = JobResponse
-  { job :: ApiJob payload
+-- | Single-job response envelope, parameterized over the job representation
+-- ('ApiJob' for insert, 'ApiJobWithStatus' for the detail endpoint).
+newtype JobResponse a = JobResponse
+  { job :: a
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Response wrapper for multiple jobs
 data JobsResponse payload = JobsResponse
-  { jobs :: [ApiJob payload]
+  { jobs :: [ApiJobWithStatus payload]
   , jobsTotal :: Int
   , jobsOffset :: Int
   , jobsLimit :: Int

@@ -156,18 +156,37 @@
         <select class="form-select form-select-sm" style="width: auto;" title="Filter by job state"
           x-model="stateFilter" @change="applyState()">
           <option value="">All states</option>
-          <option value="inflight">In-flight</option>
+          <option value="ready">Ready</option>
+          <option value="in_flight">In-flight</option>
+          <option value="backoff">Backoff</option>
+          <option value="scheduled">Scheduled</option>
           <option value="suspended">Suspended</option>
-          <option value="notsuspended">Not suspended</option>
         </select>
 
         <!-- View -->
         <button class="btn btn-sm" :class="effectiveViewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
           @click="toggleViewMode()"
-          :disabled="showInFlight"
-          :title="showInFlight ? 'In-flight always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
+          :disabled="!!stateFilter"
+          :title="stateFilter ? 'A status filter always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
           <span x-text="effectiveViewMode === 'tree' ? 'Tree' : 'Flat'"></span>
         </button>
+
+        <!-- Columns -->
+        <div class="dropdown">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Show/hide columns">Columns</button>
+          <ul class="dropdown-menu p-2" style="min-width: 12rem;">
+            <template x-for="c in columns.filter((col) => !col.required)" :key="c.key">
+              <li>
+                <label class="dropdown-item d-flex align-items-center gap-2 mb-0">
+                  <input type="checkbox" class="form-check-input mt-0" :checked="colVisible(c.key)" @change="toggleCol(c.key)">
+                  <span x-text="c.label"></span>
+                </label>
+              </li>
+            </template>
+            <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" @click="resetColumns()">Reset to defaults</button></li>
+          </ul>
+        </div>
 
         <!-- Actions -->
         <div class="ms-auto d-flex gap-2 align-items-center">
@@ -242,41 +261,28 @@
       <!-- Jobs table -->
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
-          <colgroup>
-            <col style="width: 4%;">
-            <col style="width: 13%;">
-            <col style="width: 7%;">
-            <col style="width: 5%;">
-            <col style="width: 9%;">
-            <col style="width: 5%;">
-            <col style="width: 6%;">
-            <col style="width: 7%;">
-            <col style="width: 10%;">
-            <col style="width: 17%;">
-            <col style="width: 17%;">
-          </colgroup>
           <thead>
             <tr>
-              <th class="sortable" @click="toggleSort('id')">ID<span x-text="sortIndicator('id')"></span></th>
-              <th>Payload</th>
-              <th class="sortable" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
-              <th class="sortable" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
-              <th>Children</th>
-              <th class="sortable" @click="toggleSort('priority')">Priority<span x-text="sortIndicator('priority')"></span></th>
-              <th class="sortable" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
-              <th>Status</th>
-              <th class="sortable" @click="toggleSort('inserted_at')">Inserted At<span x-text="sortIndicator('inserted_at')"></span></th>
-              <th class="sortable" @click="toggleSort('not_visible_until')">
+              <th class="sortable" :style="'width:' + colPct('id') + '%'" @click="toggleSort('id')">ID<span x-text="sortIndicator('id')"></span></th>
+              <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
+              <th :class="{ 'd-none': !colVisible('children') }" :style="'width:' + colPct('children') + '%'">Children</th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('priority') }" :style="'width:' + colPct('priority') + '%'" @click="toggleSort('priority')">Priority<span x-text="sortIndicator('priority')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
+              <th :class="{ 'd-none': !colVisible('status') }" :style="'width:' + colPct('status') + '%'">Status</th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('inserted') }" :style="'width:' + colPct('inserted') + '%'" @click="toggleSort('inserted_at')">Inserted At<span x-text="sortIndicator('inserted_at')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('visible') }" :style="'width:' + colPct('visible') + '%'" @click="toggleSort('not_visible_until')">
                 <span x-text="notVisibleFormat === 'countdown' ? 'Visible In' : 'Visible At'"></span><span x-text="sortIndicator('not_visible_until')"></span>
               </th>
-              <th>Actions</th>
+              <th :class="{ 'd-none': !colVisible('actions') }" :style="'width:' + colPct('actions') + '%'">Actions</th>
             </tr>
           </thead>
           <tbody>
             <template x-for="job in displayJobs" :key="String(job.primaryKey) + '-' + job._depth">
               <tr :class="job._depth > 0 ? 'child-row' : ''">
                 <template x-if="job._isMoreRow">
-                  <td colspan="11" class="text-center text-muted small fst-italic"
+                  <td :colspan="columns.length" class="text-center text-muted small fst-italic"
                     :style="'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)'">
                     Showing <span x-text="job._shown"></span> of <span x-text="job._total"></span> children of #<span x-text="job._parentKey"></span> &mdash;
                     <a href="#" @click.prevent="filterByParent(job._parentKey)">view all</a>
@@ -288,14 +294,14 @@
                     x-text="job.primaryKey"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate" :title="JSON.stringify(job.payload)"
+                  <td class="text-truncate" x-show="colVisible('payload')" :title="JSON.stringify(job.payload)"
                     x-text="truncate(job.payload)"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate" x-text="job.groupKey || '-'"></td>
+                  <td class="text-truncate" x-show="colVisible('group')" x-text="job.groupKey || '-'"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td>
+                  <td x-show="colVisible('parent')">
                     <template x-if="job.parentId">
                       <a href="#" class="text-decoration-none"
                         @click.prevent="filterByParent(job.parentId)"
@@ -307,7 +313,7 @@
                   </td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                <td>
+                <td x-show="colVisible('children')">
                   <template x-if="job._childCount || job._dlqChildCount">
                     <span class="d-inline-flex gap-1 flex-wrap align-items-center">
                       <template x-if="job._childCount">
@@ -339,17 +345,18 @@
                 </td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td x-text="job.priority"></td>
+                  <td x-show="colVisible('priority')" x-text="job.priority"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td x-text="job.attempts"></td>
+                  <td x-show="colVisible('attempts')" x-text="job.attempts"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td>
+                  <td x-show="colVisible('status')">
                     <span class="badge"
                       :class="{
                         'bg-warning-subtle text-warning-emphasis': job.status === 'suspended',
                         'bg-primary-subtle text-primary-emphasis': job.status === 'in_flight',
+                        'bg-danger-subtle text-danger-emphasis': job.status === 'backoff',
                         'bg-secondary-subtle text-secondary-emphasis': job.status === 'scheduled',
                         'bg-success-subtle text-success-emphasis': job.status === 'ready',
                       }"
@@ -357,10 +364,10 @@
                   </td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate" :title="job.insertedAt" x-text="formatTime(job.insertedAt, '-')"></td>
+                  <td class="text-truncate" x-show="colVisible('inserted')" :title="job.insertedAt" x-text="formatTime(job.insertedAt, '-')"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td class="text-truncate font-monospace">
+                  <td class="text-truncate font-monospace" x-show="colVisible('visible')">
                     <span class="format-toggle-cell"
                           @click="toggleNotVisibleFormat()"
                           :title="job.notVisibleUntil ? 'Click to switch format · ' + (notVisibleFormat === 'countdown' ? formatTime(job.notVisibleUntil) : formatCountdown(job.notVisibleUntil)) : 'Click to switch format'"
@@ -368,7 +375,7 @@
                   </td>
                 </template>
                 <template x-if="!job._isMoreRow">
-                  <td>
+                  <td x-show="colVisible('actions')">
                     <div class="d-inline-flex gap-1 flex-nowrap">
                       <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
                       <div class="dropdown">
@@ -376,7 +383,7 @@
                           Actions
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end">
-                          <li x-show="job.status === 'scheduled'">
+                          <li x-show="job.status === 'scheduled' || job.status === 'backoff'">
                             <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey)">Promote</a>
                           </li>
                           <li>
@@ -403,7 +410,7 @@
               </tr>
             </template>
             <tr x-show="displayJobs.length === 0">
-              <td colspan="11" class="text-muted text-center">No jobs found.</td>
+              <td :colspan="columns.length" class="text-muted text-center">No jobs found.</td>
             </tr>
           </tbody>
         </table>
@@ -492,6 +499,23 @@
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
 
+        <!-- Columns -->
+        <div class="dropdown">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Show/hide columns">Columns</button>
+          <ul class="dropdown-menu p-2" style="min-width: 12rem;">
+            <template x-for="c in columns.filter((col) => !col.required)" :key="c.key">
+              <li>
+                <label class="dropdown-item d-flex align-items-center gap-2 mb-0">
+                  <input type="checkbox" class="form-check-input mt-0" :checked="colVisible(c.key)" @change="toggleCol(c.key)">
+                  <span x-text="c.label"></span>
+                </label>
+              </li>
+            </template>
+            <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" @click="resetColumns()">Reset to defaults</button></li>
+          </ul>
+        </div>
+
         <!-- Actions -->
         <div class="ms-auto d-flex gap-2 align-items-center">
           <div class="btn-group btn-group-sm">
@@ -533,31 +557,19 @@
 
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
-          <colgroup>
-            <col style="width: 4%;">
-            <col style="width: 6%;">
-            <col style="width: 6%;">
-            <col style="width: 6%;">
-            <col style="width: 8%;">
-            <col style="width: 16%;">
-            <col style="width: 12%;">
-            <col style="width: 8%;">
-            <col style="width: 16%;">
-            <col style="width: 18%;">
-          </colgroup>
           <thead>
             <tr>
-              <th><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
+              <th :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
                   :checked="allSelected" @change="toggleSelectAll()"></th>
-              <th class="sortable" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
-              <th class="sortable" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
-              <th class="sortable" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
-              <th class="sortable" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
-              <th>Payload</th>
-              <th class="sortable" @click="toggleSort('failed_at')">Failed At<span x-text="sortIndicator('failed_at')"></span></th>
-              <th class="sortable" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
-              <th>Last Error</th>
-              <th>Actions</th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('dlqid') }" :style="'width:' + colPct('dlqid') + '%'" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
+              <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('failed') }" :style="'width:' + colPct('failed') + '%'" @click="toggleSort('failed_at')">Failed At<span x-text="sortIndicator('failed_at')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
+              <th :class="{ 'd-none': !colVisible('error') }" :style="'width:' + colPct('error') + '%'">Last Error</th>
+              <th :class="{ 'd-none': !colVisible('actions') }" :style="'width:' + colPct('actions') + '%'">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -565,9 +577,9 @@
               <tr :class="isSelected(job.dlqPrimaryKey) ? 'table-active' : ''">
                 <td><input class="form-check-input m-0" type="checkbox" aria-label="Select entry"
                     :checked="isSelected(job.dlqPrimaryKey)" @change="toggleSelect(job.dlqPrimaryKey)"></td>
-                <td class="text-truncate" x-text="job.dlqPrimaryKey"></td>
-                <td class="text-truncate" x-text="job.jobSnapshot?.primaryKey ?? '-'"></td>
-                <td class="text-truncate">
+                <td class="text-truncate" x-show="colVisible('dlqid')" x-text="job.dlqPrimaryKey"></td>
+                <td class="text-truncate" x-show="colVisible('jobid')" x-text="job.jobSnapshot?.primaryKey ?? '-'"></td>
+                <td class="text-truncate" x-show="colVisible('parent')">
                   <template x-if="job.jobSnapshot?.parentId">
                     <a href="#" class="text-decoration-none" @click.prevent="filterByParent(job.jobSnapshot.parentId)"
                       x-text="job.jobSnapshot.parentId"></a>
@@ -576,14 +588,14 @@
                     <span>-</span>
                   </template>
                 </td>
-                <td class="text-truncate" x-text="job.jobSnapshot?.groupKey || '-'"></td>
-                <td class="text-truncate" :title="JSON.stringify(job.jobSnapshot?.payload)"
+                <td class="text-truncate" x-show="colVisible('group')" x-text="job.jobSnapshot?.groupKey || '-'"></td>
+                <td class="text-truncate" x-show="colVisible('payload')" :title="JSON.stringify(job.jobSnapshot?.payload)"
                   x-text="truncate(job.jobSnapshot?.payload)"></td>
-                <td class="text-truncate" :title="job.failedAt" x-text="formatTime(job.failedAt, '-')"></td>
-                <td x-text="job.jobSnapshot?.attempts ?? '-'"></td>
-                <td class="text-truncate" :title="job.jobSnapshot?.lastError"
+                <td class="text-truncate" x-show="colVisible('failed')" :title="job.failedAt" x-text="formatTime(job.failedAt, '-')"></td>
+                <td x-show="colVisible('attempts')" x-text="job.jobSnapshot?.attempts ?? '-'"></td>
+                <td class="text-truncate" x-show="colVisible('error')" :title="job.jobSnapshot?.lastError"
                   x-text="truncate(job.jobSnapshot?.lastError)"></td>
-                <td>
+                <td x-show="colVisible('actions')">
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job)" title="View">Detail</button>
                     <div class="dropdown">
@@ -600,7 +612,7 @@
               </tr>
             </template>
             <tr x-show="dlqJobs.length === 0">
-              <td colspan="10" class="text-muted text-center">No DLQ entries.</td>
+              <td :colspan="columns.length" class="text-muted text-center">No DLQ entries.</td>
             </tr>
           </tbody>
         </table>

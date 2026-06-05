@@ -163,19 +163,63 @@ function withPagination(component, loadMethod) {
 }
 
 // ---------------------------------------------------------------------------
+// Column show/hide preferences
+// ---------------------------------------------------------------------------
+
+// Persisted column visibility shared by table tabs. Pass an ordered registry of
+// { key, label, weight, required? } and a localStorage key.
+function columnPrefs(columns, storageKey) {
+  return {
+    columns,
+    colVis: {},
+
+    _loadColPrefs() {
+      const def = {};
+      columns.forEach((c) => { def[c.key] = true; });
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch { saved = {}; }
+      this.colVis = { ...def, ...saved };
+    },
+
+    colVisible(key) {
+      return this.colVis[key] !== false;
+    },
+
+    toggleCol(key) {
+      if (columns.find((c) => c.key === key)?.required) return;
+      this.colVis = { ...this.colVis, [key]: !this.colVisible(key) };
+      localStorage.setItem(storageKey, JSON.stringify(this.colVis));
+    },
+
+    // Width renormalized over visible columns, so the table fills 100% and
+    // hiding a column lets the rest grow to fill the freed space.
+    colPct(key) {
+      const total = columns.reduce((sum, c) => sum + (this.colVisible(c.key) ? c.weight : 0), 0);
+      const col = columns.find((c) => c.key === key);
+      return total ? (col.weight / total) * 100 : 0;
+    },
+
+    resetColumns() {
+      this.colVis = {};
+      columns.forEach((c) => { this.colVis[c.key] = true; });
+      localStorage.removeItem(storageKey);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // URL filter sync
 // ---------------------------------------------------------------------------
 
-/** Keys managed by tab components — cleared on tab switch. */
-const _filterKeys = ['group_key', 'parent_id', 'suspended', 'in_flight', 'sort_by', 'sort_dir'];
+// Filter keys cleared on tab switch.
+const _filterKeys = ['group_key', 'parent_id', 'status', 'sort_by', 'sort_dir'];
 
 function readFiltersFromUrl() {
   const p = new URLSearchParams(location.search);
   return {
     groupKey: p.get('group_key') || '',
     parentId: p.get('parent_id') || '',
-    suspended: p.get('suspended') || '',
-    inFlight: p.get('in_flight') === 'true',
+    status: p.get('status') || '',
     sortBy: p.get('sort_by') || '',
     sortDir: p.get('sort_dir') || '',
   };
@@ -186,8 +230,7 @@ function writeFiltersToUrl(filters) {
   for (const k of _filterKeys) url.searchParams.delete(k);
   if (filters.groupKey) url.searchParams.set('group_key', filters.groupKey);
   if (filters.parentId) url.searchParams.set('parent_id', filters.parentId);
-  if (filters.suspended) url.searchParams.set('suspended', filters.suspended);
-  if (filters.inFlight) url.searchParams.set('in_flight', 'true');
+  if (filters.status) url.searchParams.set('status', filters.status);
   if (filters.sortBy) url.searchParams.set('sort_by', filters.sortBy);
   if (filters.sortDir) url.searchParams.set('sort_dir', filters.sortDir);
   history.replaceState(null, '', url);

@@ -1,13 +1,29 @@
 /**
  * Alpine component: job table + pagination + actions + insert form + detail modal
  */
+// Ordered column registry. Order must match the table header and cell order.
+// weight is a relative share, renormalized over the visible columns to fill 100%.
+const JOB_COLUMNS = [
+  { key: 'id', label: 'ID', weight: 4, required: true },
+  { key: 'payload', label: 'Payload', weight: 13 },
+  { key: 'group', label: 'Group', weight: 7 },
+  { key: 'parent', label: 'Parent', weight: 5 },
+  { key: 'children', label: 'Children', weight: 9 },
+  { key: 'priority', label: 'Priority', weight: 7 },
+  { key: 'attempts', label: 'Attempts', weight: 6 },
+  { key: 'status', label: 'Status', weight: 7 },
+  { key: 'inserted', label: 'Inserted At', weight: 10 },
+  { key: 'visible', label: 'Visible', weight: 17 },
+  { key: 'actions', label: 'Actions', weight: 15 },
+];
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('jobsTab', () => withPagination({
+    ...columnPrefs(JOB_COLUMNS, 'arb.jobCols'),
     jobs: [],
     total: 0,
     groupKeyFilter: '',
     parentIdFilter: '',
-    suspendedFilter: '',
     stateFilter: '',
     _appliedGroupKey: '',
     _appliedParentId: '',
@@ -16,7 +32,6 @@ document.addEventListener('alpine:init', () => {
     pausedParents: [],
     expandedParents: {},
     viewMode: 'tree',
-    showInFlight: false,
     loading: false,
     active: false,
     selectedJob: null,
@@ -38,7 +53,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     get effectiveViewMode() {
-      return this.showInFlight ? 'flat' : this.viewMode;
+      // A status filter spans the tree, so render flat (a matching child has no
+      // visible parent to nest under).
+      return this.stateFilter ? 'flat' : this.viewMode;
     },
 
     get _topLevelHiddenCount() {
@@ -114,7 +131,6 @@ document.addEventListener('alpine:init', () => {
       try {
         const data = await ArbiterAPI.listJobs(queue, {
           parentId: id, limit: 50,
-          suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
@@ -174,25 +190,21 @@ document.addEventListener('alpine:init', () => {
       writeFiltersToUrl({
         groupKey: this._appliedGroupKey,
         parentId: this._appliedParentId,
-        suspended: this.suspendedFilter,
-        inFlight: this.showInFlight,
+        status: this.stateFilter,
         sortBy: this.sortBy,
         sortDir: this.sortDir,
       });
     },
 
     init() {
+      this._loadColPrefs();
       const f = readFiltersFromUrl();
       if (location.hash.replace('#', '') === 'jobs') {
         this.groupKeyFilter = f.groupKey;
         this._appliedGroupKey = f.groupKey;
         this.parentIdFilter = f.parentId;
         this._appliedParentId = f.parentId;
-        this.suspendedFilter = f.suspended;
-        this.showInFlight = f.inFlight;
-        this.stateFilter = f.inFlight ? 'inflight'
-          : f.suspended === 'true' ? 'suspended'
-          : f.suspended === 'false' ? 'notsuspended' : '';
+        this.stateFilter = f.status;
         this.sortBy = f.sortBy;
         this.sortDir = f.sortDir;
       }
@@ -206,8 +218,6 @@ document.addEventListener('alpine:init', () => {
           clearFiltersFromUrl();
           this.groupKeyFilter = '';
           this.parentIdFilter = '';
-          this.suspendedFilter = '';
-          this.showInFlight = false;
           this.stateFilter = '';
           this._appliedGroupKey = '';
           this._appliedParentId = '';
@@ -219,8 +229,6 @@ document.addEventListener('alpine:init', () => {
       window.addEventListener('queue-changed', () => {
         this.groupKeyFilter = '';
         this.parentIdFilter = '';
-        this.suspendedFilter = '';
-        this.showInFlight = false;
         this.stateFilter = '';
         this._appliedGroupKey = '';
         this._appliedParentId = '';
@@ -233,9 +241,12 @@ document.addEventListener('alpine:init', () => {
       });
       window.addEventListener('sse-event', (e) => {
         const queue = Alpine.store('app').selectedQueue;
-        const relevantTypes = this.showInFlight
-          ? ['job_updated', 'job_deleted']
-          : ['job_inserted', 'job_updated', 'job_deleted'];
+        // Inserts land as ready/scheduled (or suspended for rollup parents), but
+        // never in_flight/backoff, which require a prior attempt.
+        const insertsRelevant = !['in_flight', 'backoff'].includes(this.stateFilter);
+        const relevantTypes = insertsRelevant
+          ? ['job_inserted', 'job_updated', 'job_deleted']
+          : ['job_updated', 'job_deleted'];
         const count = e.detail.filter(evt =>
           evt.table === queue && relevantTypes.includes(evt.event)
         ).length;
@@ -270,15 +281,14 @@ document.addEventListener('alpine:init', () => {
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
       const startingPending = this.pendingChanges;
       try {
-        const rootsOnly = !this.showInFlight && this.viewMode === 'tree' && !pid && !gk;
+        const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !pid && !gk;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
           offset: this.offset,
           groupKey: gk || undefined,
           parentId: pid || undefined,
-          suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
+          status: this.stateFilter || undefined,
           rootsOnly,
-          inFlight: this.showInFlight || undefined,
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
@@ -322,7 +332,6 @@ document.addEventListener('alpine:init', () => {
             try {
               const d = await ArbiterAPI.listJobs(queue, {
                 parentId: id, limit: 50,
-                suspended: this.suspendedFilter !== '' ? this.suspendedFilter : undefined,
                 sortBy: this.sortBy || undefined,
                 sortDir: this.sortDir || undefined,
               });
@@ -356,17 +365,8 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    toggleInFlight() {
-      this.showInFlight = !this.showInFlight;
-      this._resetView();
-    },
-
-    // Unified State dropdown -> the underlying in-flight + suspended flags.
+    // State dropdown -> server-side status filter (bound via x-model to stateFilter).
     applyState() {
-      this.showInFlight = this.stateFilter === 'inflight';
-      this.suspendedFilter = this.stateFilter === 'suspended' ? 'true'
-        : this.stateFilter === 'notsuspended' ? 'false'
-        : '';
       this._resetView();
     },
 

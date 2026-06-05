@@ -48,7 +48,6 @@ module Arbiter.Core.HighLevel
   , getJobById
   , getJobsByGroup
   , getJobsByParent
-  , getInFlightJobs
   , cancelJob
   , cancelJobsBatch
   , forceCancelJob
@@ -60,7 +59,6 @@ module Arbiter.Core.HighLevel
   , countJobs
   , countJobsByGroup
   , countJobsByParent
-  , countInFlightJobs
   , countDLQJobs
   , countChildrenBatch
   , countDLQChildren
@@ -136,7 +134,6 @@ import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
-import Arbiter.Core.SqlTemplates qualified as Tmpl
 import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
@@ -586,20 +583,6 @@ getJobsByParent pid limit offset = do
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.getJobsByParent schemaName tableName pid limit offset
 
--- | Gets all in-flight jobs (claimed, visibility timeout not expired).
-getInFlightJobs
-  :: forall m registry payload
-   . (QueueOperation m registry payload)
-  => Int
-  -- ^ Maximum number of jobs to return.
-  -> Int
-  -- ^ Number of jobs to skip (for pagination).
-  -> m [JobRead payload]
-getInFlightJobs limit offset = do
-  schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.listJobsFiltered schemaName tableName [Tmpl.FilterInFlight] limit offset
-
 -- | Cancels (deletes) a job by ID.
 --
 -- Returns 0 if the job has children - use 'cancelJobCascade' to delete
@@ -704,16 +687,6 @@ countJobsByParent pid = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.countJobsByParent schemaName tableName pid
-
--- | Counts in-flight jobs (currently being processed by workers).
-countInFlightJobs
-  :: forall m registry payload
-   . (QueueOperation m registry payload)
-  => m Int64
-countInFlightJobs = do
-  schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.countJobsFiltered schemaName tableName [Tmpl.FilterInFlight]
 
 -- | Counts jobs in the dead-letter queue.
 countDLQJobs

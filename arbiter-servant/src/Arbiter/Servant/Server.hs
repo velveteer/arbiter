@@ -20,9 +20,8 @@ module Arbiter.Servant.Server
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobRead, isRollup)
+import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
@@ -32,7 +31,7 @@ import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEn
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
 import Control.Exception (SomeException, bracket, catch)
 import Control.Monad (guard, unless, void, when)
-import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
@@ -105,22 +104,6 @@ initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   pure ArbiterServerConfig {serverEnv = env, enableSSE = True}
 
--- | Wrap jobs with current timestamp for status derivation
-toApiJobs :: (MonadIO m) => [JobRead payload] -> m [ApiJob payload]
-toApiJobs jobs = do
-  now <- liftIO getCurrentTime
-  pure $ map (`ApiJob` now) jobs
-
-toApiJob :: (MonadIO m) => JobRead payload -> m (ApiJob payload)
-toApiJob job = do
-  now <- liftIO getCurrentTime
-  pure $ ApiJob job now
-
-toApiDLQJobs :: (MonadIO m) => [DLQ.DLQJob payload] -> m [ApiDLQJob payload]
-toApiDLQJobs jobs = do
-  now <- liftIO getCurrentTime
-  pure $ map (`ApiDLQJob` now) jobs
-
 -- | Validate and sanitize pagination parameters
 validatePagination :: Maybe Int -> Maybe Int -> (Int, Int)
 validatePagination mLimit mOffset =
@@ -161,13 +144,12 @@ listJobsHandler
   -> Maybe Int
   -> Maybe Text
   -> Maybe Int64
-  -> Maybe Bool
   -> Bool
-  -> Bool
+  -> Maybe JobStatus
   -> Maybe JobSortColumn
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended rootsOnly inFlight mSortBy mSortDir = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mStatus mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -175,19 +157,18 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended r
         catMaybes
           [ FilterGroupKey <$> mGroupKey
           , FilterParentId <$> mParentId
-          , FilterSuspended <$> mSuspended
           , FilterRootsOnly <$ guard rootsOnly
-          , FilterInFlight <$ guard inFlight
+          , FilterStatus <$> mStatus
           ]
 
   (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do
-    j <- Ops.listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
+    j <- Ops.listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countJobsFiltered schemaName tableName filters
     -- Only query child/DLQ counts if any returned job could be a parent.
     -- All parents are rollup finalizers (isRollup = True), so we
     -- skip the extra queries for queues that don't use job trees.
-    let jobIds = map primaryKey j
-        hasParents = any isRollup j
+    let jobIds = map (primaryKey . fst) j
+        hasParents = any (isRollup . fst) j
     if null j || not hasParents
       then pure (j, c, Map.empty, Map.empty)
       else do
@@ -197,8 +178,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mSuspended r
 
   let childCounts = fmap fst combined
       pausedParents = Map.keys $ Map.filter (\(t, p) -> p == t) combined
-
-  apiJobs <- toApiJobs jobs
+      apiJobs = map (\(jr, s) -> ApiJobWithStatus jr s) jobs
   pure $
     JobsResponse
       { jobs = apiJobs
@@ -217,7 +197,7 @@ insertJobHandler
   => Text
   -> ArbiterServerConfig registry
   -> ApiJobWrite payload
-  -> Handler (JobResponse payload)
+  -> Handler (JobResponse (ApiJob payload))
 insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let env = serverEnv config
       schemaName = schema env
@@ -229,7 +209,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
       (Nothing, Just (IgnoreDuplicate k)) -> Ops.getJobByDedupKey schemaName tableName k
       _ -> pure Nothing
   case mJob of
-    Just j -> JobResponse <$> toApiJob j
+    Just j -> pure $ JobResponse (ApiJob j)
     Nothing -> throwError err409 {errBody = "Replace blocked: existing job is in-flight on first attempt or has children"}
 
 -- | Insert multiple jobs in a single batch operation
@@ -246,7 +226,7 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
       writes = map unApiJobWrite jobWrites
 
   inserted <- liftIO $ runSimpleDb env $ Ops.insertJobsBatch schemaName tableName writes
-  apiJobs <- toApiJobs inserted
+  let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 
 -- | Get a specific job by ID
@@ -256,17 +236,15 @@ getJobHandler
   => Text
   -> ArbiterServerConfig registry
   -> Int64
-  -> Handler (JobResponse payload)
+  -> Handler (JobResponse (ApiJobWithStatus payload))
 getJobHandler tableName config jobId = do
   let env = serverEnv config
       schemaName = schema env
 
-  mJob <- liftIO $ runSimpleDb env $ Ops.getJobById schemaName tableName jobId
+  mJob <- liftIO $ runSimpleDb env $ Ops.getJobByIdWithStatus schemaName tableName jobId
   case mJob of
     Nothing -> throwError err404 {errBody = "Job not found"}
-    Just j -> do
-      aj <- toApiJob j
-      pure $ JobResponse {job = aj}
+    Just (j, s) -> pure $ JobResponse {job = ApiJobWithStatus j s}
 
 -- | Cancel a job (delete it from the queue)
 cancelJobHandler
@@ -506,7 +484,7 @@ listDLQHandler tableName config mLimit mOffset mParentId mGroupKey mSortBy mSort
     c <- Ops.countDLQFiltered schemaName tableName filters
     pure (j, c)
 
-  apiDlqJobs <- toApiDLQJobs dlqJobs
+  let apiDlqJobs = map ApiDLQJob dlqJobs
   pure $
     DLQResponse
       { dlqJobs = apiDlqJobs

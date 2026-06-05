@@ -23,6 +23,7 @@ module Arbiter.Core.SqlTemplates
 
     -- * Admin Operations
   , getJobByIdSQL
+  , getJobByIdWithStatusSQL
   , getJobByDedupKeySQL
   , cancelJobSQL
   , promoteJobSQL
@@ -68,8 +69,10 @@ module Arbiter.Core.SqlTemplates
   , JobSortColumn (..)
   , DLQSortColumn (..)
   , SortDir (..)
+  , jobStatusCaseSQL
   , listJobsFilteredSQL
   , countJobsFilteredSQL
+  , listJobsWithStatusSQL
   , listDLQFilteredSQL
   , countDLQFilteredSQL
   , buildJobsOrderBy
@@ -140,6 +143,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , pauseNotifyChannelPrefix
   )
+import Arbiter.Core.Job.Types (JobStatus)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
@@ -151,9 +155,8 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 data JobFilter
   = FilterGroupKey Text
   | FilterParentId Int64
-  | FilterSuspended Bool
-  | FilterInFlight
   | FilterRootsOnly
+  | FilterStatus JobStatus
   deriving stock (Eq, Show)
 
 -- | Sortable columns on the main jobs table. Closed enum so the SQL builder
@@ -215,10 +218,28 @@ sortDirSql :: SortDir -> Text
 sortDirSql SortAsc = "ASC"
 sortDirSql SortDesc = "DESC"
 
--- | Generic SQL for listing jobs with dynamic WHERE and ORDER BY clauses.
---
--- @orderBy@ must be produced by 'buildJobsOrderBy'. Caller params (appended
--- after filter params): limit, offset.
+-- | Sole definition of the derived job status. Its string values must match 'jobStatusToText'.
+jobStatusCaseSQL :: Text
+jobStatusCaseSQL =
+  [text|
+    CASE
+      WHEN suspended THEN 'suspended'
+      WHEN claimed_by IS NULL AND last_error IS NOT NULL AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'backoff'
+      WHEN attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'in_flight'
+      WHEN not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'scheduled'
+      ELSE 'ready'
+    END
+  |]
+
+-- | All job columns plus the derived @status@ column, aliased @j@, for filtering.
+jobsWithStatusSubquery :: Text -> Text -> Text
+jobsWithStatusSubquery schema tableName =
+  let tbl = jobQueueTable schema tableName
+      columns = jobColumns Nothing
+      statusCase = jobStatusCaseSQL
+   in [text|(SELECT ${columns}, ${statusCase} AS status FROM ${tbl}) j|]
+
+-- | List filtered jobs without the derived status, for callers that don't need it. Params: limit, offset.
 listJobsFilteredSQL :: Text -> Text -> Text -> Text -> Text
 listJobsFilteredSQL schema tableName whereClause orderBy =
   let tbl = jobQueueTable schema tableName
@@ -230,11 +251,27 @@ listJobsFilteredSQL schema tableName whereClause orderBy =
         ORDER BY ${orderBy} LIMIT ? OFFSET ?
       |]
 
--- | Generic SQL for counting jobs with dynamic WHERE clause.
+-- | List filtered jobs with @status@ as a trailing column. Params: limit, offset.
+listJobsWithStatusSQL :: Text -> Text -> Text -> Text -> Text
+listJobsWithStatusSQL schema tableName whereClause orderBy =
+  let sub = jobsWithStatusSubquery schema tableName
+   in [text|
+        SELECT * FROM ${sub}
+        ${whereClause}
+        ORDER BY ${orderBy} LIMIT ? OFFSET ?
+      |]
+
+-- | Count filtered jobs, through the status subquery so status filters work.
 countJobsFilteredSQL :: Text -> Text -> Text -> Text
 countJobsFilteredSQL schema tableName whereClause =
-  let tbl = jobQueueTable schema tableName
-   in [text|SELECT COUNT(*) FROM ${tbl} ${whereClause}|]
+  let sub = jobsWithStatusSubquery schema tableName
+   in [text|SELECT COUNT(*) FROM ${sub} ${whereClause}|]
+
+-- | Fetch a single job by id with its derived @status@ trailing column. Param: id.
+getJobByIdWithStatusSQL :: Text -> Text -> Text
+getJobByIdWithStatusSQL schema tableName =
+  let sub = jobsWithStatusSubquery schema tableName
+   in [text|SELECT * FROM ${sub} WHERE id = ?|]
 
 -- | Generic SQL for listing DLQ jobs with dynamic WHERE and ORDER BY clauses.
 --

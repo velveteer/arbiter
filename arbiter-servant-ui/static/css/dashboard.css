@@ -586,7 +586,6 @@ th.sortable:hover {
   color: var(--arb-teal-on-bg);
 }
 
-/* Let dropdowns escape; our tables are fixed-width and never overflow. */
 .table-responsive {
   overflow: visible;
 }

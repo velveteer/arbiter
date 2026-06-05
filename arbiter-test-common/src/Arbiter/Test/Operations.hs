@@ -1419,24 +1419,6 @@ operationsSpec mkMessage runM = do
       length groupAJobs `shouldBe` 3
       forM_ groupAJobs $ \j -> groupKey j `shouldBe` Just "group-filter-a"
 
-    it "getInFlightJobs returns only claimed jobs" $ \env -> do
-      -- Insert 3 jobs
-      forM_ [1 .. 3 :: Int] $ \i ->
-        void $
-          runM env (HL.insertJob (defaultGroupedJob ("inflight-test-" <> T.pack (show i)) (mkMessage (T.pack $ "IF" <> show i))))
-
-      -- Initially no in-flight jobs
-      inFlight0 <- runM env (HL.getInFlightJobs @m @registry @payload 10 0)
-      length inFlight0 `shouldBe` 0
-
-      -- Claim 2 jobs
-      _ <- runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload]
-
-      -- Now 2 in-flight
-      inFlight2 <- runM env (HL.getInFlightJobs @m @registry @payload 10 0)
-      length inFlight2 `shouldBe` 2
-      forM_ inFlight2 $ \j -> attempts j `shouldSatisfy` (> 0)
-
     it "promoteJob makes delayed job immediately visible" $ \env -> do
       -- Insert a job, claim it, and put it in retry backoff
       let delayedJob = defaultJob (mkMessage "Delayed")
@@ -1500,23 +1482,6 @@ operationsSpec mkMessage runM = do
 
       countY <- runM env (HL.countJobsByGroup @m @registry @payload "count-group-y")
       countY `shouldBe` 2
-
-    it "countInFlightJobs returns count of claimed jobs" $ \env -> do
-      -- Insert 5 jobs
-      forM_ [1 .. 5 :: Int] $ \i ->
-        void $
-          runM env (HL.insertJob (defaultGroupedJob ("count-inflight-" <> T.pack (show i)) (mkMessage (T.pack $ "IF" <> show i))))
-
-      -- Initially 0 in-flight
-      count0 <- runM env (HL.countInFlightJobs @m @registry @payload)
-      count0 `shouldBe` 0
-
-      -- Claim 3
-      _ <- runM env (HL.claimNextVisibleJobs 3 60) :: IO [JobRead payload]
-
-      -- Now 3 in-flight
-      count3 <- runM env (HL.countInFlightJobs @m @registry @payload)
-      count3 `shouldBe` 3
 
     it "countDLQJobs returns count of DLQ jobs" $ \env -> do
       -- Initially 0 in DLQ

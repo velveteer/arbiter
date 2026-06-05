@@ -446,7 +446,7 @@ config { Worker.jitter = NoJitter }
     periodSeconds: 60
   ```
 - **Pool sizing** - `poolConfigForWorkers` auto-sizes based on worker count
-- **Pause/resume** - at worker, job, or tree level
+- **Pause/resume** - at queue, worker, or job/tree level
 
 ## REST API and Admin UI
 
