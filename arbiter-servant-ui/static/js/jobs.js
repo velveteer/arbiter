@@ -305,6 +305,7 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this.jobs = jobs;
+        this._loadErrored = false;
         this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
         this.dlqChildCounts = data.dlqChildCounts || {};
@@ -365,6 +366,7 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         if (seq !== this._loadSeq) return;
         console.error('Failed to load jobs:', e);
+        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load jobs: ' + e.message); }
       } finally {
         if (seq === this._loadSeq) {
           this.loading = false;
@@ -409,7 +411,7 @@ document.addEventListener('alpine:init', () => {
     applyFilter() {
       const trimmed = this.parentIdFilter.trim();
       if (trimmed && !/^\d+$/.test(trimmed)) {
-        // Auto-apply fires this from both Enter and change/blur; only warn once per value.
+        // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
         if (this._lastInvalidParentId !== trimmed) {
           showToast('Parent ID must be a positive integer', 'warning');
           this._lastInvalidParentId = trimmed;

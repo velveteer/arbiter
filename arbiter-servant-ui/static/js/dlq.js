@@ -146,6 +146,7 @@ document.addEventListener('alpine:init', () => {
           if (this.selected[id] && present.has(id)) pruned[id] = true;
         }
         this.selected = pruned;
+        this._loadErrored = false;
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
 
@@ -158,6 +159,7 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         if (seq !== this._loadSeq) return;
         console.error('Failed to load DLQ:', e);
+        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load DLQ: ' + e.message); }
       } finally {
         if (seq === this._loadSeq) {
           this.loading = false;
@@ -267,7 +269,7 @@ document.addEventListener('alpine:init', () => {
     applyFilter() {
       const trimmed = this.parentIdFilter.trim();
       if (trimmed && !/^\d+$/.test(trimmed)) {
-        // Auto-apply fires this from both Enter and change/blur; only warn once per value.
+        // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
         if (this._lastInvalidParentId !== trimmed) {
           showToast('Parent ID must be a positive integer', 'warning');
           this._lastInvalidParentId = trimmed;

@@ -128,6 +128,8 @@
           </div>
         </div>
       </div>
+      <div x-show="$store.app.selectedQueue && !stats && loading" class="text-muted mt-3">Loading stats…</div>
+      <div x-show="$store.app.selectedQueue && !stats && !loading" class="text-muted mt-3">Stats unavailable.</div>
       <div x-show="$store.app.initialized && !$store.app.selectedQueue" class="text-muted mt-3">No queues available.</div>
     </div>
 
@@ -191,7 +193,7 @@
 
         <!-- Actions -->
         <div class="ms-auto d-flex gap-2 align-items-center">
-          <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm">+ Insert</button>
+          <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm; insertError = ''">+ Insert</button>
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-secondary" @click="loadJobs()" title="Refresh now" aria-label="Refresh now">&#x21bb;</button>
             <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
@@ -804,11 +806,11 @@
                 <td>
                   <template x-if="editingName === s.name && editingField === 'overlap'">
                     <div class="d-flex gap-1 align-items-center">
-                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue"
-                        @change="saveEdit()">
+                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue">
                         <option value="SkipOverlap">SkipOverlap</option>
                         <option value="AllowOverlap">AllowOverlap</option>
                       </select>
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
                       <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
                     </div>
                   </template>
@@ -916,9 +918,9 @@
             <col style="width: 19%">
             <col style="width: 6%">
             <col style="width: 11%">
-            <col style="width: 22%">
+            <col style="width: 18%">
             <col style="width: 10%">
-            <col style="width: 12%">
+            <col style="width: 16%">
           </colgroup>
           <thead>
             <tr>

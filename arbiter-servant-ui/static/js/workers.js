@@ -73,9 +73,11 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.listWorkers({ queue });
         if (seq !== this._loadSeq) return;
         this.workers = data.workers || [];
+        this._loadErrored = false;
       } catch (e) {
         if (seq !== this._loadSeq) return;
         console.error('Failed to load workers:', e);
+        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load workers: ' + e.message); }
       } finally {
         if (seq === this._loadSeq) this.loading = false;
       }

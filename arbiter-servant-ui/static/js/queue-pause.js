@@ -75,6 +75,7 @@ document.addEventListener('alpine:init', () => {
         await this.refresh();
       } catch (e) {
         console.error(`Failed to ${action.toLowerCase()} queue:`, e);
+        showToast(`Failed to ${action.toLowerCase()} queue: ` + e.message);
       } finally {
         this.busy = false;
       }

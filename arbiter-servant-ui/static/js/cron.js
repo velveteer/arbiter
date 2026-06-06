@@ -138,9 +138,11 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.listCronSchedules({ queue });
         if (seq !== this._loadSeq) return;
         this.schedules = data.cronSchedules || [];
+        this._loadErrored = false;
       } catch (e) {
         if (seq !== this._loadSeq) return;
         console.error('Failed to load cron schedules:', e);
+        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load cron schedules: ' + e.message); }
       } finally {
         if (seq === this._loadSeq) this.loading = false;
       }

@@ -673,27 +673,30 @@ th.sortable:hover {
     white-space: nowrap;
   }
 
-  /* Navbar: brand and controls share the top row (controls pushed right by the
-     brand's auto margin); the queue picker drops to its own left-aligned row. */
+  /* Toolbar: the action group (Insert / refresh) sits on its own row above the
+     filter inputs, instead of wrapping down between the table and pagination. */
+  .toolbar > .ms-auto {
+    margin-left: 0;
+    order: -1;
+    width: 100%;
+  }
+}
+
+/* ---- Phones only: stack the navbar (tablets/laptops have room for one row) ---- */
+@media (max-width: 768px) {
   .navbar .container-fluid {
     flex-wrap: wrap;
   }
   .navbar-brand {
     font-size: 1rem;
   }
+  /* Brand + controls share the top row (controls pushed right by the brand's
+     auto margin). The queue picker drops to its own left-aligned row below. */
   .nav-controls {
     order: 2;
   }
   .nav-queue {
     order: 3;
-    width: 100%;
-  }
-
-  /* Toolbar: the action group (Insert / refresh) sits on its own row above the
-     filter inputs, instead of wrapping down between the table and pagination. */
-  .toolbar > .ms-auto {
-    margin-left: 0;
-    order: -1;
     width: 100%;
   }
 }

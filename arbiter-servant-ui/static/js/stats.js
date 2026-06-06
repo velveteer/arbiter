@@ -60,9 +60,11 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.getStats(queue);
         if (seq !== this._loadSeq) return;
         this.stats = data.stats;
+        this._loadErrored = false;
       } catch (e) {
         if (seq !== this._loadSeq) return;
         console.error('Failed to load stats:', e);
+        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load stats: ' + e.message); }
       } finally {
         if (seq === this._loadSeq) this.loading = false;
       }
