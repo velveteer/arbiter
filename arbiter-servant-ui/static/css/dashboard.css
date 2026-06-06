@@ -542,6 +542,17 @@
   box-shadow: 0 0 0 0.2rem var(--arb-focus-ring) !important;
 }
 
+/* Center the select-column checkbox in its header and cells. */
+.select-cell {
+  text-align: center;
+  vertical-align: middle;
+}
+.select-cell .form-check-input {
+  display: block;
+  float: none;
+  margin: 0 auto;
+}
+
 .form-label {
   color: var(--arb-text-muted);
   font-size: 0.85rem;
@@ -590,26 +601,99 @@ th.sortable:hover {
   overflow: visible;
 }
 
-/* ---- Scrollbar (Webkit, dark only) ---- */
-[data-bs-theme="dark"] ::-webkit-scrollbar {
+/* ---- Scrollbar (thin, themed for both modes via theme variables) ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--arb-input-border) var(--arb-bg);
+}
+
+::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-[data-bs-theme="dark"] ::-webkit-scrollbar-track {
-  background: #0f1320;
+::-webkit-scrollbar-track {
+  background: var(--arb-bg);
 }
 
-[data-bs-theme="dark"] ::-webkit-scrollbar-thumb {
-  background: #334155;
+::-webkit-scrollbar-thumb {
+  background: var(--arb-input-border);
   border-radius: 4px;
 }
 
-[data-bs-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: var(--arb-purple-dim);
 }
 
 .navbar-brand {
   font-family: 'Electrolize', sans-serif;
   letter-spacing: 0.08em;
+  margin-right: auto;
+}
+
+/* Brand on the left, queue picker + controls clustered on the right. */
+.navbar .container-fluid {
+  gap: 0.75rem;
+}
+
+/* ---- Narrow screens (phones + tablets, incl. iPad Pro portrait) ---- */
+@media (max-width: 1024px) {
+  /* Denser text overall. */
+  body {
+    font-size: 0.875rem;
+  }
+  .table {
+    font-size: 0.8rem;
+  }
+
+  /* Wide tables size columns to their content and scroll horizontally, rather
+     than squeezing fixed percentage widths until the headers overlap. */
+  .table-responsive {
+    overflow-x: auto;
+    margin-bottom: 0.75rem;
+  }
+  .table-responsive table[style*="table-layout: fixed"] {
+    table-layout: auto !important;
+    width: auto !important;
+    min-width: 100%;
+  }
+  /* Headers stay on one line, so the sort caret stays beside the label. */
+  .table-responsive th {
+    white-space: nowrap;
+  }
+
+  /* Tab strip: one horizontally scrollable row. overflow-y: hidden stops the
+     stray vertical scrollbar the overflow-x quirk otherwise adds. */
+  .nav-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .nav-tabs .nav-item {
+    white-space: nowrap;
+  }
+
+  /* Navbar: brand and controls share the top row (controls pushed right by the
+     brand's auto margin); the queue picker drops to its own left-aligned row. */
+  .navbar .container-fluid {
+    flex-wrap: wrap;
+  }
+  .navbar-brand {
+    font-size: 1rem;
+  }
+  .nav-controls {
+    order: 2;
+  }
+  .nav-queue {
+    order: 3;
+    width: 100%;
+  }
+
+  /* Toolbar: the action group (Insert / refresh) sits on its own row above the
+     filter inputs, instead of wrapping down between the table and pagination. */
+  .toolbar > .ms-auto {
+    margin-left: 0;
+    order: -1;
+    width: 100%;
+  }
 }

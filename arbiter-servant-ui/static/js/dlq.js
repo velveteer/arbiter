@@ -234,12 +234,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     async retryJob(id) {
+      if (this._actionBusy) return;
+      this._actionBusy = true;
       const queue = Alpine.store('app').selectedQueue;
       try {
         await ArbiterAPI.retryFromDLQ(queue, id);
         this.loadDLQ();
       } catch (e) {
         showToast('Failed to retry: ' + e.message);
+      } finally {
+        this._actionBusy = false;
       }
     },
 

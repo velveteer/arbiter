@@ -149,6 +149,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async pauseAction(job) {
+      if (this._actionBusy) return;
+      this._actionBusy = true;
       const queue = Alpine.store('app').selectedQueue;
       try {
         if (job._childCount > 0) {
@@ -159,10 +161,14 @@ document.addEventListener('alpine:init', () => {
         this.loadJobs();
       } catch (e) {
         showToast('Failed: ' + e.message);
+      } finally {
+        this._actionBusy = false;
       }
     },
 
     async resumeAction(job) {
+      if (this._actionBusy) return;
+      this._actionBusy = true;
       const queue = Alpine.store('app').selectedQueue;
       try {
         if (job._childCount > 0) {
@@ -173,6 +179,8 @@ document.addEventListener('alpine:init', () => {
         this.loadJobs();
       } catch (e) {
         showToast('Failed: ' + e.message);
+      } finally {
+        this._actionBusy = false;
       }
     },
 
@@ -473,12 +481,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     async promoteJob(id) {
+      if (this._actionBusy) return;
+      this._actionBusy = true;
       const queue = Alpine.store('app').selectedQueue;
       try {
         await ArbiterAPI.promoteJob(queue, id);
         this.loadJobs();
       } catch (e) {
         showToast('Failed to promote: ' + e.message);
+      } finally {
+        this._actionBusy = false;
       }
     },
 

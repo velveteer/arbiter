@@ -20,22 +20,23 @@
   <div class="container-fluid">
     <a class="navbar-brand" href="#">A R B I T E R</a>
 
-    <div class="d-flex align-items-center gap-3">
-      <!-- Queue selector -->
-      <div class="dropdown" x-data>
-        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
-          <span x-text="$store.app.selectedQueue || 'Select Queue'"></span>
-        </button>
-        <ul class="dropdown-menu dropdown-menu-end">
-          <template x-for="q in $store.app.queues" :key="q">
-            <li>
-              <a class="dropdown-item" href="#" @click.prevent="$store.app.selectQueue(q)" x-text="q"
-                :class="{ 'active': q === $store.app.selectedQueue }"></a>
-            </li>
-          </template>
-        </ul>
-      </div>
+    <!-- Queue selector -->
+    <div class="nav-queue dropdown" x-data>
+      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+        <span x-text="$store.app.selectedQueue || 'Select Queue'"></span>
+      </button>
+      <ul class="dropdown-menu">
+        <template x-for="q in $store.app.queues" :key="q">
+          <li>
+            <a class="dropdown-item" href="#" @click.prevent="$store.app.selectQueue(q)" x-text="q"
+              :class="{ 'active': q === $store.app.selectedQueue }"></a>
+          </li>
+        </template>
+      </ul>
+    </div>
 
+    <!-- Controls: pause/resume, SSE status, theme -->
+    <div class="nav-controls d-flex align-items-center gap-3">
       <!-- Queue pause/resume -->
       <div x-data="queuePauseToggle" x-show="$store.app.selectedQueue" class="d-flex align-items-center gap-3">
         <span x-show="paused" class="badge paused-badge"
@@ -133,7 +134,7 @@
     <!-- Jobs Tab -->
     <div class="tab-pane fade" id="tab-jobs" role="tabpanel" x-data="jobsTab">
       <!-- Toolbar -->
-      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+      <div class="toolbar d-flex flex-wrap gap-2 mb-3 align-items-center">
         <!-- Filters -->
         <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
@@ -328,7 +329,7 @@
                             </a>
                           </template>
                           <template x-if="effectiveViewMode !== 'tree'">
-                            <span class="badge bg-info-subtle text-info-emphasis"
+                            <span class="text-muted small"
                               x-text="job._childCount + (job._childCount === 1 ? ' child' : ' children')"></span>
                           </template>
                         </span>
@@ -478,7 +479,7 @@
 
     <!-- DLQ Tab -->
     <div class="tab-pane fade" id="tab-dlq" role="tabpanel" x-data="dlqTab">
-      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+      <div class="toolbar d-flex flex-wrap gap-2 mb-3 align-items-center">
         <!-- Filters -->
         <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
@@ -559,7 +560,7 @@
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
-              <th :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
+              <th class="select-cell" :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
                   :checked="allSelected" @change="toggleSelectAll()"></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('dlqid') }" :style="'width:' + colPct('dlqid') + '%'" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
@@ -575,7 +576,7 @@
           <tbody>
             <template x-for="job in dlqJobs" :key="job.dlqPrimaryKey">
               <tr :class="isSelected(job.dlqPrimaryKey) ? 'table-active' : ''">
-                <td><input class="form-check-input m-0" type="checkbox" aria-label="Select entry"
+                <td class="select-cell"><input class="form-check-input m-0" type="checkbox" aria-label="Select entry"
                     :checked="isSelected(job.dlqPrimaryKey)" @change="toggleSelect(job.dlqPrimaryKey)"></td>
                 <td class="text-truncate" x-show="colVisible('dlqid')" x-text="job.dlqPrimaryKey"></td>
                 <td class="text-truncate" x-show="colVisible('jobid')" x-text="job.jobSnapshot?.primaryKey ?? '-'"></td>
@@ -932,7 +933,7 @@
           </thead>
           <tbody>
             <template x-for="w in displayWorkers" :key="w.workerId">
-              <tr style="cursor: pointer;" @click="showDetail(w)">
+              <tr>
                 <td><code class="small" x-text="w.workerId"></code></td>
                 <td x-text="w.hostName ?? '-'"></td>
                 <td x-text="w.workerCount ?? '-'"></td>
@@ -943,11 +944,14 @@
                   <span :class="healthClass(w)" x-text="healthLabel(w)"></span>
                   <template x-if="w.paused"><span class="badge paused-badge ms-1">paused</span></template>
                 </td>
-                <td @click.stop>
-                  <button class="btn btn-sm btn-outline-secondary"
-                          :disabled="isBusy(w.workerId) || w.shuttingDown"
-                          @click="togglePause(w)"
-                          x-text="w.paused ? 'Resume' : 'Pause'"></button>
+                <td>
+                  <div class="d-inline-flex gap-1 flex-nowrap">
+                    <button class="btn btn-sm btn-outline-primary" @click="showDetail(w)" title="View">Detail</button>
+                    <button class="btn btn-sm btn-outline-secondary"
+                            :disabled="isBusy(w.workerId) || w.shuttingDown"
+                            @click="togglePause(w)"
+                            x-text="w.paused ? 'Resume' : 'Pause'"></button>
+                  </div>
                 </td>
               </tr>
             </template>

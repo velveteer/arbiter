@@ -34,11 +34,17 @@ document.addEventListener('alpine:init', () => {
     async refresh() {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
+      // Sequence guard: drop a stale response if a newer refresh (e.g. after a
+      // queue change) started while this one was in flight.
+      this._refreshSeq = (this._refreshSeq || 0) + 1;
+      const seq = this._refreshSeq;
       try {
         const details = await ArbiterAPI.getQueueDetails(queue);
+        if (seq !== this._refreshSeq) return;
         this.paused = details && !!details.paused;
         this.pausedAt = details && details.pausedAt || null;
       } catch (e) {
+        if (seq !== this._refreshSeq) return;
         if (e.status === 404) {
           this.paused = false;
           this.pausedAt = null;

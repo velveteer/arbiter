@@ -3,6 +3,13 @@
  * Loaded before component scripts so functions are available globally.
  */
 
+// Position dropdown menus with Popper's "fixed" strategy so they escape the
+// horizontal-scroll clipping of .table-responsive, without forcing the
+// container's overflow open (which would reset its scroll position).
+if (window.bootstrap && bootstrap.Dropdown) {
+  bootstrap.Dropdown.Default.popperConfig = (defaults) => ({ ...defaults, strategy: 'fixed' });
+}
+
 // ---------------------------------------------------------------------------
 // Pure utility functions
 // ---------------------------------------------------------------------------
