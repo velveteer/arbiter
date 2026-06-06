@@ -20,6 +20,7 @@ const JOB_COLUMNS = [
 document.addEventListener('alpine:init', () => {
   Alpine.data('jobsTab', () => withPagination({
     ...columnPrefs(JOB_COLUMNS, 'arb.jobCols'),
+    ...confirmArm(),
     jobs: [],
     total: 0,
     groupKeyFilter: '',
@@ -146,6 +147,16 @@ document.addEventListener('alpine:init', () => {
         if (this._expandSeq[id] !== seq) return;
         showToast('Failed to load children: ' + e.message);
       }
+    },
+
+    descendantsPaused(job) {
+      return this.pausedParents.map(String).includes(String(job.primaryKey));
+    },
+    canSuspend(job) {
+      return job._childCount > 0 ? !this.descendantsPaused(job) : job.status !== 'suspended';
+    },
+    canResume(job) {
+      return job._childCount > 0 ? this.descendantsPaused(job) : job.status === 'suspended';
     },
 
     async pauseAction(job) {
@@ -438,15 +449,9 @@ document.addEventListener('alpine:init', () => {
       this._startTimer();
     },
 
-    async cancelJob(id, childCount, dlqChildCount) {
+    async cancelJob(id) {
+      if (!this.confirmArmed('cancel:' + id)) return;
       const queue = Alpine.store('app').selectedQueue;
-      const parts = [];
-      if (childCount > 0) parts.push(`${childCount} active children`);
-      if (dlqChildCount > 0) parts.push(`${dlqChildCount} DLQ entries (will be orphaned)`);
-      const msg = parts.length > 0
-        ? `Cancel this job and ${parts.join(' + ')}?`
-        : 'Cancel this job?';
-      if (!confirm(msg)) return;
       try {
         await ArbiterAPI.cancelJob(queue, id);
         if (String(id) === this._appliedParentId) {
@@ -460,15 +465,9 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async forceCancelJob(id, childCount, dlqChildCount) {
+    async forceCancelJob(id) {
+      if (!this.confirmArmed('fcancel:' + id)) return;
       const queue = Alpine.store('app').selectedQueue;
-      const parts = [];
-      if (childCount > 0) parts.push(`${childCount} active children`);
-      if (dlqChildCount > 0) parts.push(`${dlqChildCount} DLQ entries (will be orphaned)`);
-      const detail = parts.length > 0
-        ? ` and ${parts.join(' + ')}`
-        : '';
-      if (!confirm(`Force-cancel this job${detail}? The running handler will be interrupted.`)) return;
       try {
         await ArbiterAPI.forceCancelJob(queue, id);
         if (String(id) === this._appliedParentId) {
@@ -496,12 +495,9 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async moveToDLQ(id, childCount) {
+    async moveToDLQ(id) {
+      if (!this.confirmArmed('movedlq:' + id)) return;
       const queue = Alpine.store('app').selectedQueue;
-      const msg = childCount > 0
-        ? `Move this job and its ${childCount} children to the DLQ?`
-        : 'Move this job to DLQ?';
-      if (!confirm(msg)) return;
       try {
         await ArbiterAPI.moveToDLQ(queue, id);
         this.loadJobs();

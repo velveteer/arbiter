@@ -10,6 +10,33 @@ if (window.bootstrap && bootstrap.Dropdown) {
   bootstrap.Dropdown.Default.popperConfig = (defaults) => ({ ...defaults, strategy: 'fixed' });
 }
 
+// Click-to-arm confirmation, a replacement for window.confirm on destructive
+// actions. Spread into a component with ...confirmArm(), then guard the handler
+// with `if (!this.confirmArmed(key)) return` and reflect isArmed(key) in the label.
+function confirmArm() {
+  return {
+    _armed: null,
+    _armedTimer: null,
+    // First click arms the key and returns false. A second click on the same key
+    // within the window confirms it and returns true. Arming a new key disarms
+    // the previous one, and an unconfirmed key relaxes after a few seconds.
+    confirmArmed(key) {
+      if (this._armed === key) {
+        clearTimeout(this._armedTimer);
+        this._armed = null;
+        return true;
+      }
+      this._armed = key;
+      clearTimeout(this._armedTimer);
+      this._armedTimer = setTimeout(() => { this._armed = null; }, 3000);
+      return false;
+    },
+    isArmed(key) {
+      return this._armed === key;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Pure utility functions
 // ---------------------------------------------------------------------------

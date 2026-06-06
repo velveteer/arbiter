@@ -18,6 +18,7 @@ const DLQ_COLUMNS = [
 document.addEventListener('alpine:init', () => {
   Alpine.data('dlqTab', () => withPagination({
     ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols'),
+    ...confirmArm(),
     dlqJobs: [],
     total: 0,
     loading: false,
@@ -203,7 +204,7 @@ document.addEventListener('alpine:init', () => {
     async bulkRetry() {
       const ids = this.selectedIds;
       if (ids.length === 0 || this.bulkBusy) return;
-      if (!confirm(`Retry ${ids.length} DLQ ${ids.length === 1 ? 'entry' : 'entries'}?`)) return;
+      if (!this.confirmArmed('bulkRetry')) return;
       const queue = Alpine.store('app').selectedQueue;
       this.bulkBusy = true;
       // No batch-retry endpoint, so retry each entry individually, capped at 5
@@ -220,7 +221,7 @@ document.addEventListener('alpine:init', () => {
     async bulkDelete() {
       const ids = this.selectedIds;
       if (ids.length === 0 || this.bulkBusy) return;
-      if (!confirm(`Permanently delete ${ids.length} DLQ ${ids.length === 1 ? 'entry' : 'entries'}?`)) return;
+      if (!this.confirmArmed('bulkDelete')) return;
       const queue = Alpine.store('app').selectedQueue;
       this.bulkBusy = true;
       try {
@@ -250,8 +251,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteJob(id) {
+      if (!this.confirmArmed('del:' + id)) return;
       const queue = Alpine.store('app').selectedQueue;
-      if (!confirm('Permanently delete this DLQ entry?')) return;
       try {
         await ArbiterAPI.deleteDLQ(queue, id);
         this.loadDLQ();

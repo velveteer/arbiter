@@ -9,6 +9,7 @@ document.addEventListener('alpine:init', () => {
     pausedAt: null,
     pausedAgeStr: '',
     busy: false,
+    ...confirmArm(),
 
     init() {
       this._onQueueChanged = () => {
@@ -60,11 +61,8 @@ document.addEventListener('alpine:init', () => {
     async toggle() {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue || this.busy) return;
+      if (!this.confirmArmed('toggle')) return;
       const action = this.paused ? 'Resume' : 'Pause';
-      const detail = this.paused
-        ? `Resume queue "${queue}"? Workers will start claiming jobs again.`
-        : `Pause queue "${queue}"? All workers will stop claiming jobs.`;
-      if (!confirm(detail)) return;
       this.busy = true;
       try {
         if (this.paused) {

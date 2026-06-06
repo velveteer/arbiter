@@ -43,9 +43,9 @@
               :title="pausedAt ? formatTime(pausedAt) : ''">
           queue paused<template x-if="pausedAgeStr"><span class="ms-1 fw-normal" x-text="'(' + pausedAgeStr + ')'"></span></template>
         </span>
-        <button class="btn btn-sm" :class="paused ? 'btn-success' : 'btn-outline-warning'"
+        <button class="btn btn-sm" :class="isArmed('toggle') ? 'btn-warning' : (paused ? 'btn-success' : 'btn-outline-warning')"
                 :disabled="busy" @click="toggle()"
-                x-text="paused ? 'Resume queue' : 'Pause queue'"></button>
+                x-text="isArmed('toggle') ? 'Click to confirm' : (paused ? 'Resume queue' : 'Pause queue')"></button>
       </div>
 
       <!-- SSE status dot (hidden when SSE is disabled server-side) -->
@@ -382,7 +382,7 @@
                     <div class="d-inline-flex gap-1 flex-nowrap">
                       <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
                       <div class="dropdown">
-                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
                           Actions
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end">
@@ -390,19 +390,19 @@
                             <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey)">Promote</a>
                           </li>
                           <li>
-                            <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey, job._childCount, job._dlqChildCount)">Cancel</a>
+                            <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey)" :class="{ 'text-warning fw-semibold': isArmed('cancel:' + job.primaryKey) }" x-text="isArmed('cancel:' + job.primaryKey) ? ('Confirm cancel' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Cancel'"></a>
                           </li>
                           <li x-show="job.status === 'in_flight'">
-                            <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey, job._childCount, job._dlqChildCount)">Force Cancel</a>
+                            <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey)" :class="{ 'fw-semibold': isArmed('fcancel:' + job.primaryKey) }" x-text="isArmed('fcancel:' + job.primaryKey) ? 'Confirm force-cancel' : 'Force Cancel'"></a>
                           </li>
                           <li>
-                            <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey, job._childCount)">Move to DLQ</a>
+                            <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey)" :class="{ 'text-warning fw-semibold': isArmed('movedlq:' + job.primaryKey) }" x-text="isArmed('movedlq:' + job.primaryKey) ? 'Confirm move to DLQ' : 'Move to DLQ'"></a>
                           </li>
                           <li><hr class="dropdown-divider"></li>
-                          <li>
+                          <li x-show="canSuspend(job)">
                             <a class="dropdown-item" href="#" @click.prevent="pauseAction(job)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
                           </li>
-                          <li>
+                          <li x-show="canResume(job)">
                             <a class="dropdown-item" href="#" @click.prevent="resumeAction(job)" x-text="job._childCount > 0 ? 'Resume descendants' : 'Resume'"></a>
                           </li>
                         </ul>
@@ -542,8 +542,8 @@
       <!-- Bulk actions (shown when rows are selected) -->
       <div class="d-flex align-items-center gap-2 mb-2" x-show="selectedCount > 0" x-cloak>
         <span class="small fw-semibold" x-text="selectedCount + ' selected'"></span>
-        <button class="btn btn-outline-success btn-sm" :disabled="bulkBusy" @click="bulkRetry()">Retry selected</button>
-        <button class="btn btn-outline-danger btn-sm" :disabled="bulkBusy" @click="bulkDelete()">Delete selected</button>
+        <button class="btn btn-sm" :class="isArmed('bulkRetry') ? 'btn-success' : 'btn-outline-success'" :disabled="bulkBusy" @click="bulkRetry()" x-text="isArmed('bulkRetry') ? 'Confirm retry' : 'Retry selected'"></button>
+        <button class="btn btn-sm" :class="isArmed('bulkDelete') ? 'btn-danger' : 'btn-outline-danger'" :disabled="bulkBusy" @click="bulkDelete()" x-text="isArmed('bulkDelete') ? 'Confirm delete' : 'Delete selected'"></button>
         <button class="btn btn-link btn-sm text-muted text-decoration-none p-0 ms-1" @click="selected = {}">Clear</button>
       </div>
 
@@ -602,12 +602,12 @@
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job)" title="View">Detail</button>
                     <div class="dropdown">
-                      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
                         Actions
                       </button>
                       <ul class="dropdown-menu dropdown-menu-end">
                         <li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey)">Retry</a></li>
-                        <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey)">Delete</a></li>
+                        <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey)" :class="{ 'fw-semibold': isArmed('del:' + job.dlqPrimaryKey) }" x-text="isArmed('del:' + job.dlqPrimaryKey) ? 'Confirm delete' : 'Delete'"></a></li>
                       </ul>
                     </div>
                   </div>
