@@ -98,7 +98,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
 instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
   parseJSON v = do
     ApiJob job <- parseJSON v
-    status <- withObject "JobWithStatus" (\o -> o .: "status") v
+    status <- withObject "JobWithStatus" (.: "status") v
     pure $ ApiJobWithStatus job status
 
 instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
