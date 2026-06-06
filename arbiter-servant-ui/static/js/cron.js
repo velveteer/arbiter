@@ -5,46 +5,25 @@
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('cronTab', () => ({
+    ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs),
     schedules: [],
     loading: false,
+    loaded: false,
     editingName: null,
     editingField: null,
     editValue: '',
     saveError: '',
-    actionError: '',
-    refreshInterval: null,
     active: false,
-    busyRows: {},
+    _loadErrored: false,
     tzList: [],
     tzHighlight: null,
     tzPos: { top: 0, left: 0 },
 
     init() {
-      trackTabActive(this, '#tab-cron', {
-        onShow: () => {
-          this.loadSchedules();
-          this.startPolling();
-        },
-        onHide: () => {
-          this.stopPolling();
-        },
+      this.initPolling('#tab-cron', {
+        onHide: () => this.cancelEdit(),
+        onQueueChange: () => { this.cancelEdit(); this.schedules = []; },
       });
-
-      this.$watch('$store.app.selectedQueue', () => {
-        this.schedules = [];
-        if (this.active) this.loadSchedules();
-      });
-
-      this._visibilityHandler = () => {
-        if (document.hidden) {
-          this.stopPolling();
-        } else if (this.active) {
-          this.loadSchedules();
-          this.startPolling();
-        }
-      };
-      document.addEventListener('visibilitychange', this._visibilityHandler);
-
       this.populateTimezones();
     },
 
@@ -54,7 +33,9 @@ document.addEventListener('alpine:init', () => {
         this.tzList = ['UTC'];
         return;
       }
-      this.tzList = Intl.supportedValuesOf('timeZone').slice().sort();
+      const zones = Intl.supportedValuesOf('timeZone').slice();
+      if (!zones.includes('UTC')) zones.push('UTC');
+      this.tzList = zones.sort();
     },
 
     tzFiltered() {
@@ -92,9 +73,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     tzCommit() {
-      if (this.tzHighlight) {
-        this.editValue = this.tzHighlight;
-      }
+      let match = this.tzHighlight;
+      if (!match && this.editValue.trim()) match = this.tzFiltered()[0];
+      if (match) this.editValue = match;
       this.saveEdit();
     },
 
@@ -106,50 +87,21 @@ document.addEventListener('alpine:init', () => {
     },
 
     destroy() {
-      this.stopPolling();
-      if (this._visibilityHandler) {
-        document.removeEventListener('visibilitychange', this._visibilityHandler);
-        this._visibilityHandler = null;
-      }
-    },
-
-    startPolling() {
-      this.stopPolling();
-      this.refreshInterval = setInterval(() => this.loadSchedules(), 60000);
-    },
-
-    stopPolling() {
-      if (this.refreshInterval) {
-        clearInterval(this.refreshInterval);
-        this.refreshInterval = null;
-      }
+      this.teardownPolling();
     },
 
     async loadSchedules() {
+      if (this.editingName) return;
       const queue = this.$store.app.selectedQueue;
       if (!queue) {
         this.schedules = [];
         return;
       }
-      this.loading = true;
-      this._loadSeq = (this._loadSeq || 0) + 1;
-      const seq = this._loadSeq;
-      try {
+      await guardedLoad(this, 'Failed to load cron schedules', async (seq, isStale) => {
         const data = await ArbiterAPI.listCronSchedules({ queue });
-        if (seq !== this._loadSeq) return;
+        if (isStale()) return;
         this.schedules = data.cronSchedules || [];
-        this._loadErrored = false;
-      } catch (e) {
-        if (seq !== this._loadSeq) return;
-        console.error('Failed to load cron schedules:', e);
-        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load cron schedules: ' + e.message); }
-      } finally {
-        if (seq === this._loadSeq) this.loading = false;
-      }
-    },
-
-    isBusy(name) {
-      return !!this.busyRows[name];
+      });
     },
 
     effectiveExpression(s) {
@@ -180,20 +132,25 @@ document.addEventListener('alpine:init', () => {
     },
 
     startEdit(name, field, currentValue) {
+      if (this._tzReposition) {
+        window.removeEventListener('scroll', this._tzReposition, true);
+        window.removeEventListener('resize', this._tzReposition);
+        this._tzReposition = null;
+      }
       this.editingName = name;
       this.editingField = field;
       this.editValue = currentValue;
       this.saveError = '';
       this.tzHighlight = null;
+      if (field === 'timezone') {
+        this._tzReposition = () => this.updateTzPos();
+        window.addEventListener('scroll', this._tzReposition, true);
+        window.addEventListener('resize', this._tzReposition);
+      }
       this.$nextTick(() => {
         const input = document.getElementById('inline-edit-input');
         if (input) input.focus();
-        if (field === 'timezone') {
-          this.updateTzPos();
-          this._tzReposition = () => this.updateTzPos();
-          window.addEventListener('scroll', this._tzReposition, true);
-          window.addEventListener('resize', this._tzReposition);
-        }
+        if (field === 'timezone') this.updateTzPos();
       });
     },
 
@@ -212,33 +169,29 @@ document.addEventListener('alpine:init', () => {
 
     async saveEdit() {
       const name = this.editingName;
-      if (this.busyRows[name]) return;
+      const field = this.editingField;
+      if (!name || this.busyRows[name]) return;
       const body = {};
-      if (this.editingField === 'expression') {
+      if (field === 'expression') {
         body.overrideExpression = this.editValue || null;
-      } else if (this.editingField === 'overlap') {
+      } else if (field === 'overlap') {
         body.overrideOverlap = this.editValue || null;
-      } else if (this.editingField === 'timezone') {
+      } else if (field === 'timezone') {
         body.overrideTimezone = this.editValue ? this.editValue.trim() : null;
       }
 
-      this.busyRows = { ...this.busyRows, [name]: true };
-      try {
-        await ArbiterAPI.updateCronSchedule(name, body);
-        this.cancelEdit();
-        await this.loadSchedules();
-      } catch (e) {
-        this.saveError = e.message;
-      } finally {
-        const next = { ...this.busyRows };
-        delete next[name];
-        this.busyRows = next;
-      }
+      await this.withBusyRow(name, async () => {
+        try {
+          await ArbiterAPI.updateCronSchedule(name, body);
+          this.cancelEdit();
+          await this.loadSchedules();
+        } catch (e) {
+          this.saveError = e.message;
+        }
+      });
     },
 
     async resetToDefault(name, field) {
-      if (this.busyRows[name]) return;
-      this.actionError = '';
       const body = {};
       if (field === 'expression') {
         body.overrideExpression = null;
@@ -248,36 +201,27 @@ document.addEventListener('alpine:init', () => {
         body.overrideTimezone = null;
       }
 
-      this.busyRows = { ...this.busyRows, [name]: true };
-      try {
-        await ArbiterAPI.updateCronSchedule(name, body);
-        await this.loadSchedules();
-      } catch (e) {
-        this.actionError = 'Failed to reset: ' + e.message;
-      } finally {
-        const next = { ...this.busyRows };
-        delete next[name];
-        this.busyRows = next;
-      }
+      await this.withBusyRow(name, async () => {
+        try {
+          await ArbiterAPI.updateCronSchedule(name, body);
+          await this.loadSchedules();
+        } catch (e) {
+          showToast('Failed to reset: ' + e.message);
+        }
+      });
     },
 
     async toggleEnabled(schedule) {
-      const name = schedule.name;
-      if (this.busyRows[name]) return;
-      this.actionError = '';
-      this.busyRows = { ...this.busyRows, [name]: true };
-      try {
-        await ArbiterAPI.updateCronSchedule(name, {
-          enabled: !schedule.enabled,
-        });
-        await this.loadSchedules();
-      } catch (e) {
-        this.actionError = 'Failed to toggle: ' + e.message;
-      } finally {
-        const next = { ...this.busyRows };
-        delete next[name];
-        this.busyRows = next;
-      }
+      await this.withBusyRow(schedule.name, async () => {
+        try {
+          await ArbiterAPI.updateCronSchedule(schedule.name, {
+            enabled: !schedule.enabled,
+          });
+          await this.loadSchedules();
+        } catch (e) {
+          showToast('Failed to toggle: ' + e.message);
+        }
+      });
     },
   }));
 });

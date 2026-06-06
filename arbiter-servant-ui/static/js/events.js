@@ -16,6 +16,10 @@ document.addEventListener('alpine:init', () => {
       trackTabActive(this, '#tab-events');
     },
 
+    destroy() {
+      untrackTabActive(this);
+    },
+
     get events() {
       return Alpine.store('app').events;
     },

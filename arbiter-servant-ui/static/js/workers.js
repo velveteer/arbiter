@@ -5,59 +5,23 @@
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('workersTab', () => ({
+    ...pollingTab('loadWorkers', ARB_TIMING.workerPollMs),
+    ...confirmArm(),
     workers: [],
     loading: false,
-    actionError: '',
-    refreshInterval: null,
-    busyRows: {},
+    loaded: false,
+    _loadErrored: false,
     selectedWorker: null,
     liveOnly: localStorage.getItem('arb.workersLiveOnly') === 'true',
 
     init() {
-      trackTabActive(this, '#tab-workers', {
-        onShow: () => {
-          this.loadWorkers();
-          this.startPolling();
-        },
-        onHide: () => {
-          this.stopPolling();
-        },
+      this.initPolling('#tab-workers', {
+        onQueueChange: () => { this.disarm(); this.workers = []; },
       });
-
-      this.$watch('$store.app.selectedQueue', () => {
-        this.workers = [];
-        if (this.active) this.loadWorkers();
-      });
-
-      this._visibilityHandler = () => {
-        if (document.hidden) {
-          this.stopPolling();
-        } else if (this.active) {
-          this.loadWorkers();
-          this.startPolling();
-        }
-      };
-      document.addEventListener('visibilitychange', this._visibilityHandler);
     },
 
     destroy() {
-      this.stopPolling();
-      if (this._visibilityHandler) {
-        document.removeEventListener('visibilitychange', this._visibilityHandler);
-        this._visibilityHandler = null;
-      }
-    },
-
-    startPolling() {
-      this.stopPolling();
-      this.refreshInterval = setInterval(() => this.loadWorkers(), 30000);
-    },
-
-    stopPolling() {
-      if (this.refreshInterval) {
-        clearInterval(this.refreshInterval);
-        this.refreshInterval = null;
-      }
+      this.teardownPolling();
     },
 
     async loadWorkers() {
@@ -66,25 +30,11 @@ document.addEventListener('alpine:init', () => {
         this.workers = [];
         return;
       }
-      this.loading = true;
-      this._loadSeq = (this._loadSeq || 0) + 1;
-      const seq = this._loadSeq;
-      try {
+      await guardedLoad(this, 'Failed to load workers', async (seq, isStale) => {
         const data = await ArbiterAPI.listWorkers({ queue });
-        if (seq !== this._loadSeq) return;
+        if (isStale()) return;
         this.workers = data.workers || [];
-        this._loadErrored = false;
-      } catch (e) {
-        if (seq !== this._loadSeq) return;
-        console.error('Failed to load workers:', e);
-        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load workers: ' + e.message); }
-      } finally {
-        if (seq === this._loadSeq) this.loading = false;
-      }
-    },
-
-    isBusy(id) {
-      return !!this.busyRows[id];
+      });
     },
 
     get displayWorkers() {
@@ -113,31 +63,25 @@ document.addEventListener('alpine:init', () => {
 
     showDetail(worker) {
       this.selectedWorker = worker;
-      const modalEl = document.getElementById('workerDetailModal');
-      if (modalEl && window.bootstrap) {
-        bootstrap.Modal.getOrCreateInstance(modalEl).show();
-      }
+      showModal('workerDetailModal');
     },
 
     async togglePause(worker) {
       const id = worker.workerId;
-      if (this.busyRows[id]) return;
-      this.actionError = '';
-      this.busyRows = { ...this.busyRows, [id]: true };
-      try {
-        if (worker.paused) {
-          await ArbiterAPI.resumeWorker(id);
-        } else {
-          await ArbiterAPI.pauseWorker(id);
+      if (!id || this.busyRows[id]) return;
+      if (!this.confirmArmed('toggle:' + id)) return;
+      await this.withBusyRow(id, async () => {
+        try {
+          if (worker.paused) {
+            await ArbiterAPI.resumeWorker(id);
+          } else {
+            await ArbiterAPI.pauseWorker(id);
+          }
+          await this.loadWorkers();
+        } catch (e) {
+          showToast(`Failed to toggle worker ${String(id).slice(0, 8)}: ${e.message}`);
         }
-        await this.loadWorkers();
-      } catch (e) {
-        this.actionError = `Failed to toggle worker ${id.slice(0, 8)}: ${e.message}`;
-      } finally {
-        const next = { ...this.busyRows };
-        delete next[id];
-        this.busyRows = next;
-      }
+      });
     },
   }));
 });

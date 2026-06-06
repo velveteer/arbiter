@@ -10,26 +10,26 @@ document.addEventListener('alpine:init', () => {
     pausedAgeStr: '',
     busy: false,
     ...confirmArm(),
+    ...eventBusTab(),
 
     init() {
-      this._onQueueChanged = () => {
-        this.paused = false;
-        this.pausedAt = null;
-        if (Alpine.store('app').selectedQueue) this.refresh();
-      };
-      this._onRefresh = () => this.refresh();
-      window.addEventListener('queue-changed', this._onQueueChanged);
-      window.addEventListener('poll-tick', this._onRefresh);
-      window.addEventListener('sse-refresh', this._onRefresh);
-      window.addEventListener('sse-reconnect', this._onRefresh);
+      const refresh = () => this.refresh();
+      this._bindBus({
+        queueChanged: () => {
+          this.disarm();
+          this.paused = false;
+          this.pausedAt = null;
+          if (Alpine.store('app').selectedQueue) this.refresh();
+        },
+        pollTick: refresh,
+        sseRefresh: refresh,
+        sseReconnect: refresh,
+      });
       if (Alpine.store('app').selectedQueue) this.refresh();
     },
 
     destroy() {
-      window.removeEventListener('queue-changed', this._onQueueChanged);
-      window.removeEventListener('poll-tick', this._onRefresh);
-      window.removeEventListener('sse-refresh', this._onRefresh);
-      window.removeEventListener('sse-reconnect', this._onRefresh);
+      this._unbindBus();
     },
 
     async refresh() {

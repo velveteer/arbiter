@@ -10,6 +10,23 @@ if (window.bootstrap && bootstrap.Dropdown) {
   bootstrap.Dropdown.Default.popperConfig = (defaults) => ({ ...defaults, strategy: 'fixed' });
 }
 
+// Close the dropdown a clicked item lives in. Used for single-shot actions in
+// menus that set data-bs-auto-close="outside" (so click-to-arm items survive).
+function closeDropdown(el) {
+  const toggle = el.closest('.dropdown')?.querySelector('[data-bs-toggle="dropdown"]');
+  if (toggle) bootstrap.Dropdown.getOrCreateInstance(toggle).hide();
+}
+
+function showModal(id) {
+  const el = document.getElementById(id);
+  if (el && window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).show();
+}
+
+function hideModal(id) {
+  const el = document.getElementById(id);
+  if (el && window.bootstrap) bootstrap.Modal.getInstance(el)?.hide();
+}
+
 // Click-to-arm confirmation, a replacement for window.confirm on destructive
 // actions. Spread into a component with ...confirmArm(), then guard the handler
 // with `if (!this.confirmArmed(key)) return` and reflect isArmed(key) in the label.
@@ -28,90 +45,240 @@ function confirmArm() {
       }
       this._armed = key;
       clearTimeout(this._armedTimer);
-      this._armedTimer = setTimeout(() => { this._armed = null; }, 3000);
+      this._armedTimer = setTimeout(() => { this._armed = null; }, ARB_TIMING.armWindowMs);
       return false;
     },
     isArmed(key) {
       return this._armed === key;
     },
+    disarm() {
+      clearTimeout(this._armedTimer);
+      this._armed = null;
+    },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Pure utility functions
-// ---------------------------------------------------------------------------
-
-function truncate(str, len = 60) {
-  if (!str) return '';
-  const s = typeof str === 'string' ? str : JSON.stringify(str);
-  return s.length > len ? s.substring(0, len) + '...' : s;
-}
-
-function formatJson(obj) {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return String(obj);
-  }
-}
-
-function formatTime(iso, fallback = '') {
-  if (!iso) return fallback;
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      year: 'numeric', month: 'numeric', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', second: '2-digit',
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function formatAge(iso, fallback = '-') {
-  if (!iso) return fallback;
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const ageSecs = Math.max(0, (Date.now() - t) / 1000);
-  if (ageSecs < 60) return `${Math.round(ageSecs)}s ago`;
-  if (ageSecs < 3600) return `${Math.round(ageSecs / 60)}m ago`;
-  if (ageSecs < 86400) return `${Math.round(ageSecs / 3600)}h ago`;
-  return `${Math.round(ageSecs / 86400)}d ago`;
-}
-
-function formatCountdown(iso, fallback = '') {
-  if (!iso) return fallback;
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const delta = Math.round((t - Date.now()) / 1000);
-  if (delta <= 0) return 'ready';
-  const days = Math.floor(delta / 86400);
-  const h = Math.floor((delta % 86400) / 3600);
-  const m = Math.floor((delta % 3600) / 60);
-  const s = delta % 60;
-  const pad = (n) => String(n).padStart(2, '0');
-  const hms = `${pad(h)}:${pad(m)}:${pad(s)}`;
-  return days > 0 ? `${days}d ${hms}` : hms;
-}
-
-/**
- * Runs `worker(item, i)` over `items` with at most `limit` in flight at once.
- * Returns a Promise.allSettled-style array in input order.
- */
-async function mapLimit(items, limit, worker) {
-  const results = new Array(items.length);
-  let next = 0;
-  const run = async () => {
-    while (next < items.length) {
-      const i = next++;
+// Per-row single-flight guard, spread into the table and polling mixins.
+function busyRows() {
+  return {
+    busyRows: {},
+    isBusy(key) {
+      return !!this.busyRows[key];
+    },
+    async withBusyRow(key, fn) {
+      if (this.busyRows[key]) return;
+      this.busyRows = { ...this.busyRows, [key]: true };
       try {
-        results[i] = { status: 'fulfilled', value: await worker(items[i], i) };
-      } catch (reason) {
-        results[i] = { status: 'rejected', reason };
+        await fn();
+      } finally {
+        const next = { ...this.busyRows };
+        delete next[key];
+        this.busyRows = next;
       }
-    }
+    },
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
-  return results;
+}
+
+// Runs a load body under the loading flag, a stale-response guard, and a
+// one-shot error toast. body(seq, isStale) does the fetch + apply.
+async function guardedLoad(self, errorLabel, body) {
+  self.loading = true;
+  self._loadSeq = (self._loadSeq || 0) + 1;
+  const seq = self._loadSeq;
+  const isStale = () => seq !== self._loadSeq;
+  try {
+    await body(seq, isStale);
+    if (isStale()) return;
+    self._loadErrored = false;
+  } catch (e) {
+    if (isStale()) return;
+    console.error(errorLabel + ':', e);
+    if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
+  } finally {
+    if (seq === self._loadSeq) { self.loading = false; self.loaded = true; }
+  }
+}
+
+// Shared jobs/dlq table mixin.
+function tableTab(loadMethod, refreshStorageKey) {
+  return {
+    ...busyRows(),
+    ...confirmArm(),
+    refreshMode: (refreshStorageKey && localStorage.getItem(refreshStorageKey)) || '5s',
+    _refreshTimer: null,
+    _lastInvalidParentId: null,
+    pendingChanges: 0,
+
+    _startTimer() {
+      this._stopTimer();
+      if (this.refreshMode === 'paused') return;
+      const ms = ARB_TIMING.refreshModes[this.refreshMode] || ARB_TIMING.refreshModes['5s'];
+      this._refreshTimer = setInterval(() => {
+        if (this.active && !this.loading) this[loadMethod]();
+      }, ms);
+    },
+
+    _stopTimer() {
+      if (this._refreshTimer) {
+        clearInterval(this._refreshTimer);
+        this._refreshTimer = null;
+      }
+    },
+
+    setRefreshMode(mode) {
+      this.refreshMode = mode;
+      if (refreshStorageKey) localStorage.setItem(refreshStorageKey, mode);
+      this._startTimer();
+    },
+
+    _cycleSort(col) {
+      if (this.sortBy !== col) {
+        this.sortBy = col;
+        this.sortDir = 'desc';
+      } else if (this.sortDir === 'desc') {
+        this.sortDir = 'asc';
+      } else {
+        this.sortBy = '';
+        this.sortDir = '';
+      }
+    },
+
+    sortIndicator(col) {
+      if (this.sortBy !== col) return ' ↕';
+      return this.sortDir === 'asc' ? ' ▲' : ' ▼';
+    },
+
+    applyFilter() {
+      const trimmed = this.parentIdFilter.trim();
+      if (trimmed && !/^\d+$/.test(trimmed)) {
+        // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
+        if (this._lastInvalidParentId !== trimmed) {
+          showToast('Parent ID must be a positive integer', 'warning');
+          this._lastInvalidParentId = trimmed;
+        }
+        return;
+      }
+      this._lastInvalidParentId = null;
+      if (trimmed === this._appliedParentId && this.groupKeyFilter === this._appliedGroupKey) return;
+      this.parentIdFilter = trimmed;
+      this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
+    },
+
+    filterByParent(id) {
+      this.parentIdFilter = String(id);
+      this.groupKeyFilter = '';
+      this._resetView({ groupKey: '', parentId: String(id) });
+    },
+
+    _bindTableEvents(opts) {
+      this._onQueueChanged = () => {
+        this.disarm();
+        this.groupKeyFilter = '';
+        this.parentIdFilter = '';
+        this._appliedGroupKey = '';
+        this._appliedParentId = '';
+        this.sortBy = '';
+        this.sortDir = '';
+        if (opts.onQueueReset) opts.onQueueReset();
+        if (this.active) this._resetView();
+      };
+      this._onSseReconnect = () => {
+        if (this.active) this[loadMethod]();
+      };
+      this._onSseEvent = (e) => {
+        const count = opts.relevant(e.detail);
+        if (count > 0) this.pendingChanges += count;
+      };
+      window.addEventListener(ARB_EVENTS.queueChanged, this._onQueueChanged);
+      window.addEventListener(ARB_EVENTS.sseReconnect, this._onSseReconnect);
+      window.addEventListener(ARB_EVENTS.sseEvent, this._onSseEvent);
+    },
+
+    _unbindTableEvents() {
+      window.removeEventListener(ARB_EVENTS.queueChanged, this._onQueueChanged);
+      window.removeEventListener(ARB_EVENTS.sseReconnect, this._onSseReconnect);
+      window.removeEventListener(ARB_EVENTS.sseEvent, this._onSseEvent);
+    },
+  };
+}
+
+// Shared cron/workers polling mixin (visibility-aware).
+function pollingTab(loadMethod, intervalMs) {
+  return {
+    ...busyRows(),
+    refreshInterval: null,
+
+    startPolling() {
+      this.stopPolling();
+      this.refreshInterval = setInterval(() => this[loadMethod](), intervalMs);
+    },
+
+    stopPolling() {
+      if (this.refreshInterval) {
+        clearInterval(this.refreshInterval);
+        this.refreshInterval = null;
+      }
+    },
+
+    _bindVisibility() {
+      this._visibilityHandler = () => {
+        if (document.hidden) {
+          this.stopPolling();
+        } else if (this.active) {
+          this[loadMethod]();
+          this.startPolling();
+        }
+      };
+      document.addEventListener('visibilitychange', this._visibilityHandler);
+    },
+
+    _unbindVisibility() {
+      if (this._visibilityHandler) {
+        document.removeEventListener('visibilitychange', this._visibilityHandler);
+        this._visibilityHandler = null;
+      }
+    },
+
+    // opts.onQueueChange() runs on a queue switch (before reload); opts.onHide()
+    // runs when the tab is hidden (before polling stops).
+    initPolling(tabTarget, opts = {}) {
+      trackTabActive(this, tabTarget, {
+        onShow: () => { this[loadMethod](); this.startPolling(); },
+        onHide: () => { if (opts.onHide) opts.onHide(); this.stopPolling(); },
+      });
+      this.$watch('$store.app.selectedQueue', () => {
+        if (opts.onQueueChange) opts.onQueueChange();
+        if (this.active) this[loadMethod]();
+      });
+      this._bindVisibility();
+    },
+
+    teardownPolling() {
+      untrackTabActive(this);
+      this.stopPolling();
+      this._unbindVisibility();
+    },
+  };
+}
+
+// Window event-bus subscription mixin. _bindBus maps ARB_EVENTS keys to handlers
+// and _unbindBus removes them all.
+function eventBusTab() {
+  return {
+    _busHandlers: null,
+    _bindBus(handlerMap) {
+      this._busHandlers = Object.entries(handlerMap).map(([name, fn]) => {
+        const event = ARB_EVENTS[name];
+        window.addEventListener(event, fn);
+        return [event, fn];
+      });
+    },
+    _unbindBus() {
+      if (!this._busHandlers) return;
+      for (const [event, fn] of this._busHandlers) window.removeEventListener(event, fn);
+      this._busHandlers = null;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +287,24 @@ async function mapLimit(items, limit, worker) {
 
 function showToast(message, type = 'danger') {
   const container = document.getElementById('toastContainer');
-  const id = 'toast-' + Date.now();
+  if (!container) return;
+  const key = type + '\u0000' + message;
+
+  const existing = Array.from(container.children).find((c) => c.dataset.toastKey === key);
+  if (existing && bootstrap.Toast.getInstance(existing)) {
+    const n = (parseInt(existing.dataset.toastCount, 10) || 1) + 1;
+    existing.dataset.toastCount = String(n);
+    const badge = existing.querySelector('.toast-count');
+    if (badge) { badge.textContent = '×' + n; badge.classList.remove('d-none'); }
+    return;
+  }
+
+  while (container.children.length >= ARB_TIMING.toastMaxVisible && container.firstElementChild) {
+    const oldest = container.firstElementChild;
+    bootstrap.Toast.getInstance(oldest)?.dispose();
+    oldest.remove();
+  }
+
   const bg = {
     danger: 'bg-danger-subtle text-danger-emphasis',
     success: 'bg-success-subtle text-success-emphasis',
@@ -128,16 +312,18 @@ function showToast(message, type = 'danger') {
     info: 'bg-info-subtle text-info-emphasis',
   }[type] || 'bg-danger-subtle text-danger-emphasis';
   const el = document.createElement('div');
-  el.id = id;
+  el.dataset.toastKey = key;
+  el.dataset.toastCount = '1';
   el.className = `toast ${bg}`;
-  el.setAttribute('role', 'alert');
+  el.setAttribute('role', type === 'danger' ? 'alert' : 'status');
   el.innerHTML = `<div class="d-flex">
     <div class="toast-body"></div>
-    <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+    <span class="toast-count badge text-bg-secondary align-self-center me-2 d-none"></span>
+    <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Dismiss"></button>
   </div>`;
   el.querySelector('.toast-body').textContent = message;
   container.appendChild(el);
-  const toast = new bootstrap.Toast(el, { delay: 5000 });
+  const toast = new bootstrap.Toast(el, { delay: ARB_TIMING.toastDelays[type] ?? ARB_TIMING.toastDelays.danger });
   el.addEventListener('hidden.bs.toast', () => el.remove());
   toast.show();
 }
@@ -158,7 +344,7 @@ function showToast(message, type = 'danger') {
  */
 function withPagination(component, loadMethod) {
   const pagination = {
-    limit: 50,
+    limit: ARB_TIMING.pageLimit,
     offset: 0,
     loaded: false,
 
@@ -171,8 +357,12 @@ function withPagination(component, loadMethod) {
     },
 
     goToPage(page) {
-      const p = Math.max(1, Math.min(this.totalPages, parseInt(page, 10) || 1));
-      this.offset = (p - 1) * this.limit;
+      const n = parseInt(page, 10);
+      if (!Number.isFinite(n)) return;
+      const p = Math.max(1, Math.min(this.totalPages, n));
+      const offset = (p - 1) * this.limit;
+      if (offset === this.offset) return;
+      this.offset = offset;
       this[loadMethod]();
     },
 
@@ -210,9 +400,11 @@ function columnPrefs(columns, storageKey) {
     _loadColPrefs() {
       const def = {};
       columns.forEach((c) => { def[c.key] = true; });
-      let saved = {};
-      try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch { saved = {}; }
-      this.colVis = { ...def, ...saved };
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey)) || {};
+        columns.forEach((c) => { if (c.key in saved) def[c.key] = saved[c.key] !== false; });
+      } catch { /* keep defaults */ }
+      this.colVis = def;
     },
 
     colVisible(key) {
@@ -297,16 +489,29 @@ function trackTabActive(component, tabTarget, callbacks) {
     callbacks.onShow();
   }
 
-  document.addEventListener('shown.bs.tab', (e) => {
+  component._tabShownHandler = (e) => {
     if (e.target.getAttribute('data-bs-target') === tabTarget) {
       component.active = true;
       if (callbacks && callbacks.onShow) callbacks.onShow();
     }
-  });
-  document.addEventListener('hidden.bs.tab', (e) => {
+  };
+  component._tabHiddenHandler = (e) => {
     if (e.target.getAttribute('data-bs-target') === tabTarget) {
       component.active = false;
       if (callbacks && callbacks.onHide) callbacks.onHide();
     }
-  });
+  };
+  document.addEventListener('shown.bs.tab', component._tabShownHandler);
+  document.addEventListener('hidden.bs.tab', component._tabHiddenHandler);
+}
+
+function untrackTabActive(component) {
+  if (component._tabShownHandler) {
+    document.removeEventListener('shown.bs.tab', component._tabShownHandler);
+    component._tabShownHandler = null;
+  }
+  if (component._tabHiddenHandler) {
+    document.removeEventListener('hidden.bs.tab', component._tabHiddenHandler);
+    component._tabHiddenHandler = null;
+  }
 }

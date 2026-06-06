@@ -18,7 +18,7 @@ const DLQ_COLUMNS = [
 document.addEventListener('alpine:init', () => {
   Alpine.data('dlqTab', () => withPagination({
     ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols'),
-    ...confirmArm(),
+    ...tableTab('loadDLQ', 'arb.dlqRefresh'),
     dlqJobs: [],
     total: 0,
     loading: false,
@@ -30,16 +30,9 @@ document.addEventListener('alpine:init', () => {
     groupKeyFilter: '',
     _appliedParentId: '',
     _appliedGroupKey: '',
-    refreshMode: '5s',
-    _refreshTimer: null,
-    pendingChanges: 0,
     sortBy: '',
     sortDir: '',
-
-    get hasUnappliedFilters() {
-      return this.groupKeyFilter !== this._appliedGroupKey
-          || this.parentIdFilter !== this._appliedParentId;
-    },
+    _loadErrored: false,
 
     _syncFiltersToUrl() {
       writeFiltersToUrl({
@@ -65,68 +58,32 @@ document.addEventListener('alpine:init', () => {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
-          const modalEl = document.getElementById('dlqDetailModal');
-          if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
-          clearFiltersFromUrl();
-          this.groupKeyFilter = '';
-          this.parentIdFilter = '';
-          this._appliedGroupKey = '';
-          this._appliedParentId = '';
-          this.sortBy = '';
-          this.sortDir = '';
-          this.selected = {};
-          if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
+          hideModal('dlqDetailModal');
+          this._stopTimer();
         },
       });
-      window.addEventListener('queue-changed', () => {
-        this.groupKeyFilter = '';
-        this.parentIdFilter = '';
-        this._appliedGroupKey = '';
-        this._appliedParentId = '';
-        this.sortBy = '';
-        this.sortDir = '';
-        this.selected = {};
-        if (this.active) this._resetView();
-      });
-      window.addEventListener('sse-reconnect', () => {
-        if (this.active) this.loadDLQ();
-      });
-      window.addEventListener('sse-event', (e) => {
-        const queue = Alpine.store('app').selectedQueue;
-        const count = e.detail.filter(evt =>
-          evt.table === queue && evt.event === 'job_dlq'
-        ).length;
-        if (count > 0) this.pendingChanges += count;
+      this._bindTableEvents({
+        onQueueReset: () => { this.selected = {}; },
+        relevant: (events) => {
+          const queue = Alpine.store('app').selectedQueue;
+          return events.filter(evt => evt.table === queue && evt.event === 'job_dlq').length;
+        },
       });
     },
 
-    _startTimer() {
-      if (this._refreshTimer) {
-        clearInterval(this._refreshTimer);
-        this._refreshTimer = null;
-      }
-      if (this.refreshMode === 'paused') return;
-      const ms = { '1s': 1000, '5s': 5000, '10s': 10000, '30s': 30000 }[this.refreshMode] || 5000;
-      this._refreshTimer = setInterval(() => {
-        if (this.active && !this.loading) this.loadDLQ();
-      }, ms);
-    },
-
-    setRefreshMode(mode) {
-      this.refreshMode = mode;
-      this._startTimer();
+    destroy() {
+      untrackTabActive(this);
+      this._unbindTableEvents();
+      this._stopTimer();
     },
 
     async loadDLQ(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      this.loading = true;
-      this._loadSeq = (this._loadSeq || 0) + 1;
-      const seq = this._loadSeq;
       const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
       const startingPending = this.pendingChanges;
-      try {
+      await guardedLoad(this, 'Failed to load DLQ', async (seq, isStale) => {
         const data = await ArbiterAPI.listDLQ(queue, {
           limit: this.limit,
           offset: this.offset,
@@ -135,7 +92,7 @@ document.addEventListener('alpine:init', () => {
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
-        if (seq !== this._loadSeq) return;
+        if (isStale()) return;
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this.dlqJobs = data.dlqJobs || [];
@@ -147,7 +104,6 @@ document.addEventListener('alpine:init', () => {
           if (this.selected[id] && present.has(id)) pruned[id] = true;
         }
         this.selected = pruned;
-        this._loadErrored = false;
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
 
@@ -155,18 +111,8 @@ document.addEventListener('alpine:init', () => {
         if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
           this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
           this.loadDLQ();
-          return;
         }
-      } catch (e) {
-        if (seq !== this._loadSeq) return;
-        console.error('Failed to load DLQ:', e);
-        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load DLQ: ' + e.message); }
-      } finally {
-        if (seq === this._loadSeq) {
-          this.loading = false;
-          this.loaded = true;
-        }
-      }
+      });
     },
 
     isSelected(id) {
@@ -209,13 +155,18 @@ document.addEventListener('alpine:init', () => {
       this.bulkBusy = true;
       // No batch-retry endpoint, so retry each entry individually, capped at 5
       // concurrent requests so a large selection doesn't flood the server.
-      const results = await mapLimit(ids, 5, id => ArbiterAPI.retryFromDLQ(queue, id));
-      this.bulkBusy = false;
-      const failed = results.filter(r => r.status === 'rejected').length;
-      this.selected = {};
-      this.loadDLQ();
-      if (failed > 0) showToast(`${failed} of ${ids.length} retries failed`);
-      else showToast(`Retried ${ids.length} ${ids.length === 1 ? 'entry' : 'entries'}`, 'success');
+      try {
+        const results = await mapLimit(ids, ARB_TIMING.bulkConcurrency, id => ArbiterAPI.retryFromDLQ(queue, id));
+        const failedIds = ids.filter((id, i) => results[i].status === 'rejected');
+        const next = {};
+        for (const id of failedIds) next[id] = true;
+        this.selected = next;
+        this.loadDLQ();
+        if (failedIds.length > 0) showToast(`${failedIds.length} of ${ids.length} retries failed`);
+        else showToast(`Retried ${ids.length} ${ids.length === 1 ? 'entry' : 'entries'}`, 'success');
+      } finally {
+        this.bulkBusy = false;
+      }
     },
 
     async bulkDelete() {
@@ -228,7 +179,12 @@ document.addEventListener('alpine:init', () => {
         const res = await ArbiterAPI.deleteDLQBatch(queue, ids);
         this.selected = {};
         this.loadDLQ();
-        showToast(`Deleted ${res?.deleted ?? ids.length} ${(res?.deleted ?? ids.length) === 1 ? 'entry' : 'entries'}`, 'success');
+        const deleted = res?.deleted ?? ids.length;
+        if (deleted < ids.length) {
+          showToast(`Deleted ${deleted} of ${ids.length}; ${ids.length - deleted} no longer present`, 'warning');
+        } else {
+          showToast(`Deleted ${deleted} ${deleted === 1 ? 'entry' : 'entries'}`, 'success');
+        }
       } catch (e) {
         showToast('Failed to delete: ' + e.message);
       } finally {
@@ -237,28 +193,30 @@ document.addEventListener('alpine:init', () => {
     },
 
     async retryJob(id) {
-      if (this._actionBusy) return;
-      this._actionBusy = true;
-      const queue = Alpine.store('app').selectedQueue;
-      try {
-        await ArbiterAPI.retryFromDLQ(queue, id);
-        this.loadDLQ();
-      } catch (e) {
-        showToast('Failed to retry: ' + e.message);
-      } finally {
-        this._actionBusy = false;
-      }
+      await this.withBusyRow(id, async () => {
+        const queue = Alpine.store('app').selectedQueue;
+        try {
+          await ArbiterAPI.retryFromDLQ(queue, id);
+          await this.loadDLQ();
+        } catch (e) {
+          showToast('Failed to retry: ' + e.message);
+        }
+      });
     },
 
-    async deleteJob(id) {
+    async deleteJob(id, el) {
+      if (this.busyRows[id]) return;
       if (!this.confirmArmed('del:' + id)) return;
-      const queue = Alpine.store('app').selectedQueue;
-      try {
-        await ArbiterAPI.deleteDLQ(queue, id);
-        this.loadDLQ();
-      } catch (e) {
-        showToast('Failed to delete: ' + e.message);
-      }
+      closeDropdown(el);
+      await this.withBusyRow(id, async () => {
+        const queue = Alpine.store('app').selectedQueue;
+        try {
+          await ArbiterAPI.deleteDLQ(queue, id);
+          await this.loadDLQ();
+        } catch (e) {
+          showToast('Failed to delete: ' + e.message);
+        }
+      });
     },
 
     _resetView(filterOverrides) {
@@ -267,49 +225,14 @@ document.addEventListener('alpine:init', () => {
       this._startTimer();
     },
 
-    applyFilter() {
-      const trimmed = this.parentIdFilter.trim();
-      if (trimmed && !/^\d+$/.test(trimmed)) {
-        // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
-        if (this._lastInvalidParentId !== trimmed) {
-          showToast('Parent ID must be a positive integer', 'warning');
-          this._lastInvalidParentId = trimmed;
-        }
-        return;
-      }
-      this._lastInvalidParentId = null;
-      if (trimmed === this._appliedParentId && this.groupKeyFilter === this._appliedGroupKey) return;
-      this.parentIdFilter = trimmed;
-      this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
-    },
-
-    filterByParent(id) {
-      this.parentIdFilter = String(id);
-      this.groupKeyFilter = '';
-      this._resetView({ groupKey: '', parentId: String(id) });
-    },
-
     toggleSort(col) {
-      if (this.sortBy !== col) {
-        this.sortBy = col;
-        this.sortDir = 'desc';
-      } else if (this.sortDir === 'desc') {
-        this.sortDir = 'asc';
-      } else {
-        this.sortBy = '';
-        this.sortDir = '';
-      }
+      this._cycleSort(col);
       this._resetView();
-    },
-
-    sortIndicator(col) {
-      if (this.sortBy !== col) return ' ↕';
-      return this.sortDir === 'asc' ? ' ▲' : ' ▼';
     },
 
     viewDetail(job) {
       this.selectedDLQJob = job;
-      bootstrap.Modal.getOrCreateInstance(document.getElementById('dlqDetailModal')).show();
+      showModal('dlqDetailModal');
     },
   }, 'loadDLQ'));
 });

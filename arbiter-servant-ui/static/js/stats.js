@@ -6,40 +6,35 @@
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('statsTab', () => ({
+    ...eventBusTab(),
     stats: null,
     loading: false,
     active: false,
     _statsDebounce: null,
+    _loadErrored: false,
 
     init() {
       trackTabActive(this, '#tab-stats', {
         onShow: () => this.loadStats(),
       });
+      const refreshTick = () => { if (this.active && !this.loading) this.loadStats(); };
+      this._bindBus({
+        queueChanged: () => { this.stats = null; if (this.active) this.loadStats(); },
+        sseEvent: (e) => {
+          if (!this.active) return;
+          const queue = Alpine.store('app').selectedQueue;
+          if (e.detail.some(evt => evt.table === queue)) this._debouncedLoadStats();
+        },
+        sseReconnect: () => { if (this.active) this.loadStats(); },
+        sseRefresh: refreshTick,
+        pollTick: refreshTick,
+      });
+    },
 
-      window.addEventListener('queue-changed', () => {
-        this.stats = null;
-        if (this.active) {
-          this.loadStats();
-        }
-      });
-
-      window.addEventListener('sse-event', (e) => {
-        if (!this.active) return;
-        const queue = Alpine.store('app').selectedQueue;
-        const hasRelevant = e.detail.some(evt => evt.table === queue);
-        if (hasRelevant) {
-          this._debouncedLoadStats();
-        }
-      });
-      window.addEventListener('sse-reconnect', () => {
-        if (this.active) this.loadStats();
-      });
-      window.addEventListener('sse-refresh', () => {
-        if (this.active && !this.loading) this.loadStats();
-      });
-      window.addEventListener('poll-tick', () => {
-        if (this.active && !this.loading) this.loadStats();
-      });
+    destroy() {
+      untrackTabActive(this);
+      if (this._statsDebounce) { clearTimeout(this._statsDebounce); this._statsDebounce = null; }
+      this._unbindBus();
     },
 
     _debouncedLoadStats() {
@@ -47,27 +42,17 @@ document.addEventListener('alpine:init', () => {
       this._statsDebounce = setTimeout(() => {
         this._statsDebounce = null;
         this.loadStats();
-      }, 500);
+      }, ARB_TIMING.statsDebounceMs);
     },
 
     async loadStats() {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      this.loading = true;
-      this._loadSeq = (this._loadSeq || 0) + 1;
-      const seq = this._loadSeq;
-      try {
+      await guardedLoad(this, 'Failed to load stats', async (seq, isStale) => {
         const data = await ArbiterAPI.getStats(queue);
-        if (seq !== this._loadSeq) return;
+        if (isStale()) return;
         this.stats = data.stats;
-        this._loadErrored = false;
-      } catch (e) {
-        if (seq !== this._loadSeq) return;
-        console.error('Failed to load stats:', e);
-        if (!this._loadErrored) { this._loadErrored = true; showToast('Failed to load stats: ' + e.message); }
-      } finally {
-        if (seq === this._loadSeq) this.loading = false;
-      }
+      });
     },
   }));
 });

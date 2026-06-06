@@ -48,11 +48,13 @@
                 x-text="isArmed('toggle') ? 'Click to confirm' : (paused ? 'Resume queue' : 'Pause queue')"></button>
       </div>
 
-      <!-- SSE status dot (hidden when SSE is disabled server-side) -->
-      <span class="sse-dot" x-show="!$store.app.sseDisabled" role="status"
-        :class="$store.app.connected ? 'connected' : 'disconnected'"
-        :title="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"
-        :aria-label="$store.app.connected ? 'SSE connected' : 'SSE disconnected'"></span>
+      <!-- SSE status indicator -->
+      <span class="sse-status" role="status"
+        :class="$store.app.sseDisabled ? 'polling' : ($store.app.connected ? 'connected' : 'disconnected')"
+        :title="$store.app.sseDisabled ? 'Live updates unavailable — polling for changes' : ($store.app.connected ? 'Live updates connected' : 'Disconnected — reconnecting, polling for changes')"
+        :aria-label="$store.app.sseDisabled ? 'Updates: polling' : ($store.app.connected ? 'Updates: live' : 'Updates: reconnecting')">
+        <span class="sse-dot" aria-hidden="true"></span>
+      </span>
 
       <!-- Theme toggle -->
       <button class="btn btn-sm nav-theme-toggle" @click="$store.app.toggleTheme()"
@@ -94,7 +96,7 @@
   <div class="tab-content mt-3">
     <!-- Stats Tab -->
     <div class="tab-pane fade show active" id="tab-stats" role="tabpanel" x-data="statsTab">
-      <div class="row g-3" x-show="stats">
+      <div class="row g-3" x-show="$store.app.selectedQueue">
         <div class="col-sm-6 col-lg-3">
           <div class="card text-center">
             <div class="card-body">
@@ -128,8 +130,6 @@
           </div>
         </div>
       </div>
-      <div x-show="$store.app.selectedQueue && !stats && loading" class="text-muted mt-3">Loading stats…</div>
-      <div x-show="$store.app.selectedQueue && !stats && !loading" class="text-muted mt-3">Stats unavailable.</div>
       <div x-show="$store.app.initialized && !$store.app.selectedQueue" class="text-muted mt-3">No queues available.</div>
     </div>
 
@@ -140,7 +140,7 @@
         <!-- Filters -->
         <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
-            placeholder="Group key..."
+            placeholder="Group key..." aria-label="Filter by group key"
             x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
             x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
@@ -149,14 +149,14 @@
         </div>
         <div class="position-relative" style="max-width: 160px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
-            placeholder="Parent ID..."
+            placeholder="Parent ID..." aria-label="Filter by parent ID"
             x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
             x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
-        <select class="form-select form-select-sm" style="width: auto;" title="Filter by job state"
+        <select class="form-select form-select-sm" style="width: auto;" title="Filter by job state" aria-label="Filter by job state"
           x-model="stateFilter" @change="applyState()">
           <option value="">All states</option>
           <option value="ready">Ready</option>
@@ -219,7 +219,8 @@
           <div class="row g-2">
             <div class="col-md-6">
               <label class="form-label">Payload (JSON)</label>
-              <textarea class="form-control font-monospace" rows="3" x-model="insertPayload"></textarea>
+              <textarea class="form-control font-monospace" rows="3" x-model="insertPayload" :class="{ 'is-invalid': insertPayloadInvalid }"></textarea>
+              <small class="text-danger" x-show="insertPayloadInvalid">Invalid JSON</small>
             </div>
             <div class="col-md-2">
               <label class="form-label">Group Key</label>
@@ -256,9 +257,9 @@
           <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
           <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
         </div>
-        <span class="text-muted small" x-text="displayTotal + ' jobs \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
+        <span class="text-muted small" x-text="total + ' jobs \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
         <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
-          placeholder="#" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page">
+          :placeholder="currentPage" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
       </div>
 
       <!-- Jobs table -->
@@ -266,17 +267,17 @@
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
-              <th class="sortable" :style="'width:' + colPct('id') + '%'" @click="toggleSort('id')">ID<span x-text="sortIndicator('id')"></span></th>
+              <th class="sortable" :style="'width:' + colPct('id') + '%'" @click="toggleSort('id')" @keydown.enter.prevent="toggleSort('id')" @keydown.space.prevent="toggleSort('id')" tabindex="0" :aria-sort="sortBy === 'id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">ID<span x-text="sortIndicator('id')" aria-hidden="true"></span></th>
               <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')" @keydown.enter.prevent="toggleSort('group_key')" @keydown.space.prevent="toggleSort('group_key')" tabindex="0" :aria-sort="sortBy === 'group_key' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Group<span x-text="sortIndicator('group_key')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')" @keydown.enter.prevent="toggleSort('parent_id')" @keydown.space.prevent="toggleSort('parent_id')" tabindex="0" :aria-sort="sortBy === 'parent_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Parent<span x-text="sortIndicator('parent_id')" aria-hidden="true"></span></th>
               <th :class="{ 'd-none': !colVisible('children') }" :style="'width:' + colPct('children') + '%'">Children</th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('priority') }" :style="'width:' + colPct('priority') + '%'" @click="toggleSort('priority')">Priority<span x-text="sortIndicator('priority')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('priority') }" :style="'width:' + colPct('priority') + '%'" @click="toggleSort('priority')" @keydown.enter.prevent="toggleSort('priority')" @keydown.space.prevent="toggleSort('priority')" tabindex="0" :aria-sort="sortBy === 'priority' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Priority<span x-text="sortIndicator('priority')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')" @keydown.enter.prevent="toggleSort('attempts')" @keydown.space.prevent="toggleSort('attempts')" tabindex="0" :aria-sort="sortBy === 'attempts' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Attempts<span x-text="sortIndicator('attempts')" aria-hidden="true"></span></th>
               <th :class="{ 'd-none': !colVisible('status') }" :style="'width:' + colPct('status') + '%'">Status</th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('inserted') }" :style="'width:' + colPct('inserted') + '%'" @click="toggleSort('inserted_at')">Inserted At<span x-text="sortIndicator('inserted_at')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('visible') }" :style="'width:' + colPct('visible') + '%'" @click="toggleSort('not_visible_until')">
-                <span x-text="notVisibleFormat === 'countdown' ? 'Visible In' : 'Visible At'"></span><span x-text="sortIndicator('not_visible_until')"></span>
+              <th class="sortable" :class="{ 'd-none': !colVisible('inserted') }" :style="'width:' + colPct('inserted') + '%'" @click="toggleSort('inserted_at')" @keydown.enter.prevent="toggleSort('inserted_at')" @keydown.space.prevent="toggleSort('inserted_at')" tabindex="0" :aria-sort="sortBy === 'inserted_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Inserted At<span x-text="sortIndicator('inserted_at')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('visible') }" :style="'width:' + colPct('visible') + '%'" @click="toggleSort('not_visible_until')" @keydown.enter.prevent="toggleSort('not_visible_until')" @keydown.space.prevent="toggleSort('not_visible_until')" tabindex="0" :aria-sort="sortBy === 'not_visible_until' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">
+                <span x-text="notVisibleFormat === 'countdown' ? 'Visible In' : 'Visible At'"></span><span x-text="sortIndicator('not_visible_until')" aria-hidden="true"></span>
               </th>
               <th :class="{ 'd-none': !colVisible('actions') }" :style="'width:' + colPct('actions') + '%'">Actions</th>
             </tr>
@@ -371,8 +372,10 @@
                 </template>
                 <template x-if="!job._isMoreRow">
                   <td class="text-truncate font-monospace" x-show="colVisible('visible')">
-                    <span class="format-toggle-cell"
+                    <span class="format-toggle-cell" tabindex="0" role="button"
                           @click="toggleNotVisibleFormat()"
+                          @keydown.enter.prevent="toggleNotVisibleFormat()"
+                          @keydown.space.prevent="toggleNotVisibleFormat()"
                           :title="job.notVisibleUntil ? 'Click to switch format · ' + (notVisibleFormat === 'countdown' ? formatTime(job.notVisibleUntil) : formatCountdown(job.notVisibleUntil)) : 'Click to switch format'"
                           x-text="formatNotVisible(job.notVisibleUntil)"></span>
                   </td>
@@ -382,28 +385,28 @@
                     <div class="d-inline-flex gap-1 flex-nowrap">
                       <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job.primaryKey)" title="View">Detail</button>
                       <div class="dropdown">
-                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" :disabled="isBusy(job.primaryKey)">
                           Actions
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end">
                           <li x-show="job.status === 'scheduled' || job.status === 'backoff'">
-                            <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey)">Promote</a>
+                            <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey); closeDropdown($el)">Promote</a>
                           </li>
                           <li>
-                            <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey)" :class="{ 'text-warning fw-semibold': isArmed('cancel:' + job.primaryKey) }" x-text="isArmed('cancel:' + job.primaryKey) ? ('Confirm cancel' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Cancel'"></a>
+                            <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey, $el)" :class="{ 'text-warning fw-semibold': isArmed('cancel:' + job.primaryKey) }" x-text="isArmed('cancel:' + job.primaryKey) ? ('Confirm cancel' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Cancel'"></a>
                           </li>
                           <li x-show="job.status === 'in_flight'">
-                            <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey)" :class="{ 'fw-semibold': isArmed('fcancel:' + job.primaryKey) }" x-text="isArmed('fcancel:' + job.primaryKey) ? 'Confirm force-cancel' : 'Force Cancel'"></a>
+                            <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey, $el)" :class="{ 'fw-semibold': isArmed('fcancel:' + job.primaryKey) }" x-text="isArmed('fcancel:' + job.primaryKey) ? 'Confirm force-cancel (interrupts handler)' : 'Force Cancel'"></a>
                           </li>
                           <li>
-                            <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey)" :class="{ 'text-warning fw-semibold': isArmed('movedlq:' + job.primaryKey) }" x-text="isArmed('movedlq:' + job.primaryKey) ? 'Confirm move to DLQ' : 'Move to DLQ'"></a>
+                            <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey, $el)" :class="{ 'text-warning fw-semibold': isArmed('movedlq:' + job.primaryKey) }" x-text="isArmed('movedlq:' + job.primaryKey) ? ('Confirm move to DLQ' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Move to DLQ'"></a>
                           </li>
                           <li><hr class="dropdown-divider"></li>
                           <li x-show="canSuspend(job)">
-                            <a class="dropdown-item" href="#" @click.prevent="pauseAction(job)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
+                            <a class="dropdown-item" href="#" @click.prevent="pauseAction(job); closeDropdown($el)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
                           </li>
                           <li x-show="canResume(job)">
-                            <a class="dropdown-item" href="#" @click.prevent="resumeAction(job)" x-text="job._childCount > 0 ? 'Resume descendants' : 'Resume'"></a>
+                            <a class="dropdown-item" href="#" @click.prevent="resumeAction(job); closeDropdown($el)" x-text="job._childCount > 0 ? 'Resume descendants' : 'Resume'"></a>
                           </li>
                         </ul>
                       </div>
@@ -412,7 +415,13 @@
                 </template>
               </tr>
             </template>
-            <tr x-show="displayJobs.length === 0">
+            <tr x-show="loading && !loaded && displayJobs.length === 0">
+              <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
+            </tr>
+            <tr x-show="!loading && _loadErrored && displayJobs.length === 0">
+              <td :colspan="columns.length" class="text-danger text-center">Failed to load jobs. <a href="#" @click.prevent="loadJobs()">Retry</a></td>
+            </tr>
+            <tr x-show="!loading && !_loadErrored && loaded && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No jobs found.</td>
             </tr>
           </tbody>
@@ -429,11 +438,11 @@
       </div>
 
       <!-- Job Detail Modal -->
-      <div class="modal fade" id="jobDetailModal" tabindex="-1">
+      <div class="modal fade" id="jobDetailModal" tabindex="-1" aria-labelledby="jobDetailModalLabel">
         <div class="modal-dialog modal-lg">
           <div class="modal-content">
             <div class="modal-header">
-              <h5 class="modal-title">Job Detail</h5>
+              <h5 class="modal-title" id="jobDetailModalLabel">Job Detail</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body" x-show="selectedJob">
@@ -467,7 +476,12 @@
                 <dt class="col-sm-4">Claimed By</dt>
                 <dd class="col-sm-8"><code class="small" x-text="selectedJob?.claimedBy || '-'"></code></dd>
                 <dt class="col-sm-4">Last Error</dt>
-                <dd class="col-sm-8" x-text="selectedJob?.lastError || '-'"></dd>
+                <dd class="col-sm-8">
+                  <template x-if="selectedJob?.lastError">
+                    <pre class="payload-display p-2 rounded" x-text="selectedJob.lastError"></pre>
+                  </template>
+                  <template x-if="!selectedJob?.lastError"><span>-</span></template>
+                </dd>
                 <dt class="col-sm-4">Payload</dt>
                 <dd class="col-sm-8">
                   <pre class="payload-display p-2 rounded" x-text="formatJson(selectedJob?.payload)"></pre>
@@ -485,7 +499,7 @@
         <!-- Filters -->
         <div class="position-relative" style="max-width: 220px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': groupKeyFilter !== _appliedGroupKey }"
-            placeholder="Group key..."
+            placeholder="Group key..." aria-label="Filter by group key"
             x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
             x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
@@ -494,7 +508,7 @@
         </div>
         <div class="position-relative" style="max-width: 160px;">
           <input type="text" class="form-control form-control-sm pe-4" :class="{ 'filter-dirty': parentIdFilter !== _appliedParentId }"
-            placeholder="Parent ID..."
+            placeholder="Parent ID..." aria-label="Filter by parent ID"
             x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
             x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
@@ -542,8 +556,8 @@
       <!-- Bulk actions (shown when rows are selected) -->
       <div class="d-flex align-items-center gap-2 mb-2" x-show="selectedCount > 0" x-cloak>
         <span class="small fw-semibold" x-text="selectedCount + ' selected'"></span>
-        <button class="btn btn-sm" :class="isArmed('bulkRetry') ? 'btn-success' : 'btn-outline-success'" :disabled="bulkBusy" @click="bulkRetry()" x-text="isArmed('bulkRetry') ? 'Confirm retry' : 'Retry selected'"></button>
-        <button class="btn btn-sm" :class="isArmed('bulkDelete') ? 'btn-danger' : 'btn-outline-danger'" :disabled="bulkBusy" @click="bulkDelete()" x-text="isArmed('bulkDelete') ? 'Confirm delete' : 'Delete selected'"></button>
+        <button class="btn btn-sm" :class="isArmed('bulkRetry') ? 'btn-success' : 'btn-outline-success'" :disabled="bulkBusy" @click="bulkRetry()" x-text="isArmed('bulkRetry') ? ('Confirm retry ' + selectedCount) : 'Retry selected'"></button>
+        <button class="btn btn-sm" :class="isArmed('bulkDelete') ? 'btn-danger' : 'btn-outline-danger'" :disabled="bulkBusy" @click="bulkDelete()" x-text="isArmed('bulkDelete') ? ('Confirm delete ' + selectedCount + ' permanently') : 'Delete selected'"></button>
         <button class="btn btn-link btn-sm text-muted text-decoration-none p-0 ms-1" @click="selected = {}">Clear</button>
       </div>
 
@@ -555,22 +569,22 @@
         </div>
         <span class="text-muted small" x-text="total + ' DLQ entries \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
         <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
-          placeholder="#" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page">
+          :placeholder="currentPage" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
       </div>
 
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
-              <th class="select-cell" :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all" aria-label="Select all"
+              <th class="select-cell" :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all on this page" aria-label="Select all on this page"
                   :checked="allSelected" @change="toggleSelectAll()"></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('dlqid') }" :style="'width:' + colPct('dlqid') + '%'" @click="toggleSort('id')">DLQ ID<span x-text="sortIndicator('id')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')">Job ID<span x-text="sortIndicator('job_id')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')">Parent<span x-text="sortIndicator('parent_id')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')">Group<span x-text="sortIndicator('group_key')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('dlqid') }" :style="'width:' + colPct('dlqid') + '%'" @click="toggleSort('id')" @keydown.enter.prevent="toggleSort('id')" @keydown.space.prevent="toggleSort('id')" tabindex="0" :aria-sort="sortBy === 'id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">DLQ ID<span x-text="sortIndicator('id')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')" @keydown.enter.prevent="toggleSort('job_id')" @keydown.space.prevent="toggleSort('job_id')" tabindex="0" :aria-sort="sortBy === 'job_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Job ID<span x-text="sortIndicator('job_id')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')" @keydown.enter.prevent="toggleSort('parent_id')" @keydown.space.prevent="toggleSort('parent_id')" tabindex="0" :aria-sort="sortBy === 'parent_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Parent<span x-text="sortIndicator('parent_id')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')" @keydown.enter.prevent="toggleSort('group_key')" @keydown.space.prevent="toggleSort('group_key')" tabindex="0" :aria-sort="sortBy === 'group_key' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Group<span x-text="sortIndicator('group_key')" aria-hidden="true"></span></th>
               <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('failed') }" :style="'width:' + colPct('failed') + '%'" @click="toggleSort('failed_at')">Failed At<span x-text="sortIndicator('failed_at')"></span></th>
-              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')">Attempts<span x-text="sortIndicator('attempts')"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('failed') }" :style="'width:' + colPct('failed') + '%'" @click="toggleSort('failed_at')" @keydown.enter.prevent="toggleSort('failed_at')" @keydown.space.prevent="toggleSort('failed_at')" tabindex="0" :aria-sort="sortBy === 'failed_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Failed At<span x-text="sortIndicator('failed_at')" aria-hidden="true"></span></th>
+              <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')" @keydown.enter.prevent="toggleSort('attempts')" @keydown.space.prevent="toggleSort('attempts')" tabindex="0" :aria-sort="sortBy === 'attempts' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Attempts<span x-text="sortIndicator('attempts')" aria-hidden="true"></span></th>
               <th :class="{ 'd-none': !colVisible('error') }" :style="'width:' + colPct('error') + '%'">Last Error</th>
               <th :class="{ 'd-none': !colVisible('actions') }" :style="'width:' + colPct('actions') + '%'">Actions</th>
             </tr>
@@ -602,19 +616,25 @@
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-outline-primary btn-sm" @click="viewDetail(job)" title="View">Detail</button>
                     <div class="dropdown">
-                      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" :disabled="isBusy(job.dlqPrimaryKey)">
                         Actions
                       </button>
                       <ul class="dropdown-menu dropdown-menu-end">
-                        <li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey)">Retry</a></li>
-                        <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey)" :class="{ 'fw-semibold': isArmed('del:' + job.dlqPrimaryKey) }" x-text="isArmed('del:' + job.dlqPrimaryKey) ? 'Confirm delete' : 'Delete'"></a></li>
+                        <li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey); closeDropdown($el)">Retry</a></li>
+                        <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('del:' + job.dlqPrimaryKey) }" x-text="isArmed('del:' + job.dlqPrimaryKey) ? 'Confirm delete permanently' : 'Delete'"></a></li>
                       </ul>
                     </div>
                   </div>
                 </td>
               </tr>
             </template>
-            <tr x-show="dlqJobs.length === 0">
+            <tr x-show="loading && !loaded && dlqJobs.length === 0">
+              <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
+            </tr>
+            <tr x-show="!loading && _loadErrored && dlqJobs.length === 0">
+              <td :colspan="columns.length" class="text-danger text-center">Failed to load DLQ entries. <a href="#" @click.prevent="loadDLQ()">Retry</a></td>
+            </tr>
+            <tr x-show="!loading && !_loadErrored && loaded && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No DLQ entries.</td>
             </tr>
           </tbody>
@@ -631,11 +651,11 @@
       </div>
 
       <!-- DLQ Detail Modal -->
-      <div class="modal fade" id="dlqDetailModal" tabindex="-1">
+      <div class="modal fade" id="dlqDetailModal" tabindex="-1" aria-labelledby="dlqDetailModalLabel">
         <div class="modal-dialog modal-lg">
           <div class="modal-content">
             <div class="modal-header">
-              <h5 class="modal-title">DLQ Job Detail</h5>
+              <h5 class="modal-title" id="dlqDetailModalLabel">DLQ Job Detail</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body" x-show="selectedDLQJob">
@@ -653,7 +673,12 @@
                 <dt class="col-sm-4">Attempts</dt>
                 <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.attempts"></dd>
                 <dt class="col-sm-4">Last Error</dt>
-                <dd class="col-sm-8" x-text="selectedDLQJob?.jobSnapshot?.lastError || '-'"></dd>
+                <dd class="col-sm-8">
+                  <template x-if="selectedDLQJob?.jobSnapshot?.lastError">
+                    <pre class="payload-display p-2 rounded" x-text="selectedDLQJob.jobSnapshot.lastError"></pre>
+                  </template>
+                  <template x-if="!selectedDLQJob?.jobSnapshot?.lastError"><span>-</span></template>
+                </dd>
                 <dt class="col-sm-4">Payload</dt>
                 <dd class="col-sm-8">
                   <pre class="payload-display p-2 rounded" x-text="formatJson(selectedDLQJob?.jobSnapshot?.payload)"></pre>
@@ -679,7 +704,7 @@
         <div>
           <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
             <div class="input-group" style="max-width: 200px;">
-              <select class="form-select form-select-sm" x-model="filterQueue">
+              <select class="form-select form-select-sm" x-model="filterQueue" aria-label="Filter events by queue">
                 <option value="">All Queues</option>
                 <template x-for="q in $store.app.queues" :key="q">
                   <option :value="q" x-text="q"></option>
@@ -742,7 +767,6 @@
       <template x-if="$store.app.selectedQueue">
         <div class="d-flex gap-2 mb-3 align-items-center">
           <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
-          <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
         </div>
       </template>
 
@@ -776,7 +800,7 @@
                 <!-- Expression (editable) -->
                 <td>
                   <template x-if="editingName === s.name && editingField === 'expression'">
-                    <div class="d-flex gap-1 align-items-center">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
                       <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
                         x-model="editValue" @keyup.enter="saveEdit()" @keyup.escape="cancelEdit()">
                       <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
@@ -786,7 +810,10 @@
                   <template x-if="!(editingName === s.name && editingField === 'expression')">
                     <div class="d-flex flex-column gap-0">
                       <div class="d-flex flex-wrap align-items-center gap-1">
-                        <span class="editable-cell" @click="startEdit(s.name, 'expression', effectiveExpression(s))"
+                        <span class="editable-cell" tabindex="0" role="button"
+                          @click="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          @keydown.enter.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          @keydown.space.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
                           x-text="effectiveExpression(s)"></span>
                         <template x-if="isOverridden(s, 'expression')">
                           <span class="d-inline-flex align-items-center gap-1">
@@ -805,7 +832,7 @@
                 <!-- Overlap (editable) -->
                 <td>
                   <template x-if="editingName === s.name && editingField === 'overlap'">
-                    <div class="d-flex gap-1 align-items-center">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
                       <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue">
                         <option value="SkipOverlap">SkipOverlap</option>
                         <option value="AllowOverlap">AllowOverlap</option>
@@ -816,7 +843,10 @@
                   </template>
                   <template x-if="!(editingName === s.name && editingField === 'overlap')">
                     <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                      <span class="editable-cell" tabindex="0" role="button"
+                        @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        @keydown.enter.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        @keydown.space.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
                         x-text="effectiveOverlap(s)"></span>
                       <template x-if="isOverridden(s, 'overlap')">
                         <span class="d-inline-flex align-items-center gap-1">
@@ -833,7 +863,7 @@
                 <!-- Timezone (editable) -->
                 <td>
                   <template x-if="editingName === s.name && editingField === 'timezone'">
-                    <div class="d-flex gap-1 align-items-center">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
                       <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
                         placeholder="Type to search…" autocomplete="off"
                         x-model="editValue"
@@ -862,7 +892,10 @@
                   </template>
                   <template x-if="!(editingName === s.name && editingField === 'timezone')">
                     <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                      <span class="editable-cell" tabindex="0" role="button"
+                        @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        @keydown.enter.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        @keydown.space.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
                         x-text="effectiveTimezone(s) || 'UTC'"></span>
                       <template x-if="isOverridden(s, 'timezone')">
                         <span class="d-inline-flex align-items-center gap-1">
@@ -889,7 +922,13 @@
                 <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
               </tr>
             </template>
-            <tr x-show="schedules.length === 0 && !loading">
+            <tr x-show="loading && !loaded && schedules.length === 0">
+              <td colspan="7" class="text-muted text-center">Loading…</td>
+            </tr>
+            <tr x-show="!loading && _loadErrored && schedules.length === 0">
+              <td colspan="7" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
+            </tr>
+            <tr x-show="!loading && !_loadErrored && loaded && schedules.length === 0">
               <td colspan="7" class="text-muted text-center">No cron schedules configured.</td>
             </tr>
           </tbody>
@@ -905,9 +944,8 @@
           <button class="btn btn-outline-secondary btn-sm" @click="loadWorkers()">Refresh</button>
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="workers-live-only" x-model="liveOnly" @change="persistLiveOnly()">
-            <label class="form-check-label small" for="workers-live-only">Live only</label>
+            <label class="form-check-label small" for="workers-live-only">Hide stale</label>
           </div>
-          <small class="alert alert-danger mb-0 inline-error" x-show="actionError" x-text="actionError"></small>
         </div>
       </template>
 
@@ -949,28 +987,35 @@
                 <td>
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-sm btn-outline-primary" @click="showDetail(w)" title="View">Detail</button>
-                    <button class="btn btn-sm btn-outline-secondary"
+                    <button class="btn btn-sm"
+                            :class="isArmed('toggle:' + w.workerId) ? 'btn-warning' : 'btn-outline-secondary'"
                             :disabled="isBusy(w.workerId) || w.shuttingDown"
                             @click="togglePause(w)"
-                            x-text="w.paused ? 'Resume' : 'Pause'"></button>
+                            x-text="isArmed('toggle:' + w.workerId) ? 'Click to confirm' : (w.paused ? 'Resume' : 'Pause')"></button>
                   </div>
                 </td>
               </tr>
             </template>
-            <tr x-show="displayWorkers.length === 0 && !loading">
+            <tr x-show="loading && !loaded && displayWorkers.length === 0">
+              <td colspan="7" class="text-muted text-center">Loading…</td>
+            </tr>
+            <tr x-show="!loading && _loadErrored && displayWorkers.length === 0">
+              <td colspan="7" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
+            </tr>
+            <tr x-show="!loading && !_loadErrored && loaded && displayWorkers.length === 0">
               <td colspan="7" class="text-muted text-center"
-                x-text="liveOnly && workers.length > 0 ? 'No live workers.' : 'No workers registered.'"></td>
+                x-text="liveOnly && workers.length > 0 ? 'No active workers.' : 'No workers registered.'"></td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <!-- Worker Detail Modal -->
-      <div class="modal fade" id="workerDetailModal" tabindex="-1">
+      <div class="modal fade" id="workerDetailModal" tabindex="-1" aria-labelledby="workerDetailModalLabel">
         <div class="modal-dialog modal-lg">
           <div class="modal-content">
             <div class="modal-header">
-              <h5 class="modal-title">Worker Detail</h5>
+              <h5 class="modal-title" id="workerDetailModalLabel">Worker Detail</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body" x-show="selectedWorker">
@@ -1012,13 +1057,15 @@
 </div>
 
 <!-- Toast container -->
-<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
 
 <!-- Scripts -->
 <script src="vendor/bootstrap.bundle.min.js"></script>
 <script>
   // Fix Bootstrap aria-hidden warning: blur focus before modal hides
-  document.addEventListener('hide.bs.modal', () => document.activeElement?.blur());
+  document.addEventListener('hide.bs.modal', (e) => {
+    if (e.target.contains(document.activeElement)) document.activeElement.blur();
+  });
 
   // Restore tab from URL hash (runs before Alpine removes x-cloak, so no flash)
   (function() {
@@ -1029,6 +1076,8 @@
     }
   })();
 </script>
+<script src="js/config.js"></script>
+<script src="js/format.js"></script>
 <script src="js/api.js"></script>
 <script src="js/helpers.js"></script>
 <script src="js/store.js"></script>

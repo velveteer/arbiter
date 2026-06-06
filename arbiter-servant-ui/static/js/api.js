@@ -11,19 +11,49 @@ const ArbiterAPI = {
 
   async _fetch(path, options = {}) {
     const url = `${this.baseUrl()}${path}`;
-    const res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-      ...options,
-    });
-    if (!res.ok) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ARB_TIMING.fetchTimeoutMs);
+    try {
+      const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+        ...options,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let message = `${res.status} ${res.statusText}`.trim();
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && (parsed.error || parsed.message)) message = parsed.error || parsed.message;
+        } catch {
+          if (text && text.length <= 200) message = text;
+        }
+        const err = new Error(message);
+        err.status = res.status;
+        err.body = text;
+        throw err;
+      }
+      if (res.status === 204) return null;
       const text = await res.text();
-      const err = new Error(`${res.status}: ${text}`);
-      err.status = res.status;
-      err.body = text;
-      throw err;
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        const err = new Error('Invalid JSON response');
+        err.status = res.status;
+        err.body = text;
+        throw err;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        const err = new Error('Request timed out');
+        err.status = 0;
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    if (res.status === 204) return null;
-    return res.json();
   },
 
   // Queues
@@ -143,11 +173,8 @@ const ArbiterAPI = {
   },
 
   // Workers
-  listWorkers({ queue, liveSecs } = {}) {
-    const params = new URLSearchParams();
-    if (queue) params.set('queue', queue);
-    if (liveSecs != null) params.set('live', String(liveSecs));
-    const qs = params.toString() ? `?${params.toString()}` : '';
+  listWorkers({ queue } = {}) {
+    const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';
     return this._fetch(`/workers${qs}`);
   },
 

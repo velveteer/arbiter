@@ -107,7 +107,8 @@
   white-space: nowrap;
 }
 
-.editable-cell {
+.editable-cell,
+.format-toggle-cell {
   cursor: pointer;
   border-bottom: 1px dashed var(--arb-text-muted);
   opacity: 0.8;
@@ -147,42 +148,43 @@
   background: var(--bs-primary-bg-subtle);
 }
 
-.editable-cell:hover {
-  opacity: 1;
-  color: var(--arb-teal-on-bg);
-  border-bottom-color: var(--arb-teal-dim);
-}
-
-/* Click-to-toggle column cell. Reuses editable-cell idiom: dashed underline + hover hint. */
-.format-toggle-cell {
-  cursor: pointer;
-  border-bottom: 1px dashed var(--arb-text-muted);
-  opacity: 0.8;
-  padding-bottom: 1px;
-}
-
+.editable-cell:hover,
 .format-toggle-cell:hover {
   opacity: 1;
   color: var(--arb-teal-on-bg);
   border-bottom-color: var(--arb-teal-dim);
 }
 
-/* SSE status dot */
-.sse-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
+/* SSE status indicator: shape + color distinguish each state */
+.sse-status {
+  display: inline-flex;
+  align-items: center;
   flex-shrink: 0;
 }
 
-.sse-dot.connected {
+.sse-dot {
+  width: 11px;
+  height: 11px;
+  display: inline-block;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: var(--arb-text-muted);
+}
+
+.sse-status.connected .sse-dot {
   background-color: #16a34a;
 }
 
-.sse-dot.disconnected {
-  background-color: #dc2626;
+.sse-status.disconnected .sse-dot {
+  background-color: transparent;
+  border: 2px solid #dc2626;
   animation: pulse-dot 1.5s infinite;
+}
+
+.sse-status.polling .sse-dot {
+  border-radius: 2px;
+  background-color: #d97706;
 }
 
 @keyframes pulse-dot {
@@ -226,7 +228,9 @@
 .navbar-brand {
   color: var(--arb-teal-on-bg) !important;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  font-family: 'Electrolize', sans-serif;
+  letter-spacing: 0.08em;
+  margin-right: auto;
 }
 
 [data-bs-theme="dark"] .navbar-brand {
@@ -443,7 +447,7 @@
 
 .badge.bg-secondary {
   background-color: var(--arb-surface-hover) !important;
-  color: var(--arb-text-muted);
+  color: var(--arb-text);
 }
 
 .badge.bg-info {
@@ -472,14 +476,18 @@
 }
 
 /* ---- SSE dot glow in dark mode ---- */
-[data-bs-theme="dark"] .sse-dot.connected {
+[data-bs-theme="dark"] .sse-status.connected .sse-dot {
   background-color: #34d399;
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
 }
 
-[data-bs-theme="dark"] .sse-dot.disconnected {
-  background-color: #f87171;
+[data-bs-theme="dark"] .sse-status.disconnected .sse-dot {
+  border-color: #f87171;
   box-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
+}
+
+[data-bs-theme="dark"] .sse-status.polling .sse-dot {
+  background-color: #fbbf24;
 }
 
 /* ---- Dropdowns ---- */
@@ -597,6 +605,18 @@ th.sortable:hover {
   color: var(--arb-teal-on-bg);
 }
 
+th.sortable:focus-visible {
+  outline: 2px solid var(--arb-teal-on-bg);
+  outline-offset: -2px;
+}
+
+.editable-cell:focus-visible,
+.format-toggle-cell:focus-visible {
+  outline: 2px solid var(--arb-teal-on-bg);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
 .table-responsive {
   overflow: visible;
 }
@@ -623,12 +643,6 @@ th.sortable:hover {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--arb-purple-dim);
-}
-
-.navbar-brand {
-  font-family: 'Electrolize', sans-serif;
-  letter-spacing: 0.08em;
-  margin-right: auto;
 }
 
 /* Brand on the left, queue picker + controls clustered on the right. */
@@ -698,5 +712,16 @@ th.sortable:hover {
   .nav-queue {
     order: 3;
     width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .sse-status.disconnected .sse-dot {
+    animation: none;
   }
 }

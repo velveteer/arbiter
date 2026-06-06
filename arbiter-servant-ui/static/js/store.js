@@ -17,22 +17,24 @@ document.addEventListener('alpine:init', () => {
     _hasConnected: false,
     _refreshInterval: null,
     _pollInterval: null,
-    streaming: false,
+    _sseHandshakeTimer: null,
     theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
 
     async init() {
       try {
         const data = await ArbiterAPI.listQueues();
-        this.queues = data.queues || [];
+        this.queues = (data && data.queues) || [];
         const params = new URLSearchParams(location.search);
         const urlQueue = params.get('queue');
         if (urlQueue && this.queues.includes(urlQueue)) {
           this.selectQueue(urlQueue);
-        } else if (this.queues.length > 0) {
-          this.selectQueue(this.queues[0]);
+        } else {
+          if (urlQueue) showToast(`Queue "${urlQueue}" not found`, 'warning');
+          if (this.queues.length > 0) this.selectQueue(this.queues[0]);
         }
       } catch (e) {
         console.error('Failed to load queues:', e);
+        showToast('Failed to load queues: ' + e.message);
       }
       this.initialized = true;
       this.connectSSE();
@@ -50,7 +52,7 @@ document.addEventListener('alpine:init', () => {
       this.selectedQueue = queue;
       clearFiltersFromUrl();
       this._updateUrl();
-      window.dispatchEvent(new CustomEvent('queue-changed', { detail: queue }));
+      window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
     },
 
     _updateUrl(newHash) {
@@ -82,13 +84,14 @@ document.addEventListener('alpine:init', () => {
           this._startPolling();
           this._startRefreshTimer();
         }
-      }, 3000);
+      }, ARB_TIMING.sseHandshakeMs);
       this.eventSource = ArbiterAPI.connectSSE(
         (event) => {
           this.connected = true;
           try {
             const data = JSON.parse(event.data);
             if (data.event === 'disabled') {
+              if (this._sseHandshakeTimer) { clearTimeout(this._sseHandshakeTimer); this._sseHandshakeTimer = null; }
               this.eventSource.close();
               this.eventSource = null;
               this.connected = false;
@@ -98,13 +101,13 @@ document.addEventListener('alpine:init', () => {
               return;
             }
             if (data.event === 'connected') {
+              if (this._sseHandshakeTimer) { clearTimeout(this._sseHandshakeTimer); this._sseHandshakeTimer = null; }
               // Reconnect (not first connect) — refetch all tabs
               if (this._hasConnected) {
-                window.dispatchEvent(new CustomEvent('sse-reconnect'));
+                window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseReconnect));
               }
               this._hasConnected = true;
-              this.streaming = false;
-              this._startPolling();
+              this._stopPolling();
               this._startRefreshTimer();
               return;
             }
@@ -120,6 +123,8 @@ document.addEventListener('alpine:init', () => {
         },
         () => {
           this.connected = false;
+          this._startPolling();
+          this._startRefreshTimer();
         }
       );
     },
@@ -127,8 +132,8 @@ document.addEventListener('alpine:init', () => {
     _startPolling() {
       if (this._pollInterval) return;
       this._pollInterval = setInterval(() => {
-        window.dispatchEvent(new CustomEvent('poll-tick'));
-      }, 5000);
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.pollTick));
+      }, ARB_TIMING.pollMs);
     },
 
     _stopPolling() {
@@ -141,8 +146,8 @@ document.addEventListener('alpine:init', () => {
     _startRefreshTimer() {
       if (this._refreshInterval) return;
       this._refreshInterval = setInterval(() => {
-        window.dispatchEvent(new CustomEvent('sse-refresh'));
-      }, 30000);
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseRefresh));
+      }, ARB_TIMING.refreshMs);
     },
 
     _scheduleFlush() {
@@ -151,14 +156,10 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => {
         this._flushScheduled = false;
         if (this._eventBuffer.length === 0) return;
-        if (!this.streaming) {
-          this.streaming = true;
-          this._stopPolling();
-        }
         const batch = this._eventBuffer.splice(0);
         this.events = [...batch].reverse().concat(this.events).slice(0, this.maxEvents);
-        window.dispatchEvent(new CustomEvent('sse-event', { detail: batch }));
-      }, 250);
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseEvent, { detail: batch }));
+      }, ARB_TIMING.flushMs);
     },
   });
 });
