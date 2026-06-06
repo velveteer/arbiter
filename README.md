@@ -474,15 +474,6 @@ type MyAPI =
 
 See the [arbiter-servant-ui haddocks](https://velveteer.github.io/arbiter/arbiter-servant-ui/Arbiter-Servant-UI.html)
 
-<details>
-<summary>Screenshots</summary>
-
-[![Jobs view](docs/admin-jobs.png)](docs/admin-jobs.png)
-[![Events stream](docs/admin-events.png)](docs/admin-events.png)
-[![Cron schedules](docs/admin-cron.png)](docs/admin-cron.png)
-
-</details>
-
 ### Endpoints
 
 Per-queue endpoints under `/api/v1/:table/`:
