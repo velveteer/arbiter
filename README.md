@@ -16,6 +16,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - File-based liveness probes for Kubernetes / systemd
 - Extensive test coverage (600+ integration tests)
 
+**[Live Demo](https://demo.arbiterq.dev/)**
 **[API Documentation](https://velveteer.github.io/arbiter/)**
 
 > [!NOTE]

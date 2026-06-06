@@ -8,6 +8,7 @@
 
 module Main (main) where
 
+import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
@@ -25,18 +26,19 @@ import Arbiter.Worker
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Monad (void, when)
+import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
+import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime)
+import Data.Time (addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout)
@@ -45,7 +47,7 @@ import Network.Wai.Middleware.Cors
   , cors
   , simpleCorsResourcePolicy
   )
-import Network.Wai.Middleware.RequestLogger (logStdoutDev)
+import Network.Wai.Middleware.RequestLogger (logStdout)
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
@@ -93,8 +95,8 @@ main = do
   connStr <-
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
-  schemaStr <- maybe "arbiter_demo" id <$> lookupEnv "SCHEMA"
-  portStr <- maybe "8080" id <$> lookupEnv "PORT"
+  schemaStr <- fromMaybe "arbiter_demo" <$> lookupEnv "SCHEMA"
+  portStr <- fromMaybe "8080" <$> lookupEnv "PORT"
   let schema = T.pack schemaStr
       port = read portStr :: Int
   -- Drop and recreate schema for a clean demo
@@ -118,8 +120,8 @@ main = do
   workerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
 
   -- Seed demo data
-  putStrLn "Seeding pipeline (rollup) demo..."
-  seedPipelineJobs workerEnv schema
+  putStrLn "Seeding demo data..."
+  seedDemoData workerEnv schema
 
   -- Create server config (own connection pool for admin API)
   putStrLn ""
@@ -144,16 +146,15 @@ main = do
   -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
   mDevDir <- lookupEnv "ADMIN_DEV_DIR"
   let app = case mDevDir of
-        Just dir -> cors (const $ Just policy) $ logStdoutDev $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
-        Nothing -> cors (const $ Just policy) $ logStdoutDev $ arbiterAppWithAdmin @DemoRegistry serverConfig
+        Just dir -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
+        Nothing -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdmin @DemoRegistry serverConfig
 
   -- Start server
   putStrLn ""
   putStrLn "=== Server Starting ==="
   putStrLn $ "API:     http://localhost:" <> show port <> "/api/v1"
   putStrLn $ "Admin:   http://localhost:" <> show port <> "/"
-  putStrLn "Workers: 4 queues (demo_queue, email_queue, notifications, pipeline)"
-  putStrLn "Cron:    demo-ticker (every min), email-digest (every 2 min), notif-broadcast (every 3 min)"
+  putStrLn "Workers and cron schedules running across all queues"
   case mDevDir of
     Just dir -> putStrLn $ "Dev: serving static files from " <> dir
     Nothing -> putStrLn "Set ADMIN_DEV_DIR to serve static files from disk"
@@ -182,6 +183,11 @@ main = do
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
 
+  -- Background load generator: pulse a few jobs on an interval so the queues
+  -- stay visibly active between cron ticks. A value of 0 disables it.
+  pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
+  when (pulseSec > 0) $ void $ forkIO $ loadPulse workerEnv pulseSec
+
   race_
     (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
@@ -202,16 +208,14 @@ mkDemoWorker connStr = do
       , livenessFile = Nothing
       }
   where
-    handler _conn job = liftIO $ do
-      threadDelay 5_000_000
-      putStrLn $ "[demo_queue] Processed: " <> show (payload job)
+    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
     demoCrons =
       [ either error id $
           cronJob
             "demo-ticker"
             "* * * * *" -- every minute
             AllowOverlap
-            (\_ t -> defaultJob (TestMessage $ "tick:" <> fmtTime t))
+            (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
       ]
 
 mkEmailWorker :: ByteString -> IO (WorkerConfig DemoM EmailPayload ())
@@ -224,9 +228,7 @@ mkEmailWorker connStr = do
       , livenessFile = Nothing
       }
   where
-    handler _conn job = liftIO $ do
-      threadDelay 5_000_000
-      putStrLn $ "[email_queue] Processed: " <> show (payload job)
+    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
     emailCrons =
       [ either error id $
           cronJob
@@ -246,14 +248,14 @@ mkNotifWorker connStr = do
       , livenessFile = Nothing
       }
   where
-    handler _conn job = liftIO $ putStrLn $ "[notifications] Processed: " <> show (payload job)
+    handler _conn _job = pure ()
     notifCrons =
       [ either error id $
           cronJob
             "notif-broadcast"
             "*/3 * * * *" -- every 3 minutes
             AllowOverlap
-            (\_ t -> defaultJob (PushNotification $ "broadcast:" <> fmtTime t))
+            (\_ t -> defaultJob (PushNotification $ "broadcast:" <> tshow t))
       ]
 
 -- ---------------------------------------------------------------------------
@@ -268,28 +270,8 @@ mkPipelineWorker connStr = do
     handler childResults _dlqFailures _conn job = case payload job of
       ProcessChunk chunkName -> do
         liftIO $ threadDelay 1_500_000 -- simulate 1.5s of work
-        let findings = chunkFindings chunkName
-        liftIO $
-          putStrLn $
-            "[pipeline] Leaf #"
-              <> show (primaryKey job)
-              <> " \""
-              <> T.unpack chunkName
-              <> "\" -> "
-              <> show findings
-        pure findings
-      AggregateResults label -> do
-        liftIO $
-          putStrLn $
-            "[pipeline] Finalizer #"
-              <> show (primaryKey job)
-              <> " \""
-              <> T.unpack label
-              <> "\" - merged ("
-              <> show (length childResults)
-              <> " items): "
-              <> show childResults
-        pure childResults
+        pure (chunkFindings chunkName)
+      AggregateResults _ -> pure childResults
 
 -- | Deterministic fake findings for each chunk name.
 chunkFindings :: Text -> [Text]
@@ -304,14 +286,24 @@ chunkFindings name
   | otherwise = ["processed:" <> name]
 
 -- ---------------------------------------------------------------------------
--- Seed data: 3-level rollup pipeline
+-- Seed data
 -- ---------------------------------------------------------------------------
-seedPipelineJobs :: SimpleEnv DemoRegistry -> Text -> IO ()
-seedPipelineJobs env schemaName = runSimpleDb env $ do
+
+-- | Seed a varied initial dataset so a fresh demo exercises every queue and
+-- every status the admin UI can show: ready, scheduled, suspended, backoff,
+-- in-flight (as workers claim jobs), and dead-letter.
+seedDemoData :: SimpleEnv DemoRegistry -> Text -> IO ()
+seedDemoData env schemaName = runSimpleDb env $ do
+  seedPipeline schemaName
+  seedQueues
+  liftIO $ putStrLn "  Seeded jobs across demo_queue, email_queue, notifications, and pipeline"
+
+-- | A 3-level rollup pipeline. Results flow up from leaves through finalizers.
+seedPipeline :: Text -> DemoM ()
+seedPipeline schemaName = do
   let chunk = JT.leaf . defaultJob . ProcessChunk
       agg name = JT.rollup (defaultJob (AggregateResults name))
-
-  Right (root :| rest) <-
+  result <-
     JT.insertJobTree schemaName "pipeline" $
       agg
         "final-report"
@@ -322,17 +314,100 @@ seedPipelineJobs env schemaName = runSimpleDb env $ do
                 , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
                 ]
         )
-  liftIO $ do
-    putStrLn $
-      "  Created 3-level pipeline: root=#"
-        <> show (primaryKey root)
-        <> " with "
-        <> show (length rest)
-        <> " descendants"
-    putStrLn "  Tree: final-report -> [financials -> [revenue, expense, forecast],"
-    putStrLn "                         operations -> [inventory, shipping, support]]"
-    putStrLn "  Watch the console for results flowing up through the tree!"
+  case result of
+    Left err -> liftIO $ die $ "pipeline seed failed: " <> show err
+    Right (root :| rest) ->
+      liftIO $ putStrLn $ "  pipeline: root #" <> show (primaryKey root) <> " with " <> show (length rest) <> " descendants"
 
--- | Format a UTCTime for use in payloads
-fmtTime :: UTCTime -> Text
-fmtTime = T.pack . show
+-- | A spread across the flat queues covering ready, scheduled, suspended,
+-- backoff, and dead-letter, with varied priorities and group keys.
+seedQueues :: DemoM ()
+seedQueues = do
+  now <- liftIO getCurrentTime
+
+  -- demo_queue: ready jobs with varied priority and group keys
+  forM_ (zip [0 :: Int ..] demoTasks) $ \(i, (grp, msg)) ->
+    void $ HL.insertJob ((defaultJob (TestMessage msg)) {priority = fromIntegral (i `mod` 5), groupKey = Just grp})
+  -- scheduled (not visible yet) and suspended (paused)
+  void $
+    HL.insertJob
+      ( (defaultJob (TestMessage "nightly-reindex"))
+          { notVisibleUntil = Just (addUTCTime 3600 now)
+          , groupKey = Just "maintenance"
+          }
+      )
+  void $ HL.insertJob ((defaultJob (TestMessage "paused-migration")) {suspended = True, groupKey = Just "maintenance"})
+  -- backoff: failed twice, waiting to retry
+  void $
+    HL.insertJob
+      ( (defaultJob (TestMessage "flaky-webhook"))
+          { attempts = 2
+          , lastError = Just "connection reset by upstream"
+          , notVisibleUntil = Just (addUTCTime 180 now)
+          , groupKey = Just "integrations"
+          }
+      )
+  -- dead-letter: exhausted its retries
+  doomed <-
+    need
+      =<< HL.insertJob
+        ( (defaultJob (TestMessage "corrupt-record"))
+            { attempts = 5
+            , maxAttempts = Just 5
+            , lastError = Just "unparseable payload"
+            , groupKey = Just "integrations"
+            }
+        )
+  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+
+  -- email_queue: a few ready, one scheduled, one bounced to the DLQ
+  forM_ (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text]) $ \addr ->
+    void $ HL.insertJob (defaultJob (SendEmail addr))
+  void $ HL.insertJob ((defaultJob (SendEmail "weekly-digest")) {notVisibleUntil = Just (addUTCTime 1800 now)})
+  bounced <-
+    need
+      =<< HL.insertJob
+        ( (defaultJob (SendEmail "nobody@invalid.test"))
+            { attempts = 3
+            , maxAttempts = Just 3
+            , lastError = Just "recipient rejected (550)"
+            }
+        )
+  void $ HL.moveToDLQ "recipient rejected (550)" bounced
+
+  -- notifications: a few ready
+  forM_ (["deploy finished", "build green", "nightly backup ok"] :: [Text]) $ \msg ->
+    void $ HL.insertJob (defaultJob (PushNotification msg))
+  where
+    need :: Maybe a -> DemoM a
+    need = maybe (liftIO (die "demo seed: insert returned Nothing")) pure
+
+-- | (group key, message) pairs for the demo_queue ready jobs.
+demoTasks :: [(Text, Text)]
+demoTasks =
+  [ ("imports", "import customers.csv")
+  , ("imports", "import orders.csv")
+  , ("reports", "generate Q3 summary")
+  , ("reports", "refresh dashboard")
+  , ("billing", "reconcile invoices")
+  , ("billing", "charge subscriptions")
+  , ("maintenance", "vacuum analyze")
+  , ("integrations", "sync CRM contacts")
+  ]
+
+-- | Background load generator: a small pulse of jobs every @sec@ seconds so the
+-- queues stay visibly active between cron ticks.
+loadPulse :: SimpleEnv DemoRegistry -> Int -> IO ()
+loadPulse env sec = go 0
+  where
+    go :: Int -> IO ()
+    go n = do
+      threadDelay (sec * 1_000_000)
+      runSimpleDb env $ do
+        void $ HL.insertJob ((defaultJob (TestMessage ("pulse #" <> tshow n))) {priority = fromIntegral (n `mod` 5)})
+        when (even n) $ void $ HL.insertJob (defaultJob (SendEmail ("digest #" <> tshow n)))
+        when (n `mod` 3 == 0) $ void $ HL.insertJob (defaultJob (PushNotification ("alert #" <> tshow n)))
+      go (n + 1)
+
+tshow :: (Show a) => a -> Text
+tshow = T.pack . show
