@@ -1,5 +1,5 @@
 cabal-version: 2.2
-name:          arbiter-servant-demo
+name:          arbiter-demo
 version:       0.1.0.0
 synopsis:      Demo application for arbiter-servant with admin UI
 license:       MIT
@@ -24,7 +24,7 @@ common shared-properties
     -Wderiving-defaults -Wmissing-deriving-strategies
     -Wmissing-signatures
 
-executable arbiter-servant-demo
+executable arbiter-demo
   import:         shared-properties
   main-is:        Main.hs
   hs-source-dirs: .

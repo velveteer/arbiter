@@ -23,9 +23,9 @@ import Arbiter.Worker
   , signalShutdown
   )
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -91,19 +91,12 @@ main :: IO ()
 main = do
   -- Get config from environment or use defaults
   connStr <-
-    maybe "host=localhost port=54324 user=postgres password=master dbname=postgres" BS.pack
+    maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- maybe "arbiter_demo" id <$> lookupEnv "SCHEMA"
   portStr <- maybe "8080" id <$> lookupEnv "PORT"
   let schema = T.pack schemaStr
       port = read portStr :: Int
-
-  putStrLn "=== Arbiter Servant Demo Server ==="
-  putStrLn $ "Database: " <> BS.unpack connStr
-  putStrLn $ "Schema: " <> schemaStr
-  putStrLn $ "Port: " <> show port
-  putStrLn ""
-
   -- Drop and recreate schema for a clean demo
   putStrLn "Resetting schema..."
   conn <- PG.connectPostgreSQL connStr
@@ -162,7 +155,7 @@ main = do
   putStrLn "Workers: 4 queues (demo_queue, email_queue, notifications, pipeline)"
   putStrLn "Cron:    demo-ticker (every min), email-digest (every 2 min), notif-broadcast (every 3 min)"
   case mDevDir of
-    Just dir -> putStrLn $ "Dev:     serving static files from " <> dir
+    Just dir -> putStrLn $ "Dev: serving static files from " <> dir
     Nothing -> putStrLn "Set ADMIN_DEV_DIR to serve static files from disk"
   putStrLn ""
   putStrLn "Press Ctrl+C to stop"
@@ -179,6 +172,15 @@ main = do
         let handler = Signals.Catch $ signalShutdown st
         void $ Signals.installHandler Signals.sigTERM handler Nothing
         void $ Signals.installHandler Signals.sigINT handler Nothing
+
+  -- Self-restart watchdog: after RESET_INTERVAL_MINUTES, raise SIGTERM so the
+  -- process exits via the handler above and the container's restart policy
+  -- reseeds a clean demo. A value of 0 disables it.
+  resetMin <- maybe 20 read <$> lookupEnv "RESET_INTERVAL_MINUTES"
+  when (resetMin > 0) $ void $ forkIO $ do
+    threadDelay (resetMin * 60 * 1_000_000)
+    putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
+    Signals.raiseSignal Signals.sigTERM
 
   race_
     (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)

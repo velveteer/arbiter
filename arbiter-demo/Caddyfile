@@ -1,0 +1,12 @@
+# Caddy fronts the demo with automatic Let's Encrypt TLS. Requires DNS for
+# $DEMO_DOMAIN pointing at this host and ports 80/443 reachable. To receive
+# ACME renewal notices, add a global block with an `email you@host` directive.
+
+{$DEMO_DOMAIN} {
+	encode zstd gzip
+	# flush_interval -1 disables response buffering so the admin UI's SSE
+	# stream (/api/v1/events/stream) reaches the browser live.
+	reverse_proxy demo:8080 {
+		flush_interval -1
+	}
+}

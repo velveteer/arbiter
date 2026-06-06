@@ -1,0 +1,66 @@
+# Public demo stack: ephemeral Postgres + the demo server + Caddy for TLS.
+# The image is built and pushed by CI (.github/workflows/demo-image.yml). The
+# host only pulls it.
+#
+#   DEMO_DOMAIN=demo.example.com docker compose -f arbiter-demo/compose.yml up -d
+#
+# Postgres is intentionally stateless (no volume): the demo drops and reseeds
+# its schema on every boot, so a fresh start is the desired behavior.
+name: arbiter-demo
+
+services:
+  db:
+    image: postgres:17.4
+    environment:
+      POSTGRES_PASSWORD: master
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  demo:
+    image: ghcr.io/velveteer/arbiter-demo:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "host=db port=5432 user=postgres password=master dbname=postgres"
+      SCHEMA: arbiter_demo
+      PORT: "8080"
+      # Self-restart cadence: the watchdog raises SIGTERM after this many
+      # minutes, the process exits, and restart:always reseeds a clean demo.
+      RESET_INTERVAL_MINUTES: "20"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: always
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - demo
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DEMO_DOMAIN: ${DEMO_DOMAIN:?set DEMO_DOMAIN to the public hostname}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: always
+
+  # Polls the registry and auto-pulls + restarts the demo when its image tag
+  # changes, so a CI push of :latest redeploys within the interval. --label-enable
+  # limits it to the labelled demo service, leaving db/caddy/itself untouched.
+  watchtower:
+    image: nickfedor/watchtower
+    command: --interval 300 --cleanup --label-enable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+
+volumes:
+  caddy_data:
+  caddy_config:

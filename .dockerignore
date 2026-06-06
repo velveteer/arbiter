@@ -1,0 +1,8 @@
+# Keep the build context small. Do NOT exclude arbiter-servant-ui/static
+# (embedded into the binary) or any package source.
+.git
+.github
+dist-newstyle
+**/.stack-work
+**/*.hi
+**/*.o
