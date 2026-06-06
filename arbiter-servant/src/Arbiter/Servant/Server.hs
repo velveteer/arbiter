@@ -29,12 +29,29 @@ import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
 import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
-import Control.Exception (SomeException, bracket, catch)
-import Control.Monad (guard, unless, void, when)
+import Control.Concurrent (forkIOWithUnmask, threadDelay)
+import Control.Concurrent.Async (race_)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.STM
+  ( TChan
+  , TVar
+  , atomically
+  , check
+  , dupTChan
+  , modifyTVar'
+  , newBroadcastTChanIO
+  , newTVarIO
+  , readTChan
+  , readTVar
+  , writeTChan
+  )
+import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
+import Control.Monad (forever, guard, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Map.Strict qualified as Map
@@ -55,6 +72,7 @@ import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort, se
 import Servant
 import Servant.Server.Generic (AsServerT)
 import System.Cron (parseCronSchedule)
+import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 
 import Arbiter.Servant.API
@@ -79,13 +97,24 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- @\/events\/stream@ endpoint returns a single \"disabled\" event and
   -- closes immediately, avoiding long-lived connections. The admin UI
   -- falls back to polling-only mode. Default: 'True'.
+  , sseHub :: MVar (Maybe SSEHub)
+  -- ^ Lazily started SSE broadcast hub, shared by all clients. Started on the
+  -- first subscriber and torn down (its @LISTEN@ connection released) when the
+  -- last one disconnects, so an idle server holds no streaming connection.
+  }
+
+-- | A running SSE broadcast hub: the channel every client duplicates, and the
+-- live subscriber count the listener watches to release itself at zero.
+data SSEHub = SSEHub
+  { hubChan :: TChan ByteString
+  , hubRefs :: TVar Int
   }
 
 -- | Small pool configuration for admin API traffic.
 serverPoolConfig :: PoolConfig
 serverPoolConfig =
   PoolConfig
-    { poolSize = 5
+    { poolSize = 10
     , poolIdleTimeout = 60
     , poolStripes = Just 1
     }
@@ -102,14 +131,8 @@ initArbiterServer
   -> IO (ArbiterServerConfig registry)
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
-  pure ArbiterServerConfig {serverEnv = env, enableSSE = True}
-
--- | Validate and sanitize pagination parameters
-validatePagination :: Maybe Int -> Maybe Int -> (Int, Int)
-validatePagination mLimit mOffset =
-  let limit = max 1 $ min 1000 $ fromMaybe 50 mLimit -- Clamp between 1 and 1000
-      offset = max 0 $ fromMaybe 0 mOffset -- Must be non-negative
-   in (limit, offset)
+  hub <- newMVar Nothing
+  pure ArbiterServerConfig {serverEnv = env, enableSSE = True, sseHub = hub}
 
 -- | Jobs API handlers for a specific table
 jobsServer
@@ -178,7 +201,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mS
 
   let childCounts = fmap fst combined
       pausedParents = Map.keys $ Map.filter (\(t, p) -> p == t) combined
-      apiJobs = map (\(jr, s) -> ApiJobWithStatus jr s) jobs
+      apiJobs = map (uncurry ApiJobWithStatus) jobs
   pure $
     JobsResponse
       { jobs = apiJobs
@@ -638,8 +661,11 @@ setQueuePausedHandler config knownQueues p queue = do
 -- browser receives data immediately.  Sends a @: keepalive@ comment every
 -- 15 seconds to keep the connection alive through reverse proxies.
 --
--- When 'enableSSE' is 'False', sends a single @disabled@ event and closes
--- immediately. The admin UI detects this and skips reconnection.
+-- All clients share one broadcast hub (see 'subscribeSSE'): each client is a
+-- Warp thread reading a duplicated 'TChan', not a held Postgres connection, so
+-- viewer count scales without exhausting the pool. When 'enableSSE' is 'False',
+-- sends a single @disabled@ event and closes immediately. The admin UI detects
+-- this and skips reconnection.
 eventsServer
   :: forall registry
    . ArbiterServerConfig registry
@@ -649,47 +675,35 @@ eventsServer config = Tagged $ \_req sendResponse ->
     then sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
       write "data: {\"event\":\"disabled\"}\n\n"
       flush
-    else case connectionPool (simplePool (serverEnv config)) of
-      Nothing -> sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
-        write "data: {\"event\":\"error\",\"message\":\"No connection pool available\"}\n\n"
-        flush
-      Just pool ->
-        bracket
-          (Pool.takeResource pool)
-          ( \(conn, localPool) -> do
-              -- Clean up LISTEN state before returning to pool so the connection
-              -- doesn't accumulate buffered notifications while idle.
-              -- If UNLISTEN fails, the connection is likely broken - destroy it
-              -- instead of returning a dead connection to the pool.
-              result <- (PG.execute_ conn "UNLISTEN *" >> pure True) `catch` (\(_ :: SomeException) -> pure False)
-              if result
-                then Pool.putResource localPool conn
-                else Pool.destroyResource pool localPool conn
-          )
-          $ \(conn, _) -> do
-            _ <- PG.execute_ conn $ "LISTEN " <> fromString (T.unpack Schema.eventStreamingChannel)
-            sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
-              -- Send immediate "connected" event
+    else
+      -- 'bracket' pairs the refcount increment with its decrement around the
+      -- whole response, so the hub is released even if the streaming body never
+      -- runs (early client disconnect or an async exception before it starts).
+      bracket (subscribeSSE config) (maybe (pure ()) (const (unsubscribeSSE config))) $ \mSub ->
+        case mSub of
+          Nothing -> sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
+            write "data: {\"event\":\"error\",\"message\":\"No connection pool available\"}\n\n"
+            flush
+          Just sub -> sendResponse $ responseStream status200 sseHeaders $ \write flush ->
+            -- A failed write (client gone) ends the stream. The enclosing bracket
+            -- then drops this subscriber's refcount.
+            handle swallowSync $ do
               write "data: {\"event\":\"connected\",\"message\":\"Stream connected\"}\n\n"
               flush
-              -- Loop: wait for notifications with a 15s keepalive heartbeat.
-              -- The heartbeat keeps Warp and any reverse proxies from timing out.
+              -- Read this client's channel with a 15s keepalive heartbeat that
+              -- keeps Warp and any reverse proxies from timing out.
               let go = do
-                    mNotification <- timeout 15_000_000 (getNotification conn)
-                    case mNotification of
-                      Just notification -> do
-                        let payload = notificationData notification
+                    mPayload <- timeout 15_000_000 (atomically (readTChan sub))
+                    case mPayload of
+                      Just payload -> do
                         write ("data: " <> Builder.byteString payload <> "\n\n")
                         flush
                         go
                       Nothing -> do
-                        -- Timeout: send SSE comment to keep connection alive
                         write ": keepalive\n\n"
                         flush
                         go
-              -- IOException from getNotification = PG connection lost
-              -- IOException from write/flush = client disconnected
-              go `catch` (\(_ :: SomeException) -> pure ())
+              go
   where
     sseHeaders =
       [ ("Content-Type", "text/event-stream")
@@ -697,6 +711,89 @@ eventsServer config = Tagged $ \_req sendResponse ->
       , ("Connection", "keep-alive")
       , ("X-Accel-Buffering", "no")
       ]
+
+swallowSync :: SomeException -> IO ()
+swallowSync e = case fromException e of
+  Just (_ :: SomeAsyncException) -> throwIO e
+  Nothing -> pure ()
+
+-- | Subscribe to the shared SSE hub, returning a duplicated channel to stream
+-- from. The first subscriber starts the hub (one @LISTEN@ connection). Later
+-- subscribers just bump the refcount. 'Nothing' when there is no pool.
+subscribeSSE :: ArbiterServerConfig registry -> IO (Maybe (TChan ByteString))
+subscribeSSE config =
+  modifyMVar (sseHub config) $ \mhub -> case mhub of
+    Just hub -> do
+      sub <- atomically $ do
+        modifyTVar' (hubRefs hub) (+ 1)
+        dupTChan (hubChan hub)
+      pure (Just hub, Just sub)
+    Nothing -> case connectionPool (simplePool (serverEnv config)) of
+      Nothing -> pure (Nothing, Nothing)
+      Just pool -> do
+        broadcast <- newBroadcastTChanIO
+        refs <- newTVarIO 1
+        sub <- atomically (dupTChan broadcast)
+        -- subscribeSSE runs masked (as a 'bracket' acquire), so fork the listener
+        -- with an explicit unmask to keep it interruptible.
+        void $ forkIOWithUnmask $ \unmask -> unmask (sseListenerLoop pool broadcast refs)
+        pure (Just (SSEHub broadcast refs), Just sub)
+
+-- | Drop one subscriber. When the count reaches zero the hub is removed from
+-- the config. The listener observes the same count and releases its connection
+-- (see 'sseListenerLoop').
+unsubscribeSSE :: ArbiterServerConfig registry -> IO ()
+unsubscribeSSE config =
+  modifyMVar_ (sseHub config) $ \mhub -> case mhub of
+    Nothing -> pure Nothing
+    Just hub -> do
+      remaining <- atomically $ do
+        modifyTVar' (hubRefs hub) (subtract 1)
+        readTVar (hubRefs hub)
+      pure $ if remaining <= 0 then Nothing else Just hub
+
+-- | The single listener: @LISTEN@ on one borrowed connection and fan every
+-- notification into the broadcast channel, raced against the subscriber count
+-- reaching zero. On connection loss it destroys the dead resource and
+-- reconnects, so a Postgres blip does not kill SSE for every client. When the
+-- count hits zero the race ends, the 'bracket' releases the connection, and the
+-- thread exits.
+sseListenerLoop :: Pool.Pool PG.Connection -> TChan ByteString -> TVar Int -> IO ()
+sseListenerLoop pool broadcast refs = do
+  backoff <- newIORef baseBackoff
+  race_ waitForIdle (pump backoff)
+  where
+    baseBackoff = 1_000_000 -- 1s
+    maxBackoff = 30_000_000 -- 30s
+    waitForIdle = atomically $ do
+      n <- readTVar refs
+      check (n == 0)
+    pump backoff =
+      forever
+        $ handle (onError backoff)
+        $ bracket
+          (Pool.takeResource pool)
+          (\(conn, localPool) -> Pool.destroyResource pool localPool conn)
+        $ \(conn, _) -> do
+          _ <- PG.execute_ conn $ "LISTEN " <> fromString (T.unpack Schema.eventStreamingChannel)
+          writeIORef backoff baseBackoff -- connected: reset for the next failure
+          forever $ do
+            notification <- getNotification conn
+            atomically $ writeTChan broadcast (notificationData notification)
+    -- Re-raise async exceptions so the race's cancellation stops the pump. On a
+    -- sync error (lost connection or persistent misconfiguration) log it and
+    -- retry with capped exponential backoff, so a permanent failure does not spin.
+    onError backoff e = case fromException e of
+      Just (_ :: SomeAsyncException) -> throwIO e
+      Nothing -> do
+        delay <- readIORef backoff
+        hPutStrLn stderr $
+          "[arbiter:sse] listener error, retrying in "
+            <> show (delay `div` 1_000_000)
+            <> "s: "
+            <> show e
+        threadDelay delay
+        writeIORef backoff (min maxBackoff (delay * 2))
 
 -- | Cron API handlers
 cronServer
@@ -904,3 +1001,10 @@ runArbiterAPI port config = do
   putStrLn $ "Starting Arbiter API server on port " <> show port
   let settings = setPort port $ setTimeout 0 defaultSettings
   runSettings settings (arbiterApp config)
+
+-- | Validate and sanitize pagination parameters
+validatePagination :: Maybe Int -> Maybe Int -> (Int, Int)
+validatePagination mLimit mOffset =
+  let limit = max 1 $ min 1000 $ fromMaybe 50 mLimit -- Clamp between 1 and 1000
+      offset = max 0 $ fromMaybe 0 mOffset -- Must be non-negative
+   in (limit, offset)
