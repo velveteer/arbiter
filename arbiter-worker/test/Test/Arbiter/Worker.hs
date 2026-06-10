@@ -37,13 +37,12 @@ import Arbiter.Test.Setup (cleanupData, execute_, setupOnce)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
+import Data.Maybe (fromJust, isJust, isNothing)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -75,8 +74,13 @@ import UnliftIO.Async qualified as Async
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
-  ( WorkerConfig (..)
+  ( BatchCompletion
+  , JobCompletion
+  , WorkerConfig (..)
   , defaultBatchedWorkerConfig
+  , defaultManualBatchedWorkerConfig
+  , defaultManualRollupWorkerConfig
+  , defaultManualWorkerConfig
   , defaultRollupWorkerConfig
   , defaultWorkerConfig
   , getWorkerState
@@ -506,16 +510,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             count <- queryOpsCount env
             count `shouldBe` 1
 
-      it "requires manual ack when useWorkerTransaction = False" $ \env -> do
+      it "manual mode: handler that skips the completion callback leaves the job in the queue" $ \env -> do
         -- Clean up data from previous tests
         let pool = fromJust (connectionPool (simplePool env)) in withResource pool (cleanupData testSchema testTable)
 
         processedRef <- newIORef False
 
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = do
+        let handler
+              :: JobRead WorkerTestPayload
+              -> JobCompletion (SimpleDb WorkerTestRegistry IO) ()
+              -> SimpleDb WorkerTestRegistry IO ()
+            handler _job _completion = do
               liftIO $ atomicModifyIORef' processedRef (const (True, ()))
-              -- Handler succeeds but does NOT call ackJob
+              -- Handler succeeds but does NOT call the completion callback
               pure ()
 
         -- Insert a job
@@ -523,23 +530,18 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let jobId = primaryKey insertedJob
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-        let configWithoutTx =
-              config
-                { useWorkerTransaction = False
-                , workerCount = 1
-                , pollInterval = 0.1
-                }
+          runSimpleDb env $ defaultManualWorkerConfig connStr 1 handler
+        let manualConfig = config {pollInterval = 0.1}
 
         -- Run worker pool briefly
-        withAsync (runSimpleDb env $ runWorkerPool configWithoutTx) $ \_ ->
+        withAsync (runSimpleDb env $ runWorkerPool manualConfig) $ \_ ->
           waitUntil 10_000 $ readIORef processedRef
 
         -- Verify the handler ran
         processed <- readIORef processedRef
         processed `shouldBe` True
 
-        -- Verify the job is STILL in the queue (not acked)
+        -- Verify the job is STILL in the queue (not completed)
         let pool = fromJust (connectionPool (simplePool env))
          in withResource pool $ \conn -> do
               jobRows <-
@@ -552,29 +554,31 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 [Only count] -> count `shouldBe` 1
                 _ -> expectationFailure "Expected one row from COUNT query"
 
-      it "manual ack removes job when useWorkerTransaction = False" $ \env -> do
+      it "manual mode: the completion callback acks the job and fires onJobSuccess" $ \env -> do
         -- Clean up data from previous tests
         let pool = fromJust (connectionPool (simplePool env)) in withResource pool (cleanupData testSchema testTable)
 
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            handler _conn job = do
-              -- Handler manually acks the job
-              void $ HL.ackJob job
+        successRef <- newIORef ([] :: [Int64])
+
+        let handler
+              :: JobRead WorkerTestPayload
+              -> JobCompletion (SimpleDb WorkerTestRegistry IO) ()
+              -> SimpleDb WorkerTestRegistry IO ()
+            handler _job completion = completion ()
+            hooks =
+              defaultObservabilityHooks
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+                }
 
         -- Insert a job
         void $ runSimpleDb env (HL.insertJob (defaultJob (SimpleTask "ManualAckSuccess")))
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-        let configWithoutTx =
-              config
-                { useWorkerTransaction = False
-                , workerCount = 1
-                , pollInterval = 0.1
-                }
+          runSimpleDb env $ defaultManualWorkerConfig connStr 1 handler
+        let manualConfig = config {pollInterval = 0.1, observabilityHooks = hooks}
 
         -- Run worker pool briefly
-        withAsync (runSimpleDb env $ runWorkerPool configWithoutTx) $ \_ ->
+        withAsync (runSimpleDb env $ runWorkerPool manualConfig) $ \_ ->
           waitUntil 10_000 $ do
             let pool = fromJust (connectionPool (simplePool env))
             withResource pool $ \conn -> do
@@ -594,6 +598,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               case jobRows of
                 [Only count] -> count `shouldBe` 0
                 _ -> expectationFailure "Expected one row from COUNT query"
+
+        -- onJobSuccess now fires for manual jobs (the behavior this redesign fixes)
+        successes <- readIORef successRef
+        length successes `shouldBe` 1
 
     describe "Observability Hooks" $ do
       it "onJobClaimed is called with start time when job is claimed" $ \env -> do
@@ -1185,20 +1193,26 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           job1Heartbeats `shouldSatisfy` (>= 2)
           job2Heartbeats `shouldSatisfy` (>= 2)
 
-      it "manual mode: only reports failure for un-acked jobs" $ \env -> do
+      it "manual mode: only reports failure for jobs not completed" $ \env -> do
         failuresRef <- newIORef ([] :: [Int64])
+        successRef <- newIORef ([] :: [Int64])
 
         let hooks =
               defaultObservabilityHooks
                 { onJobFailure = \job _ _ _ ->
                     liftIO $ atomicModifyIORef' failuresRef $ \fs -> (primaryKey job : fs, ())
+                , onJobSuccess = \job _ _ ->
+                    liftIO $ atomicModifyIORef' successRef $ \ss -> (primaryKey job : ss, ())
                 }
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
-              -- Manually ack first 2 jobs
-              forM_ (take 2 $ toList jobs) $ \job -> do
-                void $ HL.ackJob job
+        let batchHandler
+              :: NonEmpty (JobRead WorkerTestPayload)
+              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> SimpleDb WorkerTestRegistry IO ()
+            batchHandler jobs completion = do
+              -- Complete first 2 jobs
+              forM_ (take 2 $ toList jobs) $ \job ->
+                completion job
               -- 3rd job fails
               throwRetryable "Third job failed"
 
@@ -1212,12 +1226,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
-                { useWorkerTransaction = False
-                , pollInterval = 0.050
+                { pollInterval = 0.050
                 , observabilityHooks = hooks
                 , jitter = NoJitter
                 }
@@ -1228,17 +1241,24 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 10_000 $ (== 1) . length <$> readIORef failuresRef
 
           -- Only 1 failure should be reported (3rd job), not 3
-          -- The first 2 jobs were acked before the throw
+          -- The first 2 jobs were completed before the throw
           failures <- readIORef failuresRef
           length failures `shouldBe` 1
+
+          -- the completion callback fired onJobSuccess for the 2 completed jobs
+          successes <- readIORef successRef
+          length successes `shouldBe` 2
 
       it "manual mode: acking all jobs in batch removes them from queue" $ \env -> do
         processedRef <- newIORef False
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
-              -- Manually ack all jobs
-              forM_ jobs $ \job -> void $ HL.ackJob job
+        let batchHandler
+              :: NonEmpty (JobRead WorkerTestPayload)
+              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> SimpleDb WorkerTestRegistry IO ()
+            batchHandler jobs completion = do
+              -- Complete all jobs
+              forM_ jobs $ \job -> completion job
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1250,12 +1270,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
-                { useWorkerTransaction = False
-                , pollInterval = 0.050
+                { pollInterval = 0.050
                 }
 
         threadDelay 100_000
@@ -1274,10 +1293,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "manual mode: un-acked jobs remain in queue after handler returns" $ \env -> do
         processedRef <- newIORef False
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
-              -- Only ack the first job, leave the second un-acked
-              void $ HL.ackJob (head $ toList jobs)
+        let batchHandler
+              :: NonEmpty (JobRead WorkerTestPayload)
+              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> SimpleDb WorkerTestRegistry IO ()
+            batchHandler jobs completion = do
+              -- Only complete the first job, leave the second untouched
+              completion (head $ toList jobs)
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1289,12 +1311,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
-                { useWorkerTransaction = False
-                , pollInterval = 0.050
+                { pollInterval = 0.050
                 }
 
         threadDelay 100_000
@@ -1502,30 +1523,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             finalResult
               `shouldMatchList` ["sales", "growth", "revenue", "forecast", "trend"]
 
-      it "manual mode: user inserts results and acks for rollup" $ \env -> do
+      it "manual mode: the completion callback stores results and acks for rollup" $ \env -> do
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures _conn job = case payload job of
-              SimpleTask "child-a" -> do
-                let result = ["alpha"] :: [Text]
-                -- Manual mode: user inserts result before acking
-                void $
-                  HL.insertResult @_ @WorkerTestRegistry @WorkerTestPayload (fromMaybe 0 $ parentId job) (primaryKey job) (toJSON result)
-                void $ HL.ackJob job
-                pure result
-              SimpleTask "child-b" -> do
-                let result = ["beta", "gamma"] :: [Text]
-                void $
-                  HL.insertResult @_ @WorkerTestRegistry @WorkerTestPayload (fromMaybe 0 $ parentId job) (primaryKey job) (toJSON result)
-                void $ HL.ackJob job
-                pure result
+        let handler childResults _dlqFailures job completion = case payload job of
+              -- the completion callback stores the child result for the parent and acks it
+              SimpleTask "child-a" -> completion (["alpha"] :: [Text])
+              SimpleTask "child-b" -> completion ["beta", "gamma"]
               SimpleTask "manual-reducer" -> do
                 liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                void $ HL.ackJob job
-                pure childResults
-              _ -> do
-                void $ HL.ackJob job
-                pure []
+                completion childResults
+              _ -> completion []
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -1537,17 +1545,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultManualRollupWorkerConfig connStr 3 handler
 
         withAsync
           ( runSimpleDb env $
-              runWorkerPool
-                ( config
-                    { workerCount = 3
-                    , pollInterval = 0.1
-                    , useWorkerTransaction = False
-                    }
-                )
+              runWorkerPool (config {pollInterval = 0.1})
           )
           $ \_ -> do
             waitUntil 10_000 $ (== 3) . length <$> readIORef finalResultRef

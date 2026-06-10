@@ -14,7 +14,7 @@ services:
     environment:
       POSTGRES_PASSWORD: master
     healthcheck:
-      test: ["CMD", "pg_isready", "-q"]
+      test: ["CMD", "pg_isready", "-q", "-U", "postgres"]
       interval: 10s
       timeout: 3s
       retries: 5

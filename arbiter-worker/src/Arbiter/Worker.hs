@@ -571,43 +571,52 @@ processJobsWithRetry config jobs = do
         jobs
         (logConfig config)
         (heartbeatSignal config)
-      $ do
-        if useWorkerTransaction config
-          then withDbTransaction $ do
-            handlerResult <- runHandler config schemaName jobs
-            -- Store result for parent rollup if applicable
-            case handlerMode config of
-              SingleJobMode _ -> do
-                let (job :| _) = jobs
-                case (Job.parentId job, encodeJobResult handlerResult) of
-                  (Just pid, Just val) ->
-                    void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
-                  _ -> pure ()
-                rowsAffected <- Arb.ackJob job
-                when (rowsAffected == 0) $
-                  throwJobNotFound $
-                    "Job "
-                      <> T.pack (show (Job.primaryKey job))
-                      <> " was reclaimed during processing - rolling back handler transaction"
-              BatchedJobsMode _ _ -> do
-                rowsAffected <- Arb.ackJobsBulk (toList jobs)
-                when (rowsAffected /= fromIntegral (length jobs)) $
-                  throwJobNotFound $
-                    "Expected to ack "
-                      <> T.pack (show (length jobs))
-                      <> " jobs but only "
-                      <> T.pack (show rowsAffected)
-                      <> " were deleted - rolling back handler transaction"
-          else do
-            -- Manual mode: no transaction, no automatic acking
-            void $ runHandler config schemaName jobs
+      $ case handlerMode config of
+        SingleJobMode handler -> withDbTransaction $ do
+          let (job :| _) = jobs
+          (childResults, dlqFailures) <- readRollupChildResults schemaName job
+          handlerResult <- runHandlerWithConnection @_ @_ @result (handler childResults dlqFailures) job
+          storeJobResult schemaName job handlerResult
+          rowsAffected <- Arb.ackJob job
+          when (rowsAffected == 0) $
+            throwJobNotFound $
+              "Job "
+                <> T.pack (show (Job.primaryKey job))
+                <> " was reclaimed during processing - rolling back handler transaction"
+        BatchedJobsMode _ handler -> withDbTransaction $ do
+          void $ runHandlerWithConnection @_ @_ @result handler jobs
+          rowsAffected <- Arb.ackJobsBulk (toList jobs)
+          when (rowsAffected /= fromIntegral (length jobs)) $
+            throwJobNotFound $
+              "Expected to ack "
+                <> T.pack (show (length jobs))
+                <> " jobs but only "
+                <> T.pack (show rowsAffected)
+                <> " were deleted - rolling back handler transaction"
+        ManualJobMode handler -> do
+          let (job :| _) = jobs
+          (childResults, dlqFailures) <- readRollupChildResults schemaName job
+          let completion handlerResult = do
+                withDbTransaction $ do
+                  storeJobResult schemaName job handlerResult
+                  void $ Arb.ackJob job
+                fireJobSuccess config hooks job startTime
+          handler childResults dlqFailures job completion
+        ManualBatchedJobsMode _ handler -> do
+          let completion completedJob = do
+                void $ Arb.ackJob completedJob
+                fireJobSuccess config hooks completedJob startTime
+          handler jobs completion
   endTime <- liftIO getCurrentTime
   case result of
     Right () ->
-      -- Success: only call onJobSuccess in automatic transaction mode
-      -- In manual mode, users are responsible for acking and success observability
-      when (useWorkerTransaction config) $
-        mapM_ (\job -> runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime) jobs
+      -- Automatic modes fire onJobSuccess here, after the commit. Manual modes
+      -- fire it inside the completion callback the handler invokes.
+      case handlerMode config of
+        ManualJobMode {} -> pure ()
+        ManualBatchedJobsMode {} -> pure ()
+        _ ->
+          mapM_ (\job -> runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime) jobs
     Left e
       | isJobGoneException e ->
           tryLog (logConfig config) Info $
@@ -617,26 +626,40 @@ processJobsWithRetry config jobs = do
           withDbTransaction $
             mapM_ (handleJobFailure config hooks e maxAtts startTime endTime) jobs
 
--- | Run the user's handler, reading child results for rollup jobs.
-runHandler
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
-     , JobResult result
-     )
+-- | Read child results for a rollup job, empty otherwise.
+readRollupChildResults
+  :: (JobResult result, MonadArbiter m)
+  => Text
+  -> Job.JobRead payload
+  -> m (Map.Map Int64 (Either Text result), Map.Map Int64 T.Text)
+readRollupChildResults schemaName job
+  | Job.isRollup job = readChildResults schemaName job
+  | otherwise = pure (Map.empty, Map.empty)
+
+-- | Store a job's result for its parent rollup, if it has one.
+storeJobResult
+  :: (JobResult result, MonadArbiter m)
+  => Text
+  -> Job.JobRead payload
+  -> result
+  -> m ()
+storeJobResult schemaName job result =
+  case (Job.parentId job, encodeJobResult result) of
+    (Just pid, Just val) ->
+      void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
+    _ -> pure ()
+
+-- | Fire onJobSuccess for a job that just completed, stamping the end time now.
+fireJobSuccess
+  :: (Job.JobPayload payload, MonadUnliftIO m)
   => WorkerConfig m payload result
-  -> Text
-  -> NonEmpty (Job.JobRead payload)
-  -> m result
-runHandler config schemaName jobs = case handlerMode config of
-  SingleJobMode handler -> do
-    let (job :| _) = jobs
-    (childResults, dlqFailures) <-
-      if Job.isRollup job
-        then readChildResults schemaName job
-        else pure (Map.empty, Map.empty)
-    runHandlerWithConnection (handler childResults dlqFailures) job
-  BatchedJobsMode _ handler ->
-    runHandlerWithConnection handler jobs
+  -> Job.ObservabilityHooks m payload
+  -> Job.JobRead payload
+  -> UTCTime
+  -> m ()
+fireJobSuccess config hooks job startTime = do
+  endTime <- liftIO getCurrentTime
+  runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.

@@ -56,6 +56,10 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
           fmap (map (:| [])) (Arb.claimNextVisibleJobsAs freeWorkers (visibilityTimeout config) wid)
         BatchedJobsMode batchSize _ ->
           Arb.claimNextVisibleJobsBatchedAs batchSize freeWorkers (visibilityTimeout config) wid
+        ManualJobMode _ ->
+          fmap (map (:| [])) (Arb.claimNextVisibleJobsAs freeWorkers (visibilityTimeout config) wid)
+        ManualBatchedJobsMode batchSize _ ->
+          Arb.claimNextVisibleJobsBatchedAs batchSize freeWorkers (visibilityTimeout config) wid
       case eJobs of
         Left e ->
           tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (show e)

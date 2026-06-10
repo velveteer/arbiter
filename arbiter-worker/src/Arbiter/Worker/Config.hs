@@ -7,10 +7,19 @@ module Arbiter.Worker.Config
   , defaultWorkerConfig
   , defaultBatchedWorkerConfig
   , defaultRollupWorkerConfig
+  , defaultManualWorkerConfig
+  , defaultManualRollupWorkerConfig
+  , defaultManualBatchedWorkerConfig
   , singleJobMode
   , mergedRollupHandler
+  , manualJobMode
+  , manualRollupHandler
   , mergeChildResults
   , HandlerMode (..)
+
+    -- * Manual Completion
+  , JobCompletion
+  , BatchCompletion
 
     -- * Worker State
   , WorkerState (..)
@@ -19,13 +28,14 @@ module Arbiter.Worker.Config
   , readEffectiveState
   ) where
 
-import Arbiter.Core.Job.Types (ObservabilityHooks, defaultObservabilityHooks)
+import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (BatchedJobHandler, JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
 import Data.Int (Int32, Int64)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -42,6 +52,16 @@ import Arbiter.Worker.Cron (CronJob)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
+-- | Completion callback handed to a manual single-job handler. Apply it to the
+-- job's result to store the result, ack the job, and fire onJobSuccess. Call it
+-- once. Leaving it uncalled retries the job.
+type JobCompletion m result = result -> m ()
+
+-- | Completion callback handed to a manual batched handler. Apply it to a job
+-- in the batch to ack it and fire onJobSuccess. Call once per job you finish.
+-- Jobs left uncompleted are retried.
+type BatchCompletion m payload = JobRead payload -> m ()
+
 -- | Handler type and claiming strategy.
 --
 -- __Single vs Batched Mode__
@@ -52,6 +72,16 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 --   All-or-nothing: if any job in batch fails, entire batch rolls back (automatic mode)
 --   or is retried together. Uses minimum maxAttempts across batch.
 --   Handler receives @NonEmpty (JobRead payload)@.
+--
+-- __Automatic vs Manual Mode__
+--
+-- * __Automatic__ ('SingleJobMode', 'BatchedJobsMode'): the worker runs the
+--   handler in a transaction, stores the result, acks, and fires onJobSuccess.
+--
+-- * __Manual__ ('ManualJobMode', 'ManualBatchedJobsMode'): the handler runs
+--   without a worker transaction and is handed a completion callback. Calling
+--   it stores the result (single only), acks, and fires onJobSuccess. Jobs left
+--   uncompleted are retried.
 data HandlerMode m payload result
   = -- | Claim 1 job per group. Handler receives a map of immediate child
     -- results (with @Left@ for decode failures) and a map of immediate
@@ -60,6 +90,13 @@ data HandlerMode m payload result
   | -- | Batched mode: claim up to N jobs per group, handler receives batch.
     -- Has no rollup awareness. Use 'SingleJobMode' for rollup parents.
     BatchedJobsMode Int (BatchedJobHandler m payload result)
+  | -- | Manual single-job mode. Like 'SingleJobMode' but the handler decides
+    -- when to finalize via the 'JobCompletion' callback. No worker transaction.
+    ManualJobMode
+      (Map Int64 (Either Text result) -> Map Int64 Text -> JobRead payload -> JobCompletion m result -> m ())
+  | -- | Manual batched mode. The handler acks each job individually via the
+    -- 'BatchCompletion' callback. No rollup awareness. No worker transaction.
+    ManualBatchedJobsMode Int (NonEmpty (JobRead payload) -> BatchCompletion m payload -> m ())
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload result = WorkerConfig
@@ -89,19 +126,6 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Retry backoff strategy. Default: exponential with base 2, max 1048576 seconds.
   , jitter :: Jitter
   -- ^ Jitter strategy for retry delays. Default: 'EqualJitter'.
-  , useWorkerTransaction :: Bool
-  -- ^ __Transaction Mode:__
-  --
-  -- * __True (Automatic)__: Handler runs in a transaction with automatic
-  -- acking and rollback. Heartbeat prevents job reclaim during processing.
-  -- Cannot control commit timing. If the ack fails then all database work is
-  -- rolled back - this means 'BatchedJobsMode' can have a large blast radius
-  -- because the batch is acked atomically. Default: True.
-  --
-  -- * __False (Manual)__: Full transaction control. Handler must explicitly ack jobs.
-  -- Child results are __not__ automatically stored in the results table -
-  -- the handler must call 'Arbiter.Core.HighLevel.insertResult' to make
-  -- results visible to the rollup finalizer.
   , observabilityHooks :: ObservabilityHooks m payload
   -- ^ Callbacks for metrics or tracing. Default: no-op hooks.
   , workerStateVar :: TVar WorkerState
@@ -186,6 +210,48 @@ defaultRollupWorkerConfig
 defaultRollupWorkerConfig connStrVal workerCnt handler =
   mkDefaultConfig connStrVal workerCnt (mergedRollupHandler handler)
 
+-- | Create a t'WorkerConfig' whose handler finalizes its job manually. The
+-- handler is handed a 'JobCompletion' callback and runs without a worker
+-- transaction. See 'manualJobMode'.
+defaultManualWorkerConfig
+  :: (MonadArbiter n, MonadIO m)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> (JobRead payload -> JobCompletion n result -> n ())
+  -> m (WorkerConfig n payload result)
+defaultManualWorkerConfig connStrVal workerCnt handler =
+  mkDefaultConfig connStrVal workerCnt (manualJobMode handler)
+
+-- | Create a t'WorkerConfig' for manual rollup parents. Child results are
+-- 'Monoid'-merged, like 'defaultRollupWorkerConfig'. See 'manualRollupHandler'.
+defaultManualRollupWorkerConfig
+  :: (MonadArbiter n, MonadIO m, Monoid result)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> (result -> Map Int64 Text -> JobRead payload -> JobCompletion n result -> n ())
+  -> m (WorkerConfig n payload result)
+defaultManualRollupWorkerConfig connStrVal workerCnt handler =
+  mkDefaultConfig connStrVal workerCnt (manualRollupHandler handler)
+
+-- | Create a t'WorkerConfig' for manual batched processing. The handler acks
+-- each job via the 'BatchCompletion' callback. See 'ManualBatchedJobsMode'.
+defaultManualBatchedWorkerConfig
+  :: (MonadArbiter n, MonadIO m)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> Int
+  -- ^ Batch size (max jobs per group to claim together)
+  -> (NonEmpty (JobRead payload) -> BatchCompletion n payload -> n ())
+  -> m (WorkerConfig n payload result)
+defaultManualBatchedWorkerConfig connStrVal workerCnt batchSize handler =
+  mkDefaultConfig connStrVal workerCnt (ManualBatchedJobsMode batchSize handler)
+
 -- | Handler that ignores child results. Use for regular jobs and leaf children.
 singleJobMode :: JobHandler m payload result -> HandlerMode m payload result
 singleJobMode handler = SingleJobMode (\_ _ -> handler)
@@ -197,6 +263,21 @@ singleJobMode handler = SingleJobMode (\_ _ -> handler)
 mergedRollupHandler
   :: (Monoid result) => (result -> Map Int64 Text -> JobHandler m payload result) -> HandlerMode m payload result
 mergedRollupHandler handler = SingleJobMode $ \results dlqFailures -> handler (mergeChildResults results) dlqFailures
+
+-- | Manual handler that ignores child results. The completion callback acks the
+-- job and fires onJobSuccess. Use for regular jobs and leaf children.
+manualJobMode :: (JobRead payload -> JobCompletion m result -> m ()) -> HandlerMode m payload result
+manualJobMode handler = ManualJobMode (\_ _ -> handler)
+
+-- | Manual handler for rollup parents. Child results are 'Monoid'-merged, like
+-- 'mergedRollupHandler'. The completion callback stores the parent's result,
+-- acks it, and fires onJobSuccess.
+manualRollupHandler
+  :: (Monoid result)
+  => (result -> Map Int64 Text -> JobRead payload -> JobCompletion m result -> m ())
+  -> HandlerMode m payload result
+manualRollupHandler handler =
+  ManualJobMode $ \results dlqFailures -> handler (mergeChildResults results) dlqFailures
 
 -- | Fold child results via 'Monoid', treating failures as 'mempty'.
 mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
@@ -229,7 +310,6 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , maxAttempts = 10
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter
-      , useWorkerTransaction = True
       , observabilityHooks = defaultObservabilityHooks
       , workerStateVar = shutdownTVar
       , pauseVar = pauseTVar

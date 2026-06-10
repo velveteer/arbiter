@@ -175,7 +175,7 @@ The default job lifecycle:
 4. **On success** - the job is deleted (ack) and all database work commits atomically.
 5. **On failure** - the transaction rolls back. A separate transaction updates the job for retry or moves it to the DLQ.
 
-Set `useWorkerTransaction = False` for manual transaction control - you must call `ackJob` yourself in this mode.
+For manual transaction control, use `defaultManualWorkerConfig` (or `manualJobMode`). The handler runs without a worker transaction and is handed a completion callback - applying it to the result stores the result, acks the job, and fires the `onJobSuccess` hook.
 
 ### Head-of-Line Blocking
 
