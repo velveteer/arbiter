@@ -8,12 +8,12 @@ module Test.Arbiter.Hasql.Worker (spec) where
 import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..), defaultJob, defaultObservabilityHooks)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (setupOnce)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (WorkerConfig (..), defaultWorkerConfig)
+import Arbiter.Worker.Config (JobCompletion, WorkerConfig (..), defaultManualWorkerConfig, defaultWorkerConfig)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -77,6 +77,35 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
           completed <- readIORef completedRef
           length completed `shouldBe` 3
           completed `shouldMatchList` [SimpleTask "Job 1", SimpleTask "Job 2", SimpleTask "Job 3"]
+
+    it "manual mode: completion callback acks the job and fires onJobSuccess" $ \pool -> do
+      let env = mkEnv pool
+      successRef <- newIORef (0 :: Int)
+
+      -- Manual handlers run without a worker transaction. On hasql this used to
+      -- throw "no active connection"; the completion callback now works.
+      let handler
+            :: JobRead HasqlWorkerTestPayload
+            -> JobCompletion (HasqlDb HasqlWorkerTestRegistry IO) ()
+            -> HasqlDb HasqlWorkerTestRegistry IO ()
+          handler _job completion = completion ()
+          hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \_job _ _ -> liftIO $ atomicModifyIORef' successRef (\n -> (n + 1, ()))
+              }
+
+      void $ runHasqlDb env $ HL.insertJob ((defaultJob (SimpleTask "ManualHasql")) {groupKey = Just "g1"})
+
+      config <- defaultManualWorkerConfig connStr 1 handler
+
+      withAsync
+        (runHasqlDb env $ runWorkerPool config {pollInterval = 0.1, observabilityHooks = hooks})
+        $ \_ -> waitUntil 10_000 $ (== 1) <$> readIORef successRef
+
+      -- onJobSuccess fired and the job was acked (removed from the queue).
+      readIORef successRef >>= (`shouldBe` 1)
+      remaining <- runHasqlDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead HasqlWorkerTestPayload]
+      remaining `shouldBe` []
 
     it "respects worker count concurrency limit" $ \pool -> do
       let env = mkEnv pool

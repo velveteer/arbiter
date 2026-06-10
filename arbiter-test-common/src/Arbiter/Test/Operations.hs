@@ -88,6 +88,32 @@ operationsSpec mkMessage runM = do
       length claimed `shouldBe` 1
       payload (head claimed) `shouldBe` mkMessage "High"
 
+    it "claims the ready top-priority job, not a future-scheduled deprioritized job, in the same group" $ \env -> do
+      now <- getCurrentTime
+      -- A low-priority job scheduled to run in the future. Inserted first, so it
+      -- is the older job (lower id) and would be the group head by id alone.
+      let future = truncateToMicros (addUTCTime 3600 now)
+          deprioritizedScheduled =
+            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Scheduled"))
+              { priority = 10
+              , notVisibleUntil = Just future
+              }
+          topPriority =
+            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Top"))
+              { priority = 0
+              }
+
+      void $ runM env (HL.insertJob deprioritizedScheduled)
+      void $ runM env (HL.insertJob topPriority)
+
+      -- The not-yet-due scheduled job must not block the group: the ready
+      -- top-priority job is the head-of-line pick and is claimed.
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+
+      length claimed `shouldBe` 1
+      payload (head claimed) `shouldBe` mkMessage "Top"
+      priority (head claimed) `shouldBe` 0
+
     it "claims jobs from different groups" $ \env -> do
       let job1 = (defaultJob (mkMessage "G1")) {groupKey = Just "group1"}
           job2 = (defaultJob (mkMessage "G2")) {groupKey = Just "group2"}
