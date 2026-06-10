@@ -36,6 +36,7 @@ module Arbiter.Worker
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
+  , JobNackException (..)
   , JobNotFoundException (..)
   , JobPermanentException (..)
   , JobRetryableException (..)
@@ -53,7 +54,7 @@ import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
-import Control.Exception (SomeException, fromException)
+import Control.Exception (SomeException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (liftIO)
@@ -61,12 +62,15 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (for_, toList, traverse_)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
+import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
@@ -216,7 +220,7 @@ runSelectedWorkerPools sharedState enabled pools =
                 , logConfig = withPoolContext name (logConfig cfg)
                 }
          in ContT $ \k -> Async.withAsync (runWorkerPool cfg') k
-      lift $ mapM_ Async.waitCatch asyncs
+      lift $ traverse_ Async.waitCatch asyncs
 
 -- | Inject the pool name into log context. User-supplied pairs come after
 -- so they win on key collision.
@@ -329,14 +333,15 @@ runWorkerPool config = do
       replicateM workerCap $
         spawnRetried (workerStateVar config) (logConfig config) "Worker thread" $
           workerLoop config runningJobs workQueue busyWorkerCount workerFinishedVar
-    cron <-
-      spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
-        runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
+    crons <-
+      unlessNull (cronJobs config) $
+        spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
+          runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
       spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
         reaperLoop (logConfig config) (reaperInterval config)
 
-    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : cron : workers)
+    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : crons <> workers)
     case res of
       Left e ->
         lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (show e)
@@ -471,6 +476,10 @@ heartbeatLoop config schemaName queueName = do
         shutting <- readShuttingDown
         unless shutting $ STM.writeTVar (pauseVar config) rp
 
+-- | @[]@ when the list is empty, else a singleton holding @act@'s result.
+unlessNull :: (Applicative f) => [a] -> f b -> f [b]
+unlessNull xs act = if null xs then pure [] else (: []) <$> act
+
 -- | Run @act@. On exception, log a warning under @label@ and continue.
 tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
 tryWarn logCfg label act = tryAny act >>= either (warnEx logCfg label) (const (pure ()))
@@ -518,7 +527,7 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
     $ withJobContext jobBatch
     $ do
       currentTime <- liftIO getCurrentTime
-      mapM_ (claimHook currentTime) jobBatch
+      traverse_ (claimHook currentTime) jobBatch
       result <- withRegisteredJobs runningJobs jobIds (processJobsWithRetry config jobBatch)
       case result of
         Right () -> pure ()
@@ -557,13 +566,57 @@ processJobsWithRetry
   -> m ()
 processJobsWithRetry config jobs = do
   let hooks = observabilityHooks config
-      -- Use minimum maxAttempts across all jobs in the batch
-      maxAtts = minimum $ map (\job -> fromMaybe (maxAttempts config) (Job.maxAttempts job)) (toList jobs)
+      jobMaxAtts job = fromMaybe (maxAttempts config) (Job.maxAttempts job)
+      -- Ack a job, throwing if it was reclaimed by another worker mid-flight.
+      ackJobOrSkip job = do
+        rowsAffected <- Arb.ackJob job
+        when (rowsAffected == 0) $
+          throwJobNotFound $
+            "Job " <> T.pack (show (Job.primaryKey job)) <> " was reclaimed during processing"
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
+  handledRef <- liftIO $ newIORef Set.empty
+  let markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
+      fireSuccess j = do
+        endT <- liftIO getCurrentTime
+        runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
+      finalize j = fireSuccess j >> markHandled j
+      failWith j exc = do
+        endT <- liftIO getCurrentTime
+        withDbTransaction $ handleJobFailure config hooks exc (jobMaxAtts j) startTime endT j
+        markHandled j
+      failAs mkExc j msg = failWith j (toException (mkExc msg))
+      completeOne j r = do
+        withDbTransaction $ do
+          storeJobResult schemaName j r
+          ackJobOrSkip j
+        finalize j
+      completeAllOf pairs = do
+        let js = map fst pairs
+            isAcked acked j = Job.primaryKey j `Set.member` acked
+        acked <- withDbTransaction $ do
+          ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
+          for_ pairs $ \(j, r) -> when (isAcked ackedSet j) $ storeJobResult schemaName j r
+          pure ackedSet
+        let (done, reclaimed) = partition (isAcked acked) js
+        unless (null reclaimed) $
+          tryLog (logConfig config) Info $
+            T.pack (show (length reclaimed)) <> " job(s) reclaimed during bulk completion, skipped"
+        traverse_ finalize done
+      callbacks =
+        BatchCallbacks
+          { complete = completeOne
+          , completeAll = completeAllOf
+          , failRetry = failAs (Retryable . JobRetryableException)
+          , failPermanent = failAs (Permanent . JobPermanentException)
+          , cancelBranch = failAs (BranchCancel . BranchCancelException)
+          , cancelTree = failAs (TreeCancel . TreeCancelException)
+          , nack = markHandled
+          }
   result <-
     tryAny
       $ withJobsHeartbeat
+        (handlerMode config)
         hooks
         (jobHeartbeatInterval config)
         (visibilityTimeout config)
@@ -572,59 +625,40 @@ processJobsWithRetry config jobs = do
         (logConfig config)
         (heartbeatSignal config)
       $ case handlerMode config of
-        SingleJobMode handler -> withDbTransaction $ do
+        SingleJobMode handler -> do
           let (job :| _) = jobs
-          (childResults, dlqFailures) <- readRollupChildResults schemaName job
-          handlerResult <- runHandlerWithConnection @_ @_ @result (handler childResults dlqFailures) job
-          storeJobResult schemaName job handlerResult
-          rowsAffected <- Arb.ackJob job
-          when (rowsAffected == 0) $
-            throwJobNotFound $
-              "Job "
-                <> T.pack (show (Job.primaryKey job))
-                <> " was reclaimed during processing - rolling back handler transaction"
-        BatchedJobsMode _ handler -> withDbTransaction $ do
-          void $ runHandlerWithConnection @_ @_ @result handler jobs
-          rowsAffected <- Arb.ackJobsBulk (toList jobs)
-          when (rowsAffected /= fromIntegral (length jobs)) $
-            throwJobNotFound $
-              "Expected to ack "
-                <> T.pack (show (length jobs))
-                <> " jobs but only "
-                <> T.pack (show rowsAffected)
-                <> " were deleted - rolling back handler transaction"
-        ManualJobMode handler -> do
-          let (job :| _) = jobs
-          (childResults, dlqFailures) <- readRollupChildResults schemaName job
-          let completion handlerResult = do
-                withDbTransaction $ do
-                  storeJobResult schemaName job handlerResult
-                  void $ Arb.ackJob job
-                fireJobSuccess config hooks job startTime
-          handler childResults dlqFailures job completion
-        ManualBatchedJobsMode _ handler -> do
-          let completion completedJob = do
-                void $ Arb.ackJob completedJob
-                fireJobSuccess config hooks completedJob startTime
-          handler jobs completion
+          withDbTransaction $ do
+            (childResults, dlqFailures) <- readRollupChildResults schemaName job
+            handlerResult <- runHandlerWithConnection @_ @_ @result (handler childResults dlqFailures) job
+            storeJobResult schemaName job handlerResult
+            ackJobOrSkip job
+          finalize job
+        BatchedJobsMode _ handler -> do
+          (childMap, dlqMap) <- readBatchedChildResults schemaName jobs
+          handler childMap dlqMap jobs callbacks
   endTime <- liftIO getCurrentTime
+  handled <- liftIO $ readIORef handledRef
   case result of
     Right () ->
-      -- Automatic modes fire onJobSuccess here, after the commit. Manual modes
-      -- fire it inside the completion callback the handler invokes.
-      case handlerMode config of
-        ManualJobMode {} -> pure ()
-        ManualBatchedJobsMode {} -> pure ()
-        _ ->
-          mapM_ (\job -> runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime) jobs
+      when (Set.size handled < length jobs) $
+        tryLog (logConfig config) Warning $
+          "Handler finalized "
+            <> T.pack (show (Set.size handled))
+            <> " of "
+            <> T.pack (show (length jobs))
+            <> " jobs. The rest will be reprocessed"
     Left e
       | isJobGoneException e ->
           tryLog (logConfig config) Info $
             "Job(s) no longer available, skipping retry: " <> T.pack (show e)
+      | Just JobNackException <- fromException e ->
+          tryLog (logConfig config) Info "Job(s) nacked, will be reprocessed"
       | otherwise ->
-          -- Update all jobs for retry or move to DLQ in a separate transaction
+          -- Fail the jobs the handler did not finalize, in a separate transaction.
           withDbTransaction $
-            mapM_ (handleJobFailure config hooks e maxAtts startTime endTime) jobs
+            traverse_
+              (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
+              (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
 
 -- | Read child results for a rollup job, empty otherwise.
 readRollupChildResults
@@ -635,6 +669,21 @@ readRollupChildResults
 readRollupChildResults schemaName job
   | Job.isRollup job = readChildResults schemaName job
   | otherwise = pure (Map.empty, Map.empty)
+
+-- | Read each batch job's child results and DLQ'd children, keyed by primary key.
+readBatchedChildResults
+  :: (JobResult result, MonadArbiter m)
+  => Text
+  -> NonEmpty (Job.JobRead payload)
+  -> m (Map.Map Int64 (Map.Map Int64 (Either Text result)), Map.Map Int64 (Map.Map Int64 T.Text))
+readBatchedChildResults schemaName jobs = do
+  perJob <- for (toList jobs) $ \j -> do
+    (childResults, dlqFailures) <- readRollupChildResults schemaName j
+    pure (Job.primaryKey j, childResults, dlqFailures)
+  pure
+    ( Map.fromList [(k, cs) | (k, cs, _) <- perJob]
+    , Map.fromList [(k, dlq) | (k, _, dlq) <- perJob]
+    )
 
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult
@@ -648,18 +697,6 @@ storeJobResult schemaName job result =
     (Just pid, Just val) ->
       void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
     _ -> pure ()
-
--- | Fire onJobSuccess for a job that just completed, stamping the end time now.
-fireJobSuccess
-  :: (Job.JobPayload payload, MonadUnliftIO m)
-  => WorkerConfig m payload result
-  -> Job.ObservabilityHooks m payload
-  -> Job.JobRead payload
-  -> UTCTime
-  -> m ()
-fireJobSuccess config hooks job startTime = do
-  endTime <- liftIO getCurrentTime
-  runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks job startTime endTime
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.

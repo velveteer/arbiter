@@ -273,21 +273,6 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       void $ runM env $ HL.moveToDLQBatch jobsWithErrors
       check env "after batch DLQ"
 
-    it "ackJobsBulk: decrement counts" $ \env -> do
-      void $
-        runM env $
-          HL.insertJobsBatch
-            [ (defaultJob (mkPayload "bulk1")) {groupKey = Just "bulk-g"}
-            , (defaultJob (mkPayload "bulk2")) {groupKey = Just "bulk-g"}
-            , (defaultJob (mkPayload "bulk3")) {groupKey = Just "bulk-g2"}
-            ]
-      check env "after batch insert"
-
-      -- Claim all
-      claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 10 60
-      void $ runM env $ HL.ackJobsBulk claimed
-      check env "after bulk ack"
-
     it "retryFromDLQ: re-increment count" $ \env -> do
       void $ runM env $ HL.insertJob (defaultJob (mkPayload "retry1")) {groupKey = Just "retry-g"}
       check env "after insert"

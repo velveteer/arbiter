@@ -13,13 +13,14 @@ import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (setupOnce)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (JobCompletion, WorkerConfig (..), defaultManualWorkerConfig, defaultWorkerConfig)
+import Arbiter.Worker.Config (WorkerConfig (..), complete, defaultBatchedWorkerConfig, defaultWorkerConfig)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -78,17 +79,13 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
           length completed `shouldBe` 3
           completed `shouldMatchList` [SimpleTask "Job 1", SimpleTask "Job 2", SimpleTask "Job 3"]
 
-    it "manual mode: completion callback acks the job and fires onJobSuccess" $ \pool -> do
+    it "completing a job acks it and fires onJobSuccess" $ \pool -> do
       let env = mkEnv pool
       successRef <- newIORef (0 :: Int)
 
-      -- Manual handlers run without a worker transaction. On hasql this used to
-      -- throw "no active connection"; the completion callback now works.
-      let handler
-            :: JobRead HasqlWorkerTestPayload
-            -> JobCompletion (HasqlDb HasqlWorkerTestRegistry IO) ()
-            -> HasqlDb HasqlWorkerTestRegistry IO ()
-          handler _job completion = completion ()
+      -- Callback handlers run without a worker transaction. On hasql this used to
+      -- throw "no active connection"; completing the job now works.
+      let handler (job :| _) cbs = complete cbs job
           hooks =
             defaultObservabilityHooks
               { onJobSuccess = \_job _ _ -> liftIO $ atomicModifyIORef' successRef (\n -> (n + 1, ()))
@@ -96,7 +93,8 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
 
       void $ runHasqlDb env $ HL.insertJob ((defaultJob (SimpleTask "ManualHasql")) {groupKey = Just "g1"})
 
-      config <- defaultManualWorkerConfig connStr 1 handler
+      config :: WorkerConfig (HasqlDb HasqlWorkerTestRegistry IO) HasqlWorkerTestPayload () <-
+        defaultBatchedWorkerConfig connStr 1 1 handler
 
       withAsync
         (runHasqlDb env $ runWorkerPool config {pollInterval = 0.1, observabilityHooks = hooks})

@@ -291,7 +291,7 @@ operationsSpec mkMessage runM = do
 
       -- Ack all jobs in batch
       deleted <- runM env (HL.ackJobsBatch claimed)
-      deleted `shouldBe` 5
+      length deleted `shouldBe` 5
 
       -- Try to claim again - should get nothing (all jobs deleted)
       claimed2 <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
@@ -315,7 +315,7 @@ operationsSpec mkMessage runM = do
 
       -- Ack them in batch
       acked <- runM env (HL.ackJobsBatch claimed1)
-      acked `shouldBe` 2
+      length acked `shouldBe` 2
 
       -- Now second jobs should be claimable
       claimed2 <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
@@ -1280,7 +1280,7 @@ operationsSpec mkMessage runM = do
       length ungroupedBatches `shouldBe` 2
       forM_ ungroupedBatches $ \b -> NE.length b `shouldBe` 3
 
-    it "batched mode excludes children and finalizers" $ \env -> do
+    it "batched mode claims children but not suspended finalizers" $ \env -> do
       -- Insert a rollup tree: finalizer + 2 children
       Right (_parent :| _children) <-
         runM env $
@@ -1294,10 +1294,15 @@ operationsSpec mkMessage runM = do
       -- Insert a regular (non-tree) job
       void $ runM env (HL.insertJob (defaultJob (mkMessage "BatchExclRegular")))
 
-      -- Batched claim should only get the regular job
+      -- Batched claim gets the children and the regular job, but not the
+      -- suspended finalizer (it wakes only once its children complete).
       batches <- claimBatchedFlat env 10 10 :: IO [JobRead payload]
       let claimedPayloads = map payload batches
-      claimedPayloads `shouldBe` [mkMessage "BatchExclRegular"]
+      claimedPayloads
+        `shouldMatchList` [ mkMessage "BatchExclChild1"
+                          , mkMessage "BatchExclChild2"
+                          , mkMessage "BatchExclRegular"
+                          ]
 
   describe "Batch Admin Operations" $ do
     it "cancelJobsBatch deletes multiple jobs" $ \env -> do
@@ -2355,9 +2360,26 @@ operationsSpec mkMessage runM = do
       length claimedChildren `shouldBe` 2
 
       batchResult <- runM env (HL.ackJobsBatch claimedChildren)
-      batchResult `shouldBe` 2
+      length batchResult `shouldBe` 2
 
       assertNotSuspended env (primaryKey parent)
+
+    it "ackJobsBatch partial ack leaves the parent suspended" $ \env -> do
+      Right (parent :| _children) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "PartialAckParent"))
+              (JT.leaf (defaultJob (mkMessage "PartialChild1")) NE.:| [JT.leaf (defaultJob (mkMessage "PartialChild2"))])
+
+      claimedChildren <- claimJobs env 10
+      length claimedChildren `shouldBe` 2
+
+      -- Ack only one of the two children: the parent must stay suspended.
+      acked <- runM env (HL.ackJobsBatch (take 1 claimedChildren))
+      length acked `shouldBe` 1
+
+      assertSuspended env (primaryKey parent)
 
     it "promoteJob on suspended job returns 0" $ \env -> do
       -- Insert a job, then suspend it

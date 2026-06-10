@@ -21,8 +21,9 @@ import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.STM (TMVar, atomically)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Logger (LogConfig)
-import Arbiter.Worker.Logger.Internal (runHook)
+import Arbiter.Worker.Config (HandlerMode (..))
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
+import Arbiter.Worker.Logger.Internal (runHook, tryLog)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
 
 -- | Run an action with a heartbeat that extends visibility timeout for all jobs.
@@ -35,15 +36,22 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 --
 --   * Job successfully heartbeated - continue normally
 --   * Job already completed (acked\/canceled by handler) - ignore, not an error
---   * Job stolen by another worker (attempts changed) - throw to stop duplicate work
+--   * Job stolen by another worker (attempts changed) - see @throwOnSteal@
+--
+-- Single-job modes abort the whole action when any job is reclaimed. Batched
+-- callback mode does not, so one steal does not kill the whole batch. Detection
+-- is deferred to per-job ack time and the heartbeat just stops extending the
+-- reclaimed jobs.
 --
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
-  :: forall registry m payload a
+  :: forall registry m payload result a
    . ( JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => ObservabilityHooks m payload
+  => HandlerMode m payload result
+  -- ^ Determines whether a reclaim aborts the action or defers to ack time
+  -> ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
   -> NominalDiffTime
   -- ^ Heartbeat interval
@@ -60,9 +68,13 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal action =
+withJobsHeartbeat mode hooks intervalSecs timeoutSecs startTime jobs logCfg signal action =
   either absurd id <$> race heartbeatThread action
   where
+    throwOnSteal = case mode of
+      BatchedJobsMode {} -> False
+      _ -> True
+
     heartbeatThread =
       retryOnExceptionForever logCfg "Heartbeat" 3 $
         forever tick
@@ -73,10 +85,17 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       atomically $ void $ STM.tryPutTMVar signal ()
       let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
       unless (null stolenJobs) $
-        throwJobStolen $
-          "Heartbeat detected stolen jobs: "
-            <> T.intercalate ", " (map (T.pack . show) stolenJobs)
-            <> " (another worker reclaimed them, stopping to prevent duplicate processing)"
+        if throwOnSteal
+          then
+            throwJobStolen $
+              "Heartbeat detected stolen jobs: "
+                <> T.intercalate ", " (map (T.pack . show) stolenJobs)
+                <> " (another worker reclaimed them, stopping to prevent duplicate processing)"
+          else
+            tryLog logCfg Info $
+              "Heartbeat saw reclaimed jobs: "
+                <> T.intercalate ", " (map (T.pack . show) stolenJobs)
+                <> " (will be detected at ack time)"
       let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
           activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) (toList jobs)
       currentTime <- liftIO getCurrentTime

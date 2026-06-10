@@ -8,9 +8,9 @@ module Arbiter.Core.SqlTemplates
   , insertJobReplaceSQL
   , insertJobsBatchSQL
   , insertJobsBatchSQL_
-  , claimJobsSQL
   , claimJobsBatchedSQL
   , smartAckJobSQL
+  , smartAckJobsBatchSQL
   , setVisibilityTimeoutSQL
   , setVisibilityTimeoutBatchSQL
   , updateJobForRetrySQL
@@ -30,7 +30,6 @@ module Arbiter.Core.SqlTemplates
   , getQueueStatsSQL
 
     -- * Batch Operations
-  , ackJobsBulkSQL
   , moveToDLQBatchSQL
   , deleteDLQJobsBatchSQL
 
@@ -513,12 +512,11 @@ insertJobsBatchBase schema tableName returning =
         ${returning}
       |]
 
--- | Single-CTE claim for grouped jobs.
+-- | Batched single-CTE claim. Also serves the single-job claim at batch size 1.
 --
 -- Uses the @{queue}_groups@ table for fast candidate selection with
--- @FOR UPDATE SKIP LOCKED@ for concurrency control.
---
--- The groups table row lock provides two guarantees:
+-- @FOR UPDATE SKIP LOCKED@ for concurrency control. The groups table row lock
+-- provides two guarantees:
 --
 --   1. @SKIP LOCKED@ - groups currently being claimed by an in-flight
 --      transaction are skipped (no contention).
@@ -527,81 +525,8 @@ insertJobsBatchBase schema tableName returning =
 --      committed and the trigger updated @in_flight_until@, we see the
 --      fresh value and correctly skip the group.
 --
--- No @?@ parameters - all values are interpolated.
-claimJobsSQL :: SchemaName -> TableName -> Int -> NominalDiffTime -> Maybe UUID -> Text
-claimJobsSQL schema tableName maxJobs timeoutSeconds mWorkerId =
-  let tbl = jobQueueTable schema tableName
-      groupsTbl = jobQueueGroupsTable schema tableName
-      columns = jobColumns Nothing
-      overfetch = T.pack (show (maxJobs * 10))
-      limit = T.pack (show maxJobs)
-      timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
-      claimedBy = uuidLiteral mWorkerId
-   in [text|
-  WITH
-    eligible_groups AS (
-      SELECT group_key FROM ${groupsTbl}
-      WHERE job_count > 0
-        AND (in_flight_until IS NULL OR in_flight_until <= NOW())
-      ORDER BY min_priority ASC, min_id ASC
-      LIMIT ${overfetch}
-      FOR UPDATE SKIP LOCKED
-    ),
-    grouped_candidates AS (
-      SELECT j.id
-      FROM eligible_groups el
-      CROSS JOIN LATERAL (
-        SELECT id
-        FROM ${tbl}
-        WHERE group_key = el.group_key
-          AND NOT suspended
-          AND (not_visible_until IS NULL OR not_visible_until <= NOW())
-        ORDER BY attempts DESC, priority ASC, id ASC
-        LIMIT 1
-      ) j
-    ),
-    ungrouped_candidates AS (
-      SELECT id FROM ${tbl}
-      WHERE group_key IS NULL
-        AND NOT suspended
-        AND (not_visible_until IS NULL OR not_visible_until <= NOW())
-      ORDER BY priority ASC, id ASC
-      LIMIT ${overfetch}
-    ),
-    locked AS (
-      SELECT j.id
-      FROM (
-        SELECT id FROM grouped_candidates
-        UNION ALL
-        SELECT id FROM ungrouped_candidates
-      ) c
-      INNER JOIN ${tbl} j ON j.id = c.id
-      WHERE NOT j.suspended
-        AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
-      ORDER BY j.priority ASC, j.id ASC
-      FOR UPDATE OF j SKIP LOCKED
-      LIMIT ${limit}
-    ),
-    claimed AS (
-      UPDATE ${tbl} j
-      SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
-          attempts = j.attempts + 1,
-          last_attempted_at = NOW(),
-          updated_at = NOW(),
-          claimed_by = ${claimedBy}
-      FROM locked l
-      WHERE j.id = l.id
-      RETURNING j.*
-    )
-    SELECT ${columns} FROM claimed ORDER BY priority ASC, id ASC
-    |]
-
--- | Batched single-CTE claim.
---
--- Uses the @{queue}_groups@ table with @FOR UPDATE SKIP LOCKED@ for
--- concurrency control (see 'claimJobsSQL' for details on the EPQ
--- re-evaluation mechanism).
--- Excludes tree jobs (@parent_id IS NULL AND parent_state IS NULL@).
+-- Claims any unsuspended visible job, including rollup children and woken
+-- rollup parents.
 -- No @?@ parameters - all values are interpolated.
 claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
 claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorkerId =
@@ -632,8 +557,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         FROM ${tbl} t
         WHERE t.group_key = el.group_key
           AND NOT t.suspended
-          AND t.parent_id IS NULL
-          AND t.parent_state IS NULL
           AND (t.not_visible_until IS NULL OR t.not_visible_until <= NOW())
         ORDER BY t.priority ASC, t.id ASC
         LIMIT 1
@@ -646,8 +569,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       FROM ${tbl}
       WHERE group_key IS NULL
         AND NOT suspended
-        AND parent_id IS NULL
-        AND parent_state IS NULL
         AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       ORDER BY priority ASC, id ASC
       LIMIT ${ungroupedLimit}
@@ -680,8 +601,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         FROM ${tbl}
         WHERE group_key = flg.group_key
           AND NOT suspended
-          AND parent_id IS NULL
-          AND parent_state IS NULL
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
         ORDER BY attempts DESC, priority ASC, id ASC
         LIMIT ${bs}
@@ -705,8 +624,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       ) i
       INNER JOIN ${tbl} j ON j.id = i.id
       WHERE NOT j.suspended
-        AND j.parent_id IS NULL
-        AND j.parent_state IS NULL
         AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
       ORDER BY j.priority ASC, j.id ASC
       FOR UPDATE OF j SKIP LOCKED
@@ -769,6 +686,54 @@ smartAckJobSQL schema tableName =
         )
         SELECT
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS result
+      |]
+
+-- | Set-based 'smartAckJobSQL': acks a whole list of jobs in one statement.
+--
+-- Same per-job semantics (delete leaves, suspend finalizers-with-children, wake
+-- parents whose last child just completed), but for @unnest@ed @(id, attempts)@
+-- arrays. Deletes/updates are not visible to sibling CTEs in the same statement,
+-- so the wake check excludes acked children explicitly via the @ack@ CTE.
+-- Returns the ids that were acked (deleted or suspended). Reclaimed jobs (whose
+-- attempts no longer match) are absent. Caller must hold the parent locks.
+smartAckJobsBatchSQL :: Text -> Text -> Text
+smartAckJobsBatchSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+   in [text|
+        WITH input AS (
+          SELECT unnest(?::bigint[]) AS id, unnest(?::int[]) AS att
+        ),
+        ack AS (
+          DELETE FROM ${tbl} j
+          USING input i
+          WHERE j.id = i.id AND j.attempts = i.att
+            AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
+          RETURNING j.id, j.parent_id
+        ),
+        suspend AS (
+          UPDATE ${tbl} j
+          SET suspended = TRUE, not_visible_until = NULL, updated_at = NOW()
+          FROM input i
+          WHERE j.id = i.id AND j.attempts = i.att
+            AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = j.id)
+            AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
+          RETURNING j.id
+        ),
+        wake_parent AS (
+          UPDATE ${tbl} p
+          SET suspended = FALSE, updated_at = NOW()
+          WHERE p.id IN (SELECT DISTINCT parent_id FROM ack WHERE parent_id IS NOT NULL)
+            AND p.suspended = TRUE
+            AND NOT EXISTS (
+              SELECT 1 FROM ${tbl} c
+              WHERE c.parent_id = p.id
+                AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = c.id)
+            )
+          RETURNING p.id
+        )
+        SELECT id FROM ack
+        UNION
+        SELECT id FROM suspend
       |]
 
 -- | SQL template for setting visibility timeout
@@ -1133,30 +1098,6 @@ countDLQChildrenBatchSQL schema tableName =
 -- ---------------------------------------------------------------------------
 -- Batch Operations
 -- ---------------------------------------------------------------------------
-
--- | Bulk ack for standalone jobs (no parent, no tree logic).
---
--- Deletes jobs matching both ID and attempts (optimistic locking).
--- Skips the full smart-ack CTE since batched-mode jobs are guaranteed
--- standalone (@parent_id IS NULL AND parent_state IS NULL@).
---
--- Parameters: Array of job IDs, array of expected attempts
--- Returns: number of rows deleted
-ackJobsBulkSQL :: Text -> Text -> Text
-ackJobsBulkSQL schema tableName =
-  let tbl = jobQueueTable schema tableName
-   in [text|
-        WITH input AS (
-          SELECT unnest(?::bigint[]) AS id,
-                 unnest(?::int[]) AS expected_attempts
-        ),
-        deleted AS (
-          DELETE FROM ${tbl} j USING input i
-          WHERE j.id = i.id AND j.attempts = i.expected_attempts
-          RETURNING j.id
-        )
-        SELECT count(*) FROM deleted
-      |]
 
 -- | SQL template for moving multiple jobs to DLQ in a single operation
 --

@@ -21,7 +21,6 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobsBatchedAs
   , ackJob
   , ackJobsBatch
-  , ackJobsBulk
   , updateJobForRetry
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
@@ -263,35 +262,19 @@ ackJob job = do
   let tableName = job.queueName
   Ops.ackJob schemaName tableName job
 
--- | Acknowledges multiple jobs as complete. All jobs must be from the same
--- queue. Returns the total number of rows deleted.
+-- | Acknowledges multiple jobs as complete in one statement (parent-aware:
+-- finalizers suspend, parents wake). All jobs must be from the same queue.
+-- Returns the ids actually acked. Reclaimed jobs are absent.
 ackJobsBatch
   :: forall m registry payload
    . (JobOperation m registry payload)
   => [JobRead payload]
-  -> m Int64
-ackJobsBatch [] = pure 0
+  -> m [Int64]
+ackJobsBatch [] = pure []
 ackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
   let tableName = firstJob.queueName
   Ops.ackJobsBatch schemaName tableName jobs
-
--- | Bulk ack for standalone jobs (no parent, no tree logic).
---
--- A single DELETE with unnest - one round trip for N jobs.
--- Only valid for jobs claimed in 'BatchedJobsMode'.
---
--- Returns the number of rows deleted.
-ackJobsBulk
-  :: forall m registry payload
-   . (JobOperation m registry payload)
-  => [JobRead payload]
-  -> m Int64
-ackJobsBulk [] = pure 0
-ackJobsBulk jobs@(firstJob : _) = do
-  schemaName <- getSchema
-  let tableName = firstJob.queueName
-  Ops.ackJobsBulk schemaName tableName jobs
 
 -- | Marks a failed job for retry at a later time.
 --

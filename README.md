@@ -175,7 +175,7 @@ The default job lifecycle:
 4. **On success** - the job is deleted (ack) and all database work commits atomically.
 5. **On failure** - the transaction rolls back. A separate transaction updates the job for retry or moves it to the DLQ.
 
-For manual transaction control, use `defaultManualWorkerConfig` (or `manualJobMode`). The handler runs without a worker transaction and is handed a completion callback - applying it to the result stores the result, acks the job, and fires the `onJobSuccess` hook.
+For manual transaction control, use `defaultBatchedWorkerConfig` (batch size 1 is the single-job case). The handler runs without a worker transaction and is handed a `BatchCallbacks` record to finalize each job: `complete` acks the job and fires `onJobSuccess` (and stores the result, for rollup parents), while `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, and `nack` cover the other per-job dispositions. A job left untouched is reprocessed.
 
 ### Head-of-Line Blocking
 
@@ -355,7 +355,10 @@ Arb.throwRetryable "API timeout"       -- retry with backoff
 Arb.throwPermanent "Invalid payload"   -- move to DLQ immediately
 Arb.throwTreeCancel "Pipeline aborted" -- cancel entire tree
 Arb.throwBranchCancel "Subtask failed" -- cancel current branch
+Arb.throwNack                          -- reprocess later, not a failure
 ```
+
+In a batched handler, the same dispositions are available per job through the `BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack`) so one job's outcome does not affect the rest of the batch. A throw applies to whichever jobs the handler has not yet finalized.
 
 Any unrecognized exception is treated as retryable. Jobs have a configurable `maxAttempts` (default: 10). After exhausting attempts, the job moves to the DLQ.
 
@@ -368,15 +371,21 @@ See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-work
 Process multiple jobs per handler invocation:
 
 ```haskell
+-- defaultBatchedWorkerConfig connStr <workerCount> <batchSize> handler
 config <- Worker.defaultBatchedWorkerConfig connStr 10 5 batchHandler
 
-batchHandler :: Connection -> NonEmpty (Arb.JobRead ImagePayload) -> ArbS.SimpleDb AppRegistry IO ()
-batchHandler conn jobs = do
+batchHandler
+  :: NonEmpty (Arb.JobRead ImagePayload)
+  -> Worker.AckCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
+  -> ArbS.SimpleDb AppRegistry IO ()
+batchHandler jobs cbs = do
   let urls = map (getUrl . Arb.payload) (toList jobs)
-  liftIO $ bulkProcess conn urls
+  liftIO $ bulkProcess urls
+  -- Bulk-ack the whole batch in one transaction.
+  Worker.completeAll cbs (toList jobs)
 ```
 
-All jobs in a batch succeed or fail together. Hooks will still fire individually for each job in the batch.
+Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `complete`/`completeAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
 
 ### Observability Hooks
 
@@ -525,17 +534,17 @@ If you're choosing a backend based on raw throughput:
 
 | Backend | Single job | Batched (10) | Single (50k groups) | Batched (50k groups) |
 |---------|-----------|-------------|---------------------|---------------------|
-| hasql | 10,011/s | 30,745/s | 6,592/s | 60,074/s |
-| orville | 9,717/s | 27,048/s | 6,471/s | 55,655/s |
-| postgresql-simple | 7,626/s | 28,143/s | 5,761/s | 51,769/s |
+| hasql | 9,726/s | 31,070/s | 9,235/s | 61,951/s |
+| orville | 9,490/s | 28,275/s | 9,125/s | 58,493/s |
+| postgresql-simple | 7,607/s | 27,601/s | 7,460/s | 55,664/s |
 
 **Steady-state throughput** (10 concurrent producers):
 
-| Backend | Single job | Batched (10) | Single (groups) | Batched (groups) |
+| Backend | Single job | Batched (10) | Single (5k groups) | Batched (5k groups) |
 |---------|-----------|-------------|---------------------|---------------------|
-| hasql | 8,121/s | 19,123/s | 6,287/s | 18,129/s |
-| orville | 8,672/s | 19,142/s | 6,269/s | 18,084/s |
-| postgresql-simple | 7,041/s | 18,815/s | 5,711/s | 15,295/s |
+| hasql | 8,690/s | 17,862/s | 8,232/s | 17,442/s |
+| orville | 8,360/s | 18,748/s | 8,178/s | 17,130/s |
+| postgresql-simple | 7,196/s | 16,788/s | 7,061/s | 17,458/s |
 
 ### arbiter-simple (postgresql-simple)
 

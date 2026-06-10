@@ -18,6 +18,7 @@ module Arbiter.Core.Exceptions
   , JobPermanentException (..)
   , TreeCancelException (..)
   , BranchCancelException (..)
+  , JobNackException (..)
 
     -- * Engine-internal signals
   , ParsingException (..)
@@ -30,6 +31,7 @@ module Arbiter.Core.Exceptions
   , throwPermanent
   , throwTreeCancel
   , throwBranchCancel
+  , throwNack
   , throwParsing
   , throwInternal
   , throwJobNotFound
@@ -77,6 +79,13 @@ newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)
 
+-- | Reprocess the job later without recording a failure (a soft nack). The
+-- worker skips retry\/DLQ and leaves the job to become visible again.
+-- Symmetric with the batched @nack@ callback.
+data JobNackException = JobNackException
+  deriving stock (Eq, Generic, Show, Typeable)
+  deriving anyclass (Exception)
+
 -- | Row decoding failure (engine-internal). Classified as a permanent failure
 -- by the worker.
 newtype ParsingException = ParsingException Text
@@ -111,6 +120,9 @@ throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
 
 throwBranchCancel :: (MonadIO m) => Text -> m a
 throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
+
+throwNack :: (MonadIO m) => m a
+throwNack = UE.throwIO JobNackException
 
 throwParsing :: (MonadIO m) => Text -> m a
 throwParsing msg = UE.throwIO (ParsingException msg)

@@ -18,7 +18,6 @@ module Arbiter.Core.Operations
   , claimNextVisibleJobsBatchedAs
   , ackJob
   , ackJobsBatch
-  , ackJobsBulk
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , VisibilityUpdateInfo (..)
@@ -608,7 +607,8 @@ claimJobs
   -> Maybe UUID
   -> m [JobRead payload]
 claimJobs schemaName tableName maxJobs timeout mWorkerId = withDbTransaction $ do
-  let claimSql = Tmpl.claimJobsSQL schemaName tableName maxJobs timeout mWorkerId
+  -- Batch size 1 is the single-job claim.
+  let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName 1 maxJobs timeout mWorkerId
   rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
   traverse decodePayload rawJobs
 
@@ -734,37 +734,23 @@ ackJobsBatch
   -> TableName
   -- ^ Table name
   -> [JobRead payload]
-  -> m Int64
-ackJobsBatch _ _ [] = pure 0
-ackJobsBatch schemaName tableName jobs =
-  withDbTransaction $ sum <$> traverse (ackJobInner schemaName tableName) jobs
-
--- | Bulk ack for standalone jobs (no parent, no tree logic).
---
--- A single DELETE with unnest - one round trip for N jobs.
--- Only valid for jobs claimed in 'BatchedJobsMode', which guarantees
--- @parent_id IS NULL AND parent_state IS NULL@.
---
--- Returns the number of rows deleted.
-ackJobsBulk
-  :: forall m payload
-   . (MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
-  -> TableName
-  -- ^ Table name
-  -> [JobRead payload]
-  -> m Int64
-ackJobsBulk _ _ [] = pure 0
-ackJobsBulk schemaName tableName jobs = do
-  let ids = map primaryKey jobs
-      atts = map attempts jobs
-  queryCountStrict
-    "ackJobsBulk"
-    (Tmpl.ackJobsBulkSQL schemaName tableName)
-    [ parr CInt8 ids
-    , parr CInt4 atts
-    ]
+  -> m [Int64]
+  -- ^ Ids actually acked (deleted or suspended). Reclaimed jobs are absent.
+ackJobsBatch _ _ [] = pure []
+ackJobsBatch schemaName tableName jobs = withDbTransaction $ do
+  -- Serialize concurrent sibling acks by locking the distinct parents in a
+  -- stable order (deadlock-free), then ack the whole set in one statement.
+  let parents = Set.toAscList $ Set.fromList [pid | job <- jobs, Just pid <- [parentId job]]
+  for_ parents $ \pid ->
+    void $
+      executeQuery
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))::text AS result"
+        [pval CText (schemaName <> "." <> tableName), pval CInt8 pid]
+        (ncol "result" CText)
+  executeQuery
+    (Tmpl.smartAckJobsBatchSQL schemaName tableName)
+    [parr CInt8 (map primaryKey jobs), parr CInt4 (map attempts jobs)]
+    (col "id" CInt8)
 
 -- | Set the visibility timeout for a job
 setVisibilityTimeout

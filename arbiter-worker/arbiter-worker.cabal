@@ -90,6 +90,7 @@ test-suite arbiter-worker-tests
     , arbiter-worker
     , base
     , bytestring
+    , containers
     , cron
     , directory
     , hspec

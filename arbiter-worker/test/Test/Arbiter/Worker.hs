@@ -5,7 +5,7 @@
 module Test.Arbiter.Worker (spec) where
 
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.Exceptions (throwBranchCancel, throwPermanent, throwRetryable, throwTreeCancel)
+import Arbiter.Core.Exceptions (throwBranchCancel, throwNack, throwPermanent, throwRetryable, throwTreeCancel)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
@@ -18,7 +18,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (BatchedJobHandler, JobHandler)
+import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig, poolConfigForWorkers)
 import Arbiter.Core.Queues qualified as Q
@@ -38,10 +38,11 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Data.Foldable (toList)
+import Data.Foldable (toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust, isJust, isNothing)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
 import Data.Proxy (Proxy (..))
@@ -74,16 +75,20 @@ import UnliftIO.Async qualified as Async
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
-  ( BatchCompletion
-  , JobCompletion
+  ( AckCallbacks
   , WorkerConfig (..)
+  , cancelBranch
+  , cancelTree
+  , complete
+  , completeAll
+  , defaultBatchedRollupWorkerConfig
   , defaultBatchedWorkerConfig
-  , defaultManualBatchedWorkerConfig
-  , defaultManualRollupWorkerConfig
-  , defaultManualWorkerConfig
   , defaultRollupWorkerConfig
   , defaultWorkerConfig
+  , failPermanent
+  , failRetry
   , getWorkerState
+  , nack
   , shutdownWorker
   )
 import Arbiter.Worker.WorkerState (WorkerState (..))
@@ -510,19 +515,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             count <- queryOpsCount env
             count `shouldBe` 1
 
-      it "manual mode: handler that skips the completion callback leaves the job in the queue" $ \env -> do
+      it "skipping a job's completion leaves it in the queue" $ \env -> do
         -- Clean up data from previous tests
         let pool = fromJust (connectionPool (simplePool env)) in withResource pool (cleanupData testSchema testTable)
 
         processedRef <- newIORef False
 
-        let handler
-              :: JobRead WorkerTestPayload
-              -> JobCompletion (SimpleDb WorkerTestRegistry IO) ()
-              -> SimpleDb WorkerTestRegistry IO ()
-            handler _job _completion = do
+        let handler _jobs _cbs = do
               liftIO $ atomicModifyIORef' processedRef (const (True, ()))
-              -- Handler succeeds but does NOT call the completion callback
+              -- Handler succeeds but does NOT complete the job
               pure ()
 
         -- Insert a job
@@ -530,7 +531,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let jobId = primaryKey insertedJob
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultManualWorkerConfig connStr 1 handler
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 1 handler
         let manualConfig = config {pollInterval = 0.1}
 
         -- Run worker pool briefly
@@ -554,17 +555,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 [Only count] -> count `shouldBe` 1
                 _ -> expectationFailure "Expected one row from COUNT query"
 
-      it "manual mode: the completion callback acks the job and fires onJobSuccess" $ \env -> do
+      it "completing a job acks it and fires onJobSuccess" $ \env -> do
         -- Clean up data from previous tests
         let pool = fromJust (connectionPool (simplePool env)) in withResource pool (cleanupData testSchema testTable)
 
         successRef <- newIORef ([] :: [Int64])
 
-        let handler
-              :: JobRead WorkerTestPayload
-              -> JobCompletion (SimpleDb WorkerTestRegistry IO) ()
-              -> SimpleDb WorkerTestRegistry IO ()
-            handler _job completion = completion ()
+        let handler (job :| _) cbs = complete cbs job
             hooks =
               defaultObservabilityHooks
                 { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
@@ -574,7 +571,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env (HL.insertJob (defaultJob (SimpleTask "ManualAckSuccess")))
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultManualWorkerConfig connStr 1 handler
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 1 handler
         let manualConfig = config {pollInterval = 0.1, observabilityHooks = hooks}
 
         -- Run worker pool briefly
@@ -602,6 +599,45 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- onJobSuccess now fires for manual jobs (the behavior this redesign fixes)
         successes <- readIORef successRef
         length successes `shouldBe` 1
+
+      it "completing a reclaimed job skips without firing onJobSuccess" $ \env -> do
+        -- Clean up data from previous tests
+        let pool = fromJust (connectionPool (simplePool env)) in withResource pool (cleanupData testSchema testTable)
+
+        successRef <- newIORef ([] :: [Int64])
+
+        let handler (job :| _) cbs = do
+              -- Simulate the job being reclaimed: ack it out from under completion.
+              void $ HL.ackJob job
+              complete cbs job
+            hooks =
+              defaultObservabilityHooks
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+                }
+
+        void $ runSimpleDb env (HL.insertJob (defaultJob (SimpleTask "ManualReclaimed")))
+
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 1 handler
+        let manualConfig = config {pollInterval = 0.1, observabilityHooks = hooks}
+
+        withAsync (runSimpleDb env $ runWorkerPool manualConfig) $ \_ -> do
+          -- Wait for the job to be gone (handler acked it).
+          waitUntil 10_000 $ do
+            let pool = fromJust (connectionPool (simplePool env))
+            withResource pool $ \conn -> do
+              jobRows <-
+                query conn (fromString . T.unpack $ "SELECT COUNT(*) FROM " <> Schema.jobQueueTable testSchema testTable) ()
+                  :: IO [Only Int]
+              case jobRows of
+                [Only count] -> pure (count == 0)
+                _ -> pure False
+          -- Give any erroneous onJobSuccess time to land.
+          threadDelay 200_000
+
+        -- completion threw JobNotFound (ack found 0 rows), so onJobSuccess never fired.
+        successes <- readIORef successRef
+        length successes `shouldBe` 0
 
     describe "Observability Hooks" $ do
       it "onJobClaimed is called with start time when job is claimed" $ \env -> do
@@ -918,11 +954,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track which batches were processed
         batchesRef <- newIORef []
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
+        let batchHandler jobs cbs = do
               let jobPayloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
-              pure ()
+              traverse_ (complete cbs) jobs
 
         -- Insert multiple jobs in the same group
         let jobs =
@@ -958,11 +993,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track which batches were processed
         batchesRef <- newIORef []
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
+        let batchHandler jobs cbs = do
               let jobPayloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
-              pure ()
+              traverse_ (complete cbs) jobs
 
         -- Insert jobs in different groups
         let jobs =
@@ -995,11 +1029,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track batch sizes
         batchSizesRef <- newIORef []
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
+        let batchHandler jobs cbs = do
               let batchSize = length jobs
               liftIO $ atomicModifyIORef' batchSizesRef $ \sizes -> (batchSize : sizes, ())
-              pure ()
+              traverse_ (complete cbs) jobs
 
         -- Insert 5 jobs in the same group, but batch size is 2
         let jobs =
@@ -1033,10 +1066,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track how many times we see each batch
         attemptsRef <- newIORef (0 :: Int)
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn _jobs = do
+        let batchHandler jobs cbs = do
               attempts <- liftIO $ atomicModifyIORef' attemptsRef $ \n -> (n + 1, n + 1)
-              when (attempts < 2) $ throwRetryable "Batch failed!"
+              if attempts < 2 then throwRetryable "Batch failed!" else traverse_ (complete cbs) jobs
 
         -- Insert a batch of jobs
         let jobs =
@@ -1066,8 +1098,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           attempts `shouldBe` 2
 
       it "moves entire batch to DLQ on max failures" $ \env -> do
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn _jobs = throwRetryable "Always fails"
+        let batchHandler _jobs _cbs = throwRetryable "Always fails"
 
         -- Insert a batch of jobs
         let jobs =
@@ -1098,19 +1129,18 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           length dlqJobs `shouldBe` 2
           map (payload . DLQ.jobSnapshot) dlqJobs `shouldMatchList` [SimpleTask "G1-1", SimpleTask "G1-2"]
 
-      it "uses minimum maxAttempts across batch" $ \env -> do
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn _jobs = throwRetryable "Always fails"
+      it "uses each job's own maxAttempts in a batch" $ \env -> do
+        let batchHandler _jobs _cbs = throwRetryable "Always fails"
 
-        -- Insert jobs with different maxAttempts
+        -- Two jobs in one batch with different maxAttempts.
         let jobs =
               [ (defaultJob (SimpleTask "G1-1"))
                   { groupKey = Just "g1"
-                  , maxAttempts = Just 3 -- Lower
+                  , maxAttempts = Just 2
                   }
               , (defaultJob (SimpleTask "G1-2"))
                   { groupKey = Just "g1"
-                  , maxAttempts = Just 10 -- Higher
+                  , maxAttempts = Just 3
                   }
               ]
 
@@ -1122,27 +1152,88 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchedConfig =
               config
                 { pollInterval = 0.050
-                , maxAttempts = 5 -- Default, but should use minimum of job-specific
+                , maxAttempts = 5
                 , jitter = NoJitter -- Predictable timing
                 }
 
         threadDelay 100_000
 
         withAsync (runSimpleDb env $ runWorkerPool batchedConfig) $ \_ -> do
-          -- Wait for 3 attempts with exponential backoff (2s + 4s + processing)
           waitUntil 15_000 $ do
             dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
             pure (length dlqJobs == 2)
 
-          -- Both jobs should be in DLQ after 3 attempts (minimum maxAttempts)
-          -- not after 10 attempts (maximum) or 5 (config default)
           dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
           length dlqJobs `shouldBe` 2
-          -- Verify both jobs attempted exactly 3 times (the minimum)
-          let attempts1 = attempts . DLQ.jobSnapshot $ head dlqJobs
-          let attempts2 = attempts . DLQ.jobSnapshot $ dlqJobs !! 1
-          attempts1 `shouldBe` 3
-          attempts2 `shouldBe` 3
+          -- Each job DLQs after its own maxAttempts, not a batch-wide minimum.
+          let dlqFor name = head $ filter ((== SimpleTask name) . payload . DLQ.jobSnapshot) dlqJobs
+          (attempts . DLQ.jobSnapshot $ dlqFor "G1-1") `shouldBe` 2
+          (attempts . DLQ.jobSnapshot $ dlqFor "G1-2") `shouldBe` 3
+
+      it "completed jobs survive a throwNack while the rest reprocess" $ \env -> do
+        callCountRef <- newIORef (0 :: Int)
+        seenRef <- newIORef ([] :: [[WorkerTestPayload]])
+        completedRef <- newIORef ([] :: [WorkerTestPayload])
+
+        let batchHandler jobs cbs = do
+              n <- liftIO $ atomicModifyIORef' callCountRef $ \c -> (c + 1, c + 1)
+              liftIO $ atomicModifyIORef' seenRef $ \bs -> (map payload (toList jobs) : bs, ())
+              let finish j = do
+                    complete cbs j
+                    liftIO $ atomicModifyIORef' completedRef $ \xs -> (payload j : xs, ())
+              if n == 1
+                then do
+                  -- Complete G1-1, then bail on the rest of the batch.
+                  traverse_ finish (filter ((== SimpleTask "G1-1") . payload) (toList jobs))
+                  throwNack
+                else traverse_ finish jobs
+
+        let jobs =
+              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1"}
+              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1"}
+              , (defaultJob (SimpleTask "G1-3")) {groupKey = Just "g1"}
+              ]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        let batchedConfig =
+              config
+                { pollInterval = 0.1
+                , visibilityTimeout = 2
+                , jobHeartbeatInterval = 1
+                }
+
+        threadDelay 100_000
+        withAsync (runSimpleDb env $ runWorkerPool batchedConfig) $ \_ -> do
+          let names = map SimpleTask ["G1-1", "G1-2", "G1-3"]
+          waitUntil 15_000 $ do
+            completed <- readIORef completedRef
+            pure $ all (`elem` completed) names
+
+          seen <- readIORef seenRef
+          let occurrences p = length (filter (p `elem`) seen)
+          -- G1-1 was completed in the first batch and never reprocessed.
+          occurrences (SimpleTask "G1-1") `shouldBe` 1
+          -- The jobs left unfinalized by the throw were nacked and reprocessed.
+          occurrences (SimpleTask "G1-2") `shouldSatisfy` (>= 2)
+          occurrences (SimpleTask "G1-3") `shouldSatisfy` (>= 2)
+
+      it "throwNack in single-job mode reprocesses without recording a failure" $ \env -> do
+        callsRef <- newIORef (0 :: Int)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = do
+              n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
+              when (n == 1) throwNack
+        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tn-single"))
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultWorkerConfig connStr 1 handler
+        withAsync
+          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})) $ \_ -> do
+          -- The nacked job comes back for a second attempt, then succeeds.
+          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          filter (== SimpleTask "tn-single") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
 
       it "calls heartbeat for all jobs in batch" $ \env -> do
         heartbeatJobsRef <- newIORef []
@@ -1154,8 +1245,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 }
 
         -- Handler that takes long enough to trigger heartbeats
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn _jobs = liftIO $ threadDelay 3_000_000
+        let batchHandler jobs cbs = do
+              liftIO $ threadDelay 3_000_000
+              traverse_ (complete cbs) jobs
 
         -- Insert a batch of jobs
         let jobs =
@@ -1193,7 +1285,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           job1Heartbeats `shouldSatisfy` (>= 2)
           job2Heartbeats `shouldSatisfy` (>= 2)
 
-      it "manual mode: only reports failure for jobs not completed" $ \env -> do
+      it "a throw fails only the jobs not yet completed" $ \env -> do
         failuresRef <- newIORef ([] :: [Int64])
         successRef <- newIORef ([] :: [Int64])
 
@@ -1207,12 +1299,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
               -> SimpleDb WorkerTestRegistry IO ()
-            batchHandler jobs completion = do
+            batchHandler jobs cbs = do
               -- Complete first 2 jobs
-              forM_ (take 2 $ toList jobs) $ \job ->
-                completion job
+              traverse_ (complete cbs) (take 2 (toList jobs))
               -- 3rd job fails
               throwRetryable "Third job failed"
 
@@ -1226,7 +1317,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
@@ -1249,16 +1340,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           successes <- readIORef successRef
           length successes `shouldBe` 2
 
-      it "manual mode: acking all jobs in batch removes them from queue" $ \env -> do
+      it "completing every job in a batch removes them from the queue" $ \env -> do
         processedRef <- newIORef False
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
               -> SimpleDb WorkerTestRegistry IO ()
-            batchHandler jobs completion = do
+            batchHandler jobs cbs = do
               -- Complete all jobs
-              forM_ jobs $ \job -> completion job
+              traverse_ (complete cbs) jobs
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1270,7 +1361,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
@@ -1290,16 +1381,225 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           remainingJobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
           length remainingJobs `shouldBe` 0
 
-      it "manual mode: un-acked jobs remain in queue after handler returns" $ \env -> do
+      it "completeAll bulk-acks the batch and fires onJobSuccess for each" $ \env -> do
+        successRef <- newIORef ([] :: [Int64])
+        let hooks =
+              defaultObservabilityHooks
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+                }
+
+        let batchHandler
+              :: NonEmpty (JobRead WorkerTestPayload)
+              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> SimpleDb WorkerTestRegistry IO ()
+            batchHandler jobs cbs = completeAll cbs (toList jobs)
+
+        let jobs =
+              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1"}
+              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1"}
+              , (defaultJob (SimpleTask "G1-3")) {groupKey = Just "g1"}
+              ]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        let batchedConfig = config {pollInterval = 0.050, observabilityHooks = hooks}
+
+        threadDelay 100_000
+        withAsync (runSimpleDb env $ runWorkerPool batchedConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 3) . length <$> readIORef successRef
+
+          -- onJobSuccess fired once per job, and all are gone from the queue.
+          successes <- readIORef successRef
+          length successes `shouldBe` 3
+          remaining <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+          length remaining `shouldBe` 0
+
+      it "failPermanent callback DLQs one job while the rest complete" $ \env -> do
+        successRef <- newIORef ([] :: [WorkerTestPayload])
+        let hooks =
+              defaultObservabilityHooks
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+                }
+        let batchHandler jobs cbs =
+              traverse_
+                (\j -> if payload j == SimpleTask "fp-bad" then failPermanent cbs j "bad input" else complete cbs j)
+                (toList jobs)
+        let jobs =
+              [ (defaultJob (SimpleTask "fp-good1")) {groupKey = Just "fp"}
+              , (defaultJob (SimpleTask "fp-bad")) {groupKey = Just "fp"}
+              , (defaultJob (SimpleTask "fp-good2")) {groupKey = Just "fp"}
+              ]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
+          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          filter (== SimpleTask "fp-bad") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` [SimpleTask "fp-bad"]
+          successes <- readIORef successRef
+          successes `shouldMatchList` [SimpleTask "fp-good1", SimpleTask "fp-good2"]
+
+      it "failRetry callback retries a job and DLQs it at its maxAttempts" $ \env -> do
+        callsRef <- newIORef (0 :: Int)
+        let batchHandler jobs cbs = do
+              liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
+              traverse_ (\j -> failRetry cbs j "transient") (toList jobs)
+        let jobs = [(defaultJob (SimpleTask "fr-job")) {groupKey = Just "fr", maxAttempts = Just 2}]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, jitter = NoJitter})) $ \_ -> do
+          waitUntil 15_000 $ do
+            dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+            pure (any ((== SimpleTask "fr-job") . payload . DLQ.jobSnapshot) dlq)
+          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          let mine = filter ((== SimpleTask "fr-job") . payload . DLQ.jobSnapshot) dlq
+          (attempts . DLQ.jobSnapshot $ head mine) `shouldBe` 2
+          -- The handler ran twice (retry), not once.
+          calls <- readIORef callsRef
+          calls `shouldBe` 2
+
+      it "nack callback leaves a job to be reprocessed with no failure" $ \env -> do
+        callsRef <- newIORef (0 :: Int)
+        let batchHandler jobs cbs = do
+              n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
+              if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (complete cbs) (toList jobs)
+        let jobs = [(defaultJob (SimpleTask "nk-job")) {groupKey = Just "nk"}]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync
+          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})) $ \_ -> do
+          -- The nacked job comes back for a second attempt.
+          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+          -- It never recorded a failure.
+          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          filter (== SimpleTask "nk-job") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
+
+      it "cancelTree callback deletes the entire tree" $ \env -> do
+        Right (root :| _) <-
+          runSimpleDb env $
+            HL.insertJobTree $
+              defaultJob (SimpleTask "ct-root")
+                <~~ (defaultJob (SimpleTask "ct-c1") :| [defaultJob (SimpleTask "ct-c2")])
+        let rootId = primaryKey root
+        let batchHandler jobs cbs = traverse_ (\j -> cancelTree cbs j "abort") (toList jobs)
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05})) $ \_ ->
+          waitUntil 10_000 $ do
+            let pool = fromJust (connectionPool (simplePool env))
+            withResource pool $ \conn -> do
+              rows <-
+                query
+                  conn
+                  (fromString . T.unpack $ "SELECT COUNT(*) FROM " <> Schema.jobQueueTable testSchema testTable <> " WHERE id = ?")
+                  (Only rootId)
+                  :: IO [Only Int]
+              pure (rows == [Only 0])
+
+      it "cancelBranch callback deletes the job's branch" $ \env -> do
+        Right (root :| _) <-
+          runSimpleDb env $
+            HL.insertJobTree $
+              defaultJob (SimpleTask "cb-root")
+                <~~ (defaultJob (SimpleTask "cb-c1") :| [defaultJob (SimpleTask "cb-c2")])
+        let rootId = primaryKey root
+        let batchHandler jobs cbs = traverse_ (\j -> cancelBranch cbs j "branch failed") (toList jobs)
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05})) $ \_ ->
+          waitUntil 10_000 $ do
+            let pool = fromJust (connectionPool (simplePool env))
+            withResource pool $ \conn -> do
+              rows <-
+                query
+                  conn
+                  (fromString . T.unpack $ "SELECT COUNT(*) FROM " <> Schema.jobQueueTable testSchema testTable <> " WHERE id = ?")
+                  (Only rootId)
+                  :: IO [Only Int]
+              pure (rows == [Only 0])
+
+      it "completeAll skips a job reclaimed mid-batch" $ \env -> do
+        successRef <- newIORef ([] :: [WorkerTestPayload])
+        let hooks =
+              defaultObservabilityHooks
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+                }
+        let batchHandler jobs cbs = do
+              let js = toList jobs
+              -- Simulate a reclaim of "ca-stolen": bump its attempts so the bulk ack won't match it.
+              liftIO $
+                traverse_
+                  ( \j ->
+                      when (payload j == SimpleTask "ca-stolen") $ do
+                        let pool = fromJust (connectionPool (simplePool env))
+                        withResource pool $ \conn ->
+                          void $
+                            execute
+                              conn
+                              ( fromString . T.unpack $
+                                  "UPDATE " <> Schema.jobQueueTable testSchema testTable <> " SET attempts = attempts + 1 WHERE id = ?"
+                              )
+                              (Only (primaryKey j))
+                  )
+                  js
+              completeAll cbs js
+        let jobs =
+              [ (defaultJob (SimpleTask "ca-keep1")) {groupKey = Just "ca"}
+              , (defaultJob (SimpleTask "ca-stolen")) {groupKey = Just "ca"}
+              , (defaultJob (SimpleTask "ca-keep2")) {groupKey = Just "ca"}
+              ]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
+          successes <- readIORef successRef
+          -- onJobSuccess fired only for the survivors; the reclaimed job was skipped.
+          successes `shouldMatchList` [SimpleTask "ca-keep1", SimpleTask "ca-keep2"]
+
+      it "rollup completeAll stores each job's result for the parent" $ \env -> do
+        finalRef <- newIORef ([] :: [Text])
+        let resultFor p = case p of
+              SimpleTask "rb-ca" -> ["alpha"]
+              SimpleTask "rb-cb" -> ["beta"]
+              _ -> []
+            isReducer p = case p of SimpleTask "rb-reducer" -> True; _ -> False
+            handler childResultsMap _dlq jobs cbs =
+              if all (isReducer . payload) (toList jobs)
+                then
+                  traverse_
+                    ( \j -> do
+                        let merged = Map.findWithDefault [] (primaryKey j) childResultsMap
+                        liftIO $ atomicModifyIORef' finalRef $ \_ -> (merged, ())
+                        complete cbs j merged
+                    )
+                    (toList jobs)
+                else completeAll cbs (map (\j -> (j, resultFor (payload j))) (toList jobs))
+        runSimpleDb env $
+          void $
+            HL.insertJobTree $
+              defaultJob (SimpleTask "rb-reducer")
+                <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+          runSimpleDb env $ defaultBatchedRollupWorkerConfig connStr 1 10 handler
+        withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
+          final <- readIORef finalRef
+          final `shouldMatchList` ["alpha", "beta"]
+
+      it "uncompleted jobs remain in the queue after the handler returns" $ \env -> do
         processedRef <- newIORef False
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> BatchCompletion (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
               -> SimpleDb WorkerTestRegistry IO ()
-            batchHandler jobs completion = do
+            batchHandler jobs cbs = do
               -- Only complete the first job, leave the second untouched
-              completion (head $ toList jobs)
+              complete cbs (head $ toList jobs)
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1311,7 +1611,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultManualBatchedWorkerConfig connStr 1 10 batchHandler
+          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
 
         let batchedConfig =
               config
@@ -1343,11 +1643,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track batch sizes to verify ungrouped jobs are batched together
         batchSizesRef <- newIORef []
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
+        let batchHandler jobs cbs = do
               let batchSize = length jobs
               liftIO $ atomicModifyIORef' batchSizesRef $ \sizes -> (batchSize : sizes, ())
-              pure ()
+              traverse_ (complete cbs) jobs
 
         -- Insert multiple ungrouped jobs (group_key = Nothing)
         let jobs =
@@ -1379,11 +1678,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Track batches: grouped jobs together, ungrouped separate
         batchPayloadsRef <- newIORef []
 
-        let batchHandler :: BatchedJobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
-            batchHandler _conn jobs = do
+        let batchHandler jobs cbs = do
               let payloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchPayloadsRef $ \batches -> (payloads : batches, ())
-              pure ()
+              traverse_ (complete cbs) jobs
 
         -- Insert mix of grouped and ungrouped jobs
         let jobs =
@@ -1523,17 +1821,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             finalResult
               `shouldMatchList` ["sales", "growth", "revenue", "forecast", "trend"]
 
-      it "manual mode: the completion callback stores results and acks for rollup" $ \env -> do
+      it "completing a rollup parent stores its result and acks" $ \env -> do
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures job completion = case payload job of
-              -- the completion callback stores the child result for the parent and acks it
-              SimpleTask "child-a" -> completion (["alpha"] :: [Text])
-              SimpleTask "child-b" -> completion ["beta", "gamma"]
-              SimpleTask "manual-reducer" -> do
-                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                completion childResults
-              _ -> completion []
+        let handler childResultsMap _dlq (job :| _) cbs =
+              let childResults = Map.findWithDefault mempty (primaryKey job) childResultsMap
+               in case payload job of
+                    -- complete stores the child result for the parent and acks it
+                    SimpleTask "child-a" -> complete cbs job (["alpha"] :: [Text])
+                    SimpleTask "child-b" -> complete cbs job ["beta", "gamma"]
+                    SimpleTask "manual-reducer" -> do
+                      liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
+                      complete cbs job childResults
+                    _ -> complete cbs job []
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -1545,7 +1845,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultManualRollupWorkerConfig connStr 3 handler
+          runSimpleDb env $ defaultBatchedRollupWorkerConfig connStr 3 1 handler
 
         withAsync
           ( runSimpleDb env $
@@ -1558,6 +1858,62 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             finalResult <- readIORef finalResultRef
             length finalResult `shouldBe` 3
             finalResult `shouldMatchList` ["alpha", "beta", "gamma"]
+
+      it "batched mode: two rollup parents claimed in one batch each get their own child results" $ \env -> do
+        -- Two ungrouped rollup parents are batched together once their children
+        -- complete. Each parent must receive only its own merged children, keyed by
+        -- primary key, not a mix across the batch. No group keys are needed.
+        receivedRef <- newIORef (Map.empty :: Map.Map Text [Text])
+        batchSizeRef <- newIORef (0 :: Int)
+
+        let isReducer p = case p of SimpleTask n -> "reducer" `T.isPrefixOf` n; _ -> False
+            handler childResultsMap _dlq jobs cbs = do
+              let reducerCount = length (filter (isReducer . payload) (toList jobs))
+              when (reducerCount > 0) $
+                liftIO $
+                  atomicModifyIORef' batchSizeRef $
+                    \n -> (max n reducerCount, ())
+              flip traverse_ jobs $ \job -> case payload job of
+                SimpleTask "child-1a" -> complete cbs job ["a1"]
+                SimpleTask "child-1b" -> complete cbs job ["b1"]
+                SimpleTask "child-2a" -> complete cbs job ["a2"]
+                SimpleTask "child-2b" -> complete cbs job ["b2"]
+                SimpleTask name -> do
+                  let merged = Map.findWithDefault [] (primaryKey job) childResultsMap
+                  liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name merged m, ())
+                  complete cbs job merged
+                _ -> complete cbs job []
+
+        -- Two independent rollup trees, all ungrouped. The four children drain in
+        -- one ungrouped batch, then both parents unblock and batch together.
+        runSimpleDb env $
+          void $
+            HL.insertJobTree $
+              defaultJob (SimpleTask "reducer-1")
+                <~~ (defaultJob (SimpleTask "child-1a") :| [defaultJob (SimpleTask "child-1b")])
+        runSimpleDb env $
+          void $
+            HL.insertJobTree $
+              defaultJob (SimpleTask "reducer-2")
+                <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
+
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+          runSimpleDb env $ defaultBatchedRollupWorkerConfig connStr 1 10 handler
+
+        withAsync
+          ( runSimpleDb env $
+              runWorkerPool (config {pollInterval = 0.1})
+          )
+          $ \_ -> do
+            waitUntil 10_000 $ (== 2) . Map.size <$> readIORef receivedRef
+
+            received <- readIORef receivedRef
+            Map.findWithDefault [] "reducer-1" received `shouldMatchList` ["a1", "b1"]
+            Map.findWithDefault [] "reducer-2" received `shouldMatchList` ["a2", "b2"]
+
+            -- Both parents were handled together in a single batch.
+            batchSize <- readIORef batchSizeRef
+            batchSize `shouldBe` 2
 
       it "DLQ snapshot round-trip preserves child results" $ \env -> do
         attemptRef <- newIORef (0 :: Int)
