@@ -13,8 +13,6 @@ module Arbiter.Worker.Config
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
-  , AckCallbacks
-  , RollupCallbacks
 
     -- * Worker State
   , WorkerState (..)
@@ -32,7 +30,6 @@ import Data.Foldable (fold)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -47,46 +44,6 @@ import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponential
 import Arbiter.Worker.Cron (CronJob)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
-
--- | Per-job finalizers handed to a batched handler. Untouched jobs are
--- reprocessed. See 'AckCallbacks' and 'RollupCallbacks' for the two shapes.
-data BatchCallbacks completion bulk m payload = BatchCallbacks
-  { complete :: completion
-  -- ^ Ack, store the result (rollup), fire onJobSuccess.
-  , completeAll :: bulk
-  -- ^ Bulk-ack in one transaction (parent-aware), storing each job's result for
-  -- rollup handlers. Fires onJobSuccess for each job actually acked.
-  , failRetry :: JobRead payload -> Text -> m ()
-  -- ^ Retry with backoff, then DLQ at the job's maxAttempts.
-  , failPermanent :: JobRead payload -> Text -> m ()
-  -- ^ Straight to the DLQ.
-  , cancelBranch :: JobRead payload -> Text -> m ()
-  -- ^ Cancel this job's branch (its parent and all siblings).
-  , cancelTree :: JobRead payload -> Text -> m ()
-  -- ^ Cancel the whole tree from the root down.
-  , nack :: JobRead payload -> m ()
-  -- ^ Reprocess after the visibility timeout, no failure recorded.
-  }
-
--- | 'BatchCallbacks' for a non-rollup handler (completion just acks).
-type AckCallbacks m payload =
-  BatchCallbacks (JobRead payload -> m ()) ([JobRead payload] -> m ()) m payload
-
--- | 'BatchCallbacks' for a rollup handler (completion stores a result).
-type RollupCallbacks m payload result =
-  BatchCallbacks (JobRead payload -> result -> m ()) ([(JobRead payload, result)] -> m ()) m payload
-
--- | How the worker claims and runs jobs. Set by the @default*WorkerConfig@ helpers.
-data HandlerMode m payload result
-  = -- | Automatic single-job mode: claim one job per group and run the handler
-    -- in a worker transaction, storing its result and acking atomically.
-    SingleJobMode (JobHandler m payload result)
-  | -- | Batched callback mode: claim up to N jobs per group and hand the batch to
-    -- the handler with a 'BatchCallbacks' record to finalize each job. No worker
-    -- transaction. Batch size 1 is the manual single-job case.
-    BatchedJobsMode
-      Int
-      (NonEmpty (JobRead payload) -> RollupCallbacks m payload result -> m ())
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload result = WorkerConfig
@@ -160,6 +117,41 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Worker-level proof-of-work signal pulsed by the dispatcher and per-job heartbeats.
   }
 
+-- | Per-job finalizers handed to a batched handler. Untouched jobs are
+-- reprocessed. The @Of@ variants store a result for the job's parent rollup.
+data BatchCallbacks m payload result = BatchCallbacks
+  { ack :: JobRead payload -> m ()
+  -- ^ Ack and fire onJobSuccess.
+  , ackWith :: JobRead payload -> result -> m ()
+  -- ^ Ack, store the result for the parent rollup, fire onJobSuccess.
+  , ackAll :: [JobRead payload] -> m ()
+  -- ^ Bulk-ack in one parent-aware transaction. Fires onJobSuccess per acked job.
+  , ackAllWith :: [(JobRead payload, result)] -> m ()
+  -- ^ 'ackAll' storing each job's result for its parent rollup.
+  , failRetry :: JobRead payload -> Text -> m ()
+  -- ^ Retry with backoff, then DLQ at the job's maxAttempts.
+  , failPermanent :: JobRead payload -> Text -> m ()
+  -- ^ Straight to the DLQ.
+  , cancelBranch :: JobRead payload -> Text -> m ()
+  -- ^ Cancel this job's branch (its parent and all siblings).
+  , cancelTree :: JobRead payload -> Text -> m ()
+  -- ^ Cancel the whole tree from the root down.
+  , nack :: JobRead payload -> m ()
+  -- ^ Reprocess after the visibility timeout, no failure recorded.
+  }
+
+-- | How the worker claims and runs jobs. Set by the @default*WorkerConfig@ helpers.
+data HandlerMode m payload result
+  = -- | Automatic single-job mode: claim one job per group and run the handler
+    -- in a worker transaction, storing its result and acking atomically.
+    SingleJobMode (JobHandler m payload result)
+  | -- | Batched callback mode: claim up to N jobs per group and hand the batch to
+    -- the handler with a 'BatchCallbacks' record to finalize each job. No worker
+    -- transaction. Batch size 1 is the manual single-job case.
+    BatchedJobsMode
+      Int
+      (NonEmpty (JobRead payload) -> BatchCallbacks m payload result -> m ())
+
 -- | Create a t'WorkerConfig' with default settings.
 defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
@@ -173,7 +165,7 @@ defaultWorkerConfig connStrVal workerCnt handler =
   mkDefaultConfig connStrVal workerCnt (singleJobMode handler)
 
 -- | Create a t'WorkerConfig' for batched job processing. The handler receives
--- the batch and a 'BatchCallbacks' record to finalize each job (complete, fail,
+-- the batch and a 'BatchCallbacks' record to finalize each job (ack, fail,
 -- cancel, or nack). Jobs left untouched are reprocessed. For rollup parents that
 -- store a result per job, see 'defaultBatchedRollupWorkerConfig'.
 defaultBatchedWorkerConfig
@@ -184,21 +176,14 @@ defaultBatchedWorkerConfig
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> AckCallbacks n payload -> n ())
+  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload () -> n ())
   -> m (WorkerConfig n payload ())
 defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt $
-    BatchedJobsMode batchSize $ \jobs cbs ->
-      handler jobs $
-        cbs
-          { complete = \job -> complete cbs job ()
-          , completeAll = \js -> completeAll cbs (map (\j -> (j, ())) js)
-          }
+  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
 
--- | Create a t'WorkerConfig' for batched rollup parents. The handler is handed a
--- 'BatchCallbacks' record whose 'complete' stores a job's result for its parent,
--- acks the job, and fires onJobSuccess. Fetch a parent's child results with
--- 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
+-- | Create a t'WorkerConfig' for batched rollup parents. Store each job's result
+-- for its parent with 'ackWith' or 'ackAllWith'. Fetch a parent's child
+-- results with 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
 defaultBatchedRollupWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => ByteString
@@ -207,7 +192,7 @@ defaultBatchedRollupWorkerConfig
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> RollupCallbacks n payload result -> n ())
+  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
   -> m (WorkerConfig n payload result)
 defaultBatchedRollupWorkerConfig connStrVal workerCnt batchSize handler =
   mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)

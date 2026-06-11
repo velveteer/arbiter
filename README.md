@@ -371,16 +371,16 @@ config <- Worker.defaultBatchedWorkerConfig connStr 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.AckCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload ()
   -> ArbS.SimpleDb AppRegistry IO ()
 batchHandler jobs cbs = do
   let urls = map (getUrl . Arb.payload) (toList jobs)
   liftIO $ bulkProcess urls
   -- Bulk-ack the whole batch in one transaction.
-  Worker.completeAll cbs (toList jobs)
+  Worker.ackAll cbs (toList jobs)
 ```
 
-Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `complete`/`completeAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
+Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Rollup parents store a result per job with `ackWith`/`ackAllWith`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
 
 ### Observability Hooks
 

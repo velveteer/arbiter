@@ -66,6 +66,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
+import Data.Bifunctor (second)
 import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
@@ -590,17 +591,21 @@ processJobsWithRetry config jobs = do
         withDbTransaction $ handleJobFailure config hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
-      completeOne j r = do
+      ackOne j = do
+        withDbTransaction $ ackJobOrSkip j
+        finalize j
+      ackOneWith j r = do
         withDbTransaction $ do
           storeJobResult schemaName j r
           ackJobOrSkip j
         finalize j
-      completeAllOf pairs = do
+      -- Bulk-ack, optionally storing a result per job.
+      ackBatch pairs = do
         let js = map fst pairs
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, r) -> when (isAcked ackedSet j) $ storeJobResult schemaName j r
+          for_ pairs $ \(j, mr) -> when (isAcked ackedSet j) $ traverse_ (storeJobResult schemaName j) mr
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -609,8 +614,10 @@ processJobsWithRetry config jobs = do
         traverse_ finalize done
       callbacks =
         BatchCallbacks
-          { complete = completeOne
-          , completeAll = completeAllOf
+          { ack = ackOne
+          , ackWith = ackOneWith
+          , ackAll = \js -> ackBatch (map (\j -> (j, Nothing)) js)
+          , ackAllWith = \pairs -> ackBatch (map (second Just) pairs)
           , failRetry = failAs (Retryable . JobRetryableException)
           , failPermanent = failAs (Permanent . JobPermanentException)
           , cancelBranch = failAs (BranchCancel . BranchCancelException)

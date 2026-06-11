@@ -13,7 +13,7 @@ import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (setupOnce)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (WorkerConfig (..), complete, defaultBatchedWorkerConfig, defaultWorkerConfig)
+import Arbiter.Worker.Config (WorkerConfig (..), ack, defaultBatchedWorkerConfig, defaultWorkerConfig)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -85,7 +85,7 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
 
       -- Callback handlers run without a worker transaction. On hasql this used to
       -- throw "no active connection"; completing the job now works.
-      let handler (job :| _) cbs = complete cbs job
+      let handler (job :| _) cbs = ack cbs job
           hooks =
             defaultObservabilityHooks
               { onJobSuccess = \_job _ _ -> liftIO $ atomicModifyIORef' successRef (\n -> (n + 1, ()))

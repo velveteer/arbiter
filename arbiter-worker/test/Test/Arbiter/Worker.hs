@@ -38,7 +38,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -75,12 +75,14 @@ import UnliftIO.Async qualified as Async
 import Arbiter.Worker (mergedChildResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
-  ( AckCallbacks
+  ( BatchCallbacks
   , WorkerConfig (..)
+  , ack
+  , ackAll
+  , ackAllWith
+  , ackWith
   , cancelBranch
   , cancelTree
-  , complete
-  , completeAll
   , defaultBatchedRollupWorkerConfig
   , defaultBatchedWorkerConfig
   , defaultWorkerConfig
@@ -560,7 +562,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         successRef <- newIORef ([] :: [Int64])
 
-        let handler (job :| _) cbs = complete cbs job
+        let handler (job :| _) cbs = ack cbs job
             hooks =
               defaultObservabilityHooks
                 { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
@@ -608,7 +610,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler (job :| _) cbs = do
               -- Simulate the job being reclaimed: ack it out from under completion.
               void $ HL.ackJob job
-              complete cbs job
+              ack cbs job
             hooks =
               defaultObservabilityHooks
                 { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
@@ -956,7 +958,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchHandler jobs cbs = do
               let jobPayloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert multiple jobs in the same group
         let jobs =
@@ -995,7 +997,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchHandler jobs cbs = do
               let jobPayloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert jobs in different groups
         let jobs =
@@ -1031,7 +1033,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchHandler jobs cbs = do
               let batchSize = length jobs
               liftIO $ atomicModifyIORef' batchSizesRef $ \sizes -> (batchSize : sizes, ())
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert 5 jobs in the same group, but batch size is 2
         let jobs =
@@ -1067,7 +1069,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler jobs cbs = do
               attempts <- liftIO $ atomicModifyIORef' attemptsRef $ \n -> (n + 1, n + 1)
-              if attempts < 2 then throwRetryable "Batch failed!" else traverse_ (complete cbs) jobs
+              if attempts < 2 then throwRetryable "Batch failed!" else traverse_ (ack cbs) jobs
 
         -- Insert a batch of jobs
         let jobs =
@@ -1178,7 +1180,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               n <- liftIO $ atomicModifyIORef' callCountRef $ \c -> (c + 1, c + 1)
               liftIO $ atomicModifyIORef' seenRef $ \bs -> (map payload (toList jobs) : bs, ())
               let finish j = do
-                    complete cbs j
+                    ack cbs j
                     liftIO $ atomicModifyIORef' completedRef $ \xs -> (payload j : xs, ())
               if n == 1
                 then do
@@ -1247,7 +1249,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Handler that takes long enough to trigger heartbeats
         let batchHandler jobs cbs = do
               liftIO $ threadDelay 3_000_000
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert a batch of jobs
         let jobs =
@@ -1299,11 +1301,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> BatchCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
               -> SimpleDb WorkerTestRegistry IO ()
             batchHandler jobs cbs = do
               -- Complete first 2 jobs
-              traverse_ (complete cbs) (take 2 (toList jobs))
+              traverse_ (ack cbs) (take 2 (toList jobs))
               -- 3rd job fails
               throwRetryable "Third job failed"
 
@@ -1345,11 +1347,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> BatchCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
               -> SimpleDb WorkerTestRegistry IO ()
             batchHandler jobs cbs = do
               -- Complete all jobs
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1381,7 +1383,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           remainingJobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
           length remainingJobs `shouldBe` 0
 
-      it "completeAll bulk-acks the batch and fires onJobSuccess for each" $ \env -> do
+      it "ackAll bulk-acks the batch and fires onJobSuccess for each" $ \env -> do
         successRef <- newIORef ([] :: [Int64])
         let hooks =
               defaultObservabilityHooks
@@ -1390,9 +1392,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> BatchCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
               -> SimpleDb WorkerTestRegistry IO ()
-            batchHandler jobs cbs = completeAll cbs (toList jobs)
+            batchHandler jobs cbs = ackAll cbs (toList jobs)
 
         let jobs =
               [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1"}
@@ -1423,7 +1425,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 }
         let batchHandler jobs cbs =
               traverse_
-                (\j -> if payload j == SimpleTask "fp-bad" then failPermanent cbs j "bad input" else complete cbs j)
+                (\j -> if payload j == SimpleTask "fp-bad" then failPermanent cbs j "bad input" else ack cbs j)
                 (toList jobs)
         let jobs =
               [ (defaultJob (SimpleTask "fp-good1")) {groupKey = Just "fp"}
@@ -1464,7 +1466,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         callsRef <- newIORef (0 :: Int)
         let batchHandler jobs cbs = do
               n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-              if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (complete cbs) (toList jobs)
+              if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
         let jobs = [(defaultJob (SimpleTask "nk-job")) {groupKey = Just "nk"}]
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
@@ -1522,7 +1524,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   :: IO [Only Int]
               pure (rows == [Only 0])
 
-      it "completeAll skips a job reclaimed mid-batch" $ \env -> do
+      it "ackAll skips a job reclaimed mid-batch" $ \env -> do
         successRef <- newIORef ([] :: [WorkerTestPayload])
         let hooks =
               defaultObservabilityHooks
@@ -1546,7 +1548,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                               (Only (primaryKey j))
                   )
                   js
-              completeAll cbs js
+              ackAll cbs js
         let jobs =
               [ (defaultJob (SimpleTask "ca-keep1")) {groupKey = Just "ca"}
               , (defaultJob (SimpleTask "ca-stolen")) {groupKey = Just "ca"}
@@ -1561,7 +1563,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           -- onJobSuccess fired only for the survivors; the reclaimed job was skipped.
           successes `shouldMatchList` [SimpleTask "ca-keep1", SimpleTask "ca-keep2"]
 
-      it "rollup completeAll stores each job's result for the parent" $ \env -> do
+      it "rollup ackAllWith stores each job's result for the parent" $ \env -> do
         finalRef <- newIORef ([] :: [Text])
         let resultFor p = case p of
               SimpleTask "rb-ca" -> ["alpha"]
@@ -1569,16 +1571,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               _ -> []
             isReducer p = case p of SimpleTask "rb-reducer" -> True; _ -> False
             handler jobs cbs =
-              if all (isReducer . payload) (toList jobs)
+              if all (isReducer . payload) jobs
                 then
                   traverse_
                     ( \j -> do
                         (merged, _dlq) <- mergedChildResults j
                         liftIO $ atomicModifyIORef' finalRef $ \_ -> (merged, ())
-                        complete cbs j merged
+                        ackWith cbs j merged
                     )
                     (toList jobs)
-                else completeAll cbs (map (\j -> (j, resultFor (payload j))) (toList jobs))
+                else ackAllWith cbs (map (\j -> (j, resultFor (payload j))) (toList jobs))
         runSimpleDb env $
           void $
             HL.insertJobTree $
@@ -1596,11 +1598,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let batchHandler
               :: NonEmpty (JobRead WorkerTestPayload)
-              -> AckCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+              -> BatchCallbacks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
               -> SimpleDb WorkerTestRegistry IO ()
             batchHandler jobs cbs = do
               -- Only complete the first job, leave the second untouched
-              complete cbs (head $ toList jobs)
+              ack cbs (head $ toList jobs)
               liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
 
         -- Insert batch of jobs
@@ -1647,7 +1649,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchHandler jobs cbs = do
               let batchSize = length jobs
               liftIO $ atomicModifyIORef' batchSizesRef $ \sizes -> (batchSize : sizes, ())
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert multiple ungrouped jobs (group_key = Nothing)
         let jobs =
@@ -1682,7 +1684,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchHandler jobs cbs = do
               let payloads = map payload (toList jobs)
               liftIO $ atomicModifyIORef' batchPayloadsRef $ \batches -> (payloads : batches, ())
-              traverse_ (complete cbs) jobs
+              traverse_ (ack cbs) jobs
 
         -- Insert mix of grouped and ungrouped jobs
         let jobs =
@@ -1829,14 +1831,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let handler (job :| _) cbs =
               case payload job of
-                -- complete stores the child result for the parent and acks it
-                SimpleTask "child-a" -> complete cbs job (["alpha"] :: [Text])
-                SimpleTask "child-b" -> complete cbs job ["beta", "gamma"]
+                -- ackWith stores the child result for the parent and acks it
+                SimpleTask "child-a" -> ackWith cbs job (["alpha"] :: [Text])
+                SimpleTask "child-b" -> ackWith cbs job ["beta", "gamma"]
                 SimpleTask "manual-reducer" -> do
                   (merged, _dlq) <- mergedChildResults job
                   liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
-                  complete cbs job merged
-                _ -> complete cbs job []
+                  ackWith cbs job merged
+                _ -> ackWith cbs job []
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -1876,16 +1878,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 liftIO $
                   atomicModifyIORef' batchSizeRef $
                     \n -> (max n reducerCount, ())
-              flip traverse_ jobs $ \job -> case payload job of
-                SimpleTask "child-1a" -> complete cbs job ["a1"]
-                SimpleTask "child-1b" -> complete cbs job ["b1"]
-                SimpleTask "child-2a" -> complete cbs job ["a2"]
-                SimpleTask "child-2b" -> complete cbs job ["b2"]
+              for_ jobs $ \job -> case payload job of
+                SimpleTask "child-1a" -> ackWith cbs job ["a1"]
+                SimpleTask "child-1b" -> ackWith cbs job ["b1"]
+                SimpleTask "child-2a" -> ackWith cbs job ["a2"]
+                SimpleTask "child-2b" -> ackWith cbs job ["b2"]
                 SimpleTask name -> do
                   (merged, _dlq) <- mergedChildResults job
                   liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name merged m, ())
-                  complete cbs job merged
-                _ -> complete cbs job []
+                  ackWith cbs job merged
+                _ -> ackWith cbs job []
 
         -- Two independent rollup trees, all ungrouped. The four children drain in
         -- one ungrouped batch, then both parents unblock and batch together.
