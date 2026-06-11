@@ -721,11 +721,11 @@ tryResumeParent schemaName tableName pid = do
       (Tmpl.tryWakeAncestorSQL schemaName tableName)
       [pval CInt8 pid, pval CInt8 pid]
 
--- | Acknowledge multiple jobs as completed.
+-- | Acknowledge a list of jobs as completed in one statement.
 --
--- Iterates calling 'ackJob' so every job gets smart-ack treatment
--- (parent suspend/wake logic).
--- Returns the total number of rows affected.
+-- Set-based smart ack: deletes leaves, suspends finalizers that still have
+-- children, and wakes parents whose last child just completed. Locks the
+-- distinct parents to serialize with concurrent sibling acks.
 ackJobsBatch
   :: forall m payload
    . (MonadArbiter m)

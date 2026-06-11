@@ -4,7 +4,8 @@
 --
 -- 'JobException' is the user-facing decision sum. A handler throws one of
 -- these to signal how a failed job should be processed (retry, DLQ, cancel
--- the tree or branch).
+-- the tree or branch). A handler can also throw 'JobNackException' (via
+-- 'throwNack') to reprocess the job without recording a failure.
 --
 -- The engine-internal exceptions ('ParsingException', 'InternalException',
 -- 'JobNotFoundException', 'JobStolenException') are thrown directly as
@@ -81,7 +82,6 @@ newtype BranchCancelException = BranchCancelException Text
 
 -- | Reprocess the job later without recording a failure (a soft nack). The
 -- worker skips retry\/DLQ and leaves the job to become visible again.
--- Symmetric with the batched @nack@ callback.
 data JobNackException = JobNackException
   deriving stock (Eq, Generic, Show, Typeable)
   deriving anyclass (Exception)

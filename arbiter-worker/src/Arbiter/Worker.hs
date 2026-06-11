@@ -616,7 +616,6 @@ processJobsWithRetry config jobs = do
   result <-
     tryAny
       $ withJobsHeartbeat
-        (handlerMode config)
         hooks
         (jobHeartbeatInterval config)
         (visibilityTimeout config)

@@ -167,15 +167,15 @@ Handlers run inside a database transaction by default. If the handler succeeds, 
 
 ## Architecture
 
-The default job lifecycle:
+The default lifecycle (automatic single-job mode):
 
-1. **Claim** - the job becomes invisible to other workers. Attempt count increments.
-2. **Begin transaction.**
-3. **Run handler** - the handler receives the active database connection.
-4. **On success** - the job is deleted (ack) and all database work commits atomically.
-5. **On failure** - the transaction rolls back. A separate transaction updates the job for retry or moves it to the DLQ.
+1. **Claim** - the dispatcher claims visible jobs (respecting per-group head-of-line blocking), increments each job's attempt count, and hides it for the visibility timeout. A heartbeat extends that timeout while the handler runs, so long jobs are not reclaimed.
+2. **Run** - the worker runs the handler inside a transaction. The handler's database work, its stored result, and the ack all commit together.
+3. **Success** - the job is acked and the transaction commits.
+4. **Failure** - the transaction rolls back. A separate transaction retries the job with backoff, or moves it to the dead-letter queue (DLQ)
+5. **Reclaim** - if another worker stole the job mid-flight (its visibility lapsed), either the heartbeat or the ack will throw an exception to skip the job(s) in an attempt to prevent duplicate work.
 
-For manual transaction control, use `defaultBatchedWorkerConfig` (batch size 1 is the single-job case). The handler runs without a worker transaction and is handed a `BatchCallbacks` record to finalize each job: `complete` acks the job and fires `onJobSuccess` (and stores the result, for rollup parents), while `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, and `nack` cover the other per-job dispositions. A job left untouched is reprocessed.
+In batched mode the worker transaction in step 2 is replaced by per-job callbacks - the handler completes, fails, cancels, or nacks each job manually (see [Batched Handlers](#batched-handlers)).
 
 ### Head-of-Line Blocking
 
