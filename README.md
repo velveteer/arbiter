@@ -233,28 +233,23 @@ myTree = JT.rollup (Arb.defaultJob Aggregate)
   ]
 ```
 
-Every parent (intermediate or root) receives the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up via `ON DELETE CASCADE` when the parent is acked.
+A parent fetches its children's results on demand with `Worker.mergedChildResults`, which returns the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up via `ON DELETE CASCADE` when the parent is acked.
 
 ```haskell
-handler
-  :: [Text]         -- merged results of immediate children (empty for leaves)
-  -> Map Int64 Text -- DLQ'd immediate children (empty for leaves)
-  -> Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
-handler childResults dlqFailures _conn job =
+handler :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
+handler _conn job =
   case Arb.payload job of
     ProcessChunk name -> pure ["processed: " <> name]
-    AggregateSection name
-      | not (null dlqFailures) ->
-        -- results are merged into the DLQ'd job
-        Arb.throwPermanent $ name <> ": has failed children"
-      | otherwise ->
-        -- do something with childResults
-        processSection childResults
-    Aggregate ->
-      -- report final results
+    AggregateSection name -> do
+      (childResults, dlqFailures) <- Worker.mergedChildResults job
+      if not (null dlqFailures)
+        then Arb.throwPermanent $ name <> ": has failed children"
+        else processSection childResults
+    Aggregate -> do
+      (childResults, _) <- Worker.mergedChildResults job
       sendToS3 childResults
 
-config <- Worker.defaultRollupWorkerConfig connStr 4 handler
+config <- Worker.defaultWorkerConfig connStr 4 handler
 ```
 
 Tree-scoped cancellation:
@@ -281,15 +276,15 @@ Right _ <- Arb.insertJobTree tree
 ```
 
 ```haskell
-handler childResults _dlqFailures conn job = case Arb.payload job of
+handler conn job = case Arb.payload job of
   MigrateChunk ids -> do
     rowCount <- migrateRows conn ids
     pure (Sum rowCount)
 
   MigrationComplete -> do
-    let Sum totalRows = childResults
+    (Sum totalRows, _) <- Worker.mergedChildResults job
     reportComplete totalRows
-    pure childResults
+    pure (Sum totalRows)
 ```
 
 ### Cron Jobs

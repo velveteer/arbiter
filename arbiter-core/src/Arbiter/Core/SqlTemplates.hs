@@ -688,14 +688,12 @@ smartAckJobSQL schema tableName =
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS result
       |]
 
--- | Set-based 'smartAckJobSQL': acks a whole list of jobs in one statement.
---
--- Same per-job semantics (delete leaves, suspend finalizers-with-children, wake
--- parents whose last child just completed), but for @unnest@ed @(id, attempts)@
--- arrays. Deletes/updates are not visible to sibling CTEs in the same statement,
--- so the wake check excludes acked children explicitly via the @ack@ CTE.
--- Returns the ids that were acked (deleted or suspended). Reclaimed jobs (whose
--- attempts no longer match) are absent. Caller must hold the parent locks.
+-- | Set-based smart ack over @unnest@ed @(id, attempts)@ arrays: deletes leaves,
+-- suspends finalizers that still have children, and wakes parents whose last
+-- child completed. The wake check excludes acked children explicitly, since a
+-- sibling CTE's deletes are not visible within the same statement. Returns the
+-- acked ids. Reclaimed jobs (attempts no longer match) are absent. The caller
+-- holds the parent locks.
 smartAckJobsBatchSQL :: Text -> Text -> Text
 smartAckJobsBatchSQL schema tableName =
   let tbl = jobQueueTable schema tableName

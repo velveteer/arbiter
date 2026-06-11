@@ -17,6 +17,10 @@ module Arbiter.Worker
     -- * Job Result
   , JobResult (..)
 
+    -- * Rollup Child Results
+  , childResults
+  , mergedChildResults
+
     -- * Re-exports
   , module Arbiter.Worker.Config
   , module Arbiter.Worker.BackoffStrategy
@@ -627,14 +631,11 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            (childResults, dlqFailures) <- readRollupChildResults schemaName job
-            handlerResult <- runHandlerWithConnection @_ @_ @result (handler childResults dlqFailures) job
+            handlerResult <- runHandlerWithConnection @_ @_ @result handler job
             storeJobResult schemaName job handlerResult
             ackJobOrSkip job
           finalize job
-        BatchedJobsMode _ handler -> do
-          (childMap, dlqMap) <- readBatchedChildResults schemaName jobs
-          handler childMap dlqMap jobs callbacks
+        BatchedJobsMode _ handler -> handler jobs callbacks
   endTime <- liftIO getCurrentTime
   handled <- liftIO $ readIORef handledRef
   case result of
@@ -659,30 +660,26 @@ processJobsWithRetry config jobs = do
               (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
               (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
 
--- | Read child results for a rollup job, empty otherwise.
-readRollupChildResults
-  :: (JobResult result, MonadArbiter m)
-  => Text
-  -> Job.JobRead payload
+-- | A rollup parent's immediate child results, keyed by child id, with @Left@
+-- for results that failed to decode, plus a map of DLQ'd immediate children.
+-- Both are empty for a job with no children.
+childResults
+  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m)
+  => Job.JobRead payload
   -> m (Map.Map Int64 (Either Text result), Map.Map Int64 T.Text)
-readRollupChildResults schemaName job
-  | Job.isRollup job = readChildResults schemaName job
-  | otherwise = pure (Map.empty, Map.empty)
+childResults job = do
+  schemaName <- getSchema
+  readChildResults schemaName job
 
--- | Read each batch job's child results and DLQ'd children, keyed by primary key.
-readBatchedChildResults
-  :: (JobResult result, MonadArbiter m)
-  => Text
-  -> NonEmpty (Job.JobRead payload)
-  -> m (Map.Map Int64 (Map.Map Int64 (Either Text result)), Map.Map Int64 (Map.Map Int64 T.Text))
-readBatchedChildResults schemaName jobs = do
-  perJob <- for (toList jobs) $ \j -> do
-    (childResults, dlqFailures) <- readRollupChildResults schemaName j
-    pure (Job.primaryKey j, childResults, dlqFailures)
-  pure
-    ( Map.fromList [(k, cs) | (k, cs, _) <- perJob]
-    , Map.fromList [(k, dlq) | (k, _, dlq) <- perJob]
-    )
+-- | 'childResults' with the child results 'Monoid'-merged (decode failures
+-- contribute 'mempty').
+mergedChildResults
+  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m, Monoid result)
+  => Job.JobRead payload
+  -> m (result, Map.Map Int64 T.Text)
+mergedChildResults job = do
+  (results, dlqFailures) <- childResults job
+  pure (mergeChildResults results, dlqFailures)
 
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult

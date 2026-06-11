@@ -17,8 +17,8 @@ import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( WorkerConfig (..)
-  , defaultRollupWorkerConfig
   , defaultWorkerConfig
+  , mergedChildResults
   , namedWorkerPool
   , runWorkerPools
   , signalShutdown
@@ -264,14 +264,14 @@ mkNotifWorker connStr = do
 
 mkPipelineWorker :: ByteString -> IO (WorkerConfig DemoM PipelinePayload [Text])
 mkPipelineWorker connStr = do
-  cfg <- defaultRollupWorkerConfig connStr 3 handler
+  cfg <- defaultWorkerConfig connStr 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}
   where
-    handler childResults _dlqFailures _conn job = case payload job of
+    handler _conn job = case payload job of
       ProcessChunk chunkName -> do
         liftIO $ threadDelay 1_500_000 -- simulate 1.5s of work
         pure (chunkFindings chunkName)
-      AggregateResults _ -> pure childResults
+      AggregateResults _ -> fst <$> mergedChildResults job
 
 -- | Deterministic fake findings for each chunk name.
 chunkFindings :: Text -> [Text]

@@ -72,7 +72,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Worker (runWorkerPool)
+import Arbiter.Worker (mergedChildResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( AckCallbacks
@@ -83,7 +83,6 @@ import Arbiter.Worker.Config
   , completeAll
   , defaultBatchedRollupWorkerConfig
   , defaultBatchedWorkerConfig
-  , defaultRollupWorkerConfig
   , defaultWorkerConfig
   , failPermanent
   , failRetry
@@ -1229,11 +1228,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 1 handler
         withAsync
-          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})) $ \_ -> do
-          -- The nacked job comes back for a second attempt, then succeeds.
-          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
-          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
-          filter (== SimpleTask "tn-single") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
+          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1}))
+          $ \_ -> do
+            -- The nacked job comes back for a second attempt, then succeeds.
+            waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+            dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+            filter (== SimpleTask "tn-single") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
 
       it "calls heartbeat for all jobs in batch" $ \env -> do
         heartbeatJobsRef <- newIORef []
@@ -1470,12 +1470,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
         withAsync
-          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})) $ \_ -> do
-          -- The nacked job comes back for a second attempt.
-          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
-          -- It never recorded a failure.
-          dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
-          filter (== SimpleTask "nk-job") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
+          (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1}))
+          $ \_ -> do
+            -- The nacked job comes back for a second attempt.
+            waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+            -- It never recorded a failure.
+            dlq <- runSimpleDb env $ HL.listDLQJobs 100 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+            filter (== SimpleTask "nk-job") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
 
       it "cancelTree callback deletes the entire tree" $ \env -> do
         Right (root :| _) <-
@@ -1567,12 +1568,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               SimpleTask "rb-cb" -> ["beta"]
               _ -> []
             isReducer p = case p of SimpleTask "rb-reducer" -> True; _ -> False
-            handler childResultsMap _dlq jobs cbs =
+            handler jobs cbs =
               if all (isReducer . payload) (toList jobs)
                 then
                   traverse_
                     ( \j -> do
-                        let merged = Map.findWithDefault [] (primaryKey j) childResultsMap
+                        (merged, _dlq) <- mergedChildResults j
                         liftIO $ atomicModifyIORef' finalRef $ \_ -> (merged, ())
                         complete cbs j merged
                     )
@@ -1727,13 +1728,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "worker auto-appends handler results; finalizer reads merged state" $ \env -> do
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "mapper-a" -> pure ["sales", "growth"]
               SimpleTask "mapper-b" -> pure ["revenue"]
               SimpleTask "mapper-c" -> pure ["forecast", "trend"]
               SimpleTask "reducer" -> do
-                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                pure childResults
+                (merged, _dlq) <- mergedChildResults job
+                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                pure merged
               _ -> pure []
 
         -- Insert the rollup tree
@@ -1748,7 +1750,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -1777,16 +1779,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         --       └── mapper-2b  → ["trend"]
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "mapper-1a" -> pure ["sales", "growth"]
               SimpleTask "mapper-1b" -> pure ["revenue"]
               SimpleTask "mapper-2a" -> pure ["forecast"]
               SimpleTask "mapper-2b" -> pure ["trend"]
-              SimpleTask "section-1" -> pure childResults
-              SimpleTask "section-2" -> pure childResults
+              SimpleTask "section-1" -> fst <$> mergedChildResults job
+              SimpleTask "section-2" -> fst <$> mergedChildResults job
               SimpleTask "root" -> do
-                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                pure childResults
+                (merged, _dlq) <- mergedChildResults job
+                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                pure merged
               _ -> pure []
 
         runSimpleDb env $
@@ -1801,7 +1804,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                      ]
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -1824,16 +1827,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "completing a rollup parent stores its result and acks" $ \env -> do
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResultsMap _dlq (job :| _) cbs =
-              let childResults = Map.findWithDefault mempty (primaryKey job) childResultsMap
-               in case payload job of
-                    -- complete stores the child result for the parent and acks it
-                    SimpleTask "child-a" -> complete cbs job (["alpha"] :: [Text])
-                    SimpleTask "child-b" -> complete cbs job ["beta", "gamma"]
-                    SimpleTask "manual-reducer" -> do
-                      liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                      complete cbs job childResults
-                    _ -> complete cbs job []
+        let handler (job :| _) cbs =
+              case payload job of
+                -- complete stores the child result for the parent and acks it
+                SimpleTask "child-a" -> complete cbs job (["alpha"] :: [Text])
+                SimpleTask "child-b" -> complete cbs job ["beta", "gamma"]
+                SimpleTask "manual-reducer" -> do
+                  (merged, _dlq) <- mergedChildResults job
+                  liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                  complete cbs job merged
+                _ -> complete cbs job []
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -1867,7 +1870,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         batchSizeRef <- newIORef (0 :: Int)
 
         let isReducer p = case p of SimpleTask n -> "reducer" `T.isPrefixOf` n; _ -> False
-            handler childResultsMap _dlq jobs cbs = do
+            handler jobs cbs = do
               let reducerCount = length (filter (isReducer . payload) (toList jobs))
               when (reducerCount > 0) $
                 liftIO $
@@ -1879,7 +1882,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 SimpleTask "child-2a" -> complete cbs job ["a2"]
                 SimpleTask "child-2b" -> complete cbs job ["b2"]
                 SimpleTask name -> do
-                  let merged = Map.findWithDefault [] (primaryKey job) childResultsMap
+                  (merged, _dlq) <- mergedChildResults job
                   liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name merged m, ())
                   complete cbs job merged
                 _ -> complete cbs job []
@@ -1919,7 +1922,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         attemptRef <- newIORef (0 :: Int)
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "dlq-child-a" -> pure ["x"]
               SimpleTask "dlq-child-b" -> pure ["y", "z"]
               SimpleTask "dlq-reducer" -> do
@@ -1927,8 +1930,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 if attempt == 1
                   then throwRetryable "Intentional failure on first attempt"
                   else do
-                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                    pure childResults
+                    (merged, _dlq) <- mergedChildResults job
+                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                    pure merged
               _ -> pure []
 
         -- Insert the rollup tree
@@ -1941,7 +1945,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         let cfg =
               config
@@ -1980,7 +1984,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         attemptRef <- newIORef (0 :: Int)
         finalResultRef <- newIORef ([] :: [Text])
 
-        let handler childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "recover-child-ok" -> pure ["alpha"]
               SimpleTask "recover-child-fail" -> throwRetryable "Permanent child failure"
               SimpleTask "recover-reducer" -> do
@@ -1988,8 +1992,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 if attempt == 1
                   then throwRetryable "Reducer fails first time"
                   else do
-                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (childResults, ())
-                    pure childResults
+                    (merged, _dlq) <- mergedChildResults job
+                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                    pure merged
               _ -> pure []
 
         -- Insert rollup tree: reducer + 2 children
@@ -2003,7 +2008,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         let cfg =
               config
@@ -2053,12 +2058,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     :| []
                 )
 
-        let handler _childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "tc-leaf1" -> liftIO (throwTreeCancel "abort everything")
               _ -> pure []
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -2102,7 +2107,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     :| []
                 )
 
-        let handler _childResults _dlqFailures _conn job = case payload job of
+        let handler _conn job = case payload job of
               SimpleTask "bc-leaf1" -> liftIO (throwBranchCancel "abort this branch")
               SimpleTask "bc-root" -> do
                 liftIO $ atomicModifyIORef' rootProcessedRef $ \_ -> (True, ())
@@ -2110,7 +2115,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               _ -> pure []
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultRollupWorkerConfig connStr 10 handler
+          runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
           ( runSimpleDb env $
