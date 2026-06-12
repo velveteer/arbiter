@@ -18,6 +18,9 @@ module Arbiter.Core.Job.Schema
     -- * Index Creation SQL
   , createJobQueueGroupKeyIndexSQL
   , createJobQueueUngroupedRankingIndexSQL
+  , createJobQueueUngroupedReadyRankingIndexSQL
+  , createJobQueueUngroupedDueIndexSQL
+  , ungroupedReadySplitIndexesSQL
   , createDLQGroupKeyIndexSQL
   , createDLQFailedAtIndexSQL
   , createDLQParentIdIndexSQL
@@ -245,6 +248,40 @@ createJobQueueUngroupedRankingIndexSQL schemaName tableName =
     [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking")
     , "ON " <> jobQueueTable schemaName tableName <> " (priority ASC, id ASC)"
     , "WHERE group_key IS NULL;"
+    ]
+
+-- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL@).
+-- Scheduled/backoff/in-flight rows have @not_visible_until@ set, so they are
+-- absent, and the claim's ordered @LIMIT@ short-circuits at the head over ready
+-- rows instead of walking the future-dated backlog.
+createJobQueueUngroupedReadyRankingIndexSQL :: Text -> Text -> Text
+createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ready_ranking")
+    , "ON " <> jobQueueTable schemaName tableName <> " (priority ASC, id ASC)"
+    , "WHERE group_key IS NULL AND not_visible_until IS NULL;"
+    ]
+
+-- | Due-finder for ungrouped parked rows: range-scanned by @not_visible_until <=
+-- NOW()@ to pick up scheduled/backoff jobs that have come due and expired leases,
+-- without touching the future-dated tail.
+createJobQueueUngroupedDueIndexSQL :: Text -> Text -> Text
+createJobQueueUngroupedDueIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_due")
+    , "ON " <> jobQueueTable schemaName tableName <> " (not_visible_until ASC)"
+    , "WHERE group_key IS NULL AND not_visible_until IS NOT NULL;"
+    ]
+
+-- | Migration: replace the full ungrouped ranking index with the ready-only
+-- ranking index plus the due-finder, so the claim splits ready and due instead
+-- of walking the backlog through one @(priority, id)@ index.
+ungroupedReadySplitIndexesSQL :: Text -> Text -> Text
+ungroupedReadySplitIndexesSQL schemaName tableName =
+  T.unlines
+    [ "DROP INDEX IF EXISTS " <> quoteIdentifier schemaName <> "." <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking") <> ";"
+    , createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName
+    , createJobQueueUngroupedDueIndexSQL schemaName tableName
     ]
 
 -- | SQL to create index on DLQ group_key for querying failed jobs by group

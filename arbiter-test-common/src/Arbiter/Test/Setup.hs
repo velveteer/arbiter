@@ -66,7 +66,8 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ W.addClaimedByColumnSQL schemaName tableName
   when (setupEnableRankingIndexes config) $ do
     void $ execute_ conn $ Schema.createJobQueueGroupKeyIndexSQL schemaName tableName
-    void $ execute_ conn $ Schema.createJobQueueUngroupedRankingIndexSQL schemaName tableName
+    void $ execute_ conn $ Schema.createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName
+    void $ execute_ conn $ Schema.createJobQueueUngroupedDueIndexSQL schemaName tableName
   void $ execute_ conn $ Schema.createParentIdIndexSQL schemaName tableName
   void $ execute_ conn $ Schema.createDLQParentIdIndexSQL schemaName tableName
   void $ execute_ conn $ Schema.createResultsTableSQL schemaName tableName

@@ -44,6 +44,7 @@ import Arbiter.Core.Job.Schema
   , createJobQueueGroupKeyIndexSQL
   , createJobQueueTableSQL
   , createJobQueueUngroupedRankingIndexSQL
+  , ungroupedReadySplitIndexesSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
   , createParentIdIndexSQL
@@ -247,6 +248,7 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "create-dedup-key-index" $ createDedupKeyIndexSQL schemaName tableName
         , script "create-group-key-index" $ createJobQueueGroupKeyIndexSQL schemaName tableName
         , script "create-ungrouped-ranking-index" $ createJobQueueUngroupedRankingIndexSQL schemaName tableName
+        , script "ungrouped-ready-split-indexes" $ ungroupedReadySplitIndexesSQL schemaName tableName
         , script "create-parent-id-index" $ createParentIdIndexSQL schemaName tableName
         , script "create-dlq-parent-id-index" $ createDLQParentIdIndexSQL schemaName tableName
         , script "create-results-table" $ createResultsTableSQL schemaName tableName

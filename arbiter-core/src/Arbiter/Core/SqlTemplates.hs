@@ -562,14 +562,37 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         LIMIT 1
       ) h
     ),
+    ungrouped_pool AS (
+      -- Ready rows via the ready-ranking index: ordered LIMIT short-circuits at
+      -- the head, never walking the future-dated backlog.
+      (
+        SELECT id, priority
+        FROM ${tbl}
+        WHERE group_key IS NULL
+          AND NOT suspended
+          AND not_visible_until IS NULL
+        ORDER BY priority ASC, id ASC
+        LIMIT ${ungroupedLimit}
+      )
+      UNION ALL
+      -- Due rows (scheduled/backoff come due, expired leases) via the due-finder
+      -- index: a range scan of only the now-due tail.
+      (
+        SELECT id, priority
+        FROM ${tbl}
+        WHERE group_key IS NULL
+          AND NOT suspended
+          AND not_visible_until IS NOT NULL
+          AND not_visible_until <= NOW()
+        ORDER BY not_visible_until ASC
+        LIMIT ${ungroupedLimit}
+      )
+    ),
     ungrouped_numbered AS (
       SELECT id, priority,
         ((ROW_NUMBER() OVER (ORDER BY priority ASC, id ASC) - 1)
           / ${bs}) + 1 AS batch_num
-      FROM ${tbl}
-      WHERE group_key IS NULL
-        AND NOT suspended
-        AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+      FROM ungrouped_pool
       ORDER BY priority ASC, id ASC
       LIMIT ${ungroupedLimit}
     ),
