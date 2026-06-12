@@ -14,7 +14,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - Configurable backoff, observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
-- Extensive test coverage (600+ integration tests)
+- Extensive test coverage (700+ integration tests)
 
 **[Live Demo](https://demo.arbiterq.dev/)**
 
@@ -523,23 +523,35 @@ Global endpoints under `/api/v1/`:
 
 Arbiter's core is backend-agnostic via the `MonadArbiter` typeclass. Three official adapters are provided.
 
-If you're choosing a backend based on raw throughput:
+If you're choosing a backend based on raw throughput, consider our benchmarks:
 
-**Worker throughput** (no-op handler, 1M pre-loaded queue, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro):
+Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro.
 
-| Backend | Single job | Batched (10) | Single (50k groups) | Batched (50k groups) |
-|---------|-----------|-------------|---------------------|---------------------|
-| hasql | 9,726/s | 31,070/s | 9,235/s | 61,951/s |
-| orville | 9,490/s | 28,275/s | 9,125/s | 58,493/s |
-| postgresql-simple | 7,607/s | 27,601/s | 7,460/s | 55,664/s |
+**Pre-loaded queue** (1M jobs, 50k groups):
 
-**Steady-state throughput** (10 concurrent producers):
+| Backend | Single | Batched | Grouped single | Grouped batched |
+|---------|--------|---------|----------------|-----------------|
+| hasql | 9,017 | 29,238 | 5,830 | 31,607 |
+| orville | 8,367 | 25,776 | 5,724 | 29,237 |
+| postgresql-simple | 7,341 | 26,698 | 4,986 | 29,920 |
 
-| Backend | Single job | Batched (10) | Single (5k groups) | Batched (5k groups) |
-|---------|-----------|-------------|---------------------|---------------------|
-| hasql | 8,690/s | 17,862/s | 8,232/s | 17,442/s |
-| orville | 8,360/s | 18,748/s | 8,178/s | 17,130/s |
-| postgresql-simple | 7,196/s | 16,788/s | 7,061/s | 17,458/s |
+**Steady-state** (10 producers inserting continuously, 5k groups):
+
+| Backend | Single | Batched | Grouped single | Grouped batched |
+|---------|--------|---------|----------------|-----------------|
+| hasql | 9,398 | 18,750 | 6,512 | 18,442 |
+| orville | 9,133 | 18,771 | 6,532 | 18,549 |
+| postgresql-simple | 7,565 | 18,804 | 5,791 | 18,387 |
+
+**Under a scheduled backlog** (1M jobs, 50k groups, cells are single / batched):
+
+| Backend | ungrouped dormant | grouped stress | grouped dormant |
+|---------|-------------------|----------------|-----------------|
+| hasql | 9,074 / 31,339 | 3,916 / 28,077 | 5,885 / 32,093 |
+| orville | 8,072 / 25,235 | 3,780 / 27,405 | 5,414 / 29,680 |
+| postgresql-simple | 7,256 / 27,683 | 3,637 / 26,150 | 4,848 / 29,735 |
+
+*stress*: a fifth of jobs scheduled seconds-out, a fifth failing once into backoff. *dormant*: half the backlog parked 30 days out.
 
 ### arbiter-simple (postgresql-simple)
 

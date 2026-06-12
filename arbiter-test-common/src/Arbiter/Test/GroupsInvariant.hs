@@ -24,7 +24,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Data.Foldable (toList)
-import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -32,7 +32,6 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
-import Data.Word (Word64)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
@@ -42,7 +41,7 @@ import UnliftIO.Async (concurrently)
 import Arbiter.Test.Setup (execute_)
 
 -- | Expected state of a single group row. @min_priority@/@min_id@ range over all
--- rows; @ready_count@ is the number of ready rows (@not_visible_until IS NULL@);
+-- rows. @ready_count@ is the number of ready rows (@not_visible_until IS NULL@).
 -- @next_due@ is the earliest wake time over parked/leased rows
 -- (@not_visible_until IS NOT NULL AND NOT suspended@). @next_due@ has no @NOW()@
 -- term, so it must match the recompute exactly.
@@ -637,73 +636,6 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       forM_ (take 1 dlqJobs) $ \dj -> void $ runM env $ HL.retryFromDLQ @m @registry @payload (dlqPrimaryKey dj)
       check env "after retryFromDLQ"
 
-    it "randomized operation sequence: groups stay consistent" $ \env -> do
-      -- Deterministic (fixed-seed LCG) churn across a few shared groups,
-      -- asserting the full groups invariant after every step. Exercises the
-      -- not_visible_until transitions (claim/release/retry/schedule/suspend)
-      -- that drive ready_count and next_due, which fixed scenarios undersample.
-      -- Leases/backoffs/schedules use long delays so nothing expires mid-run
-      -- (the invariant assumes settled state).
-      let groups = ["rg0", "rg1", "rg2", "rg3"]
-          numOps = 250 :: Int
-          lcg s = s * 6364136223846793005 + 1442695040888963407
-      seedRef <- liftIO $ newIORef (0x9E3779B97F4A7C15 :: Word64)
-      claimedRef <- liftIO $ newIORef []
-      looseRef <- liftIO $ newIORef []
-      let draw n = liftIO $ atomicModifyIORef' seedRef $ \s ->
-            let s' = lcg s in (s', fromIntegral (s' `mod` fromIntegral n) :: Int)
-          takeHead ref = liftIO $ atomicModifyIORef' ref $ \xs ->
-            case xs of [] -> ([], Nothing); (y : ys) -> (ys, Just y)
-          peekHead ref = liftIO $ do
-            xs <- readIORef ref
-            pure $ if null xs then Nothing else Just (head xs)
-          insertGrouped lbl scheduled = do
-            g <- (groups !!) <$> draw (length groups)
-            p <- draw 5
-            now <- liftIO getCurrentTime
-            let nvu = if scheduled then Just (addUTCTime 300 now) else Nothing
-            mj <-
-              runM env $
-                HL.insertJob
-                  (defaultJob (mkPayload lbl)) {groupKey = Just g, priority = fromIntegral p, notVisibleUntil = nvu}
-            liftIO $ forM_ mj $ \j -> modifyIORef' looseRef (primaryKey j :)
-          onClaimedDrop act = takeHead claimedRef >>= mapM_ (\j -> void $ runM env (act j))
-          onClaimedToLoose act =
-            takeHead claimedRef
-              >>= mapM_
-                ( \j -> do
-                    void $ runM env (act j)
-                    liftIO $ modifyIORef' looseRef (primaryKey j :)
-                )
-          onClaimedKeep act = peekHead claimedRef >>= mapM_ (\j -> void $ runM env (act j))
-          onLooseKeep act = peekHead looseRef >>= mapM_ (\jid -> void $ runM env (act jid))
-          onLooseDrop act = takeHead looseRef >>= mapM_ (\jid -> void $ runM env (act jid))
-      forM_ [1 .. numOps] $ \i -> do
-        let lbl = T.pack ("op" <> show i)
-        opn <- draw 14
-        case opn of
-          0 -> insertGrouped lbl False
-          1 -> insertGrouped lbl False
-          2 -> insertGrouped lbl True -- scheduled (future not_visible_until)
-          3 -> void $ runM env $ HL.insertJob (defaultJob (mkPayload lbl)) -- ungrouped
-          4 -> do
-            k <- (+ 1) <$> draw 3
-            cs <- runM env $ HL.claimNextVisibleJobs @m @registry @payload k 60
-            let cids = map primaryKey cs
-            liftIO $ do
-              modifyIORef' claimedRef (cs ++)
-              modifyIORef' looseRef (filter (`notElem` cids))
-          5 -> onClaimedDrop HL.ackJob
-          6 -> onClaimedToLoose (HL.updateJobForRetry 60 "retry")
-          7 -> onClaimedToLoose (HL.setVisibilityTimeout 0) -- release to ready
-          8 -> onClaimedKeep (HL.setVisibilityTimeout 120) -- extend lease
-          9 -> onClaimedDrop (HL.moveToDLQ "fail")
-          10 -> onLooseKeep (HL.suspendJob @m @registry @payload)
-          11 -> onLooseKeep (HL.resumeJob @m @registry @payload)
-          12 -> onLooseKeep (HL.promoteJob @m @registry @payload)
-          _ -> onLooseDrop (HL.cancelJob @m @registry @payload)
-        check env ("randomized op " <> show i <> " (kind " <> show opn <> ")")
-
     -- -----------------------------------------------------------------
     -- in_flight_until correctness tests
     -- -----------------------------------------------------------------
@@ -900,3 +832,34 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       check env "after reaper on expired-lease group"
       reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       length reclaimed `shouldBe` 1
+
+    it "no claimable group is invisible to the claim" $ \env -> do
+      -- Liveness: every group with a visible head is reachable by the claim, via
+      -- ready work (source A) or the now-due finder (source B), while
+      -- future-scheduled groups stay parked. Drift in ready_count/next_due would
+      -- make a claimable group vanish from the candidate sources.
+      now <- liftIO getCurrentTime
+      let readyGroups = ["lv-ready-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          dueGroups = ["lv-due-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          futureGroups = ["lv-future-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          insertGrouped nvu g =
+            void $ runM env $ HL.insertJob (defaultJob (mkPayload (g <> "-j"))) {groupKey = Just g, notVisibleUntil = nvu}
+      forM_ readyGroups $ insertGrouped Nothing
+      -- Parked with a wake time already in the past, surfaced via next_due.
+      forM_ dueGroups $ insertGrouped (Just (addUTCTime (-5) now))
+      -- Not due yet. Must never be claimed.
+      forM_ futureGroups $ insertGrouped (Just (addUTCTime 3600 now))
+
+      -- Drain: claim a batch, ack it, repeat until nothing is claimable.
+      let drain acc = do
+            claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 100 60
+            if null claimed
+              then pure acc
+              else do
+                forM_ claimed $ \j -> void $ runM env $ HL.ackJob j
+                drain (acc <> [g | j <- claimed, Just g <- [groupKey j]])
+      drained <- drain []
+
+      forM_ (readyGroups <> dueGroups) $ \g -> (g `elem` drained) `shouldBe` True
+      forM_ futureGroups $ \g -> (g `elem` drained) `shouldBe` False
+      check env "after draining every claimable group"

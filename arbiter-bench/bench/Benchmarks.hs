@@ -4,9 +4,18 @@
 
 module Main (main) where
 
+import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (JobRead, defaultGroupedJob, defaultJob)
+import Arbiter.Core.Job.Types
+  ( JobRead
+  , JobWrite
+  , attempts
+  , defaultGroupedJob
+  , defaultJob
+  , notVisibleUntil
+  , payload
+  )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
@@ -20,7 +29,8 @@ import Arbiter.Orville
   )
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
-  ( WorkerConfig (..)
+  ( BatchCallbacks (..)
+  , WorkerConfig (..)
   , defaultBatchedWorkerConfig
   , defaultWorkerConfig
   , runWorkerPool
@@ -34,6 +44,8 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT (..), asks)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
+import Data.Foldable (toList, traverse_)
+import Data.List (partition)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
@@ -42,7 +54,7 @@ import Data.String (fromString)
 import Data.Tagged (Tagged (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Typeable (Typeable)
 import Database.PostgreSQL.Simple (Connection, Only (..), Query, close, connectPostgreSQL, execute)
 import Database.PostgreSQL.Simple qualified as PG
@@ -60,7 +72,7 @@ benchSchema :: Text
 benchSchema = "arbiter"
 
 benchConnStr :: ByteString
-benchConnStr = "host=localhost port=54324 user=postgres password=master dbname=postgres options='-c track_functions=all'"
+benchConnStr = "host=localhost port=5432 user=postgres password=master dbname=postgres options='-c track_functions=all'"
 
 trialCount :: Int
 trialCount = 10
@@ -74,6 +86,8 @@ steadyStateWarmupUs = 2_000_000
 data BenchPayload
   = BenchMessage Int
   | BenchBatch Int
+  | BenchFlaky Int
+  -- ^ Fails on its first attempt, then succeeds, to populate the backoff backlog.
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -83,10 +97,76 @@ data QueueFlavor
   = Ungrouped
   | Grouped Int
   | Mixed Int
+  | GroupedBacklog Int
+  -- ^ Grouped, with a fraction of jobs scheduled into the near future and a
+  -- fraction that fail once into backoff, exercising the next_due and
+  -- in_flight_until claim sources alongside the ready window.
+  | GroupedDormant Int
+  -- ^ Grouped, half the backlog scheduled far into the future (parked, never due
+  -- in-trial) while the rest is ready. Measures whether a standing scheduled
+  -- backlog slows the claim for the ready work in those same groups.
+  | UngroupedDormant
+  -- ^ Ungrouped 'GroupedDormant': half the backlog parked 30 days out, half
+  -- ready, exercising the ungrouped ready/due index split.
 
 data BenchMode
   = BenchSingleJobMode
   | BenchBatchedJobsMode Int
+
+-- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
+-- flaky (fail once into backoff), a fifth are scheduled into the near future,
+-- the rest are ready now.
+backlogJob :: UTCTime -> Int -> Int -> JobWrite BenchPayload
+backlogJob now numGroups i =
+  let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
+   in case i `mod` 5 of
+        0 -> defaultGroupedJob gk (BenchFlaky i)
+        1 -> (defaultGroupedJob gk (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (scheduledDelay i) now)}
+        _ -> defaultGroupedJob gk (BenchBatch i)
+
+-- | Spread scheduled jobs across the first few seconds so they come due during
+-- the trial rather than all at once.
+scheduledDelay :: Int -> NominalDiffTime
+scheduledDelay i = realToFrac (0.5 + fromIntegral (i `mod` 7) * 0.4 :: Double)
+
+-- | One job in a 'GroupedDormant' queue. Each group alternates ready jobs with
+-- jobs parked 30 days out, so the claim must skip a standing scheduled backlog
+-- to reach the ready work.
+dormantJob :: UTCTime -> Int -> Int -> JobWrite BenchPayload
+dormantJob now numGroups i =
+  let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
+   in if odd (i `div` numGroups)
+        then (defaultGroupedJob gk (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (30 * 86400) now)}
+        else defaultGroupedJob gk (BenchBatch i)
+
+-- | Ungrouped 'dormantJob': alternate ready jobs with jobs parked 30 days out.
+dormantUngroupedJob :: UTCTime -> Int -> JobWrite BenchPayload
+dormantUngroupedJob now i =
+  if odd i
+    then (defaultJob (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (30 * 86400) now)}
+    else defaultJob (BenchBatch i)
+
+-- | A flaky job on its first attempt. The dispatcher increments attempts at
+-- claim, so the retry lands on attempts >= 2 and succeeds.
+isFlakyFirst :: JobRead BenchPayload -> Bool
+isFlakyFirst job = case payload job of
+  BenchFlaky _ -> attempts job <= 1
+  _ -> False
+
+-- | Single-job handler body: fail flaky-first jobs into backoff, else ack.
+flakyGate :: (MonadIO m) => m () -> JobRead BenchPayload -> m ()
+flakyGate onAck job
+  | isFlakyFirst job = throwRetryable "bench-induced backoff"
+  | otherwise = onAck
+
+-- | Batched handler body: failRetry the flaky-first jobs, ack the rest, and
+-- return the acked count for throughput accounting.
+flakyBatch :: (Monad m) => BatchCallbacks m BenchPayload () -> NonEmpty (JobRead BenchPayload) -> m Int
+flakyBatch cb jobs = do
+  let (toFail, toAck) = partition isFlakyFirst (toList jobs)
+  traverse_ (\job -> failRetry cb job "bench-induced backoff") toFail
+  ackAll cb toAck
+  pure (length toAck)
 
 data BenchStats = BenchStats
   { statsMean :: !Double
@@ -212,10 +292,10 @@ simpleWorkerTrial :: RunM SimpleM -> Int -> Int -> Int -> Int -> BenchMode -> IO
 simpleWorkerTrial runM totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) _job -> pure ())
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\(_conn :: Connection) _jobs -> pure ())
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM configs totalJobs durationUs
 
@@ -223,11 +303,11 @@ hasqlWorkerTrial :: RunM HasqlM -> Int -> Int -> Int -> Int -> BenchMode -> IO D
 hasqlWorkerTrial runM totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) _job -> pure ())
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
       c <-
-        runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\(_conn :: Hasql.Connection) _jobs -> pure ())
+        runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM configs totalJobs durationUs
 
@@ -235,10 +315,10 @@ orvilleWorkerTrial :: RunM OrvilleM -> Int -> Int -> Int -> Int -> BenchMode -> 
 orvilleWorkerTrial runM totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\_job -> pure ())
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\_jobs -> pure ())
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM configs totalJobs durationUs
 
@@ -285,6 +365,7 @@ runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize
           threadDelay (producerId * (producerDelayUs `div` numProducers))
         let go = do
               offset <- atomicModifyIORef' batchCounter (\n -> (n + producerBatchSize, n))
+              now <- getCurrentTime
               let jobs = case flavor of
                     Ungrouped ->
                       [defaultJob (BenchBatch i) | i <- [1 .. producerBatchSize]]
@@ -298,6 +379,12 @@ runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize
                           else defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
                       | i <- [1 .. producerBatchSize]
                       ]
+                    GroupedBacklog numGroups ->
+                      [backlogJob now numGroups (offset + i) | i <- [1 .. producerBatchSize]]
+                    GroupedDormant numGroups ->
+                      [dormantJob now numGroups (offset + i) | i <- [1 .. producerBatchSize]]
+                    UngroupedDormant ->
+                      [dormantUngroupedJob now (offset + i) | i <- [1 .. producerBatchSize]]
               producerRunM $ void $ HL.insertJobsBatch_ jobs
               when (producerDelayUs > 0) $ threadDelay producerDelayUs
               go
@@ -331,12 +418,13 @@ simpleSteadyStateTrial runM producerRunM durationUs numPools workersPerPool prod
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Connection) _job ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Connection) job ->
+        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \(_conn :: Connection) jobs ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+        acked <- flakyBatch cb jobs
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
@@ -346,12 +434,13 @@ hasqlSteadyStateTrial runM producerRunM durationUs numPools workersPerPool produ
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Hasql.Connection) _job ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \(_conn :: Hasql.Connection) job ->
+        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \(_conn :: Hasql.Connection) jobs ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+        acked <- flakyBatch cb jobs
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
@@ -361,12 +450,13 @@ orvilleSteadyStateTrial runM producerRunM durationUs numPools workersPerPool pro
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \_job ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))
+      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool $ \job ->
+        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs ->
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + length jobs, ()))
+      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+        acked <- flakyBatch cb jobs
+        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runSteadyStateTrial runM producerRunM configs processedCounter producerBatchSize 10 50_000 flavor durationUs
 
@@ -396,6 +486,7 @@ setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
 setupQueue simpleEnv totalJobs flavor = do
   conn <- connectPostgreSQL benchConnStr
   cleanupData conn
+  now <- getCurrentTime
 
   let chunkSize = 50000
       mkJobs offset = case flavor of
@@ -411,6 +502,12 @@ setupQueue simpleEnv totalJobs flavor = do
               else defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
           | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
           ]
+        GroupedBacklog numGroups ->
+          [backlogJob now numGroups i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+        GroupedDormant numGroups ->
+          [dormantJob now numGroups i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+        UngroupedDormant ->
+          [dormantUngroupedJob now i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
       go offset
         | offset >= totalJobs = pure ()
         | otherwise = do
@@ -561,8 +658,11 @@ mkWorkerBenches statsConn simpleEnv trial =
     defaultFlavors :: [(String, QueueFlavor)]
     defaultFlavors =
       [ ("ungrouped", Ungrouped)
+      , ("ungrouped (dormant)", UngroupedDormant)
       , -- , ("10 groups", Grouped 10)
         ("50000 groups", Grouped 50000)
+      , ("50000 groups (scheduled + backoff)", GroupedBacklog 50000)
+      , ("50000 groups (dormant)", GroupedDormant 50000)
         -- , ("200000 groups", Grouped 200000)
         -- , ("mixed (50000 groups + ungrouped)", Mixed 50000)
       ]
@@ -629,4 +729,5 @@ steadyStateBenches statsConn trial =
     steadyStateFlavors =
       [ ("ungrouped", Ungrouped)
       , ("5000 groups", Grouped 5000)
+      , ("5000 groups (scheduled + backoff)", GroupedBacklog 5000)
       ]
