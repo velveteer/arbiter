@@ -72,7 +72,7 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ Schema.createDLQParentIdIndexSQL schemaName tableName
   void $ execute_ conn $ Schema.createResultsTableSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTableSQL schemaName tableName
-  void $ execute_ conn $ Schema.createGroupsIndexSQL schemaName tableName
+  void $ execute_ conn $ Schema.migrateGroupsReadyRankingSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTriggerFunctionsSQL schemaName tableName
   void $ execute_ conn $ Schema.createGroupsTriggersSQL schemaName tableName
   when (setupEnableNotifications config) $ do

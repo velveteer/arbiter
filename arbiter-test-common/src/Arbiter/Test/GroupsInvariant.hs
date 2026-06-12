@@ -24,14 +24,15 @@ import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Data.Foldable (toList)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, diffUTCTime)
+import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Word (Word64)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
@@ -40,12 +41,18 @@ import UnliftIO.Async (concurrently)
 
 import Arbiter.Test.Setup (execute_)
 
--- | Expected state of a single group row.
+-- | Expected state of a single group row. @min_priority@/@min_id@ range over all
+-- rows; @ready_count@ is the number of ready rows (@not_visible_until IS NULL@);
+-- @next_due@ is the earliest wake time over parked/leased rows
+-- (@not_visible_until IS NOT NULL AND NOT suspended@). @next_due@ has no @NOW()@
+-- term, so it must match the recompute exactly.
 data GroupState = GroupState
   { gsGroupKey :: Text
   , gsMinPriority :: Int
   , gsMinId :: Int64
   , gsJobCount :: Int64
+  , gsReadyCount :: Int64
+  , gsNextDue :: Maybe UTCTime
   }
   deriving stock (Eq, Show)
 
@@ -53,25 +60,28 @@ data GroupState = GroupState
 readGroupsTable :: PG.Connection -> Text -> Text -> IO [GroupState]
 readGroupsTable conn schemaName tableName = do
   let sql =
-        "SELECT group_key, min_priority, min_id, job_count FROM "
+        "SELECT group_key, min_priority, min_id, job_count, ready_count, next_due FROM "
           <> schemaName
           <> ".\""
           <> tableName
           <> "_groups\" ORDER BY group_key"
   rows <- PG.query_ conn (fromString (T.unpack sql))
-  pure [GroupState gk mp mi jc | (gk, mp, mi, jc) <- rows]
+  pure [GroupState gk mp mi jc rc nd | (gk, mp, mi, jc, rc, nd) <- rows]
 
 -- | Compute expected groups state from the main queue table.
 computeExpectedGroups :: PG.Connection -> Text -> Text -> IO [GroupState]
 computeExpectedGroups conn schemaName tableName = do
   let sql =
-        "SELECT group_key, MIN(priority)::int, MIN(id)::bigint, COUNT(*)::bigint FROM "
+        "SELECT group_key, MIN(priority)::int, MIN(id)::bigint, COUNT(*)::bigint, \
+        \COUNT(*) FILTER (WHERE not_visible_until IS NULL)::bigint, \
+        \MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) FROM "
           <> schemaName
           <> ".\""
           <> tableName
           <> "\" WHERE group_key IS NOT NULL GROUP BY group_key ORDER BY group_key"
   rows <- PG.query_ conn (fromString (T.unpack sql))
-  pure [GroupState gk mp mi jc | (gk, mp :: Int, mi :: Int64, jc :: Int64) <- rows]
+  pure
+    [GroupState gk mp mi jc rc nd | (gk, mp :: Int, mi :: Int64, jc :: Int64, rc :: Int64, nd :: Maybe UTCTime) <- rows]
 
 -- | Read the actual @in_flight_until@ from the groups table.
 readGroupsInFlight :: PG.Connection -> Text -> Text -> IO (Map.Map Text (Maybe UTCTime))
@@ -87,13 +97,14 @@ readGroupsInFlight conn schemaName tableName = do
 
 -- | Compute expected @in_flight_until@ from the main table.
 --
--- For each group: if any job satisfies @not_visible_until > NOW() AND NOT suspended@,
--- then @in_flight_until@ must equal @MAX(not_visible_until)@ over those jobs.
--- Otherwise @in_flight_until@ must be NULL.
+-- A group is blocked only by a lease or backoff (@attempts > 0@), not by a
+-- scheduled job (@attempts = 0@, future visibility). For each group: if any job
+-- satisfies @not_visible_until > NOW() AND NOT suspended AND attempts > 0@, then
+-- @in_flight_until@ must equal @MAX(not_visible_until)@ over those jobs. Otherwise NULL.
 computeExpectedInFlight :: PG.Connection -> Text -> Text -> IO (Map.Map Text (Maybe UTCTime))
 computeExpectedInFlight conn schemaName tableName = do
   let sql =
-        "SELECT group_key, MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended) FROM "
+        "SELECT group_key, MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) FROM "
           <> schemaName
           <> ".\""
           <> tableName
@@ -140,14 +151,14 @@ assertGroupsConsistent :: PG.Connection -> Text -> Text -> String -> IO ()
 assertGroupsConsistent conn schemaName tableName ctx = do
   actual <- readGroupsTable conn schemaName tableName
   expected <- computeExpectedGroups conn schemaName tableName
-  let toMap = Map.fromList . map (\g -> (gsGroupKey g, (gsJobCount g, gsMinPriority g, gsMinId g)))
+  let toMap = Map.fromList . map (\g -> (gsGroupKey g, (gsJobCount g, gsMinPriority g, gsMinId g, gsReadyCount g, gsNextDue g)))
       -- Filter out empty groups from actual - they're harmless leftovers
-      actualNonEmpty = Map.filter (\(c, _, _) -> c > 0) (toMap actual)
+      actualNonEmpty = Map.filter (\(c, _, _, _, _) -> c > 0) (toMap actual)
       expectedFull = toMap expected
   when (actualNonEmpty /= expectedFull) $
     expectationFailure $
       ctx
-        <> "\n  Expected (group_key -> (job_count, min_priority, min_id)): "
+        <> "\n  Expected (group_key -> (job_count, min_priority, min_id, ready_count, next_due)): "
         <> show expectedFull
         <> "\n  Actual (excluding empty groups): "
         <> show actualNonEmpty
@@ -626,6 +637,73 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       forM_ (take 1 dlqJobs) $ \dj -> void $ runM env $ HL.retryFromDLQ @m @registry @payload (dlqPrimaryKey dj)
       check env "after retryFromDLQ"
 
+    it "randomized operation sequence: groups stay consistent" $ \env -> do
+      -- Deterministic (fixed-seed LCG) churn across a few shared groups,
+      -- asserting the full groups invariant after every step. Exercises the
+      -- not_visible_until transitions (claim/release/retry/schedule/suspend)
+      -- that drive ready_count and next_due, which fixed scenarios undersample.
+      -- Leases/backoffs/schedules use long delays so nothing expires mid-run
+      -- (the invariant assumes settled state).
+      let groups = ["rg0", "rg1", "rg2", "rg3"]
+          numOps = 250 :: Int
+          lcg s = s * 6364136223846793005 + 1442695040888963407
+      seedRef <- liftIO $ newIORef (0x9E3779B97F4A7C15 :: Word64)
+      claimedRef <- liftIO $ newIORef []
+      looseRef <- liftIO $ newIORef []
+      let draw n = liftIO $ atomicModifyIORef' seedRef $ \s ->
+            let s' = lcg s in (s', fromIntegral (s' `mod` fromIntegral n) :: Int)
+          takeHead ref = liftIO $ atomicModifyIORef' ref $ \xs ->
+            case xs of [] -> ([], Nothing); (y : ys) -> (ys, Just y)
+          peekHead ref = liftIO $ do
+            xs <- readIORef ref
+            pure $ if null xs then Nothing else Just (head xs)
+          insertGrouped lbl scheduled = do
+            g <- (groups !!) <$> draw (length groups)
+            p <- draw 5
+            now <- liftIO getCurrentTime
+            let nvu = if scheduled then Just (addUTCTime 300 now) else Nothing
+            mj <-
+              runM env $
+                HL.insertJob
+                  (defaultJob (mkPayload lbl)) {groupKey = Just g, priority = fromIntegral p, notVisibleUntil = nvu}
+            liftIO $ forM_ mj $ \j -> modifyIORef' looseRef (primaryKey j :)
+          onClaimedDrop act = takeHead claimedRef >>= mapM_ (\j -> void $ runM env (act j))
+          onClaimedToLoose act =
+            takeHead claimedRef
+              >>= mapM_
+                ( \j -> do
+                    void $ runM env (act j)
+                    liftIO $ modifyIORef' looseRef (primaryKey j :)
+                )
+          onClaimedKeep act = peekHead claimedRef >>= mapM_ (\j -> void $ runM env (act j))
+          onLooseKeep act = peekHead looseRef >>= mapM_ (\jid -> void $ runM env (act jid))
+          onLooseDrop act = takeHead looseRef >>= mapM_ (\jid -> void $ runM env (act jid))
+      forM_ [1 .. numOps] $ \i -> do
+        let lbl = T.pack ("op" <> show i)
+        opn <- draw 14
+        case opn of
+          0 -> insertGrouped lbl False
+          1 -> insertGrouped lbl False
+          2 -> insertGrouped lbl True -- scheduled (future not_visible_until)
+          3 -> void $ runM env $ HL.insertJob (defaultJob (mkPayload lbl)) -- ungrouped
+          4 -> do
+            k <- (+ 1) <$> draw 3
+            cs <- runM env $ HL.claimNextVisibleJobs @m @registry @payload k 60
+            let cids = map primaryKey cs
+            liftIO $ do
+              modifyIORef' claimedRef (cs ++)
+              modifyIORef' looseRef (filter (`notElem` cids))
+          5 -> onClaimedDrop HL.ackJob
+          6 -> onClaimedToLoose (HL.updateJobForRetry 60 "retry")
+          7 -> onClaimedToLoose (HL.setVisibilityTimeout 0) -- release to ready
+          8 -> onClaimedKeep (HL.setVisibilityTimeout 120) -- extend lease
+          9 -> onClaimedDrop (HL.moveToDLQ "fail")
+          10 -> onLooseKeep (HL.suspendJob @m @registry @payload)
+          11 -> onLooseKeep (HL.resumeJob @m @registry @payload)
+          12 -> onLooseKeep (HL.promoteJob @m @registry @payload)
+          _ -> onLooseDrop (HL.cancelJob @m @registry @payload)
+        check env ("randomized op " <> show i <> " (kind " <> show opn <> ")")
+
     -- -----------------------------------------------------------------
     -- in_flight_until correctness tests
     -- -----------------------------------------------------------------
@@ -792,3 +870,33 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       -- Promote (sets not_visible_until = NULL)
       void $ runM env $ HL.promoteJob @m @registry @payload (primaryKey jobA)
       check env "after promoteJob (in_flight_until should be NULL)"
+
+    it "backoff-blocked groups do not starve a productive group" $ \env -> do
+      -- Many low-id groups go into backoff with a ready successor queued behind
+      -- the failed head. Blocked groups must leave the ready ranking, or they
+      -- crowd the claim window and starve a productive higher-id group.
+      let blocked = [1 .. 30 :: Int]
+          grp i = "boff-" <> T.pack (show i)
+      forM_ blocked $ \i ->
+        void $ runM env $ HL.insertJob (defaultJob (mkPayload (grp i <> "-head"))) {groupKey = Just (grp i)}
+      forM_ blocked $ \_ -> do
+        claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+        forM_ claimed $ \j -> void $ runM env $ HL.updateJobForRetry 3600 "boom" j
+      forM_ blocked $ \i ->
+        void $ runM env $ HL.insertJob (defaultJob (mkPayload (grp i <> "-succ"))) {groupKey = Just (grp i)}
+      -- Productive group inserted last, so it has the highest min_id.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "productive")) {groupKey = Just "productive-g"}
+      claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length claimed `shouldBe` 1
+
+    it "reclaims an expired-lease grouped job after a reaper recompute" $ \env -> do
+      -- A crashed worker leaves the job leased with a stale claimed_by. After the
+      -- lease expires AND the reaper recomputes in_flight_until to NULL, the job
+      -- must still be reclaimable (via the next_due due-finder, not in_flight).
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "crash")) {groupKey = Just "crash-g"}
+      [_jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 1
+      liftIO $ threadDelay 2_000_000
+      void $ runM env HL.refreshAllGroups
+      check env "after reaper on expired-lease group"
+      reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length reclaimed `shouldBe` 1

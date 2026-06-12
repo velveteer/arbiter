@@ -17,10 +17,9 @@ module Arbiter.Core.Job.Schema
 
     -- * Index Creation SQL
   , createJobQueueGroupKeyIndexSQL
-  , createJobQueueUngroupedRankingIndexSQL
   , createJobQueueUngroupedReadyRankingIndexSQL
   , createJobQueueUngroupedDueIndexSQL
-  , ungroupedReadySplitIndexesSQL
+  , migrateUngroupedReadySplitIndexesSQL
   , createDLQGroupKeyIndexSQL
   , createDLQFailedAtIndexSQL
   , createDLQParentIdIndexSQL
@@ -63,7 +62,7 @@ module Arbiter.Core.Job.Schema
 
     -- * Groups Table
   , createGroupsTableSQL
-  , createGroupsIndexSQL
+  , migrateGroupsReadyRankingSQL
 
     -- * Groups Trigger SQL
   , createGroupsTriggerFunctionsSQL
@@ -242,14 +241,6 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
     , "WHERE group_key IS NOT NULL;"
     ]
 
-createJobQueueUngroupedRankingIndexSQL :: Text -> Text -> Text
-createJobQueueUngroupedRankingIndexSQL schemaName tableName =
-  T.unlines
-    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking")
-    , "ON " <> jobQueueTable schemaName tableName <> " (priority ASC, id ASC)"
-    , "WHERE group_key IS NULL;"
-    ]
-
 -- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL@).
 -- Scheduled/backoff/in-flight rows have @not_visible_until@ set, so they are
 -- absent, and the claim's ordered @LIMIT@ short-circuits at the head over ready
@@ -276,10 +267,14 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
 -- | Migration: replace the full ungrouped ranking index with the ready-only
 -- ranking index plus the due-finder, so the claim splits ready and due instead
 -- of walking the backlog through one @(priority, id)@ index.
-ungroupedReadySplitIndexesSQL :: Text -> Text -> Text
-ungroupedReadySplitIndexesSQL schemaName tableName =
+migrateUngroupedReadySplitIndexesSQL :: Text -> Text -> Text
+migrateUngroupedReadySplitIndexesSQL schemaName tableName =
   T.unlines
-    [ "DROP INDEX IF EXISTS " <> quoteIdentifier schemaName <> "." <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking") <> ";"
+    [ "DROP INDEX IF EXISTS "
+        <> quoteIdentifier schemaName
+        <> "."
+        <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ranking")
+        <> ";"
     , createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName
     , createJobQueueUngroupedDueIndexSQL schemaName tableName
     ]
@@ -363,16 +358,43 @@ createGroupsTableSQL schemaName tableName =
         , ");"
         ]
 
--- | SQL to create a ranking index on the groups table.
---
--- Non-partial so that @UPDATE SET job_count@, @in_flight_until@ etc. never
--- change indexed columns - enabling HOT updates on every ack and claim.
-createGroupsIndexSQL :: Text -> Text -> Text
-createGroupsIndexSQL schemaName tableName =
+-- | Add @ready_count@ (ready-row count) and @next_due@ to the groups summary,
+-- make the ranking index partial on @ready_count > 0@ so scheduled-only groups
+-- leave it, and add the @next_due@ and @in_flight_until@ due-finders.
+migrateGroupsReadyRankingSQL :: Text -> Text -> Text
+migrateGroupsReadyRankingSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
+      tbl = jobQueueTable schemaName tableName
+      qidx suffix = quoteIdentifier ("idx_" <> tableName <> suffix)
    in T.unlines
-        [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_groups_ranking")
-        , "ON " <> groupsTbl <> " (min_priority ASC, min_id ASC);"
+        [ "ALTER TABLE " <> groupsTbl <> " ADD COLUMN IF NOT EXISTS ready_count INT NOT NULL DEFAULT 0;"
+        , "ALTER TABLE " <> groupsTbl <> " ADD COLUMN IF NOT EXISTS next_due TIMESTAMPTZ;"
+        , "UPDATE " <> groupsTbl <> " g SET"
+        , "  min_priority = sub.mp, min_id = sub.mi, ready_count = COALESCE(sub.rc, 0), next_due = sub.nd"
+        , "FROM ("
+        , "  SELECT group_key,"
+        , "    MIN(priority) AS mp,"
+        , "    MIN(id) AS mi,"
+        , "    COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS rc,"
+        , "    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS nd"
+        , "  FROM " <> tbl <> " WHERE group_key IS NOT NULL GROUP BY group_key"
+        , ") sub WHERE g.group_key = sub.group_key;"
+        , "DROP INDEX IF EXISTS " <> quoteIdentifier schemaName <> "." <> qidx "_groups_ranking" <> ";"
+        , "CREATE INDEX IF NOT EXISTS "
+            <> qidx "_groups_ranking"
+            <> " ON "
+            <> groupsTbl
+            <> " (min_priority ASC, min_id ASC) WHERE ready_count > 0 AND in_flight_until IS NULL;"
+        , "CREATE INDEX IF NOT EXISTS "
+            <> qidx "_groups_next_due"
+            <> " ON "
+            <> groupsTbl
+            <> " (next_due ASC) WHERE next_due IS NOT NULL;"
+        , "CREATE INDEX IF NOT EXISTS "
+            <> qidx "_groups_in_flight"
+            <> " ON "
+            <> groupsTbl
+            <> " (in_flight_until ASC) WHERE in_flight_until IS NOT NULL;"
         ]
 
 -- ---------------------------------------------------------------------------
@@ -406,10 +428,13 @@ groupsInsertFunction funcName groupsTbl dd =
         RETURN NULL;
       END IF;
 
-      -- ORDER BY ensures consistent lock acquisition order across concurrent
-      -- transactions to prevent deadlocks on the groups table.
-      INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count)
-      SELECT group_key, MIN(priority), MIN(id), COUNT(*)
+      INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
+      SELECT group_key,
+        MIN(priority),
+        MIN(id),
+        COUNT(*),
+        COUNT(*) FILTER (WHERE not_visible_until IS NULL),
+        MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended)
       FROM new_table
       WHERE group_key IS NOT NULL
       GROUP BY group_key
@@ -418,6 +443,8 @@ groupsInsertFunction funcName groupsTbl dd =
         min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
         min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
         job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
+        ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
+        next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due),
         in_flight_until = CASE WHEN ${groupsTbl}.in_flight_until <= NOW()
           THEN NULL ELSE ${groupsTbl}.in_flight_until END;
 
@@ -440,22 +467,27 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
       SET job_count = g.job_count - sub.removed_count,
           min_priority = COALESCE(sub.new_min_priority, g.min_priority),
           min_id = COALESCE(sub.new_min_id, g.min_id),
+          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
+          next_due = sub.new_next_due,
           in_flight_until = CASE
             WHEN sub.had_inflight THEN NULL
             ELSE g.in_flight_until
           END
       FROM (
-        SELECT d.group_key, d.removed_count, d.had_inflight,
-          MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id
+        SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
+          MIN(t.priority) AS new_min_priority,
+          MIN(t.id) AS new_min_id,
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
         FROM (
           SELECT group_key, COUNT(*) AS removed_count,
-            bool_or(not_visible_until > NOW() AND NOT suspended) AS had_inflight
+            COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS removed_ready_count,
+            bool_or(not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS had_inflight
           FROM old_table
           WHERE group_key IS NOT NULL
           GROUP BY group_key
         ) d
         LEFT JOIN ${tbl} t ON t.group_key = d.group_key
-        GROUP BY d.group_key, d.removed_count, d.had_inflight
+        GROUP BY d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight
       ) sub
       WHERE g.group_key = sub.group_key;
 
@@ -492,6 +524,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         WHERE n.group_key IS NOT NULL
           AND n.not_visible_until > NOW()
           AND NOT n.suspended
+          AND n.attempts > 0
           AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
                OR n.not_visible_until > o.not_visible_until)
         GROUP BY n.group_key
@@ -504,7 +537,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       FROM (
         SELECT t.group_key,
           MAX(t.not_visible_until) FILTER (
-            WHERE t.not_visible_until > NOW() AND NOT t.suspended
+            WHERE t.not_visible_until > NOW() AND NOT t.suspended AND t.attempts > 0
           ) AS new_ift
         FROM ${tbl} t
         WHERE t.group_key IN (
@@ -512,9 +545,10 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           JOIN old_table o ON o.id = n.id
           WHERE n.group_key IS NOT NULL
             AND (o.not_visible_until IS DISTINCT FROM n.not_visible_until
-                 OR o.suspended IS DISTINCT FROM n.suspended)
+                 OR o.suspended IS DISTINCT FROM n.suspended
+                 OR o.attempts IS DISTINCT FROM n.attempts)
             AND (
-              n.not_visible_until > NOW() AND NOT n.suspended
+              n.not_visible_until > NOW() AND NOT n.suspended AND n.attempts > 0
               AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
                    OR n.not_visible_until > o.not_visible_until)
             ) IS NOT TRUE
@@ -524,21 +558,25 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE g.group_key = sub.group_key
         AND g.in_flight_until IS DISTINCT FROM sub.new_ift;
 
-      -- Step 3: Handle group_key changes (dedup replace) - remove from old group
+      -- Step 3: group_key change (dedup replace) - remove from old group
       UPDATE ${groupsTbl} g
       SET job_count = g.job_count - sub.cnt,
           min_priority = COALESCE(sub.new_min_priority, g.min_priority),
           min_id = COALESCE(sub.new_min_id, g.min_id),
+          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
+          next_due = sub.new_next_due,
           in_flight_until = CASE
             WHEN sub.had_inflight THEN NULL
             ELSE g.in_flight_until
           END
       FROM (
-        SELECT d.group_key, d.cnt, d.had_inflight,
-          MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id
+        SELECT d.group_key, d.cnt, d.removed_ready_count, d.had_inflight,
+          MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id,
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
         FROM (
           SELECT o.group_key, COUNT(*) AS cnt,
-            bool_or(o.not_visible_until > NOW() AND NOT o.suspended) AS had_inflight
+            COUNT(*) FILTER (WHERE o.not_visible_until IS NULL) AS removed_ready_count,
+            bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND o.attempts > 0) AS had_inflight
           FROM old_table o
           JOIN new_table n ON o.id = n.id
           WHERE o.group_key IS NOT NULL
@@ -546,7 +584,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           GROUP BY o.group_key
         ) d
         LEFT JOIN ${tbl} t ON t.group_key = d.group_key
-        GROUP BY d.group_key, d.cnt, d.had_inflight
+        GROUP BY d.group_key, d.cnt, d.removed_ready_count, d.had_inflight
       ) sub
       WHERE g.group_key = sub.group_key;
 
@@ -559,9 +597,11 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
             AND o.group_key IS DISTINCT FROM n.group_key
         );
 
-      -- Step 4: Handle group_key changes - add to new group
-      INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count)
-      SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*)
+      -- Step 4: group_key change - add to new group
+      INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
+      SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
+        COUNT(*) FILTER (WHERE n.not_visible_until IS NULL),
+        MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended)
       FROM new_table n
       JOIN old_table o ON o.id = n.id
       WHERE n.group_key IS NOT NULL
@@ -571,9 +611,11 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ON CONFLICT (group_key) DO UPDATE SET
         min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
         min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
-        job_count = ${groupsTbl}.job_count + EXCLUDED.job_count;
+        job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
+        ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
+        next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due);
 
-      -- Step 5: Handle same-group priority changes (dedup replace within same group)
+      -- Step 5: same-group priority change (dedup replace) - recompute min over all rows
       UPDATE ${groupsTbl} g
       SET min_priority = sub.new_min_priority,
           min_id = sub.new_min_id
@@ -593,6 +635,46 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE g.group_key = sub.group_key
         AND (g.min_priority IS DISTINCT FROM sub.new_min_priority
              OR g.min_id IS DISTINCT FROM sub.new_min_id);
+
+      -- Step 6: same-group ready_count delta. Commutative (+=), so concurrent
+      -- claims/promotes can't strand each other - the hot claim path stays here.
+      UPDATE ${groupsTbl} g
+      SET ready_count = GREATEST(0, g.ready_count + sub.delta)
+      FROM (
+        SELECT n.group_key,
+          SUM(
+            (CASE WHEN n.not_visible_until IS NULL THEN 1 ELSE 0 END)
+            - (CASE WHEN o.not_visible_until IS NULL THEN 1 ELSE 0 END)
+          )::int AS delta
+        FROM new_table n
+        JOIN old_table o ON o.id = n.id
+        WHERE n.group_key IS NOT NULL
+          AND n.group_key IS NOT DISTINCT FROM o.group_key
+        GROUP BY n.group_key
+      ) sub
+      WHERE g.group_key = sub.group_key
+        AND sub.delta <> 0;
+
+      -- Step 7: same-group next_due recompute, gated to rows whose visibility changed.
+      UPDATE ${groupsTbl} g
+      SET next_due = sub.nd
+      FROM (
+        SELECT aff.group_key,
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS nd
+        FROM (
+          SELECT DISTINCT n.group_key
+          FROM new_table n
+          JOIN old_table o ON o.id = n.id
+          WHERE n.group_key IS NOT NULL
+            AND n.group_key IS NOT DISTINCT FROM o.group_key
+            AND (o.not_visible_until IS DISTINCT FROM n.not_visible_until
+                 OR o.suspended IS DISTINCT FROM n.suspended)
+        ) aff
+        LEFT JOIN ${tbl} t ON t.group_key = aff.group_key
+        GROUP BY aff.group_key
+      ) sub
+      WHERE g.group_key = sub.group_key
+        AND g.next_due IS DISTINCT FROM sub.nd;
 
       RETURN NULL;
     END;

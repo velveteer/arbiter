@@ -769,6 +769,7 @@ setVisibilityTimeout schemaName tableName timeout job =
   executeStatement
     (Tmpl.setVisibilityTimeoutSQL schemaName tableName)
     [ pval CFloat8 (realToFrac timeout)
+    , pval CFloat8 (realToFrac timeout)
     , pval CInt8 (primaryKey job)
     , pval CInt4 (attempts job)
     ]
@@ -804,7 +805,7 @@ setVisibilityTimeoutBatch _ _ _ [] = pure []
 setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
   let valuesPlaceholder = T.intercalate "," $ replicate (length jobs) "(?,?)"
       jobParams = concatMap (\job -> [pval CInt8 (primaryKey job), pval CInt4 (attempts job)]) jobs
-      params = jobParams <> [pval CFloat8 (realToFrac timeout)]
+      params = jobParams <> [pval CFloat8 (realToFrac timeout), pval CFloat8 (realToFrac timeout)]
 
   executeQuery
     (Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesPlaceholder)

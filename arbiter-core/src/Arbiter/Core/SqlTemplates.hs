@@ -541,11 +541,39 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       claimedBy = uuidLiteral mWorkerId
    in [text|
   WITH
+    group_candidates AS (
+      -- A: unblocked groups with ready work, ranked (ready-ranking partial index).
+      -- Blocked groups (active lease or backoff) are excluded here and recovered
+      -- by source C when their block expires, so they cannot crowd the window.
+      (
+        SELECT group_key FROM ${groupsTbl}
+        WHERE ready_count > 0 AND in_flight_until IS NULL
+        ORDER BY min_priority ASC, min_id ASC
+        LIMIT ${overfetch}
+      )
+      UNION
+      -- B: scheduled-only groups that have come due (next_due finder)
+      (
+        SELECT group_key FROM ${groupsTbl}
+        WHERE next_due <= NOW()
+        ORDER BY next_due ASC
+        LIMIT ${overfetch}
+      )
+      UNION
+      -- C: groups whose backoff/lease block has expired (in_flight finder)
+      (
+        SELECT group_key FROM ${groupsTbl}
+        WHERE in_flight_until <= NOW()
+        ORDER BY in_flight_until ASC
+        LIMIT ${overfetch}
+      )
+    ),
     eligible_groups AS (
-      SELECT group_key FROM ${groupsTbl}
-      WHERE job_count > 0
-        AND (in_flight_until IS NULL OR in_flight_until <= NOW())
-      ORDER BY min_priority ASC, min_id ASC
+      SELECT g.group_key FROM ${groupsTbl} g
+      WHERE g.group_key IN (SELECT group_key FROM group_candidates)
+        AND g.job_count > 0
+        AND (g.in_flight_until IS NULL OR g.in_flight_until <= NOW())
+      ORDER BY g.min_priority ASC NULLS LAST, g.min_id ASC NULLS LAST
       LIMIT ${overfetch}
       FOR UPDATE SKIP LOCKED
     ),
@@ -768,7 +796,7 @@ setVisibilityTimeoutSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|
         UPDATE ${tbl}
-        SET not_visible_until = NOW() + (? * interval '1 second'),
+        SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
             updated_at = NOW()
         WHERE id = ? AND attempts = ?
       |]
@@ -791,7 +819,7 @@ setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
         ),
         updated AS (
           UPDATE ${tbl} j
-          SET not_visible_until = NOW() + (? * interval '1 second'),
+          SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
               updated_at = NOW()
           FROM input_jobs ij
           WHERE j.id = ij.id AND j.attempts = ij.expected_attempts
@@ -1535,7 +1563,9 @@ refreshGroupsSQL schema tableName =
                  MIN(priority) AS min_priority,
                  MIN(id) AS min_id,
                  COUNT(*) AS job_count,
-                 MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended) AS in_flight_until
+                 COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS ready_count,
+                 MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due,
+                 MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS in_flight_until
           FROM ${tbl}
           WHERE group_key IS NOT NULL
           GROUP BY group_key
@@ -1549,15 +1579,19 @@ refreshGroupsSQL schema tableName =
           SET min_priority = c.min_priority,
               min_id = c.min_id,
               job_count = c.job_count,
+              ready_count = c.ready_count,
+              next_due = c.next_due,
               in_flight_until = c.in_flight_until
           FROM current c
           WHERE g.group_key = c.group_key
             AND (g.min_priority <> c.min_priority OR g.min_id <> c.min_id
                  OR g.job_count <> c.job_count
+                 OR g.ready_count <> c.ready_count
+                 OR g.next_due IS DISTINCT FROM c.next_due
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
         )
-        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, in_flight_until)
-        SELECT c.group_key, c.min_priority, c.min_id, c.job_count, c.in_flight_until
+        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
+        SELECT c.group_key, c.min_priority, c.min_id, c.job_count, c.ready_count, c.next_due, c.in_flight_until
         FROM current c
         WHERE NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = c.group_key)
         ON CONFLICT (group_key) DO NOTHING

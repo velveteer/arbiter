@@ -36,20 +36,20 @@ import Arbiter.Core.Job.Schema
   , createDedupKeyIndexSQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
-  , createGroupsIndexSQL
   , createGroupsTableSQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
   , createJobQueueDLQTableSQL
   , createJobQueueGroupKeyIndexSQL
   , createJobQueueTableSQL
-  , createJobQueueUngroupedRankingIndexSQL
-  , ungroupedReadySplitIndexesSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
   , createParentIdIndexSQL
   , createResultsTableSQL
   , createSchemaSQL
+  , jobQueueTable
+  , migrateGroupsReadyRankingSQL
+  , migrateUngroupedReadySplitIndexesSQL
   )
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
@@ -247,16 +247,17 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "create-dlq-failed-at-index" $ createDLQFailedAtIndexSQL schemaName tableName
         , script "create-dedup-key-index" $ createDedupKeyIndexSQL schemaName tableName
         , script "create-group-key-index" $ createJobQueueGroupKeyIndexSQL schemaName tableName
-        , script "create-ungrouped-ranking-index" $ createJobQueueUngroupedRankingIndexSQL schemaName tableName
-        , script "ungrouped-ready-split-indexes" $ ungroupedReadySplitIndexesSQL schemaName tableName
         , script "create-parent-id-index" $ createParentIdIndexSQL schemaName tableName
         , script "create-dlq-parent-id-index" $ createDLQParentIdIndexSQL schemaName tableName
         , script "create-results-table" $ createResultsTableSQL schemaName tableName
         , script "create-groups-table" $ createGroupsTableSQL schemaName tableName
-        , script "create-groups-index" $ createGroupsIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v3" $ createGroupsTriggerFunctionsSQL schemaName tableName
-        , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-claimed-by-column" $ addClaimedByColumnSQL schemaName tableName
+        , script "migrate-ungrouped-ready-split-indexes" $ migrateUngroupedReadySplitIndexesSQL schemaName tableName
+        , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
+        , script "create-groups-trigger-functions-v4" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
+        , script "set-job-queue-fillfactor-100" $
+            "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
         ]
       notifyTriggers
         | enableNotifications config =
