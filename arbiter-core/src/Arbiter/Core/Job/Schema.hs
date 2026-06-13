@@ -615,26 +615,34 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
         next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due);
 
-      -- Step 5: same-group priority change (dedup replace) - recompute min over all rows
+      -- Step 5: same-group ordering or visibility change (dedup replace, claim,
+      -- retry, promote) - recompute min and next_due over all rows in one pass.
       UPDATE ${groupsTbl} g
       SET min_priority = sub.new_min_priority,
-          min_id = sub.new_min_id
+          min_id = sub.new_min_id,
+          next_due = sub.new_next_due
       FROM (
-        SELECT d.group_key, MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id
+        SELECT d.group_key,
+          MIN(t.priority) AS new_min_priority,
+          MIN(t.id) AS new_min_id,
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
         FROM (
-          SELECT n.group_key
+          SELECT DISTINCT n.group_key
           FROM new_table n
           JOIN old_table o ON o.id = n.id
           WHERE n.group_key IS NOT NULL
             AND n.group_key IS NOT DISTINCT FROM o.group_key
-            AND n.priority IS DISTINCT FROM o.priority
+            AND (n.priority IS DISTINCT FROM o.priority
+                 OR o.not_visible_until IS DISTINCT FROM n.not_visible_until
+                 OR o.suspended IS DISTINCT FROM n.suspended)
         ) d
         LEFT JOIN ${tbl} t ON t.group_key = d.group_key
         GROUP BY d.group_key
       ) sub
       WHERE g.group_key = sub.group_key
         AND (g.min_priority IS DISTINCT FROM sub.new_min_priority
-             OR g.min_id IS DISTINCT FROM sub.new_min_id);
+             OR g.min_id IS DISTINCT FROM sub.new_min_id
+             OR g.next_due IS DISTINCT FROM sub.new_next_due);
 
       -- Step 6: same-group ready_count delta. Commutative (+=), so concurrent
       -- claims/promotes can't strand each other - the hot claim path stays here.
@@ -654,27 +662,6 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ) sub
       WHERE g.group_key = sub.group_key
         AND sub.delta <> 0;
-
-      -- Step 7: same-group next_due recompute, gated to rows whose visibility changed.
-      UPDATE ${groupsTbl} g
-      SET next_due = sub.nd
-      FROM (
-        SELECT aff.group_key,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS nd
-        FROM (
-          SELECT DISTINCT n.group_key
-          FROM new_table n
-          JOIN old_table o ON o.id = n.id
-          WHERE n.group_key IS NOT NULL
-            AND n.group_key IS NOT DISTINCT FROM o.group_key
-            AND (o.not_visible_until IS DISTINCT FROM n.not_visible_until
-                 OR o.suspended IS DISTINCT FROM n.suspended)
-        ) aff
-        LEFT JOIN ${tbl} t ON t.group_key = aff.group_key
-        GROUP BY aff.group_key
-      ) sub
-      WHERE g.group_key = sub.group_key
-        AND g.next_due IS DISTINCT FROM sub.nd;
 
       RETURN NULL;
     END;

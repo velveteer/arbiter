@@ -55,7 +55,6 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
-import Data.Typeable (Typeable)
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as UE
 
@@ -71,7 +70,7 @@ import Arbiter.Core.Operations qualified as Ops
 -- | Internal exception used to abort a tree insertion transaction.
 -- Not exported - caught and converted to @Left@ by 'insertJobTree'.
 newtype TreeInsertFailed = TreeInsertFailed Text
-  deriving stock (Show, Typeable)
+  deriving stock (Show)
   deriving anyclass (Exception)
 
 -- | A tree of jobs. Leaves are single jobs; finalizers are parents with

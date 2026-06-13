@@ -42,7 +42,6 @@ module Arbiter.Core.Exceptions
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text)
-import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import UnliftIO.Exception qualified as UE
 
@@ -55,58 +54,58 @@ data JobException
     TreeCancel TreeCancelException
   | -- | Cascade-deletes the parent and all siblings.
     BranchCancel BranchCancelException
-  deriving stock (Show, Typeable)
+  deriving stock (Show)
   deriving anyclass (Exception)
 
 -- | Transient failure - the job will be retried with backoff.
 newtype JobRetryableException = JobRetryableException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Permanent failure - the job goes straight to the DLQ, no retries.
 newtype JobPermanentException = JobPermanentException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Cancels an entire job tree from root to leaves.
 -- Use when a failure invalidates all work in the tree.
 newtype TreeCancelException = TreeCancelException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Cancels the current branch (parent + all siblings).
 -- If the parent has a grandparent, the grandparent is resumed.
 newtype BranchCancelException = BranchCancelException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Reprocess the job later without recording a failure (a soft nack). The
 -- worker skips retry\/DLQ and leaves the job to become visible again.
 data JobNackException = JobNackException
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Row decoding failure (engine-internal). Classified as a permanent failure
 -- by the worker.
 newtype ParsingException = ParsingException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Generic engine-internal failure (e.g. missing connection, bad params).
 newtype InternalException = InternalException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Job was deleted or reclaimed between claim and ack. The worker recognizes
 -- this signal via 'Arbiter.Worker.isJobGoneException' and skips retry/DLQ.
 newtype JobNotFoundException = JobNotFoundException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 -- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
 -- combinator propagates this signal so the worker can stop duplicate work.
 newtype JobStolenException = JobStolenException Text
-  deriving stock (Eq, Generic, Show, Typeable)
+  deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)
 
 throwRetryable :: (MonadIO m) => Text -> m a

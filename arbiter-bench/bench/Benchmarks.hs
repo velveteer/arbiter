@@ -45,9 +45,9 @@ import Control.Monad.Trans.Reader (ReaderT (..), asks)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
-import Data.List (partition)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
+import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -55,7 +55,6 @@ import Data.Tagged (Tagged (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
-import Data.Typeable (Typeable)
 import Database.PostgreSQL.Simple (Connection, Only (..), Query, close, connectPostgreSQL, execute)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
@@ -64,6 +63,7 @@ import Numeric (showFFloat)
 import Orville.PostgreSQL qualified as O
 import Orville.PostgreSQL.UnliftIO qualified as O
 import System.Exit (die)
+import Test.Tasty (localOption, mkTimeout)
 import Test.Tasty.Bench
 import Test.Tasty.Providers (IsTest (..), singleTest, testPassed)
 import UnliftIO (MonadUnliftIO)
@@ -80,14 +80,19 @@ trialCount = 10
 trialDurationUs :: Int
 trialDurationUs = 10_000_000
 
+-- | Per-test timeout. tasty-bench 0.5 defaults to 100s, too tight for these
+-- multi-trial tests (trialCount trials plus per-trial preloads).
+benchTimeout :: Integer
+benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * 4
+
 steadyStateWarmupUs :: Int
 steadyStateWarmupUs = 2_000_000
 
 data BenchPayload
   = BenchMessage Int
   | BenchBatch Int
-  | BenchFlaky Int
-  -- ^ Fails on its first attempt, then succeeds, to populate the backoff backlog.
+  | -- | Fails on its first attempt, then succeeds, to populate the backoff backlog.
+    BenchFlaky Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -97,17 +102,17 @@ data QueueFlavor
   = Ungrouped
   | Grouped Int
   | Mixed Int
-  | GroupedBacklog Int
-  -- ^ Grouped, with a fraction of jobs scheduled into the near future and a
-  -- fraction that fail once into backoff, exercising the next_due and
-  -- in_flight_until claim sources alongside the ready window.
-  | GroupedDormant Int
-  -- ^ Grouped, half the backlog scheduled far into the future (parked, never due
-  -- in-trial) while the rest is ready. Measures whether a standing scheduled
-  -- backlog slows the claim for the ready work in those same groups.
-  | UngroupedDormant
-  -- ^ Ungrouped 'GroupedDormant': half the backlog parked 30 days out, half
-  -- ready, exercising the ungrouped ready/due index split.
+  | -- | Grouped, with a fraction of jobs scheduled into the near future and a
+    -- fraction that fail once into backoff, exercising the next_due and
+    -- in_flight_until claim sources alongside the ready window.
+    GroupedBacklog Int
+  | -- | Grouped, half the backlog scheduled far into the future (parked, never due
+    -- in-trial) while the rest is ready. Measures whether a standing scheduled
+    -- backlog slows the claim for the ready work in those same groups.
+    GroupedDormant Int
+  | -- | Ungrouped 'GroupedDormant': half the backlog parked 30 days out, half
+    -- ready, exercising the ungrouped ready/due index split.
+    UngroupedDormant
 
 data BenchMode
   = BenchSingleJobMode
@@ -175,7 +180,6 @@ data BenchStats = BenchStats
   }
 
 newtype ThroughputBench = ThroughputBench (IO String)
-  deriving stock (Typeable)
 
 instance IsTest ThroughputBench where
   testOptions = Tagged []
@@ -303,7 +307,8 @@ hasqlWorkerTrial :: RunM HasqlM -> Int -> Int -> Int -> Int -> BenchMode -> IO D
 hasqlWorkerTrial runM totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
+      c <-
+        runM $ defaultWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
       c <-
@@ -563,30 +568,32 @@ main = do
       orvilleRun :: RunM OrvilleM
       orvilleRun action = runReaderT (unBenchOrville action) (benchSchema, orvilleState)
 
-  defaultMain
-    -- [ bgroup "Claim Throughput" $
-    --     claimBenches
-    --       simpleEnv
-    --       200000
-    --       [ ("ungrouped", Ungrouped)
-    --       , ("10 groups", Grouped 10)
-    --       , ("1000 groups", Grouped 1000)
-    --       , ("200k groups", Grouped 200000)
-    --       , ("mixed (10000 groups + ungrouped)", Mixed 10000)
-    --       ]
-    [ bgroup "Worker Throughput (simple)" $
-        simpleWorkerBenches statsConn simpleEnv simpleRun
-    , bgroup "Worker Throughput (hasql)" $
-        hasqlWorkerBenches statsConn simpleEnv hasqlRun
-    , bgroup "Worker Throughput (orville)" $
-        orvilleWorkerBenches statsConn simpleEnv orvilleRun
-    , bgroup "Steady-State Throughput (simple)" $
-        steadyStateBenches statsConn (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun d p w b m f)
-    , bgroup "Steady-State Throughput (hasql)" $
-        steadyStateBenches statsConn (\d p w b m f -> hasqlSteadyStateTrial hasqlRun producerRun d p w b m f)
-    , bgroup "Steady-State Throughput (orville)" $
-        steadyStateBenches statsConn (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun d p w b m f)
-    ]
+  defaultMain $
+    map
+      (localOption (mkTimeout benchTimeout))
+      -- [ bgroup "Claim Throughput" $
+      --     claimBenches
+      --       simpleEnv
+      --       200000
+      --       [ ("ungrouped", Ungrouped)
+      --       , ("10 groups", Grouped 10)
+      --       , ("1000 groups", Grouped 1000)
+      --       , ("200k groups", Grouped 200000)
+      --       , ("mixed (10000 groups + ungrouped)", Mixed 10000)
+      --       ]
+      [ bgroup "Worker Throughput (simple)" $
+          simpleWorkerBenches statsConn simpleEnv simpleRun
+      , bgroup "Worker Throughput (hasql)" $
+          hasqlWorkerBenches statsConn simpleEnv hasqlRun
+      , bgroup "Worker Throughput (orville)" $
+          orvilleWorkerBenches statsConn simpleEnv orvilleRun
+      , bgroup "Steady-State Throughput (simple)" $
+          steadyStateBenches statsConn (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun d p w b m f)
+      , bgroup "Steady-State Throughput (hasql)" $
+          steadyStateBenches statsConn (\d p w b m f -> hasqlSteadyStateTrial hasqlRun producerRun d p w b m f)
+      , bgroup "Steady-State Throughput (orville)" $
+          steadyStateBenches statsConn (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun d p w b m f)
+      ]
 
 _claimBenches :: SimpleEnv BenchRegistry -> Int -> [(String, QueueFlavor)] -> [Benchmark]
 _claimBenches simpleEnv queueSize flavors =
