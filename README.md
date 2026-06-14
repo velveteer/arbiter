@@ -7,7 +7,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
-- FIFO head-of-line blocking per group key
+- Per-group ordering, like SQS FIFO message groups
 - Concurrent worker pools with `LISTEN/NOTIFY` and polling fallback
 - Job trees with fan-out/fan-in result collection
 - Dead-letter queues, cron scheduling, job deduplication
@@ -169,7 +169,7 @@ Handlers run inside a database transaction by default. If the handler succeeds, 
 
 The default lifecycle (automatic single-job mode):
 
-1. **Claim** - the dispatcher claims visible jobs (respecting per-group head-of-line blocking), increments each job's attempt count, and hides it for the visibility timeout. A heartbeat extends that timeout while the handler runs, so long jobs are not reclaimed.
+1. **Claim** - the dispatcher claims visible jobs (respecting per-group ordering), increments each job's attempt count, and hides it for the visibility timeout. A heartbeat extends that timeout while the handler runs, so long jobs are not reclaimed.
 2. **Run** - the worker runs the handler inside a transaction. The handler's database work, its stored result, and the ack all commit together.
 3. **Success** - the job is acked and the transaction commits.
 4. **Failure** - the transaction rolls back. A separate transaction retries the job with backoff, or moves it to the dead-letter queue (DLQ)
@@ -177,10 +177,12 @@ The default lifecycle (automatic single-job mode):
 
 In batched mode the worker transaction in step 2 is replaced by per-job callbacks - the handler completes, fails, cancels, or nacks each job manually (see [Batched Handlers](#batched-handlers)).
 
-### Head-of-Line Blocking
+### Group Ordering
 
-- **Same group key** - processed serially. Only one visible job (or job batch) per group is eligible for claiming.
-- **No group key** - processed concurrently by any available worker.
+Group keys give ordered, serial processing within a group and concurrency across groups.
+
+- **Same group key** - run one at a time (one in-flight job or batch per group), ordered by priority then insertion order.
+- **No group key** - run concurrently by any available worker.
 
 ## Job Features
 
@@ -482,7 +484,7 @@ See the [arbiter-servant-ui haddocks](https://velveteer.github.io/arbiter/arbite
 
 ### Endpoints
 
-Per-queue endpoints under `/api/v1/:table/`:
+Per-queue endpoints under `/api/v1/:queue/`:
 
 | Method | Path | Description |
 |--------|------|-------------|

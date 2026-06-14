@@ -7,6 +7,8 @@ module Arbiter.Worker.Logger.Internal
   ( logMessage
   , tryLog
   , withJobContext
+  , withJobContextOne
+  , showJobIds
   , runHook
   ) where
 
@@ -19,7 +21,8 @@ import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
-import Data.List.NonEmpty (NonEmpty, toList)
+import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty (..), toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, tryAny)
@@ -42,6 +45,14 @@ withJobContext
   -> m a
   -> m a
 withJobContext jobs = MLA.withThreadContext (buildJobContext jobs)
+
+-- | 'withJobContext' for a single job (per-job callbacks and hooks).
+withJobContextOne :: (MonadIO m, MonadMask m) => Job.JobRead payload -> m a -> m a
+withJobContextOne job = withJobContext (job :| [])
+
+-- | Comma-separated job ids for log messages.
+showJobIds :: [Int64] -> Text
+showJobIds = T.intercalate ", " . map (T.pack . show)
 
 -- | Build structured context for a batch of jobs.
 buildJobContext :: NonEmpty (Job.JobRead payload) -> [Pair]

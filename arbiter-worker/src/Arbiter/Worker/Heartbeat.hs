@@ -9,10 +9,10 @@ import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
 import Control.Monad (forever, unless, void)
+import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList, traverse_)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
 import UnliftIO (MonadUnliftIO)
@@ -22,7 +22,7 @@ import UnliftIO.STM (TMVar, atomically)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Logger (LogConfig)
-import Arbiter.Worker.Logger.Internal (runHook)
+import Arbiter.Worker.Logger.Internal (runHook, showJobIds, withJobContext)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
 
 -- | Run an action with a heartbeat that extends visibility timeout for all jobs.
@@ -45,6 +45,7 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 withJobsHeartbeat
   :: forall registry m payload a
    . ( JobOperation m registry payload
+     , MonadMask m
      , MonadUnliftIO m
      )
   => ObservabilityHooks m payload
@@ -65,7 +66,9 @@ withJobsHeartbeat
   -- ^ Action to run with heartbeat protection
   -> m a
 withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal action =
-  either absurd id <$> race heartbeatThread action
+  -- race forks both arms onto new threads; re-establish the job context on each
+  -- so handler and heartbeat logs carry the job fields.
+  either absurd id <$> race (withJobContext jobs heartbeatThread) (withJobContext jobs action)
   where
     heartbeatThread =
       retryOnExceptionForever logCfg "Heartbeat" 3 $
@@ -77,10 +80,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       atomically $ void $ STM.tryPutTMVar signal ()
       let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
       unless (null stolenJobs) $
-        throwJobStolen $
-          "Heartbeat detected stolen jobs: "
-            <> T.intercalate ", " (map (T.pack . show) stolenJobs)
-            <> " (another worker reclaimed them, stopping to prevent duplicate processing)"
+        throwJobStolen (showJobIds stolenJobs)
       let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
           activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) (toList jobs)
       currentTime <- liftIO getCurrentTime
