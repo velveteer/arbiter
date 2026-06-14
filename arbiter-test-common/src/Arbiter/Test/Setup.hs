@@ -16,13 +16,15 @@ import Arbiter.Core.Gates qualified as Gates
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as W
+import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Database.PostgreSQL.LibPQ qualified as LibPQ
-import Database.PostgreSQL.Simple (Connection, Query, close, connectPostgreSQL, execute)
+import Database.PostgreSQL.Simple (Connection, Query, SqlError (..), close, connectPostgreSQL, execute)
 import Database.PostgreSQL.Simple.Internal qualified as PGS
 
 -- | Configuration for test setup
@@ -82,10 +84,12 @@ setupDDLWithConfig config schemaName tableName conn = do
 cleanupData :: Text -> Text -> Connection -> IO ()
 cleanupData schemaName tableName conn = do
   execute_ conn "SET client_min_messages = WARNING"
-  void $
-    execute_
-      conn
-      ( "TRUNCATE "
+  -- A draining worker pool may still hold locks on the job and groups tables in
+  -- the opposite order from this TRUNCATE, so bound the wait and retry on a
+  -- deadlock or lock timeout instead of failing the test.
+  execute_ conn "SET lock_timeout = '5s'"
+  let truncateSql =
+        "TRUNCATE "
           <> Schema.jobQueueTable schemaName tableName
           <> ", "
           <> Schema.jobQueueDLQTable schemaName tableName
@@ -98,7 +102,17 @@ cleanupData schemaName tableName conn = do
           <> ", "
           <> Gates.arbiterGatesTable schemaName
           <> " CASCADE"
-      )
+      go n = do
+        r <- try (execute_ conn truncateSql) :: IO (Either SqlError ())
+        case r of
+          Right () -> pure ()
+          -- 40P01 deadlock_detected, 55P03 lock_not_available
+          Left e
+            | sqlState e `elem` ["40P01", "55P03"] && n > (0 :: Int) ->
+                threadDelay 100_000 >> go (n - 1)
+            | otherwise -> throwIO e
+  go 10
+  execute_ conn "RESET lock_timeout"
   execute_ conn "SET client_min_messages = NOTICE"
 
 execute_ :: Connection -> Text -> IO ()
