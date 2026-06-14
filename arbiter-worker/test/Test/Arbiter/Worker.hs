@@ -384,7 +384,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             (payload $ DLQ.jobSnapshot $ head dlqJobs) `shouldBe` SimpleTask "PermanentFail"
             (attempts $ DLQ.jobSnapshot $ head dlqJobs) `shouldBe` 1
 
-    describe "Head-of-Line Blocking" $ do
+    describe "Group Ordering" $ do
       it "processes jobs in the same group serially" $ \env -> do
         -- Track job completion order
         orderRef <- newIORef []

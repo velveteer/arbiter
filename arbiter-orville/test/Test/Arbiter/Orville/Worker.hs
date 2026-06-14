@@ -285,7 +285,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
         length processed `shouldBe` 3
         processed `shouldMatchList` [Just "g1", Just "g2", Just "g3"]
 
-  describe "Head-of-Line Blocking" $ do
+  describe "Group Ordering" $ do
     it "processes jobs in the same group serially" $ \env -> do
       -- Track job completion order and concurrent execution
       orderRef <- newIORef []

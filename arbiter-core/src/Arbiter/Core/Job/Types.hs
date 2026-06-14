@@ -51,7 +51,7 @@ data Job payload key q insertedAt = Job
   , queueName :: q
   -- ^ @()@ in 'JobWrite', table name ('Text') in 'JobRead'. Not serialized.
   , groupKey :: Maybe Text
-  -- ^ Jobs with the same group key are processed serially (head-of-line blocking).
+  -- ^ Jobs with the same group key are processed serially, one at a time per group.
   -- @Nothing@ for ungrouped jobs that can run in parallel.
   , insertedAt :: insertedAt
   -- ^ @()@ in 'JobWrite' (set by DB), @UTCTime@ in 'JobRead'.

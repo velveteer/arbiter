@@ -218,7 +218,7 @@ claimNextVisibleJobsAs limit timeout workerId = do
 
 -- | Claims multiple jobs per group. Unlike 'claimNextVisibleJobs', this can
 -- claim up to @batchSize@ jobs from each group while still respecting
--- head-of-line blocking between batches.
+-- per-group ordering between batches.
 claimNextVisibleJobsBatched
   :: forall m registry payload
    . (QueueOperation m registry payload)

@@ -107,7 +107,7 @@ operationsSpec mkMessage runM = do
       void $ runM env (HL.insertJob topPriority)
 
       -- The not-yet-due scheduled job must not block the group: the ready
-      -- top-priority job is the head-of-line pick and is claimed.
+      -- top-priority job is the next pick and is claimed.
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
 
       length claimed `shouldBe` 1
@@ -126,7 +126,7 @@ operationsSpec mkMessage runM = do
       length claimed `shouldBe` 2
       map groupKey claimed `shouldMatchList` [Just "group1", Just "group2"]
 
-    it "respects head-of-line blocking per group" $ \env -> do
+    it "respects per-group ordering" $ \env -> do
       -- Insert two jobs in the same group
       let job1 = (defaultJob (mkMessage "First")) {groupKey = Just "claim-hol-test"}
           job2 = (defaultJob (mkMessage "Second")) {groupKey = Just "claim-hol-test"}
@@ -1157,7 +1157,7 @@ operationsSpec mkMessage runM = do
       NE.length (head groupedBatches) `shouldBe` 2
       groupKey (NE.head (head groupedBatches)) `shouldBe` Just "fair-batch-a"
 
-    it "respects head-of-line blocking within groups" $ \env -> do
+    it "respects per-group ordering within groups" $ \env -> do
       -- Insert jobs in batch-hol-test
       void $ runM env (HL.insertJob (defaultGroupedJob "batch-hol-test" (mkMessage "First")))
       void $ runM env (HL.insertJob (defaultGroupedJob "batch-hol-test" (mkMessage "Second")))
@@ -1218,7 +1218,7 @@ operationsSpec mkMessage runM = do
       length firstBatch `shouldBe` 5
 
       -- Try to claim more from same group while first batch is claimed (not yet acked)
-      -- Should get 0 jobs because the group is blocked by head-of-line blocking
+      -- Should get 0 jobs because the group already has an in-flight job
       secondClaim <- claimBatchedFlat env 5 10 :: IO [JobRead payload]
       length secondClaim `shouldBe` 0
 
@@ -2039,7 +2039,7 @@ operationsSpec mkMessage runM = do
       forM_ children $ \c -> groupKey c `shouldBe` Just "shared-group"
 
       -- Children should be claimable despite sharing group key with suspended parent
-      -- Head-of-line blocking applies only to non-suspended jobs
+      -- A suspended job does not hold the group
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
       let claimedPayload = payload (head claimed)

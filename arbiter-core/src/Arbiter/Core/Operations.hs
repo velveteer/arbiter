@@ -569,7 +569,7 @@ data BatchColumns = BatchColumns
 emptyColumns :: BatchColumns
 emptyColumns = mempty
 
--- | Claim up to @maxJobs@ visible jobs, respecting head-of-line blocking
+-- | Claim up to @maxJobs@ visible jobs, respecting per-group ordering
 -- (one job per group). Uses a single-CTE claim with the groups table.
 -- Leaves @claimed_by@ NULL.
 claimNextVisibleJobs

@@ -246,9 +246,9 @@ concurrencySpec mkMessage runM = do
       length allIds `shouldBe` length (nub allIds)
       length allIds `shouldSatisfy` (<= 6)
 
-    it "concurrent workers respect head-of-line blocking for grouped jobs" $ \env -> do
+    it "concurrent workers respect per-group ordering for grouped jobs" $ \env -> do
       -- 500 iterations: seed a group, race 10 workers to claim + concurrent
-      -- inserts to the same group. HOL means exactly 1 claim per round.
+      -- inserts to the same group. Per-group ordering means exactly 1 claim per round.
       let numIterations = 500
           numWorkers = 10
       violationRef <- newIORef (0 :: Int)
@@ -272,10 +272,10 @@ concurrencySpec mkMessage runM = do
                  , void (runM env $ HL.insertJob (defaultJob (mkMessage "concurrent")) {groupKey = Just "hol-stress"}) >> pure []
                  ]
 
-        -- HOL invariant: at most 1 claim per group. totalClaimed == 0 is
+        -- Ordering invariant: at most 1 claim per group. totalClaimed == 0 is
         -- normal when the INSERT trigger's groups row lock causes claims to
         -- skip the group (FOR UPDATE SKIP LOCKED). totalClaimed > 1 is a
-        -- real HOL violation.
+        -- real ordering violation.
         let totalClaimed = sum (map length results)
         when (totalClaimed > 1) $
           atomicModifyIORef' violationRef (\n -> (n + 1, ()))
@@ -600,7 +600,7 @@ raceConditionSpec mkMessage runM = do
         findDuplicates allClaimed `shouldBe` []
         length allClaimed `shouldBe` totalJobs
 
-    describe "Head-of-Line Blocking Under Stress" $ do
+    describe "Group Ordering Under Stress" $ do
       it "group ordering maintained under concurrent pressure" $ \env -> do
         let numGroups = 10
             jobsPerGroup = 30
@@ -848,7 +848,7 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
           (\_ -> runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload])
           [1 :: Int, 2]
 
-      -- Head-of-line: exactly 1 should claim
+      -- Per-group ordering: exactly 1 should claim
       (length c1 + length c2) `shouldBe` 1
       check env "after concurrent claim+claim"
 
@@ -924,7 +924,7 @@ inFlightConcurrencySpec schemaName tableName mkPayload runM withConn = do
       -- Claim the non-suspended job
       [claimed] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
 
-      -- Concurrently: resume suspended + try to claim (should get nothing due to head-of-line)
+      -- Concurrently: resume suspended + try to claim (should get nothing, group already in flight)
       _ <-
         mapConcurrently
           id
