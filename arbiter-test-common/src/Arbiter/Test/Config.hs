@@ -19,4 +19,4 @@ getTestConnectionString = do
   mConnStr <- lookupEnv "ARBITER_TEST_CONN_STRING"
   pure $ maybe defaultConnString BS8.pack mConnStr
   where
-    defaultConnString = "host=localhost port=54324 user=postgres password=master dbname=postgres"
+    defaultConnString = "host=localhost port=5432 user=postgres password=master dbname=postgres"

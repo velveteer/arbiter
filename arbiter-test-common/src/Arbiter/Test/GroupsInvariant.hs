@@ -31,7 +31,7 @@ import Data.Map.Strict qualified as Map
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, diffUTCTime)
+import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
@@ -40,12 +40,19 @@ import UnliftIO.Async (concurrently)
 
 import Arbiter.Test.Setup (execute_)
 
--- | Expected state of a single group row.
+-- | Expected state of a single group row. @min_priority@/@min_id@ range over all
+-- rows. @ready_count@ is the number of claimable-ready rows
+-- (@not_visible_until IS NULL AND NOT suspended@).
+-- @next_due@ is the earliest wake time over parked/leased rows
+-- (@not_visible_until IS NOT NULL AND NOT suspended@). @next_due@ has no @NOW()@
+-- term, so it must match the recompute exactly.
 data GroupState = GroupState
   { gsGroupKey :: Text
   , gsMinPriority :: Int
   , gsMinId :: Int64
   , gsJobCount :: Int64
+  , gsReadyCount :: Int64
+  , gsNextDue :: Maybe UTCTime
   }
   deriving stock (Eq, Show)
 
@@ -53,25 +60,28 @@ data GroupState = GroupState
 readGroupsTable :: PG.Connection -> Text -> Text -> IO [GroupState]
 readGroupsTable conn schemaName tableName = do
   let sql =
-        "SELECT group_key, min_priority, min_id, job_count FROM "
+        "SELECT group_key, min_priority, min_id, job_count, ready_count, next_due FROM "
           <> schemaName
           <> ".\""
           <> tableName
           <> "_groups\" ORDER BY group_key"
   rows <- PG.query_ conn (fromString (T.unpack sql))
-  pure [GroupState gk mp mi jc | (gk, mp, mi, jc) <- rows]
+  pure [GroupState gk mp mi jc rc nd | (gk, mp, mi, jc, rc, nd) <- rows]
 
 -- | Compute expected groups state from the main queue table.
 computeExpectedGroups :: PG.Connection -> Text -> Text -> IO [GroupState]
 computeExpectedGroups conn schemaName tableName = do
   let sql =
-        "SELECT group_key, MIN(priority)::int, MIN(id)::bigint, COUNT(*)::bigint FROM "
+        "SELECT group_key, MIN(priority)::int, MIN(id)::bigint, COUNT(*)::bigint, \
+        \COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended)::bigint, \
+        \MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) FROM "
           <> schemaName
           <> ".\""
           <> tableName
           <> "\" WHERE group_key IS NOT NULL GROUP BY group_key ORDER BY group_key"
   rows <- PG.query_ conn (fromString (T.unpack sql))
-  pure [GroupState gk mp mi jc | (gk, mp :: Int, mi :: Int64, jc :: Int64) <- rows]
+  pure
+    [GroupState gk mp mi jc rc nd | (gk, mp :: Int, mi :: Int64, jc :: Int64, rc :: Int64, nd :: Maybe UTCTime) <- rows]
 
 -- | Read the actual @in_flight_until@ from the groups table.
 readGroupsInFlight :: PG.Connection -> Text -> Text -> IO (Map.Map Text (Maybe UTCTime))
@@ -87,13 +97,14 @@ readGroupsInFlight conn schemaName tableName = do
 
 -- | Compute expected @in_flight_until@ from the main table.
 --
--- For each group: if any job satisfies @not_visible_until > NOW() AND NOT suspended@,
--- then @in_flight_until@ must equal @MAX(not_visible_until)@ over those jobs.
--- Otherwise @in_flight_until@ must be NULL.
+-- A group is blocked only by a lease or backoff (@attempts > 0@), not by a
+-- scheduled job (@attempts = 0@, future visibility). For each group: if any job
+-- satisfies @not_visible_until > NOW() AND NOT suspended AND attempts > 0@, then
+-- @in_flight_until@ must equal @MAX(not_visible_until)@ over those jobs. Otherwise NULL.
 computeExpectedInFlight :: PG.Connection -> Text -> Text -> IO (Map.Map Text (Maybe UTCTime))
 computeExpectedInFlight conn schemaName tableName = do
   let sql =
-        "SELECT group_key, MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended) FROM "
+        "SELECT group_key, MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) FROM "
           <> schemaName
           <> ".\""
           <> tableName
@@ -140,14 +151,14 @@ assertGroupsConsistent :: PG.Connection -> Text -> Text -> String -> IO ()
 assertGroupsConsistent conn schemaName tableName ctx = do
   actual <- readGroupsTable conn schemaName tableName
   expected <- computeExpectedGroups conn schemaName tableName
-  let toMap = Map.fromList . map (\g -> (gsGroupKey g, (gsJobCount g, gsMinPriority g, gsMinId g)))
+  let toMap = Map.fromList . map (\g -> (gsGroupKey g, (gsJobCount g, gsMinPriority g, gsMinId g, gsReadyCount g, gsNextDue g)))
       -- Filter out empty groups from actual - they're harmless leftovers
-      actualNonEmpty = Map.filter (\(c, _, _) -> c > 0) (toMap actual)
+      actualNonEmpty = Map.filter (\(c, _, _, _, _) -> c > 0) (toMap actual)
       expectedFull = toMap expected
   when (actualNonEmpty /= expectedFull) $
     expectationFailure $
       ctx
-        <> "\n  Expected (group_key -> (job_count, min_priority, min_id)): "
+        <> "\n  Expected (group_key -> (job_count, min_priority, min_id, ready_count, next_due)): "
         <> show expectedFull
         <> "\n  Actual (excluding empty groups): "
         <> show actualNonEmpty
@@ -792,3 +803,87 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       -- Promote (sets not_visible_until = NULL)
       void $ runM env $ HL.promoteJob @m @registry @payload (primaryKey jobA)
       check env "after promoteJob (in_flight_until should be NULL)"
+
+    it "backoff-blocked groups do not starve a productive group" $ \env -> do
+      -- Many low-id groups go into backoff with a ready successor queued behind
+      -- the failed head. Blocked groups must leave the ready ranking, or they
+      -- crowd the claim window and starve a productive higher-id group.
+      let blocked = [1 .. 30 :: Int]
+          grp i = "boff-" <> T.pack (show i)
+      forM_ blocked $ \i ->
+        void $ runM env $ HL.insertJob (defaultJob (mkPayload (grp i <> "-head"))) {groupKey = Just (grp i)}
+      forM_ blocked $ \_ -> do
+        claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+        forM_ claimed $ \j -> void $ runM env $ HL.updateJobForRetry 3600 "boom" j
+      forM_ blocked $ \i ->
+        void $ runM env $ HL.insertJob (defaultJob (mkPayload (grp i <> "-succ"))) {groupKey = Just (grp i)}
+      -- Productive group inserted last, so it has the highest min_id.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "productive")) {groupKey = Just "productive-g"}
+      claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length claimed `shouldBe` 1
+
+    it "suspended grouped jobs do not starve a productive group" $ \env -> do
+      -- A suspended job sits with not_visible_until = NULL: not claimable, but it
+      -- must leave the ready ranking. More than overfetch (maxBatches * 10 = 10 for
+      -- limit 1) low-id suspended groups crowd the claim window and starve a
+      -- productive higher-id group.
+      let suspendedGroups = [1 .. 30 :: Int]
+          grp i = "susp-" <> T.pack (show i)
+      forM_ suspendedGroups $ \i -> do
+        Just j <- runM env $ HL.insertJob (defaultJob (mkPayload (grp i))) {groupKey = Just (grp i)}
+        void $ runM env $ HL.suspendJob @m @registry @payload (primaryKey j)
+      -- Productive group inserted last, so it has the highest min_id.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "productive")) {groupKey = Just "productive-g"}
+      claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length claimed `shouldBe` 1
+
+    it "reclaims an expired-lease grouped job after a reaper recompute" $ \env -> do
+      -- A crashed worker leaves the job leased with a stale claimed_by. After the
+      -- lease expires AND the reaper recomputes in_flight_until to NULL, the job
+      -- must still be reclaimable (via the next_due due-finder, not in_flight).
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "crash")) {groupKey = Just "crash-g"}
+      [_jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 1
+      liftIO $ threadDelay 2_000_000
+      void $ runM env HL.refreshAllGroups
+      check env "after reaper on expired-lease group"
+      reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length reclaimed `shouldBe` 1
+
+    it "reclaims an expired-lease grouped job via triggers alone (no reaper)" $ \env -> do
+      -- next_due (trigger-maintained) must resurface the expired lease without a reaper.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "crash-nr")) {groupKey = Just "crash-nr-g"}
+      [_jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 1
+      liftIO $ threadDelay 2_000_000
+      reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length reclaimed `shouldBe` 1
+
+    it "no claimable group is invisible to the claim" $ \env -> do
+      -- Liveness: every group with a visible head is reachable by the claim, via
+      -- ready work (source A) or the now-due finder (source B), while
+      -- future-scheduled groups stay parked. Drift in ready_count/next_due would
+      -- make a claimable group vanish from the candidate sources.
+      now <- liftIO getCurrentTime
+      let readyGroups = ["lv-ready-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          dueGroups = ["lv-due-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          futureGroups = ["lv-future-" <> T.pack (show i) | i <- [1 .. 20 :: Int]]
+          insertGrouped nvu g =
+            void $ runM env $ HL.insertJob (defaultJob (mkPayload (g <> "-j"))) {groupKey = Just g, notVisibleUntil = nvu}
+      forM_ readyGroups $ insertGrouped Nothing
+      -- Parked with a wake time already in the past, surfaced via next_due.
+      forM_ dueGroups $ insertGrouped (Just (addUTCTime (-5) now))
+      -- Not due yet. Must never be claimed.
+      forM_ futureGroups $ insertGrouped (Just (addUTCTime 3600 now))
+
+      -- Drain: claim a batch, ack it, repeat until nothing is claimable.
+      let drain acc = do
+            claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 100 60
+            if null claimed
+              then pure acc
+              else do
+                forM_ claimed $ \j -> void $ runM env $ HL.ackJob j
+                drain (acc <> [g | j <- claimed, Just g <- [groupKey j]])
+      drained <- drain []
+
+      forM_ (readyGroups <> dueGroups) $ \g -> (g `elem` drained) `shouldBe` True
+      forM_ futureGroups $ \g -> (g `elem` drained) `shouldBe` False
+      check env "after draining every claimable group"

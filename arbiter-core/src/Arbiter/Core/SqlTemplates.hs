@@ -541,11 +541,29 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       claimedBy = uuidLiteral mWorkerId
    in [text|
   WITH
+    group_candidates AS (
+      -- A: unblocked groups with ready work, ranked by priority.
+      (
+        SELECT group_key FROM ${groupsTbl}
+        WHERE ready_count > 0 AND in_flight_until IS NULL
+        ORDER BY min_priority ASC, min_id ASC
+        LIMIT ${overfetch}
+      )
+      UNION
+      -- B: parked groups now due - scheduled, backoff, or expired lease (next_due spans all parked rows).
+      (
+        SELECT group_key FROM ${groupsTbl}
+        WHERE next_due <= NOW()
+        ORDER BY next_due ASC
+        LIMIT ${overfetch}
+      )
+    ),
     eligible_groups AS (
-      SELECT group_key FROM ${groupsTbl}
-      WHERE job_count > 0
-        AND (in_flight_until IS NULL OR in_flight_until <= NOW())
-      ORDER BY min_priority ASC, min_id ASC
+      SELECT g.group_key FROM ${groupsTbl} g
+      WHERE g.group_key IN (SELECT group_key FROM group_candidates)
+        AND g.job_count > 0
+        AND (g.in_flight_until IS NULL OR g.in_flight_until <= NOW())
+      ORDER BY g.min_priority ASC, g.min_id ASC
       LIMIT ${overfetch}
       FOR UPDATE SKIP LOCKED
     ),
@@ -562,14 +580,37 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         LIMIT 1
       ) h
     ),
+    ungrouped_pool AS (
+      -- Ready rows via the ready-ranking index: ordered LIMIT short-circuits at
+      -- the head, never walking the future-dated backlog.
+      (
+        SELECT id, priority
+        FROM ${tbl}
+        WHERE group_key IS NULL
+          AND NOT suspended
+          AND not_visible_until IS NULL
+        ORDER BY priority ASC, id ASC
+        LIMIT ${ungroupedLimit}
+      )
+      UNION ALL
+      -- Due rows (scheduled/backoff come due, expired leases) via the due-finder
+      -- index: a range scan of only the now-due tail.
+      (
+        SELECT id, priority
+        FROM ${tbl}
+        WHERE group_key IS NULL
+          AND NOT suspended
+          AND not_visible_until IS NOT NULL
+          AND not_visible_until <= NOW()
+        ORDER BY not_visible_until ASC
+        LIMIT ${ungroupedLimit}
+      )
+    ),
     ungrouped_numbered AS (
       SELECT id, priority,
         ((ROW_NUMBER() OVER (ORDER BY priority ASC, id ASC) - 1)
           / ${bs}) + 1 AS batch_num
-      FROM ${tbl}
-      WHERE group_key IS NULL
-        AND NOT suspended
-        AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+      FROM ungrouped_pool
       ORDER BY priority ASC, id ASC
       LIMIT ${ungroupedLimit}
     ),
@@ -745,7 +786,7 @@ setVisibilityTimeoutSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|
         UPDATE ${tbl}
-        SET not_visible_until = NOW() + (? * interval '1 second'),
+        SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
             updated_at = NOW()
         WHERE id = ? AND attempts = ?
       |]
@@ -756,8 +797,6 @@ setVisibilityTimeoutSQL schema tableName =
 -- This is used for heartbeating. The query attempts to update all jobs, and
 -- then reports on which ones succeeded, which were missing (acked), and which
 -- had a different attempts count (stolen).
---
--- Parameters: timeout, then a placeholder for a VALUES list of (job_id, attempts) pairs
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Text -> Text
 setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
   let tbl = jobQueueTable schema tableName
@@ -768,7 +807,7 @@ setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
         ),
         updated AS (
           UPDATE ${tbl} j
-          SET not_visible_until = NOW() + (? * interval '1 second'),
+          SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
               updated_at = NOW()
           FROM input_jobs ij
           WHERE j.id = ij.id AND j.attempts = ij.expected_attempts
@@ -1487,11 +1526,8 @@ readChildResultsSQL schema tableName =
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | The advisory lock key expression for group serialization.
---
--- Used by both claim CTEs (@pg_try_advisory_xact_lock@) and insert
--- (@pg_advisory_xact_lock@) to ensure producers and consumers share
--- the same lock namespace.
+-- | @FOR UPDATE SKIP LOCKED@ over the groups rows. The reaper acquires these
+-- before a full recompute to reduce trigger interleaving.
 lockGroupsSQL :: Text -> Text -> Text
 lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
@@ -1512,7 +1548,9 @@ refreshGroupsSQL schema tableName =
                  MIN(priority) AS min_priority,
                  MIN(id) AS min_id,
                  COUNT(*) AS job_count,
-                 MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended) AS in_flight_until
+                 COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count,
+                 MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due,
+                 MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS in_flight_until
           FROM ${tbl}
           WHERE group_key IS NOT NULL
           GROUP BY group_key
@@ -1526,15 +1564,19 @@ refreshGroupsSQL schema tableName =
           SET min_priority = c.min_priority,
               min_id = c.min_id,
               job_count = c.job_count,
+              ready_count = c.ready_count,
+              next_due = c.next_due,
               in_flight_until = c.in_flight_until
           FROM current c
           WHERE g.group_key = c.group_key
             AND (g.min_priority <> c.min_priority OR g.min_id <> c.min_id
                  OR g.job_count <> c.job_count
+                 OR g.ready_count <> c.ready_count
+                 OR g.next_due IS DISTINCT FROM c.next_due
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
         )
-        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, in_flight_until)
-        SELECT c.group_key, c.min_priority, c.min_id, c.job_count, c.in_flight_until
+        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
+        SELECT c.group_key, c.min_priority, c.min_id, c.job_count, c.ready_count, c.next_due, c.in_flight_until
         FROM current c
         WHERE NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = c.group_key)
         ON CONFLICT (group_key) DO NOTHING

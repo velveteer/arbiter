@@ -495,7 +495,7 @@ persistParentState schemaName tableName jobId state =
 
 -- | Build batch columns with within-batch dedup, preserving input order.
 --
--- A single fold over the input list. Non-keyed jobs are appended; keyed
+-- A single fold over the input list. Non-keyed jobs are appended. Keyed
 -- jobs occupy the slot of their first occurrence, with O(log n) positional
 -- updates via 'Seq' when a later 'ReplaceDuplicate' overwrites an earlier
 -- entry for the same key.
@@ -672,7 +672,7 @@ chunksOfNE n (x :| xs) = go (x : xs)
 
 -- | Acknowledge a job as completed (smart ack).
 --
--- Deletes standalone jobs; suspends parents waiting for children; wakes
+-- Deletes standalone jobs. Suspends parents waiting for children. Wakes
 -- parents when the last sibling completes. Uses an advisory lock for
 -- child jobs to serialize with concurrent sibling acks.
 --
@@ -769,6 +769,7 @@ setVisibilityTimeout schemaName tableName timeout job =
   executeStatement
     (Tmpl.setVisibilityTimeoutSQL schemaName tableName)
     [ pval CFloat8 (realToFrac timeout)
+    , pval CFloat8 (realToFrac timeout)
     , pval CInt8 (primaryKey job)
     , pval CInt4 (attempts job)
     ]
@@ -804,7 +805,7 @@ setVisibilityTimeoutBatch _ _ _ [] = pure []
 setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
   let valuesPlaceholder = T.intercalate "," $ replicate (length jobs) "(?,?)"
       jobParams = concatMap (\job -> [pval CInt8 (primaryKey job), pval CInt4 (attempts job)]) jobs
-      params = jobParams <> [pval CFloat8 (realToFrac timeout)]
+      params = jobParams <> [pval CFloat8 (realToFrac timeout), pval CFloat8 (realToFrac timeout)]
 
   executeQuery
     (Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesPlaceholder)

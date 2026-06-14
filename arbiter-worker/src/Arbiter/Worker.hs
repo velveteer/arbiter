@@ -599,7 +599,6 @@ processJobsWithRetry config jobs = do
           storeJobResult schemaName j r
           ackJobOrSkip j
         finalize j
-      -- Bulk-ack, optionally storing a result per job.
       ackBatch pairs = do
         let js = map fst pairs
             isAcked acked j = Job.primaryKey j `Set.member` acked
@@ -645,27 +644,44 @@ processJobsWithRetry config jobs = do
         BatchedJobsMode _ handler -> handler jobs callbacks
   endTime <- liftIO getCurrentTime
   handled <- liftIO $ readIORef handledRef
-  case result of
-    Right () ->
-      when (Set.size handled < length jobs) $
-        tryLog (logConfig config) Warning $
-          "Handler finalized "
-            <> T.pack (show (Set.size handled))
-            <> " of "
-            <> T.pack (show (length jobs))
-            <> " jobs. The rest will be reprocessed"
-    Left e
-      | isJobGoneException e ->
-          tryLog (logConfig config) Info $
-            "Job(s) no longer available, skipping retry: " <> T.pack (show e)
-      | Just JobNackException <- fromException e ->
-          tryLog (logConfig config) Info "Job(s) nacked, will be reprocessed"
-      | otherwise ->
-          -- Fail the jobs the handler did not finalize, in a separate transaction.
-          withDbTransaction $
-            traverse_
-              (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
-              (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
+  reportBatchOutcome config hooks startTime endTime jobs handled result
+
+-- | Interpret a finished batch: warn when the handler left jobs unfinalized,
+-- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
+reportBatchOutcome
+  :: forall m registry payload result
+   . (JobOperation m registry payload, MonadUnliftIO m)
+  => WorkerConfig m payload result
+  -> Job.ObservabilityHooks m payload
+  -> UTCTime
+  -> UTCTime
+  -> NonEmpty (Job.JobRead payload)
+  -> Set.Set Int64
+  -> Either SomeException ()
+  -> m ()
+reportBatchOutcome config hooks startTime endTime jobs handled = \case
+  Right () ->
+    when (Set.size handled < length jobs) $
+      tryLog cfg Warning $
+        "Handler finalized "
+          <> T.pack (show (Set.size handled))
+          <> " of "
+          <> T.pack (show (length jobs))
+          <> " jobs. The rest will be reprocessed"
+  Left e
+    | isJobGoneException e ->
+        tryLog cfg Info $ "Job(s) no longer available, skipping retry: " <> T.pack (show e)
+    | Just JobNackException <- fromException e ->
+        tryLog cfg Info "Job(s) nacked, will be reprocessed"
+    | otherwise ->
+        -- Fail the jobs the handler did not finalize, in a separate transaction.
+        withDbTransaction $
+          traverse_
+            (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
+            (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
+  where
+    cfg = logConfig config
+    jobMaxAtts job = fromMaybe (maxAttempts config) (Job.maxAttempts job)
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
