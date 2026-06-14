@@ -241,16 +241,16 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
     , "WHERE group_key IS NOT NULL;"
     ]
 
--- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL@).
--- Scheduled/backoff/in-flight rows have @not_visible_until@ set, so they are
--- absent, and the claim's ordered @LIMIT@ short-circuits at the head over ready
--- rows instead of walking the future-dated backlog.
+-- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL AND
+-- NOT suspended@). Scheduled/backoff/in-flight rows have @not_visible_until@ set
+-- and suspended rows are excluded, so they are absent, and the claim's ordered
+-- @LIMIT@ short-circuits at the head over ready rows instead of walking them.
 createJobQueueUngroupedReadyRankingIndexSQL :: Text -> Text -> Text
 createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
   T.unlines
     [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_ready_ranking")
     , "ON " <> jobQueueTable schemaName tableName <> " (priority ASC, id ASC)"
-    , "WHERE group_key IS NULL AND not_visible_until IS NULL;"
+    , "WHERE group_key IS NULL AND not_visible_until IS NULL AND NOT suspended;"
     ]
 
 -- | Due-finder for ungrouped parked rows: range-scanned by @not_visible_until <=
@@ -261,7 +261,7 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
   T.unlines
     [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_ungrouped_due")
     , "ON " <> jobQueueTable schemaName tableName <> " (not_visible_until ASC)"
-    , "WHERE group_key IS NULL AND not_visible_until IS NOT NULL;"
+    , "WHERE group_key IS NULL AND not_visible_until IS NOT NULL AND NOT suspended;"
     ]
 
 -- | Migration: replace the full ungrouped ranking index with the ready-only
@@ -358,9 +358,8 @@ createGroupsTableSQL schemaName tableName =
         , ");"
         ]
 
--- | Add @ready_count@ (ready-row count) and @next_due@ to the groups summary,
--- make the ranking index partial on @ready_count > 0@ so scheduled-only groups
--- leave it, and add the @next_due@ and @in_flight_until@ due-finders.
+-- | Add @ready_count@ and @next_due@ to the groups summary, make the ranking
+-- index partial on ready rows, and add the @next_due@ due-finder.
 migrateGroupsReadyRankingSQL :: Text -> Text -> Text
 migrateGroupsReadyRankingSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
@@ -375,7 +374,7 @@ migrateGroupsReadyRankingSQL schemaName tableName =
         , "  SELECT group_key,"
         , "    MIN(priority) AS mp,"
         , "    MIN(id) AS mi,"
-        , "    COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS rc,"
+        , "    COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS rc,"
         , "    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS nd"
         , "  FROM " <> tbl <> " WHERE group_key IS NOT NULL GROUP BY group_key"
         , ") sub WHERE g.group_key = sub.group_key;"
@@ -390,11 +389,6 @@ migrateGroupsReadyRankingSQL schemaName tableName =
             <> " ON "
             <> groupsTbl
             <> " (next_due ASC) WHERE next_due IS NOT NULL;"
-        , "CREATE INDEX IF NOT EXISTS "
-            <> qidx "_groups_in_flight"
-            <> " ON "
-            <> groupsTbl
-            <> " (in_flight_until ASC) WHERE in_flight_until IS NOT NULL;"
         ]
 
 -- ---------------------------------------------------------------------------
@@ -433,7 +427,7 @@ groupsInsertFunction funcName groupsTbl dd =
         MIN(priority),
         MIN(id),
         COUNT(*),
-        COUNT(*) FILTER (WHERE not_visible_until IS NULL),
+        COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
         MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended)
       FROM new_table
       WHERE group_key IS NOT NULL
@@ -480,7 +474,7 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
           MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
         FROM (
           SELECT group_key, COUNT(*) AS removed_count,
-            COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS removed_ready_count,
+            COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS removed_ready_count,
             bool_or(not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS had_inflight
           FROM old_table
           WHERE group_key IS NOT NULL
@@ -575,7 +569,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
         FROM (
           SELECT o.group_key, COUNT(*) AS cnt,
-            COUNT(*) FILTER (WHERE o.not_visible_until IS NULL) AS removed_ready_count,
+            COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
             bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND o.attempts > 0) AS had_inflight
           FROM old_table o
           JOIN new_table n ON o.id = n.id
@@ -600,7 +594,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       -- Step 4: group_key change - add to new group
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
       SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
-        COUNT(*) FILTER (WHERE n.not_visible_until IS NULL),
+        COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended),
         MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended)
       FROM new_table n
       JOIN old_table o ON o.id = n.id
@@ -651,8 +645,8 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       FROM (
         SELECT n.group_key,
           SUM(
-            (CASE WHEN n.not_visible_until IS NULL THEN 1 ELSE 0 END)
-            - (CASE WHEN o.not_visible_until IS NULL THEN 1 ELSE 0 END)
+            (CASE WHEN n.not_visible_until IS NULL AND NOT n.suspended THEN 1 ELSE 0 END)
+            - (CASE WHEN o.not_visible_until IS NULL AND NOT o.suspended THEN 1 ELSE 0 END)
           )::int AS delta
         FROM new_table n
         JOIN old_table o ON o.id = n.id

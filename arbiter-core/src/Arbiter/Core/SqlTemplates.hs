@@ -542,9 +542,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
    in [text|
   WITH
     group_candidates AS (
-      -- A: unblocked groups with ready work, ranked (ready-ranking partial index).
-      -- Blocked groups (active lease or backoff) are excluded here and recovered
-      -- by source C when their block expires, so they cannot crowd the window.
+      -- A: unblocked groups with ready work, ranked by priority.
       (
         SELECT group_key FROM ${groupsTbl}
         WHERE ready_count > 0 AND in_flight_until IS NULL
@@ -552,19 +550,11 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         LIMIT ${overfetch}
       )
       UNION
-      -- B: scheduled-only groups that have come due (next_due finder)
+      -- B: parked groups now due - scheduled, backoff, or expired lease (next_due spans all parked rows).
       (
         SELECT group_key FROM ${groupsTbl}
         WHERE next_due <= NOW()
         ORDER BY next_due ASC
-        LIMIT ${overfetch}
-      )
-      UNION
-      -- C: groups whose backoff/lease block has expired (in_flight finder)
-      (
-        SELECT group_key FROM ${groupsTbl}
-        WHERE in_flight_until <= NOW()
-        ORDER BY in_flight_until ASC
         LIMIT ${overfetch}
       )
     ),
@@ -573,7 +563,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       WHERE g.group_key IN (SELECT group_key FROM group_candidates)
         AND g.job_count > 0
         AND (g.in_flight_until IS NULL OR g.in_flight_until <= NOW())
-      ORDER BY g.min_priority ASC NULLS LAST, g.min_id ASC NULLS LAST
+      ORDER BY g.min_priority ASC, g.min_id ASC
       LIMIT ${overfetch}
       FOR UPDATE SKIP LOCKED
     ),
@@ -807,8 +797,6 @@ setVisibilityTimeoutSQL schema tableName =
 -- This is used for heartbeating. The query attempts to update all jobs, and
 -- then reports on which ones succeeded, which were missing (acked), and which
 -- had a different attempts count (stolen).
---
--- Parameters: timeout, then a placeholder for a VALUES list of (job_id, attempts) pairs
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Text -> Text
 setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
   let tbl = jobQueueTable schema tableName
@@ -1538,11 +1526,8 @@ readChildResultsSQL schema tableName =
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | The advisory lock key expression for group serialization.
---
--- Used by both claim CTEs (@pg_try_advisory_xact_lock@) and insert
--- (@pg_advisory_xact_lock@) to ensure producers and consumers share
--- the same lock namespace.
+-- | @FOR UPDATE SKIP LOCKED@ over the groups rows. The reaper acquires these
+-- before a full recompute to reduce trigger interleaving.
 lockGroupsSQL :: Text -> Text -> Text
 lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
@@ -1563,7 +1548,7 @@ refreshGroupsSQL schema tableName =
                  MIN(priority) AS min_priority,
                  MIN(id) AS min_id,
                  COUNT(*) AS job_count,
-                 COUNT(*) FILTER (WHERE not_visible_until IS NULL) AS ready_count,
+                 COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count,
                  MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due,
                  MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS in_flight_until
           FROM ${tbl}

@@ -41,7 +41,8 @@ import UnliftIO.Async (concurrently)
 import Arbiter.Test.Setup (execute_)
 
 -- | Expected state of a single group row. @min_priority@/@min_id@ range over all
--- rows. @ready_count@ is the number of ready rows (@not_visible_until IS NULL@).
+-- rows. @ready_count@ is the number of claimable-ready rows
+-- (@not_visible_until IS NULL AND NOT suspended@).
 -- @next_due@ is the earliest wake time over parked/leased rows
 -- (@not_visible_until IS NOT NULL AND NOT suspended@). @next_due@ has no @NOW()@
 -- term, so it must match the recompute exactly.
@@ -72,7 +73,7 @@ computeExpectedGroups :: PG.Connection -> Text -> Text -> IO [GroupState]
 computeExpectedGroups conn schemaName tableName = do
   let sql =
         "SELECT group_key, MIN(priority)::int, MIN(id)::bigint, COUNT(*)::bigint, \
-        \COUNT(*) FILTER (WHERE not_visible_until IS NULL)::bigint, \
+        \COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended)::bigint, \
         \MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) FROM "
           <> schemaName
           <> ".\""
@@ -821,6 +822,21 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       length claimed `shouldBe` 1
 
+    it "suspended grouped jobs do not starve a productive group" $ \env -> do
+      -- A suspended job sits with not_visible_until = NULL: not claimable, but it
+      -- must leave the ready ranking. More than overfetch (maxBatches * 10 = 10 for
+      -- limit 1) low-id suspended groups crowd the claim window and starve a
+      -- productive higher-id group.
+      let suspendedGroups = [1 .. 30 :: Int]
+          grp i = "susp-" <> T.pack (show i)
+      forM_ suspendedGroups $ \i -> do
+        Just j <- runM env $ HL.insertJob (defaultJob (mkPayload (grp i))) {groupKey = Just (grp i)}
+        void $ runM env $ HL.suspendJob @m @registry @payload (primaryKey j)
+      -- Productive group inserted last, so it has the highest min_id.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "productive")) {groupKey = Just "productive-g"}
+      claimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length claimed `shouldBe` 1
+
     it "reclaims an expired-lease grouped job after a reaper recompute" $ \env -> do
       -- A crashed worker leaves the job leased with a stale claimed_by. After the
       -- lease expires AND the reaper recomputes in_flight_until to NULL, the job
@@ -830,6 +846,14 @@ groupsInvariantSpec schemaName tableName mkPayload runM withConn = do
       liftIO $ threadDelay 2_000_000
       void $ runM env HL.refreshAllGroups
       check env "after reaper on expired-lease group"
+      reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
+      length reclaimed `shouldBe` 1
+
+    it "reclaims an expired-lease grouped job via triggers alone (no reaper)" $ \env -> do
+      -- next_due (trigger-maintained) must resurface the expired lease without a reaper.
+      void $ runM env $ HL.insertJob (defaultJob (mkPayload "crash-nr")) {groupKey = Just "crash-nr-g"}
+      [_jobA] <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 1
+      liftIO $ threadDelay 2_000_000
       reclaimed <- runM env $ HL.claimNextVisibleJobs @m @registry @payload 1 60
       length reclaimed `shouldBe` 1
 
