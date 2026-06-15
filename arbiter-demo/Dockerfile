@@ -7,7 +7,7 @@
 #   docker build -f arbiter-demo/Dockerfile -t arbiter-demo .
 
 # ---- build ----------------------------------------------------------------
-FROM haskell:9.12-slim-bookworm AS build
+FROM haskell:9.14-slim-bookworm AS build
 WORKDIR /src
 
 # Build-time C deps: libpq headers + pg_config for postgresql-libpq, plus
