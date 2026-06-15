@@ -549,11 +549,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       WHERE g.group_key IN (SELECT group_key FROM group_candidates)
         AND g.job_count > 0
         AND (g.in_flight_until IS NULL OR g.in_flight_until <= NOW())
-        AND NOT EXISTS (
-          SELECT 1 FROM ${tbl} t
-          WHERE t.group_key = g.group_key
-            AND t.not_visible_until > NOW() AND NOT t.suspended AND t.attempts > 0
-        )
       ORDER BY g.min_priority ASC, g.min_id ASC
       LIMIT ${overfetch}
       FOR UPDATE SKIP LOCKED
