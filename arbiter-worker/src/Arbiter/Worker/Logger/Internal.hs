@@ -7,22 +7,20 @@ module Arbiter.Worker.Logger.Internal
   ( logMessage
   , tryLog
   , withJobContext
-  , withJobContextOne
   , showJobIds
   , runHook
   ) where
 
 import Arbiter.Core.Job.Types qualified as Job
 import Control.Monad (void, when)
-import Control.Monad.Catch (MonadMask)
-import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Logger qualified as ML
 import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
-import Data.List.NonEmpty (NonEmpty (..), toList)
+import Data.List.NonEmpty (NonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, tryAny)
@@ -35,20 +33,19 @@ logMessage config level msg = when (level >= minLogLevel config) $ do
   extraCtx <- additionalContext config
   runWithDestination (logDestination config) extraCtx level msg
 
--- | Run an action with job context attached to the thread.
---
--- This sets up thread-local context that will be included in all log messages
--- within the action.
-withJobContext
-  :: (MonadIO m, MonadMask m)
-  => NonEmpty (Job.JobRead payload)
-  -> m a
-  -> m a
-withJobContext jobs = MLA.withThreadContext (buildJobContext jobs)
+-- | Augment a 'LogConfig' so every message it emits carries the jobs' fields.
+-- The context is folded into 'additionalContext', which is evaluated only when a
+-- message is actually emitted, so the happy path pays nothing.
+withJobContext :: LogConfig -> NonEmpty (Job.JobRead payload) -> LogConfig
+withJobContext config jobs
+  | loggingActive config = config {additionalContext = (buildJobContext jobs <>) <$> additionalContext config}
+  | otherwise = config
 
--- | 'withJobContext' for a single job (per-job callbacks and hooks).
-withJobContextOne :: (MonadIO m, MonadMask m) => Job.JobRead payload -> m a -> m a
-withJobContextOne job = withJobContext (job :| [])
+-- | Building job context is wasted work when logs are discarded.
+loggingActive :: LogConfig -> Bool
+loggingActive config = case logDestination config of
+  LogDiscard -> False
+  _ -> True
 
 -- | Comma-separated job ids for log messages.
 showJobIds :: [Int64] -> Text

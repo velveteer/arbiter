@@ -60,7 +60,6 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Control.Exception (SomeException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
-import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
@@ -129,7 +128,7 @@ import Arbiter.Worker.Cron
 import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (runHook, showJobIds, tryLog, withJobContext, withJobContextOne)
+import Arbiter.Worker.Logger.Internal (runHook, showJobIds, tryLog, withJobContext)
 import Arbiter.Worker.NotificationListener (runMultiChannelListener)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
@@ -196,7 +195,7 @@ namedWorkerPool cfg =
 -- shared 'TVar' for installing signal handlers.
 runWorkerPools
   :: forall m registry
-   . (MonadMask m, MonadUnliftIO m, RegistryTables registry)
+   . (MonadUnliftIO m, RegistryTables registry)
   => Proxy registry
   -> [NamedWorkerPool m]
   -> (TVar WorkerState -> IO ())
@@ -209,7 +208,7 @@ runWorkerPools registry pools setup = do
 
 -- | Run only the worker pools whose names appear in the enabled list.
 runSelectedWorkerPools
-  :: (MonadMask m, MonadUnliftIO m)
+  :: (MonadUnliftIO m)
   => TVar WorkerState
   -> [Text]
   -> [NamedWorkerPool m]
@@ -285,7 +284,6 @@ getEnabledQueues envVar registry = do
 runWorkerPool
   :: forall m registry payload result
    . ( JobResult result
-     , MonadMask m
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
@@ -497,7 +495,6 @@ workerLoop
   :: forall m registry payload result
    . ( JobOperation m registry payload
      , JobResult result
-     , MonadMask m
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
@@ -518,10 +515,10 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
     pure batch
 
   let jobIds = map Job.primaryKey (toList jobBatch)
+      batchCfg = withJobContext (logConfig config) jobBatch
       claimHook now job =
-        withJobContextOne job $
-          runHook (logConfig config) "onJobClaimed" $
-            Job.onJobClaimed (observabilityHooks config) job now
+        runHook batchCfg "onJobClaimed" $
+          Job.onJobClaimed (observabilityHooks config) job now
 
   flip
     finally
@@ -530,23 +527,20 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
         modifyTVar' runningJobs $ \m -> foldl' (flip Map.delete) m jobIds
         writeTVar workerFinishedVar True
     )
-    $ withJobContext jobBatch
     $ do
       currentTime <- liftIO getCurrentTime
       traverse_ (claimHook currentTime) jobBatch
-      -- withRegisteredJobs forks the work onto an async, which doesn't inherit
-      -- the thread-local context above, so re-establish it inside.
       result <-
         withRegisteredJobs runningJobs jobIds $
-          withJobContext jobBatch (processJobsWithRetry config jobBatch)
+          processJobsWithRetry config {logConfig = batchCfg} jobBatch
       case result of
         Right () -> pure ()
         Left e
           | Just JobForceCancelled <- fromException e ->
-              tryLog (logConfig config) Info "Job(s) force-cancelled"
+              tryLog batchCfg Info "Job(s) force-cancelled"
           | Just Async.AsyncCancelled <- fromException e -> throwIO e
           | otherwise -> do
-              tryLog (logConfig config) Error $ "Worker exception: " <> T.pack (show e)
+              tryLog batchCfg Error $ "Worker exception: " <> T.pack (show e)
               threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
@@ -568,7 +562,6 @@ processJobsWithRetry
   :: forall m registry payload result
    . ( JobOperation m registry payload
      , JobResult result
-     , MonadMask m
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
@@ -586,11 +579,11 @@ processJobsWithRetry config jobs = do
   schemaName <- Arb.getSchema
   handledRef <- liftIO $ newIORef Set.empty
   let markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
-      fireSuccess j = withJobContextOne j $ do
+      fireSuccess j = do
         endT <- liftIO getCurrentTime
         runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
       finalize j = fireSuccess j >> markHandled j
-      failWith j exc = withJobContextOne j $ do
+      failWith j exc = do
         endT <- liftIO getCurrentTime
         withDbTransaction $ handleJobFailure config hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
@@ -655,7 +648,7 @@ processJobsWithRetry config jobs = do
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
   :: forall m registry payload result
-   . (JobOperation m registry payload, MonadMask m, MonadUnliftIO m)
+   . (JobOperation m registry payload, MonadUnliftIO m)
   => WorkerConfig m payload result
   -> Job.ObservabilityHooks m payload
   -> UTCTime
@@ -682,7 +675,7 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
         -- Fail the jobs the handler did not finalize, in a separate transaction.
         withDbTransaction $
           traverse_
-            (\job -> withJobContextOne job $ handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
+            (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
             (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
   where
     cfg = logConfig config
