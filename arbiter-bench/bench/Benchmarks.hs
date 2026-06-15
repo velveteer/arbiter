@@ -7,7 +7,6 @@ module Main (main) where
 import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
   ( JobRead
   , JobWrite
@@ -254,65 +253,6 @@ multiTrial :: Int -> IO () -> IO Double -> String -> IO String
 multiTrial n setup measure unit = do
   samples <- replicateM n (setup >> measure)
   pure $ formatStats unit (computeStats samples)
-
--- ---------------------------------------------------------------------------
--- Index/fillfactor profiles (write-amplification A/B)
--- ---------------------------------------------------------------------------
-
--- | A claim-index/fillfactor configuration to A/B.
-data IndexProfile = IndexProfile
-  { ipLabel :: String
-  , ipCreate :: [Text]
-  -- ^ Names (from 'rankingIndexDDL') of the ranking indexes to (re)create.
-  , ipFillfactor :: Int
-  }
-
--- | The ranking\/scheduling indexes added for the claim path, as (name, DDL).
--- Structural indexes (PK, group_key, parent_id, dedup) are left in place so the
--- queue still functions - only these claim-path indexes are toggled. The
--- ungrouped DDL reuses the production schema SQL; the groups DDL mirrors
--- migrateGroupsReadyRankingSQL.
-rankingIndexDDL :: [(Text, Text)]
-rankingIndexDDL =
-  [
-    ( "idx_bench_queue_ungrouped_ready_ranking"
-    , Schema.createJobQueueUngroupedReadyRankingIndexSQL benchSchema "bench_queue"
-    )
-  , ("idx_bench_queue_ungrouped_due", Schema.createJobQueueUngroupedDueIndexSQL benchSchema "bench_queue")
-  ,
-    ( "idx_bench_queue_groups_ranking"
-    , "CREATE INDEX IF NOT EXISTS idx_bench_queue_groups_ranking ON "
-        <> groupsTbl
-        <> " (min_priority ASC, min_id ASC) WHERE ready_count > 0 AND in_flight_until IS NULL"
-    )
-  ,
-    ( "idx_bench_queue_groups_next_due"
-    , "CREATE INDEX IF NOT EXISTS idx_bench_queue_groups_next_due ON "
-        <> groupsTbl
-        <> " (next_due ASC) WHERE next_due IS NOT NULL"
-    )
-  ]
-  where
-    groupsTbl = benchSchema <> ".bench_queue_groups"
-
-allRankingIndexes :: [Text]
-allRankingIndexes = map fst rankingIndexDDL
-
-profiles :: [IndexProfile]
-profiles =
-  [ IndexProfile "indexes off, ff70" [] 70
-  , IndexProfile "indexes on, ff100" allRankingIndexes 100
-  ]
-
--- | Apply an index profile: drop every ranking index, recreate the selected
--- subset, and set the queue fillfactor. Run between bench groups while the table
--- is empty, so subsequent inserts honor the new fillfactor.
-applyIndexProfile :: Connection -> IndexProfile -> IO ()
-applyIndexProfile conn p = do
-  traverse_ (\(nm, _) -> execute_ conn ("DROP INDEX IF EXISTS " <> benchSchema <> "." <> nm)) rankingIndexDDL
-  traverse_ (\(nm, sql) -> when (nm `elem` ipCreate p) $ execute_ conn sql) rankingIndexDDL
-  execute_ conn $
-    "ALTER TABLE " <> benchSchema <> ".bench_queue SET (fillfactor = " <> T.pack (show (ipFillfactor p)) <> ")"
 
 -- ---------------------------------------------------------------------------
 -- Write-amplification / autovacuum sampling
@@ -784,11 +724,11 @@ main = do
       , bgroup "Worker Throughput (orville)" $
           orvilleWorkerBenches statsConn simpleEnv orvilleRun
       , bgroup "Steady-State Throughput (simple)" $
-          steadyStateBenches statsConn (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun statsConn d p w b m f)
+          steadyStateBenches (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun statsConn d p w b m f)
       , bgroup "Steady-State Throughput (hasql)" $
-          steadyStateBenches statsConn (\d p w b m f -> hasqlSteadyStateTrial hasqlRun producerRun statsConn d p w b m f)
+          steadyStateBenches (\d p w b m f -> hasqlSteadyStateTrial hasqlRun producerRun statsConn d p w b m f)
       , bgroup "Steady-State Throughput (orville)" $
-          steadyStateBenches statsConn (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun statsConn d p w b m f)
+          steadyStateBenches (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun statsConn d p w b m f)
       ]
 
 _claimBenches :: SimpleEnv BenchRegistry -> Int -> [(String, QueueFlavor)] -> [Benchmark]
@@ -893,30 +833,24 @@ mkWorkerFlavorBenches simpleEnv trial pools workers flavors =
               ]
 
 steadyStateBenches
-  :: Connection
-  -> (Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult)
+  :: (Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult)
   -> [Benchmark]
-steadyStateBenches statsConn trial =
+steadyStateBenches trial =
   [ bgroup "4 pools x 10 workers" $
       flip map steadyStateFlavors $ \(label, flavor) ->
-        bgroup label $
-          flip map profiles $ \profile ->
-            let producerBatch = 100
-                mkBench name mode =
-                  singleTest name $
-                    ThroughputBench $ do
-                      -- Set the index/fillfactor profile once for this group, then
-                      -- run all trials against it.
-                      applyIndexProfile statsConn profile
-                      multiTrialSteady
-                        trialCount
-                        cleanupFresh
-                        (trial trialDurationUs 4 10 producerBatch mode flavor)
-             in bgroup
-                  (ipLabel profile)
-                  [ mkBench "single job mode" BenchSingleJobMode
-                  , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10)
-                  ]
+        let producerBatch = 100
+            mkBench name mode =
+              singleTest name $
+                ThroughputBench $
+                  multiTrialSteady
+                    trialCount
+                    cleanupFresh
+                    (trial trialDurationUs 4 10 producerBatch mode flavor)
+         in bgroup
+              label
+              [ mkBench "single job mode" BenchSingleJobMode
+              , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10)
+              ]
   ]
   where
     steadyStateFlavors :: [(String, QueueFlavor)]

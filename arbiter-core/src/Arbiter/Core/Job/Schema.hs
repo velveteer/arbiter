@@ -422,6 +422,13 @@ groupsInsertFunction funcName groupsTbl dd =
         RETURN NULL;
       END IF;
 
+      -- Lock affected group rows in group_key order so concurrent triggers can never
+      -- acquire them in opposing orders and deadlock.
+      PERFORM 1 FROM ${groupsTbl} g
+      WHERE g.group_key IN (SELECT group_key FROM new_table WHERE group_key IS NOT NULL)
+      ORDER BY g.group_key
+      FOR UPDATE;
+
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
       SELECT group_key,
         MIN(priority),
@@ -456,6 +463,13 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
       IF NOT EXISTS (SELECT 1 FROM old_table WHERE group_key IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
       END IF;
+
+      -- Lock affected group rows in group_key order so concurrent triggers can never
+      -- acquire them in opposing orders and deadlock.
+      PERFORM 1 FROM ${groupsTbl} g
+      WHERE g.group_key IN (SELECT group_key FROM old_table WHERE group_key IS NOT NULL)
+      ORDER BY g.group_key
+      FOR UPDATE;
 
       UPDATE ${groupsTbl} g
       SET job_count = g.job_count - sub.removed_count,
@@ -507,6 +521,17 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ) THEN
         RETURN NULL;
       END IF;
+
+      -- Lock affected group rows (old and new) in group_key order so concurrent triggers
+      -- can never acquire them in opposing orders and deadlock.
+      PERFORM 1 FROM ${groupsTbl} g
+      WHERE g.group_key IN (
+        SELECT group_key FROM new_table WHERE group_key IS NOT NULL
+        UNION
+        SELECT group_key FROM old_table WHERE group_key IS NOT NULL
+      )
+      ORDER BY g.group_key
+      FOR UPDATE;
 
       -- Step 1: Fast path - extend in_flight_until when not_visible_until increases (claim, retry)
       UPDATE ${groupsTbl} g

@@ -513,21 +513,9 @@ insertJobsBatchBase schema tableName returning =
       |]
 
 -- | Batched single-CTE claim. Also serves the single-job claim at batch size 1.
---
--- Uses the @{queue}_groups@ table for fast candidate selection with
--- @FOR UPDATE SKIP LOCKED@ for concurrency control. The groups table row lock
--- provides two guarantees:
---
---   1. @SKIP LOCKED@ - groups currently being claimed by an in-flight
---      transaction are skipped (no contention).
---   2. @EPQ re-evaluation@ - in READ COMMITTED, @FOR UPDATE@ re-evaluates
---      the WHERE clause against committed state. If a concurrent claim
---      committed and the trigger updated @in_flight_until@, we see the
---      fresh value and correctly skip the group.
---
--- Claims any unsuspended visible job, including rollup children and woken
--- rollup parents.
--- No @?@ parameters - all values are interpolated.
+
+--- Claims any unsuspended visible job, including rollup children and woken
+--- rollup parents.
 claimJobsBatchedSQL :: SchemaName -> TableName -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
 claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorkerId =
   let tbl = jobQueueTable schema tableName
@@ -542,7 +530,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
    in [text|
   WITH
     group_candidates AS (
-      -- A: unblocked groups with ready work, ranked by priority.
       (
         SELECT group_key FROM ${groupsTbl}
         WHERE ready_count > 0 AND in_flight_until IS NULL
@@ -550,7 +537,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         LIMIT ${overfetch}
       )
       UNION
-      -- B: parked groups now due - scheduled, backoff, or expired lease (next_due spans all parked rows).
       (
         SELECT group_key FROM ${groupsTbl}
         WHERE next_due <= NOW()
@@ -563,6 +549,11 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       WHERE g.group_key IN (SELECT group_key FROM group_candidates)
         AND g.job_count > 0
         AND (g.in_flight_until IS NULL OR g.in_flight_until <= NOW())
+        AND NOT EXISTS (
+          SELECT 1 FROM ${tbl} t
+          WHERE t.group_key = g.group_key
+            AND t.not_visible_until > NOW() AND NOT t.suspended AND t.attempts > 0
+        )
       ORDER BY g.min_priority ASC, g.min_id ASC
       LIMIT ${overfetch}
       FOR UPDATE SKIP LOCKED
@@ -581,8 +572,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       ) h
     ),
     ungrouped_pool AS (
-      -- Ready rows via the ready-ranking index: ordered LIMIT short-circuits at
-      -- the head, never walking the future-dated backlog.
       (
         SELECT id, priority
         FROM ${tbl}
@@ -593,8 +582,6 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         LIMIT ${ungroupedLimit}
       )
       UNION ALL
-      -- Due rows (scheduled/backoff come due, expired leases) via the due-finder
-      -- index: a range scan of only the now-due tail.
       (
         SELECT id, priority
         FROM ${tbl}
@@ -635,7 +622,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       SELECT group_key FROM allocated_slots WHERE group_key IS NOT NULL
     ),
     grouped_candidates AS (
-      SELECT j.id
+      SELECT j.id, flg.group_key AS expected_group
       FROM final_locked_groups flg
       CROSS JOIN LATERAL (
         SELECT id
@@ -648,7 +635,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       ) j
     ),
     ungrouped_candidates AS (
-      SELECT id
+      SELECT id, NULL::text AS expected_group
       FROM ungrouped_numbered
       WHERE batch_num IN (
         SELECT ungrouped_batch
@@ -659,13 +646,14 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
     locked AS (
       SELECT j.id
       FROM (
-        SELECT id FROM grouped_candidates
+        SELECT id, expected_group FROM grouped_candidates
         UNION ALL
-        SELECT id FROM ungrouped_candidates
+        SELECT id, expected_group FROM ungrouped_candidates
       ) i
       INNER JOIN ${tbl} j ON j.id = i.id
       WHERE NOT j.suspended
         AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
+        AND j.group_key IS NOT DISTINCT FROM i.expected_group
       ORDER BY j.priority ASC, j.id ASC
       FOR UPDATE OF j SKIP LOCKED
       LIMIT ${ungroupedLimit}
@@ -1526,24 +1514,25 @@ readChildResultsSQL schema tableName =
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | @FOR UPDATE SKIP LOCKED@ over the groups rows. The reaper acquires these
--- before a full recompute to reduce trigger interleaving.
+-- | @FOR UPDATE SKIP LOCKED@ over the groups rows, returning the locked keys for
+-- the reaper to recompute. Claim-locked groups are skipped.
 lockGroupsSQL :: Text -> Text -> Text
 lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
-   in [text|SELECT 1::bigint AS result FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
+   in [text|SELECT group_key FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
 
--- | Full recompute of the groups table from the main queue.
--- Caller should first lock as many groups rows as possible via
--- 'lockGroupsSQL' (@FOR UPDATE SKIP LOCKED@) to reduce trigger
--- interleaving.  Rows locked by in-flight claims will be skipped
--- and refreshed on the next reaper cycle.
+-- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
+-- A separate statement, so its snapshot post-dates the lock and cannot clobber a
+-- concurrent claim's @in_flight_until@. The INSERT only repairs missing rows.
 refreshGroupsSQL :: Text -> Text -> Text
 refreshGroupsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
    in [text|
-        WITH current AS (
+        WITH params AS (
+          SELECT unnest(?::text[]) AS group_key
+        ),
+        current AS (
           SELECT group_key,
                  MIN(priority) AS min_priority,
                  MIN(id) AS min_id,
@@ -1552,12 +1541,13 @@ refreshGroupsSQL schema tableName =
                  MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due,
                  MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS in_flight_until
           FROM ${tbl}
-          WHERE group_key IS NOT NULL
+          WHERE group_key IN (SELECT group_key FROM params)
           GROUP BY group_key
         ),
         deleted AS (
           DELETE FROM ${groupsTbl} g
-          WHERE NOT EXISTS (SELECT 1 FROM current c WHERE c.group_key = g.group_key)
+          WHERE g.group_key IN (SELECT group_key FROM params)
+            AND NOT EXISTS (SELECT 1 FROM current c WHERE c.group_key = g.group_key)
         ),
         updated AS (
           UPDATE ${groupsTbl} g
@@ -1576,9 +1566,15 @@ refreshGroupsSQL schema tableName =
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
         )
         INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
-        SELECT c.group_key, c.min_priority, c.min_id, c.job_count, c.ready_count, c.next_due, c.in_flight_until
-        FROM current c
-        WHERE NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = c.group_key)
+        SELECT group_key,
+               MIN(priority), MIN(id), COUNT(*),
+               COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
+               MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended),
+               MAX(not_visible_until) FILTER (WHERE not_visible_until > NOW() AND NOT suspended AND attempts > 0)
+        FROM ${tbl}
+        WHERE group_key IS NOT NULL
+          AND group_key NOT IN (SELECT group_key FROM ${groupsTbl})
+        GROUP BY group_key
         ON CONFLICT (group_key) DO NOTHING
       |]
 
