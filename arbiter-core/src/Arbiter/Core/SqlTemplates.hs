@@ -15,6 +15,7 @@ module Arbiter.Core.SqlTemplates
   , setVisibilityTimeoutBatchSQL
   , updateJobForRetrySQL
   , moveToDLQSQL
+  , selectExhaustedJobsSQL
 
     -- * Dead Letter Queue Operations
   , retryFromDLQSQL
@@ -142,7 +143,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , pauseNotifyChannelPrefix
   )
-import Arbiter.Core.Job.Types (JobStatus)
+import Arbiter.Core.Job.Types (JobStatus, defaultMaxAttempts)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
@@ -389,9 +390,10 @@ insertJobSQL :: Text -> Text -> Text
 insertJobSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
+      dma = T.pack (show defaultMaxAttempts)
    in [text|
         INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?)
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
         RETURNING ${columns}
       |]
@@ -411,9 +413,10 @@ insertJobReplaceSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       columns = jobColumns Nothing
+      dma = T.pack (show defaultMaxAttempts)
    in [text|
         INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?)
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
           payload = EXCLUDED.payload,
           group_key = EXCLUDED.group_key,
@@ -468,10 +471,11 @@ insertJobsBatchBase :: Text -> Text -> Text -> Text
 insertJobsBatchBase schema tableName returning =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
+      dma = T.pack (show defaultMaxAttempts)
    in [text|
         INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until)
         SELECT
-          payload, group_key, 0, NULL, priority, dedup_key, dedup_strategy, max_attempts, parent_id,
+          payload, group_key, 0, NULL, priority, dedup_key, dedup_strategy, COALESCE(max_attempts, ${dma}), parent_id,
           parent_state, suspended, not_visible_until
         FROM (
           SELECT
@@ -527,6 +531,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       ungroupedLimit = T.pack (show (maxBatches * batchSize))
       overfetch = T.pack (show (maxBatches * 10))
       claimedBy = uuidLiteral mWorkerId
+      dma = T.pack (show defaultMaxAttempts)
    in [text|
   WITH
     group_candidates AS (
@@ -562,6 +567,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         WHERE t.group_key = el.group_key
           AND NOT t.suspended
           AND (t.not_visible_until IS NULL OR t.not_visible_until <= NOW())
+          AND t.attempts < COALESCE(t.max_attempts, ${dma})
         ORDER BY t.priority ASC, t.id ASC
         LIMIT 1
       ) h
@@ -573,6 +579,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         WHERE group_key IS NULL
           AND NOT suspended
           AND not_visible_until IS NULL
+          AND attempts < COALESCE(max_attempts, ${dma})
         ORDER BY priority ASC, id ASC
         LIMIT ${ungroupedLimit}
       )
@@ -584,6 +591,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
           AND NOT suspended
           AND not_visible_until IS NOT NULL
           AND not_visible_until <= NOW()
+          AND attempts < COALESCE(max_attempts, ${dma})
         ORDER BY not_visible_until ASC
         LIMIT ${ungroupedLimit}
       )
@@ -625,6 +633,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
         WHERE group_key = flg.group_key
           AND NOT suspended
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+          AND attempts < COALESCE(max_attempts, ${dma})
         ORDER BY attempts DESC, priority ASC, id ASC
         LIMIT ${bs}
       ) j
@@ -649,6 +658,7 @@ claimJobsBatchedSQL schema tableName batchSize maxBatches timeoutSeconds mWorker
       WHERE NOT j.suspended
         AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
         AND j.group_key IS NOT DISTINCT FROM i.expected_group
+        AND j.attempts < COALESCE(j.max_attempts, ${dma})
       ORDER BY j.priority ASC, j.id ASC
       FOR UPDATE OF j SKIP LOCKED
       LIMIT ${ungroupedLimit}
@@ -869,6 +879,25 @@ moveToDLQSQL schema tableName =
           FROM deleted_job
         )
         SELECT count(*) FROM deleted_job
+      |]
+
+-- | Select up to @limit@ claimable jobs whose attempts reached their limit,
+-- with the scalar fields the tree-aware DLQ move needs. Each row is then moved
+-- via 'moveToDLQFields'. The cap drains a large backlog over several passes
+-- rather than fetching an unbounded set at once.
+selectExhaustedJobsSQL :: Text -> Text -> Int -> Text
+selectExhaustedJobsSQL schema tableName limit =
+  let tbl = jobQueueTable schema tableName
+      dma = T.pack (show defaultMaxAttempts)
+      lim = T.pack (show limit)
+   in [text|
+        SELECT id, attempts, parent_id, (parent_state IS NOT NULL) AS is_rollup
+        FROM ${tbl}
+        WHERE NOT suspended
+          AND attempts >= COALESCE(max_attempts, ${dma})
+          AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+        ORDER BY id ASC
+        LIMIT ${lim}
       |]
 
 -- | SQL template for retrying a job from DLQ (tree-aware)

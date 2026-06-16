@@ -191,6 +191,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       let job =
             (defaultJob (FailingTask 3))
               { groupKey = Just "g1"
+              , maxAttempts = Just 5
               }
       void $ runOrvilleTest env $ HL.insertJob job
 
@@ -202,7 +203,6 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
             config
               { workerCount = 1
               , pollInterval = 0.1
-              , maxAttempts = 5 -- Allow enough retries
               , jitter = NoJitter -- Predictable timing for test
               }
         )
@@ -221,6 +221,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       let job =
             (defaultJob (SimpleTask "Doomed"))
               { groupKey = Just "g1"
+              , maxAttempts = Just 1
               }
       void $ runOrvilleTest env $ HL.insertJob job
 
@@ -232,7 +233,6 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
             config
               { workerCount = 1
               , pollInterval = 0.1
-              , maxAttempts = 1
               }
         )
         $ \_ -> do
@@ -362,6 +362,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       let job =
             (defaultJob (SimpleTask "WillFail"))
               { groupKey = Just "g1"
+              , maxAttempts = Just 1
               }
       void $ runOrvilleTest env $ HL.insertJob job
 
@@ -373,7 +374,6 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
               ( config
                   { workerCount = 1
                   , pollInterval = 0.1
-                  , maxAttempts = 1
                   }
               )
           )

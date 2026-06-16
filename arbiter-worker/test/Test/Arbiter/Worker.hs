@@ -279,6 +279,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job =
               (defaultJob (FailingTask 3))
                 { groupKey = Just "g1"
+                , maxAttempts = Just 5
                 }
         void $ runSimpleDb env $ HL.insertJob job
 
@@ -292,7 +293,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 ( config
                     { workerCount = 1
                     , pollInterval = 0.1
-                    , maxAttempts = 5 -- Allow enough retries
                     , jitter = NoJitter -- Predictable timing for test
                     }
                 )
@@ -312,6 +312,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job =
               (defaultJob (SimpleTask "Doomed"))
                 { groupKey = Just "g1"
+                , maxAttempts = Just 1
                 }
         void $ runSimpleDb env $ HL.insertJob job
 
@@ -325,7 +326,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 ( config
                     { workerCount = 1
                     , pollInterval = 0.1
-                    , maxAttempts = 1
                     }
                 )
           )
@@ -367,7 +367,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 ( config
                     { workerCount = 1
                     , pollInterval = 0.1
-                    , maxAttempts = 10 -- High max attempts to prove it's not exhaustion
                     , observabilityHooks = hooks
                     }
                 )
@@ -442,13 +441,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     (primaryKey job, "processed" :: Text)
               throwRetryable "Simulated failure"
 
-        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1"}
+        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1", maxAttempts = Just 1}
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
-          (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, maxAttempts = 1})
+          (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
           $ \_ -> do
             waitUntil 10_000 $ do
               dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
@@ -497,13 +496,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ PG.commit conn
               throwRetryable "Simulated failure after commit"
 
-        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1"}
+        void $
+          runSimpleDb env $
+            HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1", maxAttempts = Just 1}
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
 
         withAsync
-          (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, maxAttempts = 1})
+          (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
           $ \_ -> do
             waitUntil 10_000 $ do
               dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
@@ -721,10 +722,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1, maxAttempts = 1}
+        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
         -- Insert a job
-        let job = (defaultJob (SimpleTask "Test")) {groupKey = Just "g1"}
+        let job = (defaultJob (SimpleTask "Test")) {groupKey = Just "g1", maxAttempts = Just 1}
         beforeInsert <- getCurrentTime
         void $ runSimpleDb env $ HL.insertJob job
 
@@ -790,9 +791,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1, maxAttempts = 3}
+        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-        let job = (defaultJob (SimpleTask "RetryHook")) {groupKey = Just "g1"}
+        let job = (defaultJob (SimpleTask "RetryHook")) {groupKey = Just "g1", maxAttempts = Just 3}
         void $ runSimpleDb env $ HL.insertJob job
 
         withAsync (runSimpleDb env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -817,9 +818,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
           runSimpleDb env $ defaultWorkerConfig connStr 10 handler
-        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1, maxAttempts = 1}
+        let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-        let job = (defaultJob (SimpleTask "DLQHook")) {groupKey = Just "g1"}
+        let job = (defaultJob (SimpleTask "DLQHook")) {groupKey = Just "g1", maxAttempts = Just 1}
         void $ runSimpleDb env $ HL.insertJob job
 
         withAsync (runSimpleDb env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -1073,8 +1074,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert a batch of jobs
         let jobs =
-              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1"}
-              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1"}
+              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1", maxAttempts = Just 3}
+              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1", maxAttempts = Just 3}
               ]
 
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
@@ -1085,7 +1086,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchedConfig =
               config
                 { pollInterval = 0.050
-                , maxAttempts = 3
                 , jitter = NoJitter
                 }
 
@@ -1103,8 +1103,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert a batch of jobs
         let jobs =
-              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1"}
-              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1"}
+              [ (defaultJob (SimpleTask "G1-1")) {groupKey = Just "g1", maxAttempts = Just 1}
+              , (defaultJob (SimpleTask "G1-2")) {groupKey = Just "g1", maxAttempts = Just 1}
               ]
 
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
@@ -1115,7 +1115,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchedConfig =
               config
                 { pollInterval = 0.050
-                , maxAttempts = 1
                 }
 
         threadDelay 100_000
@@ -1153,7 +1152,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let batchedConfig =
               config
                 { pollInterval = 0.050
-                , maxAttempts = 5
                 , jitter = NoJitter -- Predictable timing
                 }
 
@@ -1941,7 +1939,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Right (_parent :| _children) <-
           runSimpleDb env $
             HL.insertJobTree $
-              defaultJob (SimpleTask "dlq-reducer")
+              (defaultJob (SimpleTask "dlq-reducer")) {maxAttempts = Just 1}
                 <~~ ( defaultJob (SimpleTask "dlq-child-a")
                         :| [defaultJob (SimpleTask "dlq-child-b")]
                     )
@@ -1953,7 +1951,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               config
                 { workerCount = 3
                 , pollInterval = 0.1
-                , maxAttempts = 1 -- Go to DLQ after first failure
                 }
 
         -- Phase 1: Run workers - children succeed, reducer fails → DLQ
@@ -2003,9 +2000,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Right (_parent :| _children) <-
           runSimpleDb env $
             HL.insertJobTree $
-              defaultJob (SimpleTask "recover-reducer")
+              (defaultJob (SimpleTask "recover-reducer")) {maxAttempts = Just 1}
                 <~~ ( defaultJob (SimpleTask "recover-child-ok")
-                        :| [defaultJob (SimpleTask "recover-child-fail")]
+                        :| [(defaultJob (SimpleTask "recover-child-fail")) {maxAttempts = Just 1}]
                     )
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
@@ -2016,7 +2013,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               config
                 { workerCount = 3
                 , pollInterval = 0.1
-                , maxAttempts = 1
                 }
 
         withAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->

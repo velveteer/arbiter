@@ -134,14 +134,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Insert the slow job that will get its connection killed
         runSimpleDb env $
           void $
-            HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1"}
+            HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1", maxAttempts = Just 3}
 
         config <- runSimpleDb env $ defaultWorkerConfig connStr 10 handler
         let workerConfig =
               config
                 { workerCount = 1
                 , pollInterval = 0.2
-                , maxAttempts = 3
                 , jitter = NoJitter
                 }
 

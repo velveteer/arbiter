@@ -27,7 +27,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -66,9 +66,6 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Cadence for bumping @arbiter_workers.last_heartbeat@, the optional
   -- liveness file, and reconciling pause state from the DB. Must be well below
   -- 'workerStaleThreshold'. Default: 10.
-  , maxAttempts :: Int32
-  -- ^ Max retries before moving to DLQ (used when job's maxAttempts is Nothing).
-  -- Default: 10.
   , backoffStrategy :: BackoffStrategy
   -- ^ Retry backoff strategy. Default: exponential with base 2, max 1048576 seconds.
   , jitter :: Jitter
@@ -230,7 +227,6 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , visibilityTimeout = 60
       , jobHeartbeatInterval = 30
       , workerHeartbeatInterval = 10
-      , maxAttempts = 10
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter
       , observabilityHooks = defaultObservabilityHooks

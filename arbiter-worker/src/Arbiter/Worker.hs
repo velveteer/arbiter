@@ -128,7 +128,13 @@ import Arbiter.Worker.Cron
 import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (runHook, showJobIds, tryLog, withJobContext)
+import Arbiter.Worker.Logger.Internal
+  ( runHook
+  , tryLog
+  , withJobContext
+  , withJobContextList
+  , withJobContextOne
+  )
 import Arbiter.Worker.NotificationListener (runMultiChannelListener)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
@@ -515,9 +521,10 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
     pure batch
 
   let jobIds = map Job.primaryKey (toList jobBatch)
-      batchCfg = withJobContext (logConfig config) jobBatch
+      jobLog job = withJobContextOne (logConfig config) job
+      batchLog = withJobContext (logConfig config) jobBatch
       claimHook now job =
-        runHook batchCfg "onJobClaimed" $
+        runHook (jobLog job) "onJobClaimed" $
           Job.onJobClaimed (observabilityHooks config) job now
 
   flip
@@ -532,15 +539,15 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
       traverse_ (claimHook currentTime) jobBatch
       result <-
         withRegisteredJobs runningJobs jobIds $
-          processJobsWithRetry config {logConfig = batchCfg} jobBatch
+          processJobsWithRetry config jobBatch
       case result of
         Right () -> pure ()
         Left e
           | Just JobForceCancelled <- fromException e ->
-              tryLog batchCfg Info "Job(s) force-cancelled"
+              tryLog batchLog Info "Job(s) force-cancelled"
           | Just Async.AsyncCancelled <- fromException e -> throwIO e
           | otherwise -> do
-              tryLog batchCfg Error $ "Worker exception: " <> T.pack (show e)
+              tryLog batchLog Error $ "Worker exception: " <> T.pack (show e)
               threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
@@ -569,7 +576,7 @@ processJobsWithRetry
   -> m ()
 processJobsWithRetry config jobs = do
   let hooks = observabilityHooks config
-      jobMaxAtts job = fromMaybe (maxAttempts config) (Job.maxAttempts job)
+      jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
       -- Ack a job, throwing if it was reclaimed by another worker mid-flight.
       ackJobOrSkip job = do
         rowsAffected <- Arb.ackJob job
@@ -578,14 +585,15 @@ processJobsWithRetry config jobs = do
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
   handledRef <- liftIO $ newIORef Set.empty
-  let markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
+  let jobLog j = withJobContextOne (logConfig config) j
+      markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
       fireSuccess j = do
         endT <- liftIO getCurrentTime
-        runHook (logConfig config) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
+        runHook (jobLog j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
       finalize j = fireSuccess j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        withDbTransaction $ handleJobFailure config hooks exc (jobMaxAtts j) startTime endT j
+        withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
       ackOne j = do
@@ -605,9 +613,10 @@ processJobsWithRetry config jobs = do
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
-          tryLog (logConfig config) Info $
-            "Jobs reclaimed during bulk completion, skipped: "
-              <> showJobIds (map Job.primaryKey reclaimed)
+          tryLog
+            (withJobContextList (logConfig config) reclaimed)
+            Info
+            "Jobs reclaimed during bulk completion, skipped"
         traverse_ finalize done
       callbacks =
         BatchCallbacks
@@ -659,27 +668,26 @@ reportBatchOutcome
   -> m ()
 reportBatchOutcome config hooks startTime endTime jobs handled = \case
   Right () ->
-    let unfinalized = [Job.primaryKey j | j <- toList jobs, not (Set.member (Job.primaryKey j) handled)]
-     in when (not (null unfinalized)) $
-          tryLog cfg Warning $
-            "Handler left jobs unfinalized, will reprocess: "
-              <> showJobIds unfinalized
+    unless (null unhandled) $
+      tryLog (withJobContextList (logConfig config) unhandled) Warning "Handler left jobs unfinalized, will reprocess"
   Left e
     | Just (JobStolenException ids) <- fromException e ->
-        tryLog cfg Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
+        tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
     | isJobGoneException e ->
-        tryLog cfg Info "Job(s) no longer available, skipping retry"
+        tryLog batchLog Info "Job(s) no longer available, skipping retry"
     | Just JobNackException <- fromException e ->
-        tryLog cfg Info "Job(s) nacked, will be reprocessed"
+        tryLog batchLog Info "Job(s) nacked, will be reprocessed"
     | otherwise ->
         -- Fail the jobs the handler did not finalize, in a separate transaction.
         withDbTransaction $
           traverse_
-            (\job -> handleJobFailure config hooks e (jobMaxAtts job) startTime endTime job)
-            (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
+            (\job -> handleJobFailure config {logConfig = jobLog job} hooks e (jobMaxAtts job) startTime endTime job)
+            unhandled
   where
-    cfg = logConfig config
-    jobMaxAtts job = fromMaybe (maxAttempts config) (Job.maxAttempts job)
+    unhandled = filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs)
+    batchLog = withJobContext (logConfig config) jobs
+    jobLog job = withJobContextOne (logConfig config) job
+    jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -808,9 +816,9 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
               runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
 
--- | Refreshes the groups tables (schema-wide) and sweeps stale worker
--- registry rows (schema-wide). Both gated via 'Ops.runGated' so only one
--- pool runs each task per interval.
+-- | Refreshes the groups tables, sweeps stale worker registry rows, and moves
+-- exhausted jobs to the DLQ (all schema-wide). Each gated via 'Ops.runGated' so
+-- only one pool runs it per interval.
 reaperLoop
   :: forall m registry
    . (HasArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
@@ -826,4 +834,11 @@ reaperLoop logCfg interval = do
     mFailed <- Ops.runGated schemaName "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
     traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
     void $ Ops.runGated schemaName "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
+    mSwept <- Ops.runGated schemaName "sweep-exhausted-jobs" interval $ Ops.sweepExhaustedJobs schemaName queues
+    traverse_
+      ( \(n, failed) -> do
+          traverse_ (\queue -> tryLog logCfg Warning $ "Exhausted-job sweep failed for queue: " <> queue) failed
+          when (n > 0) $ tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ"
+      )
+      mSwept
     threadDelay (intervalSecs * 1_000_000)

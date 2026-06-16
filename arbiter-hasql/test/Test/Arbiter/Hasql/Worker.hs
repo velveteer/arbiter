@@ -155,14 +155,14 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
                   throwRetryable "Not yet!"
               _ -> pure ()
 
-      let job = (defaultJob (FailingTask 3)) {groupKey = Just "g1"}
+      let job = (defaultJob (FailingTask 3)) {groupKey = Just "g1", maxAttempts = Just 5}
       void $ runHasqlDb env $ HL.insertJob job
 
       config <- defaultWorkerConfig connStr 10 handler
 
       withAsync
         ( runHasqlDb env $
-            runWorkerPool config {workerCount = 1, pollInterval = 0.1, maxAttempts = 5, jitter = NoJitter}
+            runWorkerPool config {workerCount = 1, pollInterval = 0.1, jitter = NoJitter}
         )
         $ \_ -> do
           waitUntil 15_000 $ (== 3) <$> readIORef attemptsRef
@@ -174,13 +174,13 @@ spec connStr = beforeAll (setupOnce connStr workerTestSchemaName testTable False
       let handler :: Hasql.Connection -> JobRead HasqlWorkerTestPayload -> HasqlDb HasqlWorkerTestRegistry IO ()
           handler _conn _job = throwRetryable "Always fails"
 
-      let job = (defaultJob (SimpleTask "Doomed")) {groupKey = Just "g1"}
+      let job = (defaultJob (SimpleTask "Doomed")) {groupKey = Just "g1", maxAttempts = Just 1}
       void $ runHasqlDb env $ HL.insertJob job
 
       config <- defaultWorkerConfig connStr 10 handler
 
       withAsync
-        (runHasqlDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, maxAttempts = 1})
+        (runHasqlDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
         $ \_ -> do
           waitUntil 10_000 $ do
             dlqJobs <- runHasqlDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob HasqlWorkerTestPayload]

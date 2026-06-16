@@ -14,6 +14,7 @@ module Arbiter.Core.Job.Schema
     -- * Table Creation SQL
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
+  , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
   , createJobQueueGroupKeyIndexSQL
@@ -75,6 +76,8 @@ module Arbiter.Core.Job.Schema
 import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
+
+import Arbiter.Core.Job.Types (defaultMaxAttempts)
 
 -- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
@@ -157,6 +160,17 @@ jobQueueTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteI
 -- | Qualified DLQ table name: @jobQueueDLQTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_dlq"@
 jobQueueDLQTable :: SchemaName -> TableName -> Text
 jobQueueDLQTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_dlq")
+
+-- | Backfill NULL @max_attempts@ to the default and set the column default.
+-- Left nullable for rolling-deploy safety (old code may still insert NULL).
+setMaxAttemptsDefaultSQL :: SchemaName -> TableName -> Text
+setMaxAttemptsDefaultSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
+      dma = T.pack (show defaultMaxAttempts)
+   in [text|
+        UPDATE ${tbl} SET max_attempts = ${dma} WHERE max_attempts IS NULL;
+        ALTER TABLE ${tbl} ALTER COLUMN max_attempts SET DEFAULT ${dma};
+      |]
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
 jobQueueResultsTable :: Text -> Text -> Text

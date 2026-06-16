@@ -152,7 +152,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               }
 
       -- Insert a job
-      void $ runSimpleDb env $ Ops.insertJob testSchema testTable (defaultJob (SimpleTask "will-fail"))
+      void $
+        runSimpleDb env $
+          Ops.insertJob testSchema testTable ((defaultJob (SimpleTask "will-fail")) {maxAttempts = Just 1})
 
       -- Handler that always throws (retryable exception, not job-gone)
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
@@ -163,7 +165,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             config
               { observabilityHooks = hooks
               , pollInterval = 0.1
-              , maxAttempts = 1 -- Move to DLQ immediately
               }
 
       -- Run worker pool until onJobFailure fires
@@ -241,9 +242,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       -- Insert jobs that always fail (FailingTask 999 means fail 999 times)
       runSimpleDb env $ do
-        void $ Ops.insertJob testSchema testTable (defaultJob (FailingTask 999))
-        void $ Ops.insertJob testSchema testTable (defaultJob (FailingTask 999))
-        void $ Ops.insertJob testSchema testTable (defaultJob (FailingTask 999))
+        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
+        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
+        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
 
       -- Use default handler (FailingTask will throw exceptions)
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
@@ -258,7 +259,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               { observabilityHooks = hooks
               , workerCount = 1
               , pollInterval = 0.1
-              , maxAttempts = 1 -- Fail immediately to DLQ
               }
 
       -- Run worker pool

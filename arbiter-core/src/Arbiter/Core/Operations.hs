@@ -79,6 +79,7 @@ module Arbiter.Core.Operations
     -- * Groups Table Operations
   , refreshGroupsForQueue
   , refreshAllGroups
+  , sweepExhaustedJobs
 
     -- * Cron Schedule Operations
   , upsertCronDefault
@@ -116,7 +117,9 @@ module Arbiter.Core.Operations
 
 import Control.Monad (foldM, void, when)
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
+import Data.Bifunctor (first)
 import Data.Bitraversable (bitraverse)
+import Data.Either (partitionEithers)
 import Data.Foldable (for_, toList)
 import Data.Functor qualified as Functor
 import Data.Int (Int32, Int64)
@@ -125,6 +128,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Monoid (Ap (..), Sum (..))
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
@@ -852,19 +856,39 @@ moveToDLQ
   -- ^ Error message (the final error that caused the DLQ move)
   -> JobRead payload
   -> m Int64
-moveToDLQ schemaName tableName errorMsg job = withDbTransaction $ do
-  when (isRollup job) $ do
-    snapshotDescendantRollups schemaName tableName (primaryKey job)
-    void $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
+moveToDLQ schemaName tableName errorMsg job =
+  moveToDLQFields schemaName tableName errorMsg (primaryKey job) (attempts job) (parentId job) (isRollup job)
+
+-- | 'moveToDLQ' driven by scalar fields, so callers without a typed 'JobRead'
+-- (the reaper sweep) can reuse the tree-aware move.
+moveToDLQFields
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Text
+  -- ^ Error message (the final error that caused the DLQ move)
+  -> Int64
+  -- ^ Job id
+  -> Int32
+  -- ^ Attempts (for the optimistic move check)
+  -> Maybe Int64
+  -- ^ Parent id, if a child
+  -> Bool
+  -- ^ Whether the job is a rollup finalizer
+  -> m Int64
+moveToDLQFields schemaName tableName errorMsg jobId atts mParentId rollup = withDbTransaction $ do
+  when rollup $ do
+    snapshotDescendantRollups schemaName tableName jobId
+    void $ cascadeChildrenToDLQ schemaName tableName jobId "Parent moved to DLQ"
   rows <-
     queryCount
       (Tmpl.moveToDLQSQL schemaName tableName)
-      [ pval CInt8 (primaryKey job)
-      , pval CInt4 (attempts job)
+      [ pval CInt8 jobId
+      , pval CInt4 atts
       , pval CText errorMsg
       ]
   when (rows > 0) $
-    for_ (parentId job) $ \pid ->
+    for_ mParentId $ \pid ->
       tryResumeParent schemaName tableName pid
   pure rows
 
@@ -1756,6 +1780,47 @@ refreshAllGroups schemaName queues = do
     refreshOne queue = do
       result <- tryAny (refreshGroupsForQueue schemaName queue)
       pure (either (const (Just queue)) (const Nothing) result)
+
+-- | Sweep exhausted jobs across all queues. Returns the total moved and the
+-- names of queues whose sweep failed.
+sweepExhaustedJobs
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => SchemaName
+  -> [TableName]
+  -> m (Int64, [Text])
+sweepExhaustedJobs schemaName queues = do
+  (failures, counts) <- partitionEithers <$> traverse sweepOne queues
+  pure (sum counts, failures)
+  where
+    sweepOne queue =
+      first (const queue) <$> tryAny (sweepExhaustedForQueue schemaName queue)
+
+-- | Move each exhausted job to the DLQ via the tree-aware 'moveToDLQFields',
+-- one transaction per job, so cascades and parent resumes are handled.
+sweepExhaustedForQueue
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> m Int64
+sweepExhaustedForQueue schemaName tableName = do
+  exhausted <- executeQuery (Tmpl.selectExhaustedJobsSQL schemaName tableName exhaustedSweepBatch) [] exhaustedJobCodec
+  getSum <$> getAp (foldMap moveOne exhausted)
+  where
+    moveOne (jobId, atts, mParentId, rollup) =
+      Ap $ Sum <$> moveToDLQFields schemaName tableName "max attempts exceeded (reaper sweep)" jobId atts mParentId rollup
+
+-- | Per-queue cap on jobs swept to the DLQ in one reaper pass, so a large
+-- backlog drains over several intervals instead of one unbounded fetch.
+exhaustedSweepBatch :: Int
+exhaustedSweepBatch = 1000
+
+exhaustedJobCodec :: RowCodec (Int64, Int32, Maybe Int64, Bool)
+exhaustedJobCodec =
+  (,,,)
+    <$> col "id" CInt8
+    <*> col "attempts" CInt4
+    <*> ncol "parent_id" CInt8
+    <*> col "is_rollup" CBool
 
 -- | Upsert a cron schedule's default expression and overlap policy.
 --

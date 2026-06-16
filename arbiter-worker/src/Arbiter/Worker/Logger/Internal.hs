@@ -7,6 +7,8 @@ module Arbiter.Worker.Logger.Internal
   ( logMessage
   , tryLog
   , withJobContext
+  , withJobContextOne
+  , withJobContextList
   , showJobIds
   , runHook
   ) where
@@ -20,7 +22,7 @@ import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
-import Data.List.NonEmpty (NonEmpty, toList)
+import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, tryAny)
@@ -40,6 +42,14 @@ withJobContext :: LogConfig -> NonEmpty (Job.JobRead payload) -> LogConfig
 withJobContext config jobs
   | loggingActive config = config {additionalContext = (buildJobContext jobs <>) <$> additionalContext config}
   | otherwise = config
+
+-- | 'withJobContext' scoped to a single job.
+withJobContextOne :: LogConfig -> Job.JobRead payload -> LogConfig
+withJobContextOne config job = withJobContext config (job :| [])
+
+-- | 'withJobContext' scoped to a job list; no context when the list is empty.
+withJobContextList :: LogConfig -> [Job.JobRead payload] -> LogConfig
+withJobContextList config = maybe config (withJobContext config) . nonEmpty
 
 -- | Building job context is wasted work when logs are discarded.
 loggingActive :: LogConfig -> Bool

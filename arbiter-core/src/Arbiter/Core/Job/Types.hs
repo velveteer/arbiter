@@ -7,6 +7,7 @@ module Arbiter.Core.Job.Types
   , JobWrite
   , defaultJob
   , defaultGroupedJob
+  , defaultMaxAttempts
   , isRollup
 
     -- * Derived status
@@ -70,8 +71,8 @@ data Job payload key q insertedAt = Job
   , dedupKey :: Maybe DedupKey
   -- ^ The deduplication strategy for this job.
   , maxAttempts :: Maybe Int32
-  -- ^ Override the global maxAttempts config for this specific job.
-  -- If @Nothing@, uses the worker config's global @maxAttempts@ value.
+  -- ^ Attempt limit before the job moves to the DLQ. @Nothing@ defaults to
+  -- 'defaultMaxAttempts' at insert time.
   , parentId :: Maybe Int64
   -- ^ Parent job ID. Set by 'insertJobTree', not manually. When this child
   -- is the last to complete, the parent (if a rollup finalizer) is resumed.
@@ -89,6 +90,10 @@ data Job payload key q insertedAt = Job
   -- ^ Worker pool UUID that last claimed this job.
   }
   deriving stock (Eq, Generic, Show)
+
+-- | Default attempt limit stamped onto jobs whose 'maxAttempts' is unset.
+defaultMaxAttempts :: Int32
+defaultMaxAttempts = 10
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
 -- (an empty object on insert; the merged child results before a DLQ move).

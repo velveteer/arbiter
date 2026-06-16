@@ -50,6 +50,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
+  , setMaxAttemptsDefaultSQL
   )
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
@@ -258,6 +259,7 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "set-job-queue-fillfactor-100" $
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
+        , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
         ]
       notifyTriggers
         | enableNotifications config =

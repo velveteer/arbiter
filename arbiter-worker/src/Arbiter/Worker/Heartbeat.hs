@@ -21,7 +21,7 @@ import UnliftIO.STM (TMVar, atomically)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Logger (LogConfig)
-import Arbiter.Worker.Logger.Internal (runHook, showJobIds)
+import Arbiter.Worker.Logger.Internal (runHook, showJobIds, withJobContext, withJobContextOne)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
 
 -- | Run an action with a heartbeat that extends visibility timeout for all jobs.
@@ -67,7 +67,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
   either absurd id <$> race heartbeatThread action
   where
     heartbeatThread =
-      retryOnExceptionForever logCfg "Heartbeat" 3 $
+      retryOnExceptionForever (withJobContext logCfg jobs) "Heartbeat" 3 $
         forever tick
 
     tick = do
@@ -82,7 +82,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       currentTime <- liftIO getCurrentTime
       traverse_
         ( \job ->
-            runHook logCfg "onJobHeartbeat" $
+            runHook (withJobContextOne logCfg job) "onJobHeartbeat" $
               onJobHeartbeat hooks job currentTime startTime
         )
         activeJobs
