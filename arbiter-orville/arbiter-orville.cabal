@@ -51,6 +51,7 @@ test-suite arbiter-orville-tests
   other-modules:
     Test.Arbiter.Orville.Concurrency
     Test.Arbiter.Orville.Operations
+    Test.Arbiter.Orville.StateMachine
     Test.Arbiter.Orville.TestHelpers
     Test.Arbiter.Orville.Worker
 

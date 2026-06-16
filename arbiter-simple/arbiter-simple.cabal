@@ -56,8 +56,8 @@ test-suite arbiter-simple-tests
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   other-modules:
     Test.Arbiter.Simple.Concurrency
-    Test.Arbiter.Simple.GroupsInvariant
     Test.Arbiter.Simple.Operations
+    Test.Arbiter.Simple.StateMachine
     Test.Arbiter.Simple.TestHelpers
 
   build-depends:

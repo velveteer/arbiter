@@ -83,7 +83,7 @@ trialDurationUs = 10_000_000
 -- | Per-test timeout. tasty-bench 0.5 defaults to 100s, too tight for these
 -- multi-trial tests (trialCount trials plus per-trial preloads).
 benchTimeout :: Integer
-benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * 4
+benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * 40
 
 steadyStateWarmupUs :: Int
 steadyStateWarmupUs = 2_000_000
@@ -446,7 +446,7 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 runWorkerTrial
-  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadMask m, MonadUnliftIO m)
+  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
   => RunM m -> Connection -> [WorkerConfig m BenchPayload ()] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
@@ -464,7 +464,7 @@ runWorkerTrial runM statsConn configs totalJobs durationUs =
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
 runSteadyStateTrial
-  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadMask m, MonadUnliftIO m)
+  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
   => RunM m
   -- ^ Runner for workers
   -> RunM SimpleM

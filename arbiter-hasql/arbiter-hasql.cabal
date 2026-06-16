@@ -59,6 +59,7 @@ test-suite arbiter-hasql-tests
   other-modules:
     Test.Arbiter.Hasql.Concurrency
     Test.Arbiter.Hasql.Operations
+    Test.Arbiter.Hasql.StateMachine
     Test.Arbiter.Hasql.TestHelpers
     Test.Arbiter.Hasql.Worker
 

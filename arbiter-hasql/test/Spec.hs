@@ -7,6 +7,7 @@ import Test.Hspec
 
 import Test.Arbiter.Hasql.Concurrency qualified as Concurrency
 import Test.Arbiter.Hasql.Operations qualified as Operations
+import Test.Arbiter.Hasql.StateMachine qualified as StateMachine
 import Test.Arbiter.Hasql.Worker qualified as Worker
 
 main :: IO ()
@@ -15,4 +16,5 @@ main = do
   hspec $ do
     describe "Arbiter.Hasql.Operations" $ Operations.spec connStr
     describe "Arbiter.Hasql.Concurrency" $ Concurrency.spec connStr
+    describe "Arbiter.Hasql.StateMachine" $ StateMachine.spec connStr
     describe "Arbiter.Hasql.Worker" $ Worker.spec connStr

@@ -246,7 +246,7 @@ mkDefaultConfig connStrVal workerCnt mode = do
 
 withWorkerIdContext :: UUID -> LogConfig -> LogConfig
 withWorkerIdContext workerId lc =
-  lc {additionalContext = (("workerId" .= workerId) :) <$> additionalContext lc}
+  lc {additionalContext = (("worker_id" .= workerId) :) <$> additionalContext lc}
 
 -- | Initiate graceful shutdown of the worker pool
 --

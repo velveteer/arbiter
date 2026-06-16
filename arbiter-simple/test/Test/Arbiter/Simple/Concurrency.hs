@@ -7,8 +7,6 @@ import Arbiter.Core.Job.Types
 import Arbiter.Test.Concurrency
   ( concurrencySpec
   , countHolViolations
-  , groupsConsistencyStressSpec
-  , inFlightConcurrencySpec
   , installHolDetector
   , raceConditionSpec
   , removeHolDetector
@@ -54,18 +52,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   around (withCleanup sharedPool) $ do
     concurrencySpec @TestPayload TestMessage runSimpleDb
     raceConditionSpec @TestPayload TestMessage runSimpleDb
-    groupsConsistencyStressSpec @TestPayload
-      testSchema
-      testTable
-      TestMessage
-      runSimpleDb
-      withConn
-    inFlightConcurrencySpec @TestPayload
-      testSchema
-      testTable
-      TestMessage
-      runSimpleDb
-      withConn
 
     describe "Group Serialization Race (localConnection)" $ do
       it "groups trigger serializes concurrent inserts within a group" $ \env -> do
