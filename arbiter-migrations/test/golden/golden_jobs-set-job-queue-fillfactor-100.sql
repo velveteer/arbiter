@@ -1,0 +1,1 @@
+ALTER TABLE "arbiter"."golden_jobs" SET (fillfactor = 100);

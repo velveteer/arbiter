@@ -40,3 +40,17 @@ library
     , postgresql-migration  >=0.2  && <0.3
     , postgresql-simple     >=0.6  && <0.8
     , text                  >=1.2  && <2.2
+
+test-suite arbiter-migrations-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  build-depends:
+    , arbiter-migrations
+    , base                  >=4.14 && <5
+    , bytestring            >=0.10 && <0.13
+    , filepath              >=1.4  && <1.6
+    , postgresql-migration  >=0.2  && <0.3
+    , tasty                 >=1.4  && <1.6
+    , tasty-golden          >=2.3  && <2.4

@@ -66,11 +66,11 @@ import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.Kind (Type)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromJust, isJust)
+import Data.Maybe (catMaybes, fromJust, isJust, listToMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -153,6 +153,17 @@ checkInvariantsL lbl schema table withConn = do
           , driftViolations schema table withConn
           ]
   map (("[after " <> lbl <> "] ") <>) violations === []
+
+-- | First @id@ of a query, or Nothing if it returns no rows.
+firstId :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO (Maybe Int64)
+firstId withConn sql = withConn $ \conn ->
+  listToMaybe . map fromOnly <$> PG.query_ conn (fromString (T.unpack sql))
+
+-- | A scalar @count(*)@ query through the raw-connection accessor.
+countQuery :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO Int64
+countQuery withConn sql = withConn $ \conn -> do
+  [Only n] <- PG.query_ conn (fromString (T.unpack sql))
+  pure n
 
 truncateHol :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 truncateHol schema table withConn = withConn $ \conn ->
@@ -262,7 +273,7 @@ exactViolations schema table withConn = withConn $ \conn -> do
         "multiple in-flight in group "
           <> T.unpack g
           <> " | summary["
-          <> (case summ of (s : _) -> summStr s; [] -> "MISSING")
+          <> maybe "MISSING" summStr (listToMaybe summ)
           <> "]"
           <> " | jobs "
           <> unwords (map jobStr jobs)
@@ -934,11 +945,7 @@ retryRandomDLQ
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> sm ()
 retryRandomDLQ schema table withConn = do
-  mId <- liftIO $ withConn $ \conn -> do
-    rows <- PG.query_ conn (fromString (T.unpack sql))
-    pure $ case rows of
-      Only dlqId : _ -> Just dlqId
-      _ -> Nothing
+  mId <- liftIO (firstId withConn sql)
   traverse_ (\dlqId -> void (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead payload)))) mId
   where
     sql =
@@ -955,11 +962,7 @@ onRandomJob
   -> (Int64 -> sm ())
   -> sm ()
 onRandomJob schema table withConn act = do
-  mId <- liftIO $ withConn $ \conn -> do
-    rows <- PG.query_ conn (fromString (T.unpack sql))
-    pure $ case rows of
-      Only jid : _ -> Just jid
-      _ -> Nothing
+  mId <- liftIO (firstId withConn sql)
   traverse_ act mId
   where
     sql = "SELECT id FROM " <> schema <> "." <> table <> " ORDER BY random() LIMIT 1"
@@ -989,11 +992,7 @@ onRandomRollupParent
   -> (Int64 -> sm ())
   -> sm ()
 onRandomRollupParent schema table withConn act = do
-  mId <- liftIO $ withConn $ \conn -> do
-    rows <- PG.query_ conn (fromString (T.unpack sql))
-    pure $ case rows of
-      Only jid : _ -> Just jid
-      _ -> Nothing
+  mId <- liftIO (firstId withConn sql)
   traverse_ act mId
   where
     sql =
@@ -1008,13 +1007,10 @@ deleteRandomDLQ
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> sm ()
 deleteRandomDLQ schema table withConn = do
-  mId <- liftIO $ withConn $ \conn -> do
-    rows <-
-      PG.query_ conn (fromString (T.unpack ("SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 1")))
-    pure $ case rows of
-      Only dlqId : _ -> Just dlqId
-      _ -> Nothing
+  mId <- liftIO (firstId withConn sql)
   traverse_ (void . HL.deleteDLQJob @sm @registry @payload) mId
+  where
+    sql = "SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 1"
 
 -- | Delete a small random batch of DLQ rows in one statement.
 deleteRandomDLQBatch
@@ -1292,15 +1288,13 @@ exhaustionGuard mkPayload run schema table withConn reset = do
   -- Sweep: every exhausted, claimable job lands in the DLQ.
   void (run (Ops.sweepExhaustedJobs schema [table]))
   let tbl = schema <> "." <> table
-      count1 c sql = do [Only x] <- PG.query_ c (fromString (T.unpack sql)); pure (x :: Int64)
   stranded <-
-    withConn $ \conn ->
-      count1 conn $
-        "SELECT count(*) FROM "
-          <> tbl
-          <> " WHERE attempts >= 1 AND NOT suspended"
-          <> " AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
-  dlqd <- withConn $ \conn -> count1 conn ("SELECT count(*) FROM " <> tbl <> "_dlq")
+    countQuery withConn $
+      "SELECT count(*) FROM "
+        <> tbl
+        <> " WHERE attempts >= 1 AND NOT suspended"
+        <> " AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
+  dlqd <- countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
   stranded `shouldBe` 0
   dlqd `shouldBe` fromIntegral n
 
@@ -1413,11 +1407,8 @@ treeGuard
   -> IO ()
 treeGuard mkPayload run schema table withConn reset = do
   let tbl = schema <> "." <> table
-      count1 sql = withConn $ \conn -> do
-        [Only x] <- PG.query_ conn (fromString (T.unpack sql))
-        pure (x :: Int64)
-      mainCount = count1 ("SELECT count(*) FROM " <> tbl)
-      dlqCount = count1 ("SELECT count(*) FROM " <> tbl <> "_dlq")
+      mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
+      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
       mk lbl = defaultJob (mkPayload lbl)
       twoChildTree = mk "tg parent" <~~ (mk "tg child 0" :| [mk "tg child 1"])
   -- Part 1: acking both children resumes the parent, which then completes.
@@ -1489,6 +1480,135 @@ runGatedChecks run schema withConn = do
   results <- mapConcurrently (const (run (Ops.runGated schema "sm-gate2" 3600 (pure ())))) [1 .. 16 :: Int]
   length (filter isJust results) `shouldBe` 1
 
+-- | Deterministic crash-recovery guard. Jobs claimed with a short lease and then
+-- abandoned (the worker died) must, once the lease expires, be reclaimed and acked
+-- exactly once under concurrent workers with no double-claim, no lost job, and
+-- per-group serialization intact. The fuzzer never reaches this because its leases
+-- are 60s and never expire mid-run.
+concurrentReclaimGuard
+  :: forall sm registry payload
+   . (ArbiterC sm registry payload)
+  => (Text -> payload)
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+concurrentReclaimGuard mkPayload run schema table withConn reset = do
+  reset
+  installHolDetector schema table withConn
+  flip finally (removeHolDetector schema table withConn) $ do
+    truncateHol schema table withConn
+    let groups = [Just ("crg" <> T.pack (show i)) | i <- [1 .. 5 :: Int]]
+        seeds = [(Nothing, p) | p <- [0 .. 29 :: Int]] <> [(g, p) | g <- groups, p <- [0 .. 1 :: Int]]
+    ids <- run (traverse (\(g, p) -> mkInsert @sm @registry @payload mkPayload g Nothing p Nothing) seeds)
+    let total = length ids
+    -- Claim with a 1s lease and abandon, simulating crashed workers.
+    void (run (HL.claimNextVisibleJobs total 1 :: sm [JobRead payload]))
+    threadDelay 1_500_000
+    -- Race workers to reclaim and ack until drained, recording every acked id.
+    acked <- newIORef []
+    let drain = do
+          js <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead payload])
+          if null js
+            then pure ()
+            else do
+              run (traverse_ (void . HL.ackJob) js)
+              atomicModifyIORef' acked (\xs -> (map primaryKey js <> xs, ()))
+              drain
+    mapConcurrently_ id (replicate 10 drain)
+    got <- readIORef acked
+    length got `shouldBe` total
+    length (nub got) `shouldBe` total
+    hol <- countHolViolations schema table withConn
+    hol `shouldBe` []
+
+-- | Deterministic guard that claims honor priority. Ungrouped jobs come out in
+-- ascending priority order, and the grouped candidate ranking serves the lowest
+-- min-priority group first. No other test asserts priority ordering.
+priorityOrderGuard
+  :: forall sm registry payload
+   . (ArbiterC sm registry payload)
+  => (Text -> payload)
+  -> (forall a. sm a -> IO a)
+  -> IO ()
+  -> IO ()
+priorityOrderGuard mkPayload run reset = do
+  let ins g p = void (mkInsert @sm @registry @payload mkPayload g Nothing p Nothing)
+      claimPriorities acc = do
+        c <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead payload])
+        case c of
+          [] -> pure (reverse acc)
+          js -> claimPriorities (map priority js <> acc)
+  -- Ungrouped: claim order is ascending in priority.
+  reset
+  run (traverse_ (ins Nothing) [3, 1, 4, 1, 5, 0, 2])
+  prs <- claimPriorities []
+  prs `shouldBe` map fromIntegral [0, 1, 1, 2, 3, 4, 5 :: Int]
+  -- Grouped: the lowest min-priority group is served first.
+  reset
+  run (ins (Just "pg-hi") 5)
+  run (ins (Just "pg-lo") 0)
+  c <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead payload])
+  map priority c `shouldBe` [0]
+
+-- | Deterministic guard: a freshly inserted scheduled job (never leased) becomes
+-- claimable exactly when its delay elapses, for both the grouped (@next_due@) and
+-- ungrouped paths. The fuzzer schedules 30-120s out, so it never sees the due
+-- transition.
+scheduledDueGuard
+  :: forall sm registry payload
+   . (ArbiterC sm registry payload)
+  => (Text -> payload)
+  -> (forall a. sm a -> IO a)
+  -> IO ()
+  -> IO ()
+scheduledDueGuard mkPayload run reset = do
+  reset
+  void (run (mkInsert @sm @registry @payload mkPayload (Just "sched-g") (Just 1) 0 Nothing))
+  void (run (mkInsert @sm @registry @payload mkPayload Nothing (Just 1) 0 Nothing))
+  c0 <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead payload])
+  length c0 `shouldBe` 0
+  threadDelay 1_500_000
+  c1 <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead payload])
+  length c1 `shouldBe` 2
+
+-- | Deterministic guard for the recursive @retryFromDLQ@ restore. A rollup tree
+-- cascaded to the DLQ and then retried must be restored intact and drain to empty,
+-- exercising the ancestor-walk SQL the fuzzer only hits by chance.
+treeRetryFromDLQGuard
+  :: forall sm registry payload
+   . (ArbiterC sm registry payload)
+  => (Text -> payload)
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+treeRetryFromDLQGuard mkPayload run schema table withConn reset = do
+  let tbl = schema <> "." <> table
+      mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
+      dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
+      mk lbl = defaultJob (mkPayload lbl)
+      tree = mk "trd parent" <~~ (mk "trd child 0" :| [mk "trd child 1"])
+  reset
+  Right (parent :| _) <- run (HL.insertJobTree @sm @registry @payload tree)
+  void (run (HL.moveToDLQ "tree retry guard" parent))
+  mainCount >>= (`shouldBe` 0)
+  dlqCount >>= (`shouldBe` 3)
+  -- Retry the parent's DLQ row. The recursive restore brings the whole tree back.
+  dlqId <- withConn $ \conn -> do
+    [Only i] <-
+      PG.query conn (fromString (T.unpack ("SELECT id FROM " <> tbl <> "_dlq WHERE job_id = ?"))) (Only (primaryKey parent))
+    pure (i :: Int64)
+  void (run (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead payload))))
+  mainCount >>= (`shouldBe` 3)
+  dlqCount >>= (`shouldBe` 0)
+  drainToEmpty @sm @registry @payload run 10
+  mainCount >>= (`shouldBe` 0)
+
 -- | Parameterized state-machine property suite. The runner executes a backend
 -- action against the real database. @withConn@ exposes a raw 'PG.Connection' for
 -- the oracle and HOL-detector SQL. @reset@ truncates the test tables.
@@ -1533,5 +1653,13 @@ stateMachineSpec mkPayload run schema table withConn reset = do
     withinSecs 60 (progressGuard @sm @registry @payload mkPayload run schema table withConn reset)
   it "expired-lease grouped job is reclaimable via triggers and after a reaper recompute" $
     withinSecs 60 (reclaimGuard @sm @registry @payload mkPayload run reset)
+  it "abandoned jobs are reclaimed and acked exactly once under concurrent workers" $
+    withinSecs 90 (concurrentReclaimGuard @sm @registry @payload mkPayload run schema table withConn reset)
+  it "claims honor priority order" $
+    withinSecs 60 (priorityOrderGuard @sm @registry @payload mkPayload run reset)
+  it "a freshly scheduled job becomes claimable when its delay elapses" $
+    withinSecs 60 (scheduledDueGuard @sm @registry @payload mkPayload run reset)
+  it "a DLQ'd rollup tree is restored intact on retry and drains" $
+    withinSecs 60 (treeRetryFromDLQGuard @sm @registry @payload mkPayload run schema table withConn reset)
   it "runGated skips within the interval and serializes concurrent callers" $
     withinSecs 60 (runGatedChecks run schema withConn)
