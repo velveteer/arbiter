@@ -3,3 +3,4 @@ tags
 *.bak*
 .stack-work
 cabal.project.freeze
+haddocks

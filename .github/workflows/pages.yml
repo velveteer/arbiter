@@ -23,8 +23,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.10'
-          cabal-version: '3.12'
+          ghc-version: '9.14'
+          cabal-version: '3.14'
 
       - name: Cache
         uses: actions/cache@v5
@@ -40,30 +40,24 @@ jobs:
         run: |
           cabal update
           cabal build all
+          curl -L -O https://hackage.haskell.org/package/kedgeree-0.1.0/candidate/kedgeree-0.1.0.tar.gz
+          tar xzf kedgeree-0.1.0.tar.gz
+          cd kedgeree-0.1.0
+          cabal install
 
       - name: Generate Haddocks
-        run: |
-          cabal haddock all \
-            --haddock-hyperlink-source \
-            --haddock-quickjump \
-            --disable-documentation \
-            --haddock-html-location='https://hackage.haskell.org/package/$pkg-$version/docs'
+        run: cabal haddock-project --hackage --haddock-options=--quickjump
 
-      - name: Assemble site
+      - name: Cook the haddocks
         run: |
-          mkdir -p site
-          cp docs/index.html site/
-          for pkg in arbiter-core arbiter-migrations arbiter-worker arbiter-simple arbiter-orville arbiter-hasql arbiter-servant arbiter-servant-ui; do
-            pkg_doc_dir=$(find dist-newstyle -path "*/${pkg}-*/doc/html/${pkg}" -type d 2>/dev/null | head -1)
-            if [ -n "$pkg_doc_dir" ]; then
-              cp -r "$pkg_doc_dir" "site/"
-            fi
-          done
+          kedgeree ./haddocks
+            --landing "Arbiter"
+            --landing-description "Distributed job processing in Haskell, backed by your own PostgreSQL database"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: haddocks
 
   deploy:
     needs: build
