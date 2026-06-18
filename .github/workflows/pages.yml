@@ -43,16 +43,14 @@ jobs:
           curl -L -O https://hackage.haskell.org/package/kedgeree-0.1.0/candidate/kedgeree-0.1.0.tar.gz
           tar xzf kedgeree-0.1.0.tar.gz
           cd kedgeree-0.1.0
-          cabal install
+          cabal install --project-dir=.
 
       - name: Generate Haddocks
         run: cabal haddock-project --hackage --haddock-options=--quickjump
 
       - name: Cook the haddocks
         run: |
-          kedgeree ./haddocks
-            --landing "Arbiter"
-            --landing-description "Distributed job processing in Haskell, backed by your own PostgreSQL database"
+          kedgeree ./haddocks --landing "Arbiter" --landing-description "Distributed job processing in Haskell, backed by your own PostgreSQL database"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
