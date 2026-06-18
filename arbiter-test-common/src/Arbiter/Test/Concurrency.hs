@@ -18,6 +18,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.QueueRegistry (TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, replicateM, replicateM_, void, when)
+import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List (nub, sort)
@@ -30,6 +31,8 @@ import Database.PostgreSQL.Simple qualified as PG
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_)
+
+import Arbiter.Test.StateMachine (holInstallSql, holRemoveSql, holViolTbl)
 
 -- | Claim and ack jobs in a loop until no more are available.
 -- Backs off with 10ms delay between empty claim attempts, gives up
@@ -64,91 +67,26 @@ findDuplicates = go Set.empty Set.empty
       | Set.member x seen = go seen (Set.insert x dups) xs
       | otherwise = go (Set.insert x seen) dups xs
 
--- | Count HOL violations from a log of @(group_key, claim_seq, ack_seq)@ entries.
--- Two entries from the same group with overlapping @[claim_seq, ack_seq]@ intervals
--- indicate a head-of-line violation (two workers processing the same group concurrently).
--- | Install a database-level HOL violation detector.
---
--- Creates a trigger that fires inside claim transactions (AFTER UPDATE on the
--- jobs table). When a job becomes in-flight, the trigger checks if another job
--- in the same group is already in-flight. If so, it logs a violation.
+-- | Install the gap-free HOL violation detector on a raw connection. The trigger
+-- definition is shared with the state-machine suite.
 installHolDetector :: PG.Connection -> Text -> Text -> IO ()
-installHolDetector conn schemaName tableName = do
-  let tbl = schemaName <> ".\"" <> tableName <> "\""
-      vTbl = schemaName <> ".\"" <> tableName <> "_hol_violations\""
-      fn = schemaName <> ".\"detect_hol_" <> tableName <> "_fn\"()"
-      trigger = "detect_hol_" <> tableName
-      exec = PG.execute_ conn . fromString . T.unpack
-  _ <- exec "SET client_min_messages TO 'warning'"
-  mapM_
-    exec
-    [ "CREATE TABLE IF NOT EXISTS "
-        <> vTbl
-        <> " (group_key TEXT NOT NULL, job_id BIGINT NOT NULL)"
-    , "TRUNCATE " <> vTbl
-    , "CREATE OR REPLACE FUNCTION "
-        <> fn
-        <> " RETURNS TRIGGER AS $t$ "
-        <> "BEGIN "
-        <> "IF NEW.not_visible_until IS NOT NULL "
-        <> "AND NEW.not_visible_until > NOW() "
-        <> "AND NOT NEW.suspended "
-        <> "AND NEW.group_key IS NOT NULL "
-        <> "AND EXISTS ("
-        <> "SELECT 1 FROM "
-        <> tbl
-        <> " "
-        <> "WHERE group_key = NEW.group_key AND id != NEW.id "
-        <> "AND not_visible_until IS NOT NULL "
-        <> "AND not_visible_until > NOW() "
-        <> "AND NOT suspended"
-        <> ") THEN "
-        <> "INSERT INTO "
-        <> vTbl
-        <> " (group_key, job_id) "
-        <> "VALUES (NEW.group_key, NEW.id); "
-        <> "END IF; "
-        <> "RETURN NULL; "
-        <> "END; $t$ LANGUAGE plpgsql"
-    , "DROP TRIGGER IF EXISTS " <> trigger <> " ON " <> tbl
-    , "CREATE TRIGGER "
-        <> trigger
-        <> " AFTER UPDATE ON "
-        <> tbl
-        <> " FOR EACH ROW EXECUTE FUNCTION "
-        <> fn
-    ]
-  _ <- exec "RESET client_min_messages"
-  pure ()
+installHolDetector conn schemaName tableName =
+  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holInstallSql schemaName tableName)
 
 -- | Count violations detected by the HOL detector trigger.
 countHolViolations :: PG.Connection -> Text -> Text -> IO Int64
 countHolViolations conn schemaName tableName = do
-  let vTbl = schemaName <> ".\"" <> tableName <> "_hol_violations\""
   [PG.Only count] <-
     PG.query_ conn $
       fromString $
         T.unpack $
-          "SELECT count(*)::bigint FROM " <> vTbl
+          "SELECT count(*)::bigint FROM " <> holViolTbl schemaName tableName
   pure count
 
--- | Remove the HOL detector trigger and violations table.
+-- | Remove the HOL detector trigger, function, and violations table.
 removeHolDetector :: PG.Connection -> Text -> Text -> IO ()
-removeHolDetector conn schemaName tableName = do
-  let tbl = schemaName <> ".\"" <> tableName <> "\""
-      vTbl = schemaName <> ".\"" <> tableName <> "_hol_violations\""
-      fn = schemaName <> ".\"detect_hol_" <> tableName <> "_fn\""
-      trigger = "detect_hol_" <> tableName
-      exec = PG.execute_ conn . fromString . T.unpack
-  _ <- exec "SET client_min_messages TO 'warning'"
-  mapM_
-    exec
-    [ "DROP TRIGGER IF EXISTS " <> trigger <> " ON " <> tbl
-    , "DROP FUNCTION IF EXISTS " <> fn
-    , "DROP TABLE IF EXISTS " <> vTbl
-    ]
-  _ <- exec "RESET client_min_messages"
-  pure ()
+removeHolDetector conn schemaName tableName =
+  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holRemoveSql schemaName tableName)
 
 -- | Parameterized concurrency test suite.
 --
@@ -226,32 +164,47 @@ concurrencySpec mkMessage runM = do
 
   describe "Concurrent Job Claims" $ do
     it "concurrent workers claim disjoint ungrouped jobs" $ \env -> do
-      -- Insert 6 ungrouped jobs
-      void $
-        runM env $
-          HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))
+      -- Insert 6 ungrouped jobs, remembering their ids.
+      inserted <- runM env $ HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))
+      let insertedIds = Set.fromList (map primaryKey inserted)
 
       [c1, c2, c3] <-
         mapConcurrently
           (\_ -> runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload])
           [1 :: Int, 2, 3]
 
-      let allIds = map primaryKey (c1 <> c2 <> c3)
-      length allIds `shouldBe` length (nub allIds)
-      length allIds `shouldSatisfy` (<= 6)
+      let raced = map primaryKey (c1 <> c2 <> c3)
+      -- No job claimed twice in the racy pass.
+      raced `shouldBe` nub raced
+      -- Drive any jobs missed by the race to completion (claimed jobs hold a
+      -- 60s lease, so a follow-up claim only surfaces the still-unclaimed ones).
+      drainedRef <- newIORef ([] :: [Int64])
+      drainAll (runM env (HL.claimNextVisibleJobs 6 60) :: IO [JobRead payload]) $ \j ->
+        atomicModifyIORef' drainedRef (\acc -> (primaryKey j : acc, ()))
+      drained <- readIORef drainedRef
+      -- Real progress: every inserted job was claimed exactly once across the
+      -- racing workers and the drain.
+      let allClaimed = raced <> drained
+      allClaimed `shouldBe` nub allClaimed
+      Set.fromList allClaimed `shouldBe` insertedIds
 
     it "concurrent workers respect per-group ordering for grouped jobs" $ \env -> do
       -- 500 iterations: seed a group, race 10 workers to claim + concurrent
       -- inserts to the same group. Per-group ordering means exactly 1 claim per round.
       let numIterations = 500
           numWorkers = 10
+          seedPerRound = 5
+          insertersPerRound = 2
       violationRef <- newIORef (0 :: Int)
+      insertedRef <- newIORef (0 :: Int)
+      processedRef <- newIORef (Set.empty :: Set.Set Int64)
 
       forM_ [(1 :: Int) .. numIterations] $ \_ -> do
         -- Insert 5 jobs in one group
         void $
           runM env $
-            HL.insertJobsBatch (replicate 5 $ (defaultJob (mkMessage "Grouped")) {groupKey = Just "hol-stress"})
+            HL.insertJobsBatch (replicate seedPerRound $ (defaultJob (mkMessage "Grouped")) {groupKey = Just "hol-stress"})
+        atomicModifyIORef' insertedRef (\n -> (n + seedPerRound + insertersPerRound, ()))
 
         -- Race N workers to claim + 2 concurrent inserters to the same group.
         -- The INSERT triggers fire concurrently with the claim CTEs,
@@ -262,9 +215,9 @@ concurrencySpec mkMessage runM = do
             $ map
               (\_ -> runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload])
               [(1 :: Int) .. numWorkers]
-              <> [ void (runM env $ HL.insertJob (defaultJob (mkMessage "concurrent")) {groupKey = Just "hol-stress"}) >> pure []
-                 , void (runM env $ HL.insertJob (defaultJob (mkMessage "concurrent")) {groupKey = Just "hol-stress"}) >> pure []
-                 ]
+              <> replicate
+                insertersPerRound
+                (void (runM env $ HL.insertJob (defaultJob (mkMessage "concurrent")) {groupKey = Just "hol-stress"}) >> pure [])
 
         -- Ordering invariant: at most 1 claim per group. totalClaimed == 0 is
         -- normal when the INSERT trigger's groups row lock causes claims to
@@ -274,13 +227,19 @@ concurrencySpec mkMessage runM = do
         when (totalClaimed > 1) $
           atomicModifyIORef' violationRef (\n -> (n + 1, ()))
 
-        -- Ack and drain
-        forM_ (concat results) $ \j -> void $ runM env (HL.ackJob j)
+        -- Ack the racy claims, then drain the rest, recording every processed id.
+        let record j = atomicModifyIORef' processedRef (\s -> (Set.insert (primaryKey j) s, ()))
+        forM_ (concat results) $ \j -> record j >> void (runM env (HL.ackJob j))
         drainAll (runM env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead payload]) $
-          \j -> void $ runM env (HL.ackJob j)
+          \j -> record j >> void (runM env (HL.ackJob j))
 
       violations <- readIORef violationRef
       violations `shouldBe` 0
+      -- Total progress: every job inserted across all rounds was claimed and
+      -- acked exactly once, so a zero-progress (nothing ever claimed) run fails.
+      inserted <- readIORef insertedRef
+      processed <- readIORef processedRef
+      Set.size processed `shouldBe` inserted
 
     it "FOR UPDATE SKIP LOCKED prevents concurrent claims of same job" $ \env -> do
       -- Insert a single job
@@ -298,31 +257,6 @@ concurrencySpec mkMessage runM = do
       -- With SKIP LOCKED, workers skip the locked row and return empty
       let totalClaimed = length c1 + length c2 + length c3
       totalClaimed `shouldBe` 1
-
-  describe "Optimistic Locking Under Concurrent Load" $ do
-    it "ack fails when another worker reclaimed job (real concurrent scenario)" $ \env -> do
-      -- Insert job
-      void $ runM env $ HL.insertJob ((defaultJob (mkMessage "Race")) {groupKey = Just "optimistic-lock-test"})
-
-      -- Worker A claims
-      claimedA <- runM env (HL.claimNextVisibleJobs 1 1) :: IO [JobRead payload]
-      let jobA = head claimedA
-
-      -- Wait for visibility to expire
-      threadDelay 1_500_000
-
-      -- Worker B claims (job now visible again)
-      claimedB <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
-      length claimedB `shouldBe` 1
-      let jobB = head claimedB
-
-      -- Worker A tries to ack (should fail - attempts mismatch)
-      rowsAcked <- runM env (HL.ackJob jobA)
-      rowsAcked `shouldBe` 0
-
-      -- Worker B should be able to ack successfully
-      rowsAcked2 <- runM env (HL.ackJob jobB)
-      rowsAcked2 `shouldBe` 1
 
 -- | Aggressive race condition tests designed to surface concurrency bugs.
 --

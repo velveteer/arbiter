@@ -26,11 +26,13 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime (..), addUTCTime, getCurrentTime, picosecondsToDiffTime)
+import Data.Time (addUTCTime, getCurrentTime)
 import Data.UUID.Types qualified as UUID
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO (MonadUnliftIO)
+
+import Arbiter.Test.Setup (truncateToMicros)
 
 -- | Build a test suite for the given 'MonadArbiter' runner.
 operationsSpec
@@ -50,11 +52,7 @@ operationsSpec
   -> SpecWith env
 operationsSpec mkMessage runM = do
   -- Test helpers
-  let truncateToMicros :: UTCTime -> UTCTime
-      truncateToMicros (UTCTime d t) =
-        let micros = floor (t * 1e6) :: Integer
-         in UTCTime d (picosecondsToDiffTime (micros * 1000000))
-      claimJobs env n = runM env (HL.claimNextVisibleJobs n 60) :: IO [JobRead payload]
+  let claimJobs env n = runM env (HL.claimNextVisibleJobs n 60) :: IO [JobRead payload]
       getJob env jobId = runM env (HL.getJobById @m @registry @payload jobId)
       assertSuspended env jobId = do
         Just j <- getJob env jobId
@@ -393,14 +391,16 @@ operationsSpec mkMessage runM = do
       payload inserted1 `shouldBe` mkMessage "Same"
       payload inserted2 `shouldBe` mkMessage "Same"
 
-    it "IgnoreDuplicate returns Nothing on conflict" $ \env -> do
+    it "IgnoreDuplicate returns Nothing on conflict (grouped and ungrouped)" $ \env -> do
+      -- groupKey does not participate in dedup: the same key conflicts whether
+      -- the jobs are grouped or ungrouped.
       let job1 =
             (defaultGroupedJob "dedup-ignore-test-1" (mkMessage "First"))
               { dedupKey = Just (IgnoreDuplicate "unique-key-1")
               }
           job2 =
             (defaultGroupedJob "dedup-ignore-test-2" (mkMessage "Second"))
-              { dedupKey = Just (IgnoreDuplicate "unique-key-1") -- Same dedup key!
+              { dedupKey = Just (IgnoreDuplicate "unique-key-1") -- Same dedup key, different group
               }
 
       Just inserted1 <- runM env (HL.insertJob job1)
@@ -409,6 +409,21 @@ operationsSpec mkMessage runM = do
       -- Second insert should return Nothing (conflict)
       inserted2 `shouldBe` Nothing
       payload inserted1 `shouldBe` mkMessage "First"
+
+      -- Same conflict holds for ungrouped jobs sharing a dedup key.
+      let ungrouped1 =
+            (defaultJob (mkMessage "Ungrouped1"))
+              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
+              }
+          ungrouped2 =
+            (defaultJob (mkMessage "Ungrouped2"))
+              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
+              }
+
+      Just insertedU1 <- runM env (HL.insertJob ungrouped1)
+      insertedU2 <- runM env (HL.insertJob ungrouped2)
+      insertedU2 `shouldBe` Nothing
+      payload insertedU1 `shouldBe` mkMessage "Ungrouped1"
     it "IgnoreDuplicate with different keys creates separate jobs" $ \env -> do
       let job1 =
             (defaultGroupedJob "dedup-diffkey-test-1" (mkMessage "Job1"))
@@ -509,6 +524,13 @@ operationsSpec mkMessage runM = do
       replaced <- runM env (HL.insertJob job2)
       replaced `shouldBe` Nothing
 
+      -- The original job is preserved unchanged. Make it visible and re-claim it.
+      void $ runM env (HL.setVisibilityTimeout 0 claimedJob)
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
+      primaryKey (head reclaimed) `shouldBe` primaryKey claimedJob
+      payload (head reclaimed) `shouldBe` mkMessage "Original"
+
     it "ReplaceDuplicate succeeds when job is in retry backoff (has last_error)" $ \env -> do
       let job1 =
             (defaultGroupedJob "dedup-backoff-test-1" (mkMessage "Original"))
@@ -603,23 +625,6 @@ operationsSpec mkMessage runM = do
       -- ReplaceDuplicate replaces
       primaryKey replace1 `shouldBe` primaryKey replace2
       payload replace2 `shouldBe` mkMessage "Replace2"
-
-    it "Dedup works with ungrouped jobs" $ \env -> do
-      let job1 =
-            (defaultJob (mkMessage "Ungrouped1"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
-          job2 =
-            (defaultJob (mkMessage "Ungrouped2"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
-
-      Just inserted1 <- runM env (HL.insertJob job1)
-      inserted2 <- runM env (HL.insertJob job2)
-
-      -- Second insert should return Nothing
-      inserted2 `shouldBe` Nothing
-      payload inserted1 `shouldBe` mkMessage "Ungrouped1"
 
     it "IgnoreDuplicate and ReplaceDuplicate with same key conflict" $ \env -> do
       let job1 =
@@ -1076,6 +1081,66 @@ operationsSpec mkMessage runM = do
       -- Try to ack with old attempts value (race lost)
       rowsAffected <- runM env (HL.ackJob claimedJob)
       rowsAffected `shouldBe` 0
+
+    it "maxAttempts=2 retries once then moves to DLQ on the second attempt" $ \env -> do
+      let job =
+            (defaultJob (mkMessage "MaxAtt2"))
+              { groupKey = Just "max-attempts-2-test"
+              , maxAttempts = Just 2
+              }
+      Just _inserted <- runM env (HL.insertJob job)
+
+      -- First attempt: claim brings attempts to 1, below maxAttempts, so retry.
+      claimed1 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length claimed1 `shouldBe` 1
+      let attempt1 = head claimed1
+      attempts attempt1 `shouldBe` 1
+      -- Zero backoff so the retry is immediately re-claimable.
+      void $ runM env (HL.updateJobForRetry 0 "fail 1" attempt1)
+
+      -- Second attempt: claim brings attempts to 2, which reaches maxAttempts.
+      claimed2 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length claimed2 `shouldBe` 1
+      let attempt2 = head claimed2
+      attempts attempt2 `shouldBe` 2
+
+      -- attempts >= maxAttempts, so this attempt moves the job to the DLQ.
+      moved <- runM env (HL.moveToDLQ "fail 2 (exhausted)" attempt2)
+      moved `shouldBe` 1
+
+      -- The job is gone from the main queue and sits in the DLQ at attempts=2.
+      remaining <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
+      length remaining `shouldBe` 0
+      dlqJobs <- dlqAll env
+      let dlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "MaxAtt2") dlqJobs
+      attempts (DLQ.jobSnapshot dlq) `shouldBe` 2
+      lastError (DLQ.jobSnapshot dlq) `shouldBe` Just "fail 2 (exhausted)"
+
+    it "retryFromDLQ drops dedup_key so the same key no longer dedups" $ \env -> do
+      -- A DLQ'd job carrying an IgnoreDuplicate key.
+      let job =
+            (defaultJob (mkMessage "RetryDropKey"))
+              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
+              }
+      Just _inserted <- runM env (HL.insertJob job)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.moveToDLQ "boom" (head claimed))
+
+      dlqJobs <- dlqAll env
+      let dlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == mkMessage "RetryDropKey") dlqJobs
+
+      -- Retry restores the job with attempts reset but does NOT restore dedup_key.
+      Just retried <- runM env (HL.retryFromDLQ @m @registry @payload (DLQ.dlqPrimaryKey dlq))
+      dedupKey retried `shouldBe` Nothing
+
+      -- A fresh insert with the original key is therefore NOT deduped.
+      let again =
+            (defaultJob (mkMessage "RetryDropKeyAgain"))
+              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
+              }
+      Just insertedAgain <- runM env (HL.insertJob again)
+      primaryKey insertedAgain `shouldNotBe` primaryKey retried
+      payload insertedAgain `shouldBe` mkMessage "RetryDropKeyAgain"
 
   describe "Batched Claims (claimNextVisibleJobsBatched)" $ do
     let claimBatched env batchSize limit = runM env (HL.claimNextVisibleJobsBatched batchSize limit 60)
@@ -2613,52 +2678,38 @@ operationsSpec mkMessage runM = do
       length orphans `shouldBe` 0
 
   describe "Parent State Aggregation" $ do
-    it "insertResult writes child result to results table" $ \env -> do
+    it "insertResult writes single and multiple child results to results table" $ \env -> do
       -- Insert a tree using rollup (sets isRollup = True)
       Right (parent :| children) <-
         runM env $
           HL.insertJobTree $
             JT.rollup
               (defaultJob (mkMessage "AggParent1"))
-              (JT.leaf (defaultJob (mkMessage "AggChild1")) :| [])
-      let [child] = children
+              ( JT.leaf (defaultJob (mkMessage "AggChild1"))
+                  :| [JT.leaf (defaultJob (mkMessage "AggChild2"))]
+              )
+      let [child1, child2] = children
 
       -- Verify parent is a rollup
       isRollup parent `shouldBe` True
 
-      -- Insert a result for the child
+      -- Single child result upsert returns 1 row
       rowsInserted <-
         runM env $
-          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "child1-done")
+          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "child1-done")
       rowsInserted `shouldBe` 1
 
-      -- Fetch results from the results table
+      -- A second child upserts independently into its own (parent, child) row
+      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.Number 99)
+
+      -- Both results are readable from the results table
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
-      Map.lookup (primaryKey child) results `shouldBe` Just (Aeson.String "child1-done")
+      Map.lookup (primaryKey child1) results `shouldBe` Just (Aeson.String "child1-done")
+      Map.lookup (primaryKey child2) results `shouldBe` Just (Aeson.Number 99)
 
       -- isRollup should still be True (results stored in separate table, not on job)
       Just updatedParent <- runM env $ HL.getJobById @m @registry @payload (primaryKey parent)
       isRollup updatedParent `shouldBe` True
-
-    it "insertResult stores multiple children" $ \env -> do
-      Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "AggParent2"))
-              ( JT.leaf (defaultJob (mkMessage "AggChild2a"))
-                  :| [JT.leaf (defaultJob (mkMessage "AggChild2b"))]
-              )
-      let [child1, child2] = children
-
-      -- Insert results for both children
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.Number 42)
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.Number 99)
-
-      -- Verify both results in the results table
-      results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
-      Map.lookup (primaryKey child1) results `shouldBe` Just (Aeson.Number 42)
-      Map.lookup (primaryKey child2) results `shouldBe` Just (Aeson.Number 99)
 
     it "isRollup is False for regular jobs" $ \env -> do
       Just job <- runM env $ HL.insertJob (defaultJob (mkMessage "EitherNone"))
@@ -2689,15 +2740,31 @@ operationsSpec mkMessage runM = do
       Map.lookup (primaryKey child1) errors `shouldBe` Just "error-from-child-1"
       Map.lookup (primaryKey child2) errors `shouldBe` Just "error-from-child-2"
 
-    it "getDLQChildErrorsByParent returns empty map for parent with no DLQ'd children" $ \env -> do
-      Right (parent :| _children) <-
+    it "getDLQChildErrorsByParent maps only DLQ'd children, ignoring live siblings" $ \env -> do
+      Right (parent :| children) <-
         runM env $
           HL.insertJobTree $
             JT.rollup
-              (defaultJob (mkMessage "DLQErr0Parent"))
-              (JT.leaf (defaultJob (mkMessage "DLQErr0Child")) :| [])
+              (defaultJob (mkMessage "DLQErrMixParent"))
+              ( JT.leaf (defaultJob (mkMessage "DLQErrMixChild1"))
+                  :| [JT.leaf (defaultJob (mkMessage "DLQErrMixChild2"))]
+              )
+      let [child1, child2] = children
+
+      -- Before any failure the map is empty.
+      emptyMap <- runM env $ HL.getDLQChildErrorsByParent @m @registry @payload (primaryKey parent)
+      emptyMap `shouldBe` Map.empty
+
+      -- DLQ only child1, leaving child2 live in the main queue.
+      claimed <- claimJobs env 10
+      let c1 = head $ filter (\j -> primaryKey j == primaryKey child1) claimed
+      void $ runM env $ HL.moveToDLQ "only-child1-failed" c1
+
+      -- The map contains exactly the DLQ'd child, not the live sibling.
       errors <- runM env $ HL.getDLQChildErrorsByParent @m @registry @payload (primaryKey parent)
-      errors `shouldBe` Map.empty
+      Map.size errors `shouldBe` 1
+      Map.lookup (primaryKey child1) errors `shouldBe` Just "only-child1-failed"
+      Map.lookup (primaryKey child2) errors `shouldBe` Nothing
 
     it "results table and DLQ errors coexist for mixed outcomes" $ \env -> do
       Right (parent :| children) <-

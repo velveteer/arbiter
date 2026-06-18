@@ -32,9 +32,13 @@
 -- detector (a row trigger that fires inside every claim), then quiesces with a
 -- reaper tick and asserts both the detector log and the full settled oracle are
 -- clean. All contention is in the generated, shrinkable model.
--- Deterministic guards back the known-critical races (deadlock,
--- double-claim, attempt-exhaustion).
-module Arbiter.Test.StateMachine (stateMachineSpec) where
+-- Deterministic guards back the known-critical races.
+module Arbiter.Test.StateMachine
+  ( stateMachineSpec
+  , holViolTbl
+  , holInstallSql
+  , holRemoveSql
+  ) where
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
@@ -120,6 +124,48 @@ holViolTbl, holFn, holTrigger :: Text -> Text -> Text
 holViolTbl schema table = schema <> "." <> table <> "_hol_violations"
 holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
 holTrigger _ table = "detect_hol_" <> table
+
+-- | DDL to install the gap-free HOL detector: a row trigger that logs a
+-- violation the instant a job becomes a lease\/backoff in-flight while another
+-- @attempts > 0@ job in its group already is. The @attempts > 0@ filter excludes
+-- scheduled jobs, which do not block the group. Single source of truth shared by
+-- both test suites.
+holInstallSql :: Text -> Text -> [Text]
+holInstallSql schema table =
+  [ "SET client_min_messages TO warning"
+  , "CREATE TABLE IF NOT EXISTS " <> holViolTbl schema table <> " (group_key TEXT NOT NULL, job_id BIGINT NOT NULL)"
+  , "TRUNCATE " <> holViolTbl schema table
+  , "CREATE OR REPLACE FUNCTION "
+      <> holFn schema table
+      <> "() RETURNS TRIGGER AS $t$ BEGIN IF NEW.not_visible_until > NOW()"
+      <> " AND NOT NEW.suspended AND NEW.attempts > 0 AND NEW.group_key IS NOT NULL"
+      <> " AND EXISTS (SELECT 1 FROM "
+      <> tbl
+      <> " WHERE group_key = NEW.group_key AND id <> NEW.id"
+      <> " AND not_visible_until > NOW() AND NOT suspended AND attempts > 0)"
+      <> " THEN INSERT INTO "
+      <> holViolTbl schema table
+      <> " (group_key, job_id) VALUES (NEW.group_key, NEW.id); END IF; RETURN NULL; END; $t$ LANGUAGE plpgsql"
+  , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> tbl
+  , "CREATE TRIGGER "
+      <> holTrigger schema table
+      <> " AFTER UPDATE ON "
+      <> tbl
+      <> " FOR EACH ROW EXECUTE FUNCTION "
+      <> holFn schema table
+      <> "()"
+  ]
+  where
+    tbl = schema <> "." <> table
+
+-- | DDL to remove the HOL detector trigger, function, and violations table.
+holRemoveSql :: Text -> Text -> [Text]
+holRemoveSql schema table =
+  [ "SET client_min_messages TO warning"
+  , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> schema <> "." <> table
+  , "DROP FUNCTION IF EXISTS " <> holFn schema table <> "()"
+  , "DROP TABLE IF EXISTS " <> holViolTbl schema table
+  ]
 
 -- ---------------------------------------------------------------------------
 -- Invariant checks (queried from the database after each command)
@@ -404,16 +450,56 @@ cClaim run schema table withConn =
   Command
     (\_ -> Just (pure Claim))
     ( \Claim -> do
-        n <- evalIO (run (mkClaim @sm @registry @payload))
+        ids <- evalIO (run (mkClaim @sm @registry @payload))
+        -- Each claimed job is now a live, in-flight (leased) row in the database.
+        live <- evalIO (traverse (isLiveInFlight schema table withConn) ids)
+        assert (and live)
         checkInvariants schema table withConn
-        pure n
+        pure ids
     )
-    []
+    [ Ensure $ \_ post Claim ids -> do
+        -- Never claim more than the batch size.
+        assert (length ids <= claimBatchSize)
+        -- A claimed id must not be a DLQ row (those never re-enter the main queue
+        -- by claim). Untracked jobs (batch\/tree\/dedup) are legitimately claimable
+        -- and absent from the model, so only the DLQ membership is asserted.
+        let dlqIds = map concrete (Map.keys (mDlq post))
+        nub (filter (`elem` dlqIds) ids) === []
+    ]
 
-mkClaim :: forall sm registry payload. (ArbiterC sm registry payload) => sm Int
+claimBatchSize :: Int
+claimBatchSize = 3
+
+mkClaim :: forall sm registry payload. (ArbiterC sm registry payload) => sm [Int64]
 mkClaim = do
-  js <- HL.claimNextVisibleJobs 3 60 :: sm [JobRead payload]
-  pure (length js)
+  js <- HL.claimNextVisibleJobs claimBatchSize 60 :: sm [JobRead payload]
+  pure (map primaryKey js)
+
+-- | True if the id names a live row that is currently leased (in-flight).
+isLiveInFlight :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Bool
+isLiveInFlight schema table withConn jid = withConn $ \conn -> do
+  rows <-
+    PG.query conn (fromString (T.unpack sql)) (Only jid)
+  pure $ case rows of
+    Only n : _ -> (n :: Int64) > 0
+    _ -> False
+  where
+    sql =
+      "SELECT count(*) FROM "
+        <> schema
+        <> "."
+        <> table
+        <> " WHERE id = ? AND not_visible_until > NOW() AND NOT suspended AND attempts > 0"
+
+-- | True if a row with this id is present in the main table.
+rowExists :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Bool
+rowExists schema table withConn jid = withConn $ \conn -> do
+  rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
+  pure $ case rows of
+    Only n : _ -> (n :: Int64) > 0
+    _ -> False
+  where
+    sql = "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE id = ?"
 
 -- | A reference to an existing live job, shared by every id-targeted command.
 newtype JobRef (v :: Type -> Type) = JobRef (Var Int64 v)
@@ -422,7 +508,33 @@ newtype JobRef (v :: Type -> Type) = JobRef (Var Int64 v)
 
 -- | A command that picks a live job from the model and runs an id-keyed
 -- operation, tagging any invariant failure with @lbl@. @removes@ says whether
--- the job leaves the queue.
+-- the job leaves the queue. @extra@ adds command-specific callbacks (e.g. an
+-- ack-removed Ensure).
+jobRefCommandL'
+  :: (MonadGen gen, MonadIO m, MonadTest m)
+  => String
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> Bool
+  -> (Int64 -> m ())
+  -> (Int64 -> sm ())
+  -> Command gen m Model
+jobRefCommandL' lbl run schema table withConn removes postCheck op =
+  Command gen exec callbacks
+  where
+    gen m
+      | Map.null (mLive m) = Nothing
+      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
+    exec (JobRef v) = do
+      evalIO (run (op (concrete v)))
+      postCheck (concrete v)
+      checkInvariantsL lbl schema table withConn
+    callbacks =
+      Require (\m (JobRef v) -> Map.member v (mLive m))
+        : [Update (\m (JobRef v) _ -> m {mLive = Map.delete v (mLive m)}) | removes]
+
 jobRefCommandL
   :: (MonadGen gen, MonadIO m, MonadTest m)
   => String
@@ -433,18 +545,8 @@ jobRefCommandL
   -> Bool
   -> (Int64 -> sm ())
   -> Command gen m Model
-jobRefCommandL lbl run schema table withConn removes op =
-  Command gen exec callbacks
-  where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
-    exec (JobRef v) = do
-      evalIO (run (op (concrete v)))
-      checkInvariantsL lbl schema table withConn
-    callbacks =
-      Require (\m (JobRef v) -> Map.member v (mLive m))
-        : [Update (\m (JobRef v) _ -> m {mLive = Map.delete v (mLive m)}) | removes]
+jobRefCommandL lbl run schema table withConn removes =
+  jobRefCommandL' lbl run schema table withConn removes (\_ -> pure ())
 
 cAck
   , cCancel
@@ -462,7 +564,15 @@ cAck
     -> Text
     -> (forall a. (PG.Connection -> IO a) -> IO a)
     -> Command gen m Model
-cAck mkPayload run schema table withConn = jobRefCommandL "Ack" run schema table withConn True (mkAck mkPayload)
+cAck mkPayload run schema table withConn =
+  jobRefCommandL' "Ack" run schema table withConn True ackedRowGone (mkAck mkPayload)
+  where
+    -- A plain tracked job that was acked must no longer be present in the main
+    -- table. Tracked jobs are never rollup finalizers (those are untracked), so
+    -- ack deletes the row outright rather than suspending it.
+    ackedRowGone jid = do
+      present <- evalIO (rowExists schema table withConn jid)
+      present === False
 cCancel _ run schema table withConn = jobRefCommandL "Cancel" run schema table withConn True (void . HL.cancelJob @sm @registry @payload)
 cSuspend _ run schema table withConn = jobRefCommandL "Suspend" run schema table withConn False (void . HL.suspendJob @sm @registry @payload)
 cResume _ run schema table withConn = jobRefCommandL "Resume" run schema table withConn False (void . HL.resumeJob @sm @registry @payload)
@@ -1047,40 +1157,10 @@ withRetry act = go (5 :: Int)
 isRetryableError :: SomeException -> Bool
 isRetryableError e = any (`isInfixOf` show e) ["40P01", "40001"]
 
--- | Install a row trigger that, the instant a job becomes a lease\/backoff
--- in-flight, logs a violation if another @attempts > 0@ job in the same group is
--- already in-flight. Firing inside every claim makes it gap-free, unlike a
--- periodic poll. The @attempts > 0@ filter excludes scheduled jobs, which do not
--- block the group.
+-- | Install the gap-free HOL detector through the raw-connection accessor.
 installHolDetector :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 installHolDetector schema table withConn = withConn $ \conn ->
-  traverse_
-    (void . PG.execute_ conn . fromString . T.unpack)
-    [ "SET client_min_messages TO warning"
-    , "CREATE TABLE IF NOT EXISTS " <> holViolTbl schema table <> " (group_key TEXT NOT NULL, job_id BIGINT NOT NULL)"
-    , "TRUNCATE " <> holViolTbl schema table
-    , "CREATE OR REPLACE FUNCTION "
-        <> holFn schema table
-        <> "() RETURNS TRIGGER AS $t$ BEGIN IF NEW.not_visible_until > NOW()"
-        <> " AND NOT NEW.suspended AND NEW.attempts > 0 AND NEW.group_key IS NOT NULL"
-        <> " AND EXISTS (SELECT 1 FROM "
-        <> tbl
-        <> " WHERE group_key = NEW.group_key AND id <> NEW.id"
-        <> " AND not_visible_until > NOW() AND NOT suspended AND attempts > 0)"
-        <> " THEN INSERT INTO "
-        <> holViolTbl schema table
-        <> " (group_key, job_id) VALUES (NEW.group_key, NEW.id); END IF; RETURN NULL; END; $t$ LANGUAGE plpgsql"
-    , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> tbl
-    , "CREATE TRIGGER "
-        <> holTrigger schema table
-        <> " AFTER UPDATE ON "
-        <> tbl
-        <> " FOR EACH ROW EXECUTE FUNCTION "
-        <> holFn schema table
-        <> "()"
-    ]
-  where
-    tbl = schema <> "." <> table
+  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holInstallSql schema table)
 
 countHolViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 countHolViolations schema table withConn = withConn $ \conn -> do
@@ -1092,13 +1172,7 @@ countHolViolations schema table withConn = withConn $ \conn -> do
 
 removeHolDetector :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 removeHolDetector schema table withConn = withConn $ \conn ->
-  traverse_
-    (void . PG.execute_ conn . fromString . T.unpack)
-    [ "SET client_min_messages TO warning"
-    , "DROP TRIGGER IF EXISTS " <> holTrigger schema table <> " ON " <> schema <> "." <> table
-    , "DROP FUNCTION IF EXISTS " <> holFn schema table <> "()"
-    , "DROP TABLE IF EXISTS " <> holViolTbl schema table
-    ]
+  traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holRemoveSql schema table)
 
 -- ---------------------------------------------------------------------------
 -- Property + hspec wiring
@@ -1149,12 +1223,6 @@ prop_engine mkPayload run schema table withConn reset = withTests 300 $ property
 -- concurrently under the gap-free HOL detector (installed by the caller), then
 -- quiesces with a reaper tick and asserts both the detector log and the settled
 -- summary oracle are clean.
---
--- All contention lives in the generated model: hedgehog drives N branches (not
--- the two 'executeParallel' caps at), so there is no unmodeled background thread,
--- and a failure shrinks toward a minimal set of branches and replays by seed.
--- 'executeParallel' is not used because its only extra check is output
--- linearizability against the model, which this DB model does not predict.
 prop_concurrent
   :: forall sm registry payload
    . (ArbiterC sm registry payload)

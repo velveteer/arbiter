@@ -17,18 +17,23 @@ import System.FilePath ((<.>), (</>))
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Golden (goldenVsString)
 
-import Arbiter.Migrations (defaultMigrationConfig, jobQueueMigrationsForTable)
+import Arbiter.Migrations (MigrationConfig (..), defaultMigrationConfig, jobQueueMigrationsForTable)
 
 main :: IO ()
-main = defaultMain (testGroup "migration checksums" (map migrationGolden shippedMigrations))
+main =
+  defaultMain $
+    testGroup "migration checksums" (map migrationGolden shippedMigrations)
 
--- | Per-table migrations as @(name, SQL body)@. These are the ones that churn:
--- triggers, indexes, column defaults.
+-- | Every per-table migration as @(name, SQL body)@, with all features on so the
+-- notify and event-streaming triggers are pinned alongside the core migrations.
 shippedMigrations :: [(String, BS.ByteString)]
 shippedMigrations =
   [ (name, body)
-  | MigrationScript name body <- jobQueueMigrationsForTable "arbiter" "golden_jobs" defaultMigrationConfig
+  | MigrationScript name body <- jobQueueMigrationsForTable "arbiter" "golden_jobs" allFeaturesConfig
   ]
+
+allFeaturesConfig :: MigrationConfig
+allFeaturesConfig = defaultMigrationConfig {enableEventStreaming = True}
 
 -- | Pin one migration's body to @test/golden/<name>.sql@.
 migrationGolden :: (String, BS.ByteString) -> TestTree

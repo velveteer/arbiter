@@ -8,7 +8,6 @@ module Arbiter.Worker.Config
   , defaultBatchedWorkerConfig
   , defaultBatchedRollupWorkerConfig
   , singleJobMode
-  , mergeChildResults
   , HandlerMode (..)
 
     -- * Batch Callbacks
@@ -115,7 +114,14 @@ data WorkerConfig m payload result = WorkerConfig
   }
 
 -- | Per-job finalizers handed to a batched handler. Untouched jobs are
--- reprocessed. The @Of@ variants store a result for the job's parent rollup.
+-- reprocessed. The @With@ variants store a result for the job's parent rollup.
+--
+-- Each callback runs in its own transaction and commits on return. Call them at
+-- the top level of the handler. Wrapping one in your own 'withDbTransaction'
+-- enlists the ack into that transaction as a savepoint, committing atomically
+-- with your writes. The success hook then fires at savepoint release, not at
+-- your outer commit, so an outer rollback reprocesses the job after the
+-- visibility timeout.
 data BatchCallbacks m payload result = BatchCallbacks
   { ack :: JobRead payload -> m ()
   -- ^ Ack and fire onJobSuccess.
@@ -198,10 +204,6 @@ defaultBatchedRollupWorkerConfig connStrVal workerCnt batchSize handler =
 -- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').
 singleJobMode :: JobHandler m payload result -> HandlerMode m payload result
 singleJobMode = SingleJobMode
-
--- | Fold child results via 'Monoid', treating failures as 'mempty'.
-mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
-mergeChildResults = foldMap fold
 
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig

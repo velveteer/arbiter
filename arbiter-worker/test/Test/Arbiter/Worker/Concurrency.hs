@@ -18,7 +18,7 @@ import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Simple (SimpleDb, createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Poll (waitUntil)
-import Arbiter.Test.Setup (cleanupData, setupOnce)
+import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
@@ -26,10 +26,9 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
-import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
+import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
-import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll, describe, it, runIO, shouldBe, shouldContain)
@@ -56,17 +55,6 @@ type WorkerConcurrencyTestRegistry = '[ '("arbiter_worker_concurrency_test", Wor
 -- Table name for tests
 testTable :: T.Text
 testTable = "arbiter_worker_concurrency_test"
-
--- Create shared pool for all tests
-createSharedPool :: ByteString -> IO (Pool PG.Connection)
-createSharedPool connStr =
-  newPool $
-    setNumStripes (Just 1) $
-      defaultPoolConfig
-        (connectPostgreSQL connStr)
-        close
-        60
-        5
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
@@ -270,62 +258,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       -- Verify: All jobs were processed (even though they failed)
       processed <- readIORef processedCount
       processed `shouldBe` 3
-
-  describe "Heartbeat" $ do
-    it "prevents job reclaim during long-running processing" $ do
-      env <- getEnv
-
-      -- Track when handler starts and completes
-      handlerStarted <- newIORef False
-      handlerCompleted <- newIORef False
-
-      let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
-          jobHandler _conn _job = do
-            liftIO $ atomicModifyIORef' handlerStarted (\_ -> (True, ()))
-            liftIO $ threadDelay 4_000_000 -- 4 seconds (longer than visibility timeout)
-            liftIO $ atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
-            pure ()
-
-      -- Insert a slow job
-      Just _job <- runSimpleDb env $ Ops.insertJob testSchema testTable (defaultJob (SlowTask 4))
-
-      -- Start worker with short visibility timeout and heartbeat
-      config <- runSimpleDb env $ defaultWorkerConfig connStr 10 jobHandler
-      let workerConfig =
-            config
-              { workerCount = 1
-              , pollInterval = 0.1
-              , visibilityTimeout = 2 -- 2 seconds
-              , jobHeartbeatInterval = 1 -- 1 second heartbeat
-              }
-
-      withAsync
-        (runSimpleDb env $ runWorkerPool workerConfig)
-        $ \_ -> do
-          -- Wait for handler to start
-          waitUntil 10_000 $ readIORef handlerStarted
-          started <- readIORef handlerStarted
-          started `shouldBe` True
-
-          -- Wait past visibility timeout (heartbeat should extend it)
-          threadDelay 2_500_000
-
-          -- Try to claim the job with a second worker
-          -- Heartbeat should have extended visibility, preventing reclaim
-          claimedJobs <-
-            runSimpleDb
-              env
-              ( Ops.claimNextVisibleJobs testSchema testTable 10 2
-                  :: SimpleDb WorkerConcurrencyTestRegistry IO [JobRead WorkerConcurrencyTestPayload]
-              )
-
-          -- Should be 0 because heartbeat extended visibility
-          length claimedJobs `shouldBe` (0 :: Int)
-
-          -- Wait for handler to finish and verify it completed successfully
-          waitUntil 10_000 $ readIORef handlerCompleted
-          completed <- readIORef handlerCompleted
-          completed `shouldBe` True
 
 -- | Helper: Simulate another worker claiming a job by incrementing attempts.
 -- This opens a fresh connection (outside any worker transaction) to increment

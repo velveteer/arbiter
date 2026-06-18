@@ -8,15 +8,15 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), Job (..), JobRead, defaultJob)
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, runSimpleDb)
+import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
-import Arbiter.Test.Setup (cleanupData, setupOnce)
-import Control.Exception (catch)
+import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
+import Control.Exception (bracket, catch)
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Maybe (isJust)
-import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
+import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time
@@ -449,6 +449,10 @@ spec connStr = do
           Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "bad-1 schedule missing"
 
+        -- The good cron's job was actually inserted, not just watermarked.
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` [SimpleTask "ok"]
+
   -- DB integration tests for cron schedule management
   describe "initCronSchedules" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
     sharedPool <- runIO (createSharedPool connStr)
@@ -717,15 +721,71 @@ spec connStr = do
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
-createSharedPool :: ByteString -> IO (Pool PG.Connection)
-createSharedPool connStr =
-  newPool $
-    setNumStripes (Just 1) $
-      defaultPoolConfig
-        (connectPostgreSQL connStr)
-        close
-        60
-        5
+  describe "cron concurrency primitives" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
+    sharedPool <- runIO (createSharedPool connStr)
+    around (withPool sharedPool) $ do
+      it "touchCronChecked advances last_checked_at monotonically and matches by name" $ \env -> do
+        let Right cj = cronJob "touch-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+            tEarly = mkTime 2025 6 15 12 0 0
+            tLate = mkTime 2025 6 15 12 5 0
+        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+
+        nLate <- runSimpleDb env $ Ops.touchCronChecked testSchema tLate ["touch-test"]
+        nLate `shouldBe` 1
+        Just rowLate <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "touch-test"
+        CS.lastCheckedAt rowLate `shouldBe` Just tLate
+
+        -- An earlier watermark still matches the row but never moves it backwards.
+        nEarly <- runSimpleDb env $ Ops.touchCronChecked testSchema tEarly ["touch-test"]
+        nEarly `shouldBe` 1
+        Just rowEarly <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "touch-test"
+        CS.lastCheckedAt rowEarly `shouldBe` Just tLate
+
+        -- An unknown name matches nothing.
+        nMiss <- runSimpleDb env $ Ops.touchCronChecked testSchema tLate ["no-such-schedule"]
+        nMiss `shouldBe` 0
+
+      it "tryFireCronGate fires once per minute floor" $ \env -> do
+        let Right cj = cronJob "gate-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+            m0 = mkTime 2025 6 15 12 0 0
+            m1 = mkTime 2025 6 15 12 1 0
+        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+
+        firstFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m0
+        firstFire `shouldBe` True
+        -- The same minute floor cannot fire twice.
+        secondFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m0
+        secondFire `shouldBe` False
+        -- A later minute floor fires again.
+        nextFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m1
+        nextFire `shouldBe` True
+
+      it "tryAcquireCronLeader is mutually exclusive per (schema, queue, name) and releases on commit" $ \_env ->
+        bracket (connectPostgreSQL connStr) close $ \conn1 ->
+          bracket (connectPostgreSQL connStr) close $ \conn2 -> do
+            let acquire conn name =
+                  inTransaction @WorkerTestRegistry conn testSchema (Ops.tryAcquireCronLeader testSchema testTable name)
+
+            -- The advisory lock is transaction-scoped, so conn1 must stay open to hold it.
+            PG.begin conn1
+            got1 <- acquire conn1 "leader"
+            got1 `shouldBe` True
+
+            PG.begin conn2
+            -- conn1 still holds "leader", so conn2 loses on the same key.
+            got2 <- acquire conn2 "leader"
+            got2 `shouldBe` False
+            -- A different schedule name is independent.
+            got3 <- acquire conn2 "other"
+            got3 `shouldBe` True
+            PG.rollback conn2
+
+            -- Once conn1 commits, "leader" is free for a fresh transaction.
+            PG.commit conn1
+            PG.begin conn2
+            got4 <- acquire conn2 "leader"
+            got4 `shouldBe` True
+            PG.rollback conn2
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do

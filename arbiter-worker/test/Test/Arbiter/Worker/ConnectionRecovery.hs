@@ -13,13 +13,13 @@ import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnvWithPool, inTransaction, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
-import Arbiter.Test.Setup (cleanupData, setupOnce)
+import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
+import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -39,16 +39,6 @@ testSchema = "arbiter_worker_recovery_test"
 
 testTable :: Text
 testTable = "arbiter_worker_recovery_test"
-
-createSharedPool :: ByteString -> IO (Pool PG.Connection)
-createSharedPool connStr =
-  newPool $
-    setNumStripes (Just 1) $
-      defaultPoolConfig
-        (connectPostgreSQL connStr)
-        close
-        60
-        5
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do

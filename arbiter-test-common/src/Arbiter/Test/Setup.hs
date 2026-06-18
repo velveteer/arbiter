@@ -9,6 +9,8 @@ module Arbiter.Test.Setup
   , execute_
   , setupOnce
   , disableNoticeReporting
+  , createSharedPool
+  , truncateToMicros
   ) where
 
 import Arbiter.Core.CronSchedule qualified as Cron
@@ -20,9 +22,11 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
+import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime (..), picosecondsToDiffTime)
 import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Database.PostgreSQL.Simple (Connection, Query, SqlError (..), close, connectPostgreSQL, execute)
 import Database.PostgreSQL.Simple.Internal qualified as PGS
@@ -129,3 +133,14 @@ setupOnce connStr schemaName tableName withNotify = do
 disableNoticeReporting :: Connection -> IO ()
 disableNoticeReporting conn =
   PGS.withConnection conn LibPQ.disableNoticeReporting
+
+-- | A single-stripe pool of 5 connections for tests.
+createSharedPool :: ByteString -> IO (Pool Connection)
+createSharedPool connStr =
+  newPool $ setNumStripes (Just 1) $ defaultPoolConfig (connectPostgreSQL connStr) close 60 5
+
+-- | Truncate to microsecond precision to match PostgreSQL @timestamptz@.
+truncateToMicros :: UTCTime -> UTCTime
+truncateToMicros (UTCTime d t) =
+  let micros = floor (t * 1e6) :: Integer
+   in UTCTime d (picosecondsToDiffTime (micros * 1000000))

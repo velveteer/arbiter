@@ -1,4 +1,4 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-orville
 version:         0.1.0.0
 synopsis:        Orville implementation of arbiter
@@ -61,6 +61,7 @@ test-suite arbiter-orville-tests
     , arbiter-orville
     , arbiter-test-common
     , arbiter-worker
+    , arbiter-worker:testkit
     , base
     , bytestring
     , exceptions

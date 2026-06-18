@@ -20,6 +20,7 @@ module Arbiter.Worker
     -- * Rollup Child Results
   , childResults
   , mergedChildResults
+  , mergeChildResults
 
     -- * Re-exports
   , module Arbiter.Worker.Config
@@ -66,11 +67,12 @@ import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Bifunctor (second)
-import Data.Foldable (for_, toList, traverse_)
+import Data.Foldable (fold, foldMap', for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Map (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
@@ -709,6 +711,10 @@ mergedChildResults
 mergedChildResults job = do
   (results, dlqFailures) <- childResults job
   pure (mergeChildResults results, dlqFailures)
+
+-- | Fold child results via 'Monoid', treating failures as 'mempty'.
+mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
+mergeChildResults = foldMap' fold
 
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult

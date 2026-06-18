@@ -1,4 +1,4 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-worker
 version:         0.1.0.0
 synopsis:        Worker framework for arbiter
@@ -69,6 +69,24 @@ library
     , unliftio            >=0.2  && <0.3
     , uuid                >=1.3  && <1.4
 
+-- | Backend-parameterized worker-pool test suite, instantiated by each
+-- MonadArbiter backend test suite. A public sub-library so it can depend on the
+-- worker library without the package cycle a standalone package would create.
+library testkit
+  import:          shared-properties
+  visibility:      public
+  hs-source-dirs:  testkit
+  exposed-modules: Arbiter.Worker.TestKit
+  build-depends:
+    , arbiter-core         <0.2
+    , arbiter-test-common
+    , arbiter-worker
+    , base                 >=4.14 && <5
+    , bytestring           >=0.10 && <0.13
+    , hspec                >=2.0  && <2.12
+    , text                 >=1.2  && <2.2
+    , unliftio             >=0.2  && <0.3
+
 test-suite arbiter-worker-tests
   import:         shared-properties
   type:           exitcode-stdio-1.0
@@ -87,6 +105,7 @@ test-suite arbiter-worker-tests
     , arbiter-simple
     , arbiter-test-common
     , arbiter-worker
+    , arbiter-worker:testkit
     , base
     , bytestring
     , containers

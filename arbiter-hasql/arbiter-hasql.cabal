@@ -1,4 +1,4 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-hasql
 version:         0.1.0.0
 synopsis:        Hasql backend for arbiter
@@ -68,7 +68,7 @@ test-suite arbiter-hasql-tests
     , arbiter-core         <0.2
     , arbiter-hasql
     , arbiter-test-common
-    , arbiter-worker
+    , arbiter-worker:testkit
     , base
     , bytestring
     , hasql
@@ -76,4 +76,3 @@ test-suite arbiter-hasql-tests
     , postgresql-simple
     , resource-pool
     , text
-    , unliftio
