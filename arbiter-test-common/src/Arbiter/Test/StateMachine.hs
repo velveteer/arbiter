@@ -79,6 +79,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.UUID.Types qualified as UUID
 import Database.PostgreSQL.Simple (Only (..))
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
@@ -1293,9 +1294,7 @@ deadlockGuard mkPayload run reset = do
           [1 .. rounds]
   mapConcurrently_ id [actorA, actorB]
   n <- readIORef deadlocks
-  -- A non-canonical lock order regresses to deadlocking every few hundred ops, so
-  -- hundreds here. The canonical order leaves only a sub-0.01% Postgres-internal
-  -- race, so tolerate a small handful while still catching a regression.
+  -- Tolerate the rare residual race but still catch a regression (hundreds of deadlocks).
   n `shouldSatisfy` (<= rounds `div` 100)
 
 -- | Guard for the dedup group-move double-claim. Saturates the hot groups with
@@ -1328,15 +1327,7 @@ serializationGuard mkPayload run schema table withConn reset = do
     hol <- countHolViolations schema table withConn
     hol `shouldBe` []
 
--- | Deterministic guard that the trigger-maintained summary stays exact under
--- concurrency with no reaper. 'prop_concurrent' and 'serializationGuard' read the
--- summary oracle only after a healing 'runReaper' tick, so a delta (notably the
--- commutative @ready_count@) that drifts only under concurrent interleaving is
--- masked there. Here many actors churn the hot groups with the reaper excluded
--- everywhere, then the oracle is read directly. A job write and its group-summary
--- delta commit in one transaction, and same-group triggers serialize on the group
--- row's @FOR UPDATE@, so once the churn has joined, correct deltas must already
--- match the live recompute. Any mismatch is a real maintenance bug, not transient.
+-- | Concurrent churn with no reaper, then assert the group summary matches a fresh recompute.
 concurrentDriftGuard
   :: forall sm registry payload
    . (ArbiterC sm registry payload)
@@ -1523,6 +1514,32 @@ treeGuard mkPayload run schema table withConn reset = do
   void (run (HL.moveToDLQ "tree guard cascade" parent))
   mainCount >>= (`shouldBe` 0)
   dlqCount >>= (`shouldBe` 3)
+
+-- | Regression guard: a dedup-replaced job is fresh, so it must not carry a stale
+-- claim owner. A grouped job is claimed as a worker with a 1s lease and abandoned
+-- (claimed_by set), then dedup-replaced once the lease expires. The replaced row's
+-- claimed_by must be NULL.
+dedupReplaceStaleLeaseGuard
+  :: forall sm registry payload
+   . (ArbiterC sm registry payload)
+  => (Text -> payload)
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+dedupReplaceStaleLeaseGuard mkPayload run schema table withConn reset = do
+  reset
+  let job = (defaultGroupedJob "drslg" (mkPayload "drsl")) {dedupKey = Just (ReplaceDuplicate "drsl-key")}
+  void (run (HL.insertJob job))
+  _ <- run (HL.claimNextVisibleJobsAs 1 1 (UUID.fromWords 0 0 0 1) :: sm [JobRead payload])
+  threadDelay 2_000_000
+  void (run (HL.insertJob job))
+  stale <-
+    countQuery withConn $
+      "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE dedup_key = 'drsl-key' AND claimed_by IS NOT NULL"
+  stale `shouldBe` 0
 
 -- | Deterministic guard for crashed-worker recovery: a grouped job claimed with
 -- a one-second lease must become reclaimable once the lease expires, both via the
@@ -1755,6 +1772,8 @@ stateMachineSpec mkPayload run schema table withConn reset = do
     withinSecs 60 (progressGuard @sm @registry @payload mkPayload run schema table withConn reset)
   it "expired-lease grouped job is reclaimable via triggers and after a reaper recompute" $
     withinSecs 60 (reclaimGuard @sm @registry @payload mkPayload run reset)
+  it "a dedup-replaced job does not carry a stale claim owner" $
+    withinSecs 60 (dedupReplaceStaleLeaseGuard @sm @registry @payload mkPayload run schema table withConn reset)
   it "abandoned jobs are reclaimed and acked exactly once under concurrent workers" $
     withinSecs 90 (concurrentReclaimGuard @sm @registry @payload mkPayload run schema table withConn reset)
   it "claims honor priority order" $

@@ -662,7 +662,11 @@ setupQueue simpleEnv totalJobs flavor = do
         | otherwise = do
             runSimpleDb simpleEnv $ void $ HL.insertJobsBatch_ (mkJobs offset)
             go (offset + chunkSize)
+  -- Disable triggers for the bulk load, then rebuild the summary in one pass.
+  execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue DISABLE TRIGGER USER")
   go 0
+  execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue ENABLE TRIGGER USER")
+  runSimpleDb simpleEnv $ void $ HL.refreshAllGroups @_ @BenchRegistry
 
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")

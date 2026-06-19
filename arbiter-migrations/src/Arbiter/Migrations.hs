@@ -255,7 +255,7 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "add-claimed-by-column" $ addClaimedByColumnSQL schemaName tableName
         , script "migrate-ungrouped-ready-split-indexes" $ migrateUngroupedReadySplitIndexesSQL schemaName tableName
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
-        , script "create-groups-trigger-functions-v5" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v6" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "set-job-queue-fillfactor-100" $
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"

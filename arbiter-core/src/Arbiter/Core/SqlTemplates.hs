@@ -430,7 +430,8 @@ insertJobReplaceSQL schema tableName =
           parent_state = EXCLUDED.parent_state,
           suspended = EXCLUDED.suspended,
           not_visible_until = EXCLUDED.not_visible_until,
-          last_attempted_at = NULL
+          last_attempted_at = NULL,
+          claimed_by = NULL
         WHERE (${tbl}.attempts = 0
           OR ${tbl}.not_visible_until IS NULL
           OR ${tbl}.not_visible_until <= NOW()
@@ -505,7 +506,8 @@ insertJobsBatchBase schema tableName returning =
           parent_state = EXCLUDED.parent_state,
           suspended = EXCLUDED.suspended,
           not_visible_until = EXCLUDED.not_visible_until,
-          last_attempted_at = NULL
+          last_attempted_at = NULL,
+          claimed_by = NULL
         WHERE EXCLUDED.dedup_strategy = 'replace'
           AND (${tbl}.attempts = 0
             OR ${tbl}.not_visible_until IS NULL

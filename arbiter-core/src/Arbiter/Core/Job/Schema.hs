@@ -436,8 +436,7 @@ groupsInsertFunction funcName groupsTbl dd =
         RETURN NULL;
       END IF;
 
-      -- Lock affected group rows in group_key order so concurrent triggers can never
-      -- acquire them in opposing orders and deadlock.
+      -- Lock group rows in group_key order to avoid deadlock with concurrent triggers.
       PERFORM 1 FROM ${groupsTbl} g
       WHERE g.group_key IN (SELECT group_key FROM new_table WHERE group_key IS NOT NULL)
       ORDER BY g.group_key
@@ -478,8 +477,7 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
         RETURN NULL;
       END IF;
 
-      -- Lock affected group rows in group_key order so concurrent triggers can never
-      -- acquire them in opposing orders and deadlock.
+      -- Lock group rows in group_key order to avoid deadlock with concurrent triggers.
       PERFORM 1 FROM ${groupsTbl} g
       WHERE g.group_key IN (SELECT group_key FROM old_table WHERE group_key IS NOT NULL)
       ORDER BY g.group_key
@@ -536,8 +534,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         RETURN NULL;
       END IF;
 
-      -- Lock affected group rows (old and new) in group_key order so concurrent triggers
-      -- can never acquire them in opposing orders and deadlock.
+      -- Lock group rows (old and new) in group_key order to avoid deadlock with concurrent triggers.
       PERFORM 1 FROM ${groupsTbl} g
       WHERE g.group_key IN (
         SELECT group_key FROM new_table WHERE group_key IS NOT NULL
@@ -547,24 +544,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ORDER BY g.group_key
       FOR UPDATE;
 
-      -- Step 1: Fast path - extend in_flight_until when not_visible_until increases (claim, retry)
-      UPDATE ${groupsTbl} g
-      SET in_flight_until = GREATEST(g.in_flight_until, sub.new_ift)
-      FROM (
-        SELECT n.group_key, MAX(n.not_visible_until) AS new_ift
-        FROM new_table n
-        JOIN old_table o ON o.id = n.id
-        WHERE n.group_key IS NOT NULL
-          AND n.not_visible_until > NOW()
-          AND NOT n.suspended
-          AND n.attempts > 0
-          AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
-               OR n.not_visible_until > o.not_visible_until)
-        GROUP BY n.group_key
-      ) sub
-      WHERE g.group_key = sub.group_key;
-
-      -- Step 2: Full rescan - recompute in_flight_until when not_visible_until decreases or suspended changes
+      -- Step 1: Full rescan - recompute in_flight_until when not_visible_until decreases or suspended changes
       UPDATE ${groupsTbl} g
       SET in_flight_until = sub.new_ift
       FROM (
@@ -591,7 +571,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE g.group_key = sub.group_key
         AND g.in_flight_until IS DISTINCT FROM sub.new_ift;
 
-      -- Step 3: group_key change (dedup replace) - remove from old group
+      -- Step 2: group_key change (dedup replace) - remove from old group
       UPDATE ${groupsTbl} g
       SET job_count = g.job_count - sub.cnt,
           min_priority = COALESCE(sub.new_min_priority, g.min_priority),
@@ -630,7 +610,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
             AND o.group_key IS DISTINCT FROM n.group_key
         );
 
-      -- Step 4: group_key change - add to new group
+      -- Step 3: group_key change - add to new group
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
       SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
         COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended),
@@ -648,8 +628,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
         next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due);
 
-      -- Step 5: same-group ordering or visibility change (dedup replace, claim,
-      -- retry, promote) - recompute min and next_due over all rows in one pass.
+      -- Step 4: same-group ordering/visibility change - recompute min and next_due.
       UPDATE ${groupsTbl} g
       SET min_priority = sub.new_min_priority,
           min_id = sub.new_min_id,
@@ -677,24 +656,41 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
              OR g.min_id IS DISTINCT FROM sub.new_min_id
              OR g.next_due IS DISTINCT FROM sub.new_next_due);
 
-      -- Step 6: same-group ready_count delta. Commutative (+=), so concurrent
-      -- claims/promotes can't strand each other - the hot claim path stays here.
+      -- Step 5: commutative in_flight_until extend and ready_count delta in one write.
       UPDATE ${groupsTbl} g
-      SET ready_count = GREATEST(0, g.ready_count + sub.delta)
+      SET in_flight_until = GREATEST(g.in_flight_until, s.new_ift),
+          ready_count = GREATEST(0, g.ready_count + COALESCE(s.delta, 0))
       FROM (
-        SELECT n.group_key,
-          SUM(
-            (CASE WHEN n.not_visible_until IS NULL AND NOT n.suspended THEN 1 ELSE 0 END)
-            - (CASE WHEN o.not_visible_until IS NULL AND NOT o.suspended THEN 1 ELSE 0 END)
-          )::int AS delta
-        FROM new_table n
-        JOIN old_table o ON o.id = n.id
-        WHERE n.group_key IS NOT NULL
-          AND n.group_key IS NOT DISTINCT FROM o.group_key
-        GROUP BY n.group_key
-      ) sub
-      WHERE g.group_key = sub.group_key
-        AND sub.delta <> 0;
+        SELECT COALESCE(ift.group_key, rc.group_key) AS group_key, ift.new_ift, rc.delta
+        FROM (
+          SELECT n.group_key, MAX(n.not_visible_until) AS new_ift
+          FROM new_table n
+          JOIN old_table o ON o.id = n.id
+          WHERE n.group_key IS NOT NULL
+            AND n.not_visible_until > NOW()
+            AND NOT n.suspended
+            AND n.attempts > 0
+            AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
+                 OR n.not_visible_until > o.not_visible_until)
+          GROUP BY n.group_key
+        ) ift
+        FULL OUTER JOIN (
+          SELECT group_key, delta FROM (
+            SELECT n.group_key,
+              SUM(
+                (CASE WHEN n.not_visible_until IS NULL AND NOT n.suspended THEN 1 ELSE 0 END)
+                - (CASE WHEN o.not_visible_until IS NULL AND NOT o.suspended THEN 1 ELSE 0 END)
+              )::int AS delta
+            FROM new_table n
+            JOIN old_table o ON o.id = n.id
+            WHERE n.group_key IS NOT NULL
+              AND n.group_key IS NOT DISTINCT FROM o.group_key
+            GROUP BY n.group_key
+          ) z
+          WHERE delta <> 0
+        ) rc ON ift.group_key = rc.group_key
+      ) s
+      WHERE g.group_key = s.group_key;
 
       RETURN NULL;
     END;
