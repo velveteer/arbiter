@@ -12,6 +12,8 @@ const DLQ_COLUMNS = [
   { key: 'failed', label: 'Failed At', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8 },
   { key: 'error', label: 'Last Error', weight: 16 },
+  { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
+  { key: 'concurrency', label: 'Concurrency', weight: 9 },
   { key: 'actions', label: 'Actions', weight: 18 },
 ];
 

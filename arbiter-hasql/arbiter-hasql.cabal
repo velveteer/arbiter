@@ -58,7 +58,9 @@ test-suite arbiter-hasql-tests
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   other-modules:
     Test.Arbiter.Hasql.Concurrency
+    Test.Arbiter.Hasql.ConcurrencyLimit
     Test.Arbiter.Hasql.Operations
+    Test.Arbiter.Hasql.RateLimit
     Test.Arbiter.Hasql.StateMachine
     Test.Arbiter.Hasql.TestHelpers
     Test.Arbiter.Hasql.Worker

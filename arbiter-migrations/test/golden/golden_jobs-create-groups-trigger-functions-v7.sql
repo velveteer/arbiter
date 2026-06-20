@@ -54,18 +54,19 @@ BEGIN
       ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
       next_due = sub.new_next_due,
       in_flight_until = CASE
-        WHEN sub.had_inflight THEN NULL
+        WHEN sub.had_inflight THEN sub.surviving_ift
         ELSE g.in_flight_until
       END
   FROM (
     SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
       MIN(t.priority) AS new_min_priority,
       MIN(t.id) AS new_min_id,
-      MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+      MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
+      MAX(t.not_visible_until) FILTER (WHERE t.not_visible_until > NOW() AND NOT t.suspended AND (t.attempts > 0 OR t.throttled_until > NOW())) AS surviving_ift
     FROM (
       SELECT group_key, COUNT(*) AS removed_count,
         COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS removed_ready_count,
-        bool_or(not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS had_inflight
+        bool_or(not_visible_until > NOW() AND NOT suspended AND (attempts > 0 OR throttled_until > NOW())) AS had_inflight
       FROM old_table
       WHERE group_key IS NOT NULL
       GROUP BY group_key
@@ -109,7 +110,7 @@ BEGIN
   FROM (
     SELECT t.group_key,
       MAX(t.not_visible_until) FILTER (
-        WHERE t.not_visible_until > NOW() AND NOT t.suspended AND t.attempts > 0
+        WHERE t.not_visible_until > NOW() AND NOT t.suspended AND (t.attempts > 0 OR t.throttled_until > NOW())
       ) AS new_ift
     FROM "arbiter"."golden_jobs" t
     WHERE t.group_key IN (
@@ -138,17 +139,18 @@ BEGIN
       ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
       next_due = sub.new_next_due,
       in_flight_until = CASE
-        WHEN sub.had_inflight THEN NULL
+        WHEN sub.had_inflight THEN sub.surviving_ift
         ELSE g.in_flight_until
       END
   FROM (
     SELECT d.group_key, d.cnt, d.removed_ready_count, d.had_inflight,
       MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id,
-      MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+      MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
+      MAX(t.not_visible_until) FILTER (WHERE t.not_visible_until > NOW() AND NOT t.suspended AND (t.attempts > 0 OR t.throttled_until > NOW())) AS surviving_ift
     FROM (
       SELECT o.group_key, COUNT(*) AS cnt,
         COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
-        bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND o.attempts > 0) AS had_inflight
+        bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND (o.attempts > 0 OR o.throttled_until > NOW())) AS had_inflight
       FROM old_table o
       JOIN new_table n ON o.id = n.id
       WHERE o.group_key IS NOT NULL

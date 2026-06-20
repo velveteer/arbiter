@@ -10,26 +10,55 @@
 -- @cabal test arbiter-migrations-tests --test-options=--accept@.
 module Main (main) where
 
+import Arbiter.Core.RateLimit.Schema (PolicyRow (..))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
 import System.FilePath ((<.>), (</>))
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Golden (goldenVsString)
+import Test.Tasty.HUnit (testCase, (@?=))
 
-import Arbiter.Migrations (MigrationConfig (..), defaultMigrationConfig, jobQueueMigrationsForTable)
+import Arbiter.Migrations
+  ( MigrationConfig (..)
+  , allTableAdmission
+  , conflictingPolicyPrefixes
+  , defaultMigrationConfig
+  , jobQueueMigrationsForTable
+  , schemaLevelMigrations
+  )
 
 main :: IO ()
 main =
   defaultMain $
-    testGroup "migration checksums" (map migrationGolden shippedMigrations)
+    testGroup
+      "arbiter-migrations"
+      [ testGroup "migration checksums" (map migrationGolden shippedMigrations)
+      , testGroup "policy conflict detection" conflictTests
+      ]
 
--- | Every per-table migration as @(name, SQL body)@, with all features on so the
+-- | 'conflictingPolicyPrefixes' flags only a prefix carrying two distinct parameter sets.
+conflictTests :: [TestTree]
+conflictTests =
+  [ testCase "distinct prefixes are not a conflict" $
+      conflictingPolicyPrefixes [row "a" 1 1 1, row "b" 2 2 2] @?= []
+  , testCase "identical duplicate rows are not a conflict" $
+      conflictingPolicyPrefixes [row "a" 1 1 1, row "a" 1 1 1] @?= []
+  , testCase "one prefix with two parameter sets is a conflict" $
+      conflictingPolicyPrefixes [row "a" 1 1 1, row "a" 2 1 1] @?= ["a"]
+  ]
+  where
+    row p mx rf iv = PolicyRow {prefixId = p, maxTokens = mx, refillAmt = rf, interval = iv}
+
+-- | Every shipped migration as @(name, SQL body)@, with all features on so the
 -- notify and event-streaming triggers are pinned alongside the core migrations.
+-- Covers both the schema-level migrations and the per-table migrations.
 shippedMigrations :: [(String, BS.ByteString)]
 shippedMigrations =
   [ (name, body)
-  | MigrationScript name body <- jobQueueMigrationsForTable "arbiter" "golden_jobs" allFeaturesConfig
+  | MigrationScript name body <-
+      schemaLevelMigrations allFeaturesConfig "arbiter"
+        <> jobQueueMigrationsForTable "arbiter" "golden_jobs" allFeaturesConfig allTableAdmission
   ]
 
 allFeaturesConfig :: MigrationConfig

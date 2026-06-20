@@ -20,11 +20,29 @@ module Arbiter.Migrations
   , runMigrationsForRegistry
   , runMigrationsTrackedForTables
   , jobQueueMigrationsForTable
+  , schemaLevelMigrations
+  , AdmissionSeeds (..)
+  , noAdmissionSeeds
+  , TableAdmission (..)
+  , allTableAdmission
+
+    -- * Rate-limit reconciliation
+  , conflictingPolicyPrefixes
 
     -- * Re-exports
   , MigrationResult (..)
   ) where
 
+import Arbiter.Core.Concurrency.Schema
+  ( addConcurrencyColumnsSQL
+  , createConcurrencyIndexSQL
+  , createConcurrencyPoliciesTableSQL
+  , createConcurrencyTableSQL
+  , createConcurrencyTriggerFunctionsSQL
+  , createConcurrencyTriggersSQL
+  , upsertConcurrencyPolicyRowSQL
+  )
+import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..), registryConcurrencyPolicies, registryConcurrencyTables)
 import Arbiter.Core.CronSchedule (addQueueNameColumnSQL, addTimezoneColumnSQL, createCronSchedulesTableSQL)
 import Arbiter.Core.Gates (createGatesTableSQL)
 import Arbiter.Core.Job.Schema
@@ -52,13 +70,37 @@ import Arbiter.Core.Job.Schema
   , migrateUngroupedReadySplitIndexesSQL
   , setMaxAttemptsDefaultSQL
   )
+import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
+import Arbiter.Core.RateLimit.Schema
+  ( PolicyRow (..)
+  , addRateLimitColumnsSQL
+  , addRateLimitCostColumnSQL
+  , alterRateLimitsDurabilitySQL
+  , arbiterRateLimitsTableName
+  , createRateLimitBucketTriggerFunctionsSQL
+  , createRateLimitBucketTriggersSQL
+  , createRateLimitPoliciesTableSQL
+  , createRateLimitsTableSQL
+  , createThrottledIndexSQL
+  , toPolicyRow
+  , upsertPolicyRowSQL
+  )
+import Arbiter.Core.RateLimit.Spec
+  ( Durability (..)
+  , RateLimitDurability (..)
+  , registryRateLimitPolicies
+  , registryRateLimitTables
+  )
 import Arbiter.Core.Worker (addClaimedByColumnSQL, createWorkersTableSQL)
-import Control.Exception (bracket, try)
-import Control.Monad (when)
+import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
+import Control.Monad (void, when)
 import Data.ByteString (ByteString)
+import Data.Foldable (find, traverse_)
+import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -125,7 +167,10 @@ defaultMigrationConfig =
 -- @
 runMigrationsForRegistry
   :: forall registry
-   . (RegistryTables registry)
+   . ( RateLimitDurability registry
+     , RegistryAdmissionPolicies registry
+     , RegistryTables registry
+     )
   => Proxy registry
   -- ^ Proxy for the job payload registry
   -> ByteString
@@ -137,21 +182,59 @@ runMigrationsForRegistry
   -> IO (MigrationResult String)
   -- ^ Migration results
 runMigrationsForRegistry proxy connStr schemaName config = do
-  let tables = registryTableNames proxy
-  runMigrationsTrackedForTables connStr schemaName tables config
+  let ccTables = Map.fromList (registryConcurrencyTables @registry)
+      rlTables = Map.fromList (registryRateLimitTables @registry)
+      admissionFor t =
+        TableAdmission
+          { tableConcurrency = Map.findWithDefault False t ccTables
+          , tableRateLimit = Map.findWithDefault False t rlTables
+          }
+      tables = [(t, admissionFor t) | t <- registryTableNames proxy]
+      -- Policies are collected from each payload's 'rateLimitFor' selector, so a
+      -- referenced policy is always seeded.
+      seeds =
+        AdmissionSeeds
+          { seedRateLimitPolicies = map toPolicyRow (Set.toList (registryRateLimitPolicies @registry))
+          , seedConcurrencyPolicies = Set.toList (registryConcurrencyPolicies @registry)
+          , seedDurability = rateLimitDurability proxy
+          }
+  runMigrationsTrackedForTables connStr schemaName tables config seeds
 
--- | Run migrations for multiple tables within a single schema.
+-- | Admission policy rows to seed after a successful migration.
+data AdmissionSeeds = AdmissionSeeds
+  { seedRateLimitPolicies :: [PolicyRow]
+  , seedConcurrencyPolicies :: [ConcurrencyPolicy]
+  , seedDurability :: Durability
+  }
+
+-- | Seeds for a deployment with no admission policies.
+noAdmissionSeeds :: AdmissionSeeds
+noAdmissionSeeds = AdmissionSeeds [] [] Unlogged
+
+-- | Which admission trigger kinds a table's payload declares. Trigger migrations
+-- are install-only: once recorded they are never dropped, so a kind removed from
+-- a payload keeps its triggers (rolling deploys may still enqueue keyed jobs).
+data TableAdmission = TableAdmission
+  { tableConcurrency :: Bool
+  , tableRateLimit :: Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | Install every admission trigger kind.
+allTableAdmission :: TableAdmission
+allTableAdmission = TableAdmission True True
+
+-- | Run migrations for multiple tables within a single schema, seeding the given
+-- rate-limit policies. On migration success, reconciles the policy and bucket
+-- tables on the same connection.
 runMigrationsTrackedForTables
   :: ByteString
-  -- ^ Database connection string
   -> SchemaName
-  -- ^ Schema name
-  -> [TableName]
-  -- ^ Table names to create
+  -> [(TableName, TableAdmission)]
   -> MigrationConfig
-  -- ^ Migration configuration
+  -> AdmissionSeeds
   -> IO (MigrationResult String)
-runMigrationsTrackedForTables connStr schemaName tableNames config =
+runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSeeds policyRows concRows durability) =
   bracket (connectPostgreSQL connStr) close $ \conn -> do
     -- Disable NOTICE messages on the underlying LibPQ connection
     withConnection conn $ \libpqConn ->
@@ -184,32 +267,8 @@ runMigrationsTrackedForTables connStr schemaName tableNames config =
       LibPQ.enableNoticeReporting libpqConn
 
     -- Build migrations: schema-level (once) + per-table migrations
-    let schemaMigrations =
-          [ MigrationScript
-              "create-cron-schedules"
-              (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
-          , MigrationScript
-              "cron-schedules-add-timezone"
-              (encodeUtf8 $ addTimezoneColumnSQL schemaName)
-          , MigrationScript
-              "cron-schedules-add-queue-name"
-              (encodeUtf8 $ addQueueNameColumnSQL schemaName)
-          , MigrationScript
-              "create-arbiter-workers"
-              (encodeUtf8 $ createWorkersTableSQL schemaName)
-          , MigrationScript
-              "create-arbiter-queues"
-              (encodeUtf8 $ createQueuesTableSQL schemaName)
-          , MigrationScript
-              "create-arbiter-gates"
-              (encodeUtf8 $ createGatesTableSQL schemaName)
-          ]
-            <> [ MigrationScript
-                   "create-event-streaming-function"
-                   (encodeUtf8 $ createEventStreamingFunctionSQL schemaName)
-               | enableEventStreaming config
-               ]
-        tableMigrations = concatMap (\tableName -> jobQueueMigrationsForTable schemaName tableName config) tableNames
+    let schemaMigrations = schemaLevelMigrations config schemaName
+        tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName config adm) tableNames
         migrations = schemaMigrations <> tableMigrations
         migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
         options =
@@ -222,7 +281,126 @@ runMigrationsTrackedForTables connStr schemaName tableNames config =
     _ <- runMigrations conn options [MigrationInitialization]
 
     -- Run the actual migrations
-    runMigrations conn options migrations
+    migrationResult <- runMigrations conn options migrations
+    -- Reconciliation can throw (conflicting prefix, ALTER failure). Surface as MigrationError.
+    case migrationResult of
+      MigrationSuccess -> do
+        reconciled <-
+          try $ do
+            reconcileRateLimitPolicies conn schemaName policyRows
+            reconcileConcurrencyPolicies conn schemaName concRows
+            reconcileRateLimitDurability conn schemaName durability
+        case reconciled of
+          Right () -> pure MigrationSuccess
+          -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
+          Left (e :: SomeException)
+            | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+            | otherwise -> pure (MigrationError (displayException e))
+      other -> pure other
+
+-- | Upsert each policy's @default_*@ params into the policies table (created
+-- unconditionally by the schema migrations), leaving operator @override_*@
+-- intact. Idempotent and never deletes, so overrides and removed prefixes survive
+-- a deploy.
+reconcileRateLimitPolicies :: PG.Connection -> SchemaName -> [PolicyRow] -> IO ()
+reconcileRateLimitPolicies =
+  reconcilePolicyRows "rate-limit policy" "parameters" prefixId policyParamsKey upsertPolicyRowSQL
+
+-- | 'conflictingPrefixes' specialized to policy rows.
+conflictingPolicyPrefixes :: [PolicyRow] -> [Text]
+conflictingPolicyPrefixes = conflictingPrefixes prefixId policyParamsKey
+
+-- | A canonical conflict key for a policy's params. Rendered so a non-finite value
+-- (NaN) compares equal to itself and identical declarations dedup.
+policyParamsKey :: PolicyRow -> String
+policyParamsKey r = show (maxTokens r, refillAmt r, interval r)
+
+-- | Upsert each pool's @default_limit@, leaving operator overrides intact. Two pools
+-- with the same prefix but different limits fail the migration.
+reconcileConcurrencyPolicies :: PG.Connection -> SchemaName -> [ConcurrencyPolicy] -> IO ()
+reconcileConcurrencyPolicies =
+  reconcilePolicyRows "concurrency pool" "limits" cpPrefix cpLimit upsertConcurrencyPolicyRowSQL
+
+-- | Upsert each policy row's @default_*@ params, after failing on any prefix that
+-- contains the @:@ key separator or is declared with conflicting params. Idempotent
+-- and never deletes, so operator overrides and removed prefixes survive a deploy.
+reconcilePolicyRows
+  :: (Ord params)
+  => String
+  -> String
+  -> (row -> Text)
+  -> (row -> params)
+  -> (SchemaName -> row -> Text)
+  -> PG.Connection
+  -> SchemaName
+  -> [row]
+  -> IO ()
+reconcilePolicyRows label noun prefixOf paramsOf upsertSQL conn schemaName rows
+  | Just p <- find (T.isInfixOf ":") (map prefixOf rows) =
+      ioError
+        ( userError $
+            label
+              <> " prefix "
+              <> T.unpack p
+              <> " contains ':', the key separator, so its keys would alias another prefix's. Use a colon-free prefix."
+        )
+  | (p : _) <- conflictingPrefixes prefixOf paramsOf rows =
+      ioError
+        ( userError $
+            label <> " prefix " <> T.unpack p <> " is declared with conflicting " <> noun <> ". Give each a unique prefix."
+        )
+  | otherwise =
+      PG.withTransaction conn $
+        traverse_ (\row -> void $ execute_ conn (Query (encodeUtf8 (upsertSQL schemaName row)))) rows
+
+-- | Prefixes declared with more than one distinct parameter set, which would clobber on the prefix primary key.
+conflictingPrefixes :: (Ord params) => (row -> Text) -> (row -> params) -> [row] -> [Text]
+conflictingPrefixes prefixOf paramsOf rows =
+  Map.keys (Map.filter ((> 1) . Set.size) paramsByPrefix)
+  where
+    paramsByPrefix =
+      Map.fromListWith Set.union [(prefixOf r, Set.singleton (paramsOf r)) | r <- rows]
+
+-- | Converge the bucket table's WAL persistence to the declared durability. Reads
+-- the current @pg_class.relpersistence@ and issues @SET LOGGED@/@SET UNLOGGED@
+-- only on a change. The ALTER rewrites the table under @ACCESS EXCLUSIVE@, so
+-- token consumes block briefly while a switch runs.
+reconcileRateLimitDurability :: PG.Connection -> SchemaName -> Durability -> IO ()
+reconcileRateLimitDurability conn schemaName durability = do
+  rows <-
+    query
+      conn
+      "SELECT c.relpersistence::text FROM pg_class c \
+      \JOIN pg_namespace n ON n.oid = c.relnamespace \
+      \WHERE n.nspname = ? AND c.relname = ?"
+      (schemaName, arbiterRateLimitsTableName)
+  let target = case durability of
+        Durable -> "p" :: Text
+        Unlogged -> "u"
+  case rows of
+    (Only current : _)
+      | current /= target ->
+          void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
+    _ -> pure ()
+
+-- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
+-- the golden suite can pin every shipped migration body.
+schemaLevelMigrations :: MigrationConfig -> SchemaName -> [MigrationCommand]
+schemaLevelMigrations config schemaName =
+  [ MigrationScript "create-cron-schedules" (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
+  , MigrationScript "cron-schedules-add-timezone" (encodeUtf8 $ addTimezoneColumnSQL schemaName)
+  , MigrationScript "cron-schedules-add-queue-name" (encodeUtf8 $ addQueueNameColumnSQL schemaName)
+  , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
+  , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
+  , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)
+  , MigrationScript "create-arbiter-rate-limit-policies" (encodeUtf8 $ createRateLimitPoliciesTableSQL schemaName)
+  , MigrationScript "create-arbiter-rate-limits" (encodeUtf8 $ createRateLimitsTableSQL schemaName)
+  , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
+  , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
+  ]
+    <> [ MigrationScript "create-event-streaming-function" (encodeUtf8 $ createEventStreamingFunctionSQL schemaName)
+       | enableEventStreaming config
+       ]
 
 -- | All job queue migrations for a single table
 --
@@ -235,9 +413,11 @@ jobQueueMigrationsForTable
   -- ^ Table name
   -> MigrationConfig
   -- ^ Migration configuration
+  -> TableAdmission
+  -- ^ Which admission trigger kinds to install
   -> [MigrationCommand]
   -- ^ List of migration commands
-jobQueueMigrationsForTable schemaName tableName config =
+jobQueueMigrationsForTable schemaName tableName config adm =
   let prefix = T.unpack tableName <> "-"
       script name sql = MigrationScript (prefix <> name) (encodeUtf8 sql)
 
@@ -255,12 +435,29 @@ jobQueueMigrationsForTable schemaName tableName config =
         , script "add-claimed-by-column" $ addClaimedByColumnSQL schemaName tableName
         , script "migrate-ungrouped-ready-split-indexes" $ migrateUngroupedReadySplitIndexesSQL schemaName tableName
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
-        , script "create-groups-trigger-functions-v6" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
+        , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
+        , script "create-groups-trigger-functions-v7" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
+        , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
+        , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName
+        , script "add-rate-limit-cost-column" $ addRateLimitCostColumnSQL schemaName tableName
         , script "set-job-queue-fillfactor-100" $
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
         , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
         ]
+      concurrencyTriggers
+        | tableConcurrency adm =
+            [ script "create-concurrency-trigger-functions" $ createConcurrencyTriggerFunctionsSQL schemaName tableName
+            , script "create-concurrency-triggers" $ createConcurrencyTriggersSQL schemaName tableName
+            ]
+        | otherwise = []
+      rateLimitTriggers
+        | tableRateLimit adm =
+            [ script "create-rate-limit-bucket-trigger-functions" $ createRateLimitBucketTriggerFunctionsSQL schemaName tableName
+            , script "create-rate-limit-bucket-triggers" $ createRateLimitBucketTriggersSQL schemaName tableName
+            ]
+        | otherwise = []
       notifyTriggers
         | enableNotifications config =
             [ script "create-notify-function" $ createNotifyFunctionSQL schemaName tableName
@@ -272,7 +469,7 @@ jobQueueMigrationsForTable schemaName tableName config =
             [ script "create-event-streaming-triggers" $ createEventStreamingTriggersSQL schemaName tableName
             ]
         | otherwise = []
-   in coreMigrations <> notifyTriggers <> eventStreamingTriggers
+   in coreMigrations <> concurrencyTriggers <> rateLimitTriggers <> notifyTriggers <> eventStreamingTriggers
 
 -- | Check whether a schema exists in the database.
 schemaExists :: PG.Connection -> Text -> IO Bool

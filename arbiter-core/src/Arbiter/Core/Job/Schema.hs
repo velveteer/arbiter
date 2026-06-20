@@ -67,7 +67,11 @@ module Arbiter.Core.Job.Schema
 
     -- * Groups Trigger SQL
   , createGroupsTriggerFunctionsSQL
+  , maintenanceFunctionNames
   , createGroupsTriggersSQL
+  , createMaintenanceTriggersSQL
+  , statementTriggerSQL
+  , inFlightPredicate
 
     -- * Identifier Quoting
   , quoteIdentifier
@@ -416,15 +420,20 @@ createGroupsTriggerFunctionsSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
       tbl = jobQueueTable schemaName tableName
       baseName = "maintain_" <> tableName <> "_groups"
-      funcInsert = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_insert")
-      funcDelete = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_delete")
-      funcUpdate = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_update")
+      (funcInsert, funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
       dd = "$$"
    in T.unlines
         [ groupsInsertFunction funcInsert groupsTbl dd
         , groupsDeleteFunction funcDelete groupsTbl tbl dd
         , groupsUpdateFunction funcUpdate groupsTbl tbl dd
         ]
+
+-- | The qualified @<baseName>_{insert,delete,update}@ maintenance-function names.
+maintenanceFunctionNames :: Text -> Text -> (Text, Text, Text)
+maintenanceFunctionNames schemaName baseName =
+  (func "_insert", func "_delete", func "_update")
+  where
+    func suffix = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
 
 groupsInsertFunction :: Text -> Text -> Text -> Text
 groupsInsertFunction funcName groupsTbl dd =
@@ -467,9 +476,23 @@ groupsInsertFunction funcName groupsTbl dd =
     ${dd} LANGUAGE plpgsql;
   |]
 
+-- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
+inFlightPredicate :: Text -> Text
+inFlightPredicate col =
+  col
+    <> "not_visible_until > NOW() AND NOT "
+    <> col
+    <> "suspended AND ("
+    <> col
+    <> "attempts > 0 OR "
+    <> col
+    <> "throttled_until > NOW())"
+
 groupsDeleteFunction :: Text -> Text -> Text -> Text -> Text
 groupsDeleteFunction funcName groupsTbl tbl dd =
-  [text|
+  let ifOld = inFlightPredicate ""
+      ifSurv = inFlightPredicate "t."
+   in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
     BEGIN
@@ -490,18 +513,19 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
           ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
           next_due = sub.new_next_due,
           in_flight_until = CASE
-            WHEN sub.had_inflight THEN NULL
+            WHEN sub.had_inflight THEN sub.surviving_ift
             ELSE g.in_flight_until
           END
       FROM (
         SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
           MIN(t.priority) AS new_min_priority,
           MIN(t.id) AS new_min_id,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
+          MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
         FROM (
           SELECT group_key, COUNT(*) AS removed_count,
             COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS removed_ready_count,
-            bool_or(not_visible_until > NOW() AND NOT suspended AND attempts > 0) AS had_inflight
+            bool_or(${ifOld}) AS had_inflight
           FROM old_table
           WHERE group_key IS NOT NULL
           GROUP BY group_key
@@ -522,7 +546,9 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
 
 groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
 groupsUpdateFunction funcName groupsTbl tbl dd =
-  [text|
+  let ifSurv = inFlightPredicate "t."
+      ifOld = inFlightPredicate "o."
+   in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
     BEGIN
@@ -550,7 +576,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       FROM (
         SELECT t.group_key,
           MAX(t.not_visible_until) FILTER (
-            WHERE t.not_visible_until > NOW() AND NOT t.suspended AND t.attempts > 0
+            WHERE ${ifSurv}
           ) AS new_ift
         FROM ${tbl} t
         WHERE t.group_key IN (
@@ -579,17 +605,18 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
           next_due = sub.new_next_due,
           in_flight_until = CASE
-            WHEN sub.had_inflight THEN NULL
+            WHEN sub.had_inflight THEN sub.surviving_ift
             ELSE g.in_flight_until
           END
       FROM (
         SELECT d.group_key, d.cnt, d.removed_ready_count, d.had_inflight,
           MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
+          MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
         FROM (
           SELECT o.group_key, COUNT(*) AS cnt,
             COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
-            bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND o.attempts > 0) AS had_inflight
+            bool_or(${ifOld}) AS had_inflight
           FROM old_table o
           JOIN new_table n ON o.id = n.id
           WHERE o.group_key IS NOT NULL
@@ -704,33 +731,34 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
 -- affected rows via transition tables.
 createGroupsTriggersSQL :: Text -> Text -> Text
 createGroupsTriggersSQL schemaName tableName =
-  let tbl = jobQueueTable schemaName tableName
-      baseName = "maintain_" <> tableName <> "_groups"
-      funcInsert = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_insert")
-      funcDelete = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_delete")
-      funcUpdate = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> "_update")
-      trigInsert = quoteIdentifier (baseName <> "_insert")
-      trigDelete = quoteIdentifier (baseName <> "_delete")
-      trigUpdate = quoteIdentifier (baseName <> "_update")
-   in T.unlines
-        [ "DROP TRIGGER IF EXISTS " <> trigInsert <> " ON " <> tbl <> ";"
-        , "CREATE TRIGGER " <> trigInsert
-        , "AFTER INSERT ON " <> tbl
-        , "REFERENCING NEW TABLE AS new_table"
-        , "FOR EACH STATEMENT EXECUTE FUNCTION " <> funcInsert <> "();"
-        , ""
-        , "DROP TRIGGER IF EXISTS " <> trigDelete <> " ON " <> tbl <> ";"
-        , "CREATE TRIGGER " <> trigDelete
-        , "AFTER DELETE ON " <> tbl
-        , "REFERENCING OLD TABLE AS old_table"
-        , "FOR EACH STATEMENT EXECUTE FUNCTION " <> funcDelete <> "();"
-        , ""
-        , "DROP TRIGGER IF EXISTS " <> trigUpdate <> " ON " <> tbl <> ";"
-        , "CREATE TRIGGER " <> trigUpdate
-        , "AFTER UPDATE ON " <> tbl
-        , "REFERENCING OLD TABLE AS old_table NEW TABLE AS new_table"
-        , "FOR EACH STATEMENT EXECUTE FUNCTION " <> funcUpdate <> "();"
+  createMaintenanceTriggersSQL schemaName (jobQueueTable schemaName tableName) ("maintain_" <> tableName <> "_groups")
+
+-- | One statement-level AFTER trigger: drop then recreate, wiring the
+-- @<baseName><suffix>@ function over @tbl@ with the given event and REFERENCING clause.
+statementTriggerSQL :: Text -> Text -> Text -> Text -> Text -> Text -> Text
+statementTriggerSQL schemaName tbl baseName suffix event referencing =
+  let func = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
+      trig = quoteIdentifier (baseName <> suffix)
+   in T.intercalate
+        "\n"
+        [ "DROP TRIGGER IF EXISTS " <> trig <> " ON " <> tbl <> ";"
+        , "CREATE TRIGGER " <> trig
+        , "AFTER " <> event <> " ON " <> tbl
+        , "REFERENCING " <> referencing
+        , "FOR EACH STATEMENT EXECUTE FUNCTION " <> func <> "();"
         ]
+
+-- | The 3 statement-level AFTER triggers (insert/delete/update) wiring a table's
+-- maintenance functions, named @<baseName>_{insert,delete,update}@.
+createMaintenanceTriggersSQL :: Text -> Text -> Text -> Text
+createMaintenanceTriggersSQL schemaName tbl baseName =
+  T.intercalate
+    "\n\n"
+    [ statementTriggerSQL schemaName tbl baseName "_insert" "INSERT" "NEW TABLE AS new_table"
+    , statementTriggerSQL schemaName tbl baseName "_delete" "DELETE" "OLD TABLE AS old_table"
+    , statementTriggerSQL schemaName tbl baseName "_update" "UPDATE" "OLD TABLE AS old_table NEW TABLE AS new_table"
+    ]
+    <> "\n"
 
 -- | SQL for the per-table NOTIFY function (fires after INSERT).
 -- Channel name is quoted as a string literal, not an identifier.

@@ -1,0 +1,2 @@
+ALTER TABLE "arbiter"."golden_jobs" ADD COLUMN IF NOT EXISTS rate_limit_cost DOUBLE PRECISION NOT NULL DEFAULT 1;
+ALTER TABLE "arbiter"."golden_jobs_dlq" ADD COLUMN IF NOT EXISTS rate_limit_cost DOUBLE PRECISION NOT NULL DEFAULT 1;

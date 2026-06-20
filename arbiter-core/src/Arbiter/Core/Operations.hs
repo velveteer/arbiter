@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -15,7 +16,28 @@ module Arbiter.Core.Operations
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , claimNextVisibleJobsBatchedAs
+  , ClaimSql (..)
+  , mkClaimSql
+  , claimJobsCached
+  , claimJobsBatchedCached
+  , addRateLimitTokens
+  , pruneRateLimitBuckets
+  , resetRateLimitBuckets
+  , wakeThrottledJobs
+  , wakeThrottledJobsForKey
+  , listRateLimitPolicies
+  , getRateLimitPolicy
+  , rateLimitPolicyExists
+  , listRateLimitBuckets
+  , listConcurrencyPolicies
+  , getConcurrencyPolicy
+  , listConcurrencyKeys
+  , updateRateLimitPolicyOverrides
+  , updateConcurrencyPolicyOverrides
+  , pruneConcurrencyKeys
+  , reconcileConcurrencyCounts
+  , reconcileConcurrencyCountsIfStale
+  , reconcileAndPruneConcurrency
   , ackJob
   , ackJobsBatch
   , setVisibilityTimeout
@@ -109,6 +131,7 @@ module Arbiter.Core.Operations
 
     -- * Global Gate Operations
   , runGated
+  , runGatedBounded
 
     -- * Internal Operations
   , getParentStateSnapshot
@@ -116,7 +139,7 @@ module Arbiter.Core.Operations
   , mergeRawChildResults
   ) where
 
-import Control.Monad (foldM, void, when)
+import Control.Monad (foldM, join, void, when)
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
 import Data.Bifunctor (first)
 import Data.Bitraversable (bitraverse)
@@ -124,12 +147,14 @@ import Data.Either (partitionEithers)
 import Data.Foldable (for_, toList)
 import Data.Functor qualified as Functor
 import Data.Int (Int32, Int64)
+import Data.IntMap qualified as IntMap
 import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Monoid (Ap (..), Sum (..))
+import Data.Proxy (Proxy (..))
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
@@ -145,6 +170,8 @@ import Arbiter.Core.Codec
   , Params
   , RowCodec
   , col
+  , concurrencyKeyViewCodec
+  , concurrencyPolicyViewCodec
   , countCodec
   , cronScheduleRowCodec
   , dlqRowCodec
@@ -155,8 +182,18 @@ import Arbiter.Core.Codec
   , pnul
   , pval
   , queueRowCodec
+  , rateLimitBucketCodec
+  , rateLimitPolicyViewCodec
   , workerRowCodec
   )
+import Arbiter.Core.Concurrency.Spec
+  ( ConcurrencyKey (..)
+  , HasConcurrency
+  , concurrencyFor
+  , concurrencyKeyText
+  , runConcurrencyFor
+  )
+import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate (..), ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwParsing)
@@ -175,10 +212,32 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Queues (QueueRow)
-import Arbiter.Core.SqlTemplates qualified as Tmpl
+import Arbiter.Core.RateLimit.Spec
+  ( HasRateLimit
+  , RateLimitKey (..)
+  , rateLimitCost
+  , rateLimitFor
+  , rateLimitKeyText
+  , runRateLimitFor
+  )
+import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate (..), RateLimitPolicyView)
+import Arbiter.Core.Selector (usesAnyPolicy)
+import Arbiter.Core.Sql.Claim qualified as Claim
+import Arbiter.Core.Sql.Concurrency qualified as Tmpl
+import Arbiter.Core.Sql.Cron qualified as Tmpl
+import Arbiter.Core.Sql.DLQ qualified as Tmpl
+import Arbiter.Core.Sql.Gates qualified as Tmpl
+import Arbiter.Core.Sql.Groups qualified as Tmpl
+import Arbiter.Core.Sql.Jobs qualified as Tmpl
+import Arbiter.Core.Sql.Lifecycle qualified as Tmpl
+import Arbiter.Core.Sql.Queues qualified as Tmpl
+import Arbiter.Core.Sql.RateLimit qualified as Tmpl
+import Arbiter.Core.Sql.Stats qualified as Tmpl
+import Arbiter.Core.Sql.Tree qualified as Tmpl
+import Arbiter.Core.Sql.Workers qualified as Tmpl
 import Arbiter.Core.Worker (WorkerRow)
 
-decodePayload :: (JobPayload payload, MonadArbiter m) => Job Value Int64 Text UTCTime -> m (JobRead payload)
+decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
 decodePayload job = case fromJSON (payload job) of
   Success p -> pure $ job {payload = p}
   Error e -> throwParsing $ "Failed to decode job payload: " <> T.pack e
@@ -253,6 +312,28 @@ queryCountStrict label sql params = do
     [n] -> pure n
     _ -> throwParsing $ label <> ": unexpected result"
 
+-- | The admission columns stored with a job, derived once from its payload.
+data AdmissionColumns = AdmissionColumns
+  { acRateLimitKey :: Maybe Text
+  , acRateLimitPrefix :: Maybe Text
+  , acRateLimitCost :: Double
+  , acConcurrencyKey :: Maybe Text
+  , acConcurrencyPrefix :: Maybe Text
+  }
+
+admissionColumns
+  :: forall payload. (HasConcurrency payload, HasRateLimit payload) => payload -> AdmissionColumns
+admissionColumns p =
+  let rlKey = runRateLimitFor p (rateLimitFor @payload)
+      ccKey = runConcurrencyFor p (concurrencyFor @payload)
+   in AdmissionColumns
+        { acRateLimitKey = rateLimitKeyText <$> rlKey
+        , acRateLimitPrefix = rlkPrefix <$> rlKey
+        , acRateLimitCost = rateLimitCost p
+        , acConcurrencyKey = concurrencyKeyText <$> ccKey
+        , acConcurrencyPrefix = ckPrefix <$> ccKey
+        }
+
 -- | Insert a job without validating that the parent exists.
 --
 -- This is an internal fast path for callers that already guarantee the parent
@@ -273,6 +354,8 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
         Just (IgnoreDuplicate k) -> (Tmpl.insertJobSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "ignore"))
         Just (ReplaceDuplicate k) -> (Tmpl.insertJobReplaceSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "replace"))
 
+      ac = admissionColumns (payload job)
+
       params =
         [ pval CJsonb (toJSON $ payload job)
         , pnul CText (groupKey job)
@@ -286,6 +369,11 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
         , pnul CJsonb (parentState job)
         , pval CBool (suspended job)
         , pnul CTimestamptz (notVisibleUntil job)
+        , pnul CText (acRateLimitKey ac)
+        , pnul CText (acRateLimitPrefix ac)
+        , pval CFloat8 (acRateLimitCost ac)
+        , pnul CText (acConcurrencyKey ac)
+        , pnul CText (acConcurrencyPrefix ac)
         ]
 
   rawJobs <- executeQuery sql params (jobRowCodec tableName)
@@ -295,6 +383,159 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
       Just (ReplaceDuplicate _) -> pure Nothing
       Nothing -> throwParsing "insertJob: No rows returned from INSERT"
     (raw : _) -> Just <$> decodePayload raw
+
+-- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
+-- manually-refilled policies.
+addRateLimitTokens :: (MonadArbiter m) => SchemaName -> RateLimitKey -> Double -> m ()
+addRateLimitTokens schemaName key amount =
+  void $
+    executeStatement
+      (Tmpl.addRateLimitTokensSQL schemaName)
+      [pval CText (rateLimitKeyText key), pval CText (rlkPrefix key), pval CFloat8 amount]
+
+-- | Delete full, idle rate-limit buckets. Returns the number pruned.
+pruneRateLimitBuckets :: (MonadArbiter m) => SchemaName -> NominalDiffTime -> m Int64
+pruneRateLimitBuckets schemaName idle =
+  executeStatement
+    (Tmpl.pruneRateLimitBucketsSQL schemaName)
+    [pval CFloat8 (realToFrac idle)]
+
+-- | Refill every bucket under a prefix to full. Returns the number refilled. Used to
+-- build a fixed window from a manual policy plus a cron.
+resetRateLimitBuckets :: (MonadArbiter m) => SchemaName -> Text -> m Int64
+resetRateLimitBuckets schemaName prefix =
+  executeStatement
+    (Tmpl.resetRateLimitBucketsSQL schemaName)
+    [pval CText prefix]
+
+-- | Make a prefix's throttled jobs claimable again across the given queue tables,
+-- in one statement. Returns the number woken.
+wakeThrottledJobs :: (MonadArbiter m) => SchemaName -> [TableName] -> Text -> m Int64
+wakeThrottledJobs _ [] _ = pure 0
+wakeThrottledJobs schemaName tableNames prefix =
+  queryCountStrict
+    "wakeThrottledJobs"
+    (Tmpl.wakeThrottledJobsSQL schemaName tableNames)
+    (map (const (pval CText prefix)) tableNames)
+
+-- | Wake one key's throttled jobs across the given tables, in one statement.
+-- Returns the count.
+wakeThrottledJobsForKey :: (MonadArbiter m) => SchemaName -> [TableName] -> RateLimitKey -> m Int64
+wakeThrottledJobsForKey _ [] _ = pure 0
+wakeThrottledJobsForKey schemaName tableNames key =
+  queryCountStrict
+    "wakeThrottledJobsForKey"
+    (Tmpl.wakeThrottledJobsForKeySQL schemaName tableNames)
+    (concatMap (const [pval CText (rlkPrefix key), pval CText (rateLimitKeyText key)]) tableNames)
+
+-- | List every policy with its default/override params, bucket aggregates, and
+-- live throttled count across the given queue tables.
+listRateLimitPolicies :: (MonadArbiter m) => SchemaName -> [TableName] -> m [RateLimitPolicyView]
+listRateLimitPolicies schemaName tableNames =
+  executeQuery (Tmpl.listRateLimitPoliciesSQL schemaName tableNames) [] rateLimitPolicyViewCodec
+
+-- | One prefix's policy view with bucket aggregates and live throttled count.
+getRateLimitPolicy :: (MonadArbiter m) => SchemaName -> [TableName] -> Text -> m (Maybe RateLimitPolicyView)
+getRateLimitPolicy schemaName tableNames prefix =
+  listToMaybe
+    <$> executeQuery (Tmpl.getRateLimitPolicySQL schemaName tableNames) [pval CText prefix] rateLimitPolicyViewCodec
+
+-- | Whether a rate-limit policy exists for a prefix.
+rateLimitPolicyExists :: (MonadArbiter m) => SchemaName -> Text -> m Bool
+rateLimitPolicyExists schemaName prefix =
+  or <$> executeQuery (Tmpl.rateLimitPolicyExistsSQL schemaName) [pval CText prefix] boolCodec
+
+-- | List a prefix's buckets with effective max and fill fraction, paginated.
+listRateLimitBuckets :: (MonadArbiter m) => SchemaName -> Text -> Int -> Int -> m [RateLimitBucketView]
+listRateLimitBuckets schemaName prefix limit offset =
+  executeQuery
+    (Tmpl.listRateLimitBucketsSQL schemaName)
+    [pval CText prefix, pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
+    rateLimitBucketCodec
+
+-- | Set or clear a policy's override params. Returns rows affected (0 if absent).
+updateRateLimitPolicyOverrides :: (MonadArbiter m) => SchemaName -> Text -> RateLimitPolicyUpdate -> m Int64
+updateRateLimitPolicyOverrides schemaName prefix (RateLimitPolicyUpdate mMax mRefill mIv) =
+  executeStatement
+    (Tmpl.updateRateLimitOverridesSQL schemaName)
+    [ pval CBool (isJust mMax)
+    , pnul CFloat8 (join mMax)
+    , pval CBool (isJust mRefill)
+    , pnul CFloat8 (join mRefill)
+    , pval CBool (isJust mIv)
+    , pnul CFloat8 (join mIv)
+    , pval CText prefix
+    ]
+
+-- | Apply a pool's override-limit patch (retunes every key under the prefix).
+-- Returns rows affected.
+updateConcurrencyPolicyOverrides :: (MonadArbiter m) => SchemaName -> Text -> ConcurrencyPolicyUpdate -> m Int64
+updateConcurrencyPolicyOverrides schemaName prefix (ConcurrencyPolicyUpdate mLim) =
+  executeStatement
+    (Tmpl.updateConcurrencyPolicyOverrideSQL schemaName)
+    [pval CBool (isJust mLim), pnul CInt4 (join mLim), pval CText prefix]
+
+-- | List every concurrency pool with its default/override limit and live key and
+-- in-flight aggregates.
+listConcurrencyPolicies :: (MonadArbiter m) => SchemaName -> m [ConcurrencyPolicyView]
+listConcurrencyPolicies schemaName =
+  executeQuery (Tmpl.listConcurrencyPoliciesSQL schemaName) [] concurrencyPolicyViewCodec
+
+-- | One prefix's concurrency pool view with live aggregates.
+getConcurrencyPolicy :: (MonadArbiter m) => SchemaName -> Text -> m (Maybe ConcurrencyPolicyView)
+getConcurrencyPolicy schemaName prefix =
+  listToMaybe
+    <$> executeQuery (Tmpl.getConcurrencyPolicySQL schemaName) [pval CText prefix] concurrencyPolicyViewCodec
+
+-- | List a prefix's keys with effective cap and fill fraction, paginated.
+listConcurrencyKeys :: (MonadArbiter m) => SchemaName -> Text -> Int -> Int -> m [ConcurrencyKeyView]
+listConcurrencyKeys schemaName prefix limit offset =
+  executeQuery
+    (Tmpl.listConcurrencyKeysSQL schemaName)
+    [pval CText prefix, pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
+    concurrencyKeyViewCodec
+
+-- | Delete drained concurrency rows with no live job across the given tables. Returns
+-- the number pruned. A key whose advisory try-lock is contended is skipped until the next pass.
+pruneConcurrencyKeys :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
+pruneConcurrencyKeys _ [] = pure 0
+pruneConcurrencyKeys schemaName tableNames = withDbTransaction $ do
+  dead <- executeQuery (Tmpl.lockDeadConcurrencyKeysSQL schemaName tableNames) [] (col "concurrency_key" CText)
+  if null dead
+    then pure 0
+    else do
+      locked <- executeQuery Tmpl.tryLockDeadConcurrencyAdvisorySQL [parr CText dead] (col "concurrency_key" CText)
+      if null locked
+        then pure 0
+        else executeStatement (Tmpl.pruneLockedConcurrencyKeysSQL schemaName tableNames) [parr CText locked]
+
+-- | Lock the count rows, then recount those keys under the lock so a claim's increment
+-- is not overwritten. A key seeded after the lock pass is left to its triggers.
+reconcileConcurrencyCounts :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
+reconcileConcurrencyCounts _ [] = pure 0
+reconcileConcurrencyCounts schemaName tableNames = withDbTransaction $ do
+  held <- executeQuery (Tmpl.lockConcurrencyCountsSQL schemaName) [] (col "concurrency_key" CText)
+  rows <-
+    executeQuery
+      (Tmpl.reconcileConcurrencyCountsSQL schemaName tableNames)
+      [parr CText held]
+      (col "reconciled" CInt8)
+  pure (fromMaybe 0 (listToMaybe rows))
+
+-- | Rebuild the counts only if a crash truncated the UNLOGGED table.
+reconcileConcurrencyCountsIfStale :: (MonadArbiter m) => SchemaName -> [TableName] -> m ()
+reconcileConcurrencyCountsIfStale _ [] = pure ()
+reconcileConcurrencyCountsIfStale schemaName tableNames = do
+  stale <- executeQuery (Tmpl.concurrencyCountsStaleSQL schemaName tableNames) [] (col "stale" CBool)
+  when (or stale) (void (reconcileConcurrencyCounts schemaName tableNames))
+
+-- | Reconcile then prune, skipped entirely when no concurrency key exists.
+reconcileAndPruneConcurrency :: (MonadArbiter m) => SchemaName -> [TableName] -> m ()
+reconcileAndPruneConcurrency schemaName tableNames = do
+  hasKeys <- executeQuery (Tmpl.concurrencyHasAnyKeySQL schemaName) [] (col "present" CBool)
+  when (or hasKeys) $ do
+    void $ reconcileConcurrencyCounts schemaName tableNames
+    void $ pruneConcurrencyKeys schemaName tableNames
 
 -- | Inserts a job into the queue.
 --
@@ -373,18 +614,7 @@ insertJobsBatch
 insertJobsBatch _ _ [] = pure []
 insertJobsBatch schemaName tableName jobs = withDbTransaction $ do
   let cols = buildBatchColumns jobs
-      params =
-        [ parr CJsonb (toList $ colPayloads cols)
-        , pnarr CText (toList $ colGroupKeys cols)
-        , parr CInt4 (toList $ colPriorities cols)
-        , pnarr CText (toList $ colDedupKeys cols)
-        , pnarr CText (toList $ colDedupStrategies cols)
-        , pnarr CInt4 (toList $ colMaxAttempts cols)
-        , pnarr CInt8 (toList $ colParentIds cols)
-        , pnarr CJsonb (toList $ colParentStates cols)
-        , parr CBool (toList $ colSuspended cols)
-        , pnarr CTimestamptz (toList $ colNotVisibleUntils cols)
-        ]
+      params = batchInsertParams cols
 
   rawJobs <- executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName) params (jobRowCodec tableName)
   traverse decodePayload rawJobs
@@ -399,18 +629,7 @@ insertJobsBatch_
 insertJobsBatch_ _ _ [] = pure 0
 insertJobsBatch_ schemaName tableName jobs = withDbTransaction $ do
   let cols = buildBatchColumns jobs
-      params =
-        [ parr CJsonb (toList $ colPayloads cols)
-        , pnarr CText (toList $ colGroupKeys cols)
-        , parr CInt4 (toList $ colPriorities cols)
-        , pnarr CText (toList $ colDedupKeys cols)
-        , pnarr CText (toList $ colDedupStrategies cols)
-        , pnarr CInt4 (toList $ colMaxAttempts cols)
-        , pnarr CInt8 (toList $ colParentIds cols)
-        , pnarr CJsonb (toList $ colParentStates cols)
-        , parr CBool (toList $ colSuspended cols)
-        , pnarr CTimestamptz (toList $ colNotVisibleUntils cols)
-        ]
+      params = batchInsertParams cols
   executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName) params
 
 -- | Insert a child's result into the results table.
@@ -509,7 +728,8 @@ persistParentState schemaName tableName jobId state =
 --   * All 'IgnoreDuplicate' for a key -> first occurrence wins
 --   * All 'ReplaceDuplicate' for a key -> last occurrence wins
 --   * Mixed strategies for the same key -> 'ReplaceDuplicate' takes precedence
-buildBatchColumns :: forall payload. (ToJSON payload) => [JobWrite payload] -> BatchColumns
+buildBatchColumns
+  :: forall payload. (HasConcurrency payload, HasRateLimit payload, ToJSON payload) => [JobWrite payload] -> BatchColumns
 buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
   where
     extractCols (_, _, cols) = cols
@@ -532,6 +752,7 @@ buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
     withJob :: (forall a. a -> Seq a -> Seq a) -> BatchColumns -> JobWrite payload -> BatchColumns
     withJob f cols job =
       let (dk, ds) = dedupParts (dedupKey job)
+          ac = admissionColumns (payload job)
        in BatchColumns
             { colPayloads = f (toJSON (payload job)) (colPayloads cols)
             , colGroupKeys = f (groupKey job) (colGroupKeys cols)
@@ -543,6 +764,11 @@ buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
             , colParentStates = f (parentState job) (colParentStates cols)
             , colSuspended = f (suspended job) (colSuspended cols)
             , colNotVisibleUntils = f (notVisibleUntil job) (colNotVisibleUntils cols)
+            , colRateLimitKeys = f (acRateLimitKey ac) (colRateLimitKeys cols)
+            , colRateLimitPrefixes = f (acRateLimitPrefix ac) (colRateLimitPrefixes cols)
+            , colRateLimitCosts = f (acRateLimitCost ac) (colRateLimitCosts cols)
+            , colConcurrencyKeys = f (acConcurrencyKey ac) (colConcurrencyKeys cols)
+            , colConcurrencyPrefixes = f (acConcurrencyPrefix ac) (colConcurrencyPrefixes cols)
             }
 
 dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
@@ -566,12 +792,46 @@ data BatchColumns = BatchColumns
   , colParentStates :: !(Seq (Maybe Value))
   , colSuspended :: !(Seq Bool)
   , colNotVisibleUntils :: !(Seq (Maybe UTCTime))
+  , colRateLimitKeys :: !(Seq (Maybe Text))
+  , colRateLimitPrefixes :: !(Seq (Maybe Text))
+  , colRateLimitCosts :: !(Seq Double)
+  , colConcurrencyKeys :: !(Seq (Maybe Text))
+  , colConcurrencyPrefixes :: !(Seq (Maybe Text))
   }
   deriving stock (Generic)
   deriving (Monoid, Semigroup) via Generically BatchColumns
 
 emptyColumns :: BatchColumns
 emptyColumns = mempty
+
+-- | The 15 array params for a batch insert, in the column order both batch
+-- statements expect.
+batchInsertParams :: BatchColumns -> Params
+batchInsertParams cols =
+  [ parr CJsonb (toList $ colPayloads cols)
+  , pnarr CText (toList $ colGroupKeys cols)
+  , parr CInt4 (toList $ colPriorities cols)
+  , pnarr CText (toList $ colDedupKeys cols)
+  , pnarr CText (toList $ colDedupStrategies cols)
+  , pnarr CInt4 (toList $ colMaxAttempts cols)
+  , pnarr CInt8 (toList $ colParentIds cols)
+  , pnarr CJsonb (toList $ colParentStates cols)
+  , parr CBool (toList $ colSuspended cols)
+  , pnarr CTimestamptz (toList $ colNotVisibleUntils cols)
+  , pnarr CText (toList $ colRateLimitKeys cols)
+  , pnarr CText (toList $ colRateLimitPrefixes cols)
+  , parr CFloat8 (toList $ colRateLimitCosts cols)
+  , pnarr CText (toList $ colConcurrencyKeys cols)
+  , pnarr CText (toList $ colConcurrencyPrefixes cols)
+  ]
+
+-- | The 'Claim.ClaimAdmission' for this payload type.
+claimAdmissionFor :: forall payload. (HasConcurrency payload, HasRateLimit payload) => Claim.ClaimAdmission
+claimAdmissionFor =
+  Claim.ClaimAdmission
+    { Claim.admitRateLimited = usesAnyPolicy (rateLimitFor @payload)
+    , Claim.admitConcurrent = usesAnyPolicy (concurrencyFor @payload)
+    }
 
 -- | Claim up to @maxJobs@ visible jobs, respecting per-group ordering
 -- (one job per group). Uses a single-CTE claim with the groups table.
@@ -610,10 +870,50 @@ claimJobs
   -> NominalDiffTime
   -> Maybe UUID
   -> m [JobRead payload]
-claimJobs schemaName tableName maxJobs timeout mWorkerId = withDbTransaction $ do
+claimJobs schemaName tableName maxJobs timeout mWorkerId =
   -- Batch size 1 is the single-job claim.
-  let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName 1 maxJobs timeout mWorkerId
-  rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
+  claimJobsCached (mkClaimSql (Proxy @payload) schemaName tableName 1 0 timeout mWorkerId) maxJobs
+
+-- | A pool's claim statements, rendered once per capacity in @[1 .. poolSize]@.
+-- 'claimSqlFor' falls back to a fresh render outside that range.
+data ClaimSql = ClaimSql
+  { claimSqlTable :: TableName
+  , claimSqlBatchSize :: Int
+  , claimSqlFor :: Int -> Text
+  }
+
+-- | Assemble a pool's claim statements. Every input except the per-poll capacity
+-- is constant for the pool's lifetime, so the dispatcher builds this once.
+mkClaimSql
+  :: forall payload proxy
+   . (JobPayload payload)
+  => proxy payload
+  -> SchemaName
+  -> TableName
+  -> Int
+  -> Int
+  -> NominalDiffTime
+  -> Maybe UUID
+  -> ClaimSql
+mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
+  let admission = claimAdmissionFor @payload
+      render n = Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout mWorkerId
+      cache = IntMap.fromList [(n, render n) | n <- [1 .. poolSize]]
+   in ClaimSql
+        { claimSqlTable = tableName
+        , claimSqlBatchSize = batchSize
+        , claimSqlFor = \n -> IntMap.findWithDefault (render n) n cache
+        }
+
+-- | 'claimJobs' over a prebuilt 'ClaimSql'.
+claimJobsCached
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => ClaimSql
+  -> Int
+  -> m [JobRead payload]
+claimJobsCached cs maxJobs = withDbTransaction $ do
+  rawJobs <- executeQueryPrepared (claimSqlFor cs maxJobs) [] (jobRowCodec (claimSqlTable cs))
   traverse decodePayload rawJobs
 
 -- | Batched variant of 'claimNextVisibleJobs' - claims up to @batchSize@ jobs
@@ -630,20 +930,6 @@ claimNextVisibleJobsBatched
 claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout =
   claimJobsBatched schemaName tableName batchSize maxBatches timeout Nothing
 
--- | 'claimNextVisibleJobsBatched' with claim attribution.
-claimNextVisibleJobsBatchedAs
-  :: forall m payload
-   . (JobPayload payload, MonadArbiter m)
-  => SchemaName
-  -> TableName
-  -> Int
-  -> Int
-  -> NominalDiffTime
-  -> UUID
-  -> m [NonEmpty (JobRead payload)]
-claimNextVisibleJobsBatchedAs schemaName tableName batchSize maxBatches timeout workerId =
-  claimJobsBatched schemaName tableName batchSize maxBatches timeout (Just workerId)
-
 claimJobsBatched
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -654,16 +940,25 @@ claimJobsBatched
   -> NominalDiffTime
   -> Maybe UUID
   -> m [NonEmpty (JobRead payload)]
-claimJobsBatched schemaName tableName batchSize maxBatches timeout mWorkerId
-  | batchSize < 1 = pure []
+claimJobsBatched schemaName tableName batchSize maxBatches timeout mWorkerId =
+  claimJobsBatchedCached (mkClaimSql (Proxy @payload) schemaName tableName batchSize 0 timeout mWorkerId) maxBatches
+
+-- | 'claimJobsBatched' over a prebuilt 'ClaimSql'.
+claimJobsBatchedCached
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => ClaimSql
+  -> Int
+  -> m [NonEmpty (JobRead payload)]
+claimJobsBatchedCached cs maxBatches
+  | claimSqlBatchSize cs < 1 = pure []
   | maxBatches < 1 = pure []
   | otherwise = withDbTransaction $ do
-      let claimSql = Tmpl.claimJobsBatchedSQL schemaName tableName batchSize maxBatches timeout mWorkerId
-      rawJobs <- executeQuery claimSql [] (jobRowCodec tableName)
+      rawJobs <- executeQueryPrepared (claimSqlFor cs maxBatches) [] (jobRowCodec (claimSqlTable cs))
       jobs <- traverse decodePayload rawJobs
       let sorted = sortOn groupKey jobs
           groups = groupBy (\j1 j2 -> groupKey j1 == groupKey j2) sorted
-      pure $ concatMap (chunksOfNE batchSize) $ mapMaybe NE.nonEmpty groups
+      pure $ concatMap (chunksOfNE (claimSqlBatchSize cs)) $ mapMaybe NE.nonEmpty groups
 
 -- | Split a NonEmpty list into chunks of at most @n@ elements.
 chunksOfNE :: Int -> NonEmpty a -> [NonEmpty a]
@@ -1210,7 +1505,7 @@ countDLQFiltered schemaName tableName filters = do
 
 decodeDLQRow
   :: (JobPayload payload, MonadArbiter m)
-  => (Int64, UTCTime, Job Value Int64 Text UTCTime)
+  => (Int64, UTCTime, JobRead Value)
   -> m (DLQ.DLQJob payload)
 decodeDLQRow (dlqId, dlqFailedAt, rawJob) = do
   jobSnapshot <- decodePayload rawJob
@@ -1493,9 +1788,10 @@ promoteJob schemaName tableName jobId =
     (Tmpl.promoteJobSQL schemaName tableName)
     [pval CInt8 jobId]
 
--- | Per-status breakdown of a queue. The five status counts ('readyJobs',
--- 'inFlightJobs', 'scheduledJobs', 'backoffJobs', 'suspendedJobs') partition
--- the queue and sum to 'totalJobs', mirroring the derived job status taxonomy.
+-- | Per-status breakdown of a queue. The six status counts ('readyJobs',
+-- 'inFlightJobs', 'scheduledJobs', 'backoffJobs', 'throttledJobs',
+-- 'suspendedJobs') partition the queue and sum to 'totalJobs', mirroring the
+-- derived job status taxonomy.
 data QueueStats = QueueStats
   { totalJobs :: Int64
   -- ^ Total number of jobs in the queue
@@ -1507,6 +1803,8 @@ data QueueStats = QueueStats
   -- ^ Jobs delayed until a future @not_visible_until@ (never yet attempted)
   , backoffJobs :: Int64
   -- ^ Failed jobs waiting out a retry backoff delay
+  , throttledJobs :: Int64
+  -- ^ Jobs parked by a rate limit until tokens refill
   , suspendedJobs :: Int64
   -- ^ Suspended jobs (e.g. rollup finalizers awaiting their children)
   , oldestReadyAgeSeconds :: Maybe Double
@@ -1527,6 +1825,7 @@ statsRowCodec =
     <*> col "in_flight_jobs" CInt8
     <*> col "scheduled_jobs" CInt8
     <*> col "backoff_jobs" CInt8
+    <*> col "throttled_jobs" CInt8
     <*> col "suspended_jobs" CInt8
     <*> ncol "oldest_ready_age_seconds" CFloat8
 
@@ -1548,7 +1847,7 @@ getQueueStats schemaName tableName = do
   -- only guards against an unexpected truncation.
   pure $ case rows of
     (s : _) -> s
-    [] -> QueueStats 0 0 0 0 0 0 Nothing
+    [] -> QueueStats 0 0 0 0 0 0 0 Nothing
 
 -- ---------------------------------------------------------------------------
 -- Count Operations
@@ -2212,6 +2511,22 @@ listQueues schemaName =
 -- ---------------------------------------------------------------------------
 -- Global Gate Operations
 -- ---------------------------------------------------------------------------
+
+-- | Bound the current transaction's statements to a wall-clock limit, so a stuck op aborts at the DB rather than hanging the caller.
+setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
+setLocalStatementTimeout limit =
+  let ms = ceiling (realToFrac limit * 1000 :: Double) :: Int
+   in void $
+        executeQuery
+          ("SELECT set_config('statement_timeout', '" <> T.pack (show ms) <> "', true)")
+          []
+          (col "set_config" CText)
+
+-- | 'runGated' with each statement of @work@ bounded by @limit@. The bound is
+-- transaction-local, which the gate transaction 'work' runs in makes effective.
+runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> NominalDiffTime -> m a -> m (Maybe a)
+runGatedBounded schemaName task interval limit work =
+  runGated schemaName task interval (setLocalStatementTimeout limit >> work)
 
 -- | Run @work@ at most once per @interval@ across every worker pool sharing
 -- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@

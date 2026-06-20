@@ -28,17 +28,11 @@ import Control.Applicative ((<|>))
 import Data.Aeson
   ( FromJSON (..)
   , ToJSON (..)
-  , defaultOptions
   , genericToEncoding
   , genericToJSON
-  , omitNothingFields
   , withObject
-  , (.:)
   , (.:?)
   )
-import Data.Aeson qualified as Aeson
-import Data.Aeson.Key qualified as Key
-import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -46,6 +40,7 @@ import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Schema (quoteIdentifier)
+import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 
 -- | A row from the @cron_schedules@ table.
 data CronScheduleRow = CronScheduleRow
@@ -96,29 +91,16 @@ data CronScheduleUpdate = CronScheduleUpdate
   }
   deriving stock (Eq, Generic, Show)
 
-updateOptions :: Aeson.Options
-updateOptions = defaultOptions {omitNothingFields = True}
-
 instance ToJSON CronScheduleUpdate where
-  toJSON = genericToJSON updateOptions
-  toEncoding = genericToEncoding updateOptions
+  toJSON = genericToJSON patchOptions
+  toEncoding = genericToEncoding patchOptions
 
--- @.:?@ can't distinguish missing from null for @Maybe (Maybe a)@ (both
--- yield @Nothing@), so we check key membership first.
+-- Plain @.:?@ collapses missing and null for @Maybe (Maybe a)@. 'explicitOptionalField' distinguishes them.
 instance FromJSON CronScheduleUpdate where
   parseJSON = withObject "CronScheduleUpdate" $ \o -> do
-    oe <-
-      if KeyMap.member (Key.fromText "overrideExpression") o
-        then Just <$> o .: "overrideExpression"
-        else pure Nothing
-    oo <-
-      if KeyMap.member (Key.fromText "overrideOverlap") o
-        then Just <$> o .: "overrideOverlap"
-        else pure Nothing
-    ot <-
-      if KeyMap.member (Key.fromText "overrideTimezone") o
-        then Just <$> o .: "overrideTimezone"
-        else pure Nothing
+    oe <- explicitOptionalField o "overrideExpression"
+    oo <- explicitOptionalField o "overrideOverlap"
+    ot <- explicitOptionalField o "overrideTimezone"
     en <- o .:? "enabled"
     pure CronScheduleUpdate {overrideExpression = oe, overrideOverlap = oo, overrideTimezone = ot, enabled = en}
 

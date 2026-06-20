@@ -7,14 +7,16 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
-- Per-group ordering, like SQS FIFO message groups
+- Per-group serial processing (partitioned FIFO)
 - Concurrent worker pools with `LISTEN/NOTIFY` and polling fallback
 - Job trees with fan-out/fan-in result collection
 - Dead-letter queues, cron scheduling, job deduplication
+- Cross-queue per-job rate limiting with operator-tunable token-bucket policies
+- Cross-queue per-job concurrency limits - at most N jobs sharing a key in flight
 - Configurable backoff, observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
-- Extensive test coverage (700+ integration tests)
+- Extensive test coverage (1,000+ integration tests)
 
 **[Live Demo](https://demo.arbiterq.dev/)**
 
@@ -125,7 +127,7 @@ ArbS.runSimpleDb env $ do
   -- Ungrouped - processed concurrently by any available worker
   _ <- Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 
-  -- Grouped - jobs with the same group key are processed serially (FIFO)
+  -- Grouped - jobs with the same group key are processed serially (one at a time)
   _ <- Arb.insertJob (Arb.defaultGroupedJob "user-42" $ SendReceipt "alice@example.com" 1001)
 ```
 
@@ -167,6 +169,8 @@ Handlers run inside a database transaction by default. If the handler succeeds, 
 
 ## Architecture
 
+Arbiter has no broker or central coordinator. Every worker pool claims directly from PostgreSQL, so you scale by adding worker processes and there is no leader to elect or fail over.
+
 The default lifecycle (automatic single-job mode):
 
 1. **Claim** - the dispatcher claims visible jobs (respecting per-group ordering), increments each job's attempt count, and hides it for the visibility timeout. A heartbeat extends that timeout while the handler runs, so long jobs are not reclaimed.
@@ -175,16 +179,26 @@ The default lifecycle (automatic single-job mode):
 4. **Failure** - the transaction rolls back. A separate transaction retries the job with backoff, or moves it to the dead-letter queue (DLQ)
 5. **Reclaim** - if another worker stole the job mid-flight (its visibility lapsed), either the heartbeat or the ack will throw an exception to skip the job(s) in an attempt to prevent duplicate work.
 
+Delivery is at-least-once: a job redelivered after a worker crash or visibility-timeout lapse runs again, so handlers with side effects outside the transaction should be idempotent.
+
 In batched mode the worker transaction in step 2 is replaced by per-job callbacks - the handler completes, fails, cancels, or nacks each job manually (see [Batched Handlers](#batched-handlers)).
 
 ### Group Ordering
 
-Group keys give ordered, serial processing within a group and concurrency across groups.
+A group key runs a group **one job (or batch) at a time** - serial within the group, concurrent across groups.
 
-- **Same group key** - run one at a time (one in-flight job or batch per group), ordered by priority then insertion order.
+- **Same group key** - eligible jobs run in insertion order within priority, except a retrying job keeps the head until it succeeds or dead-letters. A delayed job yields to ready siblings, and a failing job holds the group through its backoff.
 - **No group key** - run concurrently by any available worker.
 
 ## Job Features
+
+### Priority
+
+Jobs carry an integer `priority` (default `0`), and lower numbers are claimed first. Since every job defaults to `0`, give background work a higher number to defer it behind normal jobs - ordering the eligible head within a group and the ungrouped pool across the queue.
+
+```haskell
+job = (Arb.defaultJob payload) { Arb.priority = 10 }  -- runs behind default-priority work
+```
 
 ### Deduplication
 
@@ -235,7 +249,7 @@ myTree = JT.rollup (Arb.defaultJob Aggregate)
   ]
 ```
 
-A parent fetches its children's results on demand with `Worker.mergedChildResults`, which returns the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up via `ON DELETE CASCADE` when the parent is acked.
+A parent fetches its children's results on demand with `Worker.mergedChildResults`, which returns the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up automatically when the parent is acked.
 
 ```haskell
 handler :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
@@ -340,10 +354,10 @@ fall-back day (when 01:30 happens twice).
 **Backfill.** `BackfillPolicy` replays missed minutes after downtime or
 scheduler pauses, bounded by a duration you specify.
 
-**Runtime overrides.** The `cron_schedules` table holds the live config and
-is editable via the REST API or admin UI. You can change a schedule's
-expression, overlap, timezone, or enabled state without redeploying.
-Clearing an override (setting it to `null`) falls back to the value in code.
+**Runtime overrides.** A schedule's live config - expression, overlap,
+timezone, or enabled state - is editable via the REST API or admin UI
+without redeploying. Clearing an override (setting it to `null`) falls back
+to the value in code.
 
 ### Error Handling
 
@@ -358,6 +372,90 @@ Arb.throwNack                          -- reprocess later, not a failure (no att
 In a batched handler, the same dispositions are available per job through the `BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack`) so one job's outcome does not affect the rest of the batch. A throw applies to whichever jobs the handler has not yet finalized.
 
 Any unrecognized exception is treated as retryable. Jobs have a configurable `maxAttempts` (default: 10). After exhausting attempts, the job moves to the DLQ.
+
+### Rate Limiting
+
+Throttle jobs by an arbitrary key. A limit is shared by every queue in a registry, so one policy can govern a resource no matter which queues touch it.
+
+Give a payload a `HasRateLimit` instance whose `rateLimitFor` selects a policy per job. The selector is a small DSL that the migration statically inspects to collect and seed every policy it can reach, so there is no separate policy list to keep in sync.
+
+```haskell
+import Arbiter.RateLimit
+
+transactional, bulk :: Policy
+transactional = tokenBucket "transactional" 100 1 -- 100/second, burst 100
+bulk          = tokenBucket "bulk" 1000 3600      -- 1000/hour, burst 1000
+
+instance HasRateLimit EmailPayload where
+  rateLimitFor =
+    chooseWhen isTransactional
+      (limitBy transactional recipientDomain)
+      (limitBy bulk recipientDomain)
+```
+
+`tokenBucket prefix n period` reads as "n per period, with bursts up to n". To bound bursts independently of the sustained rate, build a `Policy` directly and set `policyMax` (burst) apart from `policyRefill` / `policyInterval` (rate). Weight expensive jobs with `rateLimitCost`, or top up a bucket manually with `addRateLimitTokens`.
+
+A job denied by its bucket is parked, not polled: it becomes invisible until the bucket can next afford it, then competes normally again. Throttled counts are visible per policy in the API and admin UI, and operators can override a policy's settings at runtime.
+
+A fixed window is just a manual bucket: declare it with a refill of 0 and reset it at the boundary from a cron.
+
+```haskell
+daily :: Policy
+daily =
+  Policy
+    { policyPrefix = "daily"
+    , policyMax = 1000
+    , policyRefill = 0
+    , policyInterval = 86400
+    }
+
+-- In an hourly/daily cron at the window boundary:
+resetRateLimitBuckets "daily"
+```
+
+Bucket state is not durable by default: after a database crash or a failover, buckets reset to full, so each key can burst up to its max once before settling back to the sustained rate. When that overshoot is unacceptable - strict external quotas, or manual buckets holding real credit - declare durable buckets for the registry, and bucket state survives restarts at some throughput cost:
+
+```haskell
+instance RateLimitDurability AppRegistry where
+  rateLimitDurability _ = Durable
+```
+
+> [!IMPORTANT]
+> Tokens are spent when a job is **claimed**, not when it finishes. A retry or a redelivery (worker crash, visibility timeout) spends again, so size policies against claims, not successful runs.
+>
+> A `rateLimitCost` above the bucket's max clamps to the max: the job drains a full bucket and runs, rather than blocking forever. A rate limit bounds arrivals over time. To bound how many jobs run at once, use a concurrency limit.
+
+### Concurrency Limiting
+
+Cap how many jobs sharing a key run at once, declared exactly like a rate limit. A `HasConcurrency` instance names a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are global, so a pool spans every queue in a registry.
+
+```haskell
+import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
+
+-- At most 2 sync jobs per tenant in flight at once.
+instance HasConcurrency SyncPayload where
+  concurrencyFor = concurrencyBy (concurrencyPool "tenant-sync" 2) syncTenant
+```
+
+Build the selector from `noConcurrency` / `concurrencyBy` / `globalConcurrency` / `concurrencyByCase`. The limit lives on the pool, so every key under the prefix shares the same cap. Operators retune a whole pool live through the API or admin UI. An override takes precedence until cleared, then the declared default applies again. Setting an override of 0 pauses the pool entirely: nothing under it is claimed until the override is raised or cleared.
+
+#### Concurrency limit 1 vs. a group key
+
+Both cap a key to one job in flight. The difference shows up **on failure**:
+
+| | `group_key` | concurrency limit 1 |
+| --- | --- | --- |
+| What it is | a scheduling primitive (ordered head per group) | a counter |
+| On retry/backoff | the failing job **holds the line** - the group makes no progress until it succeeds or dead-letters | the failing job **releases its slot** - a sibling runs while it backs off |
+| Ordering | eligible jobs run in insertion order within priority | none beyond the claim's sort |
+| Batching | claims an ordered batch per group | N independent jobs |
+
+Reach for a **group key** to serialize a sequence in order (event streams, state machines) - a failing job blocks the rest until it succeeds or dead-letters. Reach for **concurrency 1** as a mutex (one sync per tenant) - order doesn't matter and a backing-off job yields to the others. They're orthogonal, so a job can carry both.
+
+> [!IMPORTANT]
+> The cap counts claims: a slot is held until its job is acked, retried, or reclaimed, so a timed-out-but-unacked job still occupies its slot until then.
+>
+> Maintenance is automatic. Drained keys are cleaned up periodically, and a pool's in-flight accounting recovers on its own after a restart or failover.
 
 ## Worker Configuration
 
@@ -520,6 +618,14 @@ Global endpoints under `/api/v1/`:
 | `GET` | `workers` | List registered workers |
 | `POST` | `workers/:id/pause` | Pause a single worker pool |
 | `POST` | `workers/:id/resume` | Resume a single worker pool |
+| `GET` | `rate-limits` | List policies with bucket and throttle stats |
+| `GET` | `rate-limits/:prefix/buckets` | List a prefix's per-key buckets |
+| `PATCH` | `rate-limits/:prefix` | Set or clear a policy's override params |
+| `POST` | `rate-limits/:prefix/reset` | Reset (clear) a prefix's buckets |
+| `GET` | `concurrency` | List pools with limit and in-flight stats |
+| `GET` | `concurrency/:prefix/keys` | List a pool's per-key in-flight counts |
+| `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
+| `POST` | `concurrency/reconcile` | Repair a pool's in-flight counts |
 
 ## Backend Integration
 
@@ -527,33 +633,42 @@ Arbiter's core is backend-agnostic via the `MonadArbiter` typeclass. Three offic
 
 If you're choosing a backend based on raw throughput, consider our benchmarks:
 
-Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro.
+Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro. hasql runs with prepared claim statements (recommended but not the default).
 
 **Pre-loaded queue** (1M jobs, 50k groups):
 
 | Backend | Single | Batched | Grouped single | Grouped batched |
 |---------|--------|---------|----------------|-----------------|
-| hasql | 9,017 | 29,238 | 5,830 | 31,607 |
-| orville | 8,367 | 25,776 | 5,724 | 29,237 |
-| postgresql-simple | 7,341 | 26,698 | 4,986 | 29,920 |
+| hasql | 9,767 | 29,459 | 7,395 | 32,768 |
+| orville | 8,219 | 23,662 | 5,477 | 22,232 |
+| postgresql-simple | 7,074 | 23,912 | 4,916 | 22,488 |
 
 **Steady-state** (10 producers inserting continuously, 5k groups):
 
 | Backend | Single | Batched | Grouped single | Grouped batched |
 |---------|--------|---------|----------------|-----------------|
-| hasql | 9,398 | 18,750 | 6,512 | 18,442 |
-| orville | 9,133 | 18,771 | 6,532 | 18,549 |
-| postgresql-simple | 7,565 | 18,804 | 5,791 | 18,387 |
+| hasql | 9,994 | 19,039 | 7,832 | 18,142 |
+| orville | 8,552 | 18,456 | 6,952 | 18,312 |
+| postgresql-simple | 7,204 | 18,100 | 6,071 | 18,175 |
 
 **Under a scheduled backlog** (1M jobs, 50k groups, cells are single / batched):
 
 | Backend | ungrouped dormant | grouped stress | grouped dormant |
 |---------|-------------------|----------------|-----------------|
-| hasql | 9,074 / 31,339 | 3,916 / 28,077 | 5,885 / 32,093 |
-| orville | 8,072 / 25,235 | 3,780 / 27,405 | 5,414 / 29,680 |
-| postgresql-simple | 7,256 / 27,683 | 3,637 / 26,150 | 4,848 / 29,735 |
+| hasql | 9,793 / 32,432 | 3,750 / 26,679 | 7,915 / 32,983 |
+| orville | 8,323 / 24,630 | 3,553 / 22,951 | 5,578 / 22,208 |
+| postgresql-simple | 7,154 / 25,244 | 3,509 / 22,706 | 4,896 / 22,853 |
 
 *stress*: a fifth of jobs scheduled seconds-out, a fifth failing once into backoff. *dormant*: half the backlog parked 30 days out.
+
+**Admission gating** (hasql, prepared claims, 1 pool × 10 workers, 256 keys, cells are single / batched):
+
+| | no gate | rate limit | concurrency | both |
+|---------|--------|---------|----------------|-----------------|
+| ungrouped | 4,353 / 17,889 | 3,795 / 10,589 | 3,709 / 10,769 | 3,190 / 7,118 |
+| grouped (5k groups) | 1,143 / 7,982 | 1,061 / 5,948 | 1,038 / 6,045 | 1,027 / 4,455 |
+
+Rate limiting and concurrency caps each cost roughly 15% in single-job mode. Grouped workloads pay almost nothing on top of the cost of grouping itself.
 
 ### arbiter-simple (postgresql-simple)
 
@@ -589,6 +704,14 @@ Built on `hasql` with `resource-pool`. Handlers receive a `Hasql.Connection` for
 env <- ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
 ArbH.runHasqlDb env $ Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 ```
+
+When workers connect to PostgreSQL directly, enable prepared statements for the claim path - the claim is planned once per connection instead of on every poll, which is worth 25-70% more throughput on claim-heavy workloads:
+
+```haskell
+env <- ArbH.setPreparedStatements True <$> ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
+```
+
+Leave it off (the default) when connections pass through a pooler that does not support server-side prepared statements.
 
 Share a transaction with external hasql work:
 

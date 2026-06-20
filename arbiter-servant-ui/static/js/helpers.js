@@ -58,6 +58,24 @@ function confirmArm() {
   };
 }
 
+// Shared save lifecycle for the override edit modals. buildBody returns { body }
+// to save or { error } to reject. Owns the saving flag, modal close, and reload.
+async function saveOverrides(edit, { apiFn, modalId, buildBody, reload }) {
+  const built = buildBody(edit);
+  if (built.error) { edit.error = built.error; return; }
+  edit.error = '';
+  edit.saving = true;
+  try {
+    await apiFn(edit.prefix, built.body);
+    hideModal(modalId);
+    await reload();
+  } catch (err) {
+    edit.error = err.message;
+  } finally {
+    edit.saving = false;
+  }
+}
+
 // Per-row single-flight guard, spread into the table and polling mixins.
 function busyRows() {
   return {
@@ -210,7 +228,7 @@ function pollingTab(loadMethod, intervalMs) {
 
     startPolling() {
       this.stopPolling();
-      this.refreshInterval = setInterval(() => this[loadMethod](), intervalMs);
+      this.refreshInterval = setInterval(() => { if (!this.loading) this[loadMethod](); }, intervalMs);
     },
 
     stopPolling() {
@@ -277,6 +295,108 @@ function eventBusTab() {
       if (!this._busHandlers) return;
       for (const [event, fn] of this._busHandlers) window.removeEventListener(event, fn);
       this._busHandlers = null;
+    },
+  };
+}
+
+// Label for a job's rate-limit or concurrency gate key.
+function gateLabel(g, empty = '-') {
+  return g ? g.prefix + ':' + g.suffix : empty;
+}
+
+// ---------------------------------------------------------------------------
+// Fill-bar helpers
+// ---------------------------------------------------------------------------
+
+// Clamp a fraction to an integer 0..100 percent.
+function clampPct(frac) {
+  return Math.max(0, Math.min(100, Math.round(frac * 100)));
+}
+
+// Fill percent for a possibly-null fraction (an absent fill renders as empty).
+function fillPct(frac) {
+  return frac == null ? 0 : clampPct(frac);
+}
+
+// Colour band where low fill is bad (e.g. remaining rate-limit tokens).
+function lowFillClass(pct) {
+  return pct < 25 ? 'bg-danger' : pct < 50 ? 'bg-warning' : 'bg-success';
+}
+
+// Colour band where high fill is bad (e.g. concurrency utilization).
+function highFillClass(pct) {
+  return pct >= 100 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
+}
+
+// Shared drill-down lifecycle for the rate-limit and concurrency tabs. Owns the
+// expanded prefix and its capped child list, refreshes an open drill-down on each
+// poll without flashing the spinner, and closes a drill-down whose prefix vanished.
+// cfg supplies the field/method names, fetchers, and labels that differ per tab.
+function drillDownTab(cfg) {
+  return {
+    expandedPrefix: null,
+    [cfg.listField]: [],
+    [cfg.loadingField]: false,
+    _itemSeq: 0,
+
+    // Total items for the open prefix, from its policy row (the drill-down list is
+    // capped at cfg.itemLimit).
+    itemTotal() {
+      const p = this.policies.find((x) => x.prefix === this.expandedPrefix);
+      return p ? p[cfg.countField] : this[cfg.listField].length;
+    },
+
+    async loadPolicies() {
+      await guardedLoad(this, cfg.policyError, async (seq, isStale) => {
+        const data = await cfg.fetchPolicies();
+        if (isStale()) return;
+        this.policies = data.policies || [];
+        // Close a drill-down whose prefix vanished.
+        if (this.expandedPrefix && !this.policies.some((p) => p.prefix === this.expandedPrefix)) {
+          this.expandedPrefix = null;
+          this[cfg.listField] = [];
+        }
+      });
+      // Keep an open drill-down fresh on each poll, without flashing the spinner.
+      if (this.expandedPrefix) await this[cfg.loadName](this.expandedPrefix, { silent: true });
+    },
+
+    async [cfg.toggleName](p) {
+      if (this.expandedPrefix === p.prefix) {
+        this.expandedPrefix = null;
+        this[cfg.listField] = [];
+        this[cfg.loadingField] = false;
+        return;
+      }
+      // Drop the previous prefix's rows so they never render under the new heading.
+      this.expandedPrefix = p.prefix;
+      this[cfg.listField] = [];
+      await this[cfg.loadName](p.prefix);
+    },
+
+    async [cfg.loadName](prefix, { silent = false } = {}) {
+      const seq = ++this._itemSeq;
+      if (!silent) this[cfg.loadingField] = true;
+      let data, err;
+      try {
+        data = await cfg.fetchItems(prefix, { limit: cfg.itemLimit });
+      } catch (e) {
+        err = e;
+      }
+      // A superseded fetch (or a closed/vanished drill-down) owns nothing anymore:
+      // it must touch neither the list nor the spinner.
+      if (seq !== this._itemSeq || this.expandedPrefix !== prefix) return;
+      // The latest fetch settles the spinner, even a silent one that superseded a
+      // user-initiated load.
+      this[cfg.loadingField] = false;
+      if (err) {
+        // On a background poll, keep the stale list rather than blanking it.
+        if (silent) return;
+        showToast(`Failed to load ${cfg.itemLabel}: ${err.message}`);
+        this[cfg.listField] = [];
+      } else {
+        this[cfg.listField] = data[cfg.listField] || [];
+      }
     },
   };
 }

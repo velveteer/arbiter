@@ -32,24 +32,29 @@ library
   hs-source-dirs:  src
   exposed-modules:
     Arbiter.Test.Concurrency
+    Arbiter.Test.ConcurrencyLimit
+    Arbiter.Test.ConcurrencyModel
     Arbiter.Test.Config
     Arbiter.Test.Fixtures
     Arbiter.Test.Operations
     Arbiter.Test.Poll
+    Arbiter.Test.RateLimit
     Arbiter.Test.Setup
     Arbiter.Test.StateMachine
 
   build-depends:
     , aeson              >=2.0  && <2.3
     , arbiter-core
+    , arbiter-migrations
     , barbies
     , base               >=4.14 && <5
     , bytestring         >=0.10 && <0.13
     , containers         >=0.6  && <0.9
     , hedgehog
     , hspec              >=2.8  && <2.12
-    , postgresql-libpq   >=0.9  && <0.12
-    , postgresql-simple  >=0.6  && <0.8
+    , postgresql-libpq     >=0.9  && <0.12
+    , postgresql-migration >=0.2  && <0.3
+    , postgresql-simple    >=0.6  && <0.8
     , resource-pool      >=0.4  && <0.6
     , text               >=1.2  && <2.2
     , time               >=1.9  && <1.16

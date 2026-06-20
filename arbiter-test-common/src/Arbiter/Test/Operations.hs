@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns #-}
 
 -- | Parameterized operations test suite, instantiated for each 'MonadArbiter' backend.

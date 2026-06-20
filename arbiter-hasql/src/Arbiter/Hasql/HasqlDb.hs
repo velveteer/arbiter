@@ -23,6 +23,7 @@ module Arbiter.Hasql.HasqlDb
   , createHasqlEnv
   , createHasqlEnvWithConfig
   , createHasqlEnvWithPool
+  , setPreparedStatements
 
     -- * Hasql Settings
   , hasqlSettings
@@ -53,6 +54,7 @@ import Arbiter.Hasql.MonadArbiter
   ( HasHasqlPool (..)
   , HasqlConnectionPool (..)
   , hasqlExecuteQuery
+  , hasqlExecuteQueryPrepared
   , hasqlExecuteStatement
   , hasqlRunHandlerWithConnection
   , hasqlWithDbTransaction
@@ -96,6 +98,7 @@ instance (Monad m) => HasHasqlPool (HasqlDb registry m) where
 instance (Monad m, MonadIO m, MonadUnliftIO m) => MonadArbiter (HasqlDb registry m) where
   type Handler (HasqlDb registry m) jobs result = Hasql.Connection -> jobs -> HasqlDb registry m result
   executeQuery = hasqlExecuteQuery
+  executeQueryPrepared = hasqlExecuteQueryPrepared
   executeStatement = hasqlExecuteStatement
   withDbTransaction = hasqlWithDbTransaction
   runHandlerWithConnection = hasqlRunHandlerWithConnection
@@ -132,6 +135,7 @@ inTransaction conn schemaName action =
                 { connectionPool = Nothing
                 , activeConn = Just conn
                 , transactionDepth = 1
+                , preparedStatements = False
                 }
           }
    in runHasqlDb env action
@@ -180,7 +184,13 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
   pure
     HasqlEnv
       { schema = schemaName
-      , hasqlPool = HasqlConnectionPool {connectionPool = Just connPool, activeConn = Nothing, transactionDepth = 0}
+      , hasqlPool =
+          HasqlConnectionPool
+            { connectionPool = Just connPool
+            , activeConn = Nothing
+            , transactionDepth = 0
+            , preparedStatements = False
+            }
       }
 
 -- | Create a HasqlEnv with a user-provided connection pool.
@@ -194,8 +204,20 @@ createHasqlEnvWithPool
 createHasqlEnvWithPool _proxy connPool schemaName =
   HasqlEnv
     { schema = schemaName
-    , hasqlPool = HasqlConnectionPool {connectionPool = Just connPool, activeConn = Nothing, transactionDepth = 0}
+    , hasqlPool =
+        HasqlConnectionPool
+          { connectionPool = Just connPool
+          , activeConn = Nothing
+          , transactionDepth = 0
+          , preparedStatements = False
+          }
     }
+
+-- | Enable or disable prepared hot statements (the claim). Prepared once per pooled
+-- connection, so the plan is reused instead of rebuilt every call. Requires direct
+-- connections or a pooler that supports server-side prepared statements.
+setPreparedStatements :: Bool -> HasqlEnv registry -> HasqlEnv registry
+setPreparedStatements flag env = env {hasqlPool = (hasqlPool env) {preparedStatements = flag}}
 
 -- | Re-exported from "Arbiter.Hasql.Compat".
 hasqlSettings :: ByteString -> Compat.HasqlSettings

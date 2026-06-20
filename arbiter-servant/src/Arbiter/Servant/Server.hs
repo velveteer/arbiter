@@ -20,14 +20,15 @@ module Arbiter.Servant.Server
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
+import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
-import Arbiter.Core.SqlTemplates (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
-import Arbiter.Simple (SimpleConnectionPool (..), SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
+import Arbiter.Core.Sql.Jobs (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
+import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
@@ -46,11 +47,12 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
-import Control.Monad (forever, guard, unless, void, when)
+import Control.Monad (forever, guard, join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
+import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Kind (Type)
@@ -77,11 +79,14 @@ import System.Timeout (timeout)
 
 import Arbiter.Servant.API
   ( ArbiterAPI
+  , ConcurrencyAPI (..)
   , CronAPI (..)
   , DLQAPI (..)
   , JobsAPI (..)
   , QueuesAPI (..)
+  , RateLimitsAPI (..)
   , RegistryToAPI
+  , SharedAPI
   , StatsAPI (..)
   , TableAPI (..)
   , WorkersAPI (..)
@@ -173,7 +178,7 @@ listJobsHandler
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
 listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mStatus mSortBy mSortDir = liftIO $ do
-  let (limit, offset) = validatePagination mLimit mOffset
+  let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
       filters =
@@ -493,7 +498,7 @@ listDLQHandler
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
 listDLQHandler tableName config mLimit mOffset mParentId mGroupKey mSortBy mSortDir = do
-  let (limit, offset) = validatePagination mLimit mOffset
+  let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
       filters =
@@ -910,22 +915,180 @@ setWorkerPausedHandler config p wid = do
     then throwError err404 {errBody = "Worker not found"}
     else pure NoContent
 
+-- | Rate-limit management/observability handlers.
+rateLimitsServer
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> RateLimitsAPI (AsServerT Handler)
+rateLimitsServer config =
+  RateLimitsAPI
+    { listRateLimits = listRateLimitsHandler config
+    , listRateLimitBuckets = listRateLimitBucketsHandler config
+    , updateRateLimitPolicy = updateRateLimitPolicyHandler config
+    , resetRateLimitBuckets = resetRateLimitBucketsHandler config
+    }
+
+-- | List policies with bucket stats and currently-throttled job counts.
+listRateLimitsHandler
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> Handler RateLimitPoliciesResponse
+listRateLimitsHandler config = do
+  views <- liftIO $ runSimpleDb (serverEnv config) HL.listRateLimitPolicies
+  pure $ RateLimitPoliciesResponse {policies = views}
+
+-- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
+listRateLimitBucketsHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Maybe Int
+  -> Maybe Int
+  -> Handler RateLimitBucketsResponse
+listRateLimitBucketsHandler config prefix mLimit mOffset = do
+  let (limit, offset) = validatePagination 100 mLimit mOffset
+  rows <- liftIO $ runSimpleDb (serverEnv config) (HL.listRateLimitBuckets prefix limit offset)
+  pure $ RateLimitBucketsResponse {buckets = rows}
+
+updateThenView
+  :: SimpleEnv registry
+  -> SimpleDb registry IO (Maybe a)
+  -> LBS.ByteString
+  -> Handler a
+updateThenView env action notFound = do
+  mView <- liftIO $ runSimpleDb env action
+  maybe (throwError err404 {errBody = notFound}) pure mView
+
+-- | Set or clear a policy's override params, then return the updated view.
+updateRateLimitPolicyHandler
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> Text
+  -> RateLimitPolicyUpdate
+  -> Handler RateLimitPolicyView
+updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefill mIv) = do
+  let invalid
+        | maybe False (< 0) (join mMax) = Just "override max tokens must be >= 0"
+        | maybe False (< 0) (join mRefill) = Just "override refill amount must be >= 0"
+        | maybe False (<= 0) (join mIv) = Just "override interval must be > 0"
+        | otherwise = Nothing
+  case invalid of
+    Just msg -> throwError err400 {errBody = msg}
+    Nothing ->
+      -- An all-absent patch changes nothing, so read the view without rewriting the row and waking jobs.
+      let update = case (mMax, mRefill, mIv) of
+            (Nothing, Nothing, Nothing) -> pure ()
+            _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
+       in updateThenView (serverEnv config) (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+
+-- | Clear every bucket for a prefix. Returns the number reset. 404s an unknown prefix.
+resetRateLimitBucketsHandler
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> Text
+  -> Handler RateLimitResetResponse
+resetRateLimitBucketsHandler config prefix = do
+  let action =
+        HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> HL.resetRateLimitBuckets prefix else pure Nothing
+  n <- updateThenView (serverEnv config) action "Rate-limit policy not found"
+  pure $ RateLimitResetResponse {reset = n}
+
+-- | Concurrency management/observability handlers.
+concurrencyServer
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> ConcurrencyAPI (AsServerT Handler)
+concurrencyServer config =
+  ConcurrencyAPI
+    { listConcurrency = listConcurrencyHandler config
+    , listConcurrencyKeys = listConcurrencyKeysHandler config
+    , updateConcurrencyPolicy = updateConcurrencyPolicyHandler config
+    , reconcileConcurrency = reconcileConcurrencyHandler config
+    }
+
+-- | List pools with their default/override limit and live key/in-flight stats.
+listConcurrencyHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Handler ConcurrencyPoliciesResponse
+listConcurrencyHandler config = do
+  views <- liftIO $ runSimpleDb (serverEnv config) HL.listConcurrencyPolicies
+  pure $ ConcurrencyPoliciesResponse {policies = views}
+
+-- | List a prefix's keys with in-flight fill levels, paginated (default 100, max 1000).
+listConcurrencyKeysHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Maybe Int
+  -> Maybe Int
+  -> Handler ConcurrencyKeysResponse
+listConcurrencyKeysHandler config prefix mLimit mOffset = do
+  let (limit, offset) = validatePagination 100 mLimit mOffset
+  rows <- liftIO $ runSimpleDb (serverEnv config) (HL.listConcurrencyKeys prefix limit offset)
+  pure $ ConcurrencyKeysResponse {keys = rows}
+
+-- | Set or clear a pool's override limit, then return the updated view.
+updateConcurrencyPolicyHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> ConcurrencyPolicyUpdate
+  -> Handler ConcurrencyPolicyView
+updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLim) = do
+  let invalid
+        | maybe False (< 0) (join mLim) = Just "override limit must be >= 0"
+        | otherwise = Nothing
+  case invalid of
+    Just msg -> throwError err400 {errBody = msg}
+    Nothing ->
+      -- An absent overrideLimit changes nothing, so read the view without rewriting the row.
+      let action = case mLim of
+            Nothing -> HL.getConcurrencyPolicy prefix
+            Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
+       in updateThenView (serverEnv config) action "Concurrency pool not found"
+
+-- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
+reconcileConcurrencyHandler
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> Handler ConcurrencyReconcileResponse
+reconcileConcurrencyHandler config = do
+  n <- liftIO $ runSimpleDb (serverEnv config) HL.reconcileConcurrencyCounts
+  pure $ ConcurrencyReconcileResponse {reconciled = n}
+
+-- | Server for the shared top-level routes.
+sharedServer
+  :: forall registry
+   . (RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> ServerT SharedAPI Handler
+sharedServer config =
+  queuesServer @registry (Proxy @registry) config
+    :<|> eventsServer config
+    :<|> cronServer config
+    :<|> workersServer config
+    :<|> rateLimitsServer config
+    :<|> concurrencyServer config
+
 -- | Type class to build server implementations for registry entries
 class BuildServer registry (reg :: [(Symbol, Type)]) where
   buildServer :: ArbiterServerConfig registry -> ServerT (RegistryToAPI reg) Handler
 
--- Base case: empty registry, just queues, events, and cron endpoints
+-- Base case: empty registry, just the shared top-level routes
 instance
   (RegistryTables registry)
   => BuildServer registry '[]
   where
-  buildServer config =
-    queuesServer @registry (Proxy @registry) config
-      :<|> eventsServer config
-      :<|> cronServer config
-      :<|> workersServer config
+  buildServer = sharedServer
 
--- Single table case: table endpoints :<|> queues :<|> events :<|> cron endpoints
+-- Single table case: table endpoints :<|> shared top-level routes
 instance
   ( JobPayload payload
   , KnownSymbol tableName
@@ -936,10 +1099,7 @@ instance
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @tableName)
      in tableServer @registry @payload tableName config
-          :<|> queuesServer @registry (Proxy @registry) config
-          :<|> eventsServer config
-          :<|> cronServer config
-          :<|> workersServer config
+          :<|> sharedServer config
 
 -- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
 instance
@@ -1003,8 +1163,8 @@ runArbiterAPI port config = do
   runSettings settings (arbiterApp config)
 
 -- | Validate and sanitize pagination parameters
-validatePagination :: Maybe Int -> Maybe Int -> (Int, Int)
-validatePagination mLimit mOffset =
-  let limit = max 1 $ min 1000 $ fromMaybe 50 mLimit -- Clamp between 1 and 1000
+validatePagination :: Int -> Maybe Int -> Maybe Int -> (Int, Int)
+validatePagination defLimit mLimit mOffset =
+  let limit = max 1 $ min 1000 $ fromMaybe defLimit mLimit -- Clamp between 1 and 1000
       offset = max 0 $ fromMaybe 0 mOffset -- Must be non-negative
    in (limit, offset)

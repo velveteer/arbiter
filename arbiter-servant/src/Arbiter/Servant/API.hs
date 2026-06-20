@@ -9,6 +9,7 @@
 module Arbiter.Servant.API
   ( ArbiterAPI
   , RegistryToAPI
+  , SharedAPI
   , TableAPI (..)
   , JobsAPI (..)
   , DLQAPI (..)
@@ -17,11 +18,13 @@ module Arbiter.Servant.API
   , EventsAPI
   , CronAPI (..)
   , WorkersAPI (..)
+  , RateLimitsAPI (..)
+  , ConcurrencyAPI (..)
   ) where
 
 import Arbiter.Core.Job.Types (JobStatus, jobStatusToText)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
-import Arbiter.Core.SqlTemplates
+import Arbiter.Core.Sql.Jobs
   ( DLQSortColumn
   , JobSortColumn
   , SortDir
@@ -281,20 +284,70 @@ data WorkersAPI mode = WorkersAPI
   }
   deriving stock (Generic)
 
+-- | Rate limits API routes. Global (not queue-scoped).
+data RateLimitsAPI mode = RateLimitsAPI
+  { listRateLimits
+      :: mode
+        :- Get '[JSON] RateLimitPoliciesResponse
+  , listRateLimitBuckets
+      :: mode
+        :- Capture "prefix" Text
+          :> "buckets"
+          :> QueryParam "limit" Int
+          :> QueryParam "offset" Int
+          :> Get '[JSON] RateLimitBucketsResponse
+  , updateRateLimitPolicy
+      :: mode
+        :- Capture "prefix" Text
+          :> ReqBody '[JSON] RateLimitPolicyUpdate
+          :> Patch '[JSON] RateLimitPolicyView
+  , resetRateLimitBuckets
+      :: mode
+        :- Capture "prefix" Text
+          :> "reset"
+          :> Post '[JSON] RateLimitResetResponse
+  }
+  deriving stock (Generic)
+
+-- | Concurrency API routes. Global (not queue-scoped).
+data ConcurrencyAPI mode = ConcurrencyAPI
+  { listConcurrency
+      :: mode
+        :- Get '[JSON] ConcurrencyPoliciesResponse
+  , listConcurrencyKeys
+      :: mode
+        :- Capture "prefix" Text
+          :> "keys"
+          :> QueryParam "limit" Int
+          :> QueryParam "offset" Int
+          :> Get '[JSON] ConcurrencyKeysResponse
+  , updateConcurrencyPolicy
+      :: mode
+        :- Capture "prefix" Text
+          :> ReqBody '[JSON] ConcurrencyPolicyUpdate
+          :> Patch '[JSON] ConcurrencyPolicyView
+  , reconcileConcurrency
+      :: mode
+        :- "reconcile"
+          :> Post '[JSON] ConcurrencyReconcileResponse
+  }
+  deriving stock (Generic)
+
+-- | Shared top-level routes appended after the per-table routes.
+type SharedAPI =
+  "queues" :> NamedRoutes QueuesAPI
+    :<|> "events" :> EventsAPI
+    :<|> "cron" :> NamedRoutes CronAPI
+    :<|> "workers" :> NamedRoutes WorkersAPI
+    :<|> "rate-limits" :> NamedRoutes RateLimitsAPI
+    :<|> "concurrency" :> NamedRoutes ConcurrencyAPI
+
 -- | Generates a 'TableAPI' route per registry entry, followed by the shared
--- top-level routes. See the equations below for the exact expansion.
+-- top-level routes.
 type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
-  RegistryToAPI '[] =
-    "queues" :> NamedRoutes QueuesAPI
-      :<|> "events" :> EventsAPI
-      :<|> "cron" :> NamedRoutes CronAPI
-      :<|> "workers" :> NamedRoutes WorkersAPI
+  RegistryToAPI '[] = SharedAPI
   RegistryToAPI ('(tableName, payload) ': '[]) =
-    tableName :> NamedRoutes (TableAPI payload)
-      :<|> "queues" :> NamedRoutes QueuesAPI
-      :<|> "events" :> EventsAPI
-      :<|> "cron" :> NamedRoutes CronAPI
-      :<|> "workers" :> NamedRoutes WorkersAPI
+    tableName :> NamedRoutes (TableAPI payload) :<|> SharedAPI
   RegistryToAPI ('(tableName, payload) ': rest) =
     (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
 

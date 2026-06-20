@@ -3,6 +3,7 @@
 module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job (..)
+  , AdmissionKeys (..)
   , JobRead
   , JobWrite
   , defaultJob
@@ -17,6 +18,7 @@ module Arbiter.Core.Job.Types
 
     -- * Type Constraints
   , JobPayload
+  , RegistryAdmissionPolicies
 
     -- * Deduplication
   , DedupKey (..)
@@ -41,10 +43,13 @@ import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
+import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
+import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
+
 -- | A job in the queue. Parametrized over payload, primary key, queue name,
 -- and inserted-at timestamp. See 'JobWrite' (for insertion) and 'JobRead'
 -- (returned from claims/queries).
-data Job payload key q insertedAt = Job
+data Job payload key q insertedAt adm = Job
   { primaryKey :: key
   -- ^ @()@ in 'JobWrite' (assigned by DB), @Int64@ in 'JobRead'.
   , payload :: payload
@@ -88,6 +93,18 @@ data Job payload key q insertedAt = Job
   -- or operator-paused jobs.
   , claimedBy :: Maybe UUID
   -- ^ Worker pool UUID that last claimed this job.
+  , admission :: adm
+  -- ^ @()@ in 'JobWrite'. 'AdmissionKeys' in 'JobRead', stamped at enqueue from
+  -- the payload's admission selectors.
+  }
+  deriving stock (Eq, Generic, Show)
+
+-- | The admission keys gating a stored job's claim, one field per kind.
+data AdmissionKeys = AdmissionKeys
+  { jobRateLimitKey :: Maybe RateLimitKey
+  -- ^ From the payload's 'Arbiter.Core.RateLimit.Spec.HasRateLimit' instance.
+  , jobConcurrencyKey :: Maybe ConcurrencyKey
+  -- ^ From the payload's 'Arbiter.Core.Concurrency.Spec.HasConcurrency' instance.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -97,12 +114,12 @@ defaultMaxAttempts = 10
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
 -- (an empty object on insert; the merged child results before a DLQ move).
-isRollup :: Job p k q t -> Bool
+isRollup :: Job p k q t adm -> Bool
 isRollup = isJust . parentState
 
 -- | Effective job status, derived (never stored) by the status SQL @CASE@ in the
 -- templates module, which is its sole definition.
-data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended
+data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled
   deriving stock (Bounded, Enum, Eq, Generic, Show)
 
 jobStatusToText :: JobStatus -> Text
@@ -111,6 +128,7 @@ jobStatusToText InFlight = "in_flight"
 jobStatusToText Backoff = "backoff"
 jobStatusToText Scheduled = "scheduled"
 jobStatusToText Suspended = "suspended"
+jobStatusToText Throttled = "throttled"
 
 -- | Reverse of 'jobStatusToText' over all constructors.
 jobStatusFromTextMaybe :: Text -> Maybe JobStatus
@@ -149,6 +167,7 @@ defaultJob p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , admission = ()
     }
 
 -- | Grouped 'JobWrite'. Jobs sharing a group key are processed serially.
@@ -176,17 +195,23 @@ defaultGroupedJob gk p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , admission = ()
     }
 
 -- | A type alias for a job that has been read from the database.
-type JobRead payload = Job payload Int64 Text UTCTime
+type JobRead payload = Job payload Int64 Text UTCTime AdmissionKeys
 
 -- | A type alias for a job that is ready to be written to the database.
 -- It does not yet have an ID or insertion timestamp.
-type JobWrite payload = Job payload () () ()
+type JobWrite payload = Job payload () () () ()
 
--- | Payloads must round-trip through JSON for PostgreSQL JSONB storage.
-type JobPayload payload = (FromJSON payload, ToJSON payload)
+-- | The full payload contract: JSON round-trip for JSONB storage plus the rate-limit and concurrency declarations (both default to unlimited).
+type JobPayload payload =
+  (FromJSON payload, ToJSON payload, HasRateLimit payload, HasConcurrency payload)
+
+-- | The registry declares both admission policy kinds.
+type RegistryAdmissionPolicies registry =
+  (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
 
 -- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 data DedupKey

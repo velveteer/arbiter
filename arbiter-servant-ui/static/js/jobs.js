@@ -14,6 +14,8 @@ const JOB_COLUMNS = [
   { key: 'status', label: 'Status', weight: 7 },
   { key: 'inserted', label: 'Inserted At', weight: 10 },
   { key: 'visible', label: 'Visible', weight: 17 },
+  { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
+  { key: 'concurrency', label: 'Concurrency', weight: 9 },
   { key: 'actions', label: 'Actions', weight: 15 },
 ];
 
@@ -222,8 +224,8 @@ document.addEventListener('alpine:init', () => {
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           // Inserts land as ready/scheduled (or suspended for rollup parents), but
-          // never in_flight/backoff, which require a prior attempt.
-          const insertsRelevant = !['in_flight', 'backoff'].includes(this.stateFilter);
+          // never in_flight/backoff/throttled, which require a prior claim.
+          const insertsRelevant = !['in_flight', 'backoff', 'throttled'].includes(this.stateFilter);
           const relevantTypes = insertsRelevant
             ? ['job_inserted', 'job_updated', 'job_deleted']
             : ['job_updated', 'job_deleted'];

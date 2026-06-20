@@ -9,6 +9,8 @@ const ARB_TIMING = {
   armWindowMs: 5000,
   cronPollMs: 60000,
   workerPollMs: 30000,
+  rateLimitPollMs: 15000,
+  concurrencyPollMs: 15000,
   bulkConcurrency: 5,
   childPageLimit: 50,
   pageLimit: 50,

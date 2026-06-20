@@ -32,9 +32,15 @@ library
   import:          shared-properties
   hs-source-dirs:  src
   exposed-modules:
+    Arbiter.Concurrency
     Arbiter.Core
+    Arbiter.Core.Admission
     Arbiter.Core.Array
     Arbiter.Core.Codec
+    Arbiter.Core.SqlLiterals
+    Arbiter.Core.Concurrency.Schema
+    Arbiter.Core.Concurrency.Spec
+    Arbiter.Core.Concurrency.Stats
     Arbiter.Core.CronSchedule
     Arbiter.Core.Exceptions
     Arbiter.Core.Gates
@@ -44,13 +50,31 @@ library
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Types
     Arbiter.Core.JobTree
+    Arbiter.Core.Json
     Arbiter.Core.MonadArbiter
     Arbiter.Core.Operations
     Arbiter.Core.PoolConfig
     Arbiter.Core.Queues
     Arbiter.Core.QueueRegistry
-    Arbiter.Core.SqlTemplates
+    Arbiter.Core.RateLimit.Schema
+    Arbiter.Core.RateLimit.Spec
+    Arbiter.Core.RateLimit.Stats
+    Arbiter.Core.Selector
+    Arbiter.Core.Sql.Claim
+    Arbiter.Core.Sql.Concurrency
+    Arbiter.Core.Sql.Cron
+    Arbiter.Core.Sql.DLQ
+    Arbiter.Core.Sql.Gates
+    Arbiter.Core.Sql.Groups
+    Arbiter.Core.Sql.Jobs
+    Arbiter.Core.Sql.Lifecycle
+    Arbiter.Core.Sql.Queues
+    Arbiter.Core.Sql.RateLimit
+    Arbiter.Core.Sql.Stats
+    Arbiter.Core.Sql.Tree
+    Arbiter.Core.Sql.Workers
     Arbiter.Core.Worker
+    Arbiter.RateLimit
 
   build-depends:
     , aeson               >=2.0  && <2.3
@@ -60,6 +84,7 @@ library
     , free                >=5.1  && <5.3
     , neat-interpolation  >=0.5  && <0.6
     , postgresql-simple   >=0.6  && <0.8
+    , selective           >=0.5  && <0.8
     , text                >=1.2  && <2.2
     , time                >=1.9  && <1.16
     , unliftio            >=0.2  && <0.3

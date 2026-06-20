@@ -50,7 +50,9 @@ test-suite arbiter-orville-tests
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   other-modules:
     Test.Arbiter.Orville.Concurrency
+    Test.Arbiter.Orville.ConcurrencyLimit
     Test.Arbiter.Orville.Operations
+    Test.Arbiter.Orville.RateLimit
     Test.Arbiter.Orville.StateMachine
     Test.Arbiter.Orville.TestHelpers
     Test.Arbiter.Orville.Worker
@@ -68,6 +70,7 @@ test-suite arbiter-orville-tests
     , hspec                >=2.0 && <2.12
     , orville-postgresql
     , postgresql-simple
+    , resource-pool       >=0.4 && <0.6
     , text
     , transformers
     , unliftio

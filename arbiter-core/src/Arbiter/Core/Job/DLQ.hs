@@ -7,14 +7,13 @@ module Arbiter.Core.Job.DLQ
   ) where
 
 import Data.Int (Int64)
-import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Job.Types (Job)
+import Arbiter.Core.Job.Types (JobRead)
 
 -- | Full job state at the time of DLQ insertion.
-type JobSnapshot payload = Job payload Int64 Text UTCTime
+type JobSnapshot payload = JobRead payload
 
 -- | A job in the dead-letter queue.
 data DLQJob payload = DLQJob

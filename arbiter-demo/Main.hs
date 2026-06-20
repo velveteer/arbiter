@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -8,10 +9,12 @@
 
 module Main (main) where
 
+import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
 import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
@@ -88,6 +91,48 @@ type DemoRegistry =
    , '("notifications", NotificationPayload)
    , '("pipeline", PipelinePayload)
    ]
+
+-- | Email recipient tiers, each rate-limited separately.
+data EmailTier = Internal | External | System
+  deriving stock (Bounded, Enum, Eq, Show)
+
+-- | The recipient domain, or 'Nothing' for a non-address (e.g. a digest name).
+emailDomain :: EmailPayload -> Maybe Text
+emailDomain mail = case T.splitOn "@" (emailAddress mail) of
+  [_, dom] | not (T.null dom) -> Just dom
+  _ -> Nothing
+
+-- | Classify an email by recipient domain: in-house, external, or system digest.
+emailTier :: EmailPayload -> EmailTier
+emailTier mail = case emailDomain mail of
+  Just "acme.test" -> Internal
+  Just _ -> External
+  Nothing -> System
+
+-- | Rate-limit selection for the demo. Emails are limited per recipient tier via an
+-- N-way 'limitByCase', each tier its own bucket. Notifications share one global
+-- bucket. Other queues stay unlimited. The migration seeds every branch's policy.
+instance HasRateLimit EmailPayload where
+  rateLimitFor = limitByCase emailTier $ \case
+    Internal -> limitBy (tokenBucket "email-internal" 5 30) emailKeySuffix
+    External -> limitBy (tokenBucket "email-external" 2 30) emailKeySuffix
+    System -> globalLimit (tokenBucket "email-system" 1 30) "digests"
+
+instance HasRateLimit NotificationPayload where
+  rateLimitFor = globalLimit (tokenBucket "notify" 2 20) "all"
+
+-- | At most 2 emails per recipient domain in flight at once, from the seeded
+-- "email-domain" pool. Orthogonal to the rate limit on the same payload.
+instance HasConcurrency EmailPayload where
+  concurrencyFor = concurrencyBy (concurrencyPool "email-domain" 2) emailKeySuffix
+
+-- | The recipient address of an email job.
+emailAddress :: EmailPayload -> Text
+emailAddress (SendEmail addr) = addr
+
+-- | Key an email bucket by recipient domain, or @"system"@ for non-addresses.
+emailKeySuffix :: EmailPayload -> Text
+emailKeySuffix = fromMaybe "system" . emailDomain
 
 main :: IO ()
 main = do

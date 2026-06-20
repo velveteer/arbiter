@@ -92,6 +92,8 @@ data WorkerConfig m payload result = WorkerConfig
   -- Default: @[]@.
   , reaperInterval :: NominalDiffTime
   -- ^ How often the reaper runs. Default: @300@ (5 minutes).
+  , reaperTimeout :: NominalDiffTime
+  -- ^ Abort any single reaper statement that runs longer than this. Default: @300@ (5 minutes).
   , workerId :: UUID
   -- ^ Identity for this pool. Auto-minted by 'defaultWorkerConfig'.
   -- Note: this is not a stable identifier by default,
@@ -237,6 +239,7 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
       , reaperInterval = 300
+      , reaperTimeout = 300
       , workerId = uuid
       , workerHost = Just (T.pack host)
       , workerMetadata = Nothing

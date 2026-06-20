@@ -468,6 +468,37 @@
   border: 1px solid #d97706;
 }
 
+/* ---- Rate-limit fill bars: muted so they don't glare, especially in dark mode ---- */
+.progress-bar.bg-success {
+  background-color: #15663f !important;
+  color: #d1fae5;
+}
+
+.progress-bar.bg-warning {
+  background-color: #8a6d1f !important;
+  color: #fde9b8;
+}
+
+.progress-bar.bg-danger {
+  background-color: #8f2b2b !important;
+  color: #fbd5d5;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-success {
+  background-color: #4ca57a !important;
+  color: #ffffff;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-warning {
+  background-color: #c79a3a !important;
+  color: #ffffff;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-danger {
+  background-color: #c25b5b !important;
+  color: #ffffff;
+}
+
 /* ---- Unapplied filter indicator ---- */
 .form-control.filter-dirty,
 .form-control.filter-dirty:focus {

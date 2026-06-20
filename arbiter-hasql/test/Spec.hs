@@ -6,7 +6,9 @@ import Arbiter.Test.Config (getTestConnectionString)
 import Test.Hspec
 
 import Test.Arbiter.Hasql.Concurrency qualified as Concurrency
+import Test.Arbiter.Hasql.ConcurrencyLimit qualified as ConcurrencyLimit
 import Test.Arbiter.Hasql.Operations qualified as Operations
+import Test.Arbiter.Hasql.RateLimit qualified as RateLimit
 import Test.Arbiter.Hasql.StateMachine qualified as StateMachine
 import Test.Arbiter.Hasql.Worker qualified as Worker
 
@@ -18,3 +20,5 @@ main = do
     describe "Arbiter.Hasql.Concurrency" $ Concurrency.spec connStr
     describe "Arbiter.Hasql.StateMachine" $ StateMachine.spec connStr
     describe "Arbiter.Hasql.Worker" $ Worker.spec connStr
+    describe "Arbiter.Hasql.RateLimit" $ RateLimit.spec connStr
+    describe "Arbiter.Hasql.ConcurrencyLimit" $ ConcurrencyLimit.spec connStr

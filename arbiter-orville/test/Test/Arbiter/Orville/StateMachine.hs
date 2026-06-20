@@ -3,14 +3,15 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Orville backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Orville.StateMachine (spec) where
 
-import Arbiter.Test.Fixtures (TestPayload (..))
-import Arbiter.Test.StateMachine (stateMachineSpec)
-import Control.Exception (bracket)
+import Arbiter.Test.Setup (createSharedPool)
+import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
+import Data.Pool (withResource)
 import Data.Text (Text)
 import Database.PostgreSQL.Simple qualified as PG
 import Test.Hspec
@@ -28,18 +29,18 @@ testSchema = "arbiter_orville_sm_test"
 testTable :: Text
 testTable = "arbiter_orville_sm_test"
 
-type SMRegistry = '[ '("arbiter_orville_sm_test", TestPayload)]
+type SMRegistry = '[ '("arbiter_orville_sm_test", SMPayload)]
 
 spec :: ByteString -> Spec
 spec connStr = do
   env <- runIO (setupOrvilleTest connStr testSchema testTable 40)
+  pgPool <- runIO (createSharedPool connStr)
   let run :: forall a. TestOrville SMRegistry a -> IO a
       run = runOrvilleTest env
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
-      withConn = bracket (PG.connectPostgreSQL connStr) PG.close
+      withConn = withResource pgPool
       reset = cleanupOrvilleTest env
-  stateMachineSpec @(TestOrville SMRegistry) @SMRegistry @TestPayload
-    TestMessage
+  stateMachineSpec @(TestOrville SMRegistry) @SMRegistry
     run
     testSchema
     testTable
