@@ -108,24 +108,48 @@
         <div class="col-sm-6 col-lg-3">
           <div class="card text-center">
             <div class="card-body">
-              <h5 class="card-title text-muted">Visible</h5>
-              <p class="display-6" x-text="stats?.visibleJobs ?? '-'"></p>
+              <h5 class="card-title text-muted">Ready</h5>
+              <p class="display-6" x-text="stats?.readyJobs ?? '-'"></p>
             </div>
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center">
+          <div class="card text-center" title="Jobs currently leased by a worker">
             <div class="card-body">
               <h5 class="card-title text-muted">In-Flight</h5>
-              <p class="display-6" x-text="stats?.invisibleJobs ?? '-'"></p>
+              <p class="display-6" x-text="stats?.inFlightJobs ?? '-'"></p>
             </div>
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center">
+          <div class="card text-center" title="Jobs delayed until a future time, not yet attempted">
             <div class="card-body">
-              <h5 class="card-title text-muted">Oldest Age (s)</h5>
-              <p class="display-6" x-text="stats?.oldestJobAgeSeconds != null ? Math.round(stats.oldestJobAgeSeconds) : '-'"></p>
+              <h5 class="card-title text-muted">Scheduled</h5>
+              <p class="display-6" x-text="stats?.scheduledJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center" title="Failed jobs waiting out a retry backoff delay">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Backoff</h5>
+              <p class="display-6" x-text="stats?.backoffJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center" title="Suspended jobs (e.g. rollup finalizers awaiting children)">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Suspended</h5>
+              <p class="display-6" x-text="stats?.suspendedJobs ?? '-'"></p>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card text-center" title="Age of the oldest job currently ready to claim">
+            <div class="card-body">
+              <h5 class="card-title text-muted">Oldest Ready (s)</h5>
+              <p class="display-6" x-text="stats?.oldestReadyAgeSeconds != null ? Math.round(stats.oldestReadyAgeSeconds) : '-'"></p>
             </div>
           </div>
         </div>

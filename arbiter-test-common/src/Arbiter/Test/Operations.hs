@@ -1545,17 +1545,19 @@ operationsSpec mkMessage runM = do
       -- Check stats before claiming
       stats1 <- runM env (HL.getQueueStats @m @registry @payload)
       HL.totalJobs stats1 `shouldBe` 5
-      HL.visibleJobs stats1 `shouldBe` 5
-      HL.invisibleJobs stats1 `shouldBe` 0
+      HL.readyJobs stats1 `shouldBe` 5
+      HL.inFlightJobs stats1 `shouldBe` 0
 
       -- Claim 2 jobs
       _ <- runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload]
 
-      -- Check stats after claiming
+      -- Check stats after claiming: claimed jobs are leased (in-flight), not ready
       stats2 <- runM env (HL.getQueueStats @m @registry @payload)
       HL.totalJobs stats2 `shouldBe` 5
-      HL.visibleJobs stats2 `shouldBe` 3
-      HL.invisibleJobs stats2 `shouldBe` 2
+      HL.readyJobs stats2 `shouldBe` 3
+      HL.inFlightJobs stats2 `shouldBe` 2
+      HL.scheduledJobs stats2 `shouldBe` 0
+      HL.suspendedJobs stats2 `shouldBe` 0
 
   describe "Count Operations" $ do
     it "countJobs returns total job count" $ \env -> do

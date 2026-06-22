@@ -1101,18 +1101,30 @@ cancelJobSQL schema tableName =
         SELECT (SELECT count(*) FROM cancel) AS result
       |]
 
--- | SQL template for getting queue statistics
+-- | Per-status queue counts plus the age of the oldest @ready@ job.
 --
--- Returns: total_jobs, visible_jobs, oldest_job_age_seconds
+-- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
+-- UI can distinguish actively-leased ('in_flight') jobs from merely delayed
+-- ('scheduled'/'backoff') or 'suspended' ones. The five status counts sum to
+-- @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
+-- far-future scheduled job no longer skews the queue's backlog latency.
 getQueueStatsSQL :: Text -> Text -> Text
 getQueueStatsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
+      statusCase = jobStatusCaseSQL
    in [text|
+        WITH classified AS (
+          SELECT inserted_at, ${statusCase} AS status FROM ${tbl}
+        )
         SELECT
-          COUNT(*) as total_jobs,
-          COUNT(*) FILTER (WHERE NOT suspended AND (not_visible_until IS NULL OR not_visible_until <= NOW())) as visible_jobs,
-          EXTRACT(EPOCH FROM (NOW() - MIN(inserted_at)))::float8 as oldest_job_age_seconds
-        FROM ${tbl}
+          COUNT(*) AS total_jobs,
+          COUNT(*) FILTER (WHERE status = 'ready') AS ready_jobs,
+          COUNT(*) FILTER (WHERE status = 'in_flight') AS in_flight_jobs,
+          COUNT(*) FILTER (WHERE status = 'scheduled') AS scheduled_jobs,
+          COUNT(*) FILTER (WHERE status = 'backoff') AS backoff_jobs,
+          COUNT(*) FILTER (WHERE status = 'suspended') AS suspended_jobs,
+          EXTRACT(EPOCH FROM (NOW() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds
+        FROM classified
       |]
 
 -- ---------------------------------------------------------------------------

@@ -837,9 +837,12 @@ spec connStr = do
         body :: StatsResponse <- decodeBody resp
         let s = stats body
         Ops.totalJobs s `shouldBe` 0
-        Ops.visibleJobs s `shouldBe` 0
-        Ops.invisibleJobs s `shouldBe` 0
-        Ops.oldestJobAgeSeconds s `shouldBe` Nothing
+        Ops.readyJobs s `shouldBe` 0
+        Ops.inFlightJobs s `shouldBe` 0
+        Ops.scheduledJobs s `shouldBe` 0
+        Ops.backoffJobs s `shouldBe` 0
+        Ops.suspendedJobs s `shouldBe` 0
+        Ops.oldestReadyAgeSeconds s `shouldBe` Nothing
         timestamp body `shouldSatisfy` (not . T.null)
 
     it "GET /api/v1/arbiter_servant_test/stats reflects inserted and claimed jobs" $ do
@@ -856,9 +859,10 @@ spec connStr = do
         body :: StatsResponse <- decodeBody resp
         let s = stats body
         Ops.totalJobs s `shouldBe` 3
-        Ops.visibleJobs s `shouldBe` 2
-        Ops.invisibleJobs s `shouldBe` 1
-        Ops.oldestJobAgeSeconds s `shouldSatisfy` isJust
+        Ops.readyJobs s `shouldBe` 2
+        Ops.inFlightJobs s `shouldBe` 1
+        Ops.scheduledJobs s `shouldBe` 0
+        Ops.oldestReadyAgeSeconds s `shouldSatisfy` isJust
 
   describe "Cron API" $ with (cleanupDb >> pure app) $ do
     let seedCron name expr ov = liftIO $ runSimpleDb mkEnv $ do

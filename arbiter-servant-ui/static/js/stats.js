@@ -1,5 +1,5 @@
 /**
- * Alpine component: stat cards (total/visible/in-flight/oldest)
+ * Alpine component: stat cards (total/ready/in-flight/scheduled/backoff/suspended/oldest-ready)
  *
  * Refreshes on SSE events matching the selected queue instead of polling.
  * The 30s sse-refresh timer keeps time-dependent values (like oldest job age) fresh.

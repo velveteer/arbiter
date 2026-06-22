@@ -34,7 +34,6 @@ module Arbiter.Core.Codec
   , jobRowCodec
   , dlqRowCodec
   , countCodec
-  , statsRowCodec
 
     -- * Cron codecs
   , cronScheduleRowCodec
@@ -192,13 +191,6 @@ jobRowCodecWithJobId queueName =
 
 countCodec :: RowCodec Int64
 countCodec = col "count" CInt8
-
-statsRowCodec :: RowCodec (Int64, Int64, Maybe Double)
-statsRowCodec =
-  (,,)
-    <$> col "total_jobs" CInt8
-    <*> col "visible_jobs" CInt8
-    <*> ncol "oldest_job_age_seconds" CFloat8
 
 -- ---------------------------------------------------------------------------
 -- Cron codecs

@@ -154,7 +154,6 @@ import Arbiter.Core.Codec
   , pnul
   , pval
   , queueRowCodec
-  , statsRowCodec
   , workerRowCodec
   )
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
@@ -1472,19 +1471,42 @@ promoteJob schemaName tableName jobId =
     (Tmpl.promoteJobSQL schemaName tableName)
     [pval CInt8 jobId]
 
--- | Statistics about the job queue
+-- | Per-status breakdown of a queue. The five status counts ('readyJobs',
+-- 'inFlightJobs', 'scheduledJobs', 'backoffJobs', 'suspendedJobs') partition
+-- the queue and sum to 'totalJobs', mirroring the derived job status taxonomy.
 data QueueStats = QueueStats
   { totalJobs :: Int64
   -- ^ Total number of jobs in the queue
-  , visibleJobs :: Int64
-  -- ^ Number of jobs that are visible (can be claimed)
-  , invisibleJobs :: Int64
-  -- ^ Number of jobs that are invisible (claimed or delayed)
-  , oldestJobAgeSeconds :: Maybe Double
-  -- ^ Age in seconds of the oldest job (Nothing if queue is empty)
+  , readyJobs :: Int64
+  -- ^ Jobs claimable right now (visible, not leased)
+  , inFlightJobs :: Int64
+  -- ^ Jobs currently leased by a worker (a retry attempt in progress)
+  , scheduledJobs :: Int64
+  -- ^ Jobs delayed until a future @not_visible_until@ (never yet attempted)
+  , backoffJobs :: Int64
+  -- ^ Failed jobs waiting out a retry backoff delay
+  , suspendedJobs :: Int64
+  -- ^ Suspended jobs (e.g. rollup finalizers awaiting their children)
+  , oldestReadyAgeSeconds :: Maybe Double
+  -- ^ Age in seconds of the oldest @ready@ job (Nothing if none are ready).
+  -- Scheduled/backoff/leased jobs are excluded so a far-future delayed job
+  -- does not inflate the queue's apparent backlog latency.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | Decodes the single aggregate row produced by 'Tmpl.getQueueStatsSQL'
+-- straight into 'QueueStats', so column names map to fields by name.
+statsRowCodec :: RowCodec QueueStats
+statsRowCodec =
+  QueueStats
+    <$> col "total_jobs" CInt8
+    <*> col "ready_jobs" CInt8
+    <*> col "in_flight_jobs" CInt8
+    <*> col "scheduled_jobs" CInt8
+    <*> col "backoff_jobs" CInt8
+    <*> col "suspended_jobs" CInt8
+    <*> ncol "oldest_ready_age_seconds" CFloat8
 
 -- | Get statistics about the job queue
 getQueueStats
@@ -1500,9 +1522,11 @@ getQueueStats schemaName tableName = do
       (Tmpl.getQueueStatsSQL schemaName tableName)
       []
       statsRowCodec
-  case rows of
-    [] -> pure $ QueueStats 0 0 0 Nothing
-    ((total, visible, age) : _) -> pure $ QueueStats total visible (total - visible) age
+  -- The aggregate query always returns exactly one row. The empty fallback
+  -- only guards against an unexpected truncation.
+  pure $ case rows of
+    (s : _) -> s
+    [] -> QueueStats 0 0 0 0 0 0 Nothing
 
 -- ---------------------------------------------------------------------------
 -- Count Operations
