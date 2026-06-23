@@ -278,12 +278,12 @@
       <!-- Pagination (top) -->
       <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
         <div class="btn-group btn-group-sm">
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
         </div>
         <span class="text-muted small" x-text="total + ' jobs \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
         <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
-          :placeholder="currentPage" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
+          :placeholder="currentPage" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
       </div>
 
       <!-- Jobs table -->
@@ -442,10 +442,10 @@
             <tr x-show="loading && !loaded && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
             </tr>
-            <tr x-show="!loading && _loadErrored && displayJobs.length === 0">
+            <tr x-show="_loadErrored && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-danger text-center">Failed to load jobs. <a href="#" @click.prevent="loadJobs()">Retry</a></td>
             </tr>
-            <tr x-show="!loading && !_loadErrored && loaded && displayJobs.length === 0">
+            <tr x-show="!_loadErrored && loaded && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No jobs found.</td>
             </tr>
           </tbody>
@@ -455,8 +455,8 @@
       <!-- Pagination (bottom) -->
       <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
         <div class="btn-group btn-group-sm">
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
         </div>
         <span class="text-muted small" x-text="'Page ' + currentPage + ' of ' + totalPages"></span>
       </div>
@@ -588,12 +588,12 @@
       <!-- Pagination (top) -->
       <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
         <div class="btn-group btn-group-sm">
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
         </div>
         <span class="text-muted small" x-text="total + ' DLQ entries \u00b7 page ' + currentPage + ' of ' + totalPages"></span>
         <input type="number" class="form-control form-control-sm" style="width: 70px;" min="1" :max="totalPages"
-          :placeholder="currentPage" :disabled="loading" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
+          :placeholder="currentPage" @keyup.enter="goToPage($el.value); $el.value = ''" title="Jump to page" aria-label="Jump to page">
       </div>
 
       <div class="table-responsive">
@@ -655,10 +655,10 @@
             <tr x-show="loading && !loaded && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
             </tr>
-            <tr x-show="!loading && _loadErrored && dlqJobs.length === 0">
+            <tr x-show="_loadErrored && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-danger text-center">Failed to load DLQ entries. <a href="#" @click.prevent="loadDLQ()">Retry</a></td>
             </tr>
-            <tr x-show="!loading && !_loadErrored && loaded && dlqJobs.length === 0">
+            <tr x-show="!_loadErrored && loaded && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No DLQ entries.</td>
             </tr>
           </tbody>
@@ -668,8 +668,8 @@
       <!-- Pagination (bottom) -->
       <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
         <div class="btn-group btn-group-sm">
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage === 1" @click="prevPage()">Prev</button>
-          <button class="btn btn-outline-secondary" :disabled="loading || currentPage >= totalPages" @click="nextPage()">Next</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
+          <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
         </div>
         <span class="text-muted small" x-text="'Page ' + currentPage + ' of ' + totalPages"></span>
       </div>
@@ -949,10 +949,10 @@
             <tr x-show="loading && !loaded && schedules.length === 0">
               <td colspan="7" class="text-muted text-center">Loading…</td>
             </tr>
-            <tr x-show="!loading && _loadErrored && schedules.length === 0">
+            <tr x-show="_loadErrored && schedules.length === 0">
               <td colspan="7" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
             </tr>
-            <tr x-show="!loading && !_loadErrored && loaded && schedules.length === 0">
+            <tr x-show="!_loadErrored && loaded && schedules.length === 0">
               <td colspan="7" class="text-muted text-center">No cron schedules configured.</td>
             </tr>
           </tbody>
@@ -1023,10 +1023,10 @@
             <tr x-show="loading && !loaded && displayWorkers.length === 0">
               <td colspan="7" class="text-muted text-center">Loading…</td>
             </tr>
-            <tr x-show="!loading && _loadErrored && displayWorkers.length === 0">
+            <tr x-show="_loadErrored && displayWorkers.length === 0">
               <td colspan="7" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
             </tr>
-            <tr x-show="!loading && !_loadErrored && loaded && displayWorkers.length === 0">
+            <tr x-show="!_loadErrored && loaded && displayWorkers.length === 0">
               <td colspan="7" class="text-muted text-center"
                 x-text="liveOnly && workers.length > 0 ? 'No active workers.' : 'No workers registered.'"></td>
             </tr>
