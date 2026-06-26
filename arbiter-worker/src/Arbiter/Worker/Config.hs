@@ -137,7 +137,8 @@ data BatchCallbacks m payload result = BatchCallbacks
   , cancelTree :: JobRead payload -> Text -> m ()
   -- ^ Cancel the whole tree from the root down.
   , nack :: JobRead payload -> m ()
-  -- ^ Reprocess after the visibility timeout, no failure recorded.
+  -- ^ Reprocess after the visibility timeout, no failure recorded and no
+  -- attempt consumed.
   }
 
 -- | How the worker claims and runs jobs. Set by the @default*WorkerConfig@ helpers.

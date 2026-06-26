@@ -22,6 +22,7 @@ module Arbiter.Core.Operations
   , setVisibilityTimeoutBatch
   , VisibilityUpdateInfo (..)
   , updateJobForRetry
+  , nackJob
   , moveToDLQ
   , moveToDLQBatch
   , retryFromDLQ
@@ -837,6 +838,27 @@ updateJobForRetry schemaName tableName backoff errorMsg job =
     [ pval CInt8 (ceiling backoff)
     , pval CText errorMsg
     , pval CInt8 (primaryKey job)
+    , pval CInt4 (attempts job)
+    ]
+
+-- | Soft-nack a job: decrement the attempt the claim consumed so the reprocess
+-- does not count against the retry budget, without recording a failure.
+--
+-- Returns the number of rows updated (0 if the job was already claimed by
+-- another worker).
+nackJob
+  :: forall m payload
+   . (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> TableName
+  -- ^ Table name
+  -> JobRead payload
+  -> m Int64
+nackJob schemaName tableName job =
+  executeStatement
+    (Tmpl.nackJobSQL schemaName tableName)
+    [ pval CInt8 (primaryKey job)
     , pval CInt4 (attempts job)
     ]
 

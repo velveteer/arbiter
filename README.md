@@ -352,7 +352,7 @@ Arb.throwRetryable "API timeout"       -- retry with backoff
 Arb.throwPermanent "Invalid payload"   -- move to DLQ immediately
 Arb.throwTreeCancel "Pipeline aborted" -- cancel entire tree
 Arb.throwBranchCancel "Subtask failed" -- cancel current branch
-Arb.throwNack                          -- reprocess later, not a failure
+Arb.throwNack                          -- reprocess later, not a failure (no attempt consumed)
 ```
 
 In a batched handler, the same dispositions are available per job through the `BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack`) so one job's outcome does not affect the rest of the batch. A throw applies to whichever jobs the handler has not yet finalized.

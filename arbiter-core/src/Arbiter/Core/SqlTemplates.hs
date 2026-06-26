@@ -14,6 +14,7 @@ module Arbiter.Core.SqlTemplates
   , setVisibilityTimeoutSQL
   , setVisibilityTimeoutBatchSQL
   , updateJobForRetrySQL
+  , nackJobSQL
   , moveToDLQSQL
   , selectExhaustedJobsSQL
 
@@ -833,6 +834,25 @@ updateJobForRetrySQL schema tableName =
             last_error = ?,
             updated_at = NOW(),
             claimed_by = NULL
+        WHERE id = ? AND attempts = ? AND NOT suspended
+      |]
+
+-- | SQL template for a soft nack: give back the attempt the claim consumed so
+-- the reprocess is free, without recording a failure.
+--
+-- Parameters: job_id, attempts
+--
+-- Leaves not_visible_until untouched so the job becomes visible again when the
+-- claim's visibility timeout lapses, matching the documented nack semantics.
+-- Uses optimistic locking (attempts check) so a job reclaimed by another worker
+-- is left alone. The GREATEST floor keeps attempts non-negative.
+nackJobSQL :: Text -> Text -> Text
+nackJobSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+   in [text|
+        UPDATE ${tbl}
+        SET attempts = GREATEST(attempts - 1, 0),
+            updated_at = NOW()
         WHERE id = ? AND attempts = ? AND NOT suspended
       |]
 

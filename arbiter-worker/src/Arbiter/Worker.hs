@@ -593,6 +593,7 @@ processJobsWithRetry config jobs = do
         endT <- liftIO getCurrentTime
         runHook (jobLog j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
       finalize j = fireSuccess j >> markHandled j
+      nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
         withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
@@ -630,7 +631,7 @@ processJobsWithRetry config jobs = do
           , failPermanent = failAs (Permanent . JobPermanentException)
           , cancelBranch = failAs (BranchCancel . BranchCancelException)
           , cancelTree = failAs (TreeCancel . TreeCancelException)
-          , nack = markHandled
+          , nack = nackOne
           }
   result <-
     tryAny
@@ -677,7 +678,10 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
         tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
     | isJobGoneException e ->
         tryLog batchLog Info "Job(s) no longer available, skipping retry"
-    | Just JobNackException <- fromException e ->
+    | Just JobNackException <- fromException e -> do
+        -- Hand back the attempt the claim consumed for every job the handler
+        -- left unfinalized, so the nacked reprocess does not record a failure.
+        withDbTransaction $ traverse_ (void . Arb.nackJob) unhandled
         tryLog batchLog Info "Job(s) nacked, will be reprocessed"
     | otherwise ->
         -- Fail the jobs the handler did not finalize, in a separate transaction.

@@ -80,7 +80,8 @@ newtype BranchCancelException = BranchCancelException Text
   deriving anyclass (Exception)
 
 -- | Reprocess the job later without recording a failure (a soft nack). The
--- worker skips retry\/DLQ and leaves the job to become visible again.
+-- worker skips retry\/DLQ, hands back the attempt the claim consumed, and leaves
+-- the job to become visible again.
 data JobNackException = JobNackException
   deriving stock (Eq, Generic, Show)
   deriving anyclass (Exception)

@@ -22,6 +22,7 @@ module Arbiter.Core.HighLevel
   , ackJob
   , ackJobsBatch
   , updateJobForRetry
+  , nackJob
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , SetVisibilityResult (..)
@@ -292,6 +293,20 @@ updateJobForRetry delay errorMsg job = do
   schemaName <- getSchema
   let tableName = job.queueName
   Ops.updateJobForRetry schemaName tableName delay errorMsg job
+
+-- | Soft-nack a job so it is reprocessed after its visibility timeout without
+-- recording a failure or consuming a retry attempt.
+--
+-- Returns the number of rows updated (0 if job was already claimed by another worker).
+nackJob
+  :: forall m registry payload
+   . (JobOperation m registry payload)
+  => JobRead payload
+  -> m Int64
+nackJob job = do
+  schemaName <- getSchema
+  let tableName = job.queueName
+  Ops.nackJob schemaName tableName job
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --

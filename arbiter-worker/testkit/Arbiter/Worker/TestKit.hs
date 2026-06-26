@@ -35,7 +35,7 @@ import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (isNothing)
@@ -802,6 +802,30 @@ workerSpec connStr mkSimple mkFailing mkHandler runM = do
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           dlq <- runM env (HL.listDLQJobs 100 0) :: IO [DLQ.DLQJob payload]
           filter (== mkSimple "nk-job") (map (payload . DLQ.jobSnapshot) dlq) `shouldBe` []
+
+    it "nack hands back the attempt the claim consumed" $ \env -> do
+      callsRef <- newIORef (0 :: Int)
+      seenAttemptsRef <- newIORef (Nothing :: Maybe Int)
+      let batchHandler jobs cbs = do
+            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
+            let (j :| _) = jobs
+            if n == 1
+              then traverse_ (nack cbs) (toList jobs)
+              else do
+                liftIO $ writeIORef seenAttemptsRef (Just (fromIntegral (attempts j)))
+                traverse_ (ack cbs) (toList jobs)
+      let jobs = [(defaultJob (mkSimple "nk-attempts")) {groupKey = Just "nka"}]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        (runM env $ runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})
+        $ \_ -> do
+          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+          -- The claim on call 1 set attempts to 1. The nack gave that attempt
+          -- back, so the reclaim on call 2 sees attempts == 1 again, not 2.
+          seen <- readIORef seenAttemptsRef
+          seen `shouldBe` Just 1
 
     it "nack does not fire onJobSuccess" $ \env -> do
       successRef <- newIORef ([] :: [Int64])
