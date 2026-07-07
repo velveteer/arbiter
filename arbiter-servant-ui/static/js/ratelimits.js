@@ -3,7 +3,7 @@
  *
  * Global (not queue-scoped). Lists policies with bucket and throttle stats,
  * drills into a prefix's buckets, edits override params, and resets buckets.
- * Polls every 15s while the Rate Limits tab is visible.
+ * Polls while the Rate Limits tab is visible.
  */
 const RL_BUCKET_LIMIT = 100;
 
@@ -23,10 +23,6 @@ document.addEventListener('alpine:init', () => {
       fetchPolicies: () => ArbiterAPI.listRateLimits(),
       fetchItems: (prefix, opts) => ArbiterAPI.listRateLimitBuckets(prefix, opts),
     }),
-    policies: [],
-    loading: false,
-    loaded: false,
-    _loadErrored: false,
     edit: {
       prefix: '',
       maxOn: false, max: '',
@@ -37,7 +33,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     init() {
-      this.initPolling('#tab-ratelimits', {});
+      this.initPollingMounted();
     },
 
     destroy() {
@@ -103,13 +99,11 @@ document.addEventListener('alpine:init', () => {
         modalId: 'rateLimitEditModal',
         reload: () => this.loadPolicies(),
         buildBody: (e) => {
-          // A blank field is null (caught by the validators below), not 0.
-          const num = (v) => { if (v === '' || v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
           // Each field is sent as a value (override on) or null (revert to default).
           const body = {
-            overrideMaxTokens: e.maxOn ? num(e.max) : null,
-            overrideRefillAmount: e.refillOn ? num(e.refill) : null,
-            overrideInterval: e.intervalOn ? num(e.interval) : null,
+            overrideMaxTokens: e.maxOn ? parseOverride(e.max, Number.isFinite) : null,
+            overrideRefillAmount: e.refillOn ? parseOverride(e.refill, Number.isFinite) : null,
+            overrideInterval: e.intervalOn ? parseOverride(e.interval, Number.isFinite) : null,
           };
           if (e.maxOn && (body.overrideMaxTokens == null || body.overrideMaxTokens < 0)) return { error: 'Max tokens must be a number >= 0' };
           if (e.refillOn && (body.overrideRefillAmount == null || body.overrideRefillAmount < 0)) return { error: 'Refill amount must be a number >= 0' };

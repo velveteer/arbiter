@@ -205,14 +205,6 @@ deleteDLQJobSQL schema tableName =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [text|DELETE FROM ${dlqTbl} WHERE id = ? RETURNING parent_id|]
 
--- * Admin Operations
-
--- | SQL template for getting a job by ID
---
--- Parameters: job_id
---
--- Returns: Single job row if found
-
 -- | SQL template for moving multiple jobs to DLQ in a single operation
 --
 -- Uses unnest to process multiple (id, attempts, error_msg) tuples.
@@ -253,21 +245,6 @@ deleteDLQJobsBatchSQL schema tableName =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [text|DELETE FROM ${dlqTbl} WHERE id = ANY(?) RETURNING parent_id|]
 
--- ---------------------------------------------------------------------------
--- Job Dependency Operations
--- ---------------------------------------------------------------------------
-
--- | Pause all claimable jobs in a parent's subtree (set suspended = TRUE).
---
--- Walks the descendant tree and pauses every job that is currently
--- claimable (not in-flight, not already suspended). Naturally-suspended
--- rollup finalizers in the tree are left alone (they're already suspended
--- waiting for their own children). In-flight children are left alone so
--- their visibility timeout can expire normally if the worker crashes -
--- pausing them would break crash recovery.
---
--- Parameters: parent_id
-
 -- | Cascade all descendants of a rollup parent to the DLQ.
 --
 -- Recursively finds all descendants and moves them from the main queue
@@ -300,13 +277,6 @@ cascadeChildrenToDLQSQL schema tableName =
         SELECT count(*) FROM deleted
       |]
 
--- | Find descendant rollup finalizer IDs for snapshot preservation.
---
--- Used before cascade-DLQ to identify intermediate rollup nodes that
--- need their results persisted into @parent_state@ before deletion.
---
--- Parameters: parent_job_id
-
 -- | Batch DLQ child count: returns (parent_id, count) for a set of job IDs
 --
 -- Parameters: array of job IDs
@@ -319,14 +289,3 @@ countDLQChildrenBatchSQL schema tableName =
         WHERE parent_id = ANY(?)
         GROUP BY parent_id
       |]
-
--- ---------------------------------------------------------------------------
--- Batch Operations
--- ---------------------------------------------------------------------------
-
--- | SQL template for moving multiple jobs to DLQ in a single operation
---
--- Uses unnest to process multiple (id, attempts, error_msg) tuples.
--- Returns the number of jobs moved.
---
--- Parameters: Array of job IDs, array of attempts, array of error messages

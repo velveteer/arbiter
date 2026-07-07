@@ -209,12 +209,3 @@ promoteJobSQL schema tableName =
           AND not_visible_until > NOW()
           AND (attempts = 0 OR last_error IS NOT NULL)
       |]
-
--- | SQL template for moving job to DLQ atomically
---
--- This preserves ALL job fields (complete snapshot) plus DLQ metadata.
--- The operation is atomic: the job is deleted from the main queue and
--- inserted into the DLQ in a single statement. The final error message
--- is passed as a parameter to capture the error that caused the DLQ move.
---
--- Parameters: job_id, attempts, last_error

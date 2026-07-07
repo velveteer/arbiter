@@ -27,6 +27,22 @@ function hideModal(id) {
   if (el && window.bootstrap) bootstrap.Modal.getInstance(el)?.hide();
 }
 
+// Dismiss any open modal before a view/queue change removes its x-if block from the
+// DOM. Otherwise the .modal-backdrop and body scroll-lock are orphaned (Bootstrap's
+// hide callback never fires on a torn-out node), leaving the page dimmed and locked.
+function dismissOpenModals() {
+  if (!window.bootstrap) return;
+  document.querySelectorAll('.modal.show').forEach((el) => bootstrap.Modal.getInstance(el)?.hide());
+  // The teardown can drop the modal mid-transition, so sweep any stranded backdrop
+  // and body lock on the next frame as a safety net.
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.modal-backdrop').forEach((b) => b.remove());
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('overflow');
+    document.body.style.removeProperty('padding-right');
+  });
+}
+
 // Click-to-arm confirmation, a replacement for window.confirm on destructive
 // actions. Spread into a component with ...confirmArm(), then guard the handler
 // with `if (!this.confirmArmed(key)) return` and reflect isArmed(key) in the label.
@@ -98,8 +114,9 @@ function busyRows() {
 }
 
 // Runs a load body under the loading flag, a stale-response guard, and a
-// one-shot error toast. body(seq, isStale) does the fetch + apply.
-async function guardedLoad(self, errorLabel, body) {
+// one-shot error toast. body(seq, isStale) does the fetch + apply. opts.suppressToast,
+// if it returns true at error time, skips the toast (still logs).
+async function guardedLoad(self, errorLabel, body, opts) {
   self.loading = true;
   self._loadSeq = (self._loadSeq || 0) + 1;
   const seq = self._loadSeq;
@@ -111,6 +128,7 @@ async function guardedLoad(self, errorLabel, body) {
   } catch (e) {
     if (isStale()) return;
     console.error(errorLabel + ':', e);
+    if (opts && opts.suppressToast && opts.suppressToast()) return;
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
     if (seq === self._loadSeq) { self.loading = false; self.loaded = true; }
@@ -197,6 +215,10 @@ function tableTab(loadMethod, refreshStorageKey) {
         this._appliedParentId = '';
         this.sortBy = '';
         this.sortDir = '';
+        // Reset paging even while inactive, so the tab reopens on page 1 of the new
+        // queue rather than a leftover offset (offset lives only in _resetView, which
+        // is active-gated).
+        this.offset = 0;
         if (opts.onQueueReset) opts.onQueueReset();
         if (this.active) this._resetView();
       };
@@ -271,6 +293,15 @@ function pollingTab(loadMethod, intervalMs) {
       this._bindVisibility();
     },
 
+    // For views shown/hidden by mount (x-if) rather than a Bootstrap tab: active
+    // for the component's whole lifetime, so load and poll start immediately.
+    initPollingMounted() {
+      this.active = true;
+      this[loadMethod]();
+      this.startPolling();
+      this._bindVisibility();
+    },
+
     teardownPolling() {
       untrackTabActive(this);
       this.stopPolling();
@@ -328,12 +359,25 @@ function highFillClass(pct) {
   return pct >= 100 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
 }
 
+// Parse an override input field. A blank field is null (revert to default), not 0.
+// check is Number.isInteger for whole-number limits, Number.isFinite otherwise.
+function parseOverride(v, check) {
+  if (v === '' || v == null) return null;
+  const n = Number(v);
+  return check(n) ? n : null;
+}
+
 // Shared drill-down lifecycle for the rate-limit and concurrency tabs. Owns the
 // expanded prefix and its capped child list, refreshes an open drill-down on each
 // poll without flashing the spinner, and closes a drill-down whose prefix vanished.
 // cfg supplies the field/method names, fetchers, and labels that differ per tab.
 function drillDownTab(cfg) {
   return {
+    // Policy list and guardedLoad state, owned by loadPolicies below.
+    policies: [],
+    loading: false,
+    loaded: false,
+    _loadErrored: false,
     expandedPrefix: null,
     [cfg.listField]: [],
     [cfg.loadingField]: false,
@@ -344,6 +388,13 @@ function drillDownTab(cfg) {
     itemTotal() {
       const p = this.policies.find((x) => x.prefix === this.expandedPrefix);
       return p ? p[cfg.countField] : this[cfg.listField].length;
+    },
+
+    // Truncation note reads the stable policy count and fixed cap, never the live
+    // list, which is empty mid-load and would otherwise flash the note on open.
+    itemCap: cfg.itemLimit,
+    hasMoreItems() {
+      return this.itemTotal() > cfg.itemLimit;
     },
 
     async loadPolicies() {
@@ -588,6 +639,24 @@ function clearFiltersFromUrl() {
   history.replaceState(null, '', url);
 }
 
+// Relative URL to a queue's Jobs tab, optionally filtered by status. One source of
+// truth for the deep-link shape used by the queue cards, the stat cards, and the
+// store's in-app navigation.
+function queueJobsUrl(queue, status) {
+  const p = new URLSearchParams({ queue });
+  if (status) p.set('status', status);
+  return '?' + p.toString() + '#jobs';
+}
+
+// Anchor click guard: true if this is a plain left-click to handle as an SPA nav
+// (and preventDefault); false for modifier/middle clicks, which fall through to the
+// href so the browser opens it in a new tab.
+function plainNavClick(e) {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return false;
+  e.preventDefault();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tab-active tracking
 // ---------------------------------------------------------------------------
@@ -634,4 +703,15 @@ function untrackTabActive(component) {
     document.removeEventListener('hidden.bs.tab', component._tabHiddenHandler);
     component._tabHiddenHandler = null;
   }
+}
+
+// Activate the sub-tab named in the URL hash (or the first tab if the hash is
+// absent/unknown), so the correct pane is shown from the first paint rather than
+// flashing the default tab first. Each area's tabs mount lazily via x-if, so this
+// runs on the block's init. No tab carries a hardcoded active class.
+function activateSubTabFromHash(valid) {
+  const h = location.hash.replace('#', '');
+  const target = h && valid.includes(h) ? h : valid[0];
+  const btn = document.querySelector('[data-bs-target="#tab-' + target + '"]');
+  if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
 }

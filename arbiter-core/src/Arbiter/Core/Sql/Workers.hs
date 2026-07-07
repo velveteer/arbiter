@@ -35,8 +35,6 @@ workerHealthCaseSQL :: Text
 workerHealthCaseSQL =
   "CASE WHEN last_heartbeat < NOW() - stale_threshold_secs * interval '1 second' THEN 'stale' WHEN shutting_down THEN 'draining' ELSE 'live' END"
 
--- | Render a 'Maybe UUID' as a SQL literal: NULL or 'uuid-text'::uuid.
-
 -- | Upsert a worker registration and return its effective paused state (worker OR queue).
 -- Parameters: worker_id, queue_name, host_name, worker_count, stale_threshold_secs, metadata
 upsertWorkerSQL :: SchemaName -> Text
@@ -144,7 +142,3 @@ deleteStaleWorkersSQL schemaName =
         DELETE FROM ${tbl}
         WHERE last_heartbeat < NOW() - (stale_threshold_secs * interval '1 second')
       |]
-
--- ---------------------------------------------------------------------------
--- Queue Operations
--- ---------------------------------------------------------------------------

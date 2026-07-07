@@ -4,17 +4,17 @@
 // Ordered column registry. Order must match the table header and cell order.
 const DLQ_COLUMNS = [
   { key: 'select', label: 'Select', weight: 4, required: true },
-  { key: 'dlqid', label: 'DLQ ID', weight: 6 },
-  { key: 'jobid', label: 'Job ID', weight: 6 },
-  { key: 'parent', label: 'Parent', weight: 6 },
+  { key: 'dlqid', label: 'DLQ ID', weight: 7 },
+  { key: 'jobid', label: 'Job ID', weight: 7 },
+  { key: 'parent', label: 'Parent', weight: 7 },
   { key: 'group', label: 'Group', weight: 8 },
-  { key: 'payload', label: 'Payload', weight: 16 },
+  { key: 'payload', label: 'Payload', weight: 13 },
   { key: 'failed', label: 'Failed At', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8 },
-  { key: 'error', label: 'Last Error', weight: 16 },
+  { key: 'error', label: 'Last Error', weight: 13 },
   { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
-  { key: 'concurrency', label: 'Concurrency', weight: 9 },
-  { key: 'actions', label: 'Actions', weight: 18 },
+  { key: 'concurrency', label: 'Concurrency', weight: 10 },
+  { key: 'actions', label: 'Actions', weight: 12 },
 ];
 
 document.addEventListener('alpine:init', () => {
@@ -159,6 +159,8 @@ document.addEventListener('alpine:init', () => {
       // concurrent requests so a large selection doesn't flood the server.
       try {
         const results = await mapLimit(ids, ARB_TIMING.bulkConcurrency, id => ArbiterAPI.retryFromDLQ(queue, id));
+        // Bail if the queue switched mid-op; _onQueueChanged already cleared selection.
+        if (Alpine.store('app').selectedQueue !== queue) return;
         const failedIds = ids.filter((id, i) => results[i].status === 'rejected');
         const next = {};
         for (const id of failedIds) next[id] = true;
@@ -179,6 +181,8 @@ document.addEventListener('alpine:init', () => {
       this.bulkBusy = true;
       try {
         const res = await ArbiterAPI.deleteDLQBatch(queue, ids);
+        // Bail if the queue switched mid-op; _onQueueChanged already cleared selection.
+        if (Alpine.store('app').selectedQueue !== queue) return;
         this.selected = {};
         this.loadDLQ();
         const deleted = res?.deleted ?? ids.length;

@@ -437,8 +437,6 @@ insertJobsBatchBase schema tableName returning =
         ${returning}
       |]
 
--- | Set (or clear, with NULL) a pool's operator override limit when the guard flag is true. Affects every key under the prefix.
-
 -- * Admin Operations
 
 -- | SQL template for getting a job by ID
@@ -508,25 +506,12 @@ cancelJobSQL schema tableName =
         SELECT (SELECT count(*) FROM cancel) AS result
       |]
 
--- | Per-status queue counts plus the age of the oldest @ready@ job.
---
--- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
--- UI can distinguish actively-leased ('in_flight') jobs from merely delayed
--- ('scheduled'/'backoff'/'throttled') or 'suspended' ones. The six status counts
--- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
--- far-future scheduled job no longer skews the queue's backlog latency.
-
 -- | Render a 'Maybe UUID' as a SQL literal: NULL or 'uuid-text'::uuid.
 uuidLiteral :: Maybe UUID -> Text
 uuidLiteral Nothing = "NULL"
 uuidLiteral (Just u) = "'" <> UUID.toText u <> "'::uuid"
 
--- | Upsert a worker registration and return its effective paused state (worker OR queue).
--- Parameters: worker_id, queue_name, host_name, worker_count, stale_threshold_secs, metadata
-
--- | @UNION ALL@ of @body@ applied to each schema-qualified job table.
-unionAllOverQueueTables :: SchemaName -> [TableName] -> (Text -> Text) -> Text
+-- | @UNION ALL@ of @body@ over each job table, passing its raw name and schema-qualified reference.
+unionAllOverQueueTables :: SchemaName -> [TableName] -> (TableName -> Text -> Text) -> Text
 unionAllOverQueueTables schema tableNames body =
-  T.intercalate " UNION ALL " (map (body . jobQueueTable schema) tableNames)
-
--- | Every concurrency_key held by a live job, unioned across the queue tables.
+  T.intercalate " UNION ALL " (map (\t -> body t (jobQueueTable schema t)) tableNames)

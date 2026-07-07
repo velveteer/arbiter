@@ -95,9 +95,3 @@ tryFireCronGateSQL schemaName =
 tryAcquireCronLeaderSQL :: Text
 tryAcquireCronLeaderSQL =
   "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
-
--- ---------------------------------------------------------------------------
--- Worker Registry Operations
--- ---------------------------------------------------------------------------
-
--- | Worker SELECT columns from the codec, with @health@ rendered as a computed expression.

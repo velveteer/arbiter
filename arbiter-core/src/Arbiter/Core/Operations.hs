@@ -75,7 +75,9 @@ module Arbiter.Core.Operations
   , cancelJobsBatch
   , promoteJob
   , QueueStats (..)
+  , QueueOverview (..)
   , getQueueStats
+  , getAllQueueStats
 
     -- * Count Operations
   , countJobs
@@ -1848,6 +1850,36 @@ getQueueStats schemaName tableName = do
   pure $ case rows of
     (s : _) -> s
     [] -> QueueStats 0 0 0 0 0 0 0 Nothing
+
+-- | A landing-overview row: a queue's job-status stats plus its pause state (the
+-- queue's own flag, and how many of its live workers are paused).
+data QueueOverview = QueueOverview
+  { overviewQueue :: Text
+  , overviewStats :: QueueStats
+  , overviewQueuePaused :: Bool
+  , overviewWorkersLive :: Int64
+  , overviewWorkersPaused :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+
+allStatsRowCodec :: RowCodec QueueOverview
+allStatsRowCodec =
+  QueueOverview
+    <$> col "queue" CText
+    <*> statsRowCodec
+    <*> col "queue_paused" CBool
+    <*> col "workers_live" CInt8
+    <*> col "workers_paused" CInt8
+
+-- | Every queue's stats plus pause state in one query, for the landing overview.
+getAllQueueStats
+  :: (MonadArbiter m)
+  => SchemaName
+  -> [TableName]
+  -> m [QueueOverview]
+getAllQueueStats _ [] = pure []
+getAllQueueStats schemaName tableNames =
+  executeQuery (Tmpl.allQueueStatsSQL schemaName tableNames) [] allStatsRowCodec
 
 -- ---------------------------------------------------------------------------
 -- Count Operations

@@ -9,14 +9,29 @@ document.addEventListener('alpine:init', () => {
     pausedAt: null,
     pausedAgeStr: '',
     busy: false,
+    pauseConfirmText: '',
     ...confirmArm(),
     ...eventBusTab(),
+
+    // 'type' | 'arm' | 'off' — how a pause must be confirmed (resume always uses the arm).
+    get pauseConfirmMode() {
+      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.pauseConfirm) || 'type';
+    },
+    // In 'off' mode the pause affordance is hidden, but resume stays available.
+    get showPauseToggle() {
+      return this.paused || this.pauseConfirmMode !== 'off';
+    },
+    // The modal's Pause button unlocks only on an exact match of the queue name.
+    get pauseConfirmValid() {
+      return this.pauseConfirmText === Alpine.store('app').selectedQueue;
+    },
 
     init() {
       const refresh = () => this.refresh();
       this._bindBus({
         queueChanged: () => {
           this.disarm();
+          this.pauseConfirmText = '';
           this.paused = false;
           this.pausedAt = null;
           if (Alpine.store('app').selectedQueue) this.refresh();
@@ -58,22 +73,44 @@ document.addEventListener('alpine:init', () => {
       this.pausedAgeStr = this.pausedAt ? formatAge(this.pausedAt) : '';
     },
 
-    async toggle() {
+    // Button click. Resume and 'arm'-mode pause use the two-click arm; 'type'-mode
+    // pause opens the confirmation modal instead.
+    onToggle() {
+      if (this.busy) return;
+      if (this.paused) {
+        if (this.confirmArmed('toggle')) this._apply(false);
+        return;
+      }
+      if (this.pauseConfirmMode === 'type') {
+        this.pauseConfirmText = '';
+        showModal('pauseConfirmModal');
+        return;
+      }
+      if (this.confirmArmed('toggle')) this._apply(true);
+    },
+
+    // The modal's Pause button.
+    confirmPause() {
+      if (!this.pauseConfirmValid || this.busy) return;
+      hideModal('pauseConfirmModal');
+      this._apply(true);
+    },
+
+    async _apply(pause) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue || this.busy) return;
-      if (!this.confirmArmed('toggle')) return;
-      const action = this.paused ? 'Resume' : 'Pause';
+      const verb = pause ? 'pause' : 'resume';
       this.busy = true;
       try {
-        if (this.paused) {
-          await ArbiterAPI.resumeQueue(queue);
-        } else {
+        if (pause) {
           await ArbiterAPI.pauseQueue(queue);
+        } else {
+          await ArbiterAPI.resumeQueue(queue);
         }
         await this.refresh();
       } catch (e) {
-        console.error(`Failed to ${action.toLowerCase()} queue:`, e);
-        showToast(`Failed to ${action.toLowerCase()} queue: ` + e.message);
+        console.error(`Failed to ${verb} queue:`, e);
+        showToast(`Failed to ${verb} queue: ` + e.message);
       } finally {
         this.busy = false;
       }

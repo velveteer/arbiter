@@ -1,11 +1,16 @@
 /**
  * Alpine.js global store: queues, selected queue, SSE state, theme.
  */
+// Top-level views that aren't queue-scoped (each a nav destination after Queues).
+const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency'];
+
 document.addEventListener('alpine:init', () => {
   Alpine.store('app', {
     queues: [],
     selectedQueue: '',
+    view: 'queues',
     initialized: false,
+    _deepLinkPending: false,
     connected: false,
     sseDisabled: false,
     eventSource: null,
@@ -21,21 +26,36 @@ document.addEventListener('alpine:init', () => {
     theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
 
     async init() {
+      // A system view is queue-independent, so resolve it up front. A deep-linked
+      // queue is mounted only after listQueues confirms it exists, so a stale link
+      // never mounts a detail view or fires sub-tab loads against a missing table.
+      // While that validation is in flight, _deepLinkPending holds the queue list
+      // back so it doesn't flash before the detail view takes over.
+      const params = new URLSearchParams(location.search);
+      const urlQueue = params.get('queue');
+      const urlView = params.get('view');
+      if (urlView && SYSTEM_VIEWS.includes(urlView)) {
+        this.view = urlView;
+      } else if (urlQueue) {
+        this._deepLinkPending = true;
+      }
+
       try {
         const data = await ArbiterAPI.listQueues();
         this.queues = (data && data.queues) || [];
-        const params = new URLSearchParams(location.search);
-        const urlQueue = params.get('queue');
-        if (urlQueue && this.queues.includes(urlQueue)) {
-          this.selectQueue(urlQueue);
-        } else {
-          if (urlQueue) showToast(`Queue "${urlQueue}" not found`, 'warning');
-          if (this.queues.length > 0) this.selectQueue(this.queues[0]);
+        if (urlQueue && this.view === 'queues') {
+          if (this.queues.includes(urlQueue)) {
+            this.selectedQueue = urlQueue;
+          } else {
+            showToast(`Queue "${urlQueue}" not found`, 'warning');
+            this._updateUrl('');
+          }
         }
       } catch (e) {
         console.error('Failed to load queues:', e);
         showToast('Failed to load queues: ' + e.message);
       }
+      this._deepLinkPending = false;
       this.initialized = true;
       this.connectSSE();
 
@@ -43,24 +63,60 @@ document.addEventListener('alpine:init', () => {
       document.addEventListener('shown.bs.tab', (e) => {
         const target = e.target.getAttribute('data-bs-target');
         if (target) {
-          this._updateUrl(target.replace('#tab-', ''));
+          const tab = target.replace('#tab-', '');
+          // Jobs/DLQ own the filter params and rewrite them on load; other sub-tabs
+          // must clear them, else a stale filter desyncs the URL from the view.
+          if (tab !== 'jobs' && tab !== 'dlq') clearFiltersFromUrl();
+          this._updateUrl(tab);
         }
       });
     },
 
-    selectQueue(queue) {
+    // Drill into a queue (view + selection + queueChanged), writing the URL via `setUrl`.
+    // forceReset dispatches queueChanged even when the queue is unchanged, so re-opening
+    // the current queue still resets tab filters to match the freshly cleared URL.
+    _drillInto(queue, setUrl, forceReset = false) {
+      const changed = this.selectedQueue !== queue;
+      dismissOpenModals();
       this.selectedQueue = queue;
-      clearFiltersFromUrl();
-      this._updateUrl();
-      window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
+      this.view = 'queues';
+      setUrl();
+      if (changed || forceReset) window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
+    },
+
+    // Drill into a queue's detail view (from the queue list or the quick-switcher).
+    // A lateral switch from within a detail keeps the current sub-tab; drilling in from
+    // the list resets to the default (Stats) by clearing the hash.
+    openQueue(queue) {
+      const wasInDetail = !!this.selectedQueue;
+      this._drillInto(queue, () => { clearFiltersFromUrl(); this._updateUrl(wasInDetail ? undefined : ''); }, true);
+    },
+
+    // Drill into a queue's Jobs tab pre-filtered to a status (from a queue card).
+    openQueueJobs(queue, status) {
+      this._drillInto(queue, () => history.replaceState(null, '', queueJobsUrl(queue, status)));
+    },
+
+    // Switch to a top-level view: 'queues' (the queue area) or a system
+    // singleton ('events' / 'ratelimits' / 'concurrency').
+    setView(view) {
+      dismissOpenModals();
+      this.view = view;
+      // Returning to the Queues section always lands on the list, so the nav
+      // button is never a no-op while a queue is open.
+      if (view === 'queues') this.selectedQueue = '';
+      // Clear any sub-tab hash left over from a queue detail view.
+      this._updateUrl('');
     },
 
     _updateUrl(newHash) {
       const url = new URL(location.href);
-      if (this.selectedQueue) {
-        url.searchParams.set('queue', this.selectedQueue);
+      url.searchParams.delete('view');
+      url.searchParams.delete('queue');
+      if (this.view === 'queues') {
+        if (this.selectedQueue) url.searchParams.set('queue', this.selectedQueue);
       } else {
-        url.searchParams.delete('queue');
+        url.searchParams.set('view', this.view);
       }
       if (newHash !== undefined) {
         url.hash = newHash;

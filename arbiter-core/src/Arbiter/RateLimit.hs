@@ -22,7 +22,6 @@ module Arbiter.RateLimit
 
     -- * Bucket durability
   , Durability (..)
-  , RateLimitDurability (..)
 
     -- * Management and observability views
   , RateLimitPolicyView (..)
@@ -50,7 +49,6 @@ import Arbiter.Core.RateLimit.Spec
   ( Durability (..)
   , HasRateLimit (..)
   , Policy (..)
-  , RateLimitDurability (..)
   , RateLimitFor
   , chooseWhen
   , globalLimit

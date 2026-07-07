@@ -12,7 +12,6 @@
 module Arbiter.Core.RateLimit.Spec
   ( -- * Core types
     Durability (..)
-  , RateLimitDurability (..)
   , RateLimitKey (..)
   , rateLimitKeyText
   , Policy (..)
@@ -36,7 +35,6 @@ module Arbiter.Core.RateLimit.Spec
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..))
-import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
@@ -53,21 +51,11 @@ import Arbiter.Core.Admission
   , selectBy
   , selectNone
   )
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.Core.Selector (Selector, chooseWhen, collectPolicies, runSelector, selectByCase)
 
--- | Whether the rate-limit bucket table is WAL-logged, set per registry via
--- 'RateLimitDurability'.
+-- | Whether the rate-limit bucket table is WAL-logged. Set at migration time.
 data Durability = Durable | Unlogged
   deriving stock (Eq, Show)
-
--- | A registry's bucket-table durability. Defaults to 'Unlogged'. Override with
--- @instance RateLimitDurability MyRegistry where rateLimitDurability _ = Durable@.
-class RateLimitDurability (registry :: JobPayloadRegistry) where
-  rateLimitDurability :: Proxy registry -> Durability
-  rateLimitDurability _ = Unlogged
-
-instance {-# OVERLAPPABLE #-} RateLimitDurability registry
 
 -- | A resolved key: prefix and per-key suffix. Stored as @prefix:suffix@, prefix
 -- kept separate so policy lookup never re-splits on @:@.

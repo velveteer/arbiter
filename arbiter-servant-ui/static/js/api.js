@@ -153,6 +153,11 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/stats`);
   },
 
+  // Per-queue stats for every queue in one request (landing overview).
+  getAllStats() {
+    return this._fetch('/queues/stats');
+  },
+
   // Cron
   listCronSchedules({ queue } = {}) {
     const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';

@@ -89,7 +89,6 @@ import Arbiter.Core.RateLimit.Schema
   )
 import Arbiter.Core.RateLimit.Spec
   ( Durability (..)
-  , RateLimitDurability (..)
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
@@ -132,6 +131,10 @@ data MigrationConfig = MigrationConfig
   -- JSON event via @pg_notify@ on the @arbiter_job_events@ channel.
   -- This adds overhead to every row operation - disable for maximum throughput.
   -- Default: 'False'
+  , rateLimitDurability :: Durability
+  -- ^ WAL-logging for the rate-limit bucket table in this schema. 'Unlogged'
+  -- (default) resets buckets on crash\/failover. 'Durable' preserves them at a
+  -- throughput cost.
   }
   deriving stock (Eq, Show)
 
@@ -141,6 +144,7 @@ defaultMigrationConfig =
   MigrationConfig
     { enableNotifications = True
     , enableEventStreaming = False
+    , rateLimitDurability = Unlogged
     }
 
 -- | Run migrations for all tables in a queue registry.
@@ -167,8 +171,7 @@ defaultMigrationConfig =
 -- @
 runMigrationsForRegistry
   :: forall registry
-   . ( RateLimitDurability registry
-     , RegistryAdmissionPolicies registry
+   . ( RegistryAdmissionPolicies registry
      , RegistryTables registry
      )
   => Proxy registry
@@ -196,7 +199,7 @@ runMigrationsForRegistry proxy connStr schemaName config = do
         AdmissionSeeds
           { seedRateLimitPolicies = map toPolicyRow (Set.toList (registryRateLimitPolicies @registry))
           , seedConcurrencyPolicies = Set.toList (registryConcurrencyPolicies @registry)
-          , seedDurability = rateLimitDurability proxy
+          , seedDurability = rateLimitDurability config
           }
   runMigrationsTrackedForTables connStr schemaName tables config seeds
 

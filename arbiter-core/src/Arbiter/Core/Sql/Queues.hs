@@ -85,9 +85,3 @@ listQueuesSQL schemaName =
   let tbl = arbiterQueuesTable schemaName
       cols = queueColumnList
    in [text|SELECT ${cols} FROM ${tbl} ORDER BY queue_name|]
-
--- ---------------------------------------------------------------------------
--- Global Gate Operations
--- ---------------------------------------------------------------------------
-
--- | Idempotently create the gate row for a task. Parameters: task_name.

@@ -9,8 +9,8 @@
 module Test.Arbiter.Simple.MigrationDurability (spec) where
 
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTableName)
-import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.RateLimit (Durability (..), RateLimitDurability (..))
+import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.RateLimit (Durability (..))
 import Control.Exception (bracket)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -25,29 +25,24 @@ newtype DurPayload = DurPayload Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- Two registries over the same schema, distinguished only so each can declare
--- its own durability. The second relies on the default (Unlogged).
-type DurableReg = '[ '("durability_q", DurPayload)]
-
-type ResetReg = '[ '("durability_q2", DurPayload)]
-
-instance RateLimitDurability DurableReg where
-  rateLimitDurability _ = Durable
+type DurReg = '[ '("durability_q", DurPayload)]
 
 testSchema :: Text
 testSchema = "arbiter_simple_durability_test"
 
 spec :: ByteString -> Spec
 spec connStr =
-  it "reconciles the bucket table to the registry's declared durability" $
+  it "reconciles the bucket table to the configured durability" $
     bracket (PG.connectPostgreSQL connStr) PG.close $ \conn -> do
       _ <- PG.execute_ conn "SET client_min_messages = WARNING"
       _ <- PG.execute_ conn "DROP SCHEMA IF EXISTS arbiter_simple_durability_test CASCADE"
-      runMigrationsForRegistry (Proxy @DurableReg) connStr testSchema defaultMigrationConfig >>= shouldMigrate
+      runMigrationsForRegistry (Proxy @DurReg) connStr testSchema durableConfig >>= shouldMigrate
       bucketPersistence conn `shouldReturn` Just "p"
-      -- A re-run with a registry declaring the default reconciles it back.
-      runMigrationsForRegistry (Proxy @ResetReg) connStr testSchema defaultMigrationConfig >>= shouldMigrate
+      -- A re-run with the default config reconciles it back.
+      runMigrationsForRegistry (Proxy @DurReg) connStr testSchema defaultMigrationConfig >>= shouldMigrate
       bucketPersistence conn `shouldReturn` Just "u"
+  where
+    durableConfig = defaultMigrationConfig {rateLimitDurability = Durable}
 
 shouldMigrate :: MigrationResult String -> IO ()
 shouldMigrate MigrationSuccess = pure ()

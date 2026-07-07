@@ -44,7 +44,9 @@ import Control.Concurrent.STM
   , newTVarIO
   , readTChan
   , readTVar
+  , readTVarIO
   , writeTChan
+  , writeTVar
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
 import Control.Monad (forever, guard, join, unless, void, when)
@@ -62,7 +64,7 @@ import Data.Pool qualified as Pool
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
 import Database.PostgreSQL.Simple qualified as PG
@@ -106,6 +108,12 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- ^ Lazily started SSE broadcast hub, shared by all clients. Started on the
   -- first subscriber and torn down (its @LISTEN@ connection released) when the
   -- last one disconnects, so an idle server holds no streaming connection.
+  , rateLimitPoliciesCache :: TVar (Maybe (UTCTime, RateLimitPoliciesResponse))
+  -- ^ Short-TTL cache for the rate-limit policy list, collapsing dashboard polls.
+  , concurrencyPoliciesCache :: TVar (Maybe (UTCTime, ConcurrencyPoliciesResponse))
+  -- ^ Short-TTL cache for the concurrency policy list, collapsing dashboard polls.
+  , allQueueStatsCache :: TVar (Maybe (UTCTime, AllStatsResponse))
+  -- ^ Short-TTL cache for the all-queues overview aggregate, collapsing landing polls.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -137,7 +145,18 @@ initArbiterServer
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   hub <- newMVar Nothing
-  pure ArbiterServerConfig {serverEnv = env, enableSSE = True, sseHub = hub}
+  rlCache <- newTVarIO Nothing
+  ccCache <- newTVarIO Nothing
+  statsCache <- newTVarIO Nothing
+  pure
+    ArbiterServerConfig
+      { serverEnv = env
+      , enableSSE = True
+      , sseHub = hub
+      , rateLimitPoliciesCache = rlCache
+      , concurrencyPoliciesCache = ccCache
+      , allQueueStatsCache = statsCache
+      }
 
 -- | Jobs API handlers for a specific table
 jobsServer
@@ -602,6 +621,22 @@ getStatsHandler tableName config = do
 
   pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
 
+-- | Every queue's stats in one request, for the landing overview.
+getAllStatsHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> [Text]
+  -> Handler AllStatsResponse
+getAllStatsHandler config tables =
+  liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
+    let env = serverEnv config
+        schemaName = schema env
+    rows <- runSimpleDb env $ Ops.getAllQueueStats schemaName tables
+    pure $ AllStatsResponse {queues = map toEntry rows}
+  where
+    toEntry (Ops.QueueOverview q s qp wl wp) =
+      QueueStatsEntry {queue = q, stats = s, paused = qp, workersLive = fromIntegral wl, workersPaused = fromIntegral wp}
+
 -- | Table API handlers for a specific table
 tableServer
   :: forall registry payload
@@ -627,6 +662,7 @@ queuesServer registryProxy config =
   let known = registryTableNames registryProxy
    in QueuesAPI
         { listQueues = pure $ QueuesResponse {queues = known}
+        , getAllStats = getAllStatsHandler config known
         , getDetails = getQueueDetailsHandler config
         , pauseQueue = setQueuePausedHandler config known True
         , resumeQueue = setQueuePausedHandler config known False
@@ -658,6 +694,8 @@ setQueuePausedHandler config knownQueues p queue = do
   let env = serverEnv config
       schemaName = schema env
   void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
+  -- The landing overview shows each queue's paused flag, so refresh it promptly.
+  invalidate (allQueueStatsCache config)
   pure NoContent
 
 -- | Events server - raw WAI application for SSE streaming.
@@ -929,15 +967,46 @@ rateLimitsServer config =
     , resetRateLimitBuckets = resetRateLimitBucketsHandler config
     }
 
+-- | Poll-collapsing TTL for the dashboard list-policy stats. They are a
+-- human-facing snapshot, so serving one up to this stale is invisible while it
+-- bounds repeated and concurrent-viewer polls to one DB aggregate per window.
+policyStatsCacheTtl :: NominalDiffTime
+policyStatsCacheTtl = 10
+
+-- | Shorter TTL for the all-queues overview, which polls twice as fast (10s) as the
+-- policy tabs. Counts churn continuously from the worker fleet, so the view is
+-- approximate by nature and needs no mutation invalidation. The real-time per-queue
+-- view is SSE-driven.
+overviewStatsCacheTtl :: NominalDiffTime
+overviewStatsCacheTtl = 5
+
+-- | Serve from a short-TTL cache cell, recomputing on miss or expiry.
+cachedFor :: NominalDiffTime -> TVar (Maybe (UTCTime, a)) -> IO a -> IO a
+cachedFor ttl cell produce = do
+  now <- getCurrentTime
+  cached <- readTVarIO cell
+  case cached of
+    Just (ts, v) | diffUTCTime now ts < ttl -> pure v
+    _ -> do
+      v <- produce
+      atomically $ writeTVar cell (Just (now, v))
+      pure v
+
+-- | Drop a cache cell after an operator mutation, so the next list poll recomputes
+-- instead of serving the pre-edit snapshot for the rest of the TTL window.
+invalidate :: TVar (Maybe a) -> Handler ()
+invalidate cell = liftIO $ atomically $ writeTVar cell Nothing
+
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
   :: forall registry
    . (RegistryTables registry)
   => ArbiterServerConfig registry
   -> Handler RateLimitPoliciesResponse
-listRateLimitsHandler config = do
-  views <- liftIO $ runSimpleDb (serverEnv config) HL.listRateLimitPolicies
-  pure $ RateLimitPoliciesResponse {policies = views}
+listRateLimitsHandler config =
+  liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
+    views <- runSimpleDb (serverEnv config) HL.listRateLimitPolicies
+    pure $ RateLimitPoliciesResponse {policies = views}
 
 -- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
 listRateLimitBucketsHandler
@@ -977,12 +1046,14 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
         | otherwise = Nothing
   case invalid of
     Just msg -> throwError err400 {errBody = msg}
-    Nothing ->
+    Nothing -> do
       -- An all-absent patch changes nothing, so read the view without rewriting the row and waking jobs.
       let update = case (mMax, mRefill, mIv) of
             (Nothing, Nothing, Nothing) -> pure ()
             _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
-       in updateThenView (serverEnv config) (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+      view <- updateThenView (serverEnv config) (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+      invalidate (rateLimitPoliciesCache config)
+      pure view
 
 -- | Clear every bucket for a prefix. Returns the number reset. 404s an unknown prefix.
 resetRateLimitBucketsHandler
@@ -995,6 +1066,7 @@ resetRateLimitBucketsHandler config prefix = do
   let action =
         HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> HL.resetRateLimitBuckets prefix else pure Nothing
   n <- updateThenView (serverEnv config) action "Rate-limit policy not found"
+  invalidate (rateLimitPoliciesCache config)
   pure $ RateLimitResetResponse {reset = n}
 
 -- | Concurrency management/observability handlers.
@@ -1016,9 +1088,10 @@ listConcurrencyHandler
   :: forall registry
    . ArbiterServerConfig registry
   -> Handler ConcurrencyPoliciesResponse
-listConcurrencyHandler config = do
-  views <- liftIO $ runSimpleDb (serverEnv config) HL.listConcurrencyPolicies
-  pure $ ConcurrencyPoliciesResponse {policies = views}
+listConcurrencyHandler config =
+  liftIO $ cachedFor policyStatsCacheTtl (concurrencyPoliciesCache config) $ do
+    views <- runSimpleDb (serverEnv config) HL.listConcurrencyPolicies
+    pure $ ConcurrencyPoliciesResponse {policies = views}
 
 -- | List a prefix's keys with in-flight fill levels, paginated (default 100, max 1000).
 listConcurrencyKeysHandler
@@ -1046,12 +1119,14 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLim) 
         | otherwise = Nothing
   case invalid of
     Just msg -> throwError err400 {errBody = msg}
-    Nothing ->
+    Nothing -> do
       -- An absent overrideLimit changes nothing, so read the view without rewriting the row.
       let action = case mLim of
             Nothing -> HL.getConcurrencyPolicy prefix
             Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
-       in updateThenView (serverEnv config) action "Concurrency pool not found"
+      view <- updateThenView (serverEnv config) action "Concurrency pool not found"
+      invalidate (concurrencyPoliciesCache config)
+      pure view
 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler
@@ -1061,6 +1136,7 @@ reconcileConcurrencyHandler
   -> Handler ConcurrencyReconcileResponse
 reconcileConcurrencyHandler config = do
   n <- liftIO $ runSimpleDb (serverEnv config) HL.reconcileConcurrencyCounts
+  invalidate (concurrencyPoliciesCache config)
   pure $ ConcurrencyReconcileResponse {reconciled = n}
 
 -- | Server for the shared top-level routes.

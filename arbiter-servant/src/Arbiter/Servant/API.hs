@@ -211,6 +211,11 @@ data QueuesAPI mode = QueuesAPI
     listQueues
       :: mode
         :- Get '[JSON] QueuesResponse
+  , -- GET /queues/stats
+    getAllStats
+      :: mode
+        :- "stats"
+          :> Get '[JSON] AllStatsResponse
   , -- GET /queues/:queue/details
     getDetails
       :: mode

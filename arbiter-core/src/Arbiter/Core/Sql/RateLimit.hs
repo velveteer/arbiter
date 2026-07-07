@@ -9,15 +9,10 @@ module Arbiter.Core.Sql.RateLimit
   , resetRateLimitBucketsSQL
   , wakeThrottledJobsSQL
   , wakeThrottledJobsForKeySQL
-  , wakeThrottledAcrossSQL
-  , wakeThrottledBody
-  , accruedTokensExpr
   , refilledExpr
-  , refilledTokensExpr
   , listRateLimitPoliciesSQL
   , getRateLimitPolicySQL
   , rateLimitPolicyExistsSQL
-  , rateLimitPoliciesSQL
   , listRateLimitBucketsSQL
   , updateRateLimitOverridesSQL
   ) where
@@ -175,7 +170,7 @@ rateLimitPoliciesSQL schema tableNames single =
       refilled = refilledTokensExpr "b" "pp"
       (kCte, aggWhere, scope) = policyViewScope single "b.policy_prefix"
       thrScope = if single then " AND rate_limit_prefix = (SELECT prefix FROM k)" else "" :: Text
-      thrUnion = unionAllOverQueueTables schema tableNames $ \t ->
+      thrUnion = unionAllOverQueueTables schema tableNames $ \_ t ->
         "SELECT rate_limit_prefix AS prefix, COUNT(*)::int8 AS c FROM "
           <> t
           <> " WHERE "
@@ -201,11 +196,14 @@ rateLimitPoliciesSQL schema tableNames single =
                agg.min_tokens, agg.avg_tokens
         FROM ${policies} p
         LEFT JOIN (
-          SELECT b.policy_prefix, COUNT(*) AS bucket_count,
-                 MIN(${refilled}) AS min_tokens, AVG(${refilled}) AS avg_tokens
-          FROM ${buckets} b JOIN ${policies} pp ON pp.prefix_id = b.policy_prefix
-          ${aggWhere}
-          GROUP BY b.policy_prefix
+          SELECT policy_prefix, COUNT(*) AS bucket_count,
+                 MIN(tok) AS min_tokens, AVG(tok) AS avg_tokens
+          FROM (
+            SELECT b.policy_prefix, ${refilled} AS tok
+            FROM ${buckets} b JOIN ${policies} pp ON pp.prefix_id = b.policy_prefix
+            ${aggWhere}
+          ) r
+          GROUP BY policy_prefix
         ) agg ON agg.policy_prefix = p.prefix_id
         ${thrJoin}
         ${scope}
@@ -220,15 +218,19 @@ listRateLimitBucketsSQL schema =
       refilled = refilledTokensExpr "b" "p"
       effMax = effectivePolicyCol "p" "max_tokens"
    in [text|
-        SELECT b.rate_limit_key, b.policy_prefix,
-               ${refilled} AS tokens,
-               ${effMax} AS max_tokens,
-               ${refilled} / NULLIF(${effMax}, 0) AS fill_fraction,
-               b.last_refill
-        FROM ${buckets} b
-        JOIN ${policies} p ON p.prefix_id = b.policy_prefix
-        WHERE b.policy_prefix = ?
-        ORDER BY fill_fraction ASC NULLS LAST, b.rate_limit_key
+        SELECT rate_limit_key, policy_prefix, tokens, max_tokens,
+               tokens / NULLIF(max_tokens, 0) AS fill_fraction,
+               last_refill
+        FROM (
+          SELECT b.rate_limit_key, b.policy_prefix,
+                 ${refilled} AS tokens,
+                 ${effMax} AS max_tokens,
+                 b.last_refill
+          FROM ${buckets} b
+          JOIN ${policies} p ON p.prefix_id = b.policy_prefix
+          WHERE b.policy_prefix = ?
+        ) r
+        ORDER BY fill_fraction ASC NULLS LAST, rate_limit_key
         LIMIT ? OFFSET ?
       |]
 

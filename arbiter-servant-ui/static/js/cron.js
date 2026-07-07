@@ -87,6 +87,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     destroy() {
+      // Tears down the timezone picker's window scroll/resize listeners, which only
+      // cancelEdit removes; a view/queue change skips onHide, so destroy must do it.
+      this.cancelEdit();
       this.teardownPolling();
     },
 

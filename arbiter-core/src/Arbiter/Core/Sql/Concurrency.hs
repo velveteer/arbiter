@@ -12,7 +12,6 @@ module Arbiter.Core.Sql.Concurrency
   , reconcileConcurrencyCountsSQL
   , listConcurrencyPoliciesSQL
   , getConcurrencyPolicySQL
-  , concurrencyPoliciesSQL
   , listConcurrencyKeysSQL
   , concurrencyHasAnyKeySQL
   , concurrencyCountsStaleSQL
@@ -40,7 +39,7 @@ updateConcurrencyPolicyOverrideSQL schema =
 -- | Every concurrency_key held by a live job, unioned across the queue tables.
 liveConcurrencyKeysUnion :: SchemaName -> [TableName] -> Text
 liveConcurrencyKeysUnion schema tableNames =
-  unionAllOverQueueTables schema tableNames $ \t ->
+  unionAllOverQueueTables schema tableNames $ \_ t ->
     "SELECT concurrency_key FROM " <> t <> " WHERE concurrency_key IS NOT NULL"
 
 -- | Lock count rows with no live job, in key order to match the triggers. Returns the locked keys.
@@ -99,7 +98,7 @@ lockConcurrencyCountsSQL schema =
 reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> Text
 reconcileConcurrencyCountsSQL schema tableNames =
   let concTbl = arbiterConcurrencyTable schema
-      union = unionAllOverQueueTables schema tableNames $ \t ->
+      union = unionAllOverQueueTables schema tableNames $ \_ t ->
         "SELECT concurrency_key, claimed_by, concurrency_prefix FROM " <> t <> " WHERE concurrency_key IS NOT NULL"
    in [text|
         WITH live AS (
@@ -173,13 +172,16 @@ listConcurrencyKeysSQL schema =
       counts = arbiterConcurrencyTable schema
       effLimit = effectivePolicyCol "p" "limit"
    in [text|
-        SELECT c.concurrency_key, c.concurrency_prefix, c.in_flight,
-               ${effLimit} AS effective_limit,
-               c.in_flight::float8 / NULLIF(${effLimit}, 0) AS fill_fraction
-        FROM ${counts} c
-        JOIN ${policies} p ON p.prefix_id = c.concurrency_prefix
-        WHERE c.concurrency_prefix = ?
-        ORDER BY fill_fraction DESC NULLS LAST, c.concurrency_key
+        SELECT concurrency_key, concurrency_prefix, in_flight, effective_limit,
+               in_flight::float8 / NULLIF(effective_limit, 0) AS fill_fraction
+        FROM (
+          SELECT c.concurrency_key, c.concurrency_prefix, c.in_flight,
+                 ${effLimit} AS effective_limit
+          FROM ${counts} c
+          JOIN ${policies} p ON p.prefix_id = c.concurrency_prefix
+          WHERE c.concurrency_prefix = ?
+        ) r
+        ORDER BY fill_fraction DESC NULLS LAST, concurrency_key
         LIMIT ? OFFSET ?
       |]
 

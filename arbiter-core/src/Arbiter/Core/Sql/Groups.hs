@@ -19,8 +19,6 @@ lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
    in [text|SELECT group_key FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
 
--- | Whether any concurrency key exists, to skip the full reconcile/prune scan otherwise.
-
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
 -- A separate statement, so its snapshot post-dates the lock and cannot clobber a
 -- concurrent claim's @in_flight_until@. The INSERT only repairs missing rows.
@@ -78,7 +76,3 @@ refreshGroupsSQL schema tableName =
         GROUP BY group_key
         ON CONFLICT (group_key) DO NOTHING
       |]
-
--- ---------------------------------------------------------------------------
--- Cron Schedule Operations
--- ---------------------------------------------------------------------------

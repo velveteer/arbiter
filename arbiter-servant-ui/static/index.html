@@ -20,34 +20,20 @@
   <div class="container-fluid">
     <a class="navbar-brand" href="#">A R B I T E R</a>
 
-    <!-- Queue selector -->
-    <div class="nav-queue dropdown" x-data>
-      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
-        <span x-text="$store.app.selectedQueue || 'Select Queue'"></span>
-      </button>
-      <ul class="dropdown-menu">
-        <template x-for="q in $store.app.queues" :key="q">
-          <li>
-            <a class="dropdown-item" href="#" @click.prevent="$store.app.selectQueue(q)" x-text="q"
-              :class="{ 'active': q === $store.app.selectedQueue }"></a>
-          </li>
-        </template>
-      </ul>
-    </div>
+    <!-- Primary nav: the queue area plus the instance-wide singletons -->
+    <nav class="nav-primary" aria-label="Primary">
+      <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'queues' }"
+        @click="$store.app.setView('queues')">Queues</button>
+      <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'ratelimits' }"
+        @click="$store.app.setView('ratelimits')">Rate Limits</button>
+      <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'concurrency' }"
+        @click="$store.app.setView('concurrency')">Concurrency</button>
+      <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'events' }"
+        @click="$store.app.setView('events')">Events</button>
+    </nav>
 
-    <!-- Controls: pause/resume, SSE status, theme -->
-    <div class="nav-controls d-flex align-items-center gap-3">
-      <!-- Queue pause/resume -->
-      <div x-data="queuePauseToggle" x-show="$store.app.selectedQueue" class="d-flex align-items-center gap-3">
-        <span x-show="paused" class="badge paused-badge"
-              :title="pausedAt ? formatTime(pausedAt) : ''">
-          queue paused<template x-if="pausedAgeStr"><span class="ms-1 fw-normal" x-text="'(' + pausedAgeStr + ')'"></span></template>
-        </span>
-        <button class="btn btn-sm" :class="isArmed('toggle') ? 'btn-warning' : (paused ? 'btn-success' : 'btn-outline-warning')"
-                :disabled="busy" @click="toggle()"
-                x-text="isArmed('toggle') ? 'Click to confirm' : (paused ? 'Resume queue' : 'Pause queue')"></button>
-      </div>
-
+    <!-- Controls: SSE status, theme -->
+    <div class="nav-controls d-flex align-items-center gap-3 ms-auto">
       <!-- SSE status indicator -->
       <span class="sse-status" role="status"
         :class="$store.app.sseDisabled ? 'polling' : ($store.app.connected ? 'connected' : 'disconnected')"
@@ -69,95 +55,189 @@
 
 <!-- Main content -->
 <div class="container-fluid mt-3">
-  <!-- Tabs -->
-  <ul class="nav nav-tabs" id="main-tabs" role="tablist">
-    <li class="nav-item tab-group-label" aria-hidden="true">Queue</li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-stats" type="button" role="tab">Stats</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-jobs" type="button" role="tab">Jobs</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-dlq" type="button" role="tab">DLQ</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-cron" type="button" role="tab">Cron</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-workers" type="button" role="tab">Workers</button>
-    </li>
-    <li class="nav-item tab-group-label tab-group-divider" aria-hidden="true">Global</li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-events" type="button" role="tab">Events</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ratelimits" type="button" role="tab">Rate Limits</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-concurrency" type="button" role="tab">Concurrency</button>
-    </li>
-  </ul>
+  <!-- ============================================================ -->
+  <!-- Area: Queue list (landing) — shown when no queue is drilled into -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'queues' && !$store.app.selectedQueue && !$store.app._deepLinkPending">
+    <div x-data="queueListTab">
+      <div class="queue-grid">
+        <template x-for="r in rows" :key="r.queue">
+          <div class="queue-card" :class="{ 'is-throttled': r.stats?.throttledJobs > 0, 'is-paused': r.paused }">
+            <a class="queue-card-head" :href="queueUrl(r.queue)" @click="navTo($event, r.queue)">
+              <span class="queue-card-name" x-text="r.queue" :title="r.queue"></span>
+              <span class="queue-card-arrow" aria-hidden="true">&rarr;</span>
+            </a>
+            <template x-if="pauseState(r)">
+              <div class="queue-card-pause" :class="'is-' + pauseState(r).key" x-text="pauseState(r).label"></div>
+            </template>
 
-  <div class="tab-content mt-3">
+            <div class="queue-card-body">
+              <a class="queue-card-hero" :href="queueUrl(r.queue, 'ready')" @click="navTo($event, r.queue, 'ready')">
+                <span class="queue-card-ready" x-text="fmtCount(r.stats?.readyJobs)"></span>
+                <span class="queue-card-ready-label">ready</span>
+              </a>
+              <div class="queue-card-stats">
+                <a class="queue-card-stat" :href="queueUrl(r.queue, 'in_flight')" @click="navTo($event, r.queue, 'in_flight')">
+                  <span class="qc-val" x-text="fmtCount(r.stats?.inFlightJobs)"></span><span class="qc-lbl">in-flight</span>
+                </a>
+                <a class="queue-card-stat" :href="queueUrl(r.queue, 'scheduled')" @click="navTo($event, r.queue, 'scheduled')">
+                  <span class="qc-val" x-text="fmtCount(r.stats?.scheduledJobs)"></span><span class="qc-lbl">scheduled</span>
+                </a>
+                <a class="queue-card-stat" :href="queueUrl(r.queue, 'backoff')" @click="navTo($event, r.queue, 'backoff')">
+                  <span class="qc-val" x-text="fmtCount(r.stats?.backoffJobs)"></span><span class="qc-lbl">backoff</span>
+                </a>
+                <a class="queue-card-stat" :href="queueUrl(r.queue, 'throttled')" @click="navTo($event, r.queue, 'throttled')">
+                  <span class="qc-val" :class="{ warn: r.stats?.throttledJobs > 0 }" x-text="fmtCount(r.stats?.throttledJobs)"></span><span class="qc-lbl">throttled</span>
+                </a>
+              </div>
+              <div class="queue-card-oldest">
+                <span>oldest ready</span>
+                <span x-text="r.stats?.oldestReadyAgeSeconds != null ? Math.round(r.stats.oldestReadyAgeSeconds) + 's' : '—'"></span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div class="queue-list-empty" x-show="loading && !loaded && rows.length === 0">Loading queues…</div>
+      <div class="queue-list-empty" x-show="_loadErrored && rows.length === 0">Failed to load queues. <a href="#" @click.prevent="load()">Retry</a></div>
+      <div class="queue-list-empty" x-show="loaded && !_loadErrored && rows.length === 0">No queues available.</div>
+    </div>
+  </template>
+
+  <!-- ============================================================ -->
+  <!-- Area: Queue detail — the drilled-into queue's scoped sub-tabs -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'queues' && $store.app.selectedQueue">
+    <div x-init="$nextTick(() => activateSubTabFromHash(['stats','jobs','dlq','cron','workers']))">
+      <!-- Breadcrumb + quick switcher + pause -->
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <nav aria-label="breadcrumb">
+          <ol class="breadcrumb mb-0">
+            <li class="breadcrumb-item"><a href="#" @click.prevent="$store.app.setView('queues')">Queues</a></li>
+            <li class="breadcrumb-item active" aria-current="page" x-text="$store.app.selectedQueue"></li>
+          </ol>
+        </nav>
+        <div class="dropdown" x-show="$store.app.queues.length > 1">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Switch queue">Switch</button>
+          <ul class="dropdown-menu">
+            <template x-for="q in $store.app.queues" :key="q">
+              <li>
+                <a class="dropdown-item" href="#" @click.prevent="$store.app.openQueue(q)" x-text="q"
+                  :class="{ 'active': q === $store.app.selectedQueue }"></a>
+              </li>
+            </template>
+          </ul>
+        </div>
+        <div class="ms-auto d-flex align-items-center gap-3" x-data="queuePauseToggle">
+          <span x-show="paused" class="badge paused-badge" :title="pausedAt ? formatTime(pausedAt) : ''">
+            queue paused<template x-if="pausedAgeStr"><span class="ms-1 fw-normal" x-text="'(' + pausedAgeStr + ')'"></span></template>
+          </span>
+          <button class="btn btn-sm text-nowrap" x-show="showPauseToggle" :class="isArmed('toggle') ? 'btn-warning' : (paused ? 'btn-success' : 'btn-outline-warning')"
+                  :disabled="busy" @click="onToggle()"
+                  x-text="isArmed('toggle') ? 'Click to confirm' : (paused ? 'Resume queue' : 'Pause queue')"></button>
+
+          <!-- Type-to-confirm pause (ARB_CONFIG.pauseConfirm === 'type'). -->
+          <div class="modal fade" id="pauseConfirmModal" tabindex="-1" aria-labelledby="pauseConfirmModalLabel">
+            <div class="modal-dialog">
+              <div class="modal-content">
+                <div class="modal-header">
+                  <h5 class="modal-title" id="pauseConfirmModalLabel">Pause queue <code x-text="$store.app.selectedQueue"></code></h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                  <p class="text-muted small mb-3">Pausing stops all workers from claiming jobs in this queue until it is resumed. In-flight jobs finish, new ones wait.</p>
+                  <label class="form-label small">Type the queue name <code x-text="$store.app.selectedQueue"></code> to confirm:</label>
+                  <input type="text" class="form-control form-control-sm" x-model="pauseConfirmText" autocomplete="off" spellcheck="false"
+                         @keydown.enter.prevent="confirmPause()" :placeholder="$store.app.selectedQueue">
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                  <button type="button" class="btn btn-warning btn-sm" @click="confirmPause()" :disabled="!pauseConfirmValid || busy">Pause queue</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <ul class="nav nav-tabs" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stats" type="button" role="tab">Stats</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-jobs" type="button" role="tab">Jobs</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-dlq" type="button" role="tab">DLQ</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-cron" type="button" role="tab">Cron</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-workers" type="button" role="tab">Workers</button>
+        </li>
+      </ul>
+
+      <div class="tab-content mt-3">
     <!-- Stats Tab -->
-    <div class="tab-pane fade show active" id="tab-stats" role="tabpanel" x-data="statsTab">
+    <div class="tab-pane fade" id="tab-stats" role="tabpanel" x-data="statsTab">
       <div class="row g-3" x-show="$store.app.selectedQueue">
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center">
+          <a class="card text-center stat-card" :href="jobsUrl('')" @click="goToJobs($event, '')">
             <div class="card-body">
               <h5 class="card-title text-muted">Total Jobs</h5>
               <p class="display-6" x-text="stats?.totalJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center">
+          <a class="card text-center stat-card" :href="jobsUrl('ready')" @click="goToJobs($event, 'ready')">
             <div class="card-body">
               <h5 class="card-title text-muted">Ready</h5>
               <p class="display-6" x-text="stats?.readyJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center" title="Jobs currently leased by a worker">
+          <a class="card text-center stat-card" title="Jobs currently leased by a worker" :href="jobsUrl('in_flight')" @click="goToJobs($event, 'in_flight')">
             <div class="card-body">
               <h5 class="card-title text-muted">In-Flight</h5>
               <p class="display-6" x-text="stats?.inFlightJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center" title="Jobs delayed until a future time, not yet attempted">
+          <a class="card text-center stat-card" title="Jobs delayed until a future time, not yet attempted" :href="jobsUrl('scheduled')" @click="goToJobs($event, 'scheduled')">
             <div class="card-body">
               <h5 class="card-title text-muted">Scheduled</h5>
               <p class="display-6" x-text="stats?.scheduledJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center" title="Failed jobs waiting out a retry backoff delay">
+          <a class="card text-center stat-card" title="Failed jobs waiting out a retry backoff delay" :href="jobsUrl('backoff')" @click="goToJobs($event, 'backoff')">
             <div class="card-body">
               <h5 class="card-title text-muted">Backoff</h5>
               <p class="display-6" x-text="stats?.backoffJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center" title="Jobs parked by a rate limit until tokens refill">
+          <a class="card text-center stat-card" title="Jobs parked by a rate limit until tokens refill" :href="jobsUrl('throttled')" @click="goToJobs($event, 'throttled')">
             <div class="card-body">
               <h5 class="card-title text-muted">Throttled</h5>
               <p class="display-6" x-text="stats?.throttledJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card text-center" title="Suspended jobs (e.g. rollup finalizers awaiting children)">
+          <a class="card text-center stat-card" title="Suspended jobs (e.g. rollup finalizers awaiting children)" :href="jobsUrl('suspended')" @click="goToJobs($event, 'suspended')">
             <div class="card-body">
               <h5 class="card-title text-muted">Suspended</h5>
               <p class="display-6" x-text="stats?.suspendedJobs ?? '-'"></p>
             </div>
-          </div>
+          </a>
         </div>
         <div class="col-sm-6 col-lg-3">
           <div class="card text-center" title="Age of the oldest job currently ready to claim">
@@ -181,7 +261,7 @@
             placeholder="Group key..." aria-label="Filter by group key"
             x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
+            x-show="groupKeyFilter" @mousedown.prevent @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
@@ -190,7 +270,7 @@
             placeholder="Parent ID..." aria-label="Filter by parent ID"
             x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
+            x-show="parentIdFilter" @mousedown.prevent @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
@@ -291,7 +371,7 @@
       </div>
 
       <!-- Pagination (top) -->
-      <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
+      <div class="align-items-center gap-2 mb-2" :class="loaded ? 'd-flex' : 'd-none'">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
           <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
@@ -481,7 +561,7 @@
       </div>
 
       <!-- Pagination (bottom) -->
-      <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
+      <div class="align-items-center gap-2 mb-4" :class="loaded ? 'd-flex' : 'd-none'">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
           <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
@@ -554,7 +634,7 @@
             placeholder="Group key..." aria-label="Filter by group key"
             x-model="groupKeyFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="groupKeyFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="groupKeyFilter" @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
+            x-show="groupKeyFilter" @mousedown.prevent @click="groupKeyFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
@@ -563,7 +643,7 @@
             placeholder="Parent ID..." aria-label="Filter by parent ID"
             x-model="parentIdFilter" @keyup.enter="applyFilter()" @change="applyFilter()" @keyup.escape="parentIdFilter = ''; applyFilter()">
           <button class="btn btn-sm position-absolute top-50 end-0 translate-middle-y border-0 p-0 me-2 text-muted"
-            x-show="parentIdFilter" @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
+            x-show="parentIdFilter" @mousedown.prevent @click="parentIdFilter = ''; applyFilter()" title="Clear filter" aria-label="Clear filter"
             style="line-height: 1; font-size: .75rem; opacity: .6;"
             @mouseenter="$el.style.opacity=1" @mouseleave="$el.style.opacity=.6">&#x2715;</button>
         </div>
@@ -606,7 +686,7 @@
       <div class="text-info small mb-2" x-show="refreshMode === 'paused' && pendingChanges > 0" x-text="pendingChanges + ' changes pending'"></div>
 
       <!-- Bulk actions (shown when rows are selected) -->
-      <div class="d-flex align-items-center gap-2 mb-2" x-show="selectedCount > 0" x-cloak>
+      <div class="align-items-center gap-2 mb-2" :class="selectedCount > 0 ? 'd-flex' : 'd-none'">
         <span class="small fw-semibold" x-text="selectedCount + ' selected'"></span>
         <button class="btn btn-sm" :class="isArmed('bulkRetry') ? 'btn-success' : 'btn-outline-success'" :disabled="bulkBusy" @click="bulkRetry()" x-text="isArmed('bulkRetry') ? ('Confirm retry ' + selectedCount) : 'Retry selected'"></button>
         <button class="btn btn-sm" :class="isArmed('bulkDelete') ? 'btn-danger' : 'btn-outline-danger'" :disabled="bulkBusy" @click="bulkDelete()" x-text="isArmed('bulkDelete') ? ('Confirm delete ' + selectedCount + ' permanently') : 'Delete selected'"></button>
@@ -614,7 +694,7 @@
       </div>
 
       <!-- Pagination (top) -->
-      <div class="d-flex align-items-center gap-2 mb-2" x-show="loaded">
+      <div class="align-items-center gap-2 mb-2" :class="loaded ? 'd-flex' : 'd-none'">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
           <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
@@ -702,7 +782,7 @@
       </div>
 
       <!-- Pagination (bottom) -->
-      <div class="d-flex align-items-center gap-2 mb-4" x-show="loaded">
+      <div class="align-items-center gap-2 mb-4" :class="loaded ? 'd-flex' : 'd-none'">
         <div class="btn-group btn-group-sm">
           <button class="btn btn-outline-secondary" :disabled="currentPage === 1" @click="prevPage()">Prev</button>
           <button class="btn btn-outline-secondary" :disabled="currentPage >= totalPages" @click="nextPage()">Next</button>
@@ -756,69 +836,6 @@
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- Events Tab -->
-    <div class="tab-pane fade" id="tab-events" role="tabpanel" x-data="eventsTab">
-      <template x-if="active">
-        <div>
-          <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
-            <div class="input-group" style="max-width: 200px;">
-              <select class="form-select form-select-sm" x-model="filterQueue" aria-label="Filter events by queue">
-                <option value="">All Queues</option>
-                <template x-for="q in $store.app.queues" :key="q">
-                  <option :value="q" x-text="q"></option>
-                </template>
-              </select>
-            </div>
-            <div class="d-flex gap-2">
-              <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="evt-inserted" x-model="filterTypes.job_inserted">
-                <label class="form-check-label" for="evt-inserted"><span class="badge bg-primary-subtle text-primary-emphasis">Inserted</span></label>
-              </div>
-              <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="evt-updated" x-model="filterTypes.job_updated">
-                <label class="form-check-label" for="evt-updated"><span class="badge bg-warning-subtle text-warning-emphasis">Updated</span></label>
-              </div>
-              <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="evt-deleted" x-model="filterTypes.job_deleted">
-                <label class="form-check-label" for="evt-deleted"><span class="badge bg-danger-subtle text-danger-emphasis">Deleted</span></label>
-              </div>
-              <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="evt-dlq" x-model="filterTypes.job_dlq">
-                <label class="form-check-label" for="evt-dlq"><span class="badge bg-secondary-subtle text-secondary-emphasis">DLQ</span></label>
-              </div>
-            </div>
-            <button class="btn btn-outline-secondary btn-sm" @click="clearEvents()">Clear</button>
-          </div>
-
-          <div class="event-log">
-            <table class="table table-sm table-hover">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Event</th>
-                  <th>Table</th>
-                  <th>Job ID</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="evt in filteredEvents" :key="evt._seq">
-                  <tr>
-                    <td x-text="formatTime(evt.receivedAt)"></td>
-                    <td><span class="badge" :class="badgeClass(evt.event)" x-text="evt.event"></span></td>
-                    <td x-text="evt.table || '-'"></td>
-                    <td x-text="evt.job_id || '-'"></td>
-                  </tr>
-                </template>
-                <tr x-show="filteredEvents.length === 0">
-                  <td colspan="4" class="text-muted text-center">No events yet. Events appear in real-time via SSE.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </template>
     </div>
 
     <!-- Cron Tab -->
@@ -1047,7 +1064,7 @@
                 <td>
                   <div class="d-inline-flex gap-1 flex-nowrap">
                     <button class="btn btn-sm btn-outline-primary" @click="showDetail(w)" title="View">Detail</button>
-                    <button class="btn btn-sm"
+                    <button class="btn btn-sm text-nowrap"
                             :class="isArmed('toggle:' + w.workerId) ? 'btn-warning' : 'btn-outline-secondary'"
                             :disabled="isBusy(w.workerId) || w.shuttingDown"
                             @click="togglePause(w)"
@@ -1113,9 +1130,82 @@
         </div>
       </div>
     </div>
+      </div>
+    </div>
+  </template>
 
+  <!-- ============================================================ -->
+  <!-- Area: Events (instance-wide) -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'events'">
+    <div class="mt-3">
+    <div x-data="eventsTab">
+          <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+            <div class="input-group" style="max-width: 200px;">
+              <select class="form-select form-select-sm" x-model="filterQueue" aria-label="Filter events by queue">
+                <option value="">All Queues</option>
+                <template x-for="q in $store.app.queues" :key="q">
+                  <option :value="q" x-text="q"></option>
+                </template>
+              </select>
+            </div>
+            <div class="d-flex gap-2">
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-inserted" x-model="filterTypes.job_inserted">
+                <label class="form-check-label" for="evt-inserted"><span class="badge bg-primary-subtle text-primary-emphasis">Inserted</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-updated" x-model="filterTypes.job_updated">
+                <label class="form-check-label" for="evt-updated"><span class="badge bg-warning-subtle text-warning-emphasis">Updated</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-deleted" x-model="filterTypes.job_deleted">
+                <label class="form-check-label" for="evt-deleted"><span class="badge bg-danger-subtle text-danger-emphasis">Deleted</span></label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="checkbox" id="evt-dlq" x-model="filterTypes.job_dlq">
+                <label class="form-check-label" for="evt-dlq"><span class="badge bg-secondary-subtle text-secondary-emphasis">DLQ</span></label>
+              </div>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @click="clearEvents()">Clear</button>
+          </div>
+
+          <div class="event-log">
+            <table class="table table-sm table-hover">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Event</th>
+                  <th>Table</th>
+                  <th>Job ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="evt in filteredEvents" :key="evt._seq">
+                  <tr>
+                    <td x-text="formatTime(evt.receivedAt)"></td>
+                    <td><span class="badge" :class="badgeClass(evt.event)" x-text="evt.event"></span></td>
+                    <td x-text="evt.table || '-'"></td>
+                    <td x-text="evt.job_id || '-'"></td>
+                  </tr>
+                </template>
+                <tr x-show="filteredEvents.length === 0">
+                  <td colspan="4" class="text-muted text-center">No events yet. Events appear in real-time via SSE.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+    </div>
+    </div>
+  </template>
+
+  <!-- ============================================================ -->
+  <!-- Area: Rate Limits (instance-wide) -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'ratelimits'">
+    <div class="mt-3">
     <!-- Rate Limits Tab -->
-    <div class="tab-pane fade" id="tab-ratelimits" role="tabpanel" x-data="rateLimitsTab">
+    <div id="tab-ratelimits" x-data="rateLimitsTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
         <button class="btn btn-outline-secondary btn-sm" @click="loadPolicies()">Refresh</button>
         <span class="text-muted small" x-show="loaded && policies.length">
@@ -1126,13 +1216,13 @@
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
-            <col style="width: 18%">
-            <col style="width: 14%">
-            <col style="width: 9%">
-            <col style="width: 9%">
+            <col style="width: 22%">
+            <col style="width: 12%">
+            <col style="width: 8%">
+            <col style="width: 8%">
             <col style="width: 10%">
-            <col style="width: 20%">
-            <col style="width: 20%">
+            <col style="width: 16%">
+            <col style="width: 24%">
           </colgroup>
           <thead>
             <tr>
@@ -1142,7 +1232,7 @@
               <th>Keys</th>
               <th>Throttled</th>
               <th>Avg fill</th>
-              <th class="text-end">Actions</th>
+              <th class="cell-actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1169,11 +1259,13 @@
                   </template>
                   <span x-show="p.bucketCount === 0" class="text-muted">-</span>
                 </td>
-                <td class="text-end">
-                  <button class="btn btn-outline-primary btn-sm" @click="openEdit(p)">Edit</button>
-                  <button class="btn btn-sm ms-2" :class="isArmed('reset:' + p.prefix) ? 'btn-warning' : 'btn-outline-danger'"
-                    @click="resetPrefix(p)"
-                    x-text="isArmed('reset:' + p.prefix) ? 'Confirm reset' : 'Reset'"></button>
+                <td class="cell-actions">
+                  <div class="d-inline-flex gap-2 flex-nowrap">
+                    <button class="btn btn-outline-primary btn-sm" @click="openEdit(p)">Edit</button>
+                    <button class="btn btn-sm text-nowrap" :class="isArmed('reset:' + p.prefix) ? 'btn-warning' : 'btn-outline-danger'"
+                      @click="resetPrefix(p)"
+                      x-text="isArmed('reset:' + p.prefix) ? 'Confirm reset' : 'Reset'"></button>
+                  </div>
                 </td>
               </tr>
             </template>
@@ -1188,8 +1280,8 @@
       <div x-show="expandedPrefix" class="mt-2">
         <h6 class="mb-2">
           Buckets for <code x-text="expandedPrefix"></code>
-          <span class="text-muted small fw-normal" x-show="itemTotal() > buckets.length"
-            x-text="`showing ${buckets.length} most-drained of ${itemTotal()}`"></span>
+          <span class="text-muted small fw-normal" x-show="hasMoreItems()"
+            x-text="`showing ${itemCap} most-drained of ${itemTotal()}`"></span>
         </h6>
         <div class="table-responsive">
           <table class="table table-sm table-bordered" style="table-layout: fixed; width: 100%;">
@@ -1233,7 +1325,7 @@
                   <label class="form-check-label" for="rlMaxOn">Max tokens (burst)</label>
                 </div>
                 <input type="number" min="0" step="any" class="form-control form-control-sm" x-model="edit.max" :disabled="!edit.maxOn"
-                  :placeholder="`default ${edit.defaultMax}`">
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultMax}`">
               </div>
               <div class="mb-3">
                 <div class="form-check form-switch">
@@ -1241,7 +1333,7 @@
                   <label class="form-check-label" for="rlRefillOn">Refill amount</label>
                 </div>
                 <input type="number" min="0" step="any" class="form-control form-control-sm" x-model="edit.refill" :disabled="!edit.refillOn"
-                  :placeholder="`default ${edit.defaultRefill}`">
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultRefill}`">
               </div>
               <div class="mb-3">
                 <div class="form-check form-switch">
@@ -1249,7 +1341,7 @@
                   <label class="form-check-label" for="rlIntervalOn">Interval (seconds)</label>
                 </div>
                 <input type="number" min="0" step="any" class="form-control form-control-sm" x-model="edit.interval" :disabled="!edit.intervalOn"
-                  :placeholder="`default ${edit.defaultInterval}`">
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultInterval}`">
               </div>
               <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
             </div>
@@ -1261,9 +1353,16 @@
         </div>
       </div>
     </div>
+    </div>
+  </template>
 
+  <!-- ============================================================ -->
+  <!-- Area: Concurrency (instance-wide) -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'concurrency'">
+    <div class="mt-3">
     <!-- Concurrency Tab -->
-    <div class="tab-pane fade" id="tab-concurrency" role="tabpanel" x-data="concurrencyTab">
+    <div id="tab-concurrency" x-data="concurrencyTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
         <button class="btn btn-outline-secondary btn-sm" @click="loadPolicies()">Refresh</button>
         <button class="btn btn-sm" :class="isArmed('reconcile') ? 'btn-warning' : 'btn-outline-secondary'"
@@ -1290,7 +1389,7 @@
               <th>Keys</th>
               <th>In flight</th>
               <th>Busiest key</th>
-              <th class="text-end">Actions</th>
+              <th class="cell-actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1314,7 +1413,7 @@
                   </template>
                   <span x-show="p.keyCount === 0" class="text-muted">-</span>
                 </td>
-                <td class="text-end">
+                <td class="cell-actions">
                   <button class="btn btn-outline-primary btn-sm" @click="openEdit(p)">Edit</button>
                 </td>
               </tr>
@@ -1330,8 +1429,8 @@
       <div x-show="expandedPrefix" class="mt-2">
         <h6 class="mb-2">
           Keys for <code x-text="expandedPrefix"></code>
-          <span class="text-muted small fw-normal" x-show="itemTotal() > keys.length"
-            x-text="`showing ${keys.length} busiest of ${itemTotal()}`"></span>
+          <span class="text-muted small fw-normal" x-show="hasMoreItems()"
+            x-text="`showing ${itemCap} busiest of ${itemTotal()}`"></span>
         </h6>
         <div class="table-responsive">
           <table class="table table-sm table-bordered" style="table-layout: fixed; width: 100%;">
@@ -1375,7 +1474,7 @@
                   <label class="form-check-label" for="ccLimitOn">Concurrent limit per key</label>
                 </div>
                 <input type="number" min="0" step="1" class="form-control form-control-sm" x-model="edit.limit" :disabled="!edit.limitOn"
-                  :placeholder="`default ${edit.defaultLimit}`">
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultLimit}`">
               </div>
               <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
             </div>
@@ -1387,7 +1486,8 @@
         </div>
       </div>
     </div>
-  </div>
+    </div>
+  </template>
 </div>
 
 <!-- Toast container -->
@@ -1400,21 +1500,13 @@
   document.addEventListener('hide.bs.modal', (e) => {
     if (e.target.contains(document.activeElement)) document.activeElement.blur();
   });
-
-  // Restore tab from URL hash (runs before Alpine removes x-cloak, so no flash)
-  (function() {
-    var hash = location.hash.replace('#', '');
-    if (hash) {
-      var tab = document.querySelector('[data-bs-target="#tab-' + hash + '"]');
-      if (tab) bootstrap.Tab.getOrCreateInstance(tab).show();
-    }
-  })();
 </script>
 <script src="js/config.js"></script>
 <script src="js/format.js"></script>
 <script src="js/api.js"></script>
 <script src="js/helpers.js"></script>
 <script src="js/store.js"></script>
+<script src="js/queue-list.js"></script>
 <script src="js/stats.js"></script>
 <script src="js/jobs.js"></script>
 <script src="js/dlq.js"></script>

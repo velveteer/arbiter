@@ -16,6 +16,12 @@ function formatJson(obj) {
   }
 }
 
+// Compact count: exact below 1000, then 1.2K / 15.2K / 1.5M. Null renders as an em dash.
+const _compactNumFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+function formatCompact(n) {
+  return n == null ? '—' : _compactNumFmt.format(n);
+}
+
 function formatTime(iso, fallback = '') {
   if (!iso) return fallback;
   try {

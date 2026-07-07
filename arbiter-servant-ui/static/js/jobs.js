@@ -5,18 +5,18 @@
 // weight is a relative share, renormalized over the visible columns to fill 100%.
 const JOB_COLUMNS = [
   { key: 'id', label: 'ID', weight: 4, required: true },
-  { key: 'payload', label: 'Payload', weight: 13 },
+  { key: 'payload', label: 'Payload', weight: 12 },
   { key: 'group', label: 'Group', weight: 7 },
-  { key: 'parent', label: 'Parent', weight: 5 },
+  { key: 'parent', label: 'Parent', weight: 7 },
   { key: 'children', label: 'Children', weight: 9 },
-  { key: 'priority', label: 'Priority', weight: 7 },
-  { key: 'attempts', label: 'Attempts', weight: 6 },
+  { key: 'priority', label: 'Priority', weight: 8 },
+  { key: 'attempts', label: 'Attempts', weight: 8 },
   { key: 'status', label: 'Status', weight: 7 },
   { key: 'inserted', label: 'Inserted At', weight: 10 },
-  { key: 'visible', label: 'Visible', weight: 17 },
+  { key: 'visible', label: 'Visible', weight: 12 },
   { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
-  { key: 'concurrency', label: 'Concurrency', weight: 9 },
-  { key: 'actions', label: 'Actions', weight: 15 },
+  { key: 'concurrency', label: 'Concurrency', weight: 10 },
+  { key: 'actions', label: 'Actions', weight: 12 },
 ];
 
 document.addEventListener('alpine:init', () => {
@@ -234,12 +234,37 @@ document.addEventListener('alpine:init', () => {
           ).length;
         },
       });
+      // A stats card (same detail view) asks to show a filtered job list.
+      this._onFilterJobs = (e) => this.showStatus(e.detail || '');
+      window.addEventListener(ARB_EVENTS.filterJobs, this._onFilterJobs);
     },
 
     destroy() {
       untrackTabActive(this);
       this._unbindTableEvents();
+      window.removeEventListener(ARB_EVENTS.filterJobs, this._onFilterJobs);
       this._stopTimer();
+    },
+
+    // Switch to the Jobs tab showing only `status` (clears other filters). The
+    // tab's onShow handler does the load, so this stays a single fetch.
+    showStatus(status) {
+      this.disarm();
+      this.stateFilter = status;
+      this.groupKeyFilter = '';
+      this._appliedGroupKey = '';
+      this.parentIdFilter = '';
+      this._appliedParentId = '';
+      this.offset = 0;
+      this.expandedParents = {};
+      this._expandSeq = {};
+      if (this.active) {
+        // Already on Jobs (no tab switch to trigger onShow), so reload directly.
+        this._resetView();
+      } else {
+        const btn = document.querySelector('[data-bs-target="#tab-jobs"]');
+        if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
+      }
     },
 
     async loadJobs(filterOverrides) {

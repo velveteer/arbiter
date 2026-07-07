@@ -3,7 +3,7 @@
  *
  * Global (not queue-scoped). Lists pools with live key and in-flight stats,
  * drills into a prefix's keys, edits the override limit, and reconciles counts
- * from live jobs. Polls every 15s while the Concurrency tab is visible.
+ * from live jobs. Polls while the Concurrency tab is visible.
  */
 const CC_KEY_LIMIT = 100;
 
@@ -23,10 +23,6 @@ document.addEventListener('alpine:init', () => {
       fetchPolicies: () => ArbiterAPI.listConcurrency(),
       fetchItems: (prefix, opts) => ArbiterAPI.listConcurrencyKeys(prefix, opts),
     }),
-    policies: [],
-    loading: false,
-    loaded: false,
-    _loadErrored: false,
     edit: {
       prefix: '',
       limitOn: false, limit: '',
@@ -35,7 +31,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     init() {
-      this.initPolling('#tab-concurrency', {});
+      this.initPollingMounted();
     },
 
     destroy() {
@@ -49,7 +45,8 @@ document.addEventListener('alpine:init', () => {
     // Utilization of the busiest key, as a percent of the effective limit.
     busiestPct(p) {
       const lim = this.effLimit(p);
-      if (lim == null || lim === 0 || p.maxInFlight == null) return lim === 0 && p.maxInFlight > 0 ? 100 : 0;
+      if (lim === 0) return p.maxInFlight > 0 ? 100 : 0;
+      if (lim == null || p.maxInFlight == null) return 0;
       return clampPct(p.maxInFlight / lim);
     },
     busiestClass(p) { return highFillClass(this.busiestPct(p)); },
@@ -82,10 +79,8 @@ document.addEventListener('alpine:init', () => {
         modalId: 'concurrencyEditModal',
         reload: () => this.loadPolicies(),
         buildBody: (e) => {
-          // A blank field is null (caught by the validator below), not 0.
-          const num = (v) => { if (v === '' || v == null) return null; const n = Number(v); return Number.isInteger(n) ? n : null; };
           // The override is sent as a value (override on) or null (revert to default).
-          const body = { overrideLimit: e.limitOn ? num(e.limit) : null };
+          const body = { overrideLimit: e.limitOn ? parseOverride(e.limit, Number.isInteger) : null };
           if (e.limitOn && (body.overrideLimit == null || body.overrideLimit < 0)) return { error: 'Limit must be a whole number >= 0' };
           return { body };
         },

@@ -214,6 +214,25 @@ data StatsResponse = StatsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | One queue's stats in the bulk landing response, with pause state: the queue's
+-- own paused flag, plus how many of its live workers are paused.
+data QueueStatsEntry = QueueStatsEntry
+  { queue :: Text
+  , stats :: QueueStats
+  , paused :: Bool
+  , workersLive :: Int
+  , workersPaused :: Int
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Every queue's stats, for the landing overview.
+data AllStatsResponse = AllStatsResponse
+  { queues :: [QueueStatsEntry]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
 -- | Queues list response
 data QueuesResponse = QueuesResponse
   { queues :: [Text]

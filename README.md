@@ -7,13 +7,15 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
-- Per-group serial processing (partitioned FIFO)
+- Per-group ordering (partitioned FIFO)
 - Concurrent worker pools with `LISTEN/NOTIFY` and polling fallback
+- Dead-letter queues
 - Job trees with fan-out/fan-in result collection
-- Dead-letter queues, cron scheduling, job deduplication
+- Cron/periodic job scheduling
+- Job deduplication via unique keys
 - Cross-queue per-job rate limiting with operator-tunable token-bucket policies
 - Cross-queue per-job concurrency limits - at most N jobs sharing a key in flight
-- Configurable backoff, observability callbacks, structured logging
+- Observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
 - Extensive test coverage (1,000+ integration tests)
@@ -194,7 +196,7 @@ A group key runs a group **one job (or batch) at a time** - serial within the gr
 
 ### Priority
 
-Jobs carry an integer `priority` (default `0`), and lower numbers are claimed first. Since every job defaults to `0`, give background work a higher number to defer it behind normal jobs - ordering the eligible head within a group and the ungrouped pool across the queue.
+Jobs carry an integer `priority` (default `0`), and lower numbers are claimed first. Since every job defaults to `0`, give background work a higher number to defer it behind normal jobs.
 
 ```haskell
 job = (Arb.defaultJob payload) { Arb.priority = 10 }  -- runs behind default-priority work
@@ -382,6 +384,10 @@ Give a payload a `HasRateLimit` instance whose `rateLimitFor` selects a policy p
 ```haskell
 import Arbiter.RateLimit
 
+-- Your own functions on the payload.
+isTransactional :: EmailPayload -> Bool
+recipientDomain :: EmailPayload -> Text
+
 transactional, bulk :: Policy
 transactional = tokenBucket "transactional" 100 1 -- 100/second, burst 100
 bulk          = tokenBucket "bulk" 1000 3600      -- 1000/hour, burst 1000
@@ -413,12 +419,14 @@ daily =
 resetRateLimitBuckets "daily"
 ```
 
-Bucket state is not durable by default: after a database crash or a failover, buckets reset to full, so each key can burst up to its max once before settling back to the sustained rate. When that overshoot is unacceptable - strict external quotas, or manual buckets holding real credit - declare durable buckets for the registry, and bucket state survives restarts at some throughput cost:
+Bucket state is not durable by default: after a database crash or a failover, buckets reset to full, so each key can burst up to its max once before settling back to the sustained rate. When that overshoot is unacceptable - strict external quotas, or manual buckets holding real credit - migrate the schema with durable buckets, and bucket state survives restarts at some throughput cost:
 
 ```haskell
-instance RateLimitDurability AppRegistry where
-  rateLimitDurability _ = Durable
+runMigrationsForRegistry (Proxy @AppRegistry) connStr "arbiter"
+  defaultMigrationConfig { rateLimitDurability = Durable }
 ```
+
+Durability is a property of the migrated schema, not the registry type, so the same registry can back an unlogged staging schema and a durable production one.
 
 > [!IMPORTANT]
 > Tokens are spent when a job is **claimed**, not when it finishes. A retry or a redelivery (worker crash, visibility timeout) spends again, so size policies against claims, not successful runs.
@@ -427,7 +435,7 @@ instance RateLimitDurability AppRegistry where
 
 ### Concurrency Limiting
 
-Cap how many jobs sharing a key run at once, declared exactly like a rate limit. A `HasConcurrency` instance names a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are global, so a pool spans every queue in a registry.
+Cap how many jobs sharing a key run at once. A `HasConcurrency` instance names a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are global, so a pool spans every queue in a registry.
 
 ```haskell
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)

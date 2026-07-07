@@ -191,15 +191,6 @@ tryWakeAncestorSQL schema tableName =
           AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ?)
       |]
 
--- | Cascade all descendants of a rollup parent to the DLQ.
---
--- Recursively finds all descendants and moves them from the main queue
--- to the DLQ in a single operation. Used when a rollup parent is moved
--- to DLQ to prevent orphaned children from hitting FK violations on
--- the results table.
---
--- Parameters: parent_job_id, error_message
-
 -- | Find descendant rollup finalizer IDs for snapshot preservation.
 --
 -- Used before cascade-DLQ to identify intermediate rollup nodes that
@@ -354,10 +345,3 @@ readChildResultsSQL schema tableName =
         UNION ALL
         SELECT 's' AS source, NULL::bigint AS child_id, parent_state AS result, NULL::text AS error, NULL::bigint AS dlq_pk FROM ${tbl} WHERE id = ? AND parent_state IS NOT NULL
       |]
-
--- ---------------------------------------------------------------------------
--- Groups Table Operations
--- ---------------------------------------------------------------------------
-
--- | @FOR UPDATE SKIP LOCKED@ over the groups rows, returning the locked keys for
--- the reaper to recompute. Claim-locked groups are skipped.
