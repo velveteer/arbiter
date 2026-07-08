@@ -36,6 +36,10 @@
   --arb-purple-on-bg: #6d28d9;
   --arb-gold-on-bg: #b45309;
 
+  --arb-pause-bg: #fde68a;
+  --arb-pause-fg: #78350f;
+  --arb-pause-border: #f59e0b;
+
   --arb-stripe: rgba(124, 58, 237, 0.04);
   --arb-hover: rgba(0, 212, 255, 0.08);
   --arb-input-bg: #ffffff;
@@ -63,6 +67,10 @@
   --arb-teal-on-bg: var(--arb-teal);
   --arb-purple-on-bg: var(--arb-purple);
   --arb-gold-on-bg: var(--arb-gold);
+
+  --arb-pause-bg: #422006;
+  --arb-pause-fg: #fde68a;
+  --arb-pause-border: #d97706;
 
   --arb-stripe: rgba(124, 58, 237, 0.04);
   --arb-hover: rgba(0, 212, 255, 0.06);
@@ -474,7 +482,7 @@
 }
 
 .queue-card.is-paused {
-  border-color: #f59e0b;
+  border-color: var(--arb-pause-border);
 }
 
 /* Pause status on its own row under the title, so it never crowds a long queue name. */
@@ -512,14 +520,8 @@
 
 .queue-card-pause.is-queue,
 .queue-card-pause.is-workers {
-  color: #78350f;
-  background-color: #fde68a;
-}
-
-[data-bs-theme="dark"] .queue-card-pause.is-queue,
-[data-bs-theme="dark"] .queue-card-pause.is-workers {
-  color: #fde68a;
-  background-color: #422006;
+  color: var(--arb-pause-fg);
+  background-color: var(--arb-pause-bg);
 }
 
 /* Header links to the queue overview. Each count below links to its filtered
@@ -837,16 +839,10 @@
 }
 
 /* Paused state badge: readable in both modes (used by navbar + worker rows). */
-[data-bs-theme="light"] .paused-badge {
-  background-color: #fde68a;
-  color: #78350f;
-  border: 1px solid #f59e0b;
-}
-
-[data-bs-theme="dark"] .paused-badge {
-  background-color: #422006;
-  color: #fde68a;
-  border: 1px solid #d97706;
+.paused-badge {
+  background-color: var(--arb-pause-bg);
+  color: var(--arb-pause-fg);
+  border: 1px solid var(--arb-pause-border);
 }
 
 /* ---- Rate-limit fill bars: muted so they don't glare, especially in dark mode ---- */

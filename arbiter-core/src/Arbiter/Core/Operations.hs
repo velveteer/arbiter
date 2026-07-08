@@ -1851,8 +1851,7 @@ getQueueStats schemaName tableName = do
     (s : _) -> s
     [] -> QueueStats 0 0 0 0 0 0 0 Nothing
 
--- | A landing-overview row: a queue's job-status stats plus its pause state (the
--- queue's own flag, and how many of its live workers are paused).
+-- | A landing-overview row: a queue's stats plus its pause state.
 data QueueOverview = QueueOverview
   { overviewQueue :: Text
   , overviewStats :: QueueStats

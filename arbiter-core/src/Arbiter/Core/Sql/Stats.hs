@@ -52,15 +52,18 @@ allQueueStatsSQL schema tableNames =
   let statusCase = jobStatusCaseSQL
       qTbl = arbiterQueuesTable schema
       wTbl = arbiterWorkersTable schema
-      -- A worker counts as live while its heartbeat is within its own stale threshold.
-      liveWorker = "last_heartbeat >= NOW() - stale_threshold_secs * interval '1 second'" :: Text
+      -- Live = heartbeat within the stale threshold and not draining, matching the worker health CASE.
+      liveWorker = "last_heartbeat >= NOW() - stale_threshold_secs * interval '1 second' AND NOT shutting_down" :: Text
    in unionAllOverQueueTables schema tableNames $ \tableName tbl ->
         [text|
-          SELECT '${tableName}' AS queue, ${statsAggColumns},
+          SELECT '${tableName}' AS queue, s.*,
                  COALESCE((SELECT paused FROM ${qTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
-                 (SELECT COUNT(*) FROM ${wTbl} WHERE queue_name = '${tableName}' AND ${liveWorker})::int8 AS workers_live,
-                 (SELECT COUNT(*) FILTER (WHERE paused) FROM ${wTbl} WHERE queue_name = '${tableName}' AND ${liveWorker})::int8 AS workers_paused
-          FROM (SELECT inserted_at, ${statusCase} AS status FROM ${tbl}) classified
+                 w.workers_live, w.workers_paused
+          FROM (SELECT ${statsAggColumns} FROM (SELECT inserted_at, ${statusCase} AS status FROM ${tbl}) classified) s
+          CROSS JOIN (
+            SELECT COUNT(*)::int8 AS workers_live, COUNT(*) FILTER (WHERE paused)::int8 AS workers_paused
+            FROM ${wTbl} WHERE queue_name = '${tableName}' AND ${liveWorker}
+          ) w
         |]
 
 -- ---------------------------------------------------------------------------

@@ -108,11 +108,11 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- ^ Lazily started SSE broadcast hub, shared by all clients. Started on the
   -- first subscriber and torn down (its @LISTEN@ connection released) when the
   -- last one disconnects, so an idle server holds no streaming connection.
-  , rateLimitPoliciesCache :: TVar (Maybe (UTCTime, RateLimitPoliciesResponse))
+  , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
   -- ^ Short-TTL cache for the rate-limit policy list, collapsing dashboard polls.
-  , concurrencyPoliciesCache :: TVar (Maybe (UTCTime, ConcurrencyPoliciesResponse))
+  , concurrencyPoliciesCache :: CacheCell ConcurrencyPoliciesResponse
   -- ^ Short-TTL cache for the concurrency policy list, collapsing dashboard polls.
-  , allQueueStatsCache :: TVar (Maybe (UTCTime, AllStatsResponse))
+  , allQueueStatsCache :: CacheCell AllStatsResponse
   -- ^ Short-TTL cache for the all-queues overview aggregate, collapsing landing polls.
   }
 
@@ -145,9 +145,9 @@ initArbiterServer
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   hub <- newMVar Nothing
-  rlCache <- newTVarIO Nothing
-  ccCache <- newTVarIO Nothing
-  statsCache <- newTVarIO Nothing
+  rlCache <- newTVarIO (0, Nothing)
+  ccCache <- newTVarIO (0, Nothing)
+  statsCache <- newTVarIO (0, Nothing)
   pure
     ArbiterServerConfig
       { serverEnv = env
@@ -967,35 +967,32 @@ rateLimitsServer config =
     , resetRateLimitBuckets = resetRateLimitBucketsHandler config
     }
 
--- | Poll-collapsing TTL for the dashboard list-policy stats. They are a
--- human-facing snapshot, so serving one up to this stale is invisible while it
--- bounds repeated and concurrent-viewer polls to one DB aggregate per window.
+-- | Poll-collapsing TTL for the dashboard list-policy stats.
 policyStatsCacheTtl :: NominalDiffTime
 policyStatsCacheTtl = 10
 
--- | Shorter TTL for the all-queues overview, which polls twice as fast (10s) as the
--- policy tabs. Counts churn continuously from the worker fleet, so the view is
--- approximate by nature and needs no mutation invalidation. The real-time per-queue
--- view is SSE-driven.
+-- | Shorter TTL for the faster-polling all-queues overview.
 overviewStatsCacheTtl :: NominalDiffTime
 overviewStatsCacheTtl = 5
 
--- | Serve from a short-TTL cache cell, recomputing on miss or expiry.
-cachedFor :: NominalDiffTime -> TVar (Maybe (UTCTime, a)) -> IO a -> IO a
+-- | A TTL cache cell: an epoch bumped by 'invalidate', plus the current entry.
+type CacheCell a = TVar (Word, Maybe (UTCTime, a))
+
+-- | Serve from a short-TTL cache cell, skipping the write when 'invalidate' bumped the epoch mid-produce, so an invalidation is never clobbered.
+cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
 cachedFor ttl cell produce = do
   now <- getCurrentTime
-  cached <- readTVarIO cell
+  (epoch, cached) <- readTVarIO cell
   case cached of
     Just (ts, v) | diffUTCTime now ts < ttl -> pure v
     _ -> do
       v <- produce
-      atomically $ writeTVar cell (Just (now, v))
+      atomically $ modifyTVar' cell $ \(e, cur) -> if e == epoch then (e, Just (now, v)) else (e, cur)
       pure v
 
--- | Drop a cache cell after an operator mutation, so the next list poll recomputes
--- instead of serving the pre-edit snapshot for the rest of the TTL window.
-invalidate :: TVar (Maybe a) -> Handler ()
-invalidate cell = liftIO $ atomically $ writeTVar cell Nothing
+-- | Bump a cache cell's epoch and drop its entry, after an operator mutation.
+invalidate :: CacheCell a -> Handler ()
+invalidate cell = liftIO $ atomically $ modifyTVar' cell $ \(e, _) -> (e + 1, Nothing)
 
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
