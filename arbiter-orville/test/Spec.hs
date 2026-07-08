@@ -6,7 +6,9 @@ import Arbiter.Test.Config (getTestConnectionString)
 import Test.Hspec
 
 import Test.Arbiter.Orville.Concurrency qualified as Concurrency
+import Test.Arbiter.Orville.ConcurrencyLimit qualified as ConcurrencyLimit
 import Test.Arbiter.Orville.Operations qualified as Operations
+import Test.Arbiter.Orville.RateLimit qualified as RateLimit
 import Test.Arbiter.Orville.StateMachine qualified as StateMachine
 import Test.Arbiter.Orville.Worker qualified as Worker
 
@@ -18,3 +20,5 @@ main = do
     describe "Arbiter.Orville.Concurrency" $ Concurrency.spec connStr
     describe "Arbiter.Orville.StateMachine" $ StateMachine.spec connStr
     describe "Arbiter.Orville.Worker" $ Worker.spec connStr
+    describe "Arbiter.Orville.RateLimit" $ RateLimit.spec connStr
+    describe "Arbiter.Orville.ConcurrencyLimit" $ ConcurrencyLimit.spec connStr

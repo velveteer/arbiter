@@ -28,6 +28,9 @@ module Arbiter.Worker
   , module Arbiter.Worker.Logger
   , module Arbiter.Worker.WorkerState
 
+    -- * Reaper
+  , runReaperOp
+
     -- * Cron
   , CronJob (..)
   , OverlapPolicy (..)
@@ -38,6 +41,7 @@ module Arbiter.Worker
   , overlapPolicyFromText
   ) where
 
+import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
@@ -59,6 +63,7 @@ import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Exception (SomeException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -178,7 +183,11 @@ instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
 -- @
 data NamedWorkerPool m
   = forall registry payload result.
-  (JobResult result, QueueOperation m registry payload, RegistryTables registry) =>
+  ( Arb.RegistryAdmissionPolicies registry
+  , JobResult result
+  , QueueOperation m registry payload
+  , RegistryTables registry
+  ) =>
   NamedWorkerPool
   { workerPoolName :: Text
   -- ^ Queue name from the type-level registry
@@ -189,7 +198,11 @@ data NamedWorkerPool m
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
   :: forall m registry payload result
-   . (JobResult result, QueueOperation m registry payload, RegistryTables registry)
+   . ( Arb.RegistryAdmissionPolicies registry
+     , JobResult result
+     , QueueOperation m registry payload
+     , RegistryTables registry
+     )
   => WorkerConfig m payload result
   -> NamedWorkerPool m
 namedWorkerPool cfg =
@@ -291,7 +304,8 @@ getEnabledQueues envVar registry = do
 -- | Starts a worker pool with a dispatcher and N worker threads.
 runWorkerPool
   :: forall m registry payload result
-   . ( JobResult result
+   . ( Arb.RegistryAdmissionPolicies registry
+     , JobResult result
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
@@ -350,7 +364,7 @@ runWorkerPool config = do
           runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
       spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
-        reaperLoop (logConfig config) (reaperInterval config)
+        reaperLoop (logConfig config) (reaperInterval config) (reaperTimeout config)
 
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : crons <> workers)
     case res of
@@ -831,24 +845,61 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
 -- only one pool runs it per interval.
 reaperLoop
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
+   . ( Arb.RegistryAdmissionPolicies registry
+     , HasArbiterSchema m registry
+     , MonadArbiter m
+     , MonadUnliftIO m
+     , RegistryTables registry
+     )
   => LogConfig
   -> NominalDiffTime
   -- ^ How often this loop runs.
+  -> NominalDiffTime
+  -- ^ Abort any single statement that exceeds this.
   -> m ()
-reaperLoop logCfg interval = do
+reaperLoop logCfg interval stmtTimeout = do
   let intervalSecs = ceiling interval
       queues = registryTableNames (Proxy @registry)
+      pruneInterval = interval * 12
+      hasConcurrency = not (Set.null (registryConcurrencyPolicies @registry))
+      hasRateLimit = not (Set.null (registryRateLimitPolicies @registry))
   schemaName <- Arb.getSchema
+  let gated :: forall a. Text -> NominalDiffTime -> m a -> m (Maybe a)
+      gated = runReaperOp logCfg schemaName stmtTimeout
   forever $ do
-    mFailed <- Ops.runGated schemaName "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
+    mFailed <- gated "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
     traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
-    void $ Ops.runGated schemaName "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
-    mSwept <- Ops.runGated schemaName "sweep-exhausted-jobs" interval $ Ops.sweepExhaustedJobs schemaName queues
+    void $ gated "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
+    mSwept <- gated "sweep-exhausted-jobs" interval $ Ops.sweepExhaustedJobs schemaName queues
     traverse_
       ( \(n, failed) -> do
           traverse_ (\queue -> tryLog logCfg Warning $ "Exhausted-job sweep failed for queue: " <> queue) failed
           when (n > 0) $ tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ"
       )
       mSwept
+    when hasRateLimit $
+      void $
+        gated "prune-rate-limit-buckets" pruneInterval $
+          Arb.pruneRateLimitBuckets @m @registry interval
+    when hasConcurrency $ do
+      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m @registry
+      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m @registry
     threadDelay (intervalSecs * 1_000_000)
+
+-- | Run one gated reaper op, logging and swallowing failures so the loop survives.
+-- statement_timeout bounds each statement (aborting a stuck one at the DB), while a
+-- legitimately long multi-statement op still runs to completion.
+runReaperOp
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => LogConfig
+  -> SchemaName
+  -> NominalDiffTime
+  -> Text
+  -> NominalDiffTime
+  -> m a
+  -> m (Maybe a)
+runReaperOp logCfg schemaName stmtTimeout task every work = do
+  r <- tryAny $ Ops.runGatedBounded schemaName task every stmtTimeout work
+  case r of
+    Left e -> Nothing <$ warnEx logCfg ("Reaper op failed: " <> task) e
+    Right mr -> pure mr

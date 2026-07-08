@@ -230,7 +230,7 @@
   font-weight: 700;
   font-family: 'Electrolize', sans-serif;
   letter-spacing: 0.08em;
-  margin-right: auto;
+  margin-right: 1.5rem;
 }
 
 [data-bs-theme="dark"] .navbar-brand {
@@ -283,6 +283,30 @@
   text-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
 }
 
+/* Stat cards link to the filtered job list. No underline: the whole card lifts
+   and glows on hover, and presses in on click. */
+.stat-card {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--arb-teal-dim) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18), 0 0 14px rgba(0, 212, 255, 0.14) !important;
+}
+
+.stat-card:active {
+  transform: translateY(0);
+}
+
+.stat-card:focus-visible {
+  outline: 2px solid var(--arb-focus-ring);
+  outline-offset: 2px;
+}
+
 /* ---- Tables ---- */
 .table {
   --bs-table-bg: transparent;
@@ -303,23 +327,380 @@
   font-size: 0.75rem;
   letter-spacing: 0.06em;
   border-bottom: 2px solid var(--arb-border-accent) !important;
+  /* Keep the label and its sort caret on one line for every column. */
+  white-space: nowrap;
 }
 
-/* ---- Tab group labels & divider ---- */
-.tab-group-label {
-  font-size: 0.6rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+/* Jobs and DLQ carry many columns. Give them a floor width so headers never
+   compress and overlap; below it the table scrolls (as it already does on
+   mobile) rather than squeezing columns narrower than their headers. */
+#tab-jobs table,
+#tab-dlq table {
+  min-width: 1400px;
+}
+
+/* Rate-limit and concurrency policy tables (not the narrow drill-downs) get a
+   smaller floor so they scroll rather than crush their columns on mobile. */
+#tab-ratelimits table.table-striped,
+#tab-concurrency table.table-striped {
+  min-width: 900px;
+}
+
+/* Action columns sit flush-right on desktop. On phones they flip left so they
+   read at the start of the horizontally scrolling row. */
+.cell-actions {
+  text-align: right;
+}
+
+@media (max-width: 768px) {
+  .cell-actions {
+    text-align: left;
+  }
+}
+
+/* ---- Primary nav (top-level sections) ---- */
+.nav-primary {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.nav-primary-link {
+  position: relative;
+  background: transparent;
+  border: 0;
   color: var(--arb-text-muted);
-  opacity: 0.6;
-  padding: 0.5rem 1rem;
-  align-self: flex-end;
-  user-select: none;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s ease, background-color 0.15s ease;
 }
 
-.tab-group-divider {
-  margin-left: 0.25rem;
-  border-left: 1px solid var(--arb-border);
+.nav-primary-link:hover {
+  color: var(--arb-teal-on-bg);
+  background: var(--arb-surface-hover);
+}
+
+.nav-primary-link.active {
+  color: var(--arb-teal-on-bg);
+}
+
+.nav-primary-link.active::after {
+  content: "";
+  position: absolute;
+  left: 0.8rem;
+  right: 0.8rem;
+  bottom: -0.2rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--arb-teal-on-bg);
+}
+
+[data-bs-theme="dark"] .nav-primary-link.active {
+  text-shadow: 0 0 8px rgba(0, 212, 255, 0.25);
+}
+
+[data-bs-theme="dark"] .nav-primary-link.active::after {
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
+}
+
+.nav-primary-link:focus-visible {
+  outline: 2px solid var(--arb-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ---- Breadcrumb (queue detail header) ---- */
+.breadcrumb {
+  --bs-breadcrumb-divider-color: var(--arb-text-muted);
+  margin-bottom: 0;
+  font-size: 0.95rem;
+}
+
+.breadcrumb-item a {
+  color: var(--arb-teal-on-bg);
+  text-decoration: none;
+}
+
+.breadcrumb-item a:hover {
+  text-decoration: underline;
+}
+
+.breadcrumb-item.active {
+  color: var(--arb-text);
+  font-family: 'Electrolize', sans-serif;
+  letter-spacing: 0.02em;
+}
+
+.breadcrumb-item + .breadcrumb-item::before {
+  color: var(--arb-text-muted);
+}
+
+/* Breathing room below the last content row (matters most on mobile). */
+.container-fluid.mt-3 {
+  padding-bottom: 2rem;
+}
+
+/* ---- Queue-list landing: a grid of queue cards, the app's hero surface ---- */
+.queue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.queue-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.1rem 1.2rem 1.25rem;
+  background-color: var(--arb-surface);
+  border: 1px solid var(--arb-border-accent);
+  border-radius: 0.6rem;
+  box-shadow: var(--arb-glow);
+  color: var(--arb-text);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.queue-card:hover {
+  border-color: var(--arb-teal-dim);
+  box-shadow: 0 0 14px rgba(0, 212, 255, 0.12);
+}
+
+.queue-card.is-throttled {
+  border-color: var(--arb-gold-dim);
+}
+
+.queue-card.is-paused {
+  border-color: #f59e0b;
+}
+
+/* Pause status on its own row under the title, so it never crowds a long queue name. */
+.queue-card-pause {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: -0.65rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* Pause-bars icon (two vertical strokes). */
+.queue-card-pause::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.56rem;
+  border-left: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+}
+
+.queue-card-pause.is-some {
+  color: #6b7280;
+  background-color: rgba(148, 163, 184, 0.14);
+}
+
+[data-bs-theme="dark"] .queue-card-pause.is-some {
+  color: #cbd5e1;
+}
+
+.queue-card-pause.is-queue,
+.queue-card-pause.is-workers {
+  color: #78350f;
+  background-color: #fde68a;
+}
+
+[data-bs-theme="dark"] .queue-card-pause.is-queue,
+[data-bs-theme="dark"] .queue-card-pause.is-workers {
+  color: #fde68a;
+  background-color: #422006;
+}
+
+/* Header links to the queue overview. Each count below links to its filtered
+   Jobs view. All are real anchors, so cmd/middle-click opens a new tab. */
+.queue-card-head,
+.queue-card-hero,
+.queue-card-stat {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* The header link stretches over the whole card as a fallback target (the queue
+   overview). The counts sit above it and capture their own clicks. */
+.queue-card-head::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.queue-card-hero,
+.queue-card-stat {
+  position: relative;
+  z-index: 2;
+}
+
+.queue-card-head:focus-visible,
+.queue-card-hero:focus-visible,
+.queue-card-stat:focus-visible {
+  outline: 2px solid var(--arb-focus-ring);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+.queue-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.queue-card-name {
+  font-family: 'Electrolize', sans-serif;
+  font-size: 1.05rem;
+  letter-spacing: 0.03em;
+  color: var(--arb-teal-on-bg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-bs-theme="dark"] .queue-card-name {
+  text-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
+}
+
+.queue-card-arrow {
+  flex-shrink: 0;
+  font-size: 1.1rem;
+  color: var(--arb-text-muted);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.queue-card-head:hover .queue-card-arrow {
+  color: var(--arb-teal-on-bg);
+  transform: translateX(3px);
+}
+
+.queue-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.queue-card-hero {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.queue-card-ready {
+  font-size: 2.1rem;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--arb-teal-on-bg);
+  font-variant-numeric: tabular-nums;
+  transition: filter 0.15s ease, text-shadow 0.15s ease;
+}
+
+[data-bs-theme="dark"] .queue-card-ready {
+  text-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
+}
+
+/* The ready number is already teal, so hover brightens it and lights up the
+   otherwise-muted label rather than relying on a color swap. */
+.queue-card-hero:hover .queue-card-ready {
+  filter: brightness(1.12);
+}
+
+[data-bs-theme="dark"] .queue-card-hero:hover .queue-card-ready {
+  text-shadow: 0 0 18px rgba(0, 212, 255, 0.45);
+}
+
+.queue-card-ready-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--arb-text-muted);
+  transition: color 0.15s ease;
+}
+
+.queue-card-hero:hover .queue-card-ready-label {
+  color: var(--arb-teal-on-bg);
+}
+
+.queue-card-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.45rem 1rem;
+  margin: 0;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--arb-border);
+}
+
+.queue-card-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.qc-val {
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--arb-text);
+}
+
+.qc-val.warn {
+  color: var(--arb-gold-on-bg);
+}
+
+.queue-card-stat:hover .qc-val {
+  color: var(--arb-teal-on-bg);
+}
+
+.qc-lbl {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--arb-text-muted);
+}
+
+.queue-card-stat:hover .qc-lbl {
+  color: var(--arb-text);
+}
+
+.queue-card-oldest {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--arb-text-muted);
+}
+
+.queue-card-oldest span:last-child {
+  font-size: 0.85rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--arb-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-list-empty {
+  padding: 2rem 0;
+  text-align: center;
+  color: var(--arb-text-muted);
 }
 
 /* ---- Buttons ---- */
@@ -466,6 +847,37 @@
   background-color: #422006;
   color: #fde68a;
   border: 1px solid #d97706;
+}
+
+/* ---- Rate-limit fill bars: muted so they don't glare, especially in dark mode ---- */
+.progress-bar.bg-success {
+  background-color: #15663f !important;
+  color: #d1fae5;
+}
+
+.progress-bar.bg-warning {
+  background-color: #8a6d1f !important;
+  color: #fde9b8;
+}
+
+.progress-bar.bg-danger {
+  background-color: #8f2b2b !important;
+  color: #fbd5d5;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-success {
+  background-color: #4ca57a !important;
+  color: #ffffff;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-warning {
+  background-color: #c79a3a !important;
+  color: #ffffff;
+}
+
+[data-bs-theme="light"] .progress-bar.bg-danger {
+  background-color: #c25b5b !important;
+  color: #ffffff;
 }
 
 /* ---- Unapplied filter indicator ---- */
@@ -705,13 +1117,15 @@ th.sortable:focus-visible {
     font-size: 1rem;
   }
   /* Brand + controls share the top row (controls pushed right by the brand's
-     auto margin). The queue picker drops to its own left-aligned row below. */
+     auto margin). The primary nav drops to its own scrollable row below. */
   .nav-controls {
     order: 2;
   }
-  .nav-queue {
+  .nav-primary {
     order: 3;
     width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 }
 

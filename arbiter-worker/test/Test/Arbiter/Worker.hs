@@ -1,5 +1,6 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
 module Test.Arbiter.Worker (spec) where
@@ -17,7 +18,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (JobHandler)
+import Arbiter.Core.MonadArbiter (JobHandler, executeStatement)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as WR
@@ -68,7 +69,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Worker (mergedChildResults, runWorkerPool)
+import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
   , ackAll
@@ -80,6 +81,7 @@ import Arbiter.Worker.Config
   , getWorkerState
   , shutdownWorker
   )
+import Arbiter.Worker.Logger (silentLogConfig)
 import Arbiter.Worker.TestKit (workerSpec)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
@@ -96,6 +98,24 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   around (withPool sharedPool) $ do
     workerSpec @WorkerTestPayload @WorkerTestRegistry connStr SimpleTask FailingTask (\f _conn job -> f job) runSimpleDb
+
+    describe "Reaper op bounding" $ do
+      it "completes an op longer than the timeout when each statement is within it" $ \env -> do
+        let sleep = void $ executeStatement "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$" []
+        r <-
+          runSimpleDb env $
+            runReaperOp silentLogConfig testSchema 1 "test-reaper-slow-op" 0 $ do
+              sleep
+              sleep
+              sleep
+              pure (42 :: Int)
+        r `shouldBe` Just 42
+      it "aborts a stuck statement at the timeout without killing the caller" $ \env -> do
+        r <-
+          runSimpleDb env $
+            runReaperOp silentLogConfig testSchema 0.5 "test-reaper-stuck-op" 0 $
+              executeStatement "DO $$ BEGIN PERFORM pg_sleep(5); END $$" []
+        r `shouldBe` Nothing
 
     describe "Transactional Atomicity" $ do
       it "rolls back user operations when handler fails" $ \env -> withTestOpsTable env $ do

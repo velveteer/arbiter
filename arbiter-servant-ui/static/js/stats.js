@@ -45,6 +45,16 @@ document.addEventListener('alpine:init', () => {
       }, ARB_TIMING.statsDebounceMs);
     },
 
+    // Card link href: this queue's Jobs tab filtered by status (empty = all).
+    jobsUrl(status) {
+      return queueJobsUrl(Alpine.store('app').selectedQueue, status);
+    },
+
+    goToJobs(e, status) {
+      if (!plainNavClick(e)) return;
+      window.dispatchEvent(new CustomEvent(ARB_EVENTS.filterJobs, { detail: status }));
+    },
+
     async loadStats() {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
@@ -52,6 +62,10 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.getStats(queue);
         if (isStale()) return;
         this.stats = data.stats;
+      }, {
+        // Suppress a stats toast for a queue we've already navigated away from
+        // mid-fetch: the in-flight load for the old queue is no longer relevant.
+        suppressToast: () => Alpine.store('app').selectedQueue !== queue,
       });
     },
   }));

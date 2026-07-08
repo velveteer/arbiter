@@ -3,21 +3,12 @@
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('eventsTab', () => ({
-    active: false,
     filterQueue: '',
     filterTypes: {
       job_inserted: true,
       job_updated: true,
       job_deleted: true,
       job_dlq: true,
-    },
-
-    init() {
-      trackTabActive(this, '#tab-events');
-    },
-
-    destroy() {
-      untrackTabActive(this);
     },
 
     get events() {

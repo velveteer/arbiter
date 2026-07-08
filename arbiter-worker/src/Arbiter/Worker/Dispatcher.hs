@@ -7,6 +7,7 @@ module Arbiter.Worker.Dispatcher
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (JobRead)
+import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -36,6 +37,12 @@ runDispatcher
   -> STM.TVar (Maybe PS.Notification)
   -> m ()
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
+  -- The claim statement only varies with free capacity, so render every variant once.
+  claimSql <-
+    let batchSize = case handlerMode config of
+          SingleJobMode _ -> 1
+          BatchedJobsMode n _ -> n
+     in Arb.mkClaimSql @m @registry @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
   let
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do
@@ -50,12 +57,11 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
 
     claimAndEnqueue :: Int -> m ()
     claimAndEnqueue freeWorkers = do
-      let wid = workerId config
       eJobs <- Ex.tryAny $ case handlerMode config of
         SingleJobMode _ ->
-          fmap (map (:| [])) (Arb.claimNextVisibleJobsAs freeWorkers (visibilityTimeout config) wid)
-        BatchedJobsMode batchSize _ ->
-          Arb.claimNextVisibleJobsBatchedAs batchSize freeWorkers (visibilityTimeout config) wid
+          map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers
+        BatchedJobsMode _ _ ->
+          Ops.claimJobsBatchedCached claimSql freeWorkers
       case eJobs of
         Left e ->
           tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (show e)

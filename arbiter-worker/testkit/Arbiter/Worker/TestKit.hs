@@ -15,7 +15,7 @@ import Arbiter.Core.Exceptions
   , throwRetryable
   , throwTreeCancel
   )
-import Arbiter.Core.HighLevel (QueueOperation)
+import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types
@@ -71,6 +71,7 @@ workerSpec
    . ( Eq payload
      , MonadUnliftIO m
      , QueueOperation m registry payload
+     , RegistryAdmissionPolicies registry
      , RegistryTables registry
      , Show payload
      )

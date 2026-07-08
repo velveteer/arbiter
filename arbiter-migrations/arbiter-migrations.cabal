@@ -36,6 +36,7 @@ library
     , arbiter-core          <0.2
     , base                  >=4.14 && <5
     , bytestring            >=0.10 && <0.13
+    , containers            >=0.6  && <0.9
     , postgresql-libpq      >=0.10 && <0.12
     , postgresql-migration  >=0.2  && <0.3
     , postgresql-simple     >=0.6  && <0.8
@@ -47,6 +48,7 @@ test-suite arbiter-migrations-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
+    , arbiter-core
     , arbiter-migrations
     , base                  >=4.14 && <5
     , bytestring            >=0.10 && <0.13
@@ -54,3 +56,4 @@ test-suite arbiter-migrations-tests
     , postgresql-migration  >=0.2  && <0.3
     , tasty                 >=1.4  && <1.6
     , tasty-golden          >=2.3  && <2.4
+    , tasty-hunit           >=0.10 && <0.11

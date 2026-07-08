@@ -27,6 +27,11 @@ class (Monad m, MonadIO m) => MonadArbiter m where
   -- | Run a parameterized query and decode the result rows.
   executeQuery :: Text -> Params -> RowCodec a -> m [a]
 
+  -- | 'executeQuery' for a hot statement whose text is stable across calls, so a
+  -- backend may prepare it once per connection and reuse the plan.
+  executeQueryPrepared :: Text -> Params -> RowCodec a -> m [a]
+  executeQueryPrepared = executeQuery
+
   -- | Run a parameterized statement, returning the number of affected rows.
   executeStatement :: Text -> Params -> m Int64
 

@@ -9,14 +9,30 @@ module Arbiter.Servant.Types
   , CronScheduleUpdate (..)
   , QueueRow (..)
   , WorkerRow (..)
+  , RateLimitPolicyView (..)
+  , RateLimitBucketView (..)
+  , RateLimitPolicyUpdate (..)
+  , ConcurrencyPolicyView (..)
+  , ConcurrencyKeyView (..)
+  , ConcurrencyPolicyUpdate (..)
   ) where
 
+import Arbiter.Core.Concurrency.Stats
+  ( ConcurrencyKeyView (..)
+  , ConcurrencyPolicyUpdate (..)
+  , ConcurrencyPolicyView (..)
+  )
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
 import Arbiter.Core.Operations (QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
+import Arbiter.Core.RateLimit.Stats
+  ( RateLimitBucketView (..)
+  , RateLimitPolicyUpdate (..)
+  , RateLimitPolicyView (..)
+  )
 import Arbiter.Core.Worker (WorkerRow (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
 import Data.Aeson.Types (Pair)
@@ -64,6 +80,8 @@ apiJobPairs job =
   , "isRollup" .= isRollup job
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
+  , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
+  , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
   ]
 
 instance (ToJSON payload) => ToJSON (ApiJob payload) where
@@ -89,10 +107,11 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .: "notVisibleUntil"
         <*> v .: "dedupKey"
         <*> v .: "maxAttempts"
-        <*> v .:? "parentId" .!= Nothing
-        <*> v .:? "parentState" .!= Nothing
+        <*> v .:? "parentId"
+        <*> v .:? "parentState"
         <*> v .:? "suspended" .!= False
-        <*> v .:? "claimedBy" .!= Nothing
+        <*> v .:? "claimedBy"
+        <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
     pure $ ApiJob job
 
 instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
@@ -133,6 +152,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> pure Nothing -- parentState: managed internally
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
+        <*> pure () -- admission: server attaches from the payload's selectors
 
 newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
   deriving stock (Eq, Show)
@@ -194,6 +214,25 @@ data StatsResponse = StatsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | One queue's stats in the bulk landing response, with pause state: the queue's
+-- own paused flag, plus how many of its live workers are paused.
+data QueueStatsEntry = QueueStatsEntry
+  { queue :: Text
+  , stats :: QueueStats
+  , paused :: Bool
+  , workersLive :: Int
+  , workersPaused :: Int
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Every queue's stats, for the landing overview.
+data AllStatsResponse = AllStatsResponse
+  { queues :: [QueueStatsEntry]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
 -- | Queues list response
 data QueuesResponse = QueuesResponse
   { queues :: [Text]
@@ -240,6 +279,48 @@ data CronSchedulesResponse = CronSchedulesResponse
 -- | Worker registry response
 data WorkersResponse = WorkersResponse
   { workers :: [WorkerRow]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Rate-limit policies response
+data RateLimitPoliciesResponse = RateLimitPoliciesResponse
+  { policies :: [RateLimitPolicyView]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Rate-limit buckets response (one prefix's keys)
+data RateLimitBucketsResponse = RateLimitBucketsResponse
+  { buckets :: [RateLimitBucketView]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Number of buckets cleared by a reset.
+data RateLimitResetResponse = RateLimitResetResponse
+  { reset :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Concurrency pools response
+data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
+  { policies :: [ConcurrencyPolicyView]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Concurrency keys response (one prefix's keys)
+data ConcurrencyKeysResponse = ConcurrencyKeysResponse
+  { keys :: [ConcurrencyKeyView]
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Number of count rows repaired from live jobs.
+data ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
+  { reconciled :: Int64
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

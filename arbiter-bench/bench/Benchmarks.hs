@@ -4,8 +4,10 @@
 
 module Main (main) where
 
+import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
   ( JobRead
@@ -18,7 +20,8 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
+import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
+import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb, setPreparedStatements)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.Orville
   ( createOrvilleConnectionOptions
@@ -47,7 +50,7 @@ import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
-import Data.List (partition)
+import Data.List (find, partition)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -55,7 +58,7 @@ import Data.Tagged (Tagged (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
-import Database.PostgreSQL.Simple (Connection, Only (..), Query, close, connectPostgreSQL, execute)
+import Database.PostgreSQL.Simple (Connection, In (..), Only (..), Query, close, connectPostgreSQL, execute)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql
@@ -96,7 +99,48 @@ data BenchPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type BenchRegistry = '[ '("bench_queue", BenchPayload)]
+-- | Gated payloads for the overhead benches. Limits are huge, so gates never throttle.
+newtype BenchRl = BenchRl Int
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+newtype BenchCc = BenchCc Int
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+newtype BenchBoth = BenchBoth Int
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Gate-key cardinality knob. Sweep to vary the per-key sharing ratio.
+gateKeyCount :: Int
+gateKeyCount = 256
+
+gateKey :: Int -> Text
+gateKey i = T.pack (show (i `mod` gateKeyCount))
+
+-- | A 'BenchBoth' concurrency key decorrelated from 'gateKey'.
+gateKey2 :: Int -> Text
+gateKey2 i = T.pack (show (i `mod` max 1 (gateKeyCount - 1)))
+
+instance HasRateLimit BenchRl where
+  rateLimitFor = limitBy (tokenBucket "blr" 1.0e9 1) (\(BenchRl i) -> gateKey i)
+
+instance HasConcurrency BenchCc where
+  concurrencyFor = concurrencyBy (concurrencyPool "blc" 1000000) (\(BenchCc i) -> gateKey i)
+
+instance HasRateLimit BenchBoth where
+  rateLimitFor = limitBy (tokenBucket "bbr" 1.0e9 1) (\(BenchBoth i) -> gateKey i)
+
+instance HasConcurrency BenchBoth where
+  concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth i) -> gateKey2 i)
+
+type BenchRegistry =
+  '[ '("bench_queue", BenchPayload)
+   , '("bench_rl_queue", BenchRl)
+   , '("bench_cc_queue", BenchCc)
+   , '("bench_both_queue", BenchBoth)
+   ]
 
 data QueueFlavor
   = Ungrouped
@@ -276,19 +320,36 @@ data DbSnapshot = DbSnapshot
 zeroSnapshot :: DbSnapshot
 zeroSnapshot = DbSnapshot 0 (TableSnap 0 0 0 0) (TableSnap 0 0 0 0)
 
-captureDbSnapshot :: Connection -> IO DbSnapshot
-captureDbSnapshot conn = do
+-- | HOT-update percentage of total updates between two snapshots of a table.
+hotPct :: TableSnap -> TableSnap -> Double
+hotPct a b =
+  let du = fromIntegral (tnUpd b - tnUpd a) :: Double
+      dh = fromIntegral (tnHot b - tnHot a) :: Double
+   in if du > 0 then dh / du * 100 else 0
+
+-- | A table's snapshot row by relname from a pg_stat_user_tables result.
+snapRow :: [(Text, Int64, Int64, Int64, Int64)] -> Text -> TableSnap
+snapRow rows name =
+  case find (\(rn, _, _, _, _) -> rn == name) rows of
+    Just (_, u, h, d, av) -> TableSnap u h d av
+    Nothing -> TableSnap 0 0 0 0
+
+-- | WAL position plus a per-table snapshot lookup over the named tables.
+captureTableSnaps :: Connection -> [Text] -> IO (Int64, Text -> TableSnap)
+captureTableSnaps conn names = do
   [Only wal] <- PG.query_ conn "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')::bigint"
   rows <-
-    PG.query_
+    PG.query
       conn
       "SELECT relname::text, n_tup_upd, n_tup_hot_upd, n_dead_tup, autovacuum_count \
       \FROM pg_stat_user_tables \
-      \WHERE schemaname = 'arbiter' AND relname IN ('bench_queue', 'bench_queue_groups')"
-  let snapFor name =
-        case [TableSnap u h d av | (rn, u, h, d, av) <- rows, rn == (name :: Text)] of
-          (t : _) -> t
-          [] -> TableSnap 0 0 0 0
+      \WHERE schemaname = 'arbiter' AND relname IN ?"
+      (Only (In names))
+  pure (wal, snapRow rows)
+
+captureDbSnapshot :: Connection -> IO DbSnapshot
+captureDbSnapshot conn = do
+  (wal, snapFor) <- captureTableSnaps conn ["bench_queue", "bench_queue_groups"]
   pure $ DbSnapshot wal (snapFor "bench_queue") (snapFor "bench_queue_groups")
 
 -- | One trial's throughput plus write-amplification\/autovacuum metrics, all
@@ -326,10 +387,6 @@ mkSteadyResult throughput processed s0 s1 trg =
     }
   where
     jobs = fromIntegral (max 1 processed) :: Double
-    hotPct a b =
-      let du = fromIntegral (tnUpd b - tnUpd a) :: Double
-          dh = fromIntegral (tnHot b - tnHot a) :: Double
-       in if du > 0 then dh / du * 100 else 0
 
 formatSteady :: [SteadyResult] -> String
 formatSteady [] = "(no samples)"
@@ -460,6 +517,52 @@ runWorkerTrial runM statsConn configs totalJobs durationUs =
         elapsed = realToFrac (diffUTCTime end start) :: Double
     pure (fromIntegral processed / elapsed, processed)
 
+-- | Shared measurement window: run workers and producers, warm up, then
+-- measure one snapshot-bounded interval and report throughput.
+runMeasuredWindow
+  :: snap
+  -> (Connection -> IO snap)
+  -> (Connection -> IO ())
+  -> (Connection -> IO [TriggerStats])
+  -> [Text]
+  -> Connection
+  -> IORef Int
+  -> [IO ()]
+  -> Int
+  -> IO (Double, Int, snap, snap, [TriggerStats])
+runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn processedCounter threads durationUs = do
+  t0 <- getCurrentTime
+  startRef <- newIORef t0
+  endRef <- newIORef t0
+  snap0Ref <- newIORef zeroSnap
+  snap1Ref <- newIORef zeroSnap
+  trgRef <- newIORef []
+  race_
+    (mapConcurrently_ id threads)
+    ( do
+        threadDelay steadyStateWarmupUs
+        writeIORef processedCounter 0
+        -- Window start: reset trigger stats and ANALYZE so the planner sees the
+        -- steady-state depth, then snapshot WAL/churn. ANALYZE WAL is excluded
+        -- because the snapshot is taken after it.
+        resetTrg statsConn
+        traverse_ (\t -> execute_ statsConn ("ANALYZE " <> benchSchema <> "." <> t)) analyzeTables
+        captureSnap statsConn >>= writeIORef snap0Ref
+        getCurrentTime >>= writeIORef startRef
+        threadDelay durationUs
+        getCurrentTime >>= writeIORef endRef
+        captureSnap statsConn >>= writeIORef snap1Ref
+        readTrg statsConn >>= writeIORef trgRef
+    )
+  processed <- readIORef processedCounter
+  start <- readIORef startRef
+  end <- readIORef endRef
+  snap0 <- readIORef snap0Ref
+  snap1 <- readIORef snap1Ref
+  trg <- readIORef trgRef
+  let elapsed = realToFrac (diffUTCTime end start) :: Double
+  pure (fromIntegral processed / elapsed, processed, snap0, snap1, trg)
+
 -- | Steady-state trial. Producers insert continuously while workers consume.
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
@@ -515,43 +618,18 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
               when (producerDelayUs > 0) $ threadDelay producerDelayUs
               go
          in go
-  t0 <- getCurrentTime
-  startRef <- newIORef t0
-  endRef <- newIORef t0
-  snap0Ref <- newIORef zeroSnapshot
-  snap1Ref <- newIORef zeroSnapshot
-  trgRef <- newIORef []
-  race_
-    ( mapConcurrently_
-        id
-        ( map (\c -> runM $ runWorkerPool c) configs
-            <> [mkProducer i | i <- [0 .. numProducers - 1]]
-        )
-    )
-    ( do
-        threadDelay steadyStateWarmupUs
-        writeIORef processedCounter 0
-        -- Window start: reset trigger stats and ANALYZE so the planner sees the
-        -- steady-state depth, then snapshot WAL/churn. ANALYZE WAL is excluded
-        -- because the snapshot is taken after it.
-        resetTriggerStats statsConn
-        execute_ statsConn ("ANALYZE " <> benchSchema <> ".bench_queue")
-        execute_ statsConn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")
-        captureDbSnapshot statsConn >>= writeIORef snap0Ref
-        getCurrentTime >>= writeIORef startRef
-        threadDelay durationUs
-        getCurrentTime >>= writeIORef endRef
-        captureDbSnapshot statsConn >>= writeIORef snap1Ref
-        readTriggerStats statsConn >>= writeIORef trgRef
-    )
-  processed <- readIORef processedCounter
-  start <- readIORef startRef
-  end <- readIORef endRef
-  snap0 <- readIORef snap0Ref
-  snap1 <- readIORef snap1Ref
-  trg <- readIORef trgRef
-  let elapsed = realToFrac (diffUTCTime end start) :: Double
-  pure (mkSteadyResult (fromIntegral processed / elapsed) processed snap0 snap1 trg)
+  (throughput, processed, snap0, snap1, trg) <-
+    runMeasuredWindow
+      zeroSnapshot
+      captureDbSnapshot
+      resetTriggerStats
+      readTriggerStats
+      ["bench_queue", "bench_queue_groups"]
+      statsConn
+      processedCounter
+      (map (\c -> runM $ runWorkerPool c) configs <> [mkProducer i | i <- [0 .. numProducers - 1]])
+      durationUs
+  pure (mkSteadyResult throughput processed snap0 snap1 trg)
 
 simpleSteadyStateTrial
   :: RunM SimpleM -> RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult
@@ -631,6 +709,210 @@ cleanupFresh = do
   cleanupData conn
   close conn
 
+-- | Settle the database before a measurement group: clear the dead-tuple debt
+-- earlier suites left behind and flush checkpoint work, so neither runs mid-window.
+quietBenchDb :: IO ()
+quietBenchDb = do
+  conn <- connectPostgreSQL benchConnStr
+  execute_ conn "SET client_min_messages = WARNING"
+  tables <- PG.query conn "SELECT tablename FROM pg_tables WHERE schemaname = ?" (Only benchSchema)
+  traverse_ (\(Only t) -> execute_ conn ("VACUUM ANALYZE " <> benchSchema <> "." <> t)) (tables :: [Only Text])
+  execute_ conn "CHECKPOINT"
+  close conn
+
+-- | Defer an action to the first time the returned trigger runs.
+once :: IO () -> IO (IO ())
+once action = do
+  done <- newIORef False
+  pure $ do
+    already <- atomicModifyIORef' done (\old -> (True, old))
+    when (not already) action
+
+-- | Truncate a gated queue's tables and the shared bucket/count tables.
+cleanupGatedFresh :: Text -> IO ()
+cleanupGatedFresh table = do
+  conn <- connectPostgreSQL benchConnStr
+  execute_ conn "SET client_min_messages = WARNING"
+  execute_ conn $
+    "TRUNCATE "
+      <> benchSchema
+      <> "."
+      <> table
+      <> ", "
+      <> benchSchema
+      <> "."
+      <> table
+      <> "_groups, "
+      <> benchSchema
+      <> ".arbiter_rate_limits, "
+      <> benchSchema
+      <> ".arbiter_concurrency CASCADE"
+  close conn
+
+-- | WAL plus churn on the shared count and bucket tables over one window.
+data GatedResult = GatedResult
+  { grThroughput :: Double
+  , grWalPerJob :: Double
+  , grCcHotPct :: Double
+  , grCcUpdPerJob :: Double
+  , grRlHotPct :: Double
+  , grRlUpdPerJob :: Double
+  , grTriggers :: [TriggerStats]
+  }
+
+data GatedSnap = GatedSnap Int64 TableSnap TableSnap
+
+captureGatedSnap :: Connection -> IO GatedSnap
+captureGatedSnap conn = do
+  (wal, snapFor) <- captureTableSnaps conn ["arbiter_concurrency", "arbiter_rate_limits"]
+  pure $ GatedSnap wal (snapFor "arbiter_concurrency") (snapFor "arbiter_rate_limits")
+
+zeroGatedSnap :: GatedSnap
+zeroGatedSnap = GatedSnap 0 (TableSnap 0 0 0 0) (TableSnap 0 0 0 0)
+
+resetGatedTriggers :: Connection -> IO ()
+resetGatedTriggers conn =
+  void $
+    PG.execute_
+      conn
+      "DO $$ BEGIN PERFORM pg_stat_reset_single_function_counters(oid) FROM pg_proc \
+      \WHERE proname LIKE 'maintain_bench_%concurrency%' OR proname LIKE 'ensure_bench_%rate_limit%'; END $$"
+
+readGatedTriggers :: Connection -> IO [TriggerStats]
+readGatedTriggers conn =
+  map (\(name, calls, total) -> TriggerStats name calls total (if calls > 0 then total / fromIntegral calls else 0))
+    <$> PG.query_
+      conn
+      "SELECT funcname::text, calls, total_time FROM pg_stat_user_functions \
+      \WHERE funcname LIKE 'maintain_bench_%concurrency%' OR funcname LIKE 'ensure_bench_%rate_limit%' \
+      \ORDER BY funcname"
+
+mkGatedResult :: Double -> Int -> GatedSnap -> GatedSnap -> [TriggerStats] -> GatedResult
+mkGatedResult throughput processed (GatedSnap w0 cc0 rl0) (GatedSnap w1 cc1 rl1) trg =
+  GatedResult
+    { grThroughput = throughput
+    , grWalPerJob = fromIntegral (w1 - w0) / jobs
+    , grCcHotPct = hotPct cc0 cc1
+    , grCcUpdPerJob = fromIntegral (tnUpd cc1 - tnUpd cc0) / jobs
+    , grRlHotPct = hotPct rl0 rl1
+    , grRlUpdPerJob = fromIntegral (tnUpd rl1 - tnUpd rl0) / jobs
+    , grTriggers = trg
+    }
+  where
+    jobs = fromIntegral (max 1 processed) :: Double
+
+formatGated :: [GatedResult] -> String
+formatGated [] = "(no samples)"
+formatGated rs =
+  formatStats "jobs/sec" (computeStats (map grThroughput rs))
+    <> "\n  "
+    <> showFFloat (Just 0) (meanOf grWalPerJob) ""
+    <> " B WAL/job | count HOT "
+    <> showFFloat (Just 0) (meanOf grCcHotPct) ""
+    <> "% ("
+    <> showFFloat (Just 2) (meanOf grCcUpdPerJob) ""
+    <> " upd/job) | bucket HOT "
+    <> showFFloat (Just 0) (meanOf grRlHotPct) ""
+    <> "% ("
+    <> showFFloat (Just 2) (meanOf grRlUpdPerJob) ""
+    <> " upd/job)\n"
+    <> formatTriggerStats (grTriggers (last rs))
+  where
+    meanOf :: (GatedResult -> Double) -> Double
+    meanOf f = sum (map f rs) / fromIntegral (length rs)
+
+multiTrialGated :: Int -> IO () -> IO GatedResult -> IO String
+multiTrialGated n setup measure = formatGated <$> replicateM n (setup >> measure)
+
+-- | One steady-state window over a gated queue: 10 producers insert, a 10-worker pool acks.
+runGatedSteadyTrial
+  :: ( MonadUnliftIO m
+     , QueueOperation SimpleM BenchRegistry payload
+     , QueueOperation m BenchRegistry payload
+     )
+  => RunM m
+  -> RunM SimpleM
+  -> Connection
+  -> WorkerConfig m payload ()
+  -> IORef Int
+  -> Text
+  -> (Int -> JobWrite payload)
+  -> Int
+  -> IO GatedResult
+runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob durationUs = do
+  batchCounter <- newIORef (0 :: Int)
+  let producer = do
+        offset <- atomicModifyIORef' batchCounter (\n -> (n + 100, n))
+        producerRunM $ void $ HL.insertJobsBatch_ [mkJob (offset + i) | i <- [1 .. 100]]
+        producer
+  (throughput, processed, snap0, snap1, trg) <-
+    runMeasuredWindow
+      zeroGatedSnap
+      captureGatedSnap
+      resetGatedTriggers
+      readGatedTriggers
+      [table, table <> "_groups"]
+      statsConn
+      processedCounter
+      (runM (runWorkerPool cfg) : replicate 10 producer)
+      durationUs
+  pure (mkGatedResult throughput processed snap0 snap1 trg)
+
+hasqlGatedSteadyTrial
+  :: forall payload
+   . (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+  => RunM HasqlM -> RunM SimpleM -> Connection -> BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
+hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = do
+  processedCounter <- newIORef (0 :: Int)
+  cfg0 <- runM $ case mode of
+    BenchSingleJobMode ->
+      defaultWorkerConfig benchConnStr 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
+        liftIO (atomicModifyIORef' processedCounter (\n -> (n + 1, ())))
+    BenchBatchedJobsMode batchSize ->
+      defaultBatchedWorkerConfig benchConnStr 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) cb -> do
+        ackAll cb (toList jobs)
+        liftIO (atomicModifyIORef' processedCounter (\n -> (n + length jobs, ())))
+  let cfg = cfg0 {pollInterval = 0.1, logConfig = silentLogConfig}
+  runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob durationUs
+
+-- | No gate / rate limit / concurrency / both, each ungrouped and grouped, in single
+-- and batched mode.
+gatingBenches
+  :: IO ()
+  -> ( forall payload
+        . (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+       => BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
+     )
+  -> [Benchmark]
+gatingBenches settle trial =
+  [ bgroup "ungrouped" (profiles (\ctor i -> defaultJob (ctor i)))
+  , bgroup
+      "grouped (5000 groups)"
+      (profiles (\ctor i -> defaultGroupedJob (T.pack ("g" <> show ((i `mod` 5000) + 1))) (ctor i)))
+  ]
+  where
+    profiles :: (forall payload. (Int -> payload) -> Int -> JobWrite payload) -> [Benchmark]
+    profiles wrap =
+      [ profile "no gate (baseline)" "bench_queue" (wrap BenchMessage)
+      , profile "rate limit" "bench_rl_queue" (wrap BenchRl)
+      , profile "concurrency" "bench_cc_queue" (wrap BenchCc)
+      , profile "both" "bench_both_queue" (wrap BenchBoth)
+      ]
+    profile
+      :: (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+      => String -> Text -> (Int -> JobWrite payload) -> Benchmark
+    profile name table mkJob =
+      bgroup
+        name
+        [ mode "single" BenchSingleJobMode
+        , mode "batched (size 10)" (BenchBatchedJobsMode 10)
+        ]
+      where
+        mode label m =
+          singleTest label $
+            ThroughputBench $
+              multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial m table mkJob trialDurationUs)
+
 setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
 setupQueue simpleEnv totalJobs flavor = do
   conn <- connectPostgreSQL benchConnStr
@@ -692,6 +974,9 @@ main = do
   statsConn <- connectPostgreSQL benchConnStr
   -- Suppress "index does not exist, skipping" NOTICEs from applyIndexProfile.
   execute_ statsConn "SET client_min_messages = WARNING"
+  -- Keep autovacuum off the shared gated tables so a mid-window pass is not measured.
+  execute_ statsConn "ALTER TABLE arbiter.arbiter_concurrency SET (autovacuum_enabled = false)"
+  execute_ statsConn "ALTER TABLE arbiter.arbiter_rate_limits SET (autovacuum_enabled = false)"
   [Only trackSetting] <- PG.query_ statsConn "SHOW track_functions"
   when (trackSetting /= ("all" :: Text)) $
     putStrLn $
@@ -705,6 +990,7 @@ main = do
       <> "s per trial)..."
 
   producerEnv <- createSimpleEnv (Proxy @BenchRegistry) benchConnStr benchSchema
+  settleGated <- once quietBenchDb
 
   let simpleRun :: RunM SimpleM
       simpleRun = runSimpleDb simpleEnv
@@ -712,8 +998,9 @@ main = do
       producerRun :: RunM SimpleM
       producerRun = runSimpleDb producerEnv
 
-      hasqlRun :: RunM HasqlM
-      hasqlRun = runHasqlDb hasqlEnv
+      -- Prepared claims on, the recommended direct-connection setting.
+      hasqlPreparedRun :: RunM HasqlM
+      hasqlPreparedRun = runHasqlDb (setPreparedStatements True hasqlEnv)
 
       orvilleRun :: RunM OrvilleM
       orvilleRun action = runReaderT (unBenchOrville action) (benchSchema, orvilleState)
@@ -724,15 +1011,17 @@ main = do
       [ bgroup "Worker Throughput (simple)" $
           simpleWorkerBenches statsConn simpleEnv simpleRun
       , bgroup "Worker Throughput (hasql)" $
-          hasqlWorkerBenches statsConn simpleEnv hasqlRun
+          hasqlWorkerBenches statsConn simpleEnv hasqlPreparedRun
       , bgroup "Worker Throughput (orville)" $
           orvilleWorkerBenches statsConn simpleEnv orvilleRun
       , bgroup "Steady-State Throughput (simple)" $
           steadyStateBenches (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun statsConn d p w b m f)
       , bgroup "Steady-State Throughput (hasql)" $
-          steadyStateBenches (\d p w b m f -> hasqlSteadyStateTrial hasqlRun producerRun statsConn d p w b m f)
+          steadyStateBenches (\d p w b m f -> hasqlSteadyStateTrial hasqlPreparedRun producerRun statsConn d p w b m f)
       , bgroup "Steady-State Throughput (orville)" $
           steadyStateBenches (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun statsConn d p w b m f)
+      , bgroup "Gating Overhead (hasql)" $
+          gatingBenches settleGated (\m t j d -> hasqlGatedSteadyTrial hasqlPreparedRun producerRun statsConn m t j d)
       ]
 
 _claimBenches :: SimpleEnv BenchRegistry -> Int -> [(String, QueueFlavor)] -> [Benchmark]

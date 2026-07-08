@@ -1,5 +1,6 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
 -- | Parameterized concurrency test suite that works with any MonadArbiter implementation.

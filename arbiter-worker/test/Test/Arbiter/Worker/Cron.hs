@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns -Wno-x-partial #-}
 
 module Test.Arbiter.Worker.Cron (spec) where

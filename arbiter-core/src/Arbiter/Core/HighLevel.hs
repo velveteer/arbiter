@@ -10,6 +10,7 @@ module Arbiter.Core.HighLevel
   ( -- * Constraint Aliases
     QueueOperation
   , JobOperation
+  , RegistryAdmissionPolicies
 
     -- * Job Operations
   , insertJob
@@ -18,7 +19,23 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , claimNextVisibleJobsBatchedAs
+  , mkClaimSql
+  , addRateLimitTokens
+  , pruneRateLimitBuckets
+  , resetRateLimitBuckets
+  , listRateLimitPolicies
+  , getRateLimitPolicy
+  , rateLimitPolicyExists
+  , listRateLimitBuckets
+  , listConcurrencyPolicies
+  , getConcurrencyPolicy
+  , listConcurrencyKeys
+  , updateRateLimitPolicyOverrides
+  , updateConcurrencyPolicyOverrides
+  , pruneConcurrencyKeys
+  , reconcileConcurrencyCounts
+  , reconcileConcurrencyCountsIfStale
+  , reconcileAndPruneConcurrency
   , ackJob
   , ackJobsBatch
   , updateJobForRetry
@@ -112,6 +129,7 @@ module Arbiter.Core.HighLevel
   , getSchema
   ) where
 
+import Control.Monad (void, when)
 import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -126,14 +144,17 @@ import Data.UUID.Types (UUID)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
+import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite)
+import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
+import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
+import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate, RateLimitPolicyView)
 import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
@@ -188,7 +209,8 @@ insertJobsBatch_ jobs = do
   Ops.insertJobsBatch_ schemaName tableName jobs
 
 -- | Claim visible jobs (at most one per group). May return fewer than the
--- limit if groups are exhausted.
+-- limit if groups are exhausted. Leaves @claimed_by@ NULL, so concurrency limits
+-- are not enforced for this path. Use 'claimNextVisibleJobsAs' when capping.
 claimNextVisibleJobs
   :: forall m registry payload
    . (QueueOperation m registry payload)
@@ -201,6 +223,205 @@ claimNextVisibleJobs limit timeout = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.claimNextVisibleJobs schemaName tableName limit timeout
+
+-- | Add tokens to a key's bucket, capped at max, and wake any of its jobs parked
+-- mid-wait. A no-op without a policy.
+addRateLimitTokens
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => RateLimitKey
+  -> Double
+  -> m ()
+addRateLimitTokens key amount = withDbTransaction $ do
+  schemaName <- getSchema
+  Ops.addRateLimitTokens schemaName key amount
+  let queues = registryTableNames (Proxy @registry)
+  void $ Ops.wakeThrottledJobsForKey schemaName queues key
+
+-- | Delete reclaimable idle (full) buckets. Returns the number pruned. The worker
+-- reaper runs this. A full bucket re-seeds at full on next use, so pruning introduces
+-- no burst.
+pruneRateLimitBuckets
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => NominalDiffTime
+  -> m Int64
+pruneRateLimitBuckets idle = do
+  schemaName <- getSchema
+  Ops.pruneRateLimitBuckets schemaName idle
+
+-- | Reset every bucket for a prefix to full and wake its throttled jobs. Returns
+-- the number of buckets reset. A manual (0-refill) policy plus a cron calling this
+-- at the boundary is a fixed window.
+resetRateLimitBuckets
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => Text
+  -> m Int64
+resetRateLimitBuckets prefix = withDbTransaction $ do
+  schemaName <- getSchema
+  n <- Ops.resetRateLimitBuckets schemaName prefix
+  let queues = registryTableNames (Proxy @registry)
+  _ <- Ops.wakeThrottledJobs schemaName queues prefix
+  pure n
+
+-- | List every rate-limit policy with its params, bucket stats, and a live count
+-- of currently-throttled jobs per prefix across the registry's queues.
+listRateLimitPolicies
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => m [RateLimitPolicyView]
+listRateLimitPolicies = do
+  schemaName <- getSchema
+  Ops.listRateLimitPolicies schemaName (registryTableNames (Proxy @registry))
+
+-- | One prefix's rate-limit policy with its params, bucket stats, and live throttled
+-- count. 'Nothing' when the prefix has no policy.
+getRateLimitPolicy
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => Text
+  -> m (Maybe RateLimitPolicyView)
+getRateLimitPolicy prefix = do
+  schemaName <- getSchema
+  Ops.getRateLimitPolicy schemaName (registryTableNames (Proxy @registry)) prefix
+
+-- | Whether a rate-limit policy exists for a prefix.
+rateLimitPolicyExists
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> m Bool
+rateLimitPolicyExists prefix = do
+  schemaName <- getSchema
+  Ops.rateLimitPolicyExists schemaName prefix
+
+-- | List a prefix's buckets with fill levels, paginated.
+listRateLimitBuckets
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> Int
+  -> Int
+  -> m [RateLimitBucketView]
+listRateLimitBuckets prefix limit offset = do
+  schemaName <- getSchema
+  Ops.listRateLimitBuckets schemaName prefix limit offset
+
+-- | Set or clear a policy's override params and wake the prefix's parked jobs. Returns
+-- rows affected (0 if absent).
+updateRateLimitPolicyOverrides
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => Text
+  -> RateLimitPolicyUpdate
+  -> m Int64
+updateRateLimitPolicyOverrides prefix upd = do
+  schemaName <- getSchema
+  n <- Ops.updateRateLimitPolicyOverrides schemaName prefix upd
+  -- Wake after the override commits, so a wake failure cannot roll the override back.
+  when (n > 0) $ do
+    let queues = registryTableNames (Proxy @registry)
+    void $ Ops.wakeThrottledJobs schemaName queues prefix
+  pure n
+
+-- | List every concurrency pool with its default/override limit and live key and
+-- in-flight aggregates.
+listConcurrencyPolicies
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => m [ConcurrencyPolicyView]
+listConcurrencyPolicies = do
+  schemaName <- getSchema
+  Ops.listConcurrencyPolicies schemaName
+
+-- | One prefix's concurrency pool with its default/override limit and live aggregates.
+-- 'Nothing' when the prefix has no pool.
+getConcurrencyPolicy
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> m (Maybe ConcurrencyPolicyView)
+getConcurrencyPolicy prefix = do
+  schemaName <- getSchema
+  Ops.getConcurrencyPolicy schemaName prefix
+
+-- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
+listConcurrencyKeys
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> Int
+  -> Int
+  -> m [ConcurrencyKeyView]
+listConcurrencyKeys prefix limit offset = do
+  schemaName <- getSchema
+  Ops.listConcurrencyKeys schemaName prefix limit offset
+
+-- | Apply a pool's override-limit patch on its policy row, retuning every key under
+-- the prefix live. Lowering it does not preempt in-flight jobs until they drain.
+-- Returns rows affected.
+updateConcurrencyPolicyOverrides
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> ConcurrencyPolicyUpdate
+  -> m Int64
+updateConcurrencyPolicyOverrides prefix upd = do
+  schemaName <- getSchema
+  Ops.updateConcurrencyPolicyOverrides schemaName prefix upd
+
+-- | Delete drained concurrency rows with no live job. The reaper runs this.
+pruneConcurrencyKeys
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => m Int64
+pruneConcurrencyKeys = do
+  schemaName <- getSchema
+  Ops.pruneConcurrencyKeys schemaName (registryTableNames (Proxy @registry))
+
+-- | Recompute the concurrency counts from live jobs, repairing any trigger drift.
+reconcileConcurrencyCounts
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => m Int64
+reconcileConcurrencyCounts = do
+  schemaName <- getSchema
+  Ops.reconcileConcurrencyCounts schemaName (registryTableNames (Proxy @registry))
+
+-- | Rebuild the concurrency counts only if a crash truncated the UNLOGGED table. The
+-- reaper runs this periodically.
+reconcileConcurrencyCountsIfStale
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => m ()
+reconcileConcurrencyCountsIfStale = do
+  schemaName <- getSchema
+  Ops.reconcileConcurrencyCountsIfStale schemaName (registryTableNames (Proxy @registry))
+
+-- | Reconcile then prune. The reaper runs this.
+reconcileAndPruneConcurrency
+  :: forall m registry
+   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+  => m ()
+reconcileAndPruneConcurrency = do
+  schemaName <- getSchema
+  Ops.reconcileAndPruneConcurrency schemaName (registryTableNames (Proxy @registry))
+
+-- | Assemble a pool's claim statements once (see 'Ops.mkClaimSql'). Batch size 1
+-- is the single-job claim.
+mkClaimSql
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int
+  -> Int
+  -> NominalDiffTime
+  -> Maybe UUID
+  -> m Ops.ClaimSql
+mkClaimSql batchSize poolSize timeout mWorkerId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  pure $ Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize poolSize timeout mWorkerId
 
 -- | Variant of 'claimNextVisibleJobs' that stamps @claimed_by@ on every claimed
 -- row. Used by the worker dispatcher for claim attribution.
@@ -234,22 +455,6 @@ claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
-
--- | Variant of 'claimNextVisibleJobsBatched' that stamps @claimed_by@ on every
--- claimed row.
-claimNextVisibleJobsBatchedAs
-  :: forall m registry payload
-   . (QueueOperation m registry payload)
-  => Int
-  -> Int
-  -> NominalDiffTime
-  -> UUID
-  -- ^ Worker UUID stamped on each claimed row.
-  -> m [NonEmpty (JobRead payload)]
-claimNextVisibleJobsBatchedAs batchSize maxGroups timeout workerId = do
-  schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  Ops.claimNextVisibleJobsBatchedAs schemaName tableName batchSize maxGroups timeout workerId
 
 -- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
 -- if it's a parent with unfinished children. Returns 1 on success, 0 if gone.

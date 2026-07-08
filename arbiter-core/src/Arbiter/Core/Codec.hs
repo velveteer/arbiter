@@ -34,6 +34,10 @@ module Arbiter.Core.Codec
   , jobRowCodec
   , dlqRowCodec
   , countCodec
+  , rateLimitPolicyViewCodec
+  , rateLimitBucketCodec
+  , concurrencyPolicyViewCodec
+  , concurrencyKeyViewCodec
 
     -- * Cron codecs
   , cronScheduleRowCodec
@@ -52,9 +56,14 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 
+import Arbiter.Core.Admission (splitPrefixedSuffix)
+import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
+import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView (..), ConcurrencyPolicyView (..))
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..))
+import Arbiter.Core.Job.Types (AdmissionKeys (..), DedupKey (..), Job (..), JobRead)
 import Arbiter.Core.Queues (QueueRow (..))
+import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
+import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
 import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
 
 -- | Scalar PostgreSQL column type. The GADT tag recovers the Haskell type.
@@ -133,7 +142,7 @@ pnarr c v = SomeParam (PNullArray c) v
 -- Job codecs
 -- ---------------------------------------------------------------------------
 
-jobRowCodec :: Text -> RowCodec (Job Value Int64 Text UTCTime)
+jobRowCodec :: Text -> RowCodec (JobRead Value)
 jobRowCodec queueName =
   Job
     <$> col "id" CInt8
@@ -153,6 +162,10 @@ jobRowCodec queueName =
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
+    <*> admissionKeysCodec
+
+admissionKeysCodec :: RowCodec AdmissionKeys
+admissionKeysCodec = AdmissionKeys <$> rateLimitCodec <*> concurrencyCodec
 
 dedupKeyCodec :: RowCodec (Maybe DedupKey)
 dedupKeyCodec = toDedupKey <$> ncol "dedup_key" CText <*> ncol "dedup_strategy" CText
@@ -161,14 +174,29 @@ dedupKeyCodec = toDedupKey <$> ncol "dedup_key" CText <*> ncol "dedup_strategy" 
     toDedupKey (Just k) (Just "replace") = Just (ReplaceDuplicate k)
     toDedupKey (Just k) _ = Just (IgnoreDuplicate k)
 
-dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, Job Value Int64 Text UTCTime)
+-- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
+-- prefix columns, recovering the suffix by dropping the @prefix:@ part (so suffixes
+-- containing @:@ survive).
+prefixedKeyCodec :: Text -> Text -> (Text -> Text -> k) -> RowCodec (Maybe k)
+prefixedKeyCodec keyCol prefixCol ctor = toKey <$> ncol keyCol CText <*> ncol prefixCol CText
+  where
+    toKey (Just key) (Just prefix) = Just (ctor prefix (splitPrefixedSuffix prefix key))
+    toKey _ _ = Nothing
+
+rateLimitCodec :: RowCodec (Maybe RateLimitKey)
+rateLimitCodec = prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey
+
+concurrencyCodec :: RowCodec (Maybe ConcurrencyKey)
+concurrencyCodec = prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey
+
+dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
 dlqRowCodec queueName =
   (,,)
     <$> col "id" CInt8
     <*> col "failed_at" CTimestamptz
     <*> jobRowCodecWithJobId queueName
 
-jobRowCodecWithJobId :: Text -> RowCodec (Job Value Int64 Text UTCTime)
+jobRowCodecWithJobId :: Text -> RowCodec (JobRead Value)
 jobRowCodecWithJobId queueName =
   Job
     <$> col "job_id" CInt8
@@ -188,9 +216,55 @@ jobRowCodecWithJobId queueName =
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
+    <*> admissionKeysCodec
 
 countCodec :: RowCodec Int64
 countCodec = col "count" CInt8
+
+-- | A policy row with bucket aggregates and live throttled count.
+rateLimitPolicyViewCodec :: RowCodec RateLimitPolicyView
+rateLimitPolicyViewCodec =
+  RateLimitPolicyView
+    <$> col "prefix_id" CText
+    <*> col "default_max_tokens" CFloat8
+    <*> col "default_refill_amount" CFloat8
+    <*> col "default_interval" CFloat8
+    <*> ncol "override_max_tokens" CFloat8
+    <*> ncol "override_refill_amount" CFloat8
+    <*> ncol "override_interval" CFloat8
+    <*> col "bucket_count" CInt8
+    <*> col "throttled_count" CInt8
+    <*> ncol "min_tokens" CFloat8
+    <*> ncol "avg_tokens" CFloat8
+
+rateLimitBucketCodec :: RowCodec RateLimitBucketView
+rateLimitBucketCodec =
+  RateLimitBucketView
+    <$> col "rate_limit_key" CText
+    <*> col "policy_prefix" CText
+    <*> col "tokens" CFloat8
+    <*> col "max_tokens" CFloat8
+    <*> ncol "fill_fraction" CFloat8
+    <*> col "last_refill" CTimestamptz
+
+concurrencyPolicyViewCodec :: RowCodec ConcurrencyPolicyView
+concurrencyPolicyViewCodec =
+  ConcurrencyPolicyView
+    <$> col "prefix_id" CText
+    <*> col "default_limit" CInt4
+    <*> ncol "override_limit" CInt4
+    <*> col "key_count" CInt8
+    <*> col "total_in_flight" CInt8
+    <*> ncol "max_in_flight" CInt4
+
+concurrencyKeyViewCodec :: RowCodec ConcurrencyKeyView
+concurrencyKeyViewCodec =
+  ConcurrencyKeyView
+    <$> col "concurrency_key" CText
+    <*> col "concurrency_prefix" CText
+    <*> col "in_flight" CInt4
+    <*> col "effective_limit" CInt4
+    <*> ncol "fill_fraction" CFloat8
 
 -- ---------------------------------------------------------------------------
 -- Cron codecs

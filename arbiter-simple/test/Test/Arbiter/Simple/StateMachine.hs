@@ -3,13 +3,13 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Simple backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Simple.StateMachine (spec) where
 
-import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Setup (setupOnce)
-import Arbiter.Test.StateMachine (stateMachineSpec)
+import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
 import Data.Maybe (fromJust)
 import Data.Pool (withResource)
@@ -28,7 +28,7 @@ testSchema = "arbiter_simple_sm_test"
 testTable :: Text
 testTable = "arbiter_simple_sm_test"
 
-type SMRegistry = '[ '("arbiter_simple_sm_test", TestPayload)]
+type SMRegistry = '[ '("arbiter_simple_sm_test", SMPayload)]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
@@ -39,8 +39,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource (fromJust (connectionPool (simplePool env)))
       reset = cleanupSimpleTest env testSchema testTable
-  stateMachineSpec @(SimpleDb SMRegistry IO) @SMRegistry @TestPayload
-    TestMessage
+  stateMachineSpec @(SimpleDb SMRegistry IO) @SMRegistry
     run
     testSchema
     testTable

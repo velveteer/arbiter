@@ -56,6 +56,13 @@ const ArbiterAPI = {
     }
   },
 
+  _pageQuery({ limit, offset } = {}) {
+    const qs = [];
+    if (limit != null) qs.push(`limit=${encodeURIComponent(limit)}`);
+    if (offset != null) qs.push(`offset=${encodeURIComponent(offset)}`);
+    return qs.length ? `?${qs.join('&')}` : '';
+  },
+
   // Queues
   listQueues() {
     return this._fetch('/queues');
@@ -146,6 +153,11 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/stats`);
   },
 
+  // Per-queue stats for every queue in one request (landing overview).
+  getAllStats() {
+    return this._fetch('/queues/stats');
+  },
+
   // Cron
   listCronSchedules({ queue } = {}) {
     const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';
@@ -184,6 +196,46 @@ const ArbiterAPI = {
 
   resumeWorker(workerId) {
     return this._fetch(`/workers/${encodeURIComponent(workerId)}/resume`, { method: 'POST' });
+  },
+
+  // Rate limits
+  listRateLimits() {
+    return this._fetch('/rate-limits');
+  },
+
+  listRateLimitBuckets(prefix, page = {}) {
+    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/buckets${this._pageQuery(page)}`);
+  },
+
+  updateRateLimitPolicy(prefix, body) {
+    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  },
+
+  resetRateLimitBuckets(prefix) {
+    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/reset`, { method: 'POST' });
+  },
+
+  // Concurrency
+  listConcurrency() {
+    return this._fetch('/concurrency');
+  },
+
+  listConcurrencyKeys(prefix, page = {}) {
+    return this._fetch(`/concurrency/${encodeURIComponent(prefix)}/keys${this._pageQuery(page)}`);
+  },
+
+  updateConcurrencyPolicy(prefix, body) {
+    return this._fetch(`/concurrency/${encodeURIComponent(prefix)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  },
+
+  reconcileConcurrency() {
+    return this._fetch('/concurrency/reconcile', { method: 'POST' });
   },
 
   // SSE

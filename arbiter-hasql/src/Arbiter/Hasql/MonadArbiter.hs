@@ -19,6 +19,7 @@
 module Arbiter.Hasql.MonadArbiter
   ( -- * MonadArbiter implementation
     hasqlExecuteQuery
+  , hasqlExecuteQueryPrepared
   , hasqlExecuteStatement
   , hasqlWithDbTransaction
   , hasqlRunHandlerWithConnection
@@ -60,6 +61,8 @@ data HasqlConnectionPool = HasqlConnectionPool
   -- ^ Pinned connection when inside a transaction
   , transactionDepth :: Int
   -- ^ Current nesting depth (0 = no active transaction)
+  , preparedStatements :: Bool
+  -- ^ Whether 'hasqlExecuteQueryPrepared' prepares server-side. Off by default.
   }
 
 -- | Typeclass for monads that carry a hasql connection pool.
@@ -80,8 +83,25 @@ hasqlExecuteQuery
   -> Params
   -> RowCodec a
   -> m [a]
-hasqlExecuteQuery sql params codec = withConn $ \conn -> liftIO $ do
-  let stmt = S.unpreparable (Encode.convertPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
+hasqlExecuteQuery sql params codec = withConn $ \conn ->
+  runQueryStatement False conn sql params codec
+
+-- | 'hasqlExecuteQuery' that prepares the statement once per connection and reuses
+-- the plan, when the pool enables prepared statements.
+hasqlExecuteQueryPrepared
+  :: (HasHasqlPool m, MonadIO m)
+  => Text
+  -> Params
+  -> RowCodec a
+  -> m [a]
+hasqlExecuteQueryPrepared sql params codec = do
+  pool <- getHasqlPool
+  withConn $ \conn -> runQueryStatement (preparedStatements pool) conn sql params codec
+
+runQueryStatement :: Bool -> Hasql.Connection -> Text -> Params -> RowCodec a -> IO [a]
+runQueryStatement prepare conn sql params codec = do
+  let mk = if prepare then S.preparable else S.unpreparable
+      stmt = mk (Encode.convertPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
     Right rows -> pure rows

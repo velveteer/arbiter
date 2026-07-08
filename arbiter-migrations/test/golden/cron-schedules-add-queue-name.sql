@@ -1,0 +1,1 @@
+ALTER TABLE "arbiter".cron_schedules ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'pre-migration';
