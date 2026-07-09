@@ -5,6 +5,11 @@
 
 An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-2ea44f?style=for-the-badge&logo=postgresql&logoColor=white)](https://demo.arbiterq.dev/)
+[![API Docs](https://img.shields.io/badge/API_Docs-5e5086?style=for-the-badge&logo=haskell&logoColor=white)](https://velveteer.github.io/arbiter/)
+[![CI](https://img.shields.io/github/actions/workflow/status/velveteer/arbiter/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/velveteer/arbiter/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](./LICENSE)
+
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
 - Per-group ordering (partitioned FIFO)
@@ -19,10 +24,6 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
 - Extensive test coverage (1,000+ integration tests)
-
-**[Live Demo](https://demo.arbiterq.dev/)**
-
-**[API Documentation](https://velveteer.github.io/arbiter/)**
 
 > [!NOTE]
 >
