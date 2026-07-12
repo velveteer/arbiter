@@ -14,6 +14,7 @@ module Arbiter.Core.Job.Schema
     -- * Table Creation SQL
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
+  , addTraceContextColumnSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
@@ -192,6 +193,9 @@ createSchemaSQL schemaName =
 -- | Common job column definitions (matches the Job type structure)
 --
 -- These columns are shared between job_queue and dead_letter_queue tables.
+--
+-- The create-table migration is checksummed over this list, so a new column ships
+-- as its own ALTER script rather than an entry here.
 jobColumns :: [Text]
 jobColumns =
   [ "  id BIGSERIAL PRIMARY KEY,"
@@ -211,6 +215,15 @@ jobColumns =
   , "  parent_state JSONB,"
   , "  suspended BOOLEAN NOT NULL DEFAULT FALSE"
   ]
+
+addTraceContextColumnSQL :: Text -> Text -> Text
+addTraceContextColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS traceparent TEXT;"
+    , "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS tracestate TEXT;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS traceparent TEXT;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS tracestate TEXT;"
+    ]
 
 -- | Job column definitions for DLQ table (with job_id instead of id)
 jobColumnsForDLQ :: Text

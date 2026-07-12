@@ -9,6 +9,7 @@ module Arbiter.Test.Setup
   , execute_
   , setupOnce
   , disableNoticeReporting
+  , resetSchema
   , createSharedPool
   , truncateToMicros
   , seedConcurrencyPoolSQL
@@ -31,7 +32,7 @@ import Arbiter.Migrations
   , schemaLevelMigrations
   )
 import Control.Concurrent (threadDelay)
-import Control.Exception (throwIO, try)
+import Control.Exception (bracket, throwIO, try)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
@@ -147,6 +148,13 @@ setupOnce connStr schemaName tableName withNotify = do
 disableNoticeReporting :: Connection -> IO ()
 disableNoticeReporting conn =
   PGS.withConnection conn LibPQ.disableNoticeReporting
+
+-- | Drop a test schema and everything in it.
+resetSchema :: ByteString -> Text -> IO ()
+resetSchema connStr schemaName =
+  bracket (connectPostgreSQL connStr) close $ \conn -> do
+    execute_ conn "SET client_min_messages = warning"
+    execute_ conn ("DROP SCHEMA IF EXISTS " <> schemaName <> " CASCADE")
 
 -- | A single-stripe pool of 5 connections for tests.
 createSharedPool :: ByteString -> IO (Pool Connection)

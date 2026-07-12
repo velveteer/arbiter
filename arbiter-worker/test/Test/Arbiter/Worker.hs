@@ -363,7 +363,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
           successes <- readIORef successRef
-          -- onJobSuccess fired only for the survivors; the reclaimed job was skipped.
+          -- onJobSuccess fired only for the survivors. The reclaimed job was skipped.
           successes `shouldMatchList` [SimpleTask "ca-keep1", SimpleTask "ca-keep2"]
 
       it "rollup ackAllWith stores each job's result for the parent" $ \env -> do
@@ -939,7 +939,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         withAsync (runSimpleDb env $ runWorkerPool cfgA) $ \_ ->
           withAsync (runSimpleDb env $ runWorkerPool cfgB) $ \_ -> do
-            -- Wait on the registry rows; getWorkerState reads only TVars and
+            -- Wait on the registry rows. getWorkerState reads only TVars and
             -- would return Running before the workers have actually registered.
             waitUntil 10_000 $ do
               rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing

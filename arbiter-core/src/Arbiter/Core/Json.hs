@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Shared Aeson helpers for triple-state patch decoders, where an omitted field
 -- (leave unchanged) must stay distinct from an explicit @null@ (clear the override).
 module Arbiter.Core.Json

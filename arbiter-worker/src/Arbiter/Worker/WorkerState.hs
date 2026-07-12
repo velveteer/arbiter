@@ -2,6 +2,7 @@ module Arbiter.Worker.WorkerState
   ( WorkerState (..)
   , newWorkerState
   , signalShutdown
+  , awaitShutdown
   ) where
 
 import Control.Concurrent.STM (TVar)
@@ -16,6 +17,10 @@ newWorkerState = STM.newTVarIO Running
 -- Workers will stop claiming new jobs, finish in-flight work, then exit.
 signalShutdown :: TVar WorkerState -> IO ()
 signalShutdown st = STM.atomically $ STM.writeTVar st ShuttingDown
+
+-- | Block until 'signalShutdown'.
+awaitShutdown :: TVar WorkerState -> IO ()
+awaitShutdown st = STM.atomically $ STM.readTVar st >>= STM.check . (== ShuttingDown)
 
 -- | Effective state of a worker pool. Synthesized from two TVars on the
 -- 'Arbiter.Worker.Config.WorkerConfig': 'ShuttingDown' if the (possibly

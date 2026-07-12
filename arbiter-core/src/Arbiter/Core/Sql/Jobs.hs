@@ -29,6 +29,7 @@ module Arbiter.Core.Sql.Jobs
   , allDLQColumns
   , jobColsExceptError
   , dlqCarriedCols
+  , dlqRetryCols
   , jobColumns
   , insertJobSQL
   , insertJobReplaceSQL
@@ -36,9 +37,9 @@ module Arbiter.Core.Sql.Jobs
   , insertJobsBatchSQL_
   , insertJobsBatchBase
   , getJobByIdSQL
+  , jobExistsSQL
   , getJobByDedupKeySQL
   , cancelJobSQL
-  , uuidLiteral
   , unionAllOverQueueTables
   ) where
 
@@ -46,8 +47,6 @@ import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.UUID.Types (UUID)
-import Data.UUID.Types qualified as UUID
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec)
@@ -291,11 +290,38 @@ jobColsExceptError = T.intercalate ", " $ filter (/= "last_error") (drop 1 allJo
 dlqCarriedCols :: Text
 dlqCarriedCols = jobColsExceptError <> ", rate_limit_cost"
 
--- | Standard job column list (for SELECT and RETURNING)
-jobColumns :: Maybe Text -> Text
-jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
+-- | Job columns a DLQ retry carries back to the main queue. Excludes @id@ and every
+-- column the retry recomputes (@attempts@, @suspended@, the lifecycle timestamps).
+dlqRetryColumns :: [Text]
+dlqRetryColumns =
+  [ "payload"
+  , "group_key"
+  , "priority"
+  , "max_attempts"
+  , "parent_id"
+  , "parent_state"
+  , "traceparent"
+  , "tracestate"
+  , "rate_limit_key"
+  , "rate_limit_prefix"
+  , "rate_limit_cost"
+  , "concurrency_key"
+  , "concurrency_prefix"
+  ]
+
+-- | Comma-separated column list, optionally qualified by a table alias.
+qualifiedColumns :: [Text] -> Maybe Text -> Text
+qualifiedColumns cols mAlias = T.intercalate ", " (map withAlias cols)
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
+
+-- | Standard job column list (for SELECT and RETURNING)
+jobColumns :: Maybe Text -> Text
+jobColumns = qualifiedColumns allJobColumns
+
+-- | 'dlqRetryColumns' as a column list.
+dlqRetryCols :: Maybe Text -> Text
+dlqRetryCols = qualifiedColumns dlqRetryColumns
 
 -- | Insert a job. Parameters bind the INSERT column list in order.
 insertJobSQL :: Text -> Text -> Text
@@ -304,8 +330,8 @@ insertJobSQL schema tableName =
       columns = jobColumns Nothing
       dma = T.pack (show defaultMaxAttempts)
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, traceparent, tracestate, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
+        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
         RETURNING ${columns}
       |]
@@ -327,8 +353,8 @@ insertJobReplaceSQL schema tableName =
       columns = jobColumns Nothing
       dma = T.pack (show defaultMaxAttempts)
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, traceparent, tracestate, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
+        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
           payload = EXCLUDED.payload,
           group_key = EXCLUDED.group_key,
@@ -340,6 +366,8 @@ insertJobReplaceSQL schema tableName =
           updated_at = NOW(),
           parent_id = EXCLUDED.parent_id,
           parent_state = EXCLUDED.parent_state,
+          traceparent = EXCLUDED.traceparent,
+          tracestate = EXCLUDED.tracestate,
           suspended = EXCLUDED.suspended,
           not_visible_until = EXCLUDED.not_visible_until,
           rate_limit_key = EXCLUDED.rate_limit_key,
@@ -382,10 +410,10 @@ insertJobsBatchBase schema tableName returning =
       dlqTbl = jobQueueDLQTable schema tableName
       dma = T.pack (show defaultMaxAttempts)
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
+        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, traceparent, tracestate, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
         SELECT
           payload, group_key, 0, NULL, priority, dedup_key, dedup_strategy, COALESCE(max_attempts, ${dma}), parent_id,
-          parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix
+          parent_state, traceparent, tracestate, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix
         FROM (
           SELECT
             unnest(?::jsonb[]) AS payload,
@@ -396,6 +424,8 @@ insertJobsBatchBase schema tableName returning =
             unnest(?::int[]) AS max_attempts,
             unnest(?::bigint[]) AS parent_id,
             unnest(?::jsonb[]) AS parent_state,
+            unnest(?::text[]) AS traceparent,
+            unnest(?::text[]) AS tracestate,
             unnest(?::boolean[]) AS suspended,
             unnest(?::timestamptz[]) AS not_visible_until,
             unnest(?::text[]) AS rate_limit_key,
@@ -417,6 +447,8 @@ insertJobsBatchBase schema tableName returning =
           updated_at = NOW(),
           parent_id = EXCLUDED.parent_id,
           parent_state = EXCLUDED.parent_state,
+          traceparent = EXCLUDED.traceparent,
+          tracestate = EXCLUDED.tracestate,
           suspended = EXCLUDED.suspended,
           not_visible_until = EXCLUDED.not_visible_until,
           rate_limit_key = EXCLUDED.rate_limit_key,
@@ -453,6 +485,12 @@ getJobByIdSQL schema tableName =
         FROM ${tbl}
         WHERE id = ?
       |]
+
+-- | Does a job row exist? Reads no column.
+jobExistsSQL :: Text -> Text -> Text
+jobExistsSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+   in [text|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = ?) AS result|]
 
 -- | SQL template for fetching a job by its dedup_key.
 --
@@ -505,11 +543,6 @@ cancelJobSQL schema tableName =
         )
         SELECT (SELECT count(*) FROM cancel) AS result
       |]
-
--- | Render a 'Maybe UUID' as a SQL literal: NULL or 'uuid-text'::uuid.
-uuidLiteral :: Maybe UUID -> Text
-uuidLiteral Nothing = "NULL"
-uuidLiteral (Just u) = "'" <> UUID.toText u <> "'::uuid"
 
 -- | @UNION ALL@ of @body@ over each job table, passing its raw name and schema-qualified reference.
 unionAllOverQueueTables :: SchemaName -> [TableName] -> (TableName -> Text -> Text) -> Text

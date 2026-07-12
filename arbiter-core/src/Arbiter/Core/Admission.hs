@@ -9,8 +9,10 @@
 module Arbiter.Core.Admission
   ( -- * Keys
     prefixedKeyText
+  , prefixedKeyPairs
   , prefixedKeyToJSON
   , prefixedKeyParseJSON
+  , prefixedKeyPartValid
   , splitPrefixedSuffix
 
     -- * Policies and selectors
@@ -26,13 +28,14 @@ module Arbiter.Core.Admission
 
     -- * SQL fragments
   , effectivePolicyCol
+  , unpolicied
   , touchColumn
   , policyUpsertSQL
   , policyViewScope
   ) where
 
 import Data.Aeson (Value, object, withObject, (.:), (.=))
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Pair, Parser)
 import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -49,13 +52,22 @@ import Arbiter.Core.Selector (Selector, field, usePolicy)
 prefixedKeyText :: Text -> Text -> Text
 prefixedKeyText pfx sfx = pfx <> ":" <> sfx
 
+-- | JSON fields of a @prefix:suffix@ key.
+prefixedKeyPairs :: Text -> Text -> [Pair]
+prefixedKeyPairs p s = ["prefix" .= p, "suffix" .= s]
+
 -- | JSON for a @prefix:suffix@ key.
 prefixedKeyToJSON :: Text -> Text -> Value
-prefixedKeyToJSON p s = object ["prefix" .= p, "suffix" .= s]
+prefixedKeyToJSON p s = object (prefixedKeyPairs p s)
 
 -- | Parse a @prefix:suffix@ key into a constructor.
 prefixedKeyParseJSON :: String -> (Text -> Text -> a) -> Value -> Parser a
 prefixedKeyParseJSON name mk = withObject name $ \v -> mk <$> v .: "prefix" <*> v .: "suffix"
+
+-- | A prefix or suffix an untrusted writer may use: one holding the separator
+-- would alias another key's keyspace.
+prefixedKeyPartValid :: Text -> Bool
+prefixedKeyPartValid = not . T.isInfixOf ":"
 
 -- | Recover the suffix of a stored @prefix:suffix@ key given its prefix.
 splitPrefixedSuffix :: Text -> Text -> Text
@@ -88,6 +100,24 @@ selectBy mkKey pol suffix =
 effectivePolicyCol :: Text -> Text -> Text
 effectivePolicyCol p name =
   "COALESCE(" <> p <> ".override_" <> name <> ", " <> p <> ".default_" <> name <> ")"
+
+-- | No policy governs this job's key: unkeyed, or keyed under an undeclared prefix.
+-- Both run uncapped. Takes the policies table, the job alias, and its key column stem.
+unpolicied :: Text -> Text -> Text -> Text
+unpolicied policiesTable j stem =
+  T.concat
+    [ "("
+    , j
+    , "."
+    , stem
+    , "_key IS NULL OR NOT EXISTS (SELECT 1 FROM "
+    , policiesTable
+    , " p WHERE p.prefix_id = "
+    , j
+    , "."
+    , stem
+    , "_prefix))"
+    ]
 
 -- | An UPDATE assignment guarded by a boolean touch flag, binding flag then value.
 -- An untouched column keeps its current value.

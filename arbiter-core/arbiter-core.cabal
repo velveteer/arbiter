@@ -47,6 +47,7 @@ library
     Arbiter.Core.HasArbiterSchema
     Arbiter.Core.HighLevel
     Arbiter.Core.Job.DLQ
+    Arbiter.Core.Health
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Types
     Arbiter.Core.JobTree
@@ -66,6 +67,7 @@ library
     Arbiter.Core.Sql.DLQ
     Arbiter.Core.Sql.Gates
     Arbiter.Core.Sql.Groups
+    Arbiter.Core.Sql.Health
     Arbiter.Core.Sql.Jobs
     Arbiter.Core.Sql.Lifecycle
     Arbiter.Core.Sql.Queues
@@ -73,19 +75,22 @@ library
     Arbiter.Core.Sql.Stats
     Arbiter.Core.Sql.Tree
     Arbiter.Core.Sql.Workers
+    Arbiter.Core.Trace
     Arbiter.Core.Worker
     Arbiter.RateLimit
 
   build-depends:
-    , aeson               >=2.0  && <2.3
-    , base                >=4.14 && <5
-    , bytestring          >=0.10 && <0.13
-    , containers          >=0.6  && <0.9
-    , free                >=5.1  && <5.3
-    , neat-interpolation  >=0.5  && <0.6
-    , postgresql-simple   >=0.6  && <0.8
-    , selective           >=0.5  && <0.8
-    , text                >=1.2  && <2.2
-    , time                >=1.9  && <1.16
-    , unliftio            >=0.2  && <0.3
-    , uuid-types          >=1.0  && <1.1
+    , aeson                            >=2.0  && <2.3
+    , base                             >=4.14 && <5
+    , bytestring                       >=0.10 && <0.13
+    , containers                       >=0.6  && <0.9
+    , free                             >=5.1  && <5.3
+    , hs-opentelemetry-api             >=1.0  && <1.1
+    , hs-opentelemetry-propagator-w3c  >=1.0  && <1.1
+    , neat-interpolation               >=0.5  && <0.6
+    , postgresql-simple                >=0.6  && <0.8
+    , selective                        >=0.5  && <0.8
+    , text                             >=1.2  && <2.2
+    , time                             >=1.9  && <1.16
+    , unliftio                         >=0.2  && <0.3
+    , uuid-types                       >=1.0  && <1.1

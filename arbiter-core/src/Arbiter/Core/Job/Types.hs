@@ -87,6 +87,9 @@ data Job payload key q insertedAt adm = Job
   -- rollup finalizer, and overwrites it with the final results map before
   -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
   -- results table. 'isRollup' is derived from whether this is non-null.
+  , traceparent :: Maybe Text
+  -- ^ W3C trace context captured at enqueue, for consumer span linking. Arbiter-owned.
+  , tracestate :: Maybe Text
   , suspended :: Bool
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
@@ -113,7 +116,7 @@ defaultMaxAttempts :: Int32
 defaultMaxAttempts = 10
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
--- (an empty object on insert; the merged child results before a DLQ move).
+-- (an empty object on insert, the merged child results before a DLQ move).
 isRollup :: Job p k q t adm -> Bool
 isRollup = isJust . parentState
 
@@ -165,6 +168,8 @@ defaultJob p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceparent = Nothing
+    , tracestate = Nothing
     , suspended = False
     , claimedBy = Nothing
     , admission = ()
@@ -193,6 +198,8 @@ defaultGroupedJob gk p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceparent = Nothing
+    , tracestate = Nothing
     , suspended = False
     , claimedBy = Nothing
     , admission = ()
@@ -245,7 +252,7 @@ type BackoffDelay = NominalDiffTime
 -- | A set of callbacks invoked at key points in the job lifecycle.
 --
 -- Use these hooks to integrate with metrics, logging, or tracing systems.
--- Hooks are exception-safe; any exception thrown within a hook is caught
+-- Hooks are exception-safe. Any exception thrown within a hook is caught
 -- and ignored to prevent crashing the worker.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed
@@ -283,6 +290,13 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> JobRead payload
       -> m ()
   -- ^ Called when a job is successfully moved to the dead-letter queue.
+  , onJobCancelled
+      :: (JobPayload payload)
+      => JobRead payload
+      -> ErrorMsg
+      -> m ()
+  -- ^ Called when a job is deleted by a branch or tree cancel rather than retried
+  -- or dead-lettered.
   , onJobHeartbeat
       :: (JobPayload payload)
       => JobRead payload
@@ -309,5 +323,22 @@ defaultObservabilityHooks =
     , onJobFailure = \_ _ _ _ -> pure ()
     , onJobRetry = \_ _ -> pure ()
     , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+    , onJobCancelled = \_ _ -> pure ()
     , onJobHeartbeat = \_ _ _ -> pure ()
     }
+
+-- | Runs both hooks at each lifecycle point, left before right.
+instance (Applicative m) => Semigroup (ObservabilityHooks m payload) where
+  a <> b =
+    ObservabilityHooks
+      { onJobClaimed = \j t -> onJobClaimed a j t *> onJobClaimed b j t
+      , onJobSuccess = \j s e -> onJobSuccess a j s e *> onJobSuccess b j s e
+      , onJobFailure = \j msg s e -> onJobFailure a j msg s e *> onJobFailure b j msg s e
+      , onJobRetry = \j d -> onJobRetry a j d *> onJobRetry b j d
+      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j *> onJobFailedAndMovedToDLQ b msg j
+      , onJobCancelled = \j msg -> onJobCancelled a j msg *> onJobCancelled b j msg
+      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s *> onJobHeartbeat b j c s
+      }
+
+instance (Applicative m) => Monoid (ObservabilityHooks m payload) where
+  mempty = defaultObservabilityHooks

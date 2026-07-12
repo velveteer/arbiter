@@ -14,6 +14,7 @@ import Arbiter.Core.Job.Types
   , JobRead
   , ObservabilityHooks (..)
   , defaultJob
+  , defaultObservabilityHooks
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
@@ -27,16 +28,18 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (listToMaybe)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Test.Hspec (Spec, beforeAll, describe, it, runIO, shouldBe, shouldContain)
+import Test.Hspec (Spec, beforeAll, describe, it, runIO, shouldBe, shouldContain, shouldReturn)
 import UnliftIO (withAsync)
 
 import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.Config (WorkerConfig (..), defaultWorkerConfig)
+import Arbiter.Worker.Config (BatchCallbacks (..), WorkerConfig (..), defaultBatchedWorkerConfig, defaultWorkerConfig)
 
 -- | Test schema name
 testSchema :: T.Text
@@ -81,6 +84,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
               , onJobRetry = \_ _ -> pure ()
               , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+              , onJobCancelled = \_ _ -> pure ()
               , onJobHeartbeat = \_ _ _ -> pure ()
               }
 
@@ -137,6 +141,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
               , onJobRetry = \_ _ -> pure ()
               , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+              , onJobCancelled = \_ _ -> pure ()
               , onJobHeartbeat = \_ _ _ -> pure ()
               }
 
@@ -167,6 +172,74 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       successCount <- readIORef successCalls
       failureCount `shouldBe` 1
       successCount `shouldBe` 0
+
+    it "fires the DLQ hook once the failure has committed, not inside its transaction" $ do
+      env <- getEnv
+
+      dlqCalls <- newIORef (0 :: Int)
+      retryCalls <- newIORef (0 :: Int)
+      -- Read on a separate connection: a hook still inside the failure transaction
+      -- cannot see its own uncommitted DLQ row.
+      dlqRowsSeen <- newIORef (-1 :: Int)
+
+      let hooks =
+            defaultObservabilityHooks
+              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryCalls (\n -> (n + 1, ()))
+              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ do
+                  rows <- countDLQRows connStr
+                  atomicModifyIORef' dlqRowsSeen (\_ -> (rows, ()))
+                  atomicModifyIORef' dlqCalls (\n -> (n + 1, ()))
+              }
+
+      void $
+        runSimpleDb env $
+          Ops.insertJob testSchema testTable ((defaultJob (SimpleTask "will-dlq")) {maxAttempts = Just 1})
+
+      let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
+          jobHandler _conn _job = error "intentional failure"
+
+      config <- runSimpleDb env $ defaultWorkerConfig connStr 1 jobHandler
+      withAsync
+        (runSimpleDb env $ runWorkerPool config {observabilityHooks = hooks, pollInterval = 0.1})
+        $ \_ ->
+          waitUntil 10_000 $ (== 1) <$> readIORef dlqCalls
+
+      -- One attempt allowed, so the job dead-letters rather than retrying.
+      readIORef retryCalls `shouldReturn` 0
+      -- The row the hook is being told about is already committed.
+      readIORef dlqRowsSeen `shouldReturn` 1
+
+    it "fires the DLQ hook after the commit for a batched handler's failPermanent too" $ do
+      env <- getEnv
+
+      dlqCalls <- newIORef (0 :: Int)
+      dlqRowsSeen <- newIORef (-1 :: Int)
+
+      let hooks =
+            defaultObservabilityHooks
+              { onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ do
+                  rows <- countDLQRows connStr
+                  atomicModifyIORef' dlqRowsSeen (\_ -> (rows, ()))
+                  atomicModifyIORef' dlqCalls (\n -> (n + 1, ()))
+              }
+
+      void $
+        runSimpleDb env $
+          Ops.insertJob testSchema testTable ((defaultJob (SimpleTask "batched-dlq")) {maxAttempts = Just 1})
+
+      let batchHandler
+            :: NonEmpty (JobRead WorkerConcurrencyTestPayload)
+            -> BatchCallbacks (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
+            -> SimpleDb WorkerConcurrencyTestRegistry IO ()
+          batchHandler (job :| _) cbs = failPermanent cbs job "bad input"
+
+      config <- runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 1 batchHandler
+      withAsync
+        (runSimpleDb env $ runWorkerPool config {observabilityHooks = hooks, pollInterval = 0.1})
+        $ \_ ->
+          waitUntil 10_000 $ (== 1) <$> readIORef dlqCalls
+
+      readIORef dlqRowsSeen `shouldReturn` 1
 
   describe "Heartbeat Stolen Job Detection" $ do
     it "heartbeat cancels handler via race when job is stolen mid-processing" $ do
@@ -226,6 +299,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
               , onJobRetry = \_ _ -> pure ()
               , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+              , onJobCancelled = \_ _ -> pure ()
               , onJobHeartbeat = \_ _ _ -> pure ()
               }
 
@@ -263,6 +337,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 -- | Helper: Simulate another worker claiming a job by incrementing attempts.
 -- This opens a fresh connection (outside any worker transaction) to increment
 -- the attempts counter, causing the worker's ack to fail due to attempts mismatch.
+-- | DLQ rows as a separate session sees them, so uncommitted ones do not count.
+countDLQRows :: ByteString -> IO Int
+countDLQRows connStr = do
+  conn <- PG.connectPostgreSQL connStr
+  rows <-
+    PG.query_
+      conn
+      "SELECT count(*)::int FROM arbiter_worker_concurrency_test.arbiter_worker_concurrency_test_dlq"
+  PG.close conn
+  pure (maybe 0 PG.fromOnly (listToMaybe rows))
+
 simulateAnotherWorkerClaim :: ByteString -> Int64 -> IO ()
 simulateAnotherWorkerClaim connStr jobId = do
   conn <- PG.connectPostgreSQL connStr

@@ -20,9 +20,11 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - Job deduplication via unique keys
 - Cross-queue per-job rate limiting with operator-tunable token-bucket policies
 - Cross-queue per-job concurrency limits - at most N jobs sharing a key in flight
-- Observability callbacks, structured logging
+- Built-in OpenTelemetry tracing and metrics, observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
+- Batteries-included serving: health probes, a Prometheus `/metrics` endpoint, and graceful drain in one call
 - File-based liveness probes for Kubernetes / systemd
+- A config-driven CLI that runs jobs for non-Haskell services over HTTP webhooks
 - Extensive test coverage (1,000+ integration tests)
 
 > [!NOTE]
@@ -169,6 +171,33 @@ processEmail conn job = do
 ```
 
 Handlers run inside a database transaction by default. If the handler succeeds, the job is deleted and all database work commits atomically. If the handler throws, the transaction rolls back and the job is retried or moved to the DLQ.
+
+### Serving: workers, health, metrics, and tracing in one call
+
+`runWorkerPool` above runs a single pool and nothing else. For a real deployment, `runArbiterServe` runs all of your pools alongside the REST API and admin UI, `/healthz` + `/readyz` probes, a Prometheus `/metrics` endpoint, OpenTelemetry tracing, and graceful drain on `SIGTERM`/`SIGINT` - in one call:
+
+```haskell
+import Arbiter.Serve qualified as Serve
+import Arbiter.Worker (namedWorkerPool)
+
+main :: IO ()
+main = do
+  env      <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+  emailCfg <- Worker.defaultWorkerConfig connStr 5 processEmail
+
+  ArbS.runSimpleDb env $
+    Serve.runArbiterServe @AppRegistry
+      (Serve.defaultServeConfig connStr "arbiter")
+      [namedWorkerPool emailCfg]
+```
+
+That is the whole deployment. To mount your own routes or middleware alongside it, build the app yourself and hand it to `runArbiterServeWith` instead.
+
+Out of the box you get all three OpenTelemetry signals. Every enqueue carries the ambient trace context onto the job, and the worker opens a consumer span linked back to it, following the messaging semantic conventions - so a trace spans the enqueue, the wait, and the run. Metrics (queue depth, throughput, handler latency, Postgres health) are served at `/metrics` for Prometheus to scrape. Logs carry the trace and span of the job that wrote them, plus its id, queue, and attempt.
+
+To ship it anywhere, point `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector: that one endpoint feeds all three signals, and the per-signal variables override it. Against a traces-only backend like Jaeger or Tempo, keep metrics on the scrape endpoint with `OTEL_METRICS_EXPORTER=prometheus` and logs on stdout with `OTEL_LOGS_EXPORTER=none`. Exported logs go alongside stdout, never instead of it. Set nothing and nothing is pushed. A ready-to-run Grafana + Tempo + Prometheus stack lives under `arbiter-cli/deploy/observability`.
+
+If your application already initializes the OpenTelemetry SDK, set `telemetry = Serve.TelemetryExternal` and arbiter registers against your providers instead of installing its own.
 
 ## Architecture
 
@@ -642,7 +671,7 @@ Arbiter's core is backend-agnostic via the `MonadArbiter` typeclass. Three offic
 
 If you're choosing a backend based on raw throughput, consider our benchmarks:
 
-Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro. hasql runs with prepared claim statements (recommended but not the default).
+Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro. hasql runs with prepared claim statements (the default).
 
 **Pre-loaded queue** (1M jobs, 50k groups):
 
@@ -714,13 +743,11 @@ env <- ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
 ArbH.runHasqlDb env $ Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 ```
 
-When workers connect to PostgreSQL directly, enable prepared statements for the claim path - the claim is planned once per connection instead of on every poll, which is worth 25-70% more throughput on claim-heavy workloads:
+Prepared statements are on by default: the claim is planned once per connection instead of on every poll, which is worth 25-70% more throughput on claim-heavy workloads. Turn them off when connections pass through a pooler that does not support server-side prepared statements, such as PgBouncer in transaction or statement mode:
 
 ```haskell
-env <- ArbH.setPreparedStatements True <$> ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
+env <- ArbH.setPreparedStatements False <$> ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
 ```
-
-Leave it off (the default) when connections pass through a pooler that does not support server-side prepared statements.
 
 Share a transaction with external hasql work:
 

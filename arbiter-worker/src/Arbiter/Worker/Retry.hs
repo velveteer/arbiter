@@ -31,7 +31,7 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 -- | Run an action in a retry loop, surviving transient failures.
 --
 -- On synchronous exceptions, checks the worker state - if 'ShuttingDown',
--- exits cleanly; otherwise logs the error and retries after a 5-second delay.
+-- exits cleanly. Otherwise logs the error and retries after a 5-second delay.
 retryOnException
   :: (MonadUnliftIO m)
   => TVar WorkerState

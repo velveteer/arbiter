@@ -160,6 +160,8 @@ jobRowCodec queueName =
     <*> ncol "max_attempts" CInt4
     <*> ncol "parent_id" CInt8
     <*> ncol "parent_state" CJsonb
+    <*> ncol "traceparent" CText
+    <*> ncol "tracestate" CText
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
     <*> admissionKeysCodec
@@ -214,6 +216,8 @@ jobRowCodecWithJobId queueName =
     <*> ncol "max_attempts" CInt4
     <*> ncol "parent_id" CInt8
     <*> ncol "parent_state" CJsonb
+    <*> ncol "traceparent" CText
+    <*> ncol "tracestate" CText
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
     <*> admissionKeysCodec

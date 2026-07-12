@@ -15,24 +15,48 @@ module Arbiter.Servant.Server
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
+  , QueueSpec (..)
+  , runtimeQueue
   , initArbiterServer
   , BuildServer (..)
+
+    -- * TTL cache
+  , CacheCell
+  , newCacheCell
+  , cachedFor
   ) where
 
+import Arbiter.Core.Admission (prefixedKeyPartValid)
+import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types
+  ( DedupKey (..)
+  , Job (..)
+  , JobPayload
+  , JobRead
+  , JobStatus
+  , JobWrite
+  , ObservabilityHooks
+  , defaultMaxAttempts
+  , defaultObservabilityHooks
+  , isRollup
+  )
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
+import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.Sql.Jobs (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
+import Arbiter.Worker.Outcome qualified as Outcome
+import Arbiter.Worker.Trace qualified as Trace
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM
   ( TChan
   , TVar
@@ -46,29 +70,33 @@ import Control.Concurrent.STM
   , readTVar
   , readTVarIO
   , writeTChan
-  , writeTVar
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
+import Control.Exception (Exception, SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
 import Control.Monad (forever, guard, join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (toJSON)
+import Data.Aeson (Value)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LBS
+import Data.Foldable (traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Kind (Type)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Pool qualified as Pool
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Text.Encoding qualified as TE
+import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
+import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
+import GHC.Clock (getMonotonicTime)
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Network.HTTP.Types (status200)
 import Network.Wai (responseStream)
@@ -114,7 +142,36 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- ^ Short-TTL cache for the concurrency policy list, collapsing dashboard polls.
   , allQueueStatsCache :: CacheCell AllStatsResponse
   -- ^ Short-TTL cache for the all-queues overview aggregate, collapsing landing polls.
+  , declaredPrefixesCache :: CacheCell (Set.Set Text, Set.Set Text)
+  -- ^ Short-TTL cache of the prefixes that have a policy.
+  , serverQueues :: Map.Map Text QueueSpec
+  -- ^ Every queue this server serves. 'initArbiterServer' reflects the registry's own,
+  -- 'runtimeQueue' adds the rest.
+  , serverTracer :: Maybe Trace.Tracer
+  -- ^ Tracer resolved once at server start, passed to the producer spans.
   }
+
+-- | What this server knows about one queue.
+data QueueSpec = QueueSpec
+  { queueAdmission :: Ops.ClaimAdmission
+  -- ^ The admission its claim enforces, as its typed workers claim it.
+  , queuePayloadAdmission :: Maybe (Value -> Either String Ops.AdmissionColumns)
+  -- ^ Derive admission at the queue's payload type. 'Nothing' takes the caller's keys.
+  , queueRetry :: Outcome.RetryPolicy
+  -- ^ How the fail route retries. Set it to what this queue's worker pool uses.
+  , queueHooks :: ObservabilityHooks IO Value
+  -- ^ Lifecycle hooks the pull-consumer routes fire.
+  }
+
+-- | A queue named at runtime, with no payload type to derive admission from.
+runtimeQueue :: Ops.ClaimAdmission -> QueueSpec
+runtimeQueue admission =
+  QueueSpec
+    { queueAdmission = admission
+    , queuePayloadAdmission = Nothing
+    , queueRetry = Outcome.defaultRetryPolicy
+    , queueHooks = defaultObservabilityHooks
+    }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
 -- live subscriber count the listener watches to release itself at zero.
@@ -138,16 +195,19 @@ serverPoolConfig =
 -- @enableEventStreaming = True@ to set up the database triggers for SSE.
 initArbiterServer
   :: forall registry
-   . Proxy registry
+   . (Ops.RegistryPayloadAdmission registry)
+  => Proxy registry
   -> ByteString
   -> Text
   -> IO (ArbiterServerConfig registry)
-initArbiterServer _proxy connStr schemaName = do
+initArbiterServer proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   hub <- newMVar Nothing
-  rlCache <- newTVarIO (0, Nothing)
-  ccCache <- newTVarIO (0, Nothing)
-  statsCache <- newTVarIO (0, Nothing)
+  rlCache <- newCacheCell
+  ccCache <- newCacheCell
+  statsCache <- newCacheCell
+  prefixCache <- newCacheCell
+  serverTracer <- Trace.resolveTracer
   pure
     ArbiterServerConfig
       { serverEnv = env
@@ -156,25 +216,41 @@ initArbiterServer _proxy connStr schemaName = do
       , rateLimitPoliciesCache = rlCache
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
+      , declaredPrefixesCache = prefixCache
+      , serverQueues = reflectQueues proxy
+      , serverTracer = serverTracer
       }
+
+-- | Reflect each registry queue's declared admission and payload decoder.
+reflectQueues
+  :: forall registry
+   . (Ops.RegistryPayloadAdmission registry)
+  => Proxy registry
+  -> Map.Map Text QueueSpec
+reflectQueues proxy =
+  Map.fromList
+    [ (table, (runtimeQueue admission) {queuePayloadAdmission = Just readAdmission})
+    | (table, admission, readAdmission) <- Ops.registryPayloadAdmission proxy
+    ]
 
 -- | Jobs API handlers for a specific table
 jobsServer
   :: forall registry payload
    . (JobPayload payload)
-  => Text
+  => AdmissionResolver payload
+  -> Text
   -> ArbiterServerConfig registry
   -> JobsAPI payload (AsServerT Handler)
-jobsServer table config =
+jobsServer resolve table config =
   JobsAPI
     { listJobs = listJobsHandler @registry @payload table config
-    , insertJob = insertJobHandler @registry @payload table config
-    , insertJobsBatch = insertJobsBatchHandler @registry @payload table config
+    , insertJob = insertJobHandler @registry @payload resolve table config
+    , insertJobsBatch = insertJobsBatchHandler @registry @payload resolve table config
     , getJob = getJobHandler @registry @payload table config
     , cancelJob = cancelJobHandler @registry table config
     , forceCancelJob = forceCancelJobHandler @registry table config
     , promoteJob = promoteJobHandler @registry @payload table config
-    , moveToDLQ = moveToDLQHandler @registry @payload table config
+    , moveToDLQ = moveToDLQHandler @registry table config
     , pauseChildren = pauseChildrenHandler @registry table config
     , resumeChildren = resumeChildrenHandler @registry table config
     , suspendJob = suspendJobHandler @registry @payload table config
@@ -237,24 +313,54 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mS
       , dlqChildCounts = dlqCounts
       }
 
--- | Insert a new job into the queue
-insertJobHandler
-  :: forall registry payload
-   . (JobPayload payload)
-  => Text
-  -> ArbiterServerConfig registry
-  -> ApiJobWrite payload
-  -> Handler (JobResponse (ApiJob payload))
-insertJobHandler tableName config (ApiJobWrite jobWrite) = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  mJob <- liftIO $ runSimpleDb env $ do
-    inserted <- Ops.insertJob schemaName tableName jobWrite
-    case (inserted, dedupKey jobWrite) of
+-- | Insert in a producer span, re-fetching the existing row on an ignored duplicate.
+insertTracedWithDedup
+  :: (JobPayload payload)
+  => Maybe Trace.Tracer
+  -> SimpleEnv registry
+  -> Text
+  -> Text
+  -> Ops.AdmissionColumns
+  -> JobWrite payload
+  -> IO (Maybe (JobRead payload))
+insertTracedWithDedup mTracer env schemaName tableName ac jw =
+  runSimpleDb env $ Trace.withPublishSpan mTracer tableName $ do
+    inserted <- Ops.insertJobWithAdmission schemaName tableName ac jw
+    case (inserted, dedupKey jw) of
       (Just j, _) -> pure (Just j)
       (Nothing, Just (IgnoreDuplicate k)) -> Ops.getJobByDedupKey schemaName tableName k
       _ -> pure Nothing
+
+-- | How a queue's writes get their admission columns.
+type AdmissionResolver payload = ApiJobWrite payload -> Handler (Ops.AdmissionColumns, JobWrite payload)
+
+-- | A typed queue derives admission from its payload's selectors. Caller keys are refused.
+payloadAdmission :: (JobPayload payload) => AdmissionResolver payload
+payloadAdmission (ApiJobWrite jobWrite refs) = do
+  rejectSuppliedKeys refs
+  pure (Ops.admissionColumns (payload jobWrite), jobWrite)
+
+-- | Refuse admission keys a caller attached to a queue that derives its own.
+rejectSuppliedKeys :: AdmissionRefs -> Handler ()
+rejectSuppliedKeys refs =
+  when (hasAdmissionRefs refs) $
+    throwError err400 {errBody = "this queue derives admission from its payload type"}
+
+-- | Insert a new job into the queue.
+insertJobHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => AdmissionResolver payload
+  -> Text
+  -> ArbiterServerConfig registry
+  -> ApiJobWrite payload
+  -> Handler (JobResponse (ApiJob payload))
+insertJobHandler resolve tableName config write = do
+  let env = serverEnv config
+      schemaName = schema env
+  (ac, jobWrite) <- resolve write
+
+  mJob <- liftIO $ insertTracedWithDedup (serverTracer config) env schemaName tableName ac jobWrite
   case mJob of
     Just j -> pure $ JobResponse (ApiJob j)
     Nothing -> throwError err409 {errBody = "Replace blocked: existing job is in-flight on first attempt or has children"}
@@ -263,16 +369,21 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
 insertJobsBatchHandler
   :: forall registry payload
    . (JobPayload payload)
-  => Text
+  => AdmissionResolver payload
+  -> Text
   -> ArbiterServerConfig registry
   -> BatchInsertRequest payload
   -> Handler (BatchInsertResponse payload)
-insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
+insertJobsBatchHandler resolve tableName config (BatchInsertRequest jobWrites) = do
   let env = serverEnv config
       schemaName = schema env
-      writes = map unApiJobWrite jobWrites
+  admitted <- traverse resolve jobWrites
 
-  inserted <- liftIO $ runSimpleDb env $ Ops.insertJobsBatch schemaName tableName writes
+  inserted <-
+    liftIO $
+      runSimpleDb env $
+        Trace.withPublishSpan (serverTracer config) tableName $
+          Ops.insertJobsBatchWithAdmission schemaName tableName admitted
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 
@@ -290,7 +401,7 @@ getJobHandler tableName config jobId = do
 
   mJob <- liftIO $ runSimpleDb env $ Ops.getJobByIdWithStatus schemaName tableName jobId
   case mJob of
-    Nothing -> throwError err404 {errBody = "Job not found"}
+    Nothing -> throwError jobNotFoundErr
     Just (j, s) -> pure $ JobResponse {job = ApiJobWithStatus j s}
 
 -- | Cancel a job (delete it from the queue)
@@ -307,7 +418,7 @@ cancelJobHandler tableName config jobId = do
   rowsAffected <- liftIO $ runSimpleDb env $ Ops.cancelJobCascade schemaName tableName jobId
   if rowsAffected > 0
     then pure NoContent
-    else throwError err404 {errBody = "Job not found"}
+    else throwError jobNotFoundErr
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler
@@ -323,7 +434,7 @@ forceCancelJobHandler tableName config jobId = do
   rowsAffected <- liftIO $ runSimpleDb env $ Ops.forceCancelJob schemaName tableName jobId
   if rowsAffected > 0
     then pure NoContent
-    else throwError err404 {errBody = "Job not found"}
+    else throwError jobNotFoundErr
 
 -- | Promote a job (make it immediately visible)
 promoteJobHandler
@@ -344,7 +455,7 @@ promoteJobHandler tableName config jobId = do
       else do
         mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
         case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
+          Nothing -> pure (Left jobNotFoundErr)
           Just job
             | suspended job ->
                 pure (Left err409 {errBody = "Job is suspended - use resume endpoint"})
@@ -357,35 +468,37 @@ promoteJobHandler tableName config jobId = do
 
 -- | Move a job to the dead letter queue
 moveToDLQHandler
-  :: forall registry payload
-   . (JobPayload payload)
-  => Text
+  :: forall registry
+   . Text
   -> ArbiterServerConfig registry
   -> Int64
   -> Handler NoContent
 moveToDLQHandler tableName config jobId = do
+  spec <- requireQueue config tableName
   let env = serverEnv config
       schemaName = schema env
+      dlqNow job =
+        Outcome.failJob
+          schemaName
+          (queueRetry spec)
+          Nothing
+          True
+          (attempts job)
+          dlqReason
+          job
 
   result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
-    mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
-    case mJob of
-      Nothing -> pure Nothing
-      Just job -> do
-        -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-        when (isRollup job) $ do
-          (results, failures, mSnapshot, _dlqFailures) <-
-            Ops.readChildResultsRaw schemaName tableName (primaryKey job)
-          let merged = Ops.mergeRawChildResults results failures mSnapshot
-          when (not (Map.null merged)) $
-            void $
-              Ops.persistParentState schemaName tableName (primaryKey job) (toJSON merged)
-        Just <$> Ops.moveToDLQ schemaName tableName "Manually moved to DLQ via admin API" job
+    mJob <- Ops.getJobById @_ @Value schemaName tableName jobId
+    traverse (\job -> (,) job <$> dlqNow job) mJob
 
   case result of
-    Nothing -> throwError err404 {errBody = "Job not found"}
-    Just 0 -> throwError err409 {errBody = "Job was concurrently modified"}
-    Just _ -> pure NoContent
+    Nothing -> throwError jobNotFoundErr
+    Just (_, report)
+      | Outcome.reportRows report == 0 -> throwError err409 {errBody = "Job was concurrently modified"}
+    Just (job, report) ->
+      NoContent <$ liftIO (fireFailureHooks (queueHooks spec) job dlqReason report)
+  where
+    dlqReason = "Manually moved to DLQ via admin API"
 
 -- | Pause all children of a parent job
 pauseChildrenHandler
@@ -442,7 +555,7 @@ suspendJobHandler tableName config jobId = do
       else do
         mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
         case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
+          Nothing -> pure (Left jobNotFoundErr)
           Just job
             | suspended job ->
                 pure (Left err409 {errBody = "Job is already suspended"})
@@ -475,7 +588,7 @@ resumeJobHandler tableName config jobId = do
       else do
         mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
         case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
+          Nothing -> pure (Left jobNotFoundErr)
           Just job
             | not (suspended job) ->
                 pure (Left err409 {errBody = "Job is not suspended"})
@@ -625,13 +738,12 @@ getStatsHandler tableName config = do
 getAllStatsHandler
   :: forall registry
    . ArbiterServerConfig registry
-  -> [Text]
   -> Handler AllStatsResponse
-getAllStatsHandler config tables =
+getAllStatsHandler config =
   liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
     let env = serverEnv config
         schemaName = schema env
-    rows <- runSimpleDb env $ Ops.getAllQueueStats schemaName tables
+    rows <- runSimpleDb env $ Ops.getAllQueueStats schemaName (knownQueues config)
     pure $ AllStatsResponse {queues = map toEntry rows}
   where
     toEntry (Ops.QueueOverview q s qp wl wp) =
@@ -641,12 +753,13 @@ getAllStatsHandler config tables =
 tableServer
   :: forall registry payload
    . (JobPayload payload)
-  => Text -- table
+  => AdmissionResolver payload
+  -> Text -- table
   -> ArbiterServerConfig registry
   -> TableAPI payload (AsServerT Handler)
-tableServer table config =
+tableServer resolve table config =
   TableAPI
-    { jobs = jobsServer @registry @payload table config
+    { jobs = jobsServer @registry @payload resolve table config
     , dlq = dlqServer @registry @payload table config
     , stats = statsServer @registry table config
     }
@@ -654,19 +767,319 @@ tableServer table config =
 -- | Queues API handler
 queuesServer
   :: forall registry
-   . (RegistryTables registry)
-  => Proxy registry
-  -> ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> QueuesAPI (AsServerT Handler)
-queuesServer registryProxy config =
-  let known = registryTableNames registryProxy
-   in QueuesAPI
-        { listQueues = pure $ QueuesResponse {queues = known}
-        , getAllStats = getAllStatsHandler config known
-        , getDetails = getQueueDetailsHandler config
-        , pauseQueue = setQueuePausedHandler config known True
-        , resumeQueue = setQueuePausedHandler config known False
-        }
+queuesServer config =
+  QueuesAPI
+    { listQueues = pure $ QueuesResponse {queues = knownQueues config}
+    , getAllStats = getAllStatsHandler config
+    , getDetails = getQueueDetailsHandler config
+    , pauseQueue = setQueuePausedHandler config True
+    , resumeQueue = setQueuePausedHandler config False
+    , enqueue = enqueueRuntimeHandler config
+    , claim = claimJobsHandler config claimSqls
+    , ackJob = ackJobConsumerHandler config
+    , nackJob = nackJobConsumerHandler config
+    , extendJob = extendJobConsumerHandler config
+    , failJob = failJobConsumerHandler config
+    }
+  where
+    claimSqls = Map.mapWithKey (\q spec -> (spec, claimSqlForQueue config q spec)) (serverQueues config)
+
+-- | The largest capacity a single claim request can ask for.
+maxClaimJobs :: Int
+maxClaimJobs = 1000
+
+-- | Capacities a claim statement is cached for. A request rounds down to one of these.
+claimCapacities :: [Int]
+claimCapacities = Ops.upTo 64 <> [96, 128, 192, 256, 384, 512, 768, maxClaimJobs]
+
+claimSqlForQueue :: ArbiterServerConfig registry -> Text -> QueueSpec -> Ops.ClaimSql
+claimSqlForQueue config queue spec =
+  Ops.mkClaimSqlWith (queueAdmission spec) (schema (serverEnv config)) queue 1 claimCapacities
+
+-- | Every queue this server serves.
+knownQueues :: ArbiterServerConfig registry -> [Text]
+knownQueues = Map.keys . serverQueues
+
+-- | Enqueue a raw-JSON job. A registry queue's payload must still decode at its type.
+enqueueRuntimeHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> ApiJobWrite Value
+  -> Handler (JobResponse (ApiJob Value))
+enqueueRuntimeHandler config queue =
+  insertJobHandler @registry (runtimeAdmission config queue) queue config
+
+-- | A registry queue derives admission from its payload type, a runtime queue takes the caller's keys.
+runtimeAdmission
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> AdmissionResolver Value
+runtimeAdmission config queue (ApiJobWrite jw refs) = do
+  spec <- requireQueue config queue
+  case queuePayloadAdmission spec of
+    Just readAdmission -> do
+      rejectSuppliedKeys refs
+      ac <- either rejectPayload pure (readAdmission (Job.payload jw))
+      pure (ac, jw)
+    Nothing -> do
+      validateAdmissionRefs config refs
+      let AdmissionRefs rl cc = refs
+      pure (Ops.admissionColumnsFor ((\r -> (rlKey r, rlCost r)) <$> rl) cc, jw)
+
+-- | Reject a malformed key, or one whose prefix names no declared policy.
+validateAdmissionRefs
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> AdmissionRefs
+  -> Handler ()
+validateAdmissionRefs config refs@(AdmissionRefs rl cc) = when (hasAdmissionRefs refs) $ do
+  let parts = foldMap (keyParts . rlKey) rl <> foldMap (\k -> [ckPrefix k, ckSuffix k]) cc
+      keyParts k = [rlkPrefix k, rlkSuffix k]
+  unless (all prefixedKeyPartValid parts) $
+    throwError err400 {errBody = "admission prefix/suffix must not contain ':'"}
+  traverse_ checkCost rl
+  (rlDeclared, ccDeclared) <- liftIO (declaredPrefixes config)
+  traverse_ (checkPrefix "rate-limit" rlDeclared . rlkPrefix . rlKey) rl
+  traverse_ (checkPrefix "concurrency" ccDeclared . ckPrefix) cc
+  where
+    checkCost r =
+      unless (rlCost r > 0) $
+        throwError err400 {errBody = "rate-limit cost must be positive"}
+    checkPrefix kind declared prefix =
+      unless (Set.member prefix declared) $
+        throwError
+          err400
+            { errBody =
+                "no " <> kind <> " policy named " <> LBS.fromStrict (TE.encodeUtf8 prefix)
+            }
+
+-- | The prefixes that have a policy row, re-read rather than fixed at startup.
+declaredPrefixes :: ArbiterServerConfig registry -> IO (Set.Set Text, Set.Set Text)
+declaredPrefixes config =
+  cachedFor policyPrefixCacheTtl (declaredPrefixesCache config) $
+    runSimpleDb env $
+      (,)
+        <$> (Set.fromList <$> Ops.listRateLimitPrefixes schemaName)
+        <*> (Set.fromList <$> Ops.listConcurrencyPrefixes schemaName)
+  where
+    env = serverEnv config
+    schemaName = schema env
+
+-- | The spec for a queue this server serves, rejecting any other path segment.
+requireQueue :: ArbiterServerConfig registry -> Text -> Handler QueueSpec
+requireQueue config = requireKnown (serverQueues config)
+
+-- | Look a queue up in a per-queue map, 404ing on any name this server does not serve.
+requireKnown :: Map.Map Text a -> Text -> Handler a
+requireKnown m queue = maybe (throwError err404 {errBody = "Unknown queue"}) pure (Map.lookup queue m)
+
+jobNotFoundErr :: ServerError
+jobNotFoundErr = err404 {errBody = "Job not found"}
+
+staleLeaseErr :: ServerError
+staleLeaseErr = err409 {errBody = "Lease is stale: not held by this claimant"}
+
+rejectPayload :: String -> Handler a
+rejectPayload err =
+  throwError
+    err400 {errBody = "payload does not match this queue's type: " <> LBS.fromStrict (TE.encodeUtf8 (T.pack err))}
+
+-- | Lease up to @maxJobs@ jobs, payloads as raw JSON. The claimant stamped on each is the lease token.
+claimJobsHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Map.Map Text (QueueSpec, Ops.ClaimSql)
+  -> Text
+  -> ClaimRequest
+  -> Handler ClaimResponse
+claimJobsHandler config claimSqls queue req = do
+  (spec, claimSql) <- requireKnown claimSqls queue
+  let env = serverEnv config
+      leaseSecs = clampLease (maybe 60 realToFrac (crVisibilitySecs req))
+      n = min maxClaimJobs (max 1 (crMaxJobs req))
+  jobs <- liftIO $ do
+    claimant <- nextRandom
+    runSimpleDb
+      env
+      (Ops.claimJobsCached claimSql n leaseSecs (Just claimant) :: SimpleDb registry IO [JobRead Value])
+  unless (null jobs) $ liftIO $ do
+    claimedAt <- getCurrentTime
+    traverse_ (\j -> fireHook (Job.onJobClaimed (queueHooks spec) j claimedAt)) jobs
+  pure $ ClaimResponse (map ApiJob jobs)
+
+-- | Bound a client-supplied lease to [1s, 1d].
+clampLease :: NominalDiffTime -> NominalDiffTime
+clampLease = min 86400 . max 1
+
+-- | Run @act@ only if the caller still holds the lease, by claimant and attempt.
+withLease
+  :: forall registry a
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> UUID
+  -> Int32
+  -> (JobRead Value -> SimpleDb registry IO (Int64, a))
+  -> Handler a
+withLease config queue jobId claimant claimedAttempts act = do
+  let env = serverEnv config
+      schemaName = schema env
+  result <- liftIO $ handle (\StaleLease -> pure (Left staleLeaseErr)) $ runSimpleDb env $ withDbTransaction $ do
+    mJob <- Ops.getJobById schemaName queue jobId :: SimpleDb registry IO (Maybe (JobRead Value))
+    case mJob of
+      Nothing -> pure (Left jobNotFoundErr)
+      Just job
+        | claimedBy job /= Just claimant || attempts job /= claimedAttempts ->
+            pure (Left staleLeaseErr)
+        | otherwise -> do
+            (n, a) <- act job
+            when (n == 0) $ liftIO (throwIO StaleLease)
+            pure (Right a)
+  either throwError pure result
+
+-- | Rolls a 'withLease' transaction back when the lease turns out to be stale.
+data StaleLease = StaleLease
+  deriving stock (Show)
+
+instance Exception StaleLease
+
+-- | A finalizer carrying its lease guard in its own @WHERE@, returning the job it wrote.
+-- Nothing costs one probe, to tell a missing job apart from a stale lease.
+finalizeWithGuard
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> SimpleDb registry IO (Maybe (JobRead Value))
+  -> Handler (JobRead Value)
+finalizeWithGuard config queue jobId write = do
+  void $ requireQueue config queue
+  let env = serverEnv config
+  written <- liftIO $ runSimpleDb env write
+  case written of
+    Just job -> pure job
+    Nothing -> do
+      exists <- liftIO $ runSimpleDb env (Ops.jobExists (schema env) queue jobId)
+      throwError (if exists then staleLeaseErr else jobNotFoundErr)
+
+-- | Ack a claimed job, optionally storing a result for its parent rollup. A job standing
+-- outside every rollup acks in one guarded statement, the rest take the transactional path.
+ackJobConsumerHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> AckRequest
+  -> Handler NoContent
+ackJobConsumerHandler config queue jobId req = do
+  spec <- requireQueue config queue
+  let env = serverEnv config
+  leaf <-
+    liftIO $
+      runSimpleDb env (Ops.ackLeasedLeaf (schema env) queue jobId (arClaimedBy req) (arAttempts req))
+      :: Handler (Maybe (JobRead Value))
+  acked <- maybe rollupAck pure leaf
+  liftIO $ do
+    now <- getCurrentTime
+    fireHook $ Job.onJobSuccess (queueHooks spec) acked (leaseHeldSince acked now) now
+  pure NoContent
+  where
+    rollupAck =
+      withLease config queue jobId (arClaimedBy req) (arAttempts req) $ \job -> do
+        n <- Outcome.completeJob (schema (serverEnv config)) (arResult req) job
+        pure (n, job)
+
+-- | Soft-return a claimed job for reprocessing. Ends the lease, so it is claimable at once.
+nackJobConsumerHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> NackRequest
+  -> Handler NoContent
+nackJobConsumerHandler config queue jobId req =
+  NoContent
+    <$ finalizeWithGuard
+      config
+      queue
+      jobId
+      (Ops.nackLeasedJob (schema (serverEnv config)) queue jobId (nrClaimedBy req) (nrAttempts req))
+
+-- | Extend a claimed job's lease. A client-driven heartbeat, so it fires the queue's.
+extendJobConsumerHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> ExtendRequest
+  -> Handler NoContent
+extendJobConsumerHandler config queue jobId req = do
+  spec <- requireQueue config queue
+  job <-
+    finalizeWithGuard config queue jobId $
+      Ops.extendLeasedJob
+        (schema (serverEnv config))
+        queue
+        (clampLease (realToFrac (erVisibilitySecs req)))
+        jobId
+        (erClaimedBy req)
+        (erAttempts req)
+  liftIO $ do
+    now <- getCurrentTime
+    fireHook $ Job.onJobHeartbeat (queueHooks spec) job now (leaseHeldSince job now)
+  pure NoContent
+
+-- | Report a claimed job as failed, dead-lettering or retrying it as the worker would.
+failJobConsumerHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Int64
+  -> FailRequest
+  -> Handler FailResponse
+failJobConsumerHandler config queue jobId req = do
+  spec <- requireQueue config queue
+  (job, report) <- withLease config queue jobId (frClaimedBy req) (frAttempts req) $ \job -> do
+    let schemaName = schema (serverEnv config)
+        maxAtts = fromMaybe defaultMaxAttempts (maxAttempts job)
+    report <-
+      Outcome.failJob
+        schemaName
+        (queueRetry spec)
+        (clampBackoff . realToFrac <$> frRetryDelaySecs req)
+        (frPermanent req)
+        maxAtts
+        (frError req)
+        job
+    pure (Outcome.reportRows report, (job, report))
+  liftIO $ fireFailureHooks (queueHooks spec) job (frError req) report
+  pure $ case Outcome.reportOutcome report of
+    Outcome.DeadLettered -> FailResponse {failOutcome = DeadLettered, failRetryInSecs = Nothing}
+    Outcome.Retried delay -> FailResponse {failOutcome = Retried, failRetryInSecs = Just (realToFrac delay)}
+
+-- | Run one lifecycle hook, swallowing a synchronous throw.
+fireHook :: IO () -> IO ()
+fireHook = handle swallowSync
+
+-- | Fire what a failure fires: the queue's failure hook, then its retry or dead-letter hook.
+fireFailureHooks :: ObservabilityHooks IO Value -> JobRead Value -> Text -> Outcome.FailureReport -> IO ()
+fireFailureHooks hooks job err report = do
+  now <- getCurrentTime
+  traverse_
+    (fireHook . snd)
+    (Outcome.failureHookCalls hooks job err (leaseHeldSince job now) now (Outcome.reportOutcome report))
+
+-- | When this lease was taken. Not @updated_at@, which a lease extension rewrites.
+leaseHeldSince :: JobRead Value -> UTCTime -> UTCTime
+leaseHeldSince job now = fromMaybe now (Job.lastAttemptedAt job)
+
+-- | Bound a client-supplied retry delay to [0s, 1d].
+clampBackoff :: NominalDiffTime -> NominalDiffTime
+clampBackoff = min 86400 . max 0
 
 -- | Get a queue's operator config.
 getQueueDetailsHandler
@@ -675,22 +1088,20 @@ getQueueDetailsHandler
   -> Text
   -> Handler (Maybe QueueRow)
 getQueueDetailsHandler config queue = do
+  void $ requireQueue config queue
   let env = serverEnv config
       schemaName = schema env
   liftIO $ runSimpleDb env $ Ops.getQueue schemaName queue
 
--- | Flip the @paused@ flag for a queue, validated against the registry. The
--- @arbiter_queues@ row is created lazily on first pause.
+-- | Flip the @paused@ flag for a queue this server serves.
 setQueuePausedHandler
   :: forall registry
    . ArbiterServerConfig registry
-  -> [Text]
   -> Bool
   -> Text
   -> Handler NoContent
-setQueuePausedHandler config knownQueues p queue = do
-  unless (queue `elem` knownQueues) $
-    throwError err404 {errBody = "Unknown queue"}
+setQueuePausedHandler config p queue = do
+  void $ requireQueue config queue
   let env = serverEnv config
       schemaName = schema env
   void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
@@ -956,8 +1367,7 @@ setWorkerPausedHandler config p wid = do
 -- | Rate-limit management/observability handlers.
 rateLimitsServer
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> RateLimitsAPI (AsServerT Handler)
 rateLimitsServer config =
   RateLimitsAPI
@@ -975,35 +1385,52 @@ policyStatsCacheTtl = 10
 overviewStatsCacheTtl :: NominalDiffTime
 overviewStatsCacheTtl = 5
 
--- | A TTL cache cell: an epoch bumped by 'invalidate', plus the current entry.
-type CacheCell a = TVar (Word, Maybe (UTCTime, a))
+policyPrefixCacheTtl :: NominalDiffTime
+policyPrefixCacheTtl = 5
 
--- | Serve from a short-TTL cache cell, skipping the write when 'invalidate' bumped the epoch mid-produce, so an invalidation is never clobbered.
+-- | A TTL cache cell: an epoch bumped by 'invalidate', plus the current entry. Stamped
+-- monotonically. The lock admits one producer, so an expiry does not stampede the database.
+data CacheCell a = CacheCell (MVar ()) (TVar (Word, Maybe (Double, a)))
+
+-- | An empty cache cell.
+newCacheCell :: IO (CacheCell a)
+newCacheCell = CacheCell <$> newMVar () <*> newTVarIO (0, Nothing)
+
+-- | Serve from a short-TTL cache cell, concurrent misses queueing behind the one produce.
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
-cachedFor ttl cell produce = do
-  now <- getCurrentTime
-  (epoch, cached) <- readTVarIO cell
-  case cached of
-    Just (ts, v) | diffUTCTime now ts < ttl -> pure v
-    _ -> do
+cachedFor ttl (CacheCell lock cell) produce =
+  fresh >>= \case
+    Just v -> pure v
+    Nothing -> withMVar lock $ \() -> fresh >>= maybe fill pure
+  where
+    fresh = do
+      now <- getMonotonicTime
+      (_, cached) <- readTVarIO cell
+      pure $ case cached of
+        Just (ts, v) | now - ts < realToFrac ttl -> Just v
+        _ -> Nothing
+    fill = do
+      (epoch, _) <- readTVarIO cell
       v <- produce
+      now <- getMonotonicTime
       atomically $ modifyTVar' cell $ \(e, cur) -> if e == epoch then (e, Just (now, v)) else (e, cur)
       pure v
 
 -- | Bump a cache cell's epoch and drop its entry, after an operator mutation.
 invalidate :: CacheCell a -> Handler ()
-invalidate cell = liftIO $ atomically $ modifyTVar' cell $ \(e, _) -> (e + 1, Nothing)
+invalidate (CacheCell _ cell) = liftIO $ atomically $ modifyTVar' cell $ \(e, _) -> (e + 1, Nothing)
 
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
   liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
-    views <- runSimpleDb (serverEnv config) HL.listRateLimitPolicies
+    views <- runSimpleDb env (Ops.listRateLimitPolicies (schema env) (knownQueues config))
     pure $ RateLimitPoliciesResponse {policies = views}
+  where
+    env = serverEnv config
 
 -- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
 listRateLimitBucketsHandler
@@ -1030,8 +1457,7 @@ updateThenView env action notFound = do
 -- | Set or clear a policy's override params, then return the updated view.
 updateRateLimitPolicyHandler
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> Text
   -> RateLimitPolicyUpdate
   -> Handler RateLimitPolicyView
@@ -1047,30 +1473,40 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
       -- An all-absent patch changes nothing, so read the view without rewriting the row and waking jobs.
       let update = case (mMax, mRefill, mIv) of
             (Nothing, Nothing, Nothing) -> pure ()
-            _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
-      view <- updateThenView (serverEnv config) (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+            _ -> void $ Ops.updateRateLimitPolicyOverridesAndWake schemaName queues prefix upd
+          view = Ops.getRateLimitPolicy schemaName queues prefix
+      v <- updateThenView env (update >> view) "Rate-limit policy not found"
       invalidate (rateLimitPoliciesCache config)
-      pure view
+      pure v
+  where
+    env = serverEnv config
+    schemaName = schema env
+    queues = knownQueues config
 
 -- | Clear every bucket for a prefix. Returns the number reset. 404s an unknown prefix.
 resetRateLimitBucketsHandler
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> Text
   -> Handler RateLimitResetResponse
 resetRateLimitBucketsHandler config prefix = do
   let action =
-        HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> HL.resetRateLimitBuckets prefix else pure Nothing
-  n <- updateThenView (serverEnv config) action "Rate-limit policy not found"
+        Ops.rateLimitPolicyExists schemaName prefix >>= \exists ->
+          if exists
+            then Just <$> Ops.resetRateLimitBucketsAndWake schemaName queues prefix
+            else pure Nothing
+  n <- updateThenView env action "Rate-limit policy not found"
   invalidate (rateLimitPoliciesCache config)
   pure $ RateLimitResetResponse {reset = n}
+  where
+    env = serverEnv config
+    schemaName = schema env
+    queues = knownQueues config
 
 -- | Concurrency management/observability handlers.
 concurrencyServer
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> ConcurrencyAPI (AsServerT Handler)
 concurrencyServer config =
   ConcurrencyAPI
@@ -1128,50 +1564,62 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLim) 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> Handler ConcurrencyReconcileResponse
 reconcileConcurrencyHandler config = do
-  n <- liftIO $ runSimpleDb (serverEnv config) HL.reconcileConcurrencyCounts
+  let env = serverEnv config
+  n <- liftIO $ runSimpleDb env $ Ops.reconcileConcurrencyCounts (schema env) (knownQueues config)
   invalidate (concurrencyPoliciesCache config)
   pure $ ConcurrencyReconcileResponse {reconciled = n}
 
 -- | Server for the shared top-level routes.
 sharedServer
   :: forall registry
-   . (RegistryTables registry)
-  => ArbiterServerConfig registry
+   . ArbiterServerConfig registry
   -> ServerT SharedAPI Handler
 sharedServer config =
-  queuesServer @registry (Proxy @registry) config
+  queuesServer @registry config
     :<|> eventsServer config
     :<|> cronServer config
     :<|> workersServer config
     :<|> rateLimitsServer config
     :<|> concurrencyServer config
+    :<|> runtimeTableServer @registry config
+
+-- | The job, DLQ, and stats routes for a runtime-named queue. A registry queue's own
+-- generated routes match first.
+runtimeTableServer
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> TableAPI Value (AsServerT Handler)
+runtimeTableServer config queue =
+  hoistServer
+    (Proxy @(NamedRoutes (TableAPI Value)))
+    guarded
+    (tableServer @registry @Value (runtimeAdmission config queue) queue config)
+  where
+    guarded :: forall a. Handler a -> Handler a
+    guarded h = requireQueue config queue >> h
 
 -- | Type class to build server implementations for registry entries
 class BuildServer registry (reg :: [(Symbol, Type)]) where
   buildServer :: ArbiterServerConfig registry -> ServerT (RegistryToAPI reg) Handler
 
 -- Base case: empty registry, just the shared top-level routes
-instance
-  (RegistryTables registry)
-  => BuildServer registry '[]
-  where
+instance BuildServer registry '[] where
   buildServer = sharedServer
 
 -- Single table case: table endpoints :<|> shared top-level routes
 instance
   ( JobPayload payload
   , KnownSymbol tableName
-  , RegistryTables registry
   )
   => BuildServer registry ('(tableName, payload) ': '[])
   where
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
+     in tableServer @registry @payload payloadAdmission tableName config
           :<|> sharedServer config
 
 -- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
@@ -1184,7 +1632,7 @@ instance
   where
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
+     in tableServer @registry @payload payloadAdmission tableName config
           :<|> buildServer @registry @(nextTable ': moreRest) config
 
 -- | Complete Arbiter server at @\/api\/v1\/...@

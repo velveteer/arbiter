@@ -19,7 +19,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Job.Types (DedupKey (..), JobRead, dedupKey, defaultJob, maxAttempts, payload)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
-import Control.Monad (foldM, void)
+import Control.Monad (foldM_, void)
 import Data.Foldable (for_, traverse_)
 import Data.Int (Int32)
 import Data.Map.Strict (Map)
@@ -158,7 +158,7 @@ prop_model
 prop_model run withConn schema = withTests 60 $ property $ do
   ops <- forAll genOps
   evalIO (resetState withConn schema)
-  void (foldM (step run withConn schema) (Map.empty, Map.empty, Map.empty) ops)
+  foldM_ (step run withConn schema) (Map.empty, Map.empty, Map.empty) ops
 
 -- Threaded state: the pure model, pool overrides, and the live jobs we currently
 -- hold claimed, grouped by key, so ack and retry can target real rows.
@@ -272,7 +272,7 @@ resetState withConn schema =
   withConn $ \c -> do
     execute_ c ("DELETE FROM " <> jobQueueTable schema concurrencyTable)
     execute_ c ("TRUNCATE " <> arbiterConcurrencyTable schema)
-    traverse_ (\(p, l) -> seedPool c schema p l) modelPools
+    traverse_ (uncurry (seedPool c schema)) modelPools
 
 seedPool :: PG.Connection -> Text -> Text -> Int -> IO ()
 seedPool c schema prefix lim =

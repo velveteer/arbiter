@@ -33,6 +33,7 @@ module Arbiter.Migrations
   , MigrationResult (..)
   ) where
 
+import Arbiter.Core.Admission (prefixedKeyPartValid)
 import Arbiter.Core.Concurrency.Schema
   ( addConcurrencyColumnsSQL
   , createConcurrencyIndexSQL
@@ -44,10 +45,11 @@ import Arbiter.Core.Concurrency.Schema
   )
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..), registryConcurrencyPolicies, registryConcurrencyTables)
 import Arbiter.Core.CronSchedule (addQueueNameColumnSQL, addTimezoneColumnSQL, createCronSchedulesTableSQL)
-import Arbiter.Core.Gates (createGatesTableSQL)
+import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , addTraceContextColumnSQL
   , createDLQFailedAtIndexSQL
   , createDLQGroupKeyIndexSQL
   , createDLQParentIdIndexSQL
@@ -92,7 +94,9 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
+import Arbiter.Core.Sql.Queues (ensureQueueSQL)
 import Arbiter.Core.Worker (addClaimedByColumnSQL, createWorkersTableSQL)
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
@@ -103,6 +107,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute_, query)
 import Database.PostgreSQL.Simple qualified as PG
@@ -227,6 +232,10 @@ data TableAdmission = TableAdmission
 allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission True True
 
+-- | Advisory-lock namespace for boot migrations, paired with the schema's hash.
+migrateLockKey :: Int
+migrateLockKey = 0x41726274
+
 -- | Run migrations for multiple tables within a single schema, seeding the given
 -- rate-limit policies. On migration success, reconciles the policy and bucket
 -- tables on the same connection.
@@ -242,6 +251,16 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
     -- Disable NOTICE messages on the underlying LibPQ connection
     withConnection conn $ \libpqConn ->
       LibPQ.disableNoticeReporting libpqConn
+
+    -- Serialize concurrent migrators with a session advisory lock keyed on the schema.
+    _ <-
+      query
+        conn
+        "SELECT 1 :: int FROM (SELECT pg_advisory_lock(?, hashtext(?))) _lock"
+        (migrateLockKey, schemaName)
+        :: IO [Only Int]
+
+    void $ execute_ conn "SET lock_timeout = '15s'"
 
     -- Create the schema. If CREATE SCHEMA fails (e.g. insufficient privileges),
     -- check whether the schema already exists (manual creation) and proceed.
@@ -283,16 +302,18 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
     -- Initialize the migration system
     _ <- runMigrations conn options [MigrationInitialization]
 
+    deadline <- addUTCTime migrationLockBudget <$> getCurrentTime
     -- Run the actual migrations
-    migrationResult <- runMigrations conn options migrations
+    migrationResult <- retryOnLockTimeout deadline (runMigrations conn options migrations)
     -- Reconciliation can throw (conflicting prefix, ALTER failure). Surface as MigrationError.
     case migrationResult of
       MigrationSuccess -> do
         reconciled <-
           try $ do
+            traverse_ (\(qn, _) -> void $ PG.execute conn (Query (encodeUtf8 (ensureQueueSQL schemaName))) (Only qn)) tableNames
             reconcileRateLimitPolicies conn schemaName policyRows
             reconcileConcurrencyPolicies conn schemaName concRows
-            reconcileRateLimitDurability conn schemaName durability
+            retryOnLockTimeout deadline (reconcileRateLimitDurability conn schemaName durability)
         case reconciled of
           Right () -> pure MigrationSuccess
           -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
@@ -300,6 +321,22 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
             | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
             | otherwise -> pure (MigrationError (displayException e))
       other -> pure other
+
+-- | How long a boot waits out table locks before it gives up, across every statement it
+-- retries. Spent before the HTTP port is bound, so a deployment's startup probe must exceed it.
+migrationLockBudget :: NominalDiffTime
+migrationLockBudget = 150
+
+-- | Re-run DDL that Postgres cancelled waiting on a table lock, until 'migrationLockBudget'
+-- runs out. A migration batch is one transaction, so a cancelled run rolls back whole.
+retryOnLockTimeout :: UTCTime -> IO a -> IO a
+retryOnLockTimeout deadline act = try act >>= either again pure
+  where
+    again e = do
+      now <- getCurrentTime
+      if PG.sqlState e == "55P03" && now < deadline
+        then threadDelay 5_000_000 >> retryOnLockTimeout deadline act
+        else throwIO e
 
 -- | Upsert each policy's @default_*@ params into the policies table (created
 -- unconditionally by the schema migrations), leaving operator @override_*@
@@ -339,7 +376,7 @@ reconcilePolicyRows
   -> [row]
   -> IO ()
 reconcilePolicyRows label noun prefixOf paramsOf upsertSQL conn schemaName rows
-  | Just p <- find (T.isInfixOf ":") (map prefixOf rows) =
+  | Just p <- find (not . prefixedKeyPartValid) (map prefixOf rows) =
       ioError
         ( userError $
             label
@@ -396,6 +433,7 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
   , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
   , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)
+  , MigrationScript "arbiter-gates-add-metadata" (encodeUtf8 $ addGateMetadataColumnSQL schemaName)
   , MigrationScript "create-arbiter-rate-limit-policies" (encodeUtf8 $ createRateLimitPoliciesTableSQL schemaName)
   , MigrationScript "create-arbiter-rate-limits" (encodeUtf8 $ createRateLimitsTableSQL schemaName)
   , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
@@ -448,6 +486,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "set-job-queue-fillfactor-100" $
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
         , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
+        , script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

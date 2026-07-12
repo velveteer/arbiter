@@ -7,23 +7,24 @@ module Arbiter.Core.Sql.Claim
   , claimJobsBatchedSQL
   ) where
 
+import Data.Foldable (fold)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime)
-import Data.UUID.Types (UUID)
 import NeatInterpolation (text)
 
-import Arbiter.Core.Admission (effectivePolicyCol)
+import Arbiter.Core.Admission (effectivePolicyCol, unpolicied)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (defaultMaxAttempts)
+import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
-import Arbiter.Core.Sql.Jobs (jobColumns, uuidLiteral)
+import Arbiter.Core.Sql.Jobs (jobColumns)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
+import Arbiter.Core.SqlLiterals (textLiteral)
 
--- | Which admission filters the claim SQL renders. A payload type that declares
--- no policy of a kind never sets that key, so its filter is a guaranteed no-op
--- and is dropped from the claim statement.
+-- | Which admission filters the claim SQL renders, and so which policies this process
+-- enforces. An unrendered kind refuses the jobs its policies govern rather than admit
+-- them ungated, so a stale value costs throughput, never a breached limit.
 data ClaimAdmission = ClaimAdmission
   { admitRateLimited :: Bool
   , admitConcurrent :: Bool
@@ -122,6 +123,7 @@ rlGateCtes buckets rlPolicies =
       ivCol = effectivePolicyCol "p" "interval"
       availCol = refilledExpr mxCol "b.tokens" "b.last_refill" rfCol ivCol
       seed = bucketSeedInsert buckets rlPolicies "locked n" "n.rate_limit_key IS NOT NULL"
+      unpoliciedRl = unpolicied rlPolicies "l" "rate_limit"
    in [text|
         rl_locked AS (
           SELECT b.rate_limit_key,
@@ -148,10 +150,7 @@ rlGateCtes buckets rlPolicies =
         -- Own verdict plus per-group rank. Unkeyed/unpolicied passes. A keyed job with no locked bucket fails.
         rl_self AS (
           SELECT l.id, l.group_key,
-            COALESCE(k.key_ok,
-              l.rate_limit_key IS NULL
-              OR NOT EXISTS (SELECT 1 FROM ${rlPolicies} p WHERE p.prefix_id = l.rate_limit_prefix)
-            ) AS self_ok,
+            COALESCE(k.key_ok, ${unpoliciedRl}) AS self_ok,
             ${grpRankExpr}
           FROM locked l
           LEFT JOIN rl_keyed k ON k.id = l.id
@@ -248,7 +247,7 @@ groupCandidateCtes groupsTbl tbl overfetch dma =
 
 -- | Candidate stage two: the ungrouped ready and due pools, numbered into batches.
 ungroupedPoolCtes :: Text -> Text -> Text -> Text -> Text -> Text
-ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
+ungroupedPoolCtes tbl ungroupedLimit bs dma poolGate =
   [text|
     ungrouped_pool AS (
       (
@@ -258,7 +257,7 @@ ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
           AND NOT j.suspended
           AND j.not_visible_until IS NULL
           AND j.attempts < COALESCE(j.max_attempts, ${dma})
-          ${ccGate}
+          ${poolGate}
         ORDER BY j.priority ASC, j.id ASC
         LIMIT ${ungroupedLimit}
       )
@@ -271,7 +270,7 @@ ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
           AND j.not_visible_until IS NOT NULL
           AND j.not_visible_until <= NOW()
           AND j.attempts < COALESCE(j.max_attempts, ${dma})
-          ${ccGate}
+          ${poolGate}
         ORDER BY j.not_visible_until ASC
         LIMIT ${ungroupedLimit}
       )
@@ -313,8 +312,8 @@ allocatedSlotCtes mb =
   |]
 
 -- | Candidate stage four: resolve the allocated slots to rows and lock the claimable set.
-lockedCandidateCtes :: Text -> Text -> Text -> Text -> Text -> Text
-lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
+lockedCandidateCtes :: Text -> Text -> Text -> Text -> Text -> Text -> Text -> Text
+lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit notPaused lockedGate =
   [text|
     grouped_candidates AS (
       SELECT j.id, flg.group_key AS expected_group
@@ -348,9 +347,11 @@ lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
       ) i
       INNER JOIN ${tbl} j ON j.id = i.id
       WHERE NOT j.suspended
+        AND ${notPaused}
         AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
         AND j.group_key IS NOT DISTINCT FROM i.expected_group
         AND j.attempts < COALESCE(j.max_attempts, ${dma})
+        ${lockedGate}
       ORDER BY j.priority ASC, j.id ASC
       FOR UPDATE OF j SKIP LOCKED
       LIMIT ${ungroupedLimit}
@@ -360,9 +361,9 @@ lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
 -- | Batched single-CTE claim. Also serves the single-job claim at batch size 1.
 --
 -- Claims any unsuspended visible job, including rollup children and woken
--- rollup parents.
-claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
-claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds mWorkerId =
+-- rollup parents. Binds the lease timeout, then the claimant.
+claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> Text
+claimJobsBatchedSQL schema tableName admission batchSize maxBatches =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       buckets = arbiterRateLimitsTable schema
@@ -372,17 +373,19 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       columns = jobColumns Nothing
       bs = T.pack (show batchSize)
       mb = T.pack (show maxBatches)
-      timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
       ungroupedLimit = T.pack (show (maxBatches * batchSize))
       overfetch = T.pack (show (maxBatches * 10))
-      claimedBy = uuidLiteral mWorkerId
       dma = T.pack (show defaultMaxAttempts)
+      queuesTbl = arbiterQueuesTable schema
       hasRateLimit = admitRateLimited admission
       hasConcurrency = admitConcurrent admission
+      queueLit = textLiteral tableName
+      notPaused =
+        [text|NOT EXISTS (SELECT 1 FROM ${queuesTbl} q WHERE q.queue_name = ${queueLit} AND q.paused)|]
       -- Ungrouped-pool concurrency headroom pre-filter, rendered only for a type that
       -- declares a pool. Keeps a full key off the bounded candidate window.
       effLimit = effectivePolicyCol "p" "limit"
-      ccGate
+      ccHeadroom
         | hasConcurrency =
             [text|
               AND (j.claimed_by IS NOT NULL OR j.concurrency_key IS NULL OR EXISTS (
@@ -394,6 +397,15 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
               ))
             |]
         | otherwise = ""
+      -- An unrendered gate refuses the jobs its policies govern, so an admission that
+      -- predates a policy cannot admit past it. An unpolicied key runs uncapped either way.
+      refuse policies stem = "AND " <> unpolicied policies "j" stem
+      lockedGate =
+        fold
+          [ if hasConcurrency then "" else refuse concPolicies "concurrency"
+          , if hasRateLimit then "" else refuse rlPolicies "rate_limit"
+          ]
+      poolGate = ccHeadroom <> lockedGate
       -- The locked CTE projects only what the rendered gates read, so a gateless
       -- claim materializes bare ids.
       lockedCols =
@@ -441,12 +453,12 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
             [text|
               claimed AS (
                 UPDATE ${tbl} j
-                SET not_visible_until = CASE WHEN dc._admit THEN NOW() + (${timeout} * interval '1 second') ELSE dc._defer END,
+                SET not_visible_until = CASE WHEN dc._admit THEN NOW() + (?::float8 * interval '1 second') ELSE dc._defer END,
                     attempts = CASE WHEN dc._admit THEN j.attempts + 1 ELSE j.attempts END,
                     last_attempted_at = CASE WHEN dc._admit THEN NOW() ELSE j.last_attempted_at END,
                     updated_at = NOW(),
                     throttled_until = CASE WHEN dc._admit THEN NULL ELSE dc._defer END,
-                    claimed_by = (CASE WHEN dc._admit THEN ${claimedBy} ELSE NULL END)::uuid
+                    claimed_by = CASE WHEN dc._admit THEN ?::uuid ELSE NULL END
                 FROM decision dc
                 WHERE j.id = dc.id
                 RETURNING j.*, dc._admit
@@ -456,11 +468,11 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
             [text|
               claimed AS (
                 UPDATE ${tbl} j
-                SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
+                SET not_visible_until = NOW() + (?::float8 * interval '1 second'),
                     attempts = j.attempts + 1,
                     last_attempted_at = NOW(),
                     updated_at = NOW(),
-                    claimed_by = ${claimedBy}
+                    claimed_by = ?::uuid
                 FROM admitted a
                 WHERE j.id = a.id
                 RETURNING j.*
@@ -472,9 +484,9 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       withCtes =
         cteList
           [ groupCandidateCtes groupsTbl tbl overfetch dma
-          , ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate
+          , ungroupedPoolCtes tbl ungroupedLimit bs dma poolGate
           , allocatedSlotCtes mb
-          , lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit
+          , lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit notPaused lockedGate
           , if hasConcurrency then concGateCtes concTbl concPolicies else ""
           , if hasRateLimit then rlGateCtes buckets rlPolicies else ""
           , admittedCte

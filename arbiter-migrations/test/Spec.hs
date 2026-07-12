@@ -1,23 +1,28 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Golden tests guarding migration checksums against in-place edits.
---
--- @postgresql-migration@ records a checksum per migration name. Editing an
--- already-shipped migration changes that checksum and every deployed database
--- rejects the run, so migrations must be add-only / rename-on-change. Each
--- migration's SQL body is pinned to its own golden file. A body change fails the
--- corresponding test with a diff. Accept an intentional add or rename with
--- @cabal test arbiter-migrations-tests --test-options=--accept@.
+-- | Holds every migration body to the bytes first recorded for it under @test\/golden@.
+-- Migrations are add-only: an edited body changes its checksum, and every deployed
+-- database then refuses to start.
 module Main (main) where
 
 import Arbiter.Core.RateLimit.Schema (PolicyRow (..))
+import Control.Monad (unless)
 import Data.ByteString qualified as BS
-import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Char8 qualified as BS8 (unpack)
+import Data.Proxy (Proxy (..))
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
+import System.Directory (doesFileExist)
 import System.FilePath ((<.>), (</>))
-import Test.Tasty (TestTree, defaultMain, testGroup)
-import Test.Tasty.Golden (goldenVsString)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty
+  ( TestTree
+  , askOption
+  , defaultIngredients
+  , defaultMainWithIngredients
+  , includingOptions
+  , testGroup
+  )
+import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
+import Test.Tasty.Options (IsOption (..), OptionDescription (..), flagCLParser, safeReadBool)
 
 import Arbiter.Migrations
   ( MigrationConfig (..)
@@ -28,14 +33,25 @@ import Arbiter.Migrations
   , schemaLevelMigrations
   )
 
+-- | @--accept@ records a migration that has no golden file yet.
+newtype Accept = Accept Bool
+
+instance IsOption Accept where
+  defaultValue = Accept False
+  parseValue = fmap Accept . safeReadBool
+  optionName = pure "accept"
+  optionHelp = pure "Record the body of any migration that has no golden file yet"
+  optionCLParser = flagCLParser Nothing (Accept True)
+
 main :: IO ()
 main =
-  defaultMain $
-    testGroup
-      "arbiter-migrations"
-      [ testGroup "migration checksums" (map migrationGolden shippedMigrations)
-      , testGroup "policy conflict detection" conflictTests
-      ]
+  defaultMainWithIngredients (includingOptions [Option (Proxy :: Proxy Accept)] : defaultIngredients) $
+    askOption $ \accept ->
+      testGroup
+        "arbiter-migrations"
+        [ testGroup "migration bodies" (map (recordedBody accept) shippedMigrations)
+        , testGroup "policy conflict detection" conflictTests
+        ]
 
 -- | 'conflictingPolicyPrefixes' flags only a prefix carrying two distinct parameter sets.
 conflictTests :: [TestTree]
@@ -64,7 +80,29 @@ shippedMigrations =
 allFeaturesConfig :: MigrationConfig
 allFeaturesConfig = defaultMigrationConfig {enableEventStreaming = True}
 
--- | Pin one migration's body to @test/golden/<name>.sql@.
-migrationGolden :: (String, BS.ByteString) -> TestTree
-migrationGolden (name, body) =
-  goldenVsString name ("test" </> "golden" </> name <.> "sql") (pure (LBS.fromStrict body))
+-- | Compare one migration's body to its recording, or record it under @--accept@.
+recordedBody :: Accept -> (String, BS.ByteString) -> TestTree
+recordedBody (Accept accept) (name, body) = testCase name $ do
+  let path = "test" </> "golden" </> name <.> "sql"
+  recorded <- doesFileExist path
+  case (recorded, accept) of
+    (True, _) -> do
+      applied <- BS.readFile path
+      unless (applied == body) $ assertFailure (bodyChanged name applied body)
+    (False, True) -> BS.writeFile path body
+    (False, False) ->
+      assertFailure ("migration " <> name <> " has no golden file. Review its body and re-run with --accept")
+
+-- | Why a changed body is never the answer, and what to do instead.
+bodyChanged :: String -> BS.ByteString -> BS.ByteString -> String
+bodyChanged name applied body =
+  unlines
+    [ name <> " has already been applied to deployed databases, and its body changed."
+    , "Every such database would reject the upgrade with a checksum mismatch."
+    , "Ship the change as a new migration instead of editing this one."
+    , ""
+    , "recorded:"
+    , BS8.unpack applied
+    , "generated:"
+    , BS8.unpack body
+    ]

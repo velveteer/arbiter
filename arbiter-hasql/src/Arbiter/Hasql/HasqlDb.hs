@@ -23,6 +23,10 @@ module Arbiter.Hasql.HasqlDb
   , createHasqlEnv
   , createHasqlEnvWithConfig
   , createHasqlEnvWithPool
+  , withHasqlEnv
+  , HasqlPool
+  , newHasqlPool
+  , withHasqlPool
   , setPreparedStatements
 
     -- * Hasql Settings
@@ -38,13 +42,13 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception, bracket, throwIO)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks, local)
 import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
-import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, setNumStripes)
 import Data.Proxy (Proxy (..))
 import Hasql.Connection qualified as Hasql
 import UnliftIO (MonadUnliftIO)
@@ -167,37 +171,52 @@ createHasqlEnvWithConfig
   -- ^ Schema name
   -> PoolConfig
   -> m (HasqlEnv registry)
-createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
-  connPool <-
-    newPool $
-      setNumStripes (poolStripes config) $
-        defaultPoolConfig
-          ( do
-              result <- Hasql.acquire (hasqlSettings connStr)
-              case result of
-                Right conn -> pure conn
-                Left err -> throwIO $ HasqlConnectionError (show err)
-          )
-          Hasql.release
-          (fromIntegral $ poolIdleTimeout config)
-          (poolSize config)
-  pure
-    HasqlEnv
-      { schema = schemaName
-      , hasqlPool =
-          HasqlConnectionPool
-            { connectionPool = Just connPool
-            , activeConn = Nothing
-            , transactionDepth = 0
-            , preparedStatements = False
-            }
-      }
+createHasqlEnvWithConfig proxy connStr schemaName config = liftIO $ do
+  connPool <- newHasqlPool connStr config
+  pure (createHasqlEnvWithPool proxy connPool schemaName)
+
+-- | Connections the envs built over it draw from.
+type HasqlPool = Pool Hasql.Connection
+
+-- | A connection pool for a schema, shareable across the envs built over it.
+newHasqlPool :: (MonadIO m) => ByteString -> PoolConfig -> m HasqlPool
+newHasqlPool connStr config =
+  liftIO . newPool $
+    setNumStripes (poolStripes config) $
+      defaultPoolConfig
+        ( do
+            result <- Hasql.acquire (hasqlSettings connStr)
+            case result of
+              Right conn -> pure conn
+              Left err -> throwIO $ HasqlConnectionError (show err)
+        )
+        Hasql.release
+        (fromIntegral $ poolIdleTimeout config)
+        (poolSize config)
+
+-- | Run an action with a pool, destroyed on exit.
+withHasqlPool :: ByteString -> PoolConfig -> (HasqlPool -> IO a) -> IO a
+withHasqlPool connStr config = bracket (newHasqlPool connStr config) destroyAllResources
+
+-- | Run an action with a HasqlEnv over a pool created for it, destroyed on exit.
+withHasqlEnv
+  :: forall registry a
+   . Proxy registry
+  -> ByteString
+  -- ^ PostgreSQL connection string
+  -> SchemaName
+  -- ^ Schema name
+  -> PoolConfig
+  -> (HasqlEnv registry -> IO a)
+  -> IO a
+withHasqlEnv proxy connStr schemaName config act =
+  withHasqlPool connStr config (act . flip (createHasqlEnvWithPool proxy) schemaName)
 
 -- | Create a HasqlEnv with a user-provided connection pool.
 createHasqlEnvWithPool
   :: forall registry
    . Proxy registry
-  -> Pool Hasql.Connection
+  -> HasqlPool
   -> SchemaName
   -- ^ Schema name
   -> HasqlEnv registry
@@ -209,13 +228,14 @@ createHasqlEnvWithPool _proxy connPool schemaName =
           { connectionPool = Just connPool
           , activeConn = Nothing
           , transactionDepth = 0
-          , preparedStatements = False
+          , preparedStatements = True
           }
     }
 
--- | Enable or disable prepared hot statements (the claim). Prepared once per pooled
--- connection, so the plan is reused instead of rebuilt every call. Requires direct
--- connections or a pooler that supports server-side prepared statements.
+-- | Enable or disable prepared hot statements (the claim), on by default. Prepared
+-- once per pooled connection, so the plan is reused instead of rebuilt every call.
+-- Disable it behind a pooler that does not support server-side prepared statements,
+-- such as PgBouncer in transaction or statement mode.
 setPreparedStatements :: Bool -> HasqlEnv registry -> HasqlEnv registry
 setPreparedStatements flag env = env {hasqlPool = (hasqlPool env) {preparedStatements = flag}}
 

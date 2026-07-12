@@ -6,7 +6,7 @@
 -- A 'JobTree' describes a hierarchy of parent-child jobs that is inserted
 -- atomically (in a single transaction). Trees can be arbitrarily deep.
 --
--- Children run immediately; the finalizer (parent) is suspended until all
+-- Children run immediately. The finalizer (parent) is suspended until all
 -- children complete, then becomes claimable for a completion round.
 -- Child results are auto-stored in @{queue}_results@ and passed to the
 -- finalizer handler as @Map Int64 (Either Text result)@.
@@ -73,7 +73,7 @@ newtype TreeInsertFailed = TreeInsertFailed Text
   deriving stock (Show)
   deriving anyclass (Exception)
 
--- | A tree of jobs. Leaves are single jobs; finalizers are parents with
+-- | A tree of jobs. Leaves are single jobs. Finalizers are parents with
 -- children that run immediately while the parent waits for completion.
 data JobTree payload
   = -- | A single job with no children.
@@ -108,7 +108,7 @@ rollup parent children =
   Finalizer (parent {parentState = Just emptyState}) children
 
 -- | An empty rollup snapshot @{}@. The DB stores this on insert for any
--- rollup finalizer; presence-of-non-null is the canonical signal of
+-- rollup finalizer. Presence-of-non-null is the canonical signal of
 -- rollup-ness, and the value is overwritten with merged child results
 -- before a DLQ move.
 emptyState :: Value

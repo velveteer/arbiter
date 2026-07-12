@@ -7,6 +7,7 @@
 module Arbiter.Core.Gates
   ( arbiterGatesTable
   , createGatesTableSQL
+  , addGateMetadataColumnSQL
   ) where
 
 import Data.Text (Text)
@@ -27,3 +28,8 @@ createGatesTableSQL schemaName =
     , "  last_run_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01'::timestamptz"
     , ");"
     ]
+
+-- | Where a task publishes what it computed, for the callers that lost its gate.
+addGateMetadataColumnSQL :: SchemaName -> Text
+addGateMetadataColumnSQL schemaName =
+  "ALTER TABLE " <> arbiterGatesTable schemaName <> " ADD COLUMN IF NOT EXISTS metadata JSONB;"

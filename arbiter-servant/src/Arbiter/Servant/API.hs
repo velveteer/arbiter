@@ -32,6 +32,7 @@ import Arbiter.Core.Sql.Jobs
   , jobSortColumnName
   , sortDirSql
   )
+import Data.Aeson (Value)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
@@ -234,6 +235,56 @@ data QueuesAPI mode = QueuesAPI
         :- Capture "queue" Text
           :> "resume"
           :> PostNoContent
+  , -- POST /queues/:queue/jobs (enqueue a job to a runtime-named queue)
+    enqueue
+      :: mode
+        :- Capture "queue" Text
+          :> "jobs"
+          :> ReqBody '[JSON] (ApiJobWrite Value)
+          :> Post '[JSON] (JobResponse (ApiJob Value))
+  , -- POST /queues/:queue/claim (lease visible jobs)
+    claim
+      :: mode
+        :- Capture "queue" Text
+          :> "claim"
+          :> ReqBody '[JSON] ClaimRequest
+          :> Post '[JSON] ClaimResponse
+  , -- POST /queues/:queue/jobs/:id/ack (complete a claimed job)
+    ackJob
+      :: mode
+        :- Capture "queue" Text
+          :> "jobs"
+          :> Capture "id" Int64
+          :> "ack"
+          :> ReqBody '[JSON] AckRequest
+          :> PostNoContent
+  , -- POST /queues/:queue/jobs/:id/nack (soft-return a claimed job)
+    nackJob
+      :: mode
+        :- Capture "queue" Text
+          :> "jobs"
+          :> Capture "id" Int64
+          :> "nack"
+          :> ReqBody '[JSON] NackRequest
+          :> PostNoContent
+  , -- POST /queues/:queue/jobs/:id/extend (heartbeat a claimed job's lease)
+    extendJob
+      :: mode
+        :- Capture "queue" Text
+          :> "jobs"
+          :> Capture "id" Int64
+          :> "extend"
+          :> ReqBody '[JSON] ExtendRequest
+          :> PostNoContent
+  , -- POST /queues/:queue/jobs/:id/fail (retry with backoff, or dead-letter)
+    failJob
+      :: mode
+        :- Capture "queue" Text
+          :> "jobs"
+          :> Capture "id" Int64
+          :> "fail"
+          :> ReqBody '[JSON] FailRequest
+          :> Post '[JSON] FailResponse
   }
   deriving stock (Generic)
 
@@ -338,7 +389,9 @@ data ConcurrencyAPI mode = ConcurrencyAPI
   }
   deriving stock (Generic)
 
--- | Shared top-level routes appended after the per-table routes.
+-- | Shared top-level routes appended after the per-table routes. The trailing
+-- capture serves the same per-queue routes for a queue named at runtime, with
+-- raw-JSON payloads. A registry queue matches its own generated route first.
 type SharedAPI =
   "queues" :> NamedRoutes QueuesAPI
     :<|> "events" :> EventsAPI
@@ -346,6 +399,7 @@ type SharedAPI =
     :<|> "workers" :> NamedRoutes WorkersAPI
     :<|> "rate-limits" :> NamedRoutes RateLimitsAPI
     :<|> "concurrency" :> NamedRoutes ConcurrencyAPI
+    :<|> Capture "queue" Text :> NamedRoutes (TableAPI Value)
 
 -- | Generates a 'TableAPI' route per registry entry, followed by the shared
 -- top-level routes.
@@ -357,6 +411,6 @@ type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
     (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
--- prefix is generated from the registry; see 'RegistryToAPI' for the shape.
+-- prefix is generated from the registry. See 'RegistryToAPI' for the shape.
 type ArbiterAPI :: JobPayloadRegistry -> Type
 type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry

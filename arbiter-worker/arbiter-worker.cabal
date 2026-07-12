@@ -38,6 +38,9 @@ library
     Arbiter.Worker.Config
     Arbiter.Worker.Cron
     Arbiter.Worker.Logger
+    Arbiter.Worker.Outcome
+    Arbiter.Worker.Telemetry
+    Arbiter.Worker.Trace
     Arbiter.Worker.WorkerState
 
   other-modules:
@@ -51,6 +54,8 @@ library
     , aeson               >=2.0  && <2.3
     , arbiter-core        <0.2
     , base                >=4.14 && <5
+    , hs-opentelemetry-api >=1.0 && <1.1
+    , hs-opentelemetry-propagator-w3c >=1.0 && <1.1
     , bytestring          >=0.10 && <0.13
     , containers          >=0.6  && <0.9
     , cron                >=0.7  && <0.9
@@ -61,11 +66,13 @@ library
     , monad-logger-aeson  >=0.4  && <0.5
     , postgresql-simple   >=0.6  && <0.8
     , random              >=1.2  && <1.4
+    , scientific          >=0.3  && <0.4
     , stm                 >=2.5  && <2.6
     , text                >=1.2  && <2.2
     , time                >=1.9  && <1.16
     , transformers        >=0.5  && <0.7
     , tz                  >=0.1  && <0.2
+    , unordered-containers >=0.2  && <0.3
     , unliftio            >=0.2  && <0.3
     , uuid                >=1.3  && <1.4
 

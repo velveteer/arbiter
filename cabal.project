@@ -7,6 +7,8 @@ packages:
   arbiter-orville
   arbiter-servant
   arbiter-servant-ui
+  arbiter-serve
+  arbiter-cli
   arbiter-demo
   arbiter-test-common
   arbiter-bench

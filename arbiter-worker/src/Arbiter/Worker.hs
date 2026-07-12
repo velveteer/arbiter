@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Entry point for running a worker pool that fetches and executes jobs.
@@ -10,9 +11,13 @@ module Arbiter.Worker
     -- * Multi-Queue Workers
   , NamedWorkerPool (..)
   , namedWorkerPool
+  , queueOf
   , runWorkerPools
   , runSelectedWorkerPools
   , getEnabledQueues
+  , getEnabledQueuesFrom
+  , retryPolicyOf
+  , withPoolContext
 
     -- * Job Result
   , JobResult (..)
@@ -27,8 +32,14 @@ module Arbiter.Worker
   , module Arbiter.Worker.BackoffStrategy
   , module Arbiter.Worker.Logger
   , module Arbiter.Worker.WorkerState
+  , FailureOutcome (..)
+  , FailureReport (..)
+  , RetryPolicy (..)
+  , defaultRetryPolicy
+  , tryLog
 
     -- * Reaper
+  , runQueueMaintenance
   , runReaperOp
 
     -- * Cron
@@ -72,6 +83,7 @@ import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Bifunctor (second)
+import Data.Bits (xor)
 import Data.Foldable (fold, foldMap', for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
@@ -86,7 +98,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
+import Data.Word (Word64)
 import GHC.TypeLits (symbolVal)
+import Numeric (showHex)
 import System.Directory (removeFile)
 import System.Environment (lookupEnv)
 import UnliftIO
@@ -105,7 +119,6 @@ import UnliftIO
   , readTVar
   , throwIO
   , tryAny
-  , waitAnyCatch
   , writeTVar
   )
 import UnliftIO.Async qualified as Async
@@ -143,7 +156,10 @@ import Arbiter.Worker.Logger.Internal
   , withJobContextOne
   )
 import Arbiter.Worker.NotificationListener (runMultiChannelListener)
+import Arbiter.Worker.Outcome (FailureOutcome (..), FailureReport (..), RetryPolicy (..), defaultRetryPolicy)
+import Arbiter.Worker.Outcome qualified as Outcome
 import Arbiter.Worker.Retry (spawnRetried)
+import Arbiter.Worker.Trace qualified as Trace
 import Arbiter.Worker.WorkerState
 
 -- ---------------------------------------------------------------------------
@@ -171,15 +187,15 @@ instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
 -- Multi-Queue Workers
 -- ---------------------------------------------------------------------------
 
--- | A worker pool paired with its queue name (derived from the registry).
+-- | A worker pool paired with its name.
 --
 -- @
 -- allWorkers =
---   [ namedWorkerPool emailConfig      -- "email_jobs"
---   , namedWorkerPool imageConfig      -- "image_jobs"
+--   [ namedWorkerPool emailConfig      -- claims "email_jobs"
+--   , namedWorkerPool imageConfig      -- claims "image_jobs"
 --   ]
 --
--- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
+-- main = runSimpleDb env $ runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
   = forall registry payload result.
@@ -190,10 +206,16 @@ data NamedWorkerPool m
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
-  -- ^ Queue name from the type-level registry
+  -- ^ What this pool is called, in its logs. Two pools may claim one queue. Metrics stay
+  -- keyed by the queue.
   , workerPoolConfig :: WorkerConfig m payload result
   -- ^ The worker configuration
   }
+
+-- | The queue a pool claims from, as its payload type names it in the registry.
+queueOf :: NamedWorkerPool m -> Text
+queueOf (NamedWorkerPool @_ @registry @payload _ _) =
+  T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
 
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
@@ -227,7 +249,7 @@ runWorkerPools registry pools setup = do
   enabled <- liftIO $ getEnabledQueues "ARBITER_ENABLED_QUEUES" registry
   runSelectedWorkerPools sharedState enabled pools
 
--- | Run only the worker pools whose names appear in the enabled list.
+-- | Run only the worker pools claiming from a queue in the enabled list.
 runSelectedWorkerPools
   :: (MonadUnliftIO m)
   => TVar WorkerState
@@ -235,23 +257,25 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools sharedState enabled pools =
-  case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
+  case filter ((`elem` enabled) . queueOf) pools of
     [] -> pure ()
     selected -> evalContT $ do
       asyncs <- for selected $ \(NamedWorkerPool name cfg) ->
-        let cfg' =
-              cfg
-                { workerStateVar = sharedState
-                , logConfig = withPoolContext name (logConfig cfg)
-                }
-         in ContT $ \k -> Async.withAsync (runWorkerPool cfg') k
+        ContT $ \k ->
+          Async.withAsync
+            (runWorkerPool cfg {workerStateVar = sharedState, logConfig = withPoolContext name (logConfig cfg)})
+            k
       lift $ traverse_ Async.waitCatch asyncs
 
--- | Inject the pool name into log context. User-supplied pairs come after
--- so they win on key collision.
+-- | Inject the pool name into log context, leaving any already there. A caller naming its
+-- pool wins over the queue name 'runWorkerPool' falls back to.
 withPoolContext :: Text -> LogConfig -> LogConfig
 withPoolContext poolName lc =
-  lc {additionalContext = (("pool" .= poolName) :) <$> additionalContext lc}
+  lc {additionalContext = named <$> additionalContext lc}
+  where
+    named ctx
+      | any ((== "pool") . fst) ctx = ctx
+      | otherwise = ("pool" .= poolName) : ctx
 
 -- | Get enabled queues from an environment variable.
 --
@@ -281,8 +305,12 @@ getEnabledQueues
   -> Proxy registry
   -- ^ Registry proxy
   -> IO [Text]
-getEnabledQueues envVar registry = do
-  let allQueues = registryTableNames registry
+getEnabledQueues envVar registry = getEnabledQueuesFrom envVar (registryTableNames registry)
+
+-- | 'getEnabledQueues' against an explicit candidate list rather than a registry.
+-- Unset or empty enables all. Any name not in @allQueues@ is rejected.
+getEnabledQueuesFrom :: String -> [Text] -> IO [Text]
+getEnabledQueuesFrom envVar allQueues = do
   mVal <- lookupEnv envVar
   case mVal of
     Nothing -> pure allQueues
@@ -301,7 +329,8 @@ getEnabledQueues envVar registry = do
 -- Worker Pool
 -- ---------------------------------------------------------------------------
 
--- | Starts a worker pool with a dispatcher and N worker threads.
+-- | Starts a worker pool with a dispatcher and N worker threads. With no 'handlerMode'
+-- it consumes nothing and runs only the queue's background loops.
 runWorkerPool
   :: forall m registry payload result
    . ( Arb.RegistryAdmissionPolicies registry
@@ -312,67 +341,99 @@ runWorkerPool
      )
   => WorkerConfig m payload result
   -> m ()
-runWorkerPool config = do
-  let workerCap = workerCount config
-      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-
+runWorkerPool config0 = do
+  let queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  resolvedTracer <- Trace.resolveTracer
+  let config = config0 {logConfig = withPoolContext queueName (logConfig config0), tracer = resolvedTracer}
   schemaName <- getSchema
-  workQueue <- newTBQueueIO (fromIntegral workerCap)
-  busyWorkerCount <- newTVarIO 0
-  workerFinishedVar <- newTVarIO False
-  runningJobs <- STM.newTVarIO Map.empty
+  case handlerMode config of
+    Nothing -> maintainOnly config schemaName queueName
+    Just mode -> consume config mode schemaName queueName
+  where
+    maintainOnly config schemaName queueName = evalContT $ do
+      loops <- backgroundLoops config schemaName queueName
+      lift $ Async.race_ (liftIO (awaitShutdown (workerStateVar config))) (awaitPool (logConfig config) loops)
 
-  registerResult <- tryAny (registerSelf config schemaName queueName)
-  case registerResult of
-    Left e -> warnEx (logConfig config) "Worker registry insert failed" e
-    Right mPaused ->
-      traverse_ (atomically . writeTVar (pauseVar config)) mPaused
+    consume config mode schemaName queueName = do
+      let workerCap = workerCount config
+      workQueue <- newTBQueueIO (fromIntegral workerCap)
+      busyWorkerCount <- newTVarIO 0
+      workerFinishedVar <- newTVarIO False
+      runningJobs <- STM.newTVarIO Map.empty
 
-  dispatcherNotifVar <- STM.newTVarIO Nothing
-  let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
-      pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
-      cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
-      handlers =
-        [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
-        , (pauseChannel, handlePauseNotif config)
-        , (cancelChannel, handleCancelNotif config runningJobs)
-        ]
+      registerResult <- tryAny (registerSelf config schemaName queueName)
+      case registerResult of
+        Left e -> warnEx (logConfig config) "Worker registry insert failed" e
+        Right mPaused ->
+          traverse_ (atomically . writeTVar (pauseVar config)) mPaused
 
-  listenerReady <- STM.newTVarIO False
+      dispatcherNotifVar <- STM.newTVarIO Nothing
+      let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
+          pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
+          cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
+          handlers =
+            [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
+            , (pauseChannel, handlePauseNotif config)
+            , (cancelChannel, handleCancelNotif config runningJobs)
+            ]
 
-  evalContT $ do
-    withLivenessFile config
-    listener <-
-      spawnRetried (workerStateVar config) (logConfig config) "Multi-channel listener" $
-        runMultiChannelListener (connStr config) handlers (logConfig config) listenerReady
-    lift . atomically $
-      (readTVar listenerReady >>= checkSTM)
-        `STM.orElse` void (Async.waitCatchSTM listener)
-    heartbeat <-
-      spawnRetried (workerStateVar config) (logConfig config) "Worker heartbeat" $
-        heartbeatLoop config schemaName queueName
-    dispatcher <-
-      spawnRetried (workerStateVar config) (logConfig config) "Dispatcher" $
-        runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
-    workers <-
-      replicateM workerCap $
-        spawnRetried (workerStateVar config) (logConfig config) "Worker thread" $
-          workerLoop config runningJobs workQueue busyWorkerCount workerFinishedVar
-    crons <-
-      unlessNull (cronJobs config) $
-        spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
-          runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
-    reaper <-
-      spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
-        reaperLoop (logConfig config) (reaperInterval config) (reaperTimeout config)
+      listenerReady <- STM.newTVarIO False
 
-    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : crons <> workers)
-    case res of
-      Left e ->
-        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (show e)
-      Right _ -> pure ()
+      evalContT $ do
+        withLivenessFile config
+        listener <-
+          spawnRetried (workerStateVar config) (logConfig config) "Multi-channel listener" $
+            runMultiChannelListener (connStr config) handlers (logConfig config) listenerReady
+        lift . atomically $
+          (readTVar listenerReady >>= checkSTM)
+            `STM.orElse` void (Async.waitCatchSTM listener)
+        heartbeat <-
+          spawnRetried (workerStateVar config) (logConfig config) "Worker heartbeat" $
+            heartbeatLoop config schemaName queueName
+        dispatcher <-
+          spawnRetried (workerStateVar config) (logConfig config) "Dispatcher" $
+            runDispatcher config mode workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
+        workers <-
+          replicateM workerCap $
+            spawnRetried (workerStateVar config) (logConfig config) "Worker thread" $
+              workerLoop config mode runningJobs workQueue busyWorkerCount workerFinishedVar
+        loops <- backgroundLoops config schemaName queueName
 
-    lift $ shutdownPool config schemaName workQueue busyWorkerCount
+        lift $ awaitPool (logConfig config) (dispatcher : heartbeat : listener : loops <> workers)
+        lift $ shutdownPool config schemaName workQueue busyWorkerCount
+
+-- | The loops a pool runs whether or not it consumes: the reaper, and any cron schedules.
+backgroundLoops
+  :: ( Arb.RegistryAdmissionPolicies registry
+     , MonadUnliftIO m
+     , QueueOperation m registry payload
+     , RegistryTables registry
+     )
+  => WorkerConfig m payload result
+  -> SchemaName
+  -> Text
+  -> ContT r m [Async.Async ()]
+backgroundLoops config schemaName queueName = do
+  crons <-
+    unlessNull (cronJobs config) $
+      spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
+        runCronScheduler (workerStateVar config) (logConfig config) schemaName queueName (cronJobs config)
+  reaper <-
+    spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
+      runQueueMaintenance
+        (logConfig config)
+        (claimAdmissionOverride config)
+        (maintenanceQueues config)
+        (reaperInterval config)
+        (reaperTimeout config)
+  pure (reaper : crons)
+
+-- | Wait for the pool's first thread to finish, logging whatever brought it down.
+awaitPool :: (MonadUnliftIO m) => LogConfig -> [Async.Async ()] -> m ()
+awaitPool logCfg asyncs =
+  Async.waitAnyCatch asyncs >>= \case
+    (_, Left e) -> tryLog logCfg Error $ "Thread pool exception: " <> T.pack (show e)
+    (_, Right ()) -> pure ()
 
 -- | Remove the liveness file when the pool exits, after the drain.
 withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
@@ -520,6 +581,7 @@ workerLoop
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
+  -> HandlerMode m payload result
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
@@ -528,7 +590,7 @@ workerLoop
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
+workerLoop config mode runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
   -- Mask covers the window between the atomic claim (which increments
   -- busyCount) and entering the finally block that decrements it.
   jobBatch <- atomically $ do
@@ -555,7 +617,7 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
       traverse_ (claimHook currentTime) jobBatch
       result <-
         withRegisteredJobs runningJobs jobIds $
-          processJobsWithRetry config jobBatch
+          processJobsWithRetry config mode jobBatch
       case result of
         Right () -> pure ()
         Left e
@@ -588,18 +650,18 @@ processJobsWithRetry
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
+  -> HandlerMode m payload result
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config jobs = do
+processJobsWithRetry config mode jobs = do
   let hooks = observabilityHooks config
       jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
-      -- Ack a job, throwing if it was reclaimed by another worker mid-flight.
-      ackJobOrSkip job = do
-        rowsAffected <- Arb.ackJob job
-        when (rowsAffected == 0) $
-          throwJobNotFound "reclaimed by another worker during processing"
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
+  let ackJobOrSkip mResult job = do
+        rowsAffected <- Outcome.completeJob schemaName mResult job
+        when (rowsAffected == 0) $
+          throwJobNotFound "reclaimed by another worker during processing"
   handledRef <- liftIO $ newIORef Set.empty
   let jobLog j = withJobContextOne (logConfig config) j
       markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
@@ -610,23 +672,24 @@ processJobsWithRetry config jobs = do
       nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
+        event <- withDbTransaction $ handleJobFailure config {logConfig = jobLog j} exc (jobMaxAtts j) j
+        traverse_ (fireFailureHooks (jobLog j) hooks startTime endT j) event
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
       ackOne j = do
-        withDbTransaction $ ackJobOrSkip j
+        withDbTransaction $ ackJobOrSkip Nothing j
         finalize j
       ackOneWith j r = do
-        withDbTransaction $ do
-          storeJobResult schemaName j r
-          ackJobOrSkip j
+        withDbTransaction $ ackJobOrSkip (encodeJobResult r) j
         finalize j
       ackBatch pairs = do
         let js = map fst pairs
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, mr) -> when (isAcked ackedSet j) $ traverse_ (storeJobResult schemaName j) mr
+          for_ pairs $ \(j, mr) ->
+            when (isAcked ackedSet j) $
+              traverse_ (\r -> Outcome.storeResult schemaName (encodeJobResult r) j) mr
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -657,15 +720,17 @@ processJobsWithRetry config jobs = do
         jobs
         (logConfig config)
         (heartbeatSignal config)
-      $ case handlerMode config of
+      $ case mode of
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @result handler job
-            storeJobResult schemaName job handlerResult
-            ackJobOrSkip job
+            handlerResult <-
+              Trace.withConsumeSpan (tracer config) (consumeSpanAttributes config (pure job)) job $
+                runHandlerWithConnection @_ @_ @result handler job
+            ackJobOrSkip (encodeJobResult handlerResult) job
           finalize job
-        BatchedJobsMode _ handler -> handler jobs callbacks
+        BatchedJobsMode _ handler ->
+          Trace.withConsumeSpanBatch (tracer config) (consumeSpanAttributes config jobs) jobs $ handler jobs callbacks
   endTime <- liftIO getCurrentTime
   handled <- liftIO $ readIORef handledRef
   reportBatchOutcome config hooks startTime endTime jobs handled result
@@ -697,12 +762,15 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
         -- left unfinalized, so the nacked reprocess does not record a failure.
         withDbTransaction $ traverse_ (void . Arb.nackJob) unhandled
         tryLog batchLog Info "Job(s) nacked, will be reprocessed"
-    | otherwise ->
+    | otherwise -> do
         -- Fail the jobs the handler did not finalize, in a separate transaction.
-        withDbTransaction $
-          traverse_
-            (\job -> handleJobFailure config {logConfig = jobLog job} hooks e (jobMaxAtts job) startTime endTime job)
-            unhandled
+        events <-
+          withDbTransaction $
+            traverse
+              (\job -> (,) job <$> handleJobFailure config {logConfig = jobLog job} e (jobMaxAtts job) job)
+              unhandled
+        for_ events $ \(job, event) ->
+          traverse_ (fireFailureHooks (jobLog job) hooks startTime endTime job) event
   where
     unhandled = filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs)
     batchLog = withJobContext (logConfig config) jobs
@@ -734,19 +802,6 @@ mergedChildResults job = do
 mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
 mergeChildResults = foldMap' fold
 
--- | Store a job's result for its parent rollup, if it has one.
-storeJobResult
-  :: (JobResult result, MonadArbiter m)
-  => Text
-  -> Job.JobRead payload
-  -> result
-  -> m ()
-storeJobResult schemaName job result =
-  case (Job.parentId job, encodeJobResult result) of
-    (Just pid, Just val) ->
-      void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
-    _ -> pure ()
-
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.
 isJobGoneException :: SomeException -> Bool
@@ -773,77 +828,81 @@ classifyException e
   | Just (ParsingException msg) <- fromException e = (msg, PermanentFailure)
   | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
 
--- | Handle failure for a single job (retry or move to DLQ).
+-- | A committed failure and what to tell its hooks.
+data FailureEvent
+  = -- | Deleted, rather than retried or dead-lettered.
+    Cancelled Text
+  | Failed Text Outcome.FailureOutcome
+
+-- | Write a job's failure (retry or move to DLQ), yielding what its hooks report.
+-- Hooks fire outside the failure transaction.
 handleJobFailure
   :: forall m registry payload result
    . ( JobOperation m registry payload
      , MonadUnliftIO m
      )
   => WorkerConfig m payload result
-  -> Job.ObservabilityHooks m payload
   -> SomeException
   -> Int32
-  -> UTCTime
-  -> UTCTime
   -> Job.JobRead payload
-  -> m ()
-handleJobFailure config hooks e maxAtts startTime endTime job = do
+  -> m (Maybe FailureEvent)
+handleJobFailure config e maxAtts job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
+      cancelled deleted = if deleted > 0 then Just (Cancelled errorMsg) else Nothing
   schemaName <- getSchema
   case failureKind of
-    TreeCancelFailure -> do
+    TreeCancelFailure ->
       -- TreeCancel: delete the entire tree from root down (including this job)
-      deleted <- Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
-      when (deleted > 0) $
-        runHook cfg "onJobFailure" $
-          Job.onJobFailure hooks job errorMsg startTime endTime
+      cancelled <$> Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
     BranchCancelFailure -> do
       -- BranchCancel: cascade-delete the parent + all siblings (including this job).
       -- If no parent, just delete this job.
       let target = fromMaybe (Job.primaryKey job) (Job.parentId job)
-      deleted <- Ops.cancelJobCascade schemaName (Job.queueName job) target
-      when (deleted > 0) $
-        runHook cfg "onJobFailure" $
-          Job.onJobFailure hooks job errorMsg startTime endTime
-    _
-      | failureKind == PermanentFailure || Job.attempts job >= maxAtts -> do
-          -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-          -- Merges old snapshot so repeated DLQ round-trips don't lose data.
-          when (Job.isRollup job) $ do
-            (results, failures, mSnapshot, _dlqFailures) <-
-              Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
-            let merged = Ops.mergeRawChildResults results failures mSnapshot
-            unless (Map.null merged) $
-              void $
-                Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
-          -- Permanent failure or max attempts reached - move to DLQ
-          rowsAffected <- Arb.moveToDLQ errorMsg job
-          if rowsAffected == 0
-            then
-              tryLog cfg Warning "Job not available for moving to DLQ"
-            else do
-              -- Successfully moved to DLQ
-              runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
-              runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
-      | otherwise -> do
-          -- Retry with configured backoff strategy and jitter
-          let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
-          backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
-          rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
-          if rowsAffected == 0
-            then
-              tryLog cfg Warning $
-                "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
-            else do
-              -- Successfully updated for retry
-              runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
-              runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
+      cancelled <$> Ops.cancelJobCascade schemaName (Job.queueName job) target
+    _ -> do
+      report <-
+        Outcome.failJob
+          schemaName
+          (retryPolicyOf config)
+          Nothing
+          (failureKind == PermanentFailure)
+          maxAtts
+          errorMsg
+          job
+      if Outcome.reportRows report == 0
+        then do
+          tryLog cfg Warning $ "Job " <> T.pack (show (Job.primaryKey job)) <> " not available to fail"
+          pure Nothing
+        else pure (Just (Failed errorMsg (Outcome.reportOutcome report)))
+
+-- | Report a committed failure to the job's hooks.
+fireFailureHooks
+  :: (Job.JobPayload payload, MonadUnliftIO m)
+  => LogConfig
+  -> Job.ObservabilityHooks m payload
+  -> UTCTime
+  -> UTCTime
+  -> Job.JobRead payload
+  -> FailureEvent
+  -> m ()
+fireFailureHooks cfg hooks startTime endTime job event =
+  traverse_ (uncurry (runHook cfg)) $ case event of
+    Cancelled msg ->
+      [ ("onJobFailure", Job.onJobFailure hooks job msg startTime endTime)
+      , ("onJobCancelled", Job.onJobCancelled hooks job msg)
+      ]
+    Failed msg outcome -> Outcome.failureHookCalls hooks job msg startTime endTime outcome
+
+-- | The retry policy a pool's config runs with.
+retryPolicyOf :: WorkerConfig m payload result -> Outcome.RetryPolicy
+retryPolicyOf config =
+  Outcome.RetryPolicy {Outcome.retryBackoff = backoffStrategy config, Outcome.retryJitter = jitter config}
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, and moves
--- exhausted jobs to the DLQ (all schema-wide). Each gated via 'Ops.runGated' so
--- only one pool runs it per interval.
-reaperLoop
+-- exhausted jobs to the DLQ. Each op is gated so only one pool runs it per interval.
+-- Run this directly for a queue served over HTTP with no handler of its own.
+runQueueMaintenance
   :: forall m registry
    . ( Arb.RegistryAdmissionPolicies registry
      , HasArbiterSchema m registry
@@ -852,25 +911,33 @@ reaperLoop
      , RegistryTables registry
      )
   => LogConfig
+  -> Maybe ClaimAdmission
+  -- ^ Forces the rate-limit and concurrency maintenance on for a runtime queue,
+  -- whose type-level registry declares no policies.
+  -> Maybe [Text]
+  -- ^ Queues to maintain. See 'maintenanceQueues'.
   -> NominalDiffTime
   -- ^ How often this loop runs.
   -> NominalDiffTime
   -- ^ Abort any single statement that exceeds this.
   -> m ()
-reaperLoop logCfg interval stmtTimeout = do
+runQueueMaintenance logCfg mAdmission mMaintenanceQueues interval stmtTimeout = do
   let intervalSecs = ceiling interval
-      queues = registryTableNames (Proxy @registry)
+      registryQueues = registryTableNames (Proxy @registry)
+      -- A runtime pool's registry names only its own queue, so the deployment's list wins.
+      queues = Set.toList (Set.fromList (fromMaybe registryQueues mMaintenanceQueues))
       pruneInterval = interval * 12
-      hasConcurrency = not (Set.null (registryConcurrencyPolicies @registry))
-      hasRateLimit = not (Set.null (registryRateLimitPolicies @registry))
+      hasConcurrency = maybe False admitConcurrent mAdmission || not (Set.null (registryConcurrencyPolicies @registry))
+      hasRateLimit = maybe False admitRateLimited mAdmission || not (Set.null (registryRateLimitPolicies @registry))
+      qtag = gateTag queues
   schemaName <- Arb.getSchema
   let gated :: forall a. Text -> NominalDiffTime -> m a -> m (Maybe a)
       gated = runReaperOp logCfg schemaName stmtTimeout
   forever $ do
-    mFailed <- gated "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
+    mFailed <- gated ("refresh-all-groups" <> qtag) interval $ Ops.refreshAllGroups schemaName queues
     traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
     void $ gated "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
-    mSwept <- gated "sweep-exhausted-jobs" interval $ Ops.sweepExhaustedJobs schemaName queues
+    mSwept <- gated ("sweep-exhausted-jobs" <> qtag) interval $ Ops.sweepExhaustedJobs schemaName queues
     traverse_
       ( \(n, failed) -> do
           traverse_ (\queue -> tryLog logCfg Warning $ "Exhausted-job sweep failed for queue: " <> queue) failed
@@ -881,10 +948,34 @@ reaperLoop logCfg interval stmtTimeout = do
       void $
         gated "prune-rate-limit-buckets" pruneInterval $
           Arb.pruneRateLimitBuckets @m @registry interval
-    when hasConcurrency $ do
-      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m @registry
-      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m @registry
+    when hasConcurrency $
+      tryAny (Ops.discoverQueues schemaName) >>= \case
+        Left e -> warnEx logCfg "Queue registry read failed, skipping the concurrency reconcile" e
+        Right discovered -> do
+          -- A concurrency key spans queues, so the recount must cover every queue in the schema.
+          -- A recount over this process's subset would zero the in-flight the unscanned queues hold.
+          void $
+            gated "reconcile-concurrency-stale" interval $
+              Ops.reconcileConcurrencyCountsIfStale schemaName discovered
+          void $
+            gated "reconcile-prune-concurrency" pruneInterval $
+              Ops.reconcileAndPruneConcurrency schemaName discovered
     threadDelay (intervalSecs * 1_000_000)
+
+-- | A queue set's gate key suffix, order-independent so pools over the same queues share
+-- one gate row. Digested past a bound the primary-key index could not hold.
+gateTag :: [Text] -> Text
+gateTag qs
+  | T.length joined <= 128 = "@" <> joined
+  | otherwise = "@" <> T.pack (showHex (fnv1a joined) "")
+  where
+    joined = T.intercalate "," (Set.toList (Set.fromList qs))
+
+-- | FNV-1a over a queue set, for a gate key that is bounded rather than readable.
+fnv1a :: Text -> Word64
+fnv1a = T.foldl' step 0xcbf29ce484222325
+  where
+    step h c = (h `xor` fromIntegral (fromEnum c)) * 0x100000001b3
 
 -- | Run one gated reaper op, logging and swallowing failures so the loop survives.
 -- statement_timeout bounds each statement (aborting a stuck one at the DB), while a

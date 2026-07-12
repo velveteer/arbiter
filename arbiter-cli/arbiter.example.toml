@@ -1,0 +1,122 @@
+# Example configuration for the `arbiter` binary.
+#   arbiter migrate -c arbiter.toml   # create/upgrade the queue tables
+#   arbiter serve   -c arbiter.toml   # run migrations, then serve the API + workers
+#
+# Secrets (database url, webhook secret) should NOT be committed as plaintext.
+# Each accepts, in precedence order:
+#   1. a `*_file` sibling  -> read the trimmed file (Docker/K8s/systemd secrets)
+#   2. a `${ENV_VAR}` ref  -> resolved from the environment (errors if unset)
+#   3. a literal           -> dev only
+
+[database]
+# Any libpq connection string (key=value or postgres:// URL).
+url = "${ARBITER_DATABASE_URL}"        # or a literal, or use url_file below
+# url_file = "/run/secrets/database_url"
+schema  = "arbiter"                    # optional, default "arbiter"
+# prepared_statements = true           # optional, default true. Plans the claim once per
+                                       # connection. Set false behind a pooler that does not
+                                       # support server-side prepared statements, such as
+                                       # PgBouncer in transaction or statement mode.
+
+[server]
+host   = "127.0.0.1"                   # optional, default 127.0.0.1 (loopback)
+port   = 8080                          # optional, default 8080
+events = false                         # live job feed in the admin UI (default false).
+                                       # `migrate` installs a trigger that fires on every
+                                       # row write. Off, the dashboard polls instead.
+shutdown_grace_secs = 5                # how long to wait for open connections to drain on
+                                       # shutdown (default 5). Keep it under the orchestrator's
+                                       # termination grace period.
+
+# Each queue is created by `migrate` and validated by the API. Add a [queue.webhook]
+# to have `serve` run a worker that delivers this queue's jobs to an HTTP endpoint.
+[[queue]]
+name    = "emails"
+
+  [queue.webhook]
+  url         = "https://handlers.example.com/emails"
+  workers     = 4                       # jobs delivered concurrently, default 1
+  secret_file = "/run/secrets/webhook_emails"  # HMAC key; or secret = "${...}" / literal
+  timeout_secs = 30                     # per-request timeout, default 30
+
+  # Optional. Every key has a default and every duration is in seconds. The retry
+  # keys also govern this queue's HTTP fail route, so a job backs off the same way
+  # whether a webhook worker or a pull consumer reported it failed.
+  [queue.worker]
+  poll_interval             = 5.0      # dispatcher poll floor (jobs also arrive by NOTIFY)
+  visibility_timeout        = 60.0     # how long a claimed job stays hidden
+  job_heartbeat_interval    = 30.0     # extends the timeout while a handler runs. must be below it
+  worker_heartbeat_interval = 10.0     # bumps this worker's registry row
+  worker_stale_threshold    = 300.0    # a worker quiet this long is swept. must be above the beat
+  reaper_interval           = 300.0    # groups refresh, stale-worker sweep, exhausted-job DLQ
+  reaper_timeout            = 300.0    # abort any single reaper statement that runs longer
+  graceful_shutdown_timeout = 30.0     # on SIGTERM, wait this long for in-flight jobs (0 = forever)
+  jitter                    = "equal"  # equal (default) | full | none
+
+    [queue.worker.backoff]
+    strategy = "exponential"           # exponential (default) | linear | constant
+    base     = 2.0                     # exponential: multiplier per attempt
+    cap      = 1048576.0               # exponential/linear: longest delay to grow to
+    # increment = 30.0                 # linear only: seconds added per attempt
+    # delay     = 60.0                 # constant only: seconds before every retry
+
+  # Schedules that enqueue onto this queue. Evaluated every minute, whatever the
+  # reaper_interval is. Runs on webhook and webhook-less queues alike.
+  [[queue.cron]]
+  name       = "email-digest"          # unique across every [[queue]]: it keys the schedule row
+  expression = "*/2 * * * *"           # 5-field: minute hour day-of-month month day-of-week
+  overlap    = "skip"                  # skip (default): one job pending/running at a time
+                                       # allow: one job per tick, ticks may overlap
+  timezone   = "America/New_York"      # optional IANA name, default UTC
+  backfill   = 3600.0                  # optional: replay ticks missed in the last N seconds
+  payload    = { kind = "digest" }     # the job payload. arbiter adds the tick time as "tick",
+                                       # e.g. {"kind":"digest","tick":"2026-07-13T03:00:00Z"}
+
+[[queue]]
+name = "reports"                       # no webhook: produce + consume over HTTP only
+
+  # A webhook-less queue still runs a maintenance loop, so its reaper_* knobs apply.
+  [queue.worker]
+  reaper_interval = 60.0
+
+  # Its schedules still fire: the row lands on the queue and a pull consumer claims it.
+  [[queue.cron]]
+  name       = "nightly-report"
+  expression = "0 3 * * *"
+  payload    = { kind = "nightly" }
+
+# arbiter does no authentication of its own. Put a reverse proxy / API gateway in
+# front (TLS + SSO/tokens/allowlists) and let it decide who reaches the API and
+# admin UI. The admin dashboard is for operators.
+
+# Admission policies. Defined here, seeded by `migrate`, and enforced at claim
+# time. Producers attach a job to a policy with a "rateLimit"/"concurrency" key
+# on enqueue, e.g. POST /api/v1/queues/emails/jobs
+#   {"payload":{...},"rateLimit":{"prefix":"send","suffix":"acme.test","cost":1}}
+
+[[ratelimit]]                          # token bucket: burst `max`, refill `refill` every `interval`s
+prefix   = "send"
+max      = 100.0
+refill   = 100.0
+interval = 60.0
+
+[[concurrency]]                        # at most `limit` in flight per key under `prefix`
+prefix = "tenant"
+limit  = 10
+
+# OpenTelemetry. A Prometheus /metrics endpoint is served on a dedicated port,
+# meant to be scraped directly (keep it off your public ingress). Everything else is
+# driven by the standard OTEL_* env vars: set OTEL_EXPORTER_OTLP_ENDPOINT to push to a
+# collector, and OTEL_SERVICE_NAME to name the service. The shared endpoint feeds all
+# three signals; switch one off with OTEL_{TRACES,METRICS,LOGS}_EXPORTER=none. Against a
+# trace-only backend, set OTEL_METRICS_EXPORTER=prometheus and OTEL_LOGS_EXPORTER=none.
+# Exported logs go alongside stdout, not instead of it, and each carries the trace and
+# span of the job that wrote it. With no OTEL_* set, nothing is pushed to a collector and
+# metrics remain scrape-only.
+[telemetry]
+enabled             = true             # set up OpenTelemetry at all (default true)
+metrics             = true             # serve the /metrics scrape endpoint (default true)
+metrics_port        = 9464             # dedicated metrics port (default 9464)
+gauge_interval_secs = 60               # how often a replica rescans queue depth and database
+                                       # health for the gauges (default 60). The scan counts each
+                                       # queue's jobs by status, so raise it on large queues.

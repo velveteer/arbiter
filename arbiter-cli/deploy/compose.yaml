@@ -1,0 +1,146 @@
+# Single-host stack: Postgres + arbiter (migrate, then serve) + a job loop
+# (producer -> REST API -> webhook worker -> handler) + observability
+# (Prometheus, Tempo, Grafana). Images build from their Dockerfiles, so:
+#
+#   docker compose -f arbiter-cli/deploy/compose.yaml up --build
+#
+# The producer enqueues jobs across the queues via POST /api/v1/<queue>/jobs;
+# arbiter's per-queue webhook workers deliver each to the handler, whose HTTP
+# status acks (2xx), retries (5xx), or DLQs (4xx). Watch it with:
+#   docker compose -f arbiter-cli/deploy/compose.yaml logs -f producer handler
+#
+# Traces push to Tempo and metrics are scraped from /metrics (:9464). Grafana at
+# :3000 has both datasources provisioned: Dashboards -> "Arbiter" for metrics,
+# Explore -> "Tempo" for traces.
+#
+# Secrets here are inline for local use. In production, pass them via env or
+# mounted files (see arbiter.example.toml and PRODUCTION.md).
+
+# Shared OTLP/metrics wiring.
+x-otel: &otel
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_METRICS_EXPORTER: prometheus
+  OTEL_LOGS_EXPORTER: none
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: arbiter
+      POSTGRES_PASSWORD: arbiter
+      POSTGRES_DB: arbiter
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arbiter"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql   # postgres:18+ mounts the parent, not /data
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: arbiter-cli/Dockerfile
+    image: arbiter:latest
+    command: ["migrate", "-c", "/etc/arbiter/arbiter.toml"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-shared-secret}
+    volumes:
+      - ./compose.arbiter.toml:/etc/arbiter/arbiter.toml:ro
+
+  arbiter:
+    build:
+      context: ../..
+      dockerfile: arbiter-cli/Dockerfile
+    image: arbiter:latest
+    command: ["serve", "-c", "/etc/arbiter/arbiter.toml"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      tempo: { condition: service_started }
+      handler: { condition: service_started }
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: arbiter
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-shared-secret}
+    ports:
+      - "8080:8080"
+      - "9464:9464"
+    volumes:
+      - ./compose.arbiter.toml:/etc/arbiter/arbiter.toml:ro
+
+  # Dummy external worker: receives job deliveries and acks/retries/DLQs by status.
+  handler:
+    build:
+      context: .
+      dockerfile: apps.Dockerfile
+    image: arbiter-pyapp:latest
+    command: ["python", "/app/handler.py"]
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: webhook-handler
+      PORT: "9000"
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-shared-secret}
+    volumes:
+      - ./handler.py:/app/handler.py:ro
+    ports:
+      - "9000:9000"   # optional, to poke the handler from the host
+
+  # Dummy producer: enqueues jobs round-robin across the queues via the REST API.
+  producer:
+    build:
+      context: .
+      dockerfile: apps.Dockerfile
+    image: arbiter-pyapp:latest
+    command: ["python", "/app/producer.py"]
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: producer
+      ARBITER_URL: http://arbiter:8080
+      QUEUES: emails,reports,notifications
+      INTERVAL_SECS: "2"
+    volumes:
+      - ./producer.py:/app/producer.py:ro
+    depends_on:
+      arbiter: { condition: service_started }
+    restart: on-failure
+
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - arbiter
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"     # Tempo query API (Grafana datasource)
+      - "4318:4318"     # OTLP HTTP
+      - "4317:4317"     # OTLP gRPC
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+
+volumes:
+  pgdata:

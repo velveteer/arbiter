@@ -30,20 +30,25 @@ runDispatcher
      , QueueOperation m registry payload
      )
   => WorkerConfig m payload result
+  -> HandlerMode m payload result
+  -- ^ The pool's handler. A pool without one runs no dispatcher.
   -> Int
   -> STM.TBQueue (NonEmpty (JobRead payload))
   -> STM.TVar Int
   -> STM.TVar Bool
   -> STM.TVar (Maybe PS.Notification)
   -> m ()
-runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
+runDispatcher config mode workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
   claimSql <-
-    let batchSize = case handlerMode config of
+    let batchSize = case mode of
           SingleJobMode _ -> 1
           BatchedJobsMode n _ -> n
-     in Arb.mkClaimSql @m @registry @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
+     in Arb.mkClaimSqlFor @m @registry @payload (claimAdmissionOverride config) batchSize workerCapacity
   let
+    cap = visibilityTimeout config
+    wid = Just (workerId config)
+
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do
       busyCount <- STM.readTVar busyWorkerCount
@@ -57,11 +62,11 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
 
     claimAndEnqueue :: Int -> m ()
     claimAndEnqueue freeWorkers = do
-      eJobs <- Ex.tryAny $ case handlerMode config of
+      eJobs <- Ex.tryAny $ case mode of
         SingleJobMode _ ->
-          map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers
+          map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers cap wid
         BatchedJobsMode _ _ ->
-          Ops.claimJobsBatchedCached claimSql freeWorkers
+          Ops.claimJobsBatchedCached claimSql freeWorkers cap wid
       case eJobs of
         Left e ->
           tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (show e)

@@ -23,6 +23,8 @@ module Arbiter.Servant
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
+  , QueueSpec (..)
+  , runtimeQueue
   , initArbiterServer
   , BuildServer (..)
 
@@ -40,8 +42,17 @@ module Arbiter.Servant
 
     -- * Request Types
   , ApiJobWrite (..)
+  , AdmissionRefs (..)
+  , ClaimRequest (..)
+  , AckRequest (..)
+  , NackRequest (..)
+  , ExtendRequest (..)
+  , FailRequest (..)
 
     -- * Response Types
+  , ApiJob (..)
+  , ClaimResponse (..)
+  , FailResponse (..)
   , QueuesResponse (..)
   , QueueRow (..)
   , WorkersResponse (..)

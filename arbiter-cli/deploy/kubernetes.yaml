@@ -1,0 +1,177 @@
+# Kubernetes deployment for arbiter. Apply with:
+#   kubectl apply -f kubernetes.yaml
+#
+# Layout:
+#   - Secret     : the DB URL and webhook secrets (mounted as files)
+#   - ConfigMap  : arbiter.toml, which references the secret files (never inline secrets)
+#   - Job        : `arbiter migrate` — run once before/with a rollout
+#   - Deployment : `arbiter serve` — N replicas serving the API + webhook workers
+#   - Service    : cluster-internal endpoint
+#   - Ingress    : TLS termination + external routing (adjust to your controller)
+#   - HPA        : scale on CPU
+#
+# arbiter's claim engine is safe across replicas: every replica can serve the API
+# and run workers concurrently against the same Postgres without double-processing.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arbiter-secrets
+type: Opaque
+stringData:
+  # Replace these. In real clusters, source them from an external secret manager
+  # (External Secrets Operator, Vault, cloud secret CSI) rather than committing.
+  database-url: "host=postgres port=5432 user=arbiter password=CHANGE_ME dbname=arbiter"
+  webhook-emails-secret: "CHANGE_ME_whsec"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbiter-config
+data:
+  arbiter.toml: |
+    [database]
+    url_file = "/etc/arbiter/secrets/database-url"   # secret mounted as a file
+    schema   = "arbiter"
+
+    [server]
+    host = "0.0.0.0"                                  # bind the pod network
+    port = 8080                                       # auth is the Ingress/gateway's job
+
+    [[queue]]
+    name = "emails"
+      [queue.webhook]
+      url         = "https://handlers.default.svc.cluster.local/emails"
+      secret_file = "/etc/arbiter/secrets/webhook-emails-secret"
+      workers     = 4
+
+    [[queue]]
+    name = "reports"                                  # produce/consume over HTTP only
+
+    # [[ratelimit]]   # optional admission policies (enforced at claim)
+    # prefix = "send"
+    # max = 100.0
+    # refill = 100.0
+    # interval = 60.0
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: arbiter-migrate
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: arbiter:latest
+          args: ["migrate", "-c", "/etc/arbiter/arbiter.toml"]
+          volumeMounts:
+            - { name: config, mountPath: /etc/arbiter/arbiter.toml, subPath: arbiter.toml }
+            - { name: secrets, mountPath: /etc/arbiter/secrets, readOnly: true }
+      volumes:
+        - { name: config, configMap: { name: arbiter-config } }
+        - { name: secrets, secret: { secretName: arbiter-secrets } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbiter
+  labels: { app: arbiter }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: arbiter }
+  template:
+    metadata:
+      labels: { app: arbiter }
+      annotations:
+        # Scraped directly by Prometheus on the dedicated metrics port. This port
+        # is NOT routed through the Ingress, so /metrics stays cluster-internal.
+        # With the Prometheus Operator, prefer a ServiceMonitor over these.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      # arbiter drains on SIGTERM; give it room to finish in-flight work.
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: arbiter
+          image: arbiter:latest
+          args: ["serve", "-c", "/etc/arbiter/arbiter.toml"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: metrics, containerPort: 9464 }   # Prometheus scrape; kept off the Ingress
+          # Migrations run before the port is bound, and wait out table locks for up to
+          # migrationLockBudget (150s). Keep periodSeconds * failureThreshold above that, or a
+          # contended rollout is killed mid-migration and crash-loops.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:               # process is up
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          readinessProbe:              # DB reachable (can this pod serve API traffic?)
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          # A stuck worker is not a traffic-gating condition, so it is not a probe:
+          # alert on arbiter_queue_depth / arbiter_queue_oldest_ready_age instead.
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { memory: "512Mi" }
+          volumeMounts:
+            - { name: config, mountPath: /etc/arbiter/arbiter.toml, subPath: arbiter.toml }
+            - { name: secrets, mountPath: /etc/arbiter/secrets, readOnly: true }
+      volumes:
+        - { name: config, configMap: { name: arbiter-config } }
+        - { name: secrets, secret: { secretName: arbiter-secrets } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arbiter
+spec:
+  selector: { app: arbiter }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: arbiter
+  # annotations:                       # e.g. cert-manager, nginx/traefik controller
+  #   cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  tls:
+    - hosts: [arbiter.example.com]
+      secretName: arbiter-tls          # TLS terminates here; arbiter speaks plain HTTP behind it
+  rules:
+    - host: arbiter.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: arbiter
+                port: { number: 80 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: arbiter
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: arbiter
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

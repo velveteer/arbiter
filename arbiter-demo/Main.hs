@@ -17,18 +17,11 @@ import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMi
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
 import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
+import Arbiter.Serve qualified as Serve
 import Arbiter.Simple
-import Arbiter.Worker
-  ( WorkerConfig (..)
-  , defaultWorkerConfig
-  , mergedChildResults
-  , namedWorkerPool
-  , runWorkerPools
-  , signalShutdown
-  )
+import Arbiter.Worker (WorkerConfig (..), defaultWorkerConfig, mergedChildResults, namedWorkerPool)
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (race_)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
@@ -44,7 +37,6 @@ import Data.Text qualified as T
 import Data.Time (addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout)
 import Network.Wai.Middleware.Cors
   ( CorsResourcePolicy (..)
   , cors
@@ -54,6 +46,7 @@ import Network.Wai.Middleware.RequestLogger (logStdout)
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
+import Text.Read (readMaybe)
 
 -- ---------------------------------------------------------------------------
 -- Payload types
@@ -134,17 +127,17 @@ emailAddress (SendEmail addr) = addr
 emailKeySuffix :: EmailPayload -> Text
 emailKeySuffix = fromMaybe "system" . emailDomain
 
+-- | A typed four-queue app served through 'runArbiterServeWith'. No TOML.
 main :: IO ()
 main = do
-  -- Get config from environment or use defaults
   connStr <-
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
       <$> lookupEnv "DATABASE_URL"
   schemaStr <- fromMaybe "arbiter_demo" <$> lookupEnv "SCHEMA"
-  portStr <- fromMaybe "8080" <$> lookupEnv "PORT"
+  port <- maybe 8080 (fromMaybe 8080 . readMaybe) <$> lookupEnv "PORT"
+  host <- maybe "0.0.0.0" T.pack <$> lookupEnv "HOST"
   let schema = T.pack schemaStr
-      port = read portStr :: Int
-  -- Drop and recreate schema for a clean demo
+
   putStrLn "Resetting schema..."
   conn <- PG.connectPostgreSQL connStr
   void $ PG.execute_ conn $ "DROP SCHEMA IF EXISTS " <> fromString schemaStr <> " CASCADE"
@@ -161,81 +154,54 @@ main = do
     MigrationSuccess -> putStrLn "Migrations complete"
     MigrationError err -> die $ "Migration failed: " <> err
 
-  -- Create worker environment (its own pool)
   workerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
-
-  -- Seed demo data
   putStrLn "Seeding demo data..."
   seedDemoData workerEnv schema
 
-  -- Create server config (own connection pool for admin API)
-  putStrLn ""
-  putStrLn "Setting up server..."
-  serverConfig <- initArbiterServer (Proxy @DemoRegistry) connStr schema
-  putStrLn "Server ready"
-
-  -- Create worker configs with cron jobs
-  putStrLn "Creating worker configs..."
+  apiCfg <- initArbiterServer (Proxy @DemoRegistry) connStr schema
   demoWorkerCfg <- mkDemoWorker connStr
   emailWorkerCfg <- mkEmailWorker connStr
   notifWorkerCfg <- mkNotifWorker connStr
   pipelineWorkerCfg <- mkPipelineWorker connStr
-  putStrLn "Workers configured"
 
   let policy =
         simpleCorsResourcePolicy
           { corsRequestHeaders = ["Content-Type", "Accept"]
           , corsMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
           }
-
-  -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
   mDevDir <- lookupEnv "ADMIN_DEV_DIR"
-  let app = case mDevDir of
-        Just dir -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
-        Nothing -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdmin @DemoRegistry serverConfig
-
-  -- Start server
-  putStrLn ""
-  putStrLn "=== Server Starting ==="
-  putStrLn $ "API:     http://localhost:" <> show port <> "/api/v1"
-  putStrLn $ "Admin:   http://localhost:" <> show port <> "/"
-  putStrLn "Workers and cron schedules running across all queues"
-  case mDevDir of
-    Just dir -> putStrLn $ "Dev: serving static files from " <> dir
-    Nothing -> putStrLn "Set ADMIN_DEV_DIR to serve static files from disk"
-  putStrLn ""
-  putStrLn "Press Ctrl+C to stop"
-  putStrLn ""
-
-  -- Build worker pool list
-  let workers =
+  let pools =
         [ namedWorkerPool demoWorkerCfg
         , namedWorkerPool emailWorkerCfg
         , namedWorkerPool notifWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
-      installSignals st = do
-        let handler = Signals.Catch $ signalShutdown st
-        void $ Signals.installHandler Signals.sigTERM handler Nothing
-        void $ Signals.installHandler Signals.sigINT handler Nothing
+      mkApp cfg =
+        let uiApp =
+              maybe
+                (arbiterAppWithAdmin @DemoRegistry cfg)
+                (\dir -> arbiterAppWithAdminDev @DemoRegistry dir cfg)
+                mDevDir
+         in cors (const (Just policy)) (logStdout uiApp)
 
-  -- Self-restart watchdog: after RESET_INTERVAL_MINUTES, raise SIGTERM so the
-  -- process exits via the handler above and the container's restart policy
-  -- reseeds a clean demo. A value of 0 disables it.
   resetMin <- maybe 20 read <$> lookupEnv "RESET_INTERVAL_MINUTES"
   when (resetMin > 0) $ void $ forkIO $ do
     threadDelay (resetMin * 60 * 1_000_000)
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
-
-  -- Background load generator: pulse a few jobs on an interval so the queues
-  -- stay visibly active between cron ticks. A value of 0 disables it.
   pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
   when (pulseSec > 0) $ void $ forkIO $ loadPulse workerEnv pulseSec
 
-  race_
-    (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
-    (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
+  let serveCfg = (Serve.defaultServeConfig connStr schema) {Serve.host = host, Serve.port = port}
+
+  putStrLn ""
+  putStrLn "=== arbiter-demo (served by runArbiterServeWith) ==="
+  putStrLn $ "Admin UI: http://" <> T.unpack host <> ":" <> show port <> "/"
+  putStrLn $ "API:      http://" <> T.unpack host <> ":" <> show port <> "/api/v1"
+  putStrLn "Metrics:  :9464/metrics    Health: /healthz  /readyz"
+  putStrLn ""
+
+  runSimpleDb workerEnv $ Serve.runArbiterServeWith serveCfg apiCfg pools mkApp
 
 -- ---------------------------------------------------------------------------
 -- Worker configs

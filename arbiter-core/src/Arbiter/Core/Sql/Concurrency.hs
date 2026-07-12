@@ -12,6 +12,7 @@ module Arbiter.Core.Sql.Concurrency
   , reconcileConcurrencyCountsSQL
   , listConcurrencyPoliciesSQL
   , getConcurrencyPolicySQL
+  , listConcurrencyPrefixesSQL
   , listConcurrencyKeysSQL
   , concurrencyHasAnyKeySQL
   , concurrencyCountsStaleSQL
@@ -141,6 +142,11 @@ listConcurrencyPoliciesSQL schema = concurrencyPoliciesSQL schema False
 -- | Single-prefix variant of 'listConcurrencyPoliciesSQL'. Parameter: prefix.
 getConcurrencyPolicySQL :: SchemaName -> Text
 getConcurrencyPolicySQL schema = concurrencyPoliciesSQL schema True
+
+-- | Every declared concurrency prefix.
+listConcurrencyPrefixesSQL :: SchemaName -> Text
+listConcurrencyPrefixesSQL schema =
+  "SELECT prefix_id FROM " <> arbiterConcurrencyPoliciesTable schema
 
 concurrencyPoliciesSQL :: SchemaName -> Bool -> Text
 concurrencyPoliciesSQL schema single =

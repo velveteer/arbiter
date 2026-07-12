@@ -19,7 +19,7 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , mkClaimSql
+  , mkClaimSqlFor
   , addRateLimitTokens
   , pruneRateLimitBuckets
   , resetRateLimitBuckets
@@ -129,7 +129,7 @@ module Arbiter.Core.HighLevel
   , getSchema
   ) where
 
-import Control.Monad (void, when)
+import Control.Monad (void)
 import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -258,12 +258,9 @@ resetRateLimitBuckets
    . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => Text
   -> m Int64
-resetRateLimitBuckets prefix = withDbTransaction $ do
+resetRateLimitBuckets prefix = do
   schemaName <- getSchema
-  n <- Ops.resetRateLimitBuckets schemaName prefix
-  let queues = registryTableNames (Proxy @registry)
-  _ <- Ops.wakeThrottledJobs schemaName queues prefix
-  pure n
+  Ops.resetRateLimitBucketsAndWake schemaName (registryTableNames (Proxy @registry)) prefix
 
 -- | List every rate-limit policy with its params, bucket stats, and a live count
 -- of currently-throttled jobs per prefix across the registry's queues.
@@ -318,12 +315,7 @@ updateRateLimitPolicyOverrides
   -> m Int64
 updateRateLimitPolicyOverrides prefix upd = do
   schemaName <- getSchema
-  n <- Ops.updateRateLimitPolicyOverrides schemaName prefix upd
-  -- Wake after the override commits, so a wake failure cannot roll the override back.
-  when (n > 0) $ do
-    let queues = registryTableNames (Proxy @registry)
-    void $ Ops.wakeThrottledJobs schemaName queues prefix
-  pure n
+  Ops.updateRateLimitPolicyOverridesAndWake schemaName (registryTableNames (Proxy @registry)) prefix upd
 
 -- | List every concurrency pool with its default/override limit and live key and
 -- in-flight aggregates.
@@ -409,19 +401,21 @@ reconcileAndPruneConcurrency = do
   Ops.reconcileAndPruneConcurrency schemaName (registryTableNames (Proxy @registry))
 
 -- | Assemble a pool's claim statements once (see 'Ops.mkClaimSql'). Batch size 1
--- is the single-job claim.
-mkClaimSql
+-- is the single-job claim. 'Nothing' derives admission from the payload type, for
+-- runtime (untyped) claims whose admission comes from configuration instead.
+mkClaimSqlFor
   :: forall m registry payload
    . (QueueOperation m registry payload)
-  => Int
+  => Maybe Ops.ClaimAdmission
   -> Int
-  -> NominalDiffTime
-  -> Maybe UUID
+  -> Int
   -> m Ops.ClaimSql
-mkClaimSql batchSize poolSize timeout mWorkerId = do
+mkClaimSqlFor mAdmission batchSize capacityBound = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
-  pure $ Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize poolSize timeout mWorkerId
+  pure $ case mAdmission of
+    Nothing -> Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize (Ops.upTo capacityBound)
+    Just admission -> Ops.mkClaimSqlWith admission schemaName tableName batchSize (Ops.upTo capacityBound)
 
 -- | Variant of 'claimNextVisibleJobs' that stamps @claimed_by@ on every claimed
 -- row. Used by the worker dispatcher for claim attribution.

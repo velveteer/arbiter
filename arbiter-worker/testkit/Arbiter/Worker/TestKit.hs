@@ -850,7 +850,7 @@ workerSpec connStr mkSimple mkFailing mkHandler runM = do
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           threadDelay 300_000
           successes <- readIORef successRef
-          -- The nack (call 1) fires no success hook; only the ack (call 2) does.
+          -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
 
     it "a thrown JobStolenException skips retry and leaves the job to reprocess" $ \env -> do

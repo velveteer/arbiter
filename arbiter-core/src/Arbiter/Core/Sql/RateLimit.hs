@@ -13,6 +13,7 @@ module Arbiter.Core.Sql.RateLimit
   , listRateLimitPoliciesSQL
   , getRateLimitPolicySQL
   , rateLimitPolicyExistsSQL
+  , listRateLimitPrefixesSQL
   , listRateLimitBucketsSQL
   , updateRateLimitOverridesSQL
   ) where
@@ -162,6 +163,11 @@ getRateLimitPolicySQL schema tableNames = rateLimitPoliciesSQL schema tableNames
 rateLimitPolicyExistsSQL :: SchemaName -> Text
 rateLimitPolicyExistsSQL schema =
   "SELECT EXISTS (SELECT 1 FROM " <> arbiterRateLimitPoliciesTable schema <> " WHERE prefix_id = ?) AS result"
+
+-- | Every declared rate-limit prefix.
+listRateLimitPrefixesSQL :: SchemaName -> Text
+listRateLimitPrefixesSQL schema =
+  "SELECT prefix_id FROM " <> arbiterRateLimitPoliciesTable schema
 
 rateLimitPoliciesSQL :: SchemaName -> [TableName] -> Bool -> Text
 rateLimitPoliciesSQL schema tableNames single =

@@ -1,0 +1,32 @@
+# Config used by deploy/compose.yaml (local single-host).
+[database]
+url    = "host=postgres port=5432 user=arbiter password=arbiter dbname=arbiter"
+schema = "arbiter"
+
+[server]
+host = "0.0.0.0"   # container network; auth is the proxy/gateway's job
+port = 8080
+
+# Each queue runs a webhook worker: it claims jobs and POSTs them to handler.py,
+# whose HTTP status acks, retries, or DLQs the job. Deliveries are signed with
+# WEBHOOK_SECRET (HMAC-SHA256); the handler verifies X-Arbiter-Signature.
+[[queue]]
+name = "emails"
+[queue.webhook]
+url     = "http://handler:9000/"
+workers = 4
+secret  = "${WEBHOOK_SECRET}"
+
+[[queue]]
+name = "reports"
+[queue.webhook]
+url     = "http://handler:9000/"
+workers = 2
+secret  = "${WEBHOOK_SECRET}"
+
+[[queue]]
+name = "notifications"
+[queue.webhook]
+url     = "http://handler:9000/"
+workers = 4
+secret  = "${WEBHOOK_SECRET}"

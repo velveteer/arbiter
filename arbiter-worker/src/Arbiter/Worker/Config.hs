@@ -7,8 +7,16 @@ module Arbiter.Worker.Config
   , defaultWorkerConfig
   , defaultBatchedWorkerConfig
   , defaultBatchedRollupWorkerConfig
+  , defaultMaintenanceConfig
   , singleJobMode
   , HandlerMode (..)
+  , ClaimAdmission (..)
+
+    -- * Timings
+  , WorkerTimings (..)
+  , defaultWorkerTimings
+  , applyWorkerTimings
+  , applyRetryPolicy
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
@@ -22,6 +30,7 @@ module Arbiter.Worker.Config
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
+import Arbiter.Core.Sql.Claim (ClaimAdmission (..))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.ByteString (ByteString)
@@ -32,14 +41,63 @@ import Data.Time (NominalDiffTime)
 import Data.UUID (UUID, toString)
 import Data.UUID.V4 qualified as UUID
 import Network.HostName (getHostName)
+import OpenTelemetry.Attributes (Attribute)
+import OpenTelemetry.Trace.Core (Tracer)
 import System.Directory (getTemporaryDirectory)
 import UnliftIO.STM (TMVar, TVar, newEmptyTMVarIO, newTVarIO)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
+import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter)
 import Arbiter.Worker.Cron (CronJob)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
+import Arbiter.Worker.Outcome (RetryPolicy (..), defaultRetryPolicy)
 import Arbiter.Worker.WorkerState (WorkerState (..))
+
+-- | The pool's cadences, in seconds.
+data WorkerTimings = WorkerTimings
+  { timingPollInterval :: NominalDiffTime
+  , timingVisibilityTimeout :: NominalDiffTime
+  , timingJobHeartbeatInterval :: NominalDiffTime
+  -- ^ Must stay below 'timingVisibilityTimeout', or a running job is reclaimed.
+  , timingWorkerHeartbeatInterval :: NominalDiffTime
+  -- ^ Must stay below 'timingWorkerStaleThreshold', or a live worker is swept.
+  , timingWorkerStaleThreshold :: NominalDiffTime
+  , timingReaperInterval :: NominalDiffTime
+  , timingReaperTimeout :: NominalDiffTime
+  , timingGracefulShutdownTimeout :: Maybe NominalDiffTime
+  -- ^ 'Nothing' waits for in-flight jobs indefinitely.
+  }
+  deriving stock (Eq, Show)
+
+defaultWorkerTimings :: WorkerTimings
+defaultWorkerTimings =
+  WorkerTimings
+    { timingPollInterval = 5
+    , timingVisibilityTimeout = 60
+    , timingJobHeartbeatInterval = 30
+    , timingWorkerHeartbeatInterval = 10
+    , timingWorkerStaleThreshold = 300
+    , timingReaperInterval = 300
+    , timingReaperTimeout = 300
+    , timingGracefulShutdownTimeout = Just 30
+    }
+
+applyWorkerTimings :: WorkerTimings -> WorkerConfig m payload result -> WorkerConfig m payload result
+applyWorkerTimings t config =
+  config
+    { pollInterval = timingPollInterval t
+    , visibilityTimeout = timingVisibilityTimeout t
+    , jobHeartbeatInterval = timingJobHeartbeatInterval t
+    , workerHeartbeatInterval = timingWorkerHeartbeatInterval t
+    , workerStaleThreshold = timingWorkerStaleThreshold t
+    , reaperInterval = timingReaperInterval t
+    , reaperTimeout = timingReaperTimeout t
+    , gracefulShutdownTimeout = timingGracefulShutdownTimeout t
+    }
+
+applyRetryPolicy :: RetryPolicy -> WorkerConfig m payload result -> WorkerConfig m payload result
+applyRetryPolicy p config =
+  config {backoffStrategy = retryBackoff p, jitter = retryJitter p}
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload result = WorkerConfig
@@ -47,8 +105,10 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ PostgreSQL connection string (used for LISTEN/NOTIFY).
   , workerCount :: Int
   -- ^ Number of concurrent worker threads.
-  , handlerMode :: HandlerMode m payload result
+  , handlerMode :: Maybe (HandlerMode m payload result)
   -- ^ Job handler and claiming strategy. Set by the @default*WorkerConfig@ helpers.
+  -- 'Nothing' consumes nothing: the pool runs only the queue's background loops.
+  -- See 'defaultMaintenanceConfig'.
   , pollInterval :: NominalDiffTime
   -- ^ Cadence floor in seconds for the dispatcher poll.
   -- Default: 5.
@@ -68,6 +128,10 @@ data WorkerConfig m payload result = WorkerConfig
   -- ^ Jitter strategy for retry delays. Default: 'EqualJitter'.
   , observabilityHooks :: ObservabilityHooks m payload
   -- ^ Callbacks for metrics or tracing. Default: no-op hooks.
+  , consumeSpanAttributes :: NonEmpty (JobRead payload) -> [(Text, Attribute)]
+  -- ^ Attributes set on the consumer span at creation, so a sampler can read them. Default: none.
+  , tracer :: Maybe Tracer
+  -- ^ Tracer resolved once at pool start. 'runWorkerPool' sets it. Default: none.
   , workerStateVar :: TVar WorkerState
   -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
   -- Shared across pools in multi-pool setups.
@@ -110,6 +174,13 @@ data WorkerConfig m payload result = WorkerConfig
   -- Default: @300@ (5 minutes).
   , heartbeatSignal :: TMVar ()
   -- ^ Worker-level proof-of-work signal pulsed by the dispatcher and per-job heartbeats.
+  , claimAdmissionOverride :: Maybe ClaimAdmission
+  -- ^ Force the claim's admission rather than deriving it from the payload type, for a
+  -- runtime (untyped) worker. Default: 'Nothing' (type-derived).
+  , maintenanceQueues :: Maybe [Text]
+  -- ^ Queues this pool's reaper maintains: group refresh, exhausted-job sweep, and
+  -- concurrency recount. A single-queue registry must name every queue the deployment
+  -- runs. Default: this pool's registry.
   }
 
 -- | Per-job finalizers handed to a batched handler. Untouched jobs are
@@ -165,7 +236,7 @@ defaultWorkerConfig
   -> JobHandler n payload result
   -> m (WorkerConfig n payload result)
 defaultWorkerConfig connStrVal workerCnt handler =
-  mkDefaultConfig connStrVal workerCnt (singleJobMode handler)
+  mkDefaultConfig connStrVal workerCnt (Just (singleJobMode handler))
 
 -- | Create a t'WorkerConfig' for batched job processing. The handler receives
 -- the batch and a 'BatchCallbacks' record to finalize each job (ack, fail,
@@ -182,7 +253,7 @@ defaultBatchedWorkerConfig
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload () -> n ())
   -> m (WorkerConfig n payload ())
 defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+  mkDefaultConfig connStrVal workerCnt (Just (BatchedJobsMode batchSize handler))
 
 -- | Create a t'WorkerConfig' for batched rollup parents. Store each job's result
 -- for its parent with 'ackWith' or 'ackAllWith'. Fetch a parent's child
@@ -198,7 +269,13 @@ defaultBatchedRollupWorkerConfig
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
   -> m (WorkerConfig n payload result)
 defaultBatchedRollupWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+  mkDefaultConfig connStrVal workerCnt (Just (BatchedJobsMode batchSize handler))
+
+-- | A t'WorkerConfig' for a queue this process serves but does not consume: background
+-- loops only, with no dispatcher, worker threads, or worker-registry row.
+defaultMaintenanceConfig :: (Applicative n, MonadIO m) => ByteString -> m (WorkerConfig n payload ())
+defaultMaintenanceConfig connStrVal =
+  (\c -> c {livenessFile = Nothing}) <$> mkDefaultConfig connStrVal 0 Nothing
 
 -- | Handler that runs a single job. Use for regular jobs, leaf children, and
 -- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').
@@ -210,7 +287,7 @@ mkDefaultConfig
   :: (Applicative n, MonadIO m)
   => ByteString
   -> Int
-  -> HandlerMode n payload result
+  -> Maybe (HandlerMode n payload result)
   -> m (WorkerConfig n payload result)
 mkDefaultConfig connStrVal workerCnt mode = do
   heartbeatTMVar <- liftIO newEmptyTMVarIO
@@ -225,27 +302,33 @@ mkDefaultConfig connStrVal workerCnt mode = do
       { connStr = connStrVal
       , workerCount = workerCnt
       , handlerMode = mode
-      , pollInterval = 5
-      , visibilityTimeout = 60
-      , jobHeartbeatInterval = 30
-      , workerHeartbeatInterval = 10
-      , backoffStrategy = exponentialBackoff 2.0 1_048_576
-      , jitter = EqualJitter
+      , pollInterval = timingPollInterval t
+      , visibilityTimeout = timingVisibilityTimeout t
+      , jobHeartbeatInterval = timingJobHeartbeatInterval t
+      , workerHeartbeatInterval = timingWorkerHeartbeatInterval t
+      , workerStaleThreshold = timingWorkerStaleThreshold t
+      , reaperInterval = timingReaperInterval t
+      , reaperTimeout = timingReaperTimeout t
+      , gracefulShutdownTimeout = timingGracefulShutdownTimeout t
+      , backoffStrategy = retryBackoff defaultRetryPolicy
+      , jitter = retryJitter defaultRetryPolicy
       , observabilityHooks = defaultObservabilityHooks
+      , consumeSpanAttributes = const []
+      , tracer = Nothing
       , workerStateVar = shutdownTVar
       , pauseVar = pauseTVar
       , livenessFile = Just livenessPath
-      , gracefulShutdownTimeout = Just 30
       , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
-      , reaperInterval = 300
-      , reaperTimeout = 300
       , workerId = uuid
       , workerHost = Just (T.pack host)
       , workerMetadata = Nothing
-      , workerStaleThreshold = 300
       , heartbeatSignal = heartbeatTMVar
+      , claimAdmissionOverride = Nothing
+      , maintenanceQueues = Nothing
       }
+  where
+    t = defaultWorkerTimings
 
 withWorkerIdContext :: UUID -> LogConfig -> LogConfig
 withWorkerIdContext workerId lc =

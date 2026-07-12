@@ -1,0 +1,1 @@
+ALTER TABLE "arbiter".arbiter_gates ADD COLUMN IF NOT EXISTS metadata JSONB;

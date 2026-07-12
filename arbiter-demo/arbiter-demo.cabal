@@ -34,9 +34,9 @@ executable arbiter-demo
     , arbiter-migrations
     , arbiter-servant
     , arbiter-servant-ui
+    , arbiter-serve
     , arbiter-simple
     , arbiter-worker
-    , async               >=2.2
     , base                >=4.14 && <5
     , bytestring          >=0.10
     , postgresql-simple   >=0.6
@@ -45,6 +45,5 @@ executable arbiter-demo
     , unix                >=2.7
     , wai-cors            >=0.2
     , wai-extra           >=3.0
-    , warp
 
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N

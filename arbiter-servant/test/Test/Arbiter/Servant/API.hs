@@ -5,22 +5,32 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
-module Test.Arbiter.Servant.API (spec) where
+module Test.Arbiter.Servant.API (spec, postJSON) where
 
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
+import Arbiter.Core.Job.Types
+  ( DedupKey (..)
+  , Job (..)
+  , JobRead
+  , JobStatus (..)
+  , JobWrite
+  , defaultGroupedJob
+  , defaultJob
+  )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.Queues qualified as Q
+import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), globalLimit, tokenBucket)
 import Arbiter.Core.Worker qualified as W
+import Arbiter.Migrations (defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
-import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce, truncateToMicros)
-import Control.Monad (forM_)
+import Arbiter.Test.Setup (cleanupData, createSharedPool, resetSchema, setupOnce, truncateToMicros)
 import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, (.=))
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
+import Data.Foldable (for_)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -34,7 +44,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Time (addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.HTTP.Types (status200, status400, status404)
+import Network.HTTP.Types (methodPost, status200, status400, status404)
 import Test.Hspec
 import Test.Hspec.Wai
 
@@ -46,12 +56,18 @@ import Arbiter.Servant.Types
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
+  , ClaimResponse (..)
   , DLQResponse (..)
   , JobResponse (..)
   , JobsResponse (..)
   , StatsResponse (..)
   , WorkersResponse (..)
+  , noAdmissionRefs
   )
+
+-- | A write with no admission keys attached, as a typed queue's producer sends.
+apiWrite :: JobWrite payload -> ApiJobWrite payload
+apiWrite jw = ApiJobWrite jw noAdmissionRefs
 
 jsonMatch :: Value -> ResponseMatcher
 jsonMatch v = ResponseMatcher 200 [] (MatchBody matcher)
@@ -75,9 +91,27 @@ data ServantTestPayload
 -- | Test registry
 type ServantTestRegistry = '[ '("arbiter_servant_test", ServantTestPayload)]
 
+-- | A payload that declares a rate limit, so the runtime claim path can be held
+-- to what the queue's type says rather than to a server-config flag.
+newtype LimitedPayload = LimitedPayload Text
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+instance HasRateLimit LimitedPayload where
+  rateLimitFor = globalLimit (tokenBucket "servant-limited" 2 60) "all"
+
+type LimitedRegistry = '[ '("arbiter_servant_limited", LimitedPayload)]
+
+limitedSchema :: Text
+limitedSchema = "arbiter_servant_limited_test"
+
 -- Table name for tests
 testTable :: Text
 testTable = "arbiter_servant_test"
+
+-- | POST a JSON body. The routes negotiate on content type, so 'post' alone 415s.
+postJSON :: ByteString -> Value -> WaiSession st SResponse
+postJSON path body = request methodPost path [("Content-Type", "application/json")] (encode body)
 
 -- | Decode a JSON response body or fail the test
 decodeBody :: (FromJSON a) => SResponse -> IO a
@@ -87,6 +121,7 @@ decodeBody resp = case decode (simpleBody resp) of
 
 spec :: ByteString -> Spec
 spec connStr = do
+  limitedSpec connStr
   runIO (setupOnce connStr testSchema testTable False)
   sharedPool <- runIO (createSharedPool connStr)
   serverConfig <- runIO (initArbiterServer (Proxy @ServantTestRegistry) connStr testSchema)
@@ -214,9 +249,9 @@ spec connStr = do
           [("Content-Type", "application/json")]
           ( encode $
               BatchInsertRequest
-                [ ApiJobWrite (defaultGroupedJob "batch-g1" (TestMessage "batch 1"))
-                , ApiJobWrite (defaultGroupedJob "batch-g2" (TestMessage "batch 2"))
-                , ApiJobWrite (defaultGroupedJob "batch-g3" (TestMessage "batch 3"))
+                [ apiWrite (defaultGroupedJob "batch-g1" (TestMessage "batch 1"))
+                , apiWrite (defaultGroupedJob "batch-g2" (TestMessage "batch 2"))
+                , apiWrite (defaultGroupedJob "batch-g3" (TestMessage "batch 3"))
                 ]
           )
 
@@ -266,10 +301,8 @@ spec connStr = do
           [("Content-Type", "application/json")]
           ( encode $
               BatchInsertRequest
-                [ ApiJobWrite
-                    (defaultJob (TestMessage "new job"))
-                , ApiJobWrite
-                    ((defaultJob (TestMessage "duplicate")) {dedupKey = Just (IgnoreDuplicate "batch-dedup")})
+                [ apiWrite (defaultJob (TestMessage "new job"))
+                , apiWrite ((defaultJob (TestMessage "duplicate")) {dedupKey = Just (IgnoreDuplicate "batch-dedup")})
                 ]
           )
 
@@ -325,7 +358,7 @@ spec connStr = do
         jobsTotal body `shouldBe` 1
         length (jobs body) `shouldBe` 1
         -- Verify only groupA jobs returned (not groupB)
-        forM_ (jobs body) $ \j -> groupKey (ajwsJob j) `shouldBe` Just "groupA"
+        for_ (jobs body) $ \j -> groupKey (ajwsJob j) `shouldBe` Just "groupA"
 
     it "GET /api/v1/arbiter_servant_test/jobs sort_by/sort_dir changes ordering" $ do
       ids <- liftIO $ do
@@ -371,7 +404,7 @@ spec connStr = do
         body :: JobsResponse ServantTestPayload <- decodeBody childResp
         jobsTotal body `shouldBe` 2
         let returned = map (primaryKey . ajwsJob) (jobs body)
-        forM_ childIds $ \cid -> (cid `elem` returned) `shouldBe` True
+        for_ childIds $ \cid -> (cid `elem` returned) `shouldBe` True
 
     it "GET /api/v1/arbiter_servant_test/jobs clamps out-of-range limit and offset" $ do
       liftIO $ do
@@ -569,7 +602,7 @@ spec connStr = do
         allJobs :: [JobRead ServantTestPayload] <- runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
         let childJobs = filter (\j -> payload j == TestMessage "child") allJobs
         length childJobs `shouldBe` 1
-        forM_ childJobs $ \j -> suspended j `shouldBe` True
+        for_ childJobs $ \j -> suspended j `shouldBe` True
 
     it "POST /api/v1/arbiter_servant_test/jobs/:id/pause-children returns 204 for job with no children" $ do
       jobId <- liftIO $ do
@@ -1040,6 +1073,25 @@ spec connStr = do
       get "/api/v1/queues"
         `shouldRespondWith` jsonMatch [aesonQQ|{ "queues": ["arbiter_servant_test"] }|]
 
+    -- The raw-JSON enqueue reaches a typed queue too, so it has to hold the
+    -- payload contract: a row the typed workers cannot decode stalls the queue.
+    it "POST /api/v1/queues/:queue/jobs rejects a payload the queue's type cannot decode" $ do
+      postJSON "/api/v1/queues/arbiter_servant_test/jobs" [aesonQQ|{ "payload": { "garbage": 1 } }|]
+        `shouldRespondWith` 400
+
+    it "POST /api/v1/queues/:queue/jobs accepts a payload the queue's type decodes" $ do
+      postJSON "/api/v1/queues/arbiter_servant_test/jobs" [aesonQQ|{ "payload": { "tag": "TestMessage", "contents": "ok" } }|]
+        `shouldRespondWith` 200
+
+    it "POST /api/v1/queues/:queue/claim leases nothing while the queue is paused" $ do
+      postJSON "/api/v1/queues/arbiter_servant_test/jobs" [aesonQQ|{ "payload": { "tag": "TestMessage", "contents": "hi" } }|]
+        `shouldRespondWith` 200
+      post "/api/v1/queues/arbiter_servant_test/pause" "" `shouldRespondWith` 204
+      pausedResp <- postJSON "/api/v1/queues/arbiter_servant_test/claim" [aesonQQ|{ "maxJobs": 5 }|]
+      liftIO $ do
+        body :: Value <- decodeBody pausedResp
+        body `shouldBe` [aesonQQ|{ "jobs": [] }|]
+
     it "GET /api/v1/queues/:queue/details returns null before any state, then the row" $ do
       -- No arbiter_queues row exists yet.
       noneResp <- get "/api/v1/queues/arbiter_servant_test/details"
@@ -1089,7 +1141,7 @@ spec connStr = do
       liftIO $ do
         body :: WorkersResponse <- decodeBody resp
         length (workers body) `shouldBe` 1
-        forM_ (workers body) $ \w -> W.paused w `shouldBe` False
+        for_ (workers body) $ \w -> W.paused w `shouldBe` False
 
     it "POST /api/v1/workers/:id/pause then resume flips the paused flag" $ do
       _ <- seedWorker
@@ -1115,3 +1167,23 @@ spec connStr = do
     it "POST /api/v1/workers/:id/resume returns 404 for unknown worker" $ do
       post "/api/v1/workers/22222222-2222-2222-2222-222222222222/resume" ""
         `shouldRespondWith` 404
+
+-- | A queue whose payload type declares a rate limit is claimed under that limit
+-- over HTTP too. The server config sets no admission flags here: the policy comes
+-- from the registry, exactly as it does for the queue's typed workers.
+limitedSpec :: ByteString -> Spec
+limitedSpec connStr = do
+  runIO (resetSchema connStr limitedSchema)
+  _ <- runIO $ runMigrationsForRegistry (Proxy @LimitedRegistry) connStr limitedSchema defaultMigrationConfig
+  config <- runIO (initArbiterServer (Proxy @LimitedRegistry) connStr limitedSchema)
+
+  describe "Runtime claim on a typed queue" $
+    with (pure (arbiterApp @LimitedRegistry config)) $
+      it "honors the rate limit its payload type declares" $ do
+        for_ [1 :: Int .. 5] $ \n ->
+          postJSON "/api/v1/queues/arbiter_servant_limited/jobs" (object ["payload" .= show n])
+            `shouldRespondWith` 200
+        resp <- postJSON "/api/v1/queues/arbiter_servant_limited/claim" [aesonQQ|{ "maxJobs": 10 }|]
+        liftIO $ do
+          body :: ClaimResponse <- decodeBody resp
+          length (claimedJobs body) `shouldBe` 2

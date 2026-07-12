@@ -5,10 +5,13 @@
 module Arbiter.Core.Sql.Lifecycle
   ( smartAckJobSQL
   , smartAckJobsBatchSQL
+  , ackLeasedLeafSQL
   , setVisibilityTimeoutSQL
   , setVisibilityTimeoutBatchSQL
+  , extendLeasedJobSQL
   , updateJobForRetrySQL
   , nackJobSQL
+  , nackLeasedJobSQL
   , promoteJobSQL
   ) where
 
@@ -16,6 +19,7 @@ import Data.Text (Text)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (jobQueueTable)
+import Arbiter.Core.Sql.Jobs (jobColumns)
 
 -- | Smart ack CTE for job dependencies.
 --
@@ -108,6 +112,24 @@ smartAckJobsBatchSQL schema tableName =
         SELECT id FROM suspend
       |]
 
+-- | 'smartAckJobSQL' for a job outside every rollup, guarded by the lease itself. Zero rows
+-- leaves the caller the general path, which tells a rollup from a stale lease or missing job.
+ackLeasedLeafSQL :: Text -> Text -> Text
+ackLeasedLeafSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      columns = jobColumns Nothing
+   in [text|
+        DELETE FROM ${tbl}
+        WHERE id = ? AND claimed_by = ? AND attempts = ? AND parent_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ?)
+        RETURNING ${columns}
+      |]
+
+-- | The visibility deadline, cleared by a non-positive timeout. Takes the timeout twice.
+visibilitySet :: Text
+visibilitySet =
+  "not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END, updated_at = NOW()"
+
 -- | SQL template for setting visibility timeout
 --
 -- Parameters: timeout, job_id, attempts
@@ -119,9 +141,21 @@ setVisibilityTimeoutSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|
         UPDATE ${tbl}
-        SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
-            updated_at = NOW()
+        SET ${visibilitySet}
         WHERE id = ? AND attempts = ?
+      |]
+
+-- | 'setVisibilityTimeoutSQL' guarded by the lease itself, so a caller holding only
+-- the job's id can extend it without first reading the row. Returns the extended job.
+extendLeasedJobSQL :: Text -> Text -> Text
+extendLeasedJobSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      columns = jobColumns Nothing
+   in [text|
+        UPDATE ${tbl}
+        SET ${visibilitySet}
+        WHERE id = ? AND claimed_by = ? AND attempts = ?
+        RETURNING ${columns}
       |]
 
 -- | Atomically updates the visibility timeout for a batch of jobs and returns
@@ -140,8 +174,7 @@ setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
         ),
         updated AS (
           UPDATE ${tbl} j
-          SET not_visible_until = CASE WHEN ?::double precision <= 0 THEN NULL ELSE NOW() + (?::double precision * interval '1 second') END,
-              updated_at = NOW()
+          SET ${visibilitySet}
           FROM input_jobs ij
           WHERE j.id = ij.id AND j.attempts = ij.expected_attempts
           RETURNING j.id
@@ -191,6 +224,23 @@ nackJobSQL schema tableName =
         SET attempts = GREATEST(attempts - 1, 0),
             updated_at = NOW()
         WHERE id = ? AND attempts = ? AND NOT suspended
+      |]
+
+-- | SQL template for a nack that also ends the lease, so the job is claimable again
+-- at once rather than when the caller's chosen visibility timeout lapses. Guarded by
+-- the lease itself, so a caller holding only the job's id needs no prior read.
+nackLeasedJobSQL :: Text -> Text -> Text
+nackLeasedJobSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      columns = jobColumns Nothing
+   in [text|
+        UPDATE ${tbl}
+        SET attempts = GREATEST(attempts - 1, 0),
+            not_visible_until = NULL,
+            claimed_by = NULL,
+            updated_at = NOW()
+        WHERE id = ? AND claimed_by = ? AND attempts = ? AND NOT suspended
+        RETURNING ${columns}
       |]
 
 -- | Promote a delayed or retrying job to be immediately visible.
