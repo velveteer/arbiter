@@ -847,6 +847,7 @@ cronServer config =
   CronAPI
     { listSchedules = listCronSchedulesHandler config
     , updateSchedule = updateCronScheduleHandler config
+    , runSchedule = runCronScheduleHandler config
     }
 
 -- | List cron schedules, optionally scoped to a queue.
@@ -911,6 +912,30 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
   case result of
     Nothing -> throwError err404 {errBody = "Cron schedule not found"}
     Just row -> pure row
+
+data RunRequestResult = RunNotFound | RunDisabled | RunRequested
+
+-- | Request an out-of-band run of a cron schedule. Disabled schedules are
+-- refused so a manual run never fires what the schedule itself would not.
+runCronScheduleHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Text
+  -> Handler NoContent
+runCronScheduleHandler config name = do
+  let env = serverEnv config
+      schemaName = schema env
+  result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+    mRow <- Ops.getCronScheduleByName schemaName name
+    case mRow of
+      Nothing -> pure RunNotFound
+      Just CS.CronScheduleRow {CS.enabled = isEnabled}
+        | not isEnabled -> pure RunDisabled
+        | otherwise -> Ops.requestCronRun schemaName name >> pure RunRequested
+  case result of
+    RunNotFound -> throwError err404 {errBody = "Cron schedule not found"}
+    RunDisabled -> throwError err409 {errBody = "Cron schedule is disabled"}
+    RunRequested -> pure NoContent
 
 -- | Workers API handlers
 workersServer

@@ -11,6 +11,8 @@ module Arbiter.Core.Sql.Cron
   , touchCronCheckedSQL
   , tryFireCronGateSQL
   , tryAcquireCronLeaderSQL
+  , requestCronRunSQL
+  , claimCronRunSQL
   ) where
 
 import Data.Text (Text)
@@ -19,6 +21,7 @@ import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec)
 import Arbiter.Core.CronSchedule (cronSchedulesTable)
+import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
 
 allCronColumns :: Text
 allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
@@ -95,3 +98,18 @@ tryFireCronGateSQL schemaName =
 tryAcquireCronLeaderSQL :: Text
 tryAcquireCronLeaderSQL =
   "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
+
+-- | Stamp a manual run request and NOTIFY the run-now channel for the matched
+-- row. Returns the matched-row count (0 = no such schedule). Parameters: schedule name.
+requestCronRunSQL :: Text -> Text
+requestCronRunSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+      chan = T.replace "'" "''" (cronRunNotifyChannel schemaName)
+   in "WITH upd AS (UPDATE " <> tbl <> " SET run_requested_at = NOW(), updated_at = NOW() WHERE name = ? RETURNING name), notif AS (SELECT pg_notify('" <> chan <> "', name) FROM upd) SELECT count(*)::int8 AS count FROM upd WHERE (SELECT count(*) FROM notif) >= 0"
+
+-- | Claim a fresh run request, clearing the flag and advancing the gate.
+-- Parameters: minute floor, schedule name, staleness cutoff.
+claimCronRunSQL :: Text -> Text
+claimCronRunSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "UPDATE " <> tbl <> " SET run_requested_at = NULL, last_fired_at = GREATEST(last_fired_at, ?), updated_at = NOW() WHERE name = ? AND enabled AND run_requested_at IS NOT NULL AND run_requested_at >= ?"

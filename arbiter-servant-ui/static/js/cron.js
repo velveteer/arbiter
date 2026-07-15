@@ -4,8 +4,10 @@
  * Only polls while the Cron tab is active and the browser tab is visible.
  */
 document.addEventListener('alpine:init', () => {
-  Alpine.data('cronTab', () => ({
+  Alpine.data('cronTab', (opts = {}) => ({
     ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs),
+    ...confirmArm(),
+    global: !!opts.global,
     schedules: [],
     loading: false,
     loaded: false,
@@ -20,10 +22,16 @@ document.addEventListener('alpine:init', () => {
     tzPos: { top: 0, left: 0 },
 
     init() {
-      this.initPolling('#tab-cron', {
-        onHide: () => this.cancelEdit(),
-        onQueueChange: () => { this.cancelEdit(); this.schedules = []; },
-      });
+      // Global mode is a top-level view mounted by x-if. The per-queue tab is
+      // a Bootstrap tab scoped to the selected queue.
+      if (this.global) {
+        this.initPollingMounted();
+      } else {
+        this.initPolling('#tab-cron', {
+          onHide: () => this.cancelEdit(),
+          onQueueChange: () => { this.cancelEdit(); this.schedules = []; },
+        });
+      }
       this.populateTimezones();
     },
 
@@ -95,13 +103,13 @@ document.addEventListener('alpine:init', () => {
 
     async loadSchedules() {
       if (this.editingName) return;
-      const queue = this.$store.app.selectedQueue;
-      if (!queue) {
+      const queue = this.global ? undefined : this.$store.app.selectedQueue;
+      if (!this.global && !queue) {
         this.schedules = [];
         return;
       }
       await guardedLoad(this, 'Failed to load cron schedules', async (seq, isStale) => {
-        const data = await ArbiterAPI.listCronSchedules({ queue });
+        const data = await ArbiterAPI.listCronSchedules(this.global ? {} : { queue });
         if (isStale()) return;
         this.schedules = data.cronSchedules || [];
       });
@@ -225,6 +233,24 @@ document.addEventListener('alpine:init', () => {
           showToast('Failed to toggle: ' + e.message);
         }
       });
+    },
+
+    async runNow(schedule) {
+      if (!schedule.enabled || this.busyRows[schedule.name]) return;
+      if (!this.confirmArmed('run:' + schedule.name)) return;
+      await this.withBusyRow(schedule.name, async () => {
+        try {
+          await ArbiterAPI.runCronSchedule(schedule.name);
+          showToast('Run requested for ' + schedule.name, 'success');
+        } catch (e) {
+          showToast('Failed to run: ' + e.message);
+        }
+      });
+    },
+
+    // Drill from the global overview's Queue column into that queue.
+    openQueue(queue) {
+      this.$store.app.openQueue(queue);
     },
   }));
 });

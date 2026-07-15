@@ -1,0 +1,1 @@
+ALTER TABLE "arbiter".cron_schedules ADD COLUMN IF NOT EXISTS run_requested_at TIMESTAMPTZ;

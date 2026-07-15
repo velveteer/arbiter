@@ -22,6 +22,7 @@ module Arbiter.Core.CronSchedule
   , createCronSchedulesTableSQL
   , addTimezoneColumnSQL
   , addQueueNameColumnSQL
+  , addRunRequestedColumnSQL
   ) where
 
 import Control.Applicative ((<|>))
@@ -139,3 +140,8 @@ addQueueNameColumnSQL schemaName =
   "ALTER TABLE "
     <> cronSchedulesTable schemaName
     <> " ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'pre-migration';"
+
+-- | Idempotent migration adding the manual run-request column to an existing table.
+addRunRequestedColumnSQL :: Text -> Text
+addRunRequestedColumnSQL schemaName =
+  "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS run_requested_at TIMESTAMPTZ;"

@@ -28,6 +28,8 @@
         @click="$store.app.setView('ratelimits')">Rate Limits</button>
       <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'concurrency' }"
         @click="$store.app.setView('concurrency')">Concurrency</button>
+      <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'cron' }"
+        @click="$store.app.setView('cron')">Cron</button>
       <button type="button" class="nav-primary-link" :class="{ active: $store.app.view === 'events' }"
         @click="$store.app.setView('events')">Events</button>
     </nav>
@@ -851,12 +853,13 @@
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
             <col style="width: 14%">
-            <col style="width: 22%">
+            <col style="width: 20%">
             <col style="width: 12%">
-            <col style="width: 14%">
+            <col style="width: 12%">
             <col style="width: 6%">
-            <col style="width: 16%">
-            <col style="width: 16%">
+            <col style="width: 14%">
+            <col style="width: 14%">
+            <col style="width: 8%">
           </colgroup>
           <thead>
             <tr>
@@ -867,6 +870,7 @@
               <th>Enabled</th>
               <th>Last Fired At</th>
               <th>Last Checked</th>
+              <th class="cell-actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -997,16 +1001,26 @@
 
                 <td x-text="formatTime(s.lastFiredAt, 'Never')"></td>
                 <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
+
+                <!-- Actions -->
+                <td class="cell-actions">
+                  <div class="d-inline-flex gap-2 flex-nowrap">
+                    <button class="btn btn-sm text-nowrap" :class="isArmed('run:' + s.name) ? 'btn-primary' : 'btn-outline-primary'"
+                      :disabled="isBusy(s.name) || !s.enabled"
+                      @click="runNow(s)" :title="s.enabled ? 'Enqueue this schedule\'s job now' : 'Schedule is disabled'"
+                      x-text="isArmed('run:' + s.name) ? 'Confirm run' : 'Run now'"></button>
+                  </div>
+                </td>
               </tr>
             </template>
             <tr x-show="loading && !loaded && schedules.length === 0">
-              <td colspan="7" class="text-muted text-center">Loading…</td>
+              <td colspan="8" class="text-muted text-center">Loading…</td>
             </tr>
             <tr x-show="_loadErrored && schedules.length === 0">
-              <td colspan="7" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
+              <td colspan="8" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
             </tr>
             <tr x-show="!_loadErrored && loaded && schedules.length === 0">
-              <td colspan="7" class="text-muted text-center">No cron schedules configured.</td>
+              <td colspan="8" class="text-muted text-center">No cron schedules configured.</td>
             </tr>
           </tbody>
         </table>
@@ -1351,6 +1365,207 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+    </div>
+  </template>
+
+  <!-- ============================================================ -->
+  <!-- Area: Cron (instance-wide overview) -->
+  <!-- ============================================================ -->
+  <template x-if="$store.app.view === 'cron'">
+    <div class="mt-3">
+    <!-- Global cron overview: same component as the per-queue Cron tab, scoped to all queues. -->
+    <div id="tab-cron-overview" x-data="cronTab({ global: true })">
+      <div class="d-flex gap-2 mb-3 align-items-center">
+        <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
+        <span class="text-muted small" x-show="loaded && schedules.length">
+          <span x-text="schedules.length"></span> <span x-text="schedules.length === 1 ? 'schedule' : 'schedules'"></span> across all queues
+        </span>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
+          <colgroup>
+            <col style="width: 12%">
+            <col style="width: 12%">
+            <col style="width: 18%">
+            <col style="width: 11%">
+            <col style="width: 11%">
+            <col style="width: 5%">
+            <col style="width: 12%">
+            <col style="width: 11%">
+            <col style="width: 8%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Queue</th>
+              <th>Expression</th>
+              <th>Overlap Policy</th>
+              <th>Timezone</th>
+              <th>Enabled</th>
+              <th>Last Fired At</th>
+              <th>Last Checked</th>
+              <th class="cell-actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="s in schedules" :key="s.name">
+              <tr>
+                <td class="text-truncate" x-text="s.name" :title="s.name"></td>
+
+                <!-- Queue (drill into its detail view) -->
+                <td class="text-truncate">
+                  <a href="#" @click.prevent="openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
+                </td>
+
+                <!-- Expression (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'expression'">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
+                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
+                        x-model="editValue" @keyup.enter="saveEdit()" @keyup.escape="cancelEdit()">
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'expression')">
+                    <div class="d-flex flex-column gap-0">
+                      <div class="d-flex flex-wrap align-items-center gap-1">
+                        <span class="editable-cell" tabindex="0" role="button"
+                          @click="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          @keydown.enter.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          @keydown.space.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
+                          x-text="effectiveExpression(s)"></span>
+                        <template x-if="isOverridden(s, 'expression')">
+                          <span class="d-inline-flex align-items-center gap-1">
+                            <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                            <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                              @click="resetToDefault(s.name, 'expression')" title="Reset to default">reset</button>
+                          </span>
+                        </template>
+                      </div>
+                      <small class="text-muted" x-text="describeExpression(s)"></small>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'expression' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Overlap (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'overlap'">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
+                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue">
+                        <option value="SkipOverlap">SkipOverlap</option>
+                        <option value="AllowOverlap">AllowOverlap</option>
+                      </select>
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'overlap')">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
+                      <span class="editable-cell" tabindex="0" role="button"
+                        @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        @keydown.enter.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        @keydown.space.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
+                        x-text="effectiveOverlap(s)"></span>
+                      <template x-if="isOverridden(s, 'overlap')">
+                        <span class="d-inline-flex align-items-center gap-1">
+                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                            @click="resetToDefault(s.name, 'overlap')" title="Reset to default">reset</button>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'overlap' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Timezone (editable) -->
+                <td>
+                  <template x-if="editingName === s.name && editingField === 'timezone'">
+                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
+                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
+                        placeholder="Type to search…" autocomplete="off"
+                        x-model="editValue"
+                        @keydown.down.prevent="tzMove(1)"
+                        @keydown.up.prevent="tzMove(-1)"
+                        @keydown.enter.prevent="tzCommit()"
+                        @keydown.escape.prevent="cancelEdit()">
+                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
+                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                      <div class="tz-combobox-panel" x-show="tzGrouped().length > 0"
+                        :style="`top: ${tzPos.top}px; left: ${tzPos.left}px;`">
+                        <template x-for="group in tzGrouped()" :key="group.name">
+                          <div>
+                            <div class="tz-group-header" x-text="group.name"></div>
+                            <template x-for="zone in group.zones" :key="zone">
+                              <div class="tz-option"
+                                :class="{ 'tz-highlighted': zone === tzHighlight }"
+                                @mousedown.prevent="editValue = zone; tzHighlight = null; saveEdit()"
+                                @mouseover="tzHighlight = zone"
+                                x-text="zone"></div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="!(editingName === s.name && editingField === 'timezone')">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
+                      <span class="editable-cell" tabindex="0" role="button"
+                        @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        @keydown.enter.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        @keydown.space.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
+                        x-text="effectiveTimezone(s) || 'UTC'"></span>
+                      <template x-if="isOverridden(s, 'timezone')">
+                        <span class="d-inline-flex align-items-center gap-1">
+                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
+                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
+                            @click="resetToDefault(s.name, 'timezone')" title="Reset to default">reset</button>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'timezone' && saveError" x-text="saveError"></small>
+                </td>
+
+                <!-- Enabled toggle -->
+                <td>
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" :checked="s.enabled"
+                      :disabled="isBusy(s.name)"
+                      @change="toggleEnabled(s)">
+                  </div>
+                </td>
+
+                <td x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
+
+                <!-- Actions -->
+                <td class="cell-actions">
+                  <div class="d-inline-flex gap-2 flex-nowrap">
+                    <button class="btn btn-sm text-nowrap" :class="isArmed('run:' + s.name) ? 'btn-primary' : 'btn-outline-primary'"
+                      :disabled="isBusy(s.name) || !s.enabled"
+                      @click="runNow(s)" :title="s.enabled ? 'Enqueue this schedule\'s job now' : 'Schedule is disabled'"
+                      x-text="isArmed('run:' + s.name) ? 'Confirm run' : 'Run now'"></button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="loading && !loaded && schedules.length === 0">
+              <td colspan="9" class="text-muted text-center">Loading…</td>
+            </tr>
+            <tr x-show="_loadErrored && schedules.length === 0">
+              <td colspan="9" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
+            </tr>
+            <tr x-show="!_loadErrored && loaded && schedules.length === 0">
+              <td colspan="9" class="text-muted text-center">No cron schedules configured.</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
     </div>

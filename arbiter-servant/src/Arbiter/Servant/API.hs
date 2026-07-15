@@ -257,6 +257,13 @@ data CronAPI mode = CronAPI
           :> Capture "name" Text
           :> ReqBody '[JSON] CronScheduleUpdate
           :> Patch '[JSON] CronScheduleRow
+  , -- POST /cron/schedules/:name/run
+    runSchedule
+      :: mode
+        :- "schedules"
+          :> Capture "name" Text
+          :> "run"
+          :> PostNoContent
   }
   deriving stock (Generic)
 

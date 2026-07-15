@@ -2,7 +2,7 @@
  * Alpine.js global store: queues, selected queue, SSE state, theme.
  */
 // Top-level views that aren't queue-scoped (each a nav destination after Queues).
-const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency'];
+const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency', 'cron'];
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('app', {

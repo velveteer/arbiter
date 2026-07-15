@@ -115,6 +115,8 @@ module Arbiter.Core.Operations
   , touchCronChecked
   , tryFireCronGate
   , tryAcquireCronLeader
+  , requestCronRun
+  , claimCronRun
 
     -- * Worker Registry Operations
   , registerWorker
@@ -2371,6 +2373,39 @@ tryAcquireCronLeader schemaName queueName scheduleName = do
   pure $ case rows of
     (True : _) -> True
     _ -> False
+
+-- | Stamp a manual run request on a schedule and NOTIFY the run-now channel.
+-- 'False' = no such schedule.
+requestCronRun
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> Text
+  -- ^ Schedule name
+  -> m Bool
+requestCronRun schemaName scheduleName = do
+  n <- queryCount (Tmpl.requestCronRunSQL schemaName) [pval CText scheduleName]
+  pure (n > 0)
+
+-- | Claim a fresh run request within the staleness window. 'True' = caller
+-- proceeds with the insert. The claim clears the flag and advances the gate.
+claimCronRun
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> Text
+  -- ^ Schedule name
+  -> UTCTime
+  -- ^ Minute floor for the gate advance
+  -> UTCTime
+  -- ^ Staleness cutoff (requests older than this are ignored)
+  -> m Bool
+claimCronRun schemaName scheduleName minuteFloor cutoff = do
+  rows <-
+    executeStatement
+      (Tmpl.claimCronRunSQL schemaName)
+      [pval CTimestamptz minuteFloor, pval CText scheduleName, pval CTimestamptz cutoff]
+  pure (rows > 0)
 
 -- ---------------------------------------------------------------------------
 -- Worker Registry Operations

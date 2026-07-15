@@ -171,6 +171,12 @@ const ArbiterAPI = {
     });
   },
 
+  runCronSchedule(name) {
+    return this._fetch(`/cron/schedules/${encodeURIComponent(name)}/run`, {
+      method: 'POST',
+    });
+  },
+
   // Queue details (pause/resume)
   getQueueDetails(queue) {
     return this._fetch(`/queues/${encodeURIComponent(queue)}/details`);

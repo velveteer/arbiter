@@ -44,6 +44,7 @@ module Arbiter.Core.Job.Schema
   , pauseNotifyChannelPrefix
   , cancelNotifyChannel
   , cancelNotifyChannelPrefix
+  , cronRunNotifyChannel
 
     -- * Trigger / Function Name Helpers
   , notifyFunctionName
@@ -136,6 +137,10 @@ cancelNotifyChannelPrefix schemaName = "arbiter_cancel_" <> schemaName <> "_"
 cancelNotifyChannel :: SchemaName -> Text -> Text
 cancelNotifyChannel schemaName queueName =
   T.take 63 $ cancelNotifyChannelPrefix schemaName <> queueName
+
+-- | Per-schema NOTIFY channel for manual cron run-now requests.
+cronRunNotifyChannel :: SchemaName -> Text
+cronRunNotifyChannel schemaName = T.take 63 $ "arbiter_cron_run_" <> schemaName
 
 -- | Per-table NOTIFY trigger function name.
 notifyFunctionName :: TableName -> Text
