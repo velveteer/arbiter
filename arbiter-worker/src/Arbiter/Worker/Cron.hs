@@ -260,8 +260,8 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
   startupNow <- liftIO getCurrentTime
   shuttingDown <- isShuttingDown stateVar
   unless shuttingDown $ do
-    processCronCatchUp logCfg schemaName queueName jobs startupNow
     processRunRequests logCfg schemaName jobs startupNow
+    processCronCatchUp logCfg schemaName queueName jobs startupNow
   logCron logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
   loop
   where
@@ -275,8 +275,8 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
         WakeShutdown -> pure ()
         WakeMinute -> do
           now <- liftIO getCurrentTime
-          processCronCatchUp logCfg schemaName queueName jobs now
           processRunRequests logCfg schemaName jobs now
+          processCronCatchUp logCfg schemaName queueName jobs now
           loop
         WakeRunNow -> do
           now <- liftIO getCurrentTime
@@ -427,11 +427,13 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
       pure True
 
-data RunNowOutcome = Fired | Skipped
+data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
 
 -- | Claim and fire every schedule with a pending run request. A 'SkipOverlap'
 -- schedule reuses its constant dedup key, so a manual run is skipped while one
 -- of its jobs is already active.
+--
+-- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
@@ -444,32 +446,33 @@ processRunRequests logCfg schemaName jobs now = do
       forM_ (filter (\cj -> Set.member (name cj) requested) jobs) (claimAndFire (truncateToMinute now))
   where
     claimAndFire tick cj = do
-      claim <- tryAny $ Ops.claimCronRun schemaName (name cj)
-      case claim of
+      outcome <- tryAny . withDbTransaction $ do
+        claimed <- Ops.claimCronRun schemaName (name cj)
+        maybe (pure NotRequested) (fireClaimed tick cj) claimed
+      case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now claim failed: " <> T.pack (show e)
-        Right Nothing -> pure ()
-        Right (Just row) -> fireClaimed tick cj row
+          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> T.pack (show e)
+        Right NotRequested -> pure ()
+        Right Fired ->
+          logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
+        Right Skipped ->
+          logCron logCfg Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
+        Right Dropped ->
+          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now inserted no job, the parent job it references is gone"
     fireClaimed tick cj row = do
       let effectiveOv = fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
           key = case effectiveOv of
             SkipOverlap -> Just (IgnoreDuplicate (makeDedupKeyFromParts (name cj) SkipOverlap Nothing tick))
             AllowOverlap -> Nothing
           jobWrite = (builder cj Live tick) {dedupKey = key}
-      outcome <- tryAny . withDbTransaction $ do
-        inserted <- HL.insertJob jobWrite
-        if isNothing inserted
-          then pure Skipped
-          else do
-            void $ Ops.touchCronManualRun schemaName now (name cj)
-            pure Fired
-      case outcome of
-        Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> T.pack (show e)
-        Right Fired ->
-          logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
-        Right Skipped ->
-          logCron logCfg Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
+      inserted <- HL.insertJob jobWrite
+      case (inserted, key) of
+        (Just _, _) -> do
+          void $ Ops.touchCronManualRun schemaName now (name cj)
+          pure Fired
+        -- No dedup key, so an absent job means the parent is missing.
+        (Nothing, Nothing) -> pure Dropped
+        (Nothing, Just _) -> pure Skipped
 
 -- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()

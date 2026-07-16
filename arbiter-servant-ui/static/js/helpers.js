@@ -74,6 +74,29 @@ function confirmArm() {
   };
 }
 
+// Type-the-name confirmation, keyed on an ARB_CONFIG mode flag. Methods, not
+// getters: a spread evaluates a getter once and copies the result as a value.
+function typeToConfirm(configKey) {
+  return {
+    confirmTarget: '',
+    confirmText: '',
+    confirmMode() {
+      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG[configKey]) || 'type';
+    },
+    confirmValid() {
+      return this.confirmText === this.confirmTarget && this.confirmTarget !== '';
+    },
+    openConfirm(target) {
+      this.confirmTarget = target;
+      this.confirmText = '';
+    },
+    resetConfirm() {
+      this.confirmTarget = '';
+      this.confirmText = '';
+    },
+  };
+}
+
 // Shared save lifecycle for the override edit modals. buildBody returns { body }
 // to save or { error } to reject. Owns the saving flag, modal close, and reload.
 async function saveOverrides(edit, { apiFn, modalId, buildBody, reload }) {
@@ -144,9 +167,12 @@ function busyRows() {
 async function guardedLoad(self, errorLabel, body, opts) {
   // The first load of a view drives the global top-bar loader instead of an
   // in-table "Loading…" flash. Later polls only spin that view's Refresh button.
+  // The release is idempotent, so a concurrent load must not claim twice.
   const store = self.$store && self.$store.app;
-  const initial = !self.loaded && !!store;
-  if (initial) store.beginInitialLoad();
+  if (!self.loaded && !!store && !self._initialLoadHeld) {
+    self._initialLoadHeld = true;
+    store.beginInitialLoad();
+  }
   self.loading = true;
   self._loadSeq = (self._loadSeq || 0) + 1;
   const seq = self._loadSeq;
@@ -162,8 +188,17 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
     if (seq === self._loadSeq) { self.loading = false; self.loaded = true; }
-    if (initial) store.endInitialLoad();
+    releaseInitialLoad(self);
   }
+}
+
+// Drops this component's claim on the top-bar loader. Idempotent: teardown may
+// release a load whose fetch is still in flight.
+function releaseInitialLoad(self) {
+  if (!self._initialLoadHeld) return;
+  self._initialLoadHeld = false;
+  const store = self.$store && self.$store.app;
+  if (store) store.endInitialLoad();
 }
 
 // Shared jobs/dlq table mixin.
@@ -238,6 +273,7 @@ function tableTab(loadMethod, refreshStorageKey) {
     },
 
     _bindTableEvents(opts) {
+      this._watchPolling();
       this._onQueueChanged = () => {
         this.disarm();
         this.groupKeyFilter = '';
@@ -269,6 +305,8 @@ function tableTab(loadMethod, refreshStorageKey) {
       window.removeEventListener(ARB_EVENTS.queueChanged, this._onQueueChanged);
       window.removeEventListener(ARB_EVENTS.sseReconnect, this._onSseReconnect);
       window.removeEventListener(ARB_EVENTS.sseEvent, this._onSseEvent);
+      this._stopWatchPolling();
+      releaseInitialLoad(this);
     },
   };
 }
@@ -339,7 +377,8 @@ function pollingTab(loadMethod, intervalMs) {
       untrackTabActive(this);
       this.stopPolling();
       this._unbindVisibility();
-      if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+      this._stopWatchPolling();
+      releaseInitialLoad(this);
     },
   };
 }

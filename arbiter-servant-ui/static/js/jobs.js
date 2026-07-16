@@ -221,7 +221,6 @@ document.addEventListener('alpine:init', () => {
           this._stopTimer();
         },
       });
-      this._watchPolling();
       this._bindTableEvents({
         onQueueReset: () => { this.stateFilter = ''; },
         relevant: (events) => {
@@ -247,7 +246,6 @@ document.addEventListener('alpine:init', () => {
       this._unbindTableEvents();
       window.removeEventListener(ARB_EVENTS.filterJobs, this._onFilterJobs);
       this._stopTimer();
-      this._stopWatchPolling();
     },
 
     // Switch to the Jobs tab showing only `status` (clears other filters). The
@@ -500,12 +498,19 @@ document.addEventListener('alpine:init', () => {
         const body = { payload };
         if (this.insertGroupKey) body.groupKey = this.insertGroupKey;
         if (this.insertDedupKey) body.dedupKey = {key: this.insertDedupKey, strategy: this.insertDedupStrategy};
-        if (this.insertPriority) body.priority = parseInt(this.insertPriority, 10);
+        if (this.insertPriority) {
+          const priority = Number(this.insertPriority);
+          if (!Number.isInteger(priority)) {
+            this.insertError = 'Priority must be a whole number.';
+            return;
+          }
+          body.priority = priority;
+        }
         if (notVisibleUntil) body.notVisibleUntil = notVisibleUntil;
         if (this.insertMaxAttempts) {
-          const maxAttempts = parseInt(this.insertMaxAttempts, 10);
-          if (Number.isNaN(maxAttempts) || maxAttempts < 1) {
-            this.insertError = 'Max attempts must be at least 1.';
+          const maxAttempts = Number(this.insertMaxAttempts);
+          if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+            this.insertError = 'Max attempts must be a whole number of at least 1.';
             return;
           }
           body.maxAttempts = maxAttempts;

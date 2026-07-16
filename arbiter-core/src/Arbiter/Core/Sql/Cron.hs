@@ -102,24 +102,25 @@ tryAcquireCronLeaderSQL =
   "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
 
 -- | Stamp a run request on an enabled schedule and NOTIFY. Returns 0 (no such
--- schedule), 1 (disabled), or 2 (stamped).
+-- schedule), 1 (disabled), 2 (stamped), or 3 (a request is already pending).
 requestCronRunSQL :: Text -> Text
 requestCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
       chan = T.replace "'" "''" (cronRunNotifyChannel schemaName)
-   in "WITH found AS (SELECT enabled FROM "
+   in "WITH found AS (SELECT enabled, run_requested_at FROM "
         <> tbl
         <> " WHERE name = ?),"
         <> " upd AS ("
         <> "UPDATE "
         <> tbl
         <> " SET run_requested_at = NOW(), updated_at = NOW()"
-        <> " WHERE name = ? AND enabled"
+        <> " WHERE name = ? AND enabled AND run_requested_at IS NULL"
         <> " RETURNING pg_notify('"
         <> chan
         <> "', name))"
         <> " SELECT (CASE"
         <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 2"
+        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND run_requested_at IS NOT NULL) THEN 3"
         <> " WHEN EXISTS (SELECT 1 FROM found) THEN 1"
         <> " ELSE 0 END)::int8 AS count"
 

@@ -9,21 +9,14 @@ document.addEventListener('alpine:init', () => {
     pausedAt: null,
     pausedAgeStr: '',
     busy: false,
-    pauseConfirmText: '',
     ...confirmArm(),
     ...eventBusTab(),
-
     // 'type' | 'arm' | 'off' — how a pause must be confirmed (resume always uses the arm).
-    get pauseConfirmMode() {
-      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.pauseConfirm) || 'type';
-    },
+    ...typeToConfirm('pauseConfirm'),
+
     // In 'off' mode the pause affordance is hidden, but resume stays available.
     get showPauseToggle() {
-      return this.paused || this.pauseConfirmMode !== 'off';
-    },
-    // The modal's Pause button unlocks only on an exact match of the queue name.
-    get pauseConfirmValid() {
-      return this.pauseConfirmText === Alpine.store('app').selectedQueue;
+      return this.paused || this.confirmMode() !== 'off';
     },
 
     init() {
@@ -31,7 +24,7 @@ document.addEventListener('alpine:init', () => {
       this._bindBus({
         queueChanged: () => {
           this.disarm();
-          this.pauseConfirmText = '';
+          this.resetConfirm();
           this.paused = false;
           this.pausedAt = null;
           if (Alpine.store('app').selectedQueue) this.refresh();
@@ -81,8 +74,8 @@ document.addEventListener('alpine:init', () => {
         if (this.confirmArmed('toggle')) this._apply(false);
         return;
       }
-      if (this.pauseConfirmMode === 'type') {
-        this.pauseConfirmText = '';
+      if (this.confirmMode() === 'type') {
+        this.openConfirm(Alpine.store('app').selectedQueue);
         showModal('pauseConfirmModal');
         return;
       }
@@ -91,7 +84,7 @@ document.addEventListener('alpine:init', () => {
 
     // The modal's Pause button.
     confirmPause() {
-      if (!this.pauseConfirmValid || this.busy) return;
+      if (!this.confirmValid() || this.busy) return;
       hideModal('pauseConfirmModal');
       this._apply(true);
     },

@@ -479,6 +479,32 @@ spec connStr = do
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-nightly"
         CS.runRequestedAt row `shouldBe` Nothing
 
+      it "keeps the request pending when the insert fails" $ \env -> do
+        -- The claim rolls back with the insert, so a later pass still fires it.
+        let failing :: CronJob WorkerTestPayload
+            Right failing =
+              cronJob
+                "run-atomic"
+                "0 3 * * *"
+                AllowOverlap
+                (\_ _ -> error "intentional builder failure")
+            Right working = cronJob "run-atomic" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "manual"))
+            now = mkTime 2025 6 15 12 30 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [failing] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-atomic"
+          processRunRequests testLogConfig testSchema [failing] now
+
+        Just pendingRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-atomic"
+        CS.runRequestedAt pendingRow `shouldNotBe` Nothing
+
+        runSimpleDb env $ processRunRequests testLogConfig testSchema [working] now
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` [SimpleTask "manual"]
+
+        Just firedRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-atomic"
+        CS.runRequestedAt firedRow `shouldBe` Nothing
+
       it "records the manual run at wall-clock time without advancing the gate" $ \env -> do
         let Right cj = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "gate"))
             now = mkTime 2025 6 15 12 30 45
@@ -563,6 +589,24 @@ spec connStr = do
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask (T.pack (show (mkTime 2025 6 15 12 30 0)))]
+
+      it "refuses a second request while one is still pending" $ \env -> do
+        let Right cj = cronJob "run-coalesce" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
+        outcomes <- runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          first <- Ops.requestCronRun testSchema "run-coalesce"
+          second <- Ops.requestCronRun testSchema "run-coalesce"
+          pure (first, second)
+        outcomes `shouldBe` (Ops.RunReqStamped, Ops.RunReqPending)
+
+      it "accepts a fresh request once the pending one is claimed" $ \env -> do
+        let Right cj = cronJob "run-again" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "again"))
+        outcome <- runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-again"
+          _ <- Ops.claimCronRun testSchema "run-again"
+          Ops.requestCronRun testSchema "run-again"
+        outcome `shouldBe` Ops.RunReqStamped
 
       it "claims a request exactly once across pools" $ \env -> do
         let Right cj = cronJob "run-once" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))

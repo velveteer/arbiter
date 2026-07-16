@@ -62,6 +62,7 @@ document.addEventListener('alpine:init', () => {
         this._deepLinkPending = true;
       }
 
+      this.beginInitialLoad();
       try {
         const data = await ArbiterAPI.listQueues();
         this.queues = (data && data.queues) || [];
@@ -76,6 +77,8 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         console.error('Failed to load queues:', e);
         showToast('Failed to load queues: ' + e.message);
+      } finally {
+        this.endInitialLoad();
       }
       this._deepLinkPending = false;
       this.initialized = true;

@@ -35,6 +35,7 @@ document.addEventListener('alpine:init', () => {
       untrackTabActive(this);
       if (this._statsDebounce) { clearTimeout(this._statsDebounce); this._statsDebounce = null; }
       this._unbindBus();
+      releaseInitialLoad(this);
     },
 
     _debouncedLoadStats() {

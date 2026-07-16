@@ -2378,11 +2378,11 @@ tryAcquireCronLeader schemaName queueName scheduleName = do
     _ -> False
 
 -- | Result of a manual run request.
-data RunRequestOutcome = RunReqNotFound | RunReqDisabled | RunReqStamped
+data RunRequestOutcome = RunReqNotFound | RunReqDisabled | RunReqStamped | RunReqPending
   deriving stock (Eq, Show)
 
 -- | Stamp a manual run request on an enabled schedule and NOTIFY the run-now
--- channel.
+-- channel. A request already pending is left as it stands.
 requestCronRun
   :: (MonadArbiter m)
   => SchemaName
@@ -2393,6 +2393,7 @@ requestCronRun
 requestCronRun schemaName scheduleName = do
   status <- queryCount (Tmpl.requestCronRunSQL schemaName) [pval CText scheduleName, pval CText scheduleName]
   pure $ case status of
+    3 -> RunReqPending
     2 -> RunReqStamped
     1 -> RunReqDisabled
     _ -> RunReqNotFound

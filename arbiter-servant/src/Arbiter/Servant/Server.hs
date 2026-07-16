@@ -912,8 +912,9 @@ updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverl
     Nothing -> throwError err404 {errBody = "Cron schedule not found"}
     Just row -> pure row
 
--- | Request an out-of-band run of a cron schedule. Disabled schedules are
--- refused so a manual run never fires what the schedule itself would not.
+-- | Request an out-of-band run of a cron schedule. A disabled schedule is
+-- refused so a manual run never fires what the schedule itself would not, and
+-- so is one whose pending request would be coalesced away.
 runCronScheduleHandler
   :: forall registry
    . ArbiterServerConfig registry
@@ -926,6 +927,7 @@ runCronScheduleHandler config name = do
   case outcome of
     Ops.RunReqNotFound -> throwError err404 {errBody = "Cron schedule not found"}
     Ops.RunReqDisabled -> throwError err409 {errBody = "Cron schedule is disabled"}
+    Ops.RunReqPending -> throwError err409 {errBody = "Cron schedule already has a run pending"}
     Ops.RunReqStamped -> pure NoContent
 
 -- | Workers API handlers

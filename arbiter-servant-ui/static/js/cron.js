@@ -15,11 +15,16 @@ function safeCronDescribe(expr) {
   }
 }
 
+// Alpine re-wraps `this` in a fresh proxy per evaluation, so a host cannot be
+// identified by reference.
+let cronHostSeq = 0;
+
 document.addEventListener('alpine:init', () => {
   Alpine.store('cronEdit', {
+    ...typeToConfirm('cronConfirm'),
     host: null,
+    hostId: null,
     tzList: [],
-    toggleConfirm: { name: '', text: '' },
     edit: {
       prefix: '', name: '', queueName: '',
       exprOn: false, expr: '',
@@ -30,6 +35,9 @@ document.addEventListener('alpine:init', () => {
       saving: false, error: '',
     },
 
+    // Suggestions only. The field accepts any zone name, and the server
+    // rejects one it cannot resolve, so an engine without Intl.supportedValuesOf
+    // just gets a shorter list rather than a smaller choice of zones.
     populateTimezones() {
       if (this.tzList.length > 0) return;
       if (typeof Intl.supportedValuesOf !== 'function') {
@@ -41,40 +49,25 @@ document.addEventListener('alpine:init', () => {
       this.tzList = zones.sort();
     },
 
-    // IANA zones grouped by region for the timezone <select> optgroups.
-    tzGroups() {
-      const groups = new Map();
-      for (const z of this.tzList) {
-        const slash = z.indexOf('/');
-        const region = slash === -1 ? 'Other' : z.slice(0, slash);
-        if (!groups.has(region)) groups.set(region, []);
-        groups.get(region).push(z);
-      }
-      return Array.from(groups, ([name, zones]) => ({ name, zones }));
-    },
-
-    // 'type' | 'off' — how disabling a schedule is confirmed.
-    get cronConfirmMode() {
-      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.cronConfirm) || 'type';
-    },
-    // The confirm button unlocks only on an exact match of the schedule name.
-    get toggleConfirmValid() {
-      return this.toggleConfirm.text === this.toggleConfirm.name;
-    },
-
     isHostBusy(name) {
       return !!(this.host && this.host.isBusy(name));
     },
 
-    // Open the override editor for a schedule, hosted by the active table.
-    async openEdit(host, s) {
+    setHost(host) {
       this.host = host;
+      this.hostId = host.hostId;
+    },
+
+    releaseHost(hostId) {
+      if (this.hostId !== hostId) return;
+      this.host = null;
+      this.hostId = null;
+    },
+
+    // Open the override editor for a schedule, hosted by the active table.
+    openEdit(host, s) {
+      this.setHost(host);
       const tz = s.overrideTimezone ?? (s.defaultTimezone || 'UTC');
-      // x-model resolves against rendered options, so the zone needs one first.
-      if (tz && !this.tzList.includes(tz)) {
-        this.tzList = [...this.tzList, tz].sort();
-        await Alpine.nextTick();
-      }
       const values = {
         exprOn: s.overrideExpression !== null,
         expr: s.overrideExpression ?? '',
@@ -131,27 +124,26 @@ document.addEventListener('alpine:init', () => {
     // Checkbox change handler. Enabling applies immediately. Disabling is guarded
     // like pausing a queue: revert the switch and open the confirm modal.
     onToggleEnabled(host, schedule, ev) {
-      this.host = host;
+      this.setHost(host);
       if (host.isBusy(schedule.name)) {
         if (ev) ev.target.checked = schedule.enabled;
         return;
       }
       const target = !schedule.enabled;
-      if (target || this.cronConfirmMode === 'off') {
-        host.applyEnabled(schedule, target);
+      if (target || this.confirmMode() === 'off') {
+        host.applyEnabled(schedule.name, target);
         return;
       }
       if (ev) ev.target.checked = schedule.enabled;
-      this.toggleConfirm = { name: schedule.name, text: '' };
+      this.openConfirm(schedule.name);
       showModal('cronToggleModal');
     },
 
     confirmToggleEnabled() {
       const host = this.host;
-      if (!this.toggleConfirmValid || host.isBusy(this.toggleConfirm.name)) return;
+      if (!this.confirmValid() || host.isBusy(this.confirmTarget)) return;
       hideModal('cronToggleModal');
-      const schedule = host.schedules.find((s) => s.name === this.toggleConfirm.name);
-      if (schedule) host.applyEnabled(schedule, false);
+      host.applyEnabled(this.confirmTarget, false);
     },
   });
 
@@ -159,6 +151,7 @@ document.addEventListener('alpine:init', () => {
     ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs),
     ...confirmArm(),
     global: !!opts.global,
+    hostId: ++cronHostSeq,
     schedules: [],
     loading: false,
     loaded: false,
@@ -181,7 +174,7 @@ document.addEventListener('alpine:init', () => {
     destroy() {
       this.teardownPolling();
       this.disarm();
-      if (this.$store.cronEdit.host === this) this.$store.cronEdit.host = null;
+      this.$store.cronEdit.releaseHost(this.hostId);
     },
 
     async loadSchedules() {
@@ -191,7 +184,7 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       await guardedLoad(this, 'Failed to load cron schedules', async (seq, isStale) => {
-        const data = await ArbiterAPI.listCronSchedules(this.global ? {} : { queue });
+        const data = await ArbiterAPI.listCronSchedules({ queue });
         if (isStale()) return;
         this.schedules = data.cronSchedules || [];
       });
@@ -228,10 +221,10 @@ document.addEventListener('alpine:init', () => {
       this.$store.cronEdit.onToggleEnabled(this, schedule, ev);
     },
 
-    async applyEnabled(schedule, target) {
-      await this.withBusyRow(schedule.name, async () => {
+    async applyEnabled(name, target) {
+      await this.withBusyRow(name, async () => {
         try {
-          await ArbiterAPI.updateCronSchedule(schedule.name, { enabled: target });
+          await ArbiterAPI.updateCronSchedule(name, { enabled: target });
         } catch (e) {
           showToast('Failed to toggle: ' + e.message);
         } finally {
@@ -240,8 +233,17 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    canRun(s) {
+      return s.enabled;
+    },
+
+    runTitle(s) {
+      if (!s.enabled) return 'Schedule is disabled';
+      return "Enqueue this schedule's job now";
+    },
+
     async runNow(schedule) {
-      if (!schedule.enabled || this.busyRows[schedule.name]) return;
+      if (!this.canRun(schedule) || this.busyRows[schedule.name]) return;
       if (!this.confirmArmed('run:' + schedule.name)) return;
       await this.withBusyRow(schedule.name, async () => {
         try {
@@ -249,6 +251,8 @@ document.addEventListener('alpine:init', () => {
           showToast('Run requested for ' + schedule.name, 'success');
         } catch (e) {
           showToast('Failed to run: ' + e.message);
+        } finally {
+          await this.loadSchedules();
         }
       });
     },
@@ -257,10 +261,13 @@ document.addEventListener('alpine:init', () => {
       return s.runRequestedAt != null;
     },
 
-    // Scheduled fires stamp the minute floor, manual runs the wall clock.
+    // Scheduled fires stamp the minute floor, manual runs the wall clock. The
+    // two ISO strings differ in width, so they are ordered as instants.
     lastFired(s) {
       const manual = s.lastManualRunAt;
-      if (manual && (!s.lastFiredAt || manual > s.lastFiredAt)) return { at: manual, manual: true };
+      if (manual && (!s.lastFiredAt || Date.parse(manual) > Date.parse(s.lastFiredAt))) {
+        return { at: manual, manual: true };
+      }
       return { at: s.lastFiredAt, manual: false };
     },
 
