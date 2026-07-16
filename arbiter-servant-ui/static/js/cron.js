@@ -4,17 +4,20 @@
  * Used in two places: the per-queue Cron tab (scoped to the selected queue)
  * and the global Cron view (all queues, mounted via cronTab({ global: true })).
  * Only polls while its view is active and the browser tab is visible.
+ * The edit/confirm modals render once at page level, driven by the cronEdit store.
  */
+// Human-readable description of a cron expression, or '' if it can't be parsed.
+function safeCronDescribe(expr) {
+  try {
+    return cronstrue.toString(expr);
+  } catch {
+    return '';
+  }
+}
+
 document.addEventListener('alpine:init', () => {
-  Alpine.data('cronTab', (opts = {}) => ({
-    ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs),
-    ...confirmArm(),
-    global: !!opts.global,
-    schedules: [],
-    loading: false,
-    loaded: false,
-    active: false,
-    _loadErrored: false,
+  Alpine.store('cronEdit', {
+    host: null,
     tzList: [],
     toggleConfirm: { name: '', text: '' },
     edit: {
@@ -22,25 +25,9 @@ document.addEventListener('alpine:init', () => {
       exprOn: false, expr: '',
       overlapOn: false, overlap: 'SkipOverlap',
       tzOn: false, tz: '',
+      orig: {},
       defaultExpression: '', defaultOverlap: '', defaultTimezone: '',
       saving: false, error: '',
-    },
-
-    init() {
-      // Global mode is a top-level view mounted by x-if. The per-queue tab is
-      // a Bootstrap tab scoped to the selected queue.
-      if (this.global) {
-        this.initPollingMounted();
-      } else {
-        this.initPolling('#tab-cron', {
-          onQueueChange: () => { this.schedules = []; },
-        });
-      }
-      this.populateTimezones();
-    },
-
-    destroy() {
-      this.teardownPolling();
     },
 
     populateTimezones() {
@@ -64,6 +51,137 @@ document.addEventListener('alpine:init', () => {
         groups.get(region).push(z);
       }
       return Array.from(groups, ([name, zones]) => ({ name, zones }));
+    },
+
+    // 'type' | 'off' — how disabling a schedule is confirmed.
+    get cronConfirmMode() {
+      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.cronConfirm) || 'type';
+    },
+    // The confirm button unlocks only on an exact match of the schedule name.
+    get toggleConfirmValid() {
+      return this.toggleConfirm.text === this.toggleConfirm.name;
+    },
+
+    isHostBusy(name) {
+      return !!(this.host && this.host.isBusy(name));
+    },
+
+    // Open the override editor for a schedule, hosted by the active table.
+    async openEdit(host, s) {
+      this.host = host;
+      const tz = s.overrideTimezone ?? (s.defaultTimezone || 'UTC');
+      // x-model resolves against rendered options, so the zone needs one first.
+      if (tz && !this.tzList.includes(tz)) {
+        this.tzList = [...this.tzList, tz].sort();
+        await Alpine.nextTick();
+      }
+      const values = {
+        exprOn: s.overrideExpression !== null,
+        expr: s.overrideExpression ?? '',
+        overlapOn: s.overrideOverlap !== null,
+        overlap: s.overrideOverlap ?? s.defaultOverlap,
+        tzOn: s.overrideTimezone !== null,
+        tz,
+      };
+      this.edit = {
+        prefix: s.name,
+        name: s.name,
+        queueName: s.queueName,
+        ...values,
+        orig: values,
+        defaultExpression: s.defaultExpression,
+        defaultOverlap: s.defaultOverlap,
+        defaultTimezone: s.defaultTimezone || 'UTC',
+        saving: false,
+        error: '',
+      };
+      showModal('cronEditModal');
+    },
+
+    // Live human-readable description of the expression being edited.
+    editDescribe() {
+      const expr = this.edit.exprOn ? this.edit.expr : this.edit.defaultExpression;
+      return safeCronDescribe(expr);
+    },
+
+    async saveEdit() {
+      const host = this.host;
+      await saveOverrides(this.edit, {
+        apiFn: (name, body) => ArbiterAPI.updateCronSchedule(name, body),
+        modalId: 'cronEditModal',
+        reload: () => host.loadSchedules(),
+        buildBody: (e) => {
+          if (e.exprOn && !e.expr.trim()) return { error: 'Expression cannot be empty' };
+          if (e.tzOn && !e.tz.trim()) return { error: 'Timezone cannot be empty' };
+          // Sent as a value (override on) or null (revert), only when changed.
+          const body = {};
+          const put = (key, on, value, origOn, origValue) => {
+            const next = on ? value : null;
+            const prev = origOn ? origValue : null;
+            if (next !== prev) body[key] = next;
+          };
+          put('overrideExpression', e.exprOn, e.expr.trim(), e.orig.exprOn, e.orig.expr);
+          put('overrideOverlap', e.overlapOn, e.overlap, e.orig.overlapOn, e.orig.overlap);
+          put('overrideTimezone', e.tzOn, e.tz.trim(), e.orig.tzOn, e.orig.tz);
+          return { body };
+        },
+      });
+    },
+
+    // Checkbox change handler. Enabling applies immediately. Disabling is guarded
+    // like pausing a queue: revert the switch and open the confirm modal.
+    onToggleEnabled(host, schedule, ev) {
+      this.host = host;
+      if (host.isBusy(schedule.name)) {
+        if (ev) ev.target.checked = schedule.enabled;
+        return;
+      }
+      const target = !schedule.enabled;
+      if (target || this.cronConfirmMode === 'off') {
+        host.applyEnabled(schedule, target);
+        return;
+      }
+      if (ev) ev.target.checked = schedule.enabled;
+      this.toggleConfirm = { name: schedule.name, text: '' };
+      showModal('cronToggleModal');
+    },
+
+    confirmToggleEnabled() {
+      const host = this.host;
+      if (!this.toggleConfirmValid || host.isBusy(this.toggleConfirm.name)) return;
+      hideModal('cronToggleModal');
+      const schedule = host.schedules.find((s) => s.name === this.toggleConfirm.name);
+      if (schedule) host.applyEnabled(schedule, false);
+    },
+  });
+
+  Alpine.data('cronTab', (opts = {}) => ({
+    ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs),
+    ...confirmArm(),
+    global: !!opts.global,
+    schedules: [],
+    loading: false,
+    loaded: false,
+    active: false,
+    _loadErrored: false,
+
+    init() {
+      // Global mode is a top-level view mounted by x-if. The per-queue tab is
+      // a Bootstrap tab scoped to the selected queue.
+      if (this.global) {
+        this.initPollingMounted();
+      } else {
+        this.initPolling('#tab-cron', {
+          onQueueChange: () => { this.disarm(); this.schedules = []; },
+        });
+      }
+      this.$store.cronEdit.populateTimezones();
+    },
+
+    destroy() {
+      this.teardownPolling();
+      this.disarm();
+      if (this.$store.cronEdit.host === this) this.$store.cronEdit.host = null;
     },
 
     async loadSchedules() {
@@ -92,11 +210,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     describeExpression(s) {
-      try {
-        return cronstrue.toString(this.effectiveExpression(s));
-      } catch {
-        return '';
-      }
+      return safeCronDescribe(this.effectiveExpression(s));
     },
 
     isOverridden(s, field) {
@@ -106,92 +220,15 @@ document.addEventListener('alpine:init', () => {
       return false;
     },
 
-    // Open the override editor for a schedule.
     openEdit(s) {
-      this.edit = {
-        prefix: s.name,
-        name: s.name,
-        queueName: s.queueName,
-        exprOn: s.overrideExpression !== null,
-        expr: s.overrideExpression ?? '',
-        overlapOn: s.overrideOverlap !== null,
-        overlap: s.overrideOverlap ?? s.defaultOverlap,
-        tzOn: s.overrideTimezone !== null,
-        tz: s.overrideTimezone ?? (s.defaultTimezone || 'UTC'),
-        defaultExpression: s.defaultExpression,
-        defaultOverlap: s.defaultOverlap,
-        defaultTimezone: s.defaultTimezone || 'UTC',
-        saving: false,
-        error: '',
-      };
-      showModal('cronEditModal');
+      this.$store.cronEdit.openEdit(this, s);
     },
 
-    // Live human-readable description of the expression being edited.
-    editDescribe() {
-      const expr = this.edit.exprOn ? this.edit.expr : this.edit.defaultExpression;
-      try {
-        return cronstrue.toString(expr);
-      } catch {
-        return '';
-      }
-    },
-
-    async saveEdit() {
-      await saveOverrides(this.edit, {
-        apiFn: (name, body) => ArbiterAPI.updateCronSchedule(name, body),
-        modalId: 'cronEditModal',
-        reload: () => this.loadSchedules(),
-        buildBody: (e) => {
-          // Each field is sent as a value (override on) or null (revert to default).
-          if (e.exprOn && !e.expr.trim()) return { error: 'Expression cannot be empty' };
-          if (e.tzOn && !e.tz.trim()) return { error: 'Timezone cannot be empty' };
-          return {
-            body: {
-              overrideExpression: e.exprOn ? e.expr.trim() : null,
-              overrideOverlap: e.overlapOn ? e.overlap : null,
-              overrideTimezone: e.tzOn ? e.tz.trim() : null,
-            },
-          };
-        },
-      });
-    },
-
-    // 'type' | 'off' — how disabling a schedule is confirmed.
-    get cronConfirmMode() {
-      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.cronConfirm) || 'type';
-    },
-    // The modal's confirm button unlocks only on an exact match of the schedule name.
-    get toggleConfirmValid() {
-      return this.toggleConfirm.text === this.toggleConfirm.name;
-    },
-
-    // Checkbox change handler. Enabling applies immediately. Disabling is guarded
-    // like pausing a queue: revert the switch and open the confirm modal.
     onToggleEnabled(schedule, ev) {
-      if (this.isBusy(schedule.name)) {
-        if (ev) ev.target.checked = schedule.enabled;
-        return;
-      }
-      const target = !schedule.enabled;
-      if (target || this.cronConfirmMode === 'off') {
-        this._applyEnabled(schedule, target);
-        return;
-      }
-      if (ev) ev.target.checked = schedule.enabled;
-      this.toggleConfirm = { name: schedule.name, text: '' };
-      showModal('cronToggleModal');
+      this.$store.cronEdit.onToggleEnabled(this, schedule, ev);
     },
 
-    // The modal's confirm button.
-    confirmToggleEnabled() {
-      if (!this.toggleConfirmValid || this.isBusy(this.toggleConfirm.name)) return;
-      hideModal('cronToggleModal');
-      const schedule = this.schedules.find((s) => s.name === this.toggleConfirm.name);
-      if (schedule) this._applyEnabled(schedule, false);
-    },
-
-    async _applyEnabled(schedule, target) {
+    async applyEnabled(schedule, target) {
       await this.withBusyRow(schedule.name, async () => {
         try {
           await ArbiterAPI.updateCronSchedule(schedule.name, { enabled: target });
@@ -216,8 +253,27 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // Drill from the global overview's Queue column into that queue.
+    isRunPending(s) {
+      return s.runRequestedAt != null;
+    },
+
+    // Scheduled fires stamp the minute floor, manual runs the wall clock.
+    lastFired(s) {
+      const manual = s.lastManualRunAt;
+      if (manual && (!s.lastFiredAt || manual > s.lastFiredAt)) return { at: manual, manual: true };
+      return { at: s.lastFiredAt, manual: false };
+    },
+
+    // The schedule list spans the schema, so it names queues this server lacks.
+    queueServed(s) {
+      return this.$store.app.queues.includes(s.queueName);
+    },
+
     openQueue(queue) {
+      if (!this.$store.app.queues.includes(queue)) {
+        showToast(`Queue "${queue}" is not served by this server`, 'warning');
+        return;
+      }
       this.$store.app.openQueue(queue);
     },
   }));

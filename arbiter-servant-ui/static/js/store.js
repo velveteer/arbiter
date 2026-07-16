@@ -119,8 +119,7 @@ document.addEventListener('alpine:init', () => {
       this._drillInto(queue, () => history.replaceState(null, '', queueJobsUrl(queue, status)));
     },
 
-    // Switch to a top-level view: 'queues' (the queue area) or a system
-    // singleton ('events' / 'ratelimits' / 'concurrency').
+    // Switch to a top-level view: 'queues' (the queue area) or one of SYSTEM_VIEWS.
     setView(view) {
       dismissOpenModals();
       this.view = view;

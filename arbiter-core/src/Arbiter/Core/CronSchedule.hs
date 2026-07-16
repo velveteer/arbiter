@@ -23,6 +23,7 @@ module Arbiter.Core.CronSchedule
   , addTimezoneColumnSQL
   , addQueueNameColumnSQL
   , addRunRequestedColumnSQL
+  , addLastManualRunColumnSQL
   ) where
 
 import Control.Applicative ((<|>))
@@ -59,6 +60,10 @@ data CronScheduleRow = CronScheduleRow
   , enabled :: Bool
   , lastFiredAt :: Maybe UTCTime
   , lastCheckedAt :: Maybe UTCTime
+  , runRequestedAt :: Maybe UTCTime
+  -- ^ Manual run awaiting a worker pool. @NULL@ = none pending.
+  , lastManualRunAt :: Maybe UTCTime
+  -- ^ When a manual run last fired a job. @NULL@ = never.
   , createdAt :: UTCTime
   , updatedAt :: UTCTime
   }
@@ -145,3 +150,8 @@ addQueueNameColumnSQL schemaName =
 addRunRequestedColumnSQL :: Text -> Text
 addRunRequestedColumnSQL schemaName =
   "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS run_requested_at TIMESTAMPTZ;"
+
+-- | Idempotent migration adding the manual run-completed column to an existing table.
+addLastManualRunColumnSQL :: Text -> Text
+addLastManualRunColumnSQL schemaName =
+  "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS last_manual_run_at TIMESTAMPTZ;"

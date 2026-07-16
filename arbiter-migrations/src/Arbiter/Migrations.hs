@@ -44,7 +44,8 @@ import Arbiter.Core.Concurrency.Schema
   )
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..), registryConcurrencyPolicies, registryConcurrencyTables)
 import Arbiter.Core.CronSchedule
-  ( addQueueNameColumnSQL
+  ( addLastManualRunColumnSQL
+  , addQueueNameColumnSQL
   , addRunRequestedColumnSQL
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
@@ -399,6 +400,7 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "cron-schedules-add-timezone" (encodeUtf8 $ addTimezoneColumnSQL schemaName)
   , MigrationScript "cron-schedules-add-queue-name" (encodeUtf8 $ addQueueNameColumnSQL schemaName)
   , MigrationScript "cron-schedules-add-run-requested" (encodeUtf8 $ addRunRequestedColumnSQL schemaName)
+  , MigrationScript "cron-schedules-add-last-manual-run" (encodeUtf8 $ addLastManualRunColumnSQL schemaName)
   , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
   , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
   , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)

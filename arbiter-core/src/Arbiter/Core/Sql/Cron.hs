@@ -13,7 +13,8 @@ module Arbiter.Core.Sql.Cron
   , tryAcquireCronLeaderSQL
   , requestCronRunSQL
   , claimCronRunSQL
-  , clearCronRunRequestsSQL
+  , touchCronManualRunSQL
+  , pendingCronRunsSQL
   ) where
 
 import Data.Text (Text)
@@ -120,9 +121,9 @@ requestCronRunSQL schemaName =
         <> " SELECT (CASE"
         <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 2"
         <> " WHEN EXISTS (SELECT 1 FROM found) THEN 1"
-        <> " ELSE 0 END)::int8 AS status"
+        <> " ELSE 0 END)::int8 AS count"
 
--- | Claim a pending run request, clearing the flag.
+-- | Claim a pending run request, clearing the flag and returning the claimed row.
 claimCronRunSQL :: Text -> Text
 claimCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
@@ -130,12 +131,21 @@ claimCronRunSQL schemaName =
         <> tbl
         <> " SET run_requested_at = NULL, updated_at = NOW()"
         <> " WHERE name = ? AND enabled AND run_requested_at IS NOT NULL"
+        <> " RETURNING "
+        <> allCronColumns
 
--- | Clear pending run requests for the named schedules without firing.
-clearCronRunRequestsSQL :: Text -> Text
-clearCronRunRequestsSQL schemaName =
+-- | Record when a manual run last fired a job.
+--
+-- Parameters: fired-at timestamp, schedule name
+touchCronManualRunSQL :: Text -> Text
+touchCronManualRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE "
+   in "UPDATE " <> tbl <> " SET last_manual_run_at = ?, updated_at = NOW() WHERE name = ?"
+
+-- | Names of enabled schedules with a pending run request among the given names.
+pendingCronRunsSQL :: Text -> Text
+pendingCronRunsSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "SELECT name FROM "
         <> tbl
-        <> " SET run_requested_at = NULL, updated_at = NOW()"
-        <> " WHERE name = ANY(?) AND run_requested_at IS NOT NULL"
+        <> " WHERE name = ANY(?) AND enabled AND run_requested_at IS NOT NULL"

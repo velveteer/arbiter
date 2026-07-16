@@ -16,10 +16,12 @@ import Control.Exception (bracket, catch)
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.List (sort)
 import Data.Maybe (isJust)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time
   ( UTCTime (..)
   , fromGregorian
@@ -57,6 +59,7 @@ import Arbiter.Worker.Cron
   , makeDedupKey
   , matchesInTimezone
   , processCronCatchUp
+  , processRunRequests
   , resolveTZ
   , truncateToMinute
   )
@@ -453,6 +456,158 @@ spec connStr = do
         -- The good cron's job was actually inserted, not just watermarked.
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "ok"]
+
+  describe "processRunRequests" $ beforeAll (setupOnce connStr testSchema testTable True) $ do
+    sharedPool <- runIO (createSharedPool connStr)
+    around (withPool sharedPool) $ do
+      it "fires a requested schedule the tick would not match" $ \env -> do
+        let Right cj =
+              cronJob
+                "run-nightly"
+                "0 3 * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "manual"))
+            now = mkTime 2025 6 15 12 30 0
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-nightly"
+          processRunRequests testLogConfig testSchema [cj] now
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` [SimpleTask "manual"]
+
+        Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-nightly"
+        CS.runRequestedAt row `shouldBe` Nothing
+
+      it "records the manual run at wall-clock time without advancing the gate" $ \env -> do
+        let Right cj = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "gate"))
+            now = mkTime 2025 6 15 12 30 45
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-gate"
+          processRunRequests testLogConfig testSchema [cj] now
+
+        Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-gate"
+        CS.lastManualRunAt row `shouldBe` Just now
+        CS.lastFiredAt row `shouldBe` Nothing
+
+      it "leaves last_manual_run_at alone when the run is skipped" $ \env -> do
+        let Right cj = cronJob "run-skipmark" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-skipmark"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          _ <- Ops.requestCronRun testSchema "run-skipmark"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 31 0)
+
+        Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-skipmark"
+        CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
+
+      it "AllowOverlap: a manual run does not suppress a Backfill replay" $ \env -> do
+        let Right base =
+              cronJob
+                "run-backfill"
+                "0 * * * *"
+                AllowOverlap
+                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
+            cj = base {backfill = Backfill 86400}
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-backfill"]
+          _ <- Ops.requestCronRun testSchema "run-backfill"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        sort [t | SimpleTask t <- map payload jobs]
+          `shouldBe` ["2025-06-15T10:00", "2025-06-15T11:00", "2025-06-15T12:00", "2025-06-15T12:30"]
+
+      it "SkipOverlap: a manual run's active job dedups a Backfill replay" $ \env -> do
+        let Right base =
+              cronJob
+                "run-skipbf"
+                "0 * * * *"
+                SkipOverlap
+                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
+            cj = base {backfill = Backfill 86400}
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-skipbf"]
+          _ <- Ops.requestCronRun testSchema "run-skipbf"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` [SimpleTask "2025-06-15T12:30"]
+
+      it "does nothing without a pending request" $ \env -> do
+        let Right cj = cronJob "run-none" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        length jobs `shouldBe` 0
+
+      it "passes the builder a minute-truncated Live tick" $ \env -> do
+        let Right cj =
+              cronJob
+                "run-tick"
+                "0 3 * * *"
+                AllowOverlap
+                (\_ t -> defaultJob (SimpleTask (T.pack (show t))))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-tick"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` [SimpleTask (T.pack (show (mkTime 2025 6 15 12 30 0)))]
+
+      it "claims a request exactly once across pools" $ \env -> do
+        let Right cj = cronJob "run-once" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          void $ Ops.requestCronRun testSchema "run-once"
+
+        won <- runSimpleDb env $ Ops.claimCronRun testSchema "run-once"
+        lost <- runSimpleDb env $ Ops.claimCronRun testSchema "run-once"
+        fmap CS.name won `shouldBe` Just "run-once"
+        fmap CS.name lost `shouldBe` Nothing
+
+      it "SkipOverlap: a request is skipped while a job is already active" $ \env -> do
+        let Right cj = cronJob "run-skip" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-skip"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          _ <- Ops.requestCronRun testSchema "run-skip"
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 31 0)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        length jobs `shouldBe` 1
+
+      it "disabling a schedule drops its pending request" $ \env -> do
+        let Right cj = cronJob "run-off" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          _ <- Ops.requestCronRun testSchema "run-off"
+          _ <-
+            Ops.updateCronSchedule
+              testSchema
+              "run-off"
+              CronScheduleUpdate
+                { overrideExpression = Nothing
+                , overrideOverlap = Nothing
+                , overrideTimezone = Nothing
+                , enabled = Just False
+                }
+          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+
+        jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
+        length jobs `shouldBe` 0
+        Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-off"
+        CS.runRequestedAt row `shouldBe` Nothing
 
   -- DB integration tests for cron schedule management
   describe "initCronSchedules" $ beforeAll (setupOnce connStr testSchema testTable True) $ do

@@ -330,15 +330,16 @@ runWorkerPool config = do
       traverse_ (atomically . writeTVar (pauseVar config)) mPaused
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
-  cronRunVar <- STM.newTVarIO Set.empty
+  cronRunVar <- STM.newTVarIO False
   let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
       pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
       cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
       cronRunChannel = T.unpack (Schema.cronRunNotifyChannel schemaName)
+      cronNames = Set.fromList (map name (cronJobs config))
       cronHandlers =
         if null (cronJobs config)
           then []
-          else [(cronRunChannel, handleCronRunNotif cronRunVar)]
+          else [(cronRunChannel, handleCronRunNotif cronNames cronRunVar)]
       handlers =
         [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
         , (pauseChannel, handlePauseNotif config)

@@ -914,7 +914,13 @@
                   </div>
                 </td>
 
-                <td class="text-nowrap" x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td class="text-nowrap">
+                  <span x-text="formatTime(lastFired(s).at, 'Never')"></span>
+                  <span x-show="lastFired(s).manual" class="badge bg-secondary-subtle text-secondary-emphasis ms-1"
+                    title="Last fired by a manual run, not the schedule">manual</span>
+                  <span x-show="isRunPending(s)" class="badge bg-warning-subtle text-warning-emphasis ms-1"
+                    title="A manual run is waiting for a worker pool to claim it">run pending</span>
+                </td>
                 <td class="text-nowrap" x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
 
                 <!-- Actions -->
@@ -939,81 +945,6 @@
         </table>
       </div>
 
-      <!-- Type-to-confirm enable/disable (ARB_CONFIG.cronConfirm === 'type'). -->
-      <div class="modal fade" id="cronToggleModal" tabindex="-1" aria-labelledby="cronToggleModalLabel">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="cronToggleModalLabel">Disable schedule <code x-text="toggleConfirm.name"></code></h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted small mb-3">Disabling stops scheduled ticks for this schedule. Manual runs are refused until it is re-enabled.</p>
-              <label class="form-label small">Type the schedule name <code x-text="toggleConfirm.name"></code> to confirm:</label>
-              <input type="text" class="form-control form-control-sm" x-model="toggleConfirm.text" autocomplete="off" spellcheck="false"
-                     @keydown.enter.prevent="confirmToggleEnabled()" :placeholder="toggleConfirm.name">
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-warning btn-sm" @click="confirmToggleEnabled()" :disabled="!toggleConfirmValid || isBusy(toggleConfirm.name)">Disable schedule</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Override editor -->
-      <div class="modal fade" id="cronEditModal" tabindex="-1" aria-labelledby="cronEditModalLabel">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="cronEditModalLabel">Override <code x-text="edit.name"></code></h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted small">Overrides take effect on the next tick. Uncheck a field to revert it to the declared default.</p>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronExprOn" x-model="edit.exprOn">
-                  <label class="form-check-label" for="cronExprOn">Expression</label>
-                </div>
-                <input type="text" class="form-control form-control-sm" x-model="edit.expr" :disabled="!edit.exprOn"
-                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultExpression}`">
-                <small class="text-muted" x-text="editDescribe()"></small>
-              </div>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronOverlapOn" x-model="edit.overlapOn">
-                  <label class="form-check-label" for="cronOverlapOn">Overlap policy</label>
-                </div>
-                <select class="form-select form-select-sm" x-model="edit.overlap" :disabled="!edit.overlapOn">
-                  <option value="SkipOverlap">SkipOverlap</option>
-                  <option value="AllowOverlap">AllowOverlap</option>
-                </select>
-                <small class="text-muted" x-show="!edit.overlapOn" x-text="`default ${edit.defaultOverlap}`"></small>
-              </div>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronTzOn" x-model="edit.tzOn">
-                  <label class="form-check-label" for="cronTzOn">Timezone</label>
-                </div>
-                <select class="form-select form-select-sm" x-model="edit.tz" :disabled="!edit.tzOn">
-                  <template x-for="g in tzGroups()" :key="g.name">
-                    <optgroup :label="g.name">
-                      <template x-for="z in g.zones" :key="z"><option :value="z" x-text="z"></option></template>
-                    </optgroup>
-                  </template>
-                </select>
-                <small class="text-muted" x-show="!edit.tzOn" x-text="`default ${edit.defaultTimezone}`"></small>
-              </div>
-              <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-primary btn-sm" @click="saveEdit()" :disabled="edit.saving">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
 
     <!-- Workers Tab -->
@@ -1402,7 +1333,9 @@
 
                 <!-- Queue (drill into its detail view) -->
                 <td class="text-truncate">
-                  <a href="#" @click.prevent="openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
+                  <a x-show="queueServed(s)" href="#" @click.prevent="openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
+                  <span x-show="!queueServed(s)" class="text-muted" x-text="s.queueName"
+                    :title="s.queueName + ' is not served by this server'"></span>
                 </td>
 
                 <!-- Expression -->
@@ -1437,7 +1370,13 @@
                   </div>
                 </td>
 
-                <td class="text-nowrap" x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td class="text-nowrap">
+                  <span x-text="formatTime(lastFired(s).at, 'Never')"></span>
+                  <span x-show="lastFired(s).manual" class="badge bg-secondary-subtle text-secondary-emphasis ms-1"
+                    title="Last fired by a manual run, not the schedule">manual</span>
+                  <span x-show="isRunPending(s)" class="badge bg-warning-subtle text-warning-emphasis ms-1"
+                    title="A manual run is waiting for a worker pool to claim it">run pending</span>
+                </td>
                 <td class="text-nowrap" x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
 
                 <!-- Actions -->
@@ -1462,81 +1401,6 @@
         </table>
       </div>
 
-      <!-- Type-to-confirm enable/disable (ARB_CONFIG.cronConfirm === 'type'). -->
-      <div class="modal fade" id="cronToggleModal" tabindex="-1" aria-labelledby="cronToggleModalLabel">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="cronToggleModalLabel">Disable schedule <code x-text="toggleConfirm.name"></code></h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted small mb-3">Disabling stops scheduled ticks for this schedule. Manual runs are refused until it is re-enabled.</p>
-              <label class="form-label small">Type the schedule name <code x-text="toggleConfirm.name"></code> to confirm:</label>
-              <input type="text" class="form-control form-control-sm" x-model="toggleConfirm.text" autocomplete="off" spellcheck="false"
-                     @keydown.enter.prevent="confirmToggleEnabled()" :placeholder="toggleConfirm.name">
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-warning btn-sm" @click="confirmToggleEnabled()" :disabled="!toggleConfirmValid || isBusy(toggleConfirm.name)">Disable schedule</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Override editor -->
-      <div class="modal fade" id="cronEditModal" tabindex="-1" aria-labelledby="cronEditModalLabel">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="cronEditModalLabel">Override <code x-text="edit.name"></code> <span class="text-muted small" x-text="edit.queueName"></span></h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted small">Overrides take effect on the next tick. Uncheck a field to revert it to the declared default.</p>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronExprOnG" x-model="edit.exprOn">
-                  <label class="form-check-label" for="cronExprOnG">Expression</label>
-                </div>
-                <input type="text" class="form-control form-control-sm" x-model="edit.expr" :disabled="!edit.exprOn"
-                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultExpression}`">
-                <small class="text-muted" x-text="editDescribe()"></small>
-              </div>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronOverlapOnG" x-model="edit.overlapOn">
-                  <label class="form-check-label" for="cronOverlapOnG">Overlap policy</label>
-                </div>
-                <select class="form-select form-select-sm" x-model="edit.overlap" :disabled="!edit.overlapOn">
-                  <option value="SkipOverlap">SkipOverlap</option>
-                  <option value="AllowOverlap">AllowOverlap</option>
-                </select>
-                <small class="text-muted" x-show="!edit.overlapOn" x-text="`default ${edit.defaultOverlap}`"></small>
-              </div>
-              <div class="mb-3">
-                <div class="form-check form-switch">
-                  <input class="form-check-input" type="checkbox" id="cronTzOnG" x-model="edit.tzOn">
-                  <label class="form-check-label" for="cronTzOnG">Timezone</label>
-                </div>
-                <select class="form-select form-select-sm" x-model="edit.tz" :disabled="!edit.tzOn">
-                  <template x-for="g in tzGroups()" :key="g.name">
-                    <optgroup :label="g.name">
-                      <template x-for="z in g.zones" :key="z"><option :value="z" x-text="z"></option></template>
-                    </optgroup>
-                  </template>
-                </select>
-                <small class="text-muted" x-show="!edit.tzOn" x-text="`default ${edit.defaultTimezone}`"></small>
-              </div>
-              <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-primary btn-sm" @click="saveEdit()" :disabled="edit.saving">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
     </div>
   </template>
@@ -1675,6 +1539,82 @@
 </div>
 
 <!-- Toast container -->
+<!-- Cron modals, shared by the per-queue Cron tab and the global Cron overview. -->
+<div class="modal fade" id="cronToggleModal" tabindex="-1" aria-labelledby="cronToggleModalLabel">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="cronToggleModalLabel">Disable schedule <code x-text="$store.cronEdit.toggleConfirm.name"></code></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">Disabling stops scheduled ticks for this schedule. Manual runs are refused until it is re-enabled.</p>
+        <label class="form-label small">Type the schedule name <code x-text="$store.cronEdit.toggleConfirm.name"></code> to confirm:</label>
+        <input type="text" class="form-control form-control-sm" x-model="$store.cronEdit.toggleConfirm.text" autocomplete="off" spellcheck="false"
+               @keydown.enter.prevent="$store.cronEdit.confirmToggleEnabled()" :placeholder="$store.cronEdit.toggleConfirm.name">
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning btn-sm" @click="$store.cronEdit.confirmToggleEnabled()" :disabled="!$store.cronEdit.toggleConfirmValid || $store.cronEdit.isHostBusy($store.cronEdit.toggleConfirm.name)">Disable schedule</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Cron override editor, shared. -->
+<div class="modal fade" id="cronEditModal" tabindex="-1" aria-labelledby="cronEditModalLabel">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="cronEditModalLabel">Override <code x-text="$store.cronEdit.edit.name"></code> <span class="text-muted small" x-text="$store.cronEdit.edit.queueName"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">Overrides take effect on the next tick. Uncheck a field to revert it to the declared default.</p>
+        <div class="mb-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="cronExprOn" x-model="$store.cronEdit.edit.exprOn">
+            <label class="form-check-label" for="cronExprOn">Expression</label>
+          </div>
+          <input type="text" class="form-control form-control-sm" x-model="$store.cronEdit.edit.expr" :disabled="!$store.cronEdit.edit.exprOn"
+            @keydown.enter.prevent="$store.cronEdit.saveEdit()" :placeholder="`default ${$store.cronEdit.edit.defaultExpression}`">
+          <small class="text-muted" x-text="$store.cronEdit.editDescribe()"></small>
+        </div>
+        <div class="mb-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="cronOverlapOn" x-model="$store.cronEdit.edit.overlapOn">
+            <label class="form-check-label" for="cronOverlapOn">Overlap policy</label>
+          </div>
+          <select class="form-select form-select-sm" x-model="$store.cronEdit.edit.overlap" :disabled="!$store.cronEdit.edit.overlapOn">
+            <option value="SkipOverlap">SkipOverlap</option>
+            <option value="AllowOverlap">AllowOverlap</option>
+          </select>
+          <small class="text-muted" x-show="!$store.cronEdit.edit.overlapOn" x-text="`default ${$store.cronEdit.edit.defaultOverlap}`"></small>
+        </div>
+        <div class="mb-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="cronTzOn" x-model="$store.cronEdit.edit.tzOn">
+            <label class="form-check-label" for="cronTzOn">Timezone</label>
+          </div>
+          <select class="form-select form-select-sm" x-model="$store.cronEdit.edit.tz" :disabled="!$store.cronEdit.edit.tzOn">
+            <template x-for="g in $store.cronEdit.tzGroups()" :key="g.name">
+              <optgroup :label="g.name">
+                <template x-for="z in g.zones" :key="z"><option :value="z" x-text="z"></option></template>
+              </optgroup>
+            </template>
+          </select>
+          <small class="text-muted" x-show="!$store.cronEdit.edit.tzOn" x-text="`default ${$store.cronEdit.edit.defaultTimezone}`"></small>
+        </div>
+        <div class="alert alert-danger py-2 mb-0" x-show="$store.cronEdit.edit.error" x-text="$store.cronEdit.edit.error"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" @click="$store.cronEdit.saveEdit()" :disabled="$store.cronEdit.edit.saving">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
 
 <!-- Scripts -->

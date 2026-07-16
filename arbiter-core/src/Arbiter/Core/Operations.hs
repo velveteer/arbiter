@@ -118,7 +118,8 @@ module Arbiter.Core.Operations
   , RunRequestOutcome (..)
   , requestCronRun
   , claimCronRun
-  , clearCronRunRequests
+  , touchCronManualRun
+  , pendingCronRuns
 
     -- * Worker Registry Operations
   , registerWorker
@@ -2293,7 +2294,7 @@ updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mT
           , case mEnabled of
               Nothing -> ([], [])
               Just True -> (["enabled = TRUE"], [])
-              Just False -> (["enabled = FALSE"], [])
+              Just False -> (["enabled = FALSE", "run_requested_at = NULL"], [])
           ]
   if null clauses
     then pure 0
@@ -2396,32 +2397,49 @@ requestCronRun schemaName scheduleName = do
     1 -> RunReqDisabled
     _ -> RunReqNotFound
 
--- | Claim a pending run request. 'True' = caller proceeds with the insert.
+-- | Claim a pending run request, returning the claimed row. 'Nothing' = another
+-- pool won the claim, or the schedule was disabled meanwhile.
 claimCronRun
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
   -> Text
   -- ^ Schedule name
-  -> m Bool
+  -> m (Maybe CronScheduleRow)
 claimCronRun schemaName scheduleName = do
   rows <-
-    executeStatement
+    executeQuery
       (Tmpl.claimCronRunSQL schemaName)
       [pval CText scheduleName]
-  pure (rows > 0)
+      cronScheduleRowCodec
+  pure $ listToMaybe rows
 
--- | Clear pending run requests for the named schedules without firing.
-clearCronRunRequests
+-- | Record when a manual run last fired a job for a cron schedule.
+touchCronManualRun
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> UTCTime
+  -- ^ When the manual run fired
+  -> Text
+  -- ^ Schedule name
+  -> m Int64
+touchCronManualRun schemaName firedAt scheduleName =
+  executeStatement
+    (Tmpl.touchCronManualRunSQL schemaName)
+    [pval CTimestamptz firedAt, pval CText scheduleName]
+
+-- | Enabled schedules among @names@ that have a pending run request.
+pendingCronRuns
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
   -> [Text]
   -- ^ Schedule names
-  -> m Int64
-clearCronRunRequests _ [] = pure 0
-clearCronRunRequests schemaName names =
-  executeStatement (Tmpl.clearCronRunRequestsSQL schemaName) [parr CText names]
+  -> m [Text]
+pendingCronRuns _ [] = pure []
+pendingCronRuns schemaName names =
+  executeQuery (Tmpl.pendingCronRunsSQL schemaName) [parr CText names] (col "name" CText)
 
 -- ---------------------------------------------------------------------------
 -- Worker Registry Operations

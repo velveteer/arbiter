@@ -624,6 +624,7 @@ Global endpoints under `/api/v1/`:
 | `GET` | `events/stream` | SSE stream for real-time notifications |
 | `GET` | `cron/schedules` | List cron schedules |
 | `PATCH` | `cron/schedules/:name` | Override cron expression at runtime |
+| `POST` | `cron/schedules/:name/run` | Run an enabled schedule once, out of band |
 | `GET` | `workers` | List registered workers |
 | `POST` | `workers/:id/pause` | Pause a single worker pool |
 | `POST` | `workers/:id/resume` | Resume a single worker pool |

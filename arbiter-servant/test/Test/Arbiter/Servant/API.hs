@@ -34,7 +34,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Time (addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.HTTP.Types (status200, status400, status404)
+import Network.HTTP.Types (status200, status204, status400, status404, status409)
 import Test.Hspec
 import Test.Hspec.Wai
 
@@ -1012,6 +1012,36 @@ spec connStr = do
           (encode [aesonQQ|{"overrideTimezone": "Made/Up_Zone"}|])
 
       liftIO $ simpleStatus resp `shouldBe` status400
+
+    it "POST /api/v1/cron/schedules/:name/run stamps a run request" $ do
+      seedCron "run-me" "0 3 * * *" "SkipOverlap"
+
+      resp <- request "POST" "/api/v1/cron/schedules/run-me/run" [] ""
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status204
+        Just row <- runSimpleDb mkEnv $ Ops.getCronScheduleByName testSchema "run-me"
+        CS.runRequestedAt row `shouldSatisfy` isJust
+
+    it "POST /api/v1/cron/schedules/:name/run 404s an unknown schedule" $ do
+      resp <- request "POST" "/api/v1/cron/schedules/no-such-schedule/run" [] ""
+      liftIO $ simpleStatus resp `shouldBe` status404
+
+    it "POST /api/v1/cron/schedules/:name/run 409s a disabled schedule" $ do
+      seedCron "run-disabled" "0 3 * * *" "SkipOverlap"
+      _ <-
+        request
+          "PATCH"
+          "/api/v1/cron/schedules/run-disabled"
+          [("Content-Type", "application/json")]
+          (encode [aesonQQ|{"enabled": false}|])
+
+      resp <- request "POST" "/api/v1/cron/schedules/run-disabled/run" [] ""
+
+      liftIO $ do
+        simpleStatus resp `shouldBe` status409
+        Just row <- runSimpleDb mkEnv $ Ops.getCronScheduleByName testSchema "run-disabled"
+        CS.runRequestedAt row `shouldBe` Nothing
 
     it "PATCH /api/v1/cron/schedules/:name rejects invalid overlap policy" $ do
       seedCron "bad-overlap" "* * * * *" "AllowOverlap"

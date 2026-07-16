@@ -284,6 +284,8 @@ cronScheduleRowCodec =
     <*> col "enabled" CBool
     <*> ncol "last_fired_at" CTimestamptz
     <*> ncol "last_checked_at" CTimestamptz
+    <*> ncol "run_requested_at" CTimestamptz
+    <*> ncol "last_manual_run_at" CTimestamptz
     <*> col "created_at" CTimestamptz
     <*> col "updated_at" CTimestamptz
 

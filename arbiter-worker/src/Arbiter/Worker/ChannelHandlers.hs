@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | STM handlers for the worker pool's NOTIFY channels (pause, force-cancel).
--- Each handler decodes the JSON payload and reacts only if the message
+-- | STM handlers for the worker pool's NOTIFY channels.
+-- Each handler decodes the payload and reacts only if the message
 -- addresses this worker.
 module Arbiter.Worker.ChannelHandlers
   ( RunningJobs
@@ -20,7 +20,7 @@ import Control.Exception
   , asyncExceptionFromException
   , asyncExceptionToException
   )
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Data.Aeson qualified as Aeson
 import Data.Foldable (traverse_)
 import Data.Int (Int64)
@@ -74,14 +74,20 @@ handleCancelNotif config runningJobs notif =
     fireCancel a =
       liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) JobForceCancelled
 
--- | Record the run-now request's schedule name from the NOTIFY payload.
+-- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
+-- The cron-run channel is per-schema, so pools that do not own the named
+-- schedule ignore the wake instead of issuing a useless pending-runs scan.
 handleCronRunNotif
   :: (MonadUnliftIO m)
-  => TVar (Set Text)
+  => Set Text
+  -- ^ This pool's own cron schedule names
+  -> TVar Bool
   -> PS.Notification
   -> m ()
-handleCronRunNotif runNowVar notif =
-  atomically $ STM.modifyTVar' runNowVar (Set.insert (decodeUtf8Lenient (PS.notificationData notif)))
+handleCronRunNotif ownNames runNowVar notif =
+  when (Set.member (decodeUtf8Lenient (PS.notificationData notif)) ownNames) $
+    atomically $
+      STM.writeTVar runNowVar True
 
 -- | Run @work@ as an async registered in 'RunningJobs' for its lifetime.
 withRegisteredJobs

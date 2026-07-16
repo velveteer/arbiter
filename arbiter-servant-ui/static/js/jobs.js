@@ -502,7 +502,14 @@ document.addEventListener('alpine:init', () => {
         if (this.insertDedupKey) body.dedupKey = {key: this.insertDedupKey, strategy: this.insertDedupStrategy};
         if (this.insertPriority) body.priority = parseInt(this.insertPriority, 10);
         if (notVisibleUntil) body.notVisibleUntil = notVisibleUntil;
-        if (this.insertMaxAttempts) body.maxAttempts = parseInt(this.insertMaxAttempts, 10);
+        if (this.insertMaxAttempts) {
+          const maxAttempts = parseInt(this.insertMaxAttempts, 10);
+          if (Number.isNaN(maxAttempts) || maxAttempts < 1) {
+            this.insertError = 'Max attempts must be at least 1.';
+            return;
+          }
+          body.maxAttempts = maxAttempts;
+        }
 
         await ArbiterAPI.insertJob(queue, body);
 
