@@ -13,6 +13,7 @@ module Arbiter.Core.Sql.Cron
   , tryAcquireCronLeaderSQL
   , requestCronRunSQL
   , claimCronRunSQL
+  , clearCronRunRequestsSQL
   ) where
 
 import Data.Text (Text)
@@ -99,17 +100,42 @@ tryAcquireCronLeaderSQL :: Text
 tryAcquireCronLeaderSQL =
   "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
 
--- | Stamp a manual run request and NOTIFY the run-now channel for the matched
--- row. Returns the matched-row count (0 = no such schedule). Parameters: schedule name.
+-- | Stamp a run request on an enabled schedule and NOTIFY. Returns 0 (no such
+-- schedule), 1 (disabled), or 2 (stamped).
 requestCronRunSQL :: Text -> Text
 requestCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
       chan = T.replace "'" "''" (cronRunNotifyChannel schemaName)
-   in "WITH upd AS (UPDATE " <> tbl <> " SET run_requested_at = NOW(), updated_at = NOW() WHERE name = ? RETURNING name), notif AS (SELECT pg_notify('" <> chan <> "', name) FROM upd) SELECT count(*)::int8 AS count FROM upd WHERE (SELECT count(*) FROM notif) >= 0"
+   in "WITH found AS (SELECT enabled FROM "
+        <> tbl
+        <> " WHERE name = ?),"
+        <> " upd AS ("
+        <> "UPDATE "
+        <> tbl
+        <> " SET run_requested_at = NOW(), updated_at = NOW()"
+        <> " WHERE name = ? AND enabled"
+        <> " RETURNING pg_notify('"
+        <> chan
+        <> "', name))"
+        <> " SELECT (CASE"
+        <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 2"
+        <> " WHEN EXISTS (SELECT 1 FROM found) THEN 1"
+        <> " ELSE 0 END)::int8 AS status"
 
--- | Claim a fresh run request, clearing the flag and advancing the gate.
--- Parameters: minute floor, schedule name, staleness cutoff.
+-- | Claim a pending run request, clearing the flag.
 claimCronRunSQL :: Text -> Text
 claimCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET run_requested_at = NULL, last_fired_at = GREATEST(last_fired_at, ?), updated_at = NOW() WHERE name = ? AND enabled AND run_requested_at IS NOT NULL AND run_requested_at >= ?"
+   in "UPDATE "
+        <> tbl
+        <> " SET run_requested_at = NULL, updated_at = NOW()"
+        <> " WHERE name = ? AND enabled AND run_requested_at IS NOT NULL"
+
+-- | Clear pending run requests for the named schedules without firing.
+clearCronRunRequestsSQL :: Text -> Text
+clearCronRunRequestsSQL schemaName =
+  let tbl = cronSchedulesTable schemaName
+   in "UPDATE "
+        <> tbl
+        <> " SET run_requested_at = NULL, updated_at = NOW()"
+        <> " WHERE name = ANY(?) AND run_requested_at IS NOT NULL"

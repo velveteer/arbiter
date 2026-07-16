@@ -118,6 +118,7 @@ import Arbiter.Worker.ChannelHandlers
   ( JobForceCancelled (..)
   , RunningJobs
   , handleCancelNotif
+  , handleCronRunNotif
   , handlePauseNotif
   , withRegisteredJobs
   )
@@ -329,7 +330,7 @@ runWorkerPool config = do
       traverse_ (atomically . writeTVar (pauseVar config)) mPaused
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
-  cronRunVar <- STM.newTVarIO False
+  cronRunVar <- STM.newTVarIO Set.empty
   let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
       pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
       cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
@@ -337,7 +338,7 @@ runWorkerPool config = do
       cronHandlers =
         if null (cronJobs config)
           then []
-          else [(cronRunChannel, \_ -> atomically (STM.writeTVar cronRunVar True))]
+          else [(cronRunChannel, handleCronRunNotif cronRunVar)]
       handlers =
         [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
         , (pauseChannel, handlePauseNotif config)

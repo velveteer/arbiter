@@ -8,6 +8,7 @@ module Arbiter.Worker.ChannelHandlers
   , JobForceCancelled (..)
   , handlePauseNotif
   , handleCancelNotif
+  , handleCronRunNotif
   , withRegisteredJobs
   ) where
 
@@ -24,6 +25,10 @@ import Data.Aeson qualified as Aeson
 import Data.Foldable (traverse_)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text.Encoding (decodeUtf8Lenient)
 import Data.UUID (UUID)
 import Database.PostgreSQL.Simple.Notification qualified as PS
 import UnliftIO (MonadUnliftIO, atomically, liftIO)
@@ -68,6 +73,15 @@ handleCancelNotif config runningJobs notif =
     -- Fork so throwTo can't block the listener on the target unwinding.
     fireCancel a =
       liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) JobForceCancelled
+
+-- | Record the run-now request's schedule name from the NOTIFY payload.
+handleCronRunNotif
+  :: (MonadUnliftIO m)
+  => TVar (Set Text)
+  -> PS.Notification
+  -> m ()
+handleCronRunNotif runNowVar notif =
+  atomically $ STM.modifyTVar' runNowVar (Set.insert (decodeUtf8Lenient (PS.notificationData notif)))
 
 -- | Run @work@ as an async registered in 'RunningJobs' for its lifetime.
 withRegisteredJobs

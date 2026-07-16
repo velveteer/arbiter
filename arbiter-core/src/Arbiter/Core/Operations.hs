@@ -115,8 +115,10 @@ module Arbiter.Core.Operations
   , touchCronChecked
   , tryFireCronGate
   , tryAcquireCronLeader
+  , RunRequestOutcome (..)
   , requestCronRun
   , claimCronRun
+  , clearCronRunRequests
 
     -- * Worker Registry Operations
   , registerWorker
@@ -2374,38 +2376,52 @@ tryAcquireCronLeader schemaName queueName scheduleName = do
     (True : _) -> True
     _ -> False
 
--- | Stamp a manual run request on a schedule and NOTIFY the run-now channel.
--- 'False' = no such schedule.
+-- | Result of a manual run request.
+data RunRequestOutcome = RunReqNotFound | RunReqDisabled | RunReqStamped
+  deriving stock (Eq, Show)
+
+-- | Stamp a manual run request on an enabled schedule and NOTIFY the run-now
+-- channel.
 requestCronRun
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
   -> Text
   -- ^ Schedule name
-  -> m Bool
+  -> m RunRequestOutcome
 requestCronRun schemaName scheduleName = do
-  n <- queryCount (Tmpl.requestCronRunSQL schemaName) [pval CText scheduleName]
-  pure (n > 0)
+  status <- queryCount (Tmpl.requestCronRunSQL schemaName) [pval CText scheduleName, pval CText scheduleName]
+  pure $ case status of
+    2 -> RunReqStamped
+    1 -> RunReqDisabled
+    _ -> RunReqNotFound
 
--- | Claim a fresh run request within the staleness window. 'True' = caller
--- proceeds with the insert. The claim clears the flag and advances the gate.
+-- | Claim a pending run request. 'True' = caller proceeds with the insert.
 claimCronRun
   :: (MonadArbiter m)
   => SchemaName
   -- ^ Schema name
   -> Text
   -- ^ Schedule name
-  -> UTCTime
-  -- ^ Minute floor for the gate advance
-  -> UTCTime
-  -- ^ Staleness cutoff (requests older than this are ignored)
   -> m Bool
-claimCronRun schemaName scheduleName minuteFloor cutoff = do
+claimCronRun schemaName scheduleName = do
   rows <-
     executeStatement
       (Tmpl.claimCronRunSQL schemaName)
-      [pval CTimestamptz minuteFloor, pval CText scheduleName, pval CTimestamptz cutoff]
+      [pval CText scheduleName]
   pure (rows > 0)
+
+-- | Clear pending run requests for the named schedules without firing.
+clearCronRunRequests
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> [Text]
+  -- ^ Schedule names
+  -> m Int64
+clearCronRunRequests _ [] = pure 0
+clearCronRunRequests schemaName names =
+  executeStatement (Tmpl.clearCronRunRequestsSQL schemaName) [parr CText names]
 
 -- ---------------------------------------------------------------------------
 -- Worker Registry Operations

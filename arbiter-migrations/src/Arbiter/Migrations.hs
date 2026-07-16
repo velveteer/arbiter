@@ -43,7 +43,12 @@ import Arbiter.Core.Concurrency.Schema
   , upsertConcurrencyPolicyRowSQL
   )
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..), registryConcurrencyPolicies, registryConcurrencyTables)
-import Arbiter.Core.CronSchedule (addQueueNameColumnSQL, addRunRequestedColumnSQL, addTimezoneColumnSQL, createCronSchedulesTableSQL)
+import Arbiter.Core.CronSchedule
+  ( addQueueNameColumnSQL
+  , addRunRequestedColumnSQL
+  , addTimezoneColumnSQL
+  , createCronSchedulesTableSQL
+  )
 import Arbiter.Core.Gates (createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName

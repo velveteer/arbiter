@@ -54,6 +54,8 @@ import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (unfoldr)
 import Data.Maybe (fromMaybe, isNothing)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -246,8 +248,8 @@ initCronSchedules schemaName queueName jobs logCfg = do
 runCronScheduler
   :: (MonadUnliftIO m, QueueOperation m registry payload)
   => TVar WorkerState
-  -> TVar Bool
-  -- ^ Set by the run-now listener to wake the scheduler out of band.
+  -> TVar (Set Text)
+  -- ^ Schedule names signalled by the run-now listener.
   -> LogConfig
   -> SchemaName
   -> Text
@@ -256,6 +258,10 @@ runCronScheduler
   -> m ()
 runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
   initCronSchedules schemaName queueName jobs logCfg
+  clearOutcome <- tryAny $ Ops.clearCronRunRequests schemaName (map name jobs)
+  case clearOutcome of
+    Left e -> logCron logCfg Error $ "Cron run-request startup clear failed: " <> T.pack (show e)
+    Right _ -> pure ()
   startupNow <- liftIO getCurrentTime
   shuttingDown <- isShuttingDown stateVar
   unless shuttingDown $
@@ -271,9 +277,9 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
           now <- liftIO getCurrentTime
           processCronCatchUp logCfg schemaName queueName jobs now
           loop
-        WakeRunNow -> do
+        WakeRunNow requested -> do
           now <- liftIO getCurrentTime
-          processRunRequests logCfg schemaName jobs now
+          processRunRequests logCfg schemaName jobs requested now
           loop
 
 -- | Scheduler catch-up step. Each cron runs in its own transaction.
@@ -420,24 +426,15 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
       pure True
 
--- | Staleness window for manual run requests. A request older than this is
--- cleared without firing, so a click made while the worker was down does not
--- fire on recovery.
-runRequestStaleWindow :: NominalDiffTime
-runRequestStaleWindow = 5
-
--- | Process pending manual run requests. Each schedule runs in its own
--- transaction. A claimed request fires 'builder' with the current time and
--- no dedup key, so it always inserts.
+-- | Process run requests for the schedules named in @requested@, one
+-- transaction each. A claim fires 'builder' with no dedup key.
 processRunRequests
   :: (MonadUnliftIO m, QueueOperation m registry payload)
-  => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
-processRunRequests logCfg schemaName jobs now = do
-  let minuteFloor = truncateToMinute now
-      cutoff = addUTCTime (negate runRequestStaleWindow) now
-  forM_ jobs $ \cj -> do
+  => LogConfig -> Text -> [CronJob payload] -> Set Text -> UTCTime -> m ()
+processRunRequests logCfg schemaName jobs requested now =
+  forM_ (filter (\cj -> Set.member (name cj) requested) jobs) $ \cj -> do
     outcome <- tryAny . withDbTransaction $ do
-      claimed <- Ops.claimCronRun schemaName (name cj) minuteFloor cutoff
+      claimed <- Ops.claimCronRun schemaName (name cj)
       when claimed $ do
         let jobWrite = (builder cj Live now) {dedupKey = Nothing}
         void $ HL.insertJob jobWrite
@@ -474,11 +471,11 @@ computeDelayMicros now =
    in max 0 (min 120_000_000 rawMicros)
 
 -- | Why the scheduler woke.
-data WakeReason = WakeShutdown | WakeMinute | WakeRunNow
+data WakeReason = WakeShutdown | WakeMinute | WakeRunNow (Set Text)
 
 -- | Block until the next minute boundary, a run-now signal, or shutdown.
--- Shutdown wins, then a pending run-now, then the minute timer.
-waitForWake :: (MonadIO m) => TVar WorkerState -> TVar Bool -> m WakeReason
+-- Shutdown wins, then an elapsed minute boundary, then a pending run-now.
+waitForWake :: (MonadIO m) => TVar WorkerState -> TVar (Set Text) -> m WakeReason
 waitForWake stateVar runNowVar = liftIO $ do
   now <- getCurrentTime
   timerVar <- registerDelay (computeDelayMicros now)
@@ -487,12 +484,14 @@ waitForWake stateVar runNowVar = liftIO $ do
     case st of
       ShuttingDown -> pure WakeShutdown
       _ -> do
-        runNow <- readTVar runNowVar
-        if runNow
-          then writeTVar runNowVar False >> pure WakeRunNow
+        timedOut <- readTVar timerVar
+        if timedOut
+          then pure WakeMinute
           else do
-            timedOut <- readTVar timerVar
-            if timedOut then pure WakeMinute else retry
+            requested <- readTVar runNowVar
+            if Set.null requested
+              then retry
+              else writeTVar runNowVar Set.empty >> pure (WakeRunNow requested)
 
 -- | Snapshot of the current 'WorkerState' for use outside STM.
 isShuttingDown :: (MonadIO m) => TVar WorkerState -> m Bool
