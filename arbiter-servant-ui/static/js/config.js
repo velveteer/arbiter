@@ -25,8 +25,11 @@ const ARB_TIMING = {
 // Behavioral config. pauseConfirm gates how a queue is paused (resume always uses
 // the light two-click arm): 'type' — modal, must type the queue name; 'arm' — inline
 // two-click; 'off' — hide the pause button entirely.
+// cronConfirm gates disabling a cron schedule (enabling always applies
+// immediately): 'type' — modal, must type the schedule name; 'off' — immediate.
 const ARB_CONFIG = {
   pauseConfirm: 'type',
+  cronConfirm: 'type',
 };
 
 // Registry of window-dispatched event-bus names.

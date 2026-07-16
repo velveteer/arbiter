@@ -910,7 +910,7 @@
                   <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" :checked="s.enabled"
                       :disabled="isBusy(s.name)"
-                      @change="toggleEnabled(s)">
+                      @change="onToggleEnabled(s, $event)">
                   </div>
                 </td>
 
@@ -937,6 +937,28 @@
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Type-to-confirm enable/disable (ARB_CONFIG.cronConfirm === 'type'). -->
+      <div class="modal fade" id="cronToggleModal" tabindex="-1" aria-labelledby="cronToggleModalLabel">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="cronToggleModalLabel">Disable schedule <code x-text="toggleConfirm.name"></code></h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small mb-3">Disabling stops scheduled ticks for this schedule. Manual runs are refused until it is re-enabled.</p>
+              <label class="form-label small">Type the schedule name <code x-text="toggleConfirm.name"></code> to confirm:</label>
+              <input type="text" class="form-control form-control-sm" x-model="toggleConfirm.text" autocomplete="off" spellcheck="false"
+                     @keydown.enter.prevent="confirmToggleEnabled()" :placeholder="toggleConfirm.name">
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-warning btn-sm" @click="confirmToggleEnabled()" :disabled="!toggleConfirmValid || isBusy(toggleConfirm.name)">Disable schedule</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Override editor -->
@@ -1411,7 +1433,7 @@
                   <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" :checked="s.enabled"
                       :disabled="isBusy(s.name)"
-                      @change="toggleEnabled(s)">
+                      @change="onToggleEnabled(s, $event)">
                   </div>
                 </td>
 
@@ -1438,6 +1460,28 @@
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Type-to-confirm enable/disable (ARB_CONFIG.cronConfirm === 'type'). -->
+      <div class="modal fade" id="cronToggleModal" tabindex="-1" aria-labelledby="cronToggleModalLabel">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="cronToggleModalLabel">Disable schedule <code x-text="toggleConfirm.name"></code></h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small mb-3">Disabling stops scheduled ticks for this schedule. Manual runs are refused until it is re-enabled.</p>
+              <label class="form-label small">Type the schedule name <code x-text="toggleConfirm.name"></code> to confirm:</label>
+              <input type="text" class="form-control form-control-sm" x-model="toggleConfirm.text" autocomplete="off" spellcheck="false"
+                     @keydown.enter.prevent="confirmToggleEnabled()" :placeholder="toggleConfirm.name">
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-warning btn-sm" @click="confirmToggleEnabled()" :disabled="!toggleConfirmValid || isBusy(toggleConfirm.name)">Disable schedule</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Override editor -->

@@ -16,6 +16,7 @@ document.addEventListener('alpine:init', () => {
     active: false,
     _loadErrored: false,
     tzList: [],
+    toggleConfirm: { name: '', text: '' },
     edit: {
       prefix: '', name: '', queueName: '',
       exprOn: false, expr: '',
@@ -156,15 +157,48 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    async toggleEnabled(schedule) {
+    // 'type' | 'off' — how disabling a schedule is confirmed.
+    get cronConfirmMode() {
+      return (typeof ARB_CONFIG !== 'undefined' && ARB_CONFIG.cronConfirm) || 'type';
+    },
+    // The modal's confirm button unlocks only on an exact match of the schedule name.
+    get toggleConfirmValid() {
+      return this.toggleConfirm.text === this.toggleConfirm.name;
+    },
+
+    // Checkbox change handler. Enabling applies immediately. Disabling is guarded
+    // like pausing a queue: revert the switch and open the confirm modal.
+    onToggleEnabled(schedule, ev) {
+      if (this.isBusy(schedule.name)) {
+        if (ev) ev.target.checked = schedule.enabled;
+        return;
+      }
+      const target = !schedule.enabled;
+      if (target || this.cronConfirmMode === 'off') {
+        this._applyEnabled(schedule, target);
+        return;
+      }
+      if (ev) ev.target.checked = schedule.enabled;
+      this.toggleConfirm = { name: schedule.name, text: '' };
+      showModal('cronToggleModal');
+    },
+
+    // The modal's confirm button.
+    confirmToggleEnabled() {
+      if (!this.toggleConfirmValid || this.isBusy(this.toggleConfirm.name)) return;
+      hideModal('cronToggleModal');
+      const schedule = this.schedules.find((s) => s.name === this.toggleConfirm.name);
+      if (schedule) this._applyEnabled(schedule, false);
+    },
+
+    async _applyEnabled(schedule, target) {
       await this.withBusyRow(schedule.name, async () => {
         try {
-          await ArbiterAPI.updateCronSchedule(schedule.name, {
-            enabled: !schedule.enabled,
-          });
-          await this.loadSchedules();
+          await ArbiterAPI.updateCronSchedule(schedule.name, { enabled: target });
         } catch (e) {
           showToast('Failed to toggle: ' + e.message);
+        } finally {
+          await this.loadSchedules();
         }
       });
     },

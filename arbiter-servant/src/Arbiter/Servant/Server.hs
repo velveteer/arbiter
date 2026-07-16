@@ -46,7 +46,6 @@ import Control.Concurrent.STM
   , readTVar
   , readTVarIO
   , writeTChan
-  , writeTVar
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
 import Control.Monad (forever, guard, join, unless, void, when)
