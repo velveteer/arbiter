@@ -10,6 +10,9 @@ document.addEventListener('alpine:init', () => {
     selectedQueue: '',
     view: 'queues',
     initialized: false,
+    initialLoads: 0,
+    showLoader: false,
+    _loaderTimer: null,
     _deepLinkPending: false,
     connected: false,
     sseDisabled: false,
@@ -24,6 +27,25 @@ document.addEventListener('alpine:init', () => {
     _pollInterval: null,
     _sseHandshakeTimer: null,
     theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
+
+    // Count of in-flight first-time loads. The bar only renders once loads have
+    // been pending past a threshold, so fast connections never flash it.
+    beginInitialLoad() {
+      this.initialLoads++;
+      if (this.initialLoads === 1 && !this._loaderTimer) {
+        this._loaderTimer = setTimeout(() => {
+          this._loaderTimer = null;
+          if (this.initialLoads > 0) this.showLoader = true;
+        }, ARB_TIMING.loaderDelayMs);
+      }
+    },
+    endInitialLoad() {
+      this.initialLoads = Math.max(0, this.initialLoads - 1);
+      if (this.initialLoads === 0) {
+        if (this._loaderTimer) { clearTimeout(this._loaderTimer); this._loaderTimer = null; }
+        this.showLoader = false;
+      }
+    },
 
     async init() {
       // A system view is queue-independent, so resolve it up front. A deep-linked

@@ -110,6 +110,31 @@ function busyRows() {
         this.busyRows = next;
       }
     },
+
+    // Drives the Refresh button spinner. True only for polls (not the first
+    // load, which the top bar covers) and held for a minimum so a fast poll is
+    // still visible rather than an imperceptible blip. Call _watchPolling once
+    // during the component's init.
+    polling: false,
+    _pollStart: 0,
+    _pollTimer: null,
+    _watchPolling() {
+      this.$watch('loading', (v) => {
+        if (v) {
+          if (!this.loaded) return;
+          this.polling = true;
+          this._pollStart = Date.now();
+          if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+        } else if (this.polling) {
+          const remaining = Math.max(0, ARB_TIMING.pollSpinMinMs - (Date.now() - this._pollStart));
+          if (this._pollTimer) clearTimeout(this._pollTimer);
+          this._pollTimer = setTimeout(() => { this.polling = false; this._pollTimer = null; }, remaining);
+        }
+      });
+    },
+    _stopWatchPolling() {
+      if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+    },
   };
 }
 
@@ -117,6 +142,11 @@ function busyRows() {
 // one-shot error toast. body(seq, isStale) does the fetch + apply. opts.suppressToast,
 // if it returns true at error time, skips the toast (still logs).
 async function guardedLoad(self, errorLabel, body, opts) {
+  // The first load of a view drives the global top-bar loader instead of an
+  // in-table "Loading…" flash. Later polls only spin that view's Refresh button.
+  const store = self.$store && self.$store.app;
+  const initial = !self.loaded && !!store;
+  if (initial) store.beginInitialLoad();
   self.loading = true;
   self._loadSeq = (self._loadSeq || 0) + 1;
   const seq = self._loadSeq;
@@ -132,6 +162,7 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
     if (seq === self._loadSeq) { self.loading = false; self.loaded = true; }
+    if (initial) store.endInitialLoad();
   }
 }
 
@@ -290,6 +321,7 @@ function pollingTab(loadMethod, intervalMs) {
         if (opts.onQueueChange) opts.onQueueChange();
         if (this.active) this[loadMethod]();
       });
+      this._watchPolling();
       this._bindVisibility();
     },
 
@@ -297,6 +329,7 @@ function pollingTab(loadMethod, intervalMs) {
     // for the component's whole lifetime, so load and poll start immediately.
     initPollingMounted() {
       this.active = true;
+      this._watchPolling();
       this[loadMethod]();
       this.startPolling();
       this._bindVisibility();
@@ -306,6 +339,7 @@ function pollingTab(loadMethod, intervalMs) {
       untrackTabActive(this);
       this.stopPolling();
       this._unbindVisibility();
+      if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
     },
   };
 }

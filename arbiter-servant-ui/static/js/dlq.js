@@ -64,6 +64,7 @@ document.addEventListener('alpine:init', () => {
           this._stopTimer();
         },
       });
+      this._watchPolling();
       this._bindTableEvents({
         onQueueReset: () => { this.selected = {}; },
         relevant: (events) => {
@@ -77,6 +78,7 @@ document.addEventListener('alpine:init', () => {
       untrackTabActive(this);
       this._unbindTableEvents();
       this._stopTimer();
+      this._stopWatchPolling();
     },
 
     async loadDLQ(filterOverrides) {

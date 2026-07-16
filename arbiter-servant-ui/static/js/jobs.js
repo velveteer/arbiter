@@ -179,6 +179,8 @@ document.addEventListener('alpine:init', () => {
     insertDedupKey: '',
     insertDedupStrategy: 'ignore',
     insertPriority: 0,
+    insertNotVisibleUntil: '',
+    insertMaxAttempts: '',
     insertError: '',
     inserting: false,
 
@@ -219,6 +221,7 @@ document.addEventListener('alpine:init', () => {
           this._stopTimer();
         },
       });
+      this._watchPolling();
       this._bindTableEvents({
         onQueueReset: () => { this.stateFilter = ''; },
         relevant: (events) => {
@@ -244,6 +247,7 @@ document.addEventListener('alpine:init', () => {
       this._unbindTableEvents();
       window.removeEventListener(ARB_EVENTS.filterJobs, this._onFilterJobs);
       this._stopTimer();
+      this._stopWatchPolling();
     },
 
     // Switch to the Jobs tab showing only `status` (clears other filters). The
@@ -480,12 +484,25 @@ document.addEventListener('alpine:init', () => {
         }
       }
 
+      // datetime-local is wall-clock in the browser's zone; send it as UTC ISO.
+      let notVisibleUntil = null;
+      if (this.insertNotVisibleUntil) {
+        const d = new Date(this.insertNotVisibleUntil);
+        if (isNaN(d.getTime())) {
+          this.insertError = 'Invalid "Scheduled for" time.';
+          return;
+        }
+        notVisibleUntil = d.toISOString();
+      }
+
       this.inserting = true;
       try {
         const body = { payload };
         if (this.insertGroupKey) body.groupKey = this.insertGroupKey;
         if (this.insertDedupKey) body.dedupKey = {key: this.insertDedupKey, strategy: this.insertDedupStrategy};
         if (this.insertPriority) body.priority = parseInt(this.insertPriority, 10);
+        if (notVisibleUntil) body.notVisibleUntil = notVisibleUntil;
+        if (this.insertMaxAttempts) body.maxAttempts = parseInt(this.insertMaxAttempts, 10);
 
         await ArbiterAPI.insertJob(queue, body);
 
@@ -494,6 +511,8 @@ document.addEventListener('alpine:init', () => {
         this.insertDedupKey = '';
         this.insertDedupStrategy = 'ignore';
         this.insertPriority = 0;
+        this.insertNotVisibleUntil = '';
+        this.insertMaxAttempts = '';
         this.loadJobs();
         showToast('Job inserted', 'success');
       } catch (e) {

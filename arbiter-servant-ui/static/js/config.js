@@ -5,6 +5,8 @@ const ARB_TIMING = {
   refreshMs: 30000,
   fetchTimeoutMs: 30000,
   flushMs: 250,
+  loaderDelayMs: 180,
+  pollSpinMinMs: 500,
   statsDebounceMs: 500,
   armWindowMs: 5000,
   cronPollMs: 60000,

@@ -15,6 +15,9 @@
 </head>
 <body x-cloak x-data>
 
+<!-- Global top-bar loader for initial view loads -->
+<div class="top-loader" x-show="$store.app.showLoader" x-cloak role="status" aria-label="Loading"></div>
+
 <!-- Navbar -->
 <nav class="navbar navbar-expand-lg">
   <div class="container-fluid">
@@ -101,7 +104,6 @@
         </template>
       </div>
 
-      <div class="queue-list-empty" x-show="loading && !loaded && rows.length === 0">Loading queues…</div>
       <div class="queue-list-empty" x-show="_loadErrored && rows.length === 0">Failed to load queues. <a href="#" @click.prevent="load()">Retry</a></div>
       <div class="queue-list-empty" x-show="loaded && !_loadErrored && rows.length === 0">No queues available.</div>
     </div>
@@ -316,7 +318,7 @@
         <div class="ms-auto d-flex gap-2 align-items-center">
           <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm; insertError = ''">+ Insert</button>
           <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" @click="loadJobs()" title="Refresh now" aria-label="Refresh now">&#x21bb;</button>
+            <button class="btn btn-outline-secondary" :disabled="polling" @click="loadJobs()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
             <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
               <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
             </button>
@@ -361,6 +363,14 @@
             <div class="col-md-1">
               <label class="form-label">Priority</label>
               <input type="number" class="form-control" x-model="insertPriority">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Scheduled For</label>
+              <input type="datetime-local" class="form-control" x-model="insertNotVisibleUntil" title="Optional: the job stays scheduled and is not claimable until this local time">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Max Attempts</label>
+              <input type="number" min="1" class="form-control" x-model="insertMaxAttempts" placeholder="Default">
             </div>
           </div>
           <div class="mt-2 d-flex align-items-center gap-2">
@@ -549,9 +559,6 @@
                 </template>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && displayJobs.length === 0">
-              <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
-            </tr>
             <tr x-show="_loadErrored && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-danger text-center">Failed to load jobs. <a href="#" @click.prevent="loadJobs()">Retry</a></td>
             </tr>
@@ -670,7 +677,7 @@
         <!-- Actions -->
         <div class="ms-auto d-flex gap-2 align-items-center">
           <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" @click="loadDLQ()" title="Refresh now" aria-label="Refresh now">&#x21bb;</button>
+            <button class="btn btn-outline-secondary" :disabled="polling" @click="loadDLQ()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
             <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
               <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
             </button>
@@ -770,9 +777,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && dlqJobs.length === 0">
-              <td :colspan="columns.length" class="text-muted text-center">Loading…</td>
-            </tr>
             <tr x-show="_loadErrored && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-danger text-center">Failed to load DLQ entries. <a href="#" @click.prevent="loadDLQ()">Retry</a></td>
             </tr>
@@ -845,21 +849,21 @@
       <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its cron schedules.</div>
       <template x-if="$store.app.selectedQueue">
         <div class="d-flex gap-2 mb-3 align-items-center">
-          <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
+          <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         </div>
       </template>
 
       <div class="table-responsive" x-show="$store.app.selectedQueue">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
-            <col style="width: 14%">
-            <col style="width: 20%">
             <col style="width: 12%">
+            <col style="width: 20%">
+            <col style="width: 11%">
             <col style="width: 12%">
             <col style="width: 6%">
-            <col style="width: 14%">
-            <col style="width: 14%">
-            <col style="width: 8%">
+            <col style="width: 12%">
+            <col style="width: 11%">
+            <col style="width: 16%">
           </colgroup>
           <thead>
             <tr>
@@ -878,116 +882,27 @@
               <tr>
                 <td class="text-truncate" x-text="s.name" :title="s.name"></td>
 
-                <!-- Expression (editable) -->
+                <!-- Expression -->
                 <td>
-                  <template x-if="editingName === s.name && editingField === 'expression'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
-                        x-model="editValue" @keyup.enter="saveEdit()" @keyup.escape="cancelEdit()">
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                  <div class="d-flex flex-column gap-0">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
+                      <span x-text="effectiveExpression(s)"></span>
+                      <span x-show="isOverridden(s, 'expression')" class="badge bg-info-subtle text-info-emphasis">override</span>
                     </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'expression')">
-                    <div class="d-flex flex-column gap-0">
-                      <div class="d-flex flex-wrap align-items-center gap-1">
-                        <span class="editable-cell" tabindex="0" role="button"
-                          @click="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          @keydown.enter.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          @keydown.space.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          x-text="effectiveExpression(s)"></span>
-                        <template x-if="isOverridden(s, 'expression')">
-                          <span class="d-inline-flex align-items-center gap-1">
-                            <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                            <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                              @click="resetToDefault(s.name, 'expression')" title="Reset to default">reset</button>
-                          </span>
-                        </template>
-                      </div>
-                      <small class="text-muted" x-text="describeExpression(s)"></small>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'expression' && saveError" x-text="saveError"></small>
+                    <small class="text-muted" x-text="describeExpression(s)"></small>
+                  </div>
                 </td>
 
-                <!-- Overlap (editable) -->
+                <!-- Overlap -->
                 <td>
-                  <template x-if="editingName === s.name && editingField === 'overlap'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue">
-                        <option value="SkipOverlap">SkipOverlap</option>
-                        <option value="AllowOverlap">AllowOverlap</option>
-                      </select>
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
-                    </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'overlap')">
-                    <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" tabindex="0" role="button"
-                        @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        @keydown.enter.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        @keydown.space.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        x-text="effectiveOverlap(s)"></span>
-                      <template x-if="isOverridden(s, 'overlap')">
-                        <span class="d-inline-flex align-items-center gap-1">
-                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                            @click="resetToDefault(s.name, 'overlap')" title="Reset to default">reset</button>
-                        </span>
-                      </template>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'overlap' && saveError" x-text="saveError"></small>
+                  <span x-text="effectiveOverlap(s)"></span>
+                  <span x-show="isOverridden(s, 'overlap')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
                 </td>
 
-                <!-- Timezone (editable) -->
-                <td>
-                  <template x-if="editingName === s.name && editingField === 'timezone'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
-                        placeholder="Type to search…" autocomplete="off"
-                        x-model="editValue"
-                        @keydown.down.prevent="tzMove(1)"
-                        @keydown.up.prevent="tzMove(-1)"
-                        @keydown.enter.prevent="tzCommit()"
-                        @keydown.escape.prevent="cancelEdit()">
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
-                      <div class="tz-combobox-panel" x-show="tzGrouped().length > 0"
-                        :style="`top: ${tzPos.top}px; left: ${tzPos.left}px;`">
-                        <template x-for="group in tzGrouped()" :key="group.name">
-                          <div>
-                            <div class="tz-group-header" x-text="group.name"></div>
-                            <template x-for="zone in group.zones" :key="zone">
-                              <div class="tz-option"
-                                :class="{ 'tz-highlighted': zone === tzHighlight }"
-                                @mousedown.prevent="editValue = zone; tzHighlight = null; saveEdit()"
-                                @mouseover="tzHighlight = zone"
-                                x-text="zone"></div>
-                            </template>
-                          </div>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'timezone')">
-                    <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" tabindex="0" role="button"
-                        @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        @keydown.enter.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        @keydown.space.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        x-text="effectiveTimezone(s) || 'UTC'"></span>
-                      <template x-if="isOverridden(s, 'timezone')">
-                        <span class="d-inline-flex align-items-center gap-1">
-                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                            @click="resetToDefault(s.name, 'timezone')" title="Reset to default">reset</button>
-                        </span>
-                      </template>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'timezone' && saveError" x-text="saveError"></small>
+                <!-- Timezone -->
+                <td class="text-truncate">
+                  <span x-text="effectiveTimezone(s) || 'UTC'"></span>
+                  <span x-show="isOverridden(s, 'timezone')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
                 </td>
 
                 <!-- Enabled toggle -->
@@ -999,12 +914,13 @@
                   </div>
                 </td>
 
-                <td x-text="formatTime(s.lastFiredAt, 'Never')"></td>
-                <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
+                <td class="text-nowrap" x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td class="text-nowrap" x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
 
                 <!-- Actions -->
                 <td class="cell-actions">
                   <div class="d-inline-flex gap-2 flex-nowrap">
+                    <button class="btn btn-outline-secondary btn-sm" :disabled="isBusy(s.name)" @click="openEdit(s)">Edit</button>
                     <button class="btn btn-sm text-nowrap" :class="isArmed('run:' + s.name) ? 'btn-primary' : 'btn-outline-primary'"
                       :disabled="isBusy(s.name) || !s.enabled"
                       @click="runNow(s)" :title="s.enabled ? 'Enqueue this schedule\'s job now' : 'Schedule is disabled'"
@@ -1013,9 +929,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && schedules.length === 0">
-              <td colspan="8" class="text-muted text-center">Loading…</td>
-            </tr>
             <tr x-show="_loadErrored && schedules.length === 0">
               <td colspan="8" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
             </tr>
@@ -1025,6 +938,60 @@
           </tbody>
         </table>
       </div>
+
+      <!-- Override editor -->
+      <div class="modal fade" id="cronEditModal" tabindex="-1" aria-labelledby="cronEditModalLabel">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="cronEditModalLabel">Override <code x-text="edit.name"></code></h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small">Overrides take effect on the next tick. Uncheck a field to revert it to the declared default.</p>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronExprOn" x-model="edit.exprOn">
+                  <label class="form-check-label" for="cronExprOn">Expression</label>
+                </div>
+                <input type="text" class="form-control form-control-sm" x-model="edit.expr" :disabled="!edit.exprOn"
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultExpression}`">
+                <small class="text-muted" x-text="editDescribe()"></small>
+              </div>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronOverlapOn" x-model="edit.overlapOn">
+                  <label class="form-check-label" for="cronOverlapOn">Overlap policy</label>
+                </div>
+                <select class="form-select form-select-sm" x-model="edit.overlap" :disabled="!edit.overlapOn">
+                  <option value="SkipOverlap">SkipOverlap</option>
+                  <option value="AllowOverlap">AllowOverlap</option>
+                </select>
+                <small class="text-muted" x-show="!edit.overlapOn" x-text="`default ${edit.defaultOverlap}`"></small>
+              </div>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronTzOn" x-model="edit.tzOn">
+                  <label class="form-check-label" for="cronTzOn">Timezone</label>
+                </div>
+                <select class="form-select form-select-sm" x-model="edit.tz" :disabled="!edit.tzOn">
+                  <template x-for="g in tzGroups()" :key="g.name">
+                    <optgroup :label="g.name">
+                      <template x-for="z in g.zones" :key="z"><option :value="z" x-text="z"></option></template>
+                    </optgroup>
+                  </template>
+                </select>
+                <small class="text-muted" x-show="!edit.tzOn" x-text="`default ${edit.defaultTimezone}`"></small>
+              </div>
+              <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-primary btn-sm" @click="saveEdit()" :disabled="edit.saving">Save</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Workers Tab -->
@@ -1032,7 +999,7 @@
       <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its workers.</div>
       <template x-if="$store.app.selectedQueue">
         <div class="d-flex gap-3 mb-3 align-items-center">
-          <button class="btn btn-outline-secondary btn-sm" @click="loadWorkers()">Refresh</button>
+          <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadWorkers()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="workers-live-only" x-model="liveOnly" @change="persistLiveOnly()">
             <label class="form-check-label small" for="workers-live-only">Hide stale</label>
@@ -1087,9 +1054,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && displayWorkers.length === 0">
-              <td colspan="7" class="text-muted text-center">Loading…</td>
-            </tr>
             <tr x-show="_loadErrored && displayWorkers.length === 0">
               <td colspan="7" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
             </tr>
@@ -1221,7 +1185,7 @@
     <!-- Rate Limits Tab -->
     <div id="tab-ratelimits" x-data="rateLimitsTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" @click="loadPolicies()">Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <span class="text-muted small" x-show="loaded && policies.length">
           <span x-text="policies.length"></span> <span x-text="policies.length === 1 ? 'policy' : 'policies'"></span>
         </span>
@@ -1283,7 +1247,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && policies.length === 0"><td colspan="7" class="text-muted text-center">Loading…</td></tr>
             <tr x-show="!loading && _loadErrored && policies.length === 0"><td colspan="7" class="text-danger text-center">Failed to load rate limits. <a href="#" @click.prevent="loadPolicies()">Retry</a></td></tr>
             <tr x-show="!loading && !_loadErrored && loaded && policies.length === 0"><td colspan="7" class="text-muted text-center">No rate-limit policies declared.</td></tr>
           </tbody>
@@ -1378,7 +1341,7 @@
     <!-- Global cron overview: same component as the per-queue Cron tab, scoped to all queues. -->
     <div id="tab-cron-overview" x-data="cronTab({ global: true })">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" @click="loadSchedules()">Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <span class="text-muted small" x-show="loaded && schedules.length">
           <span x-text="schedules.length"></span> <span x-text="schedules.length === 1 ? 'schedule' : 'schedules'"></span> across all queues
         </span>
@@ -1387,15 +1350,15 @@
       <div class="table-responsive">
         <table class="table table-striped table-hover table-sm" style="table-layout: fixed; width: 100%;">
           <colgroup>
-            <col style="width: 12%">
-            <col style="width: 12%">
-            <col style="width: 18%">
             <col style="width: 11%">
+            <col style="width: 11%">
+            <col style="width: 17%">
+            <col style="width: 10%">
             <col style="width: 11%">
             <col style="width: 5%">
-            <col style="width: 12%">
             <col style="width: 11%">
-            <col style="width: 8%">
+            <col style="width: 10%">
+            <col style="width: 14%">
           </colgroup>
           <thead>
             <tr>
@@ -1420,116 +1383,27 @@
                   <a href="#" @click.prevent="openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
                 </td>
 
-                <!-- Expression (editable) -->
+                <!-- Expression -->
                 <td>
-                  <template x-if="editingName === s.name && editingField === 'expression'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
-                        x-model="editValue" @keyup.enter="saveEdit()" @keyup.escape="cancelEdit()">
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
+                  <div class="d-flex flex-column gap-0">
+                    <div class="d-flex flex-wrap align-items-center gap-1">
+                      <span x-text="effectiveExpression(s)"></span>
+                      <span x-show="isOverridden(s, 'expression')" class="badge bg-info-subtle text-info-emphasis">override</span>
                     </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'expression')">
-                    <div class="d-flex flex-column gap-0">
-                      <div class="d-flex flex-wrap align-items-center gap-1">
-                        <span class="editable-cell" tabindex="0" role="button"
-                          @click="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          @keydown.enter.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          @keydown.space.prevent="startEdit(s.name, 'expression', effectiveExpression(s))"
-                          x-text="effectiveExpression(s)"></span>
-                        <template x-if="isOverridden(s, 'expression')">
-                          <span class="d-inline-flex align-items-center gap-1">
-                            <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                            <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                              @click="resetToDefault(s.name, 'expression')" title="Reset to default">reset</button>
-                          </span>
-                        </template>
-                      </div>
-                      <small class="text-muted" x-text="describeExpression(s)"></small>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'expression' && saveError" x-text="saveError"></small>
+                    <small class="text-muted" x-text="describeExpression(s)"></small>
+                  </div>
                 </td>
 
-                <!-- Overlap (editable) -->
+                <!-- Overlap -->
                 <td>
-                  <template x-if="editingName === s.name && editingField === 'overlap'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <select class="form-select form-select-sm" style="max-width: 160px;" x-model="editValue">
-                        <option value="SkipOverlap">SkipOverlap</option>
-                        <option value="AllowOverlap">AllowOverlap</option>
-                      </select>
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
-                    </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'overlap')">
-                    <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" tabindex="0" role="button"
-                        @click="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        @keydown.enter.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        @keydown.space.prevent="startEdit(s.name, 'overlap', effectiveOverlap(s))"
-                        x-text="effectiveOverlap(s)"></span>
-                      <template x-if="isOverridden(s, 'overlap')">
-                        <span class="d-inline-flex align-items-center gap-1">
-                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                            @click="resetToDefault(s.name, 'overlap')" title="Reset to default">reset</button>
-                        </span>
-                      </template>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'overlap' && saveError" x-text="saveError"></small>
+                  <span x-text="effectiveOverlap(s)"></span>
+                  <span x-show="isOverridden(s, 'overlap')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
                 </td>
 
-                <!-- Timezone (editable) -->
-                <td>
-                  <template x-if="editingName === s.name && editingField === 'timezone'">
-                    <div class="d-flex gap-1 align-items-center" @click.away="cancelEdit()">
-                      <input id="inline-edit-input" type="text" class="form-control form-control-sm inline-edit-input"
-                        placeholder="Type to search…" autocomplete="off"
-                        x-model="editValue"
-                        @keydown.down.prevent="tzMove(1)"
-                        @keydown.up.prevent="tzMove(-1)"
-                        @keydown.enter.prevent="tzCommit()"
-                        @keydown.escape.prevent="cancelEdit()">
-                      <button class="btn btn-outline-success btn-sm cron-inline-btn" @click="saveEdit()">Save</button>
-                      <button class="btn btn-outline-secondary btn-sm cron-inline-btn" @click="cancelEdit()">Cancel</button>
-                      <div class="tz-combobox-panel" x-show="tzGrouped().length > 0"
-                        :style="`top: ${tzPos.top}px; left: ${tzPos.left}px;`">
-                        <template x-for="group in tzGrouped()" :key="group.name">
-                          <div>
-                            <div class="tz-group-header" x-text="group.name"></div>
-                            <template x-for="zone in group.zones" :key="zone">
-                              <div class="tz-option"
-                                :class="{ 'tz-highlighted': zone === tzHighlight }"
-                                @mousedown.prevent="editValue = zone; tzHighlight = null; saveEdit()"
-                                @mouseover="tzHighlight = zone"
-                                x-text="zone"></div>
-                            </template>
-                          </div>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                  <template x-if="!(editingName === s.name && editingField === 'timezone')">
-                    <div class="d-flex flex-wrap align-items-center gap-1">
-                      <span class="editable-cell" tabindex="0" role="button"
-                        @click="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        @keydown.enter.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        @keydown.space.prevent="startEdit(s.name, 'timezone', effectiveTimezone(s))"
-                        x-text="effectiveTimezone(s) || 'UTC'"></span>
-                      <template x-if="isOverridden(s, 'timezone')">
-                        <span class="d-inline-flex align-items-center gap-1">
-                          <span class="badge bg-info-subtle text-info-emphasis">override</span>
-                          <button class="btn btn-outline-secondary btn-sm" style="font-size: .7rem; padding: .1rem .35rem;"
-                            @click="resetToDefault(s.name, 'timezone')" title="Reset to default">reset</button>
-                        </span>
-                      </template>
-                    </div>
-                  </template>
-                  <small class="alert alert-danger mb-0 inline-error" x-show="editingName === s.name && editingField === 'timezone' && saveError" x-text="saveError"></small>
+                <!-- Timezone -->
+                <td class="text-truncate">
+                  <span x-text="effectiveTimezone(s) || 'UTC'"></span>
+                  <span x-show="isOverridden(s, 'timezone')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
                 </td>
 
                 <!-- Enabled toggle -->
@@ -1541,12 +1415,13 @@
                   </div>
                 </td>
 
-                <td x-text="formatTime(s.lastFiredAt, 'Never')"></td>
-                <td x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
+                <td class="text-nowrap" x-text="formatTime(s.lastFiredAt, 'Never')"></td>
+                <td class="text-nowrap" x-text="formatTime(s.lastCheckedAt, 'Never')"></td>
 
                 <!-- Actions -->
                 <td class="cell-actions">
                   <div class="d-inline-flex gap-2 flex-nowrap">
+                    <button class="btn btn-outline-secondary btn-sm" :disabled="isBusy(s.name)" @click="openEdit(s)">Edit</button>
                     <button class="btn btn-sm text-nowrap" :class="isArmed('run:' + s.name) ? 'btn-primary' : 'btn-outline-primary'"
                       :disabled="isBusy(s.name) || !s.enabled"
                       @click="runNow(s)" :title="s.enabled ? 'Enqueue this schedule\'s job now' : 'Schedule is disabled'"
@@ -1555,9 +1430,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && schedules.length === 0">
-              <td colspan="9" class="text-muted text-center">Loading…</td>
-            </tr>
             <tr x-show="_loadErrored && schedules.length === 0">
               <td colspan="9" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
             </tr>
@@ -1566,6 +1438,60 @@
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Override editor -->
+      <div class="modal fade" id="cronEditModal" tabindex="-1" aria-labelledby="cronEditModalLabel">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="cronEditModalLabel">Override <code x-text="edit.name"></code> <span class="text-muted small" x-text="edit.queueName"></span></h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small">Overrides take effect on the next tick. Uncheck a field to revert it to the declared default.</p>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronExprOnG" x-model="edit.exprOn">
+                  <label class="form-check-label" for="cronExprOnG">Expression</label>
+                </div>
+                <input type="text" class="form-control form-control-sm" x-model="edit.expr" :disabled="!edit.exprOn"
+                  @keydown.enter.prevent="saveEdit()" :placeholder="`default ${edit.defaultExpression}`">
+                <small class="text-muted" x-text="editDescribe()"></small>
+              </div>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronOverlapOnG" x-model="edit.overlapOn">
+                  <label class="form-check-label" for="cronOverlapOnG">Overlap policy</label>
+                </div>
+                <select class="form-select form-select-sm" x-model="edit.overlap" :disabled="!edit.overlapOn">
+                  <option value="SkipOverlap">SkipOverlap</option>
+                  <option value="AllowOverlap">AllowOverlap</option>
+                </select>
+                <small class="text-muted" x-show="!edit.overlapOn" x-text="`default ${edit.defaultOverlap}`"></small>
+              </div>
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="cronTzOnG" x-model="edit.tzOn">
+                  <label class="form-check-label" for="cronTzOnG">Timezone</label>
+                </div>
+                <select class="form-select form-select-sm" x-model="edit.tz" :disabled="!edit.tzOn">
+                  <template x-for="g in tzGroups()" :key="g.name">
+                    <optgroup :label="g.name">
+                      <template x-for="z in g.zones" :key="z"><option :value="z" x-text="z"></option></template>
+                    </optgroup>
+                  </template>
+                </select>
+                <small class="text-muted" x-show="!edit.tzOn" x-text="`default ${edit.defaultTimezone}`"></small>
+              </div>
+              <div class="alert alert-danger py-2 mb-0" x-show="edit.error" x-text="edit.error"></div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-primary btn-sm" @click="saveEdit()" :disabled="edit.saving">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     </div>
@@ -1579,7 +1505,7 @@
     <!-- Concurrency Tab -->
     <div id="tab-concurrency" x-data="concurrencyTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" @click="loadPolicies()">Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <button class="btn btn-sm" :class="isArmed('reconcile') ? 'btn-warning' : 'btn-outline-secondary'"
           @click="reconcile()" x-text="isArmed('reconcile') ? 'Confirm reconcile' : 'Reconcile counts'"></button>
         <span class="text-muted small" x-show="loaded && policies.length">
@@ -1633,7 +1559,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="loading && !loaded && policies.length === 0"><td colspan="6" class="text-muted text-center">Loading…</td></tr>
             <tr x-show="!loading && _loadErrored && policies.length === 0"><td colspan="6" class="text-danger text-center">Failed to load concurrency pools. <a href="#" @click.prevent="loadPolicies()">Retry</a></td></tr>
             <tr x-show="!loading && !_loadErrored && loaded && policies.length === 0"><td colspan="6" class="text-muted text-center">No concurrency pools declared.</td></tr>
           </tbody>
