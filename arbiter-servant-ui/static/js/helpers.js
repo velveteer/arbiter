@@ -133,11 +133,15 @@ function busyRows() {
         this.busyRows = next;
       }
     },
+  };
+}
 
-    // Drives the Refresh button spinner. True only for polls (not the first
-    // load, which the top bar covers) and held for a minimum so a fast poll is
-    // still visible rather than an imperceptible blip. Call _watchPolling once
-    // during the component's init.
+// Drives the Refresh button spinner. True only for polls (not the first load,
+// which the top bar covers) and held for a minimum so a fast poll is still
+// visible rather than an imperceptible blip. Call _watchPolling once during the
+// component's init.
+function pollSpinner() {
+  return {
     polling: false,
     _pollStart: 0,
     _pollTimer: null,
@@ -205,6 +209,7 @@ function releaseInitialLoad(self) {
 function tableTab(loadMethod, refreshStorageKey) {
   return {
     ...busyRows(),
+    ...pollSpinner(),
     ...confirmArm(),
     refreshMode: (refreshStorageKey && localStorage.getItem(refreshStorageKey)) || '5s',
     _refreshTimer: null,
@@ -315,6 +320,7 @@ function tableTab(loadMethod, refreshStorageKey) {
 function pollingTab(loadMethod, intervalMs) {
   return {
     ...busyRows(),
+    ...pollSpinner(),
     refreshInterval: null,
 
     startPolling() {

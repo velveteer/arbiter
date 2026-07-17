@@ -1023,6 +1023,17 @@ spec connStr = do
         Just row <- runSimpleDb mkEnv $ Ops.getCronScheduleByName testSchema "run-me"
         CS.runRequestedAt row `shouldSatisfy` isJust
 
+    it "POST /api/v1/cron/schedules/:name/run 409s a schedule with a run pending" $ do
+      seedCron "run-twice" "0 3 * * *" "SkipOverlap"
+      first <- request "POST" "/api/v1/cron/schedules/run-twice/run" [] ""
+      second <- request "POST" "/api/v1/cron/schedules/run-twice/run" [] ""
+
+      liftIO $ do
+        simpleStatus first `shouldBe` status204
+        simpleStatus second `shouldBe` status409
+        Just row <- runSimpleDb mkEnv $ Ops.getCronScheduleByName testSchema "run-twice"
+        CS.runRequestedAt row `shouldSatisfy` isJust
+
     it "POST /api/v1/cron/schedules/:name/run 404s an unknown schedule" $ do
       resp <- request "POST" "/api/v1/cron/schedules/no-such-schedule/run" [] ""
       liftIO $ simpleStatus resp `shouldBe` status404

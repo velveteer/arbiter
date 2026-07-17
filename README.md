@@ -170,6 +170,8 @@ processEmail conn job = do
 
 Handlers run inside a database transaction by default. If the handler succeeds, the job is deleted and all database work commits atomically. If the handler throws, the transaction rolls back and the job is retried or moved to the DLQ.
 
+That transaction is held open for as long as the handler runs, which is what you want when the handler writes to the database and you need those writes to land with the ack. If your handler does no database work - it calls an HTTP API, shells out, or crunches data in memory - or it runs long enough that holding a connection open is wasteful, use [Batched Handlers](#batched-handlers) instead. Batched mode opens no worker transaction and works with a batch size of 1, so it is also the way to run one job at a time with no transaction around it.
+
 ## Architecture
 
 Arbiter has no broker or central coordinator. Every worker pool claims directly from PostgreSQL, so you scale by adding worker processes and there is no leader to elect or fail over.
@@ -472,7 +474,7 @@ See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-work
 
 ### Batched Handlers
 
-Process multiple jobs per handler invocation:
+Process jobs with no worker transaction, finalizing each one yourself. The handler receives a batch of up to `batchSize` jobs from a group - use a larger size to amortize work across jobs, or 1 to run them one at a time. Either way no transaction is held while the handler runs, so this is the mode for handlers that do no database work, or that run long enough that holding a connection open is wasteful.
 
 ```haskell
 -- defaultBatchedWorkerConfig connStr <workerCount> <batchSize> handler
@@ -488,6 +490,17 @@ batchHandler jobs cbs = do
   -- Bulk-ack the whole batch in one transaction.
   Worker.ackAll cbs (toList jobs)
 ```
+
+Opting out of the worker transaction does not mean giving up atomicity where you want it. Each callback runs in its own transaction, and wrapping one in your own `withDbTransaction` commits the ack together with your writes:
+
+```haskell
+batchHandler jobs cbs =
+  for_ jobs $ \job -> Arb.withDbTransaction $ do
+    recordCharge (Arb.payload job)
+    Worker.ack cbs job
+```
+
+So you pay for a transaction only around the work that needs one, rather than for the whole handler. Your writes commit with the ack, but `onJobSuccess` does not - it can fire for a job that is later reprocessed. Keep effects that must happen exactly once in the transaction next to the ack, not in the hook.
 
 Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Rollup parents store a result per job with `ackWith`/`ackAllWith`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
 

@@ -46,7 +46,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, JobWrite, dedupKey, parentId)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
@@ -435,7 +435,8 @@ data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
 --
 -- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
-  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  :: forall m registry payload
+   . (MonadUnliftIO m, QueueOperation m registry payload)
   => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
@@ -466,13 +467,17 @@ processRunRequests logCfg schemaName jobs now = do
             AllowOverlap -> Nothing
           jobWrite = (builder cj Live tick) {dedupKey = key}
       inserted <- HL.insertJob jobWrite
-      case (inserted, key) of
-        (Just _, _) -> do
+      case inserted of
+        Just _ -> do
           void $ Ops.touchCronManualRun schemaName now (name cj)
           pure Fired
-        -- No dedup key, so an absent job means the parent is missing.
-        (Nothing, Nothing) -> pure Dropped
-        (Nothing, Just _) -> pure Skipped
+        -- An absent job is either the dedup key or a missing parent, and only
+        -- the parent it names can tell the two apart.
+        Nothing -> do
+          parentGone <- case parentId jobWrite of
+            Nothing -> pure False
+            Just pid -> isNothing <$> (HL.getJobById pid :: m (Maybe (JobRead payload)))
+          pure $ if parentGone then Dropped else Skipped
 
 -- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()

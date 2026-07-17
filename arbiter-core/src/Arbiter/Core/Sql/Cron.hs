@@ -103,13 +103,14 @@ tryAcquireCronLeaderSQL =
 
 -- | Stamp a run request on an enabled schedule and NOTIFY. Returns 0 (no such
 -- schedule), 1 (disabled), 2 (stamped), or 3 (a request is already pending).
+-- The status read locks, so it reports the same row version the update sees.
 requestCronRunSQL :: Text -> Text
 requestCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
       chan = T.replace "'" "''" (cronRunNotifyChannel schemaName)
    in "WITH found AS (SELECT enabled, run_requested_at FROM "
         <> tbl
-        <> " WHERE name = ?),"
+        <> " WHERE name = ? FOR UPDATE),"
         <> " upd AS ("
         <> "UPDATE "
         <> tbl

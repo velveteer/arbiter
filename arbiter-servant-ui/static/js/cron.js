@@ -26,7 +26,7 @@ document.addEventListener('alpine:init', () => {
     hostId: null,
     tzList: [],
     edit: {
-      prefix: '', name: '', queueName: '',
+      prefix: '', queueName: '',
       exprOn: false, expr: '',
       overlapOn: false, overlap: 'SkipOverlap',
       tzOn: false, tz: '',
@@ -78,7 +78,6 @@ document.addEventListener('alpine:init', () => {
       };
       this.edit = {
         prefix: s.name,
-        name: s.name,
         queueName: s.queueName,
         ...values,
         orig: values,
@@ -102,7 +101,7 @@ document.addEventListener('alpine:init', () => {
       await saveOverrides(this.edit, {
         apiFn: (name, body) => ArbiterAPI.updateCronSchedule(name, body),
         modalId: 'cronEditModal',
-        reload: () => host.loadSchedules(),
+        reload: () => host?.loadSchedules(),
         buildBody: (e) => {
           if (e.exprOn && !e.expr.trim()) return { error: 'Expression cannot be empty' };
           if (e.tzOn && !e.tz.trim()) return { error: 'Timezone cannot be empty' };
@@ -125,10 +124,6 @@ document.addEventListener('alpine:init', () => {
     // like pausing a queue: revert the switch and open the confirm modal.
     onToggleEnabled(host, schedule, ev) {
       this.setHost(host);
-      if (host.isBusy(schedule.name)) {
-        if (ev) ev.target.checked = schedule.enabled;
-        return;
-      }
       const target = !schedule.enabled;
       if (target || this.confirmMode() === 'off') {
         host.applyEnabled(schedule.name, target);
@@ -233,12 +228,16 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // Only a pool serving the queue can claim a request, and nothing expires an
+    // unclaimable one, so a run is offered only where it can actually be taken.
     canRun(s) {
-      return s.enabled;
+      return s.enabled && this.queueServed(s) && !this.isRunPending(s);
     },
 
     runTitle(s) {
       if (!s.enabled) return 'Schedule is disabled';
+      if (!this.queueServed(s)) return 'Queue is not served by this server';
+      if (this.isRunPending(s)) return 'A run is already pending';
       return "Enqueue this schedule's job now";
     },
 
@@ -274,14 +273,6 @@ document.addEventListener('alpine:init', () => {
     // The schedule list spans the schema, so it names queues this server lacks.
     queueServed(s) {
       return this.$store.app.queues.includes(s.queueName);
-    },
-
-    openQueue(queue) {
-      if (!this.$store.app.queues.includes(queue)) {
-        showToast(`Queue "${queue}" is not served by this server`, 'warning');
-        return;
-      }
-      this.$store.app.openQueue(queue);
     },
   }));
 });
