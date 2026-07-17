@@ -2392,12 +2392,19 @@ requestCronRun
   -- ^ Schedule name
   -> m RunRequestOutcome
 requestCronRun schemaName scheduleName = do
-  status <- queryCount (Tmpl.requestCronRunSQL schemaName) [pval CText scheduleName, pval CText scheduleName]
-  pure $ case status of
-    3 -> RunReqPending
-    2 -> RunReqStamped
-    1 -> RunReqDisabled
+  rows <-
+    executeQuery
+      (Tmpl.requestCronRunSQL schemaName)
+      [pval CText scheduleName, pval CText scheduleName]
+      outcomeCodec
+  pure $ case rows of
+    [(True, _, _)] -> RunReqStamped
+    [(_, True, _)] -> RunReqPending
+    [(_, _, True)] -> RunReqDisabled
     _ -> RunReqNotFound
+  where
+    outcomeCodec :: RowCodec (Bool, Bool, Bool)
+    outcomeCodec = (,,) <$> col "stamped" CBool <*> col "pending" CBool <*> col "found" CBool
 
 -- | Claim a pending run request, returning the claimed row. 'Nothing' = another
 -- pool won the claim, or the schedule was disabled meanwhile.

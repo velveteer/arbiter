@@ -523,13 +523,15 @@ waitForWake stateVar runNowVar timerVar = liftIO . atomically $ do
     ShuttingDown -> pure WakeShutdown
     _ -> do
       timedOut <- readTVar timerVar
-      if timedOut
-        then writeTVar runNowVar False >> pure WakeMinute
-        else do
-          requested <- readTVar runNowVar
-          if not requested
-            then retry
-            else writeTVar runNowVar False >> pure WakeRunNow
+      reason <-
+        if timedOut
+          then pure WakeMinute
+          else do
+            requested <- readTVar runNowVar
+            unless requested retry
+            pure WakeRunNow
+      writeTVar runNowVar False
+      pure reason
 
 -- | Snapshot of the current 'WorkerState' for use outside STM.
 isShuttingDown :: (MonadIO m) => TVar WorkerState -> m Bool

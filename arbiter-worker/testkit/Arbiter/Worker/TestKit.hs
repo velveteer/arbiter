@@ -55,10 +55,10 @@ import Arbiter.Worker.Config
   , cancelBranch
   , cancelTree
   , defaultBatchedWorkerConfig
-  , transactionalWorkerConfig
   , failPermanent
   , failRetry
   , nack
+  , transactionalWorkerConfig
   )
 
 -- | Build a worker-pool test suite for the given 'MonadArbiter' runner.

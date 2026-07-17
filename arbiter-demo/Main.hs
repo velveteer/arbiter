@@ -20,11 +20,11 @@ import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( WorkerConfig (..)
-  , transactionalWorkerConfig
   , mergedChildResults
   , namedWorkerPool
   , runWorkerPools
   , signalShutdown
+  , transactionalWorkerConfig
   )
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
 import Control.Concurrent (forkIO, threadDelay)

@@ -493,28 +493,26 @@ document.addEventListener('alpine:init', () => {
         notVisibleUntil = d.toISOString();
       }
 
+      const priority = parseOptionalInt(this.insertPriority);
+      if (priority.error) {
+        this.insertError = 'Priority must be a whole number.';
+        return;
+      }
+
+      const maxAttempts = parseOptionalInt(this.insertMaxAttempts, 1);
+      if (maxAttempts.error) {
+        this.insertError = 'Max attempts must be a whole number of at least 1.';
+        return;
+      }
+
       this.inserting = true;
       try {
         const body = { payload };
         if (this.insertGroupKey) body.groupKey = this.insertGroupKey;
         if (this.insertDedupKey) body.dedupKey = {key: this.insertDedupKey, strategy: this.insertDedupStrategy};
-        if (this.insertPriority) {
-          const priority = Number(this.insertPriority);
-          if (!Number.isInteger(priority)) {
-            this.insertError = 'Priority must be a whole number.';
-            return;
-          }
-          body.priority = priority;
-        }
+        if (priority.value != null) body.priority = priority.value;
         if (notVisibleUntil) body.notVisibleUntil = notVisibleUntil;
-        if (this.insertMaxAttempts) {
-          const maxAttempts = Number(this.insertMaxAttempts);
-          if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-            this.insertError = 'Max attempts must be a whole number of at least 1.';
-            return;
-          }
-          body.maxAttempts = maxAttempts;
-        }
+        if (maxAttempts.value != null) body.maxAttempts = maxAttempts.value;
 
         await ArbiterAPI.insertJob(queue, body);
 

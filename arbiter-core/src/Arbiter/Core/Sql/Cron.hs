@@ -120,8 +120,7 @@ cronRunRequestTtl = "INTERVAL '5 minutes'"
 cronRunPending :: Text
 cronRunPending = "(run_requested_at IS NOT NULL AND run_requested_at > NOW() - " <> cronRunRequestTtl <> ")"
 
--- | Stamp a run request on an enabled schedule and NOTIFY. Returns 0 (no such
--- schedule), 1 (disabled), 2 (stamped), or 3 (a request is already pending).
+-- | Stamp a run request on an enabled schedule and NOTIFY.
 -- The status read locks, so it reports the same row version the update sees.
 -- An expired request is overwritten rather than reported as pending.
 requestCronRunSQL :: Text -> Text
@@ -139,13 +138,11 @@ requestCronRunSQL schemaName =
         <> " RETURNING pg_notify("
         <> textLiteral (cronRunNotifyChannel schemaName)
         <> ", name))"
-        <> " SELECT (CASE"
-        <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 2"
-        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND "
+        <> " SELECT EXISTS (SELECT 1 FROM upd) AS stamped,"
+        <> " EXISTS (SELECT 1 FROM found WHERE enabled AND "
         <> cronRunPending
-        <> ") THEN 3"
-        <> " WHEN EXISTS (SELECT 1 FROM found) THEN 1"
-        <> " ELSE 0 END)::int8 AS count"
+        <> ") AS pending,"
+        <> " EXISTS (SELECT 1 FROM found) AS found"
 
 -- | Claim a pending run request, clearing the flag and returning the claimed row.
 claimCronRunSQL :: Text -> Text

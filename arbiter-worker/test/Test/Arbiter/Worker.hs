@@ -77,9 +77,9 @@ import Arbiter.Worker.Config
   , ackWith
   , defaultBatchedResultWorkerConfig
   , defaultBatchedWorkerConfig
-  , transactionalWorkerConfig
   , getWorkerState
   , shutdownWorker
+  , transactionalWorkerConfig
   )
 import Arbiter.Worker.Logger (silentLogConfig)
 import Arbiter.Worker.TestKit (workerSpec)

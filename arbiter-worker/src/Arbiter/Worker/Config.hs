@@ -180,7 +180,10 @@ defaultWorkerConfig
   -> JobHandler n payload result
   -> m (WorkerConfig n payload result)
 defaultWorkerConfig = transactionalWorkerConfig
-{-# DEPRECATED defaultWorkerConfig "Use transactionalWorkerConfig. The handler runs in a transaction held for its whole duration, which is not always what you want - see manualWorkerConfig to scope transactions yourself." #-}
+{-# DEPRECATED
+  defaultWorkerConfig
+  "Use transactionalWorkerConfig. The handler runs in a transaction held for its whole duration, which is not always what you want - see manualWorkerConfig to scope transactions yourself."
+  #-}
 
 -- | Create a t'WorkerConfig' for batched job processing, no worker transaction.
 -- The handler receives the batch and a 'BatchCallbacks' record to finalize each
@@ -196,8 +199,7 @@ defaultBatchedWorkerConfig
   -- ^ Batch size (max jobs per group to claim together)
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload () -> n ())
   -> m (WorkerConfig n payload ())
-defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+defaultBatchedWorkerConfig = defaultBatchedResultWorkerConfig
 
 -- | Create a t'WorkerConfig' running one job at a time, no worker transaction.
 -- The handler finalizes the job through 'BatchCallbacks'. An unfinalized job is

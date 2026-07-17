@@ -441,6 +441,14 @@ function highFillClass(pct) {
   return pct >= 100 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
 }
 
+// Parse an optional whole-number form field. Blank is null, invalid is { error: true }.
+function parseOptionalInt(v, min) {
+  if (!v) return { value: null };
+  const n = Number(v);
+  if (!Number.isInteger(n) || (min != null && n < min)) return { error: true };
+  return { value: n };
+}
+
 // Parse an override input field. A blank field is null (revert to default), not 0.
 // check is Number.isInteger for whole-number limits, Number.isFinite otherwise.
 function parseOverride(v, check) {

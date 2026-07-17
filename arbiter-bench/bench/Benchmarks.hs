@@ -35,9 +35,9 @@ import Arbiter.Worker
   ( BatchCallbacks (..)
   , WorkerConfig (..)
   , defaultBatchedWorkerConfig
-  , transactionalWorkerConfig
   , runWorkerPool
   , silentLogConfig
+  , transactionalWorkerConfig
   )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race_)
@@ -471,7 +471,8 @@ simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> B
 simpleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
+      c <-
+        runM $ transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
       c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
@@ -483,7 +484,8 @@ hasqlWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool mod
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
       c <-
-        runM $ transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
+        runM $
+          transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
       c <-

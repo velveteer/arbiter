@@ -23,7 +23,6 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('cronEdit', {
     ...typeToConfirm('cronConfirm'),
     host: null,
-    hostId: null,
     tzList: [],
     edit: {
       prefix: '', queueName: '',
@@ -55,18 +54,17 @@ document.addEventListener('alpine:init', () => {
 
     setHost(host) {
       this.host = host;
-      this.hostId = host.hostId;
     },
 
     releaseHost(hostId) {
-      if (this.hostId !== hostId) return;
+      if (this.host?.hostId !== hostId) return;
       this.host = null;
-      this.hostId = null;
     },
 
     // Open the override editor for a schedule, hosted by the active table.
     openEdit(host, s) {
       this.setHost(host);
+      this.populateTimezones();
       const tz = s.overrideTimezone ?? (s.defaultTimezone || 'UTC');
       const values = {
         exprOn: s.overrideExpression !== null,
@@ -163,7 +161,6 @@ document.addEventListener('alpine:init', () => {
           onQueueChange: () => { this.disarm(); this.schedules = []; },
         });
       }
-      this.$store.cronEdit.populateTimezones();
     },
 
     destroy() {
@@ -231,12 +228,11 @@ document.addEventListener('alpine:init', () => {
     // An unclaimed request expires, so a run offered where no pool takes it
     // costs a wait rather than wedging the row.
     canRun(s) {
-      return s.enabled && this.queueServed(s) && !this.isRunPending(s);
+      return s.enabled && !this.isRunPending(s);
     },
 
     runTitle(s) {
       if (!s.enabled) return 'Schedule is disabled';
-      if (!this.queueServed(s)) return 'Queue is not served by this server';
       if (this.isRunPending(s)) return 'A run is already pending';
       return "Enqueue this schedule's job now";
     },
