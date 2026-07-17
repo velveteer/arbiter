@@ -193,6 +193,9 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (opts && opts.suppressToast && opts.suppressToast()) return;
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
+    // Only the winning load releases the loader, so a superseded first load
+    // can't drop it while the view is still empty. Teardown and an onHide seq
+    // bump release the claim themselves.
     if (seq === self._loadSeq) {
       self.loading = false;
       self.loaded = true;

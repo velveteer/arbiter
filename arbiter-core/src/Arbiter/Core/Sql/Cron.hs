@@ -120,9 +120,7 @@ cronRunRequestTtl = "INTERVAL '5 minutes'"
 cronRunPending :: Text
 cronRunPending = "(run_requested_at IS NOT NULL AND run_requested_at > NOW() - " <> cronRunRequestTtl <> ")"
 
--- | Stamp a run request on an enabled schedule and NOTIFY.
--- The status read locks, so it reports the same row version the update sees.
--- An expired request is overwritten rather than reported as pending.
+-- | Stamp a run request on an enabled schedule and NOTIFY, returning a status.
 requestCronRunSQL :: Text -> Text
 requestCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
@@ -138,11 +136,13 @@ requestCronRunSQL schemaName =
         <> " RETURNING pg_notify("
         <> textLiteral (cronRunNotifyChannel schemaName)
         <> ", name))"
-        <> " SELECT EXISTS (SELECT 1 FROM upd) AS stamped,"
-        <> " EXISTS (SELECT 1 FROM found WHERE enabled AND "
+        <> " SELECT CASE"
+        <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 'stamped'"
+        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND "
         <> cronRunPending
-        <> ") AS pending,"
-        <> " EXISTS (SELECT 1 FROM found) AS found"
+        <> ") THEN 'pending'"
+        <> " WHEN EXISTS (SELECT 1 FROM found) THEN 'disabled'"
+        <> " ELSE 'not_found' END AS status"
 
 -- | Claim a pending run request, clearing the flag and returning the claimed row.
 claimCronRunSQL :: Text -> Text
@@ -157,12 +157,10 @@ claimCronRunSQL schemaName =
         <> allCronColumns
 
 -- | Record when a manual run last fired a job.
---
--- Parameters: fired-at timestamp, schedule name
 touchCronManualRunSQL :: Text -> Text
 touchCronManualRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET last_manual_run_at = ?, updated_at = NOW() WHERE name = ?"
+   in "UPDATE " <> tbl <> " SET last_manual_run_at = GREATEST(last_manual_run_at, ?), updated_at = NOW() WHERE name = ?"
 
 -- | Names of enabled schedules with a pending run request among the given names.
 pendingCronRunsSQL :: Text -> Text

@@ -1337,9 +1337,7 @@
 
                 <!-- Queue (drill into its detail view) -->
                 <td class="text-truncate">
-                  <a x-show="queueServed(s)" href="#" @click.prevent="$store.app.openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
-                  <span x-show="!queueServed(s)" class="text-muted" x-text="s.queueName"
-                    :title="s.queueName + ' is not served by this server'"></span>
+                  <a href="#" @click.prevent="$store.app.openQueue(s.queueName)" x-text="s.queueName" :title="'Open ' + s.queueName"></a>
                 </td>
 
                 <!-- Expression -->

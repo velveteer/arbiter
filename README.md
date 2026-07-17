@@ -168,8 +168,6 @@ processEmail conn job = do
         (recipient, orderId)
 ```
 
-There are two ways to run a handler, and which one you want depends on the handler.
-
 `transactionalWorkerConfig`, above, wraps each handler in a transaction and acks for you. If the handler succeeds, the job is deleted and all its database work commits atomically. If it throws, the transaction rolls back and the job is retried or moved to the DLQ. The transaction stays open for the whole handler, so the handler's writes are guaranteed to land with the ack.
 
 `manualWorkerConfig` opens no transaction and hands you callbacks to finalize the job yourself - ack it, fail it, cancel it, or leave it to be reprocessed. You scope a transaction to just the writes that need one, and nothing is held while the rest of the handler runs:
@@ -177,7 +175,10 @@ There are two ways to run a handler, and which one you want depends on the handl
 ```haskell
 config <- Worker.manualWorkerConfig connStr 5 processEmail
 
-processEmail :: Arb.JobRead EmailPayload -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload () -> ArbS.SimpleDb AppRegistry IO ()
+processEmail
+    :: Arb.JobRead EmailPayload
+    -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
+    -> ArbS.SimpleDb AppRegistry IO ()
 processEmail job cbs = do
   liftIO $ sendEmail (Arb.payload job)
   Worker.ack cbs job

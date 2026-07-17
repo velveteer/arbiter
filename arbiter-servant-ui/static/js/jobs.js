@@ -217,6 +217,7 @@ document.addEventListener('alpine:init', () => {
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           this._detailSeq = (this._detailSeq || 0) + 1;
+          releaseInitialLoad(this);
           hideModal('jobDetailModal');
           this._stopTimer();
         },

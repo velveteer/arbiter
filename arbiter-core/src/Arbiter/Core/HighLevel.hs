@@ -63,6 +63,7 @@ module Arbiter.Core.HighLevel
     -- * Admin Operations
   , listJobs
   , getJobById
+  , jobExists
   , getJobsByGroup
   , getJobsByParent
   , cancelJob
@@ -753,6 +754,18 @@ getJobById jobId = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.getJobById schemaName tableName jobId
+
+-- | Whether a job with the given id exists in this payload's queue table.
+jobExists
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int64
+  -- ^ Job ID
+  -> m Bool
+jobExists jobId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.jobExists schemaName tableName jobId
 
 -- | Gets all jobs for a specific group key with pagination.
 getJobsByGroup

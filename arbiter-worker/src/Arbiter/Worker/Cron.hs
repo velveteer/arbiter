@@ -46,7 +46,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, JobWrite, dedupKey, parentId)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey, parentId)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
@@ -479,7 +479,7 @@ processRunRequests logCfg schemaName jobs now = do
         Nothing -> do
           parentGone <- case parentId jobWrite of
             Nothing -> pure False
-            Just pid -> isNothing <$> (HL.getJobById pid :: m (Maybe (JobRead payload)))
+            Just pid -> not <$> HL.jobExists @m @registry @payload pid
           pure $ if parentGone then Dropped else Skipped
 
 -- | Log a cron message, swallowing logger failures.

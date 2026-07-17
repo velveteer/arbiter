@@ -60,6 +60,7 @@ document.addEventListener('alpine:init', () => {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
+          releaseInitialLoad(this);
           hideModal('dlqDetailModal');
           this._stopTimer();
         },

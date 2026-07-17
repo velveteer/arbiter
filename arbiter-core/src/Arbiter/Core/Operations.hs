@@ -67,6 +67,7 @@ module Arbiter.Core.Operations
 
     -- * Admin Operations
   , listJobs
+  , jobExists
   , getJobById
   , getJobByIdWithStatus
   , getJobByDedupKey
@@ -585,13 +586,7 @@ insertJob
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
 insertJob schemaName tableName job = do
-  parentOk <- case parentId job of
-    Nothing -> pure True
-    Just pid -> do
-      checkRows <- executeQuery (Tmpl.parentExistsSQL schemaName tableName) [pval CInt8 pid] boolCodec
-      case checkRows of
-        [True] -> pure True
-        _ -> pure False
+  parentOk <- maybe (pure True) (jobExists schemaName tableName) (parentId job)
   if not parentOk
     then pure Nothing
     else insertJobUnsafe schemaName tableName job
@@ -1637,7 +1632,12 @@ listJobs
   -> m [JobRead payload]
 listJobs schemaName tableName = listJobsFiltered schemaName tableName []
 
--- | Get a single job by its ID
+-- | Whether a job with the given id exists in the table, without decoding it.
+jobExists :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m Bool
+jobExists schemaName tableName jobId =
+  or <$> executeQuery (Tmpl.jobExistsSQL schemaName tableName) [pval CInt8 jobId] boolCodec
+
+-- | Get a single job by its ID.
 getJobById
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -2396,15 +2396,15 @@ requestCronRun schemaName scheduleName = do
     executeQuery
       (Tmpl.requestCronRunSQL schemaName)
       [pval CText scheduleName, pval CText scheduleName]
-      outcomeCodec
-  pure $ case rows of
-    [(True, _, _)] -> RunReqStamped
-    [(_, True, _)] -> RunReqPending
-    [(_, _, True)] -> RunReqDisabled
+      statusCodec
+  pure $ case listToMaybe rows of
+    Just "stamped" -> RunReqStamped
+    Just "pending" -> RunReqPending
+    Just "disabled" -> RunReqDisabled
     _ -> RunReqNotFound
   where
-    outcomeCodec :: RowCodec (Bool, Bool, Bool)
-    outcomeCodec = (,,) <$> col "stamped" CBool <*> col "pending" CBool <*> col "found" CBool
+    statusCodec :: RowCodec Text
+    statusCodec = col "status" CText
 
 -- | Claim a pending run request, returning the claimed row. 'Nothing' = another
 -- pool won the claim, or the schedule was disabled meanwhile.

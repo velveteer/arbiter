@@ -133,10 +133,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     confirmToggleEnabled() {
-      const host = this.host;
-      if (!this.confirmValid() || host.isBusy(this.confirmTarget)) return;
+      if (!this.confirmValid() || this.isHostBusy(this.confirmTarget)) return;
       hideModal('cronToggleModal');
-      host.applyEnabled(this.confirmTarget, false);
+      this.host?.applyEnabled(this.confirmTarget, false);
     },
   });
 
@@ -234,7 +233,7 @@ document.addEventListener('alpine:init', () => {
     runTitle(s) {
       if (!s.enabled) return 'Schedule is disabled';
       if (this.isRunPending(s)) return 'A run is already pending';
-      return "Enqueue this schedule's job now";
+      return 'Request a run now';
     },
 
     async runNow(schedule) {
@@ -243,7 +242,13 @@ document.addEventListener('alpine:init', () => {
       await this.withBusyRow(schedule.name, async () => {
         try {
           await ArbiterAPI.runCronSchedule(schedule.name);
-          showToast('Run requested for ' + schedule.name, 'success');
+          // The request is claimed asynchronously by a serving pool, and a
+          // SkipOverlap schedule drops it while one of its jobs is still active,
+          // so this reports the request rather than a completed run.
+          const note = this.effectiveOverlap(schedule) === 'SkipOverlap'
+            ? ' (skipped if a job is already running)'
+            : '';
+          showToast('Run requested for ' + schedule.name + note, 'info');
         } catch (e) {
           showToast('Failed to run: ' + e.message);
         } finally {
@@ -258,15 +263,12 @@ document.addEventListener('alpine:init', () => {
 
     lastFired(s) {
       const manual = s.lastManualRunAt;
-      if (manual && (!s.lastFiredAt || Date.parse(manual) > Date.parse(s.lastFiredAt))) {
+      // Both timestamps are minute floors server-side, so a same-minute manual
+      // run ties the scheduled fire. Break the tie toward the manual run.
+      if (manual && (!s.lastFiredAt || Date.parse(manual) >= Date.parse(s.lastFiredAt))) {
         return { at: manual, manual: true };
       }
       return { at: s.lastFiredAt, manual: false };
-    },
-
-    // The schedule list spans the schema, so it names queues this server lacks.
-    queueServed(s) {
-      return this.$store.app.queues.includes(s.queueName);
     },
   }));
 });

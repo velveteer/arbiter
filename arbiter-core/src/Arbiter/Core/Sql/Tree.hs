@@ -13,7 +13,7 @@ module Arbiter.Core.Sql.Tree
   , descendantRollupIdsSQL
   , suspendJobSQL
   , resumeJobSQL
-  , parentExistsSQL
+  , jobExistsSQL
   , getParentIdSQL
   , insertResultSQL
   , getResultsByParentSQL
@@ -249,12 +249,12 @@ resumeJobSQL schema tableName =
           )
       |]
 
--- | Check whether a parent job exists.
+-- | Check whether a job with the given id exists.
 --
--- Parameters: parent_id
+-- Parameters: id
 -- Returns: single row with a boolean
-parentExistsSQL :: Text -> Text -> Text
-parentExistsSQL schema tableName =
+jobExistsSQL :: Text -> Text -> Text
+jobExistsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = ?) AS result|]
 
