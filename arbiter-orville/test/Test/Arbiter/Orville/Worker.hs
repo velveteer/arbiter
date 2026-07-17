@@ -13,7 +13,7 @@ import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.Config (WorkerConfig (..), defaultWorkerConfig)
+import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 import Arbiter.Worker.TestKit (workerSpec)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
@@ -94,7 +94,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool with max 1 attempt so it goes to DLQ
-      config <- defaultWorkerConfig connStr 10 handler
+      config <- transactionalWorkerConfig connStr 10 handler
       runOrvilleTest env
         $ withAsync
           ( runWorkerPool
@@ -162,7 +162,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool
-      config <- defaultWorkerConfig connStr 10 handler
+      config <- transactionalWorkerConfig connStr 10 handler
       runOrvilleTest env
         $ withAsync
           ( runWorkerPool

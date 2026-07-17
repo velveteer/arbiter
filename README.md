@@ -149,7 +149,7 @@ import Database.PostgreSQL.Simple qualified as PG
 main :: IO ()
 main = do
   env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-  config <- Worker.defaultWorkerConfig connStr 5 processEmail
+  config <- Worker.transactionalWorkerConfig connStr 5 processEmail
   ArbS.runSimpleDb env $ Worker.runWorkerPool config
 
 processEmail :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
@@ -168,15 +168,28 @@ processEmail conn job = do
         (recipient, orderId)
 ```
 
-Handlers run inside a database transaction by default. If the handler succeeds, the job is deleted and all database work commits atomically. If the handler throws, the transaction rolls back and the job is retried or moved to the DLQ.
+There are two ways to run a handler, and which one you want depends on the handler.
 
-That transaction is held open for as long as the handler runs, which is what you want when the handler writes to the database and you need those writes to land with the ack. If your handler does no database work - it calls an HTTP API, shells out, or crunches data in memory - or it runs long enough that holding a connection open is wasteful, use [Batched Handlers](#batched-handlers) instead. Batched mode opens no worker transaction and works with a batch size of 1, so it is also the way to run one job at a time with no transaction around it.
+`transactionalWorkerConfig`, above, wraps each handler in a transaction and acks for you. If the handler succeeds, the job is deleted and all its database work commits atomically. If it throws, the transaction rolls back and the job is retried or moved to the DLQ. The transaction stays open for the whole handler, so the handler's writes are guaranteed to land with the ack.
+
+`manualWorkerConfig` opens no transaction and hands you callbacks to finalize the job yourself - ack it, fail it, cancel it, or leave it to be reprocessed. You scope a transaction to just the writes that need one, and nothing is held while the rest of the handler runs:
+
+```haskell
+config <- Worker.manualWorkerConfig connStr 5 processEmail
+
+processEmail :: Arb.JobRead EmailPayload -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload () -> ArbS.SimpleDb AppRegistry IO ()
+processEmail job cbs = do
+  liftIO $ sendEmail (Arb.payload job)
+  Worker.ack cbs job
+```
+
+To take several jobs per invocation and amortize work across them, see [Batched Handlers](#batched-handlers).
 
 ## Architecture
 
 Arbiter has no broker or central coordinator. Every worker pool claims directly from PostgreSQL, so you scale by adding worker processes and there is no leader to elect or fail over.
 
-The default lifecycle (automatic single-job mode):
+The lifecycle under `transactionalWorkerConfig`:
 
 1. **Claim** - the dispatcher claims visible jobs (respecting per-group ordering), increments each job's attempt count, and hides it for the visibility timeout. A heartbeat extends that timeout while the handler runs, so long jobs are not reclaimed.
 2. **Run** - the worker runs the handler inside a transaction. The handler's database work, its stored result, and the ack all commit together.
@@ -184,9 +197,9 @@ The default lifecycle (automatic single-job mode):
 4. **Failure** - the transaction rolls back. A separate transaction retries the job with backoff, or moves it to the dead-letter queue (DLQ)
 5. **Reclaim** - if another worker stole the job mid-flight (its visibility lapsed), either the heartbeat or the ack will throw an exception to skip the job(s) in an attempt to prevent duplicate work.
 
-Delivery is at-least-once: a job redelivered after a worker crash or visibility-timeout lapse runs again, so handlers with side effects outside the transaction should be idempotent.
+Delivery is at-least-once: a job redelivered after a worker crash or visibility-timeout lapse runs again, so handlers with side effects that no transaction covers should be idempotent.
 
-In batched mode the worker transaction in step 2 is replaced by per-job callbacks - the handler completes, fails, cancels, or nacks each job manually (see [Batched Handlers](#batched-handlers)).
+Under `manualWorkerConfig` and `defaultBatchedWorkerConfig` there is no transaction in step 2 - the handler completes, fails, cancels, or nacks each job through callbacks. Claim, heartbeat, and reclaim work the same way.
 
 ### Group Ordering
 
@@ -270,7 +283,7 @@ handler _conn job =
       (childResults, _) <- Worker.mergedChildResults job
       sendToS3 childResults
 
-config <- Worker.defaultWorkerConfig connStr 4 handler
+config <- Worker.transactionalWorkerConfig connStr 4 handler
 ```
 
 Tree-scoped cancellation:
@@ -336,7 +349,7 @@ Right marketOpen = Cron.cronJobInTimezone
   Cron.SkipOverlap
   (\_kind tick -> Arb.defaultJob (OpeningBell tick))
 
-config <- Worker.defaultWorkerConfig connStr 4 processEmail
+config <- Worker.transactionalWorkerConfig connStr 4 processEmail
 let configWithCron = config
       { Worker.cronJobs = [healthCheck, nightlyWithBackfill, marketOpen] }
 ```
@@ -474,7 +487,7 @@ See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-work
 
 ### Batched Handlers
 
-Process jobs with no worker transaction, finalizing each one yourself. The handler receives a batch of up to `batchSize` jobs from a group - use a larger size to amortize work across jobs, or 1 to run them one at a time. Either way no transaction is held while the handler runs, so this is the mode for handlers that do no database work, or that run long enough that holding a connection open is wasteful.
+`defaultBatchedWorkerConfig` is `manualWorkerConfig` with more than one job per invocation: the handler receives a batch of up to `batchSize` jobs from a group, so it can amortize work across them. Finalize each one through the same callbacks.
 
 ```haskell
 -- defaultBatchedWorkerConfig connStr <workerCount> <batchSize> handler
@@ -502,7 +515,24 @@ batchHandler jobs cbs =
 
 So you pay for a transaction only around the work that needs one, rather than for the whole handler. Your writes commit with the ack, but `onJobSuccess` does not - it can fire for a job that is later reprocessed. Keep effects that must happen exactly once in the transaction next to the ack, not in the hook.
 
-Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Rollup parents store a result per job with `ackWith`/`ackAllWith`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
+Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
+
+To store a result per job - for a [job tree's](#job-trees-fan-outfan-in) rollup parent to collect - use `defaultBatchedResultWorkerConfig` and ack with `ackWith`/`ackAllWith`:
+
+```haskell
+-- defaultBatchedResultWorkerConfig connStr <workerCount> <batchSize> handler
+config <- Worker.defaultBatchedResultWorkerConfig connStr 10 5 scoreHandler
+
+scoreHandler
+  :: NonEmpty (Arb.JobRead ImagePayload)
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
+  -> ArbS.SimpleDb AppRegistry IO ()
+scoreHandler jobs cbs =
+  for_ jobs $ \job -> do
+    score <- liftIO $ scoreImage (Arb.payload job)
+    -- The score lands with the ack, for the rollup parent to collect.
+    Worker.ackWith cbs job score
+```
 
 ### Observability Hooks
 
@@ -516,7 +546,7 @@ myHooks = Arb.defaultObservabilityHooks
       liftIO $ recordGauge "jobs.running_duration" (realToFrac $ diffUTCTime now startTime)
   }
 
-config <- Worker.defaultWorkerConfig connStr 5 handler
+config <- Worker.transactionalWorkerConfig connStr 5 handler
 let instrumented = config { Worker.observabilityHooks = myHooks }
 ```
 
@@ -527,7 +557,7 @@ Single-queue:
 ```haskell
 import System.Posix.Signals qualified as Signals
 
-config <- Worker.defaultWorkerConfig connStr 10 processEmail
+config <- Worker.transactionalWorkerConfig connStr 10 processEmail
 Signals.installHandler Signals.sigTERM (Signals.Catch $ Worker.shutdownWorker config) Nothing
 Signals.installHandler Signals.sigINT (Signals.Catch $ Worker.shutdownWorker config) Nothing
 ArbS.runSimpleDb env $ Worker.runWorkerPool config
@@ -536,8 +566,8 @@ ArbS.runSimpleDb env $ Worker.runWorkerPool config
 Multi-queue - all pools share a single shutdown signal:
 
 ```haskell
-emailConfig <- Worker.defaultWorkerConfig connStr 3 processEmail
-imageConfig <- Worker.defaultWorkerConfig connStr 2 processImage
+emailConfig <- Worker.transactionalWorkerConfig connStr 3 processEmail
+imageConfig <- Worker.transactionalWorkerConfig connStr 2 processImage
 
 ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry)
   [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]

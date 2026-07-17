@@ -31,7 +31,7 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (WorkerConfig (..), defaultWorkerConfig)
+import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
 type WorkerTestRegistry = '[ '("arbiter_worker_recovery_test", WorkerTestPayload)]
 
@@ -65,7 +65,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             void $
               HL.insertJob (defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))) {groupKey = Just "g1"}
 
-        config <- runSimpleDb env $ defaultWorkerConfig connStr 10 handler
+        config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
         let workerConfig =
               config
                 { workerCount = 1
@@ -127,7 +127,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           void $
             HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1", maxAttempts = Just 3}
 
-        config <- runSimpleDb env $ defaultWorkerConfig connStr 10 handler
+        config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
         let workerConfig =
               config
                 { workerCount = 1

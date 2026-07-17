@@ -228,8 +228,8 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // Only a pool serving the queue can claim a request, and nothing expires an
-    // unclaimable one, so a run is offered only where it can actually be taken.
+    // An unclaimed request expires, so a run offered where no pool takes it
+    // costs a wait rather than wedging the row.
     canRun(s) {
       return s.enabled && this.queueServed(s) && !this.isRunPending(s);
     },
@@ -260,8 +260,6 @@ document.addEventListener('alpine:init', () => {
       return s.runRequestedAt != null;
     },
 
-    // Scheduled fires stamp the minute floor, manual runs the wall clock. The
-    // two ISO strings differ in width, so they are ordered as instants.
     lastFired(s) {
       const manual = s.lastManualRunAt;
       if (manual && (!s.lastFiredAt || Date.parse(manual) > Date.parse(s.lastFiredAt))) {

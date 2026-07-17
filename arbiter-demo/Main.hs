@@ -20,7 +20,7 @@ import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( WorkerConfig (..)
-  , defaultWorkerConfig
+  , transactionalWorkerConfig
   , mergedChildResults
   , namedWorkerPool
   , runWorkerPools
@@ -245,7 +245,7 @@ type DemoM = SimpleDb DemoRegistry IO
 
 mkDemoWorker :: ByteString -> IO (WorkerConfig DemoM DemoPayload ())
 mkDemoWorker connStr = do
-  cfg <- defaultWorkerConfig connStr 5 handler
+  cfg <- transactionalWorkerConfig connStr 5 handler
   pure
     cfg
       { cronJobs = demoCrons
@@ -265,7 +265,7 @@ mkDemoWorker connStr = do
 
 mkEmailWorker :: ByteString -> IO (WorkerConfig DemoM EmailPayload ())
 mkEmailWorker connStr = do
-  cfg <- defaultWorkerConfig connStr 1 handler
+  cfg <- transactionalWorkerConfig connStr 1 handler
   pure
     cfg
       { cronJobs = emailCrons
@@ -285,7 +285,7 @@ mkEmailWorker connStr = do
 
 mkNotifWorker :: ByteString -> IO (WorkerConfig DemoM NotificationPayload ())
 mkNotifWorker connStr = do
-  cfg <- defaultWorkerConfig connStr 1 handler
+  cfg <- transactionalWorkerConfig connStr 1 handler
   pure
     cfg
       { cronJobs = notifCrons
@@ -309,7 +309,7 @@ mkNotifWorker connStr = do
 
 mkPipelineWorker :: ByteString -> IO (WorkerConfig DemoM PipelinePayload [Text])
 mkPipelineWorker connStr = do
-  cfg <- defaultWorkerConfig connStr 3 handler
+  cfg <- transactionalWorkerConfig connStr 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}
   where
     handler _conn job = case payload job of

@@ -505,7 +505,7 @@ spec connStr = do
         Just firedRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-atomic"
         CS.runRequestedAt firedRow `shouldBe` Nothing
 
-      it "records the manual run at wall-clock time without advancing the gate" $ \env -> do
+      it "records the manual run at the tick without advancing the gate" $ \env -> do
         let Right cj = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "gate"))
             now = mkTime 2025 6 15 12 30 45
         runSimpleDb env $ do
@@ -514,7 +514,7 @@ spec connStr = do
           processRunRequests testLogConfig testSchema [cj] now
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-gate"
-        CS.lastManualRunAt row `shouldBe` Just now
+        CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
         CS.lastFiredAt row `shouldBe` Nothing
 
       it "leaves last_manual_run_at alone when the run is skipped" $ \env -> do
@@ -528,6 +528,30 @@ spec connStr = do
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-skipmark"
         CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
+
+      it "expires a request no pool claimed in time" $ \env -> do
+        let Right cj = cronJob "run-expire" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "expire"))
+        runSimpleDb env $ do
+          initCronSchedules testSchema testTable [cj] testLogConfig
+          void $ Ops.requestCronRun testSchema "run-expire"
+
+        withResource sharedPool $ \conn ->
+          void $
+            PG.execute
+              conn
+              "UPDATE arbiter_cron_test.cron_schedules SET run_requested_at = NOW() - interval '10 minutes' WHERE name = ?"
+              (PG.Only ("run-expire" :: Text))
+
+        now <- runSimpleDb env $ liftIO getCurrentTime
+        runSimpleDb env $ processRunRequests testLogConfig testSchema [cj] now
+        jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
+        map payload jobs `shouldBe` []
+
+        Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-expire"
+        CS.runRequestedAt row `shouldBe` Nothing
+
+        outcome <- runSimpleDb env $ Ops.requestCronRun testSchema "run-expire"
+        outcome `shouldBe` Ops.RunReqStamped
 
       it "AllowOverlap: a manual run does not suppress a Backfill replay" $ \env -> do
         let Right base =

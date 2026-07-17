@@ -318,7 +318,7 @@
         <div class="ms-auto d-flex gap-2 align-items-center">
           <button class="btn btn-outline-success btn-sm" @click="showInsertForm = !showInsertForm; insertError = ''">+ Insert</button>
           <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" :disabled="polling" @click="loadJobs()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
+            <button class="btn btn-outline-secondary" :disabled="loading" @click="loadJobs()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
             <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
               <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
             </button>
@@ -677,7 +677,7 @@
         <!-- Actions -->
         <div class="ms-auto d-flex gap-2 align-items-center">
           <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" :disabled="polling" @click="loadDLQ()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
+            <button class="btn btn-outline-secondary" :disabled="loading" @click="loadDLQ()" title="Refresh now" aria-label="Refresh now"><span :class="{ spin: polling }">&#x21bb;</span></button>
             <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
               <span x-text="refreshMode === 'paused' ? 'Off' : refreshMode"></span>
             </button>
@@ -849,7 +849,7 @@
       <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its cron schedules.</div>
       <template x-if="$store.app.selectedQueue">
         <div class="d-flex gap-2 mb-3 align-items-center">
-          <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
+          <button class="btn btn-outline-secondary btn-sm" :disabled="loading" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         </div>
       </template>
 
@@ -956,7 +956,7 @@
       <div x-show="!$store.app.selectedQueue" class="text-muted">Select a queue to view its workers.</div>
       <template x-if="$store.app.selectedQueue">
         <div class="d-flex gap-3 mb-3 align-items-center">
-          <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadWorkers()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
+          <button class="btn btn-outline-secondary btn-sm" :disabled="loading" @click="loadWorkers()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="workers-live-only" x-model="liveOnly" @change="persistLiveOnly()">
             <label class="form-check-label small" for="workers-live-only">Hide stale</label>
@@ -1142,7 +1142,7 @@
     <!-- Rate Limits Tab -->
     <div id="tab-ratelimits" x-data="rateLimitsTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="loading" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <span class="text-muted small" x-show="loaded && policies.length">
           <span x-text="policies.length"></span> <span x-text="policies.length === 1 ? 'policy' : 'policies'"></span>
         </span>
@@ -1298,7 +1298,7 @@
     <!-- Global cron overview: same component as the per-queue Cron tab, scoped to all queues. -->
     <div id="tab-cron-overview" x-data="cronTab({ global: true })">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="loading" @click="loadSchedules()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <span class="text-muted small" x-show="loaded && schedules.length">
           <span x-text="schedules.length"></span> <span x-text="schedules.length === 1 ? 'schedule' : 'schedules'"></span> across all queues
         </span>
@@ -1421,7 +1421,7 @@
     <!-- Concurrency Tab -->
     <div id="tab-concurrency" x-data="concurrencyTab">
       <div class="d-flex gap-2 mb-3 align-items-center">
-        <button class="btn btn-outline-secondary btn-sm" :disabled="polling" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
+        <button class="btn btn-outline-secondary btn-sm" :disabled="loading" @click="loadPolicies()"><span class="me-1" :class="{ spin: polling }">&#x21bb;</span>Refresh</button>
         <button class="btn btn-sm" :class="isArmed('reconcile') ? 'btn-warning' : 'btn-outline-secondary'"
           @click="reconcile()" x-text="isArmed('reconcile') ? 'Confirm reconcile' : 'Reconcile counts'"></button>
         <span class="text-muted small" x-show="loaded && policies.length">

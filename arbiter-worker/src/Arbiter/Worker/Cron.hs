@@ -383,13 +383,17 @@ data Resolved
   | InvalidTimezone Text
   | Effective OverlapPolicy CronSchedule (Maybe Text)
 
+-- | The row's overlap override, falling back to the schedule's code default.
+effectiveOverlapFor :: CronJob payload -> CS.CronScheduleRow -> OverlapPolicy
+effectiveOverlapFor cj row = fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
+
 resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
 resolveAndParse cj mRow =
   let (expr, ov, tz, isEnabled) = case mRow of
         Nothing -> (cronExpression cj, overlap cj, timezone cj, True)
         Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
           ( CS.effectiveExpression row
-          , fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
+          , effectiveOverlapFor cj row
           , CS.effectiveTimezone row
           , rowEnabled
           )
@@ -461,15 +465,14 @@ processRunRequests logCfg schemaName jobs now = do
         Right Dropped ->
           logCron logCfg Error $ "Cron '" <> name cj <> "' run-now inserted no job, the parent job it references is gone"
     fireClaimed tick cj row = do
-      let effectiveOv = fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
-          key = case effectiveOv of
-            SkipOverlap -> Just (IgnoreDuplicate (makeDedupKeyFromParts (name cj) SkipOverlap Nothing tick))
+      let key = case effectiveOverlapFor cj row of
+            SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cj)))
             AllowOverlap -> Nothing
           jobWrite = (builder cj Live tick) {dedupKey = key}
       inserted <- HL.insertJob jobWrite
       case inserted of
         Just _ -> do
-          void $ Ops.touchCronManualRun schemaName now (name cj)
+          void $ Ops.touchCronManualRun schemaName tick (name cj)
           pure Fired
         -- An absent job is either the dedup key or a missing parent, and only
         -- the parent it names can tell the two apart.
@@ -491,8 +494,13 @@ makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) (timezone cj
 -- timezone, so DST fall-back fires once instead of twice.
 makeDedupKeyFromParts :: Text -> OverlapPolicy -> Maybe Text -> UTCTime -> Text
 makeDedupKeyFromParts jobName ov tz tick = case ov of
-  SkipOverlap -> "arbiter_cron:" <> jobName
+  SkipOverlap -> skipOverlapKey jobName
   AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinuteInTimezone tz tick
+
+-- | The tick-independent key a 'SkipOverlap' schedule reuses, so at most one of
+-- its jobs is ever active.
+skipOverlapKey :: Text -> Text
+skipOverlapKey jobName = "arbiter_cron:" <> jobName
 
 -- | Compute the delay in microseconds until the next minute boundary,
 -- clamped to @[0, 120_000_000]@.

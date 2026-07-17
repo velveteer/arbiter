@@ -55,7 +55,7 @@ import Arbiter.Worker.Config
   , cancelBranch
   , cancelTree
   , defaultBatchedWorkerConfig
-  , defaultWorkerConfig
+  , transactionalWorkerConfig
   , failPermanent
   , failRetry
   , nack
@@ -1051,7 +1051,7 @@ workerSpec connStr mkSimple mkFailing mkHandler runM = do
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload ())
-    mkConfig h = defaultWorkerConfig connStr 10 (mkHandler h)
+    mkConfig h = transactionalWorkerConfig connStr 10 (mkHandler h)
     mkBatchedConfig
       :: Int
       -> Int

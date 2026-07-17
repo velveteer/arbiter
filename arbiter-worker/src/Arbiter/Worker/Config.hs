@@ -4,8 +4,11 @@
 module Arbiter.Worker.Config
   ( -- * Worker Configuration
     WorkerConfig (..)
+  , transactionalWorkerConfig
+  , manualWorkerConfig
   , defaultWorkerConfig
   , defaultBatchedWorkerConfig
+  , defaultBatchedResultWorkerConfig
   , defaultBatchedRollupWorkerConfig
   , singleJobMode
   , HandlerMode (..)
@@ -25,7 +28,7 @@ import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.ByteString (ByteString)
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -95,7 +98,7 @@ data WorkerConfig m payload result = WorkerConfig
   , reaperTimeout :: NominalDiffTime
   -- ^ Abort any single reaper statement that runs longer than this. Default: @300@ (5 minutes).
   , workerId :: UUID
-  -- ^ Identity for this pool. Auto-minted by 'defaultWorkerConfig'.
+  -- ^ Identity for this pool. Auto-minted by 'transactionalWorkerConfig'.
   -- Note: this is not a stable identifier by default,
   -- i.e. it will not persist across worker restarts.
   , workerHost :: Maybe Text
@@ -155,7 +158,19 @@ data HandlerMode m payload result
       Int
       (NonEmpty (JobRead payload) -> BatchCallbacks m payload result -> m ())
 
--- | Create a t'WorkerConfig' with default settings.
+-- | Create a t'WorkerConfig' running one job per group in a worker transaction
+-- held for the duration of the handler.
+transactionalWorkerConfig
+  :: (MonadArbiter n, MonadIO m)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> JobHandler n payload result
+  -> m (WorkerConfig n payload result)
+transactionalWorkerConfig connStrVal workerCnt handler =
+  mkDefaultConfig connStrVal workerCnt (singleJobMode handler)
+
 defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => ByteString
@@ -164,13 +179,13 @@ defaultWorkerConfig
   -- ^ Worker count
   -> JobHandler n payload result
   -> m (WorkerConfig n payload result)
-defaultWorkerConfig connStrVal workerCnt handler =
-  mkDefaultConfig connStrVal workerCnt (singleJobMode handler)
+defaultWorkerConfig = transactionalWorkerConfig
+{-# DEPRECATED defaultWorkerConfig "Use transactionalWorkerConfig. The handler runs in a transaction held for its whole duration, which is not always what you want - see manualWorkerConfig to scope transactions yourself." #-}
 
--- | Create a t'WorkerConfig' for batched job processing. The handler receives
--- the batch and a 'BatchCallbacks' record to finalize each job (ack, fail,
--- cancel, or nack). Jobs left untouched are reprocessed. For rollup parents that
--- store a result per job, see 'defaultBatchedRollupWorkerConfig'.
+-- | Create a t'WorkerConfig' for batched job processing, no worker transaction.
+-- The handler receives the batch and a 'BatchCallbacks' record to finalize each
+-- job (ack, fail, cancel, or nack). Jobs left untouched are reprocessed. To store
+-- a result per job, see 'defaultBatchedResultWorkerConfig'.
 defaultBatchedWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => ByteString
@@ -184,9 +199,36 @@ defaultBatchedWorkerConfig
 defaultBatchedWorkerConfig connStrVal workerCnt batchSize handler =
   mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
 
--- | Create a t'WorkerConfig' for batched rollup parents. Store each job's result
--- for its parent with 'ackWith' or 'ackAllWith'. Fetch a parent's child
--- results with 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
+-- | Create a t'WorkerConfig' running one job at a time, no worker transaction.
+-- The handler finalizes the job through 'BatchCallbacks'. An unfinalized job is
+-- reprocessed.
+manualWorkerConfig
+  :: (MonadArbiter n, MonadIO m)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> (JobRead payload -> BatchCallbacks n payload () -> n ())
+  -> m (WorkerConfig n payload ())
+manualWorkerConfig connStrVal workerCnt handler =
+  defaultBatchedWorkerConfig connStrVal workerCnt 1 (\(job :| _) -> handler job)
+
+-- | 'defaultBatchedWorkerConfig' where each job carries a result. Store one with
+-- 'ackWith' or 'ackAllWith'. Fetch a parent's child results with
+-- 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
+defaultBatchedResultWorkerConfig
+  :: (MonadArbiter n, MonadIO m)
+  => ByteString
+  -- ^ Connection string
+  -> Int
+  -- ^ Worker count
+  -> Int
+  -- ^ Batch size (max jobs per group to claim together)
+  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
+  -> m (WorkerConfig n payload result)
+defaultBatchedResultWorkerConfig connStrVal workerCnt batchSize handler =
+  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+
 defaultBatchedRollupWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => ByteString
@@ -197,8 +239,8 @@ defaultBatchedRollupWorkerConfig
   -- ^ Batch size (max jobs per group to claim together)
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
   -> m (WorkerConfig n payload result)
-defaultBatchedRollupWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+defaultBatchedRollupWorkerConfig = defaultBatchedResultWorkerConfig
+{-# DEPRECATED defaultBatchedRollupWorkerConfig "Use defaultBatchedResultWorkerConfig." #-}
 
 -- | Handler that runs a single job. Use for regular jobs, leaf children, and
 -- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').

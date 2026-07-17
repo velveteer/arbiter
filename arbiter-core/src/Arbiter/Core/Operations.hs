@@ -2382,7 +2382,8 @@ data RunRequestOutcome = RunReqNotFound | RunReqDisabled | RunReqStamped | RunRe
   deriving stock (Eq, Show)
 
 -- | Stamp a manual run request on an enabled schedule and NOTIFY the run-now
--- channel. A request already pending is left as it stands.
+-- channel. A request already pending is left as it stands, unless it has gone
+-- unclaimed long enough to expire.
 requestCronRun
   :: (MonadArbiter m)
   => SchemaName

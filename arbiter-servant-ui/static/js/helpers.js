@@ -191,8 +191,11 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (opts && opts.suppressToast && opts.suppressToast()) return;
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
-    if (seq === self._loadSeq) { self.loading = false; self.loaded = true; }
-    releaseInitialLoad(self);
+    if (seq === self._loadSeq) {
+      self.loading = false;
+      self.loaded = true;
+      releaseInitialLoad(self);
+    }
   }
 }
 

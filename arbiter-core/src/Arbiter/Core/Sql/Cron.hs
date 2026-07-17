@@ -24,9 +24,18 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec)
 import Arbiter.Core.CronSchedule (cronSchedulesTable)
 import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
+import Arbiter.Core.SqlLiterals (textLiteral)
 
 allCronColumns :: Text
 allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
+
+-- | 'allCronColumns' with an expired @run_requested_at@ read back as NULL, so a
+-- request no pool claimed in time reaches readers as the no-op it now is.
+cronReadColumns :: Text
+cronReadColumns = T.intercalate ", " (map expire (codecColumns cronScheduleRowCodec))
+  where
+    expire "run_requested_at" = "(CASE WHEN " <> cronRunPending <> " THEN run_requested_at END) AS run_requested_at"
+    expire c = c
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
 -- Parameters: name, queue_name, default_expression, default_overlap, default_timezone
@@ -49,7 +58,7 @@ listCronSchedulesSQL :: Text -> Text
 listCronSchedulesSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in [text|
-        SELECT ${allCronColumns} FROM ${tbl}
+        SELECT ${cronReadColumns} FROM ${tbl}
         WHERE ?::text IS NULL OR queue_name = ?::text
         ORDER BY name
       |]
@@ -60,7 +69,7 @@ listCronSchedulesSQL schemaName =
 getCronScheduleByNameSQL :: Text -> Text
 getCronScheduleByNameSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-   in "SELECT " <> allCronColumns <> " FROM " <> tbl <> " WHERE name = ?"
+   in "SELECT " <> cronReadColumns <> " FROM " <> tbl <> " WHERE name = ?"
 
 -- | Set @last_fired_at@ to NOW() for a schedule.
 touchCronLastFiredSQL :: Text -> Text
@@ -101,13 +110,23 @@ tryAcquireCronLeaderSQL :: Text
 tryAcquireCronLeaderSQL =
   "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
 
+-- | How long a run request stays claimable. Only a pool serving the queue can
+-- claim one, so a request older than this had no pool to take it and expires
+-- instead of pinning the schedule.
+cronRunRequestTtl :: Text
+cronRunRequestTtl = "INTERVAL '5 minutes'"
+
+-- | A run request that is still claimable.
+cronRunPending :: Text
+cronRunPending = "(run_requested_at IS NOT NULL AND run_requested_at > NOW() - " <> cronRunRequestTtl <> ")"
+
 -- | Stamp a run request on an enabled schedule and NOTIFY. Returns 0 (no such
 -- schedule), 1 (disabled), 2 (stamped), or 3 (a request is already pending).
 -- The status read locks, so it reports the same row version the update sees.
+-- An expired request is overwritten rather than reported as pending.
 requestCronRunSQL :: Text -> Text
 requestCronRunSQL schemaName =
   let tbl = cronSchedulesTable schemaName
-      chan = T.replace "'" "''" (cronRunNotifyChannel schemaName)
    in "WITH found AS (SELECT enabled, run_requested_at FROM "
         <> tbl
         <> " WHERE name = ? FOR UPDATE),"
@@ -115,13 +134,16 @@ requestCronRunSQL schemaName =
         <> "UPDATE "
         <> tbl
         <> " SET run_requested_at = NOW(), updated_at = NOW()"
-        <> " WHERE name = ? AND enabled AND run_requested_at IS NULL"
-        <> " RETURNING pg_notify('"
-        <> chan
-        <> "', name))"
+        <> " WHERE name = ? AND enabled AND NOT "
+        <> cronRunPending
+        <> " RETURNING pg_notify("
+        <> textLiteral (cronRunNotifyChannel schemaName)
+        <> ", name))"
         <> " SELECT (CASE"
         <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 2"
-        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND run_requested_at IS NOT NULL) THEN 3"
+        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND "
+        <> cronRunPending
+        <> ") THEN 3"
         <> " WHEN EXISTS (SELECT 1 FROM found) THEN 1"
         <> " ELSE 0 END)::int8 AS count"
 
@@ -132,7 +154,8 @@ claimCronRunSQL schemaName =
    in "UPDATE "
         <> tbl
         <> " SET run_requested_at = NULL, updated_at = NOW()"
-        <> " WHERE name = ? AND enabled AND run_requested_at IS NOT NULL"
+        <> " WHERE name = ? AND enabled AND "
+        <> cronRunPending
         <> " RETURNING "
         <> allCronColumns
 
@@ -150,4 +173,5 @@ pendingCronRunsSQL schemaName =
   let tbl = cronSchedulesTable schemaName
    in "SELECT name FROM "
         <> tbl
-        <> " WHERE name = ANY(?) AND enabled AND run_requested_at IS NOT NULL"
+        <> " WHERE name = ANY(?) AND enabled AND "
+        <> cronRunPending
