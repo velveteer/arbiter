@@ -6,7 +6,8 @@ const ARB_TIMING = {
   fetchTimeoutMs: 30000,
   flushMs: 250,
   loaderDelayMs: 180,
-  pollSpinMinMs: 500,
+  // One turn of the .spin animation in dashboard.css. Keep the two in step.
+  spinPeriodMs: 800,
   statsDebounceMs: 500,
   armWindowMs: 5000,
   cronPollMs: 60000,

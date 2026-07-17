@@ -137,9 +137,9 @@ function busyRows() {
 }
 
 // Drives the Refresh button spinner. True only for polls (not the first load,
-// which the top bar covers) and held for a minimum so a fast poll is still
-// visible rather than an imperceptible blip. Call _watchPolling once during the
-// component's init.
+// which the top bar covers) and held to a whole number of turns, so a fast poll
+// finishes a rotation instead of snapping back part-way. Call _watchPolling once
+// during the component's init.
 function pollSpinner() {
   return {
     polling: false,
@@ -153,7 +153,9 @@ function pollSpinner() {
           this._pollStart = Date.now();
           if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
         } else if (this.polling) {
-          const remaining = Math.max(0, ARB_TIMING.pollSpinMinMs - (Date.now() - this._pollStart));
+          const elapsed = Date.now() - this._pollStart;
+          const turns = Math.max(1, Math.ceil(elapsed / ARB_TIMING.spinPeriodMs));
+          const remaining = turns * ARB_TIMING.spinPeriodMs - elapsed;
           if (this._pollTimer) clearTimeout(this._pollTimer);
           this._pollTimer = setTimeout(() => { this.polling = false; this._pollTimer = null; }, remaining);
         }
