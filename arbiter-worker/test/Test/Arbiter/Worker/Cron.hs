@@ -1013,7 +1013,7 @@ spec connStr = do
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  env <- createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> do
     cleanupData testSchema testTable conn
     _ <- PG.execute_ conn "DELETE FROM arbiter_cron_test.cron_schedules" `catch` (\(_ :: PG.SqlError) -> pure 0)

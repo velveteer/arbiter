@@ -65,6 +65,7 @@ selectExhaustedJobsSQL schema tableName limit =
         SELECT id, attempts, parent_id, (parent_state IS NOT NULL) AS is_rollup
         FROM ${tbl}
         WHERE NOT suspended
+          AND cancel_requested_at IS NULL
           AND attempts >= COALESCE(max_attempts, ${dma})
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
         ORDER BY id ASC

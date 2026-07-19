@@ -8,6 +8,7 @@
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
+  , withHasqlLibPQConnection
   , hasqlSettings
   , HasqlSettings
   ) where
@@ -63,6 +64,18 @@ connectionInTransaction conn =
   Hasql.withLibPQConnection conn $ \pq -> do
     status <- LibPQ.transactionStatus pq
     pure (txStatusNeedsRollback status)
+#endif
+
+-- | Run an action with the underlying libpq connection, for LISTEN/NOTIFY.
+withHasqlLibPQConnection :: Hasql.Connection -> (LibPQ.Connection -> IO a) -> IO a
+#if MIN_VERSION_hasql(1,10,0)
+withHasqlLibPQConnection conn action = do
+  result <- Hasql.use conn $ Session.onLibpqConnection $ \pq -> do
+    a <- action pq
+    pure (Right a, pq)
+  either (const (throwInternal "arbiter listener: connection lost")) pure result
+#else
+withHasqlLibPQConnection = Hasql.withLibPQConnection
 #endif
 
 -- | Only @TransInTrans@ and @TransInError@ accept a @ROLLBACK@ without warning.

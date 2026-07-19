@@ -15,7 +15,8 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Job.Schema (SchemaName, quoteIdentifier)
+import Arbiter.Core.Job.Schema (SchemaName)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 data QueueRow = QueueRow
   { queueName :: Text

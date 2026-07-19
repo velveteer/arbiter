@@ -538,6 +538,8 @@ data SetVisibilityResult
   | -- | Job was reclaimed by another worker (attempts count changed).
     -- Contains: job ID, expected attempts, actual attempts.
     JobReclaimed Int64 Int32 Int32
+  | -- | Job was force-cancel-flagged. Contains job ID.
+    JobCancelled Int64
   deriving stock (Eq, Show)
 
 -- | Extends visibility timeout for multiple jobs. All jobs must be from
@@ -557,9 +559,10 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
       toResult info = case info of
-        Ops.VisibilityUpdateInfo jobId True _ -> VisibilityExtended jobId
-        Ops.VisibilityUpdateInfo jobId False Nothing -> JobGone jobId
-        Ops.VisibilityUpdateInfo jobId False (Just actual) ->
+        Ops.VisibilityUpdateInfo jobId _ _ True -> JobCancelled jobId
+        Ops.VisibilityUpdateInfo jobId True _ False -> VisibilityExtended jobId
+        Ops.VisibilityUpdateInfo jobId False Nothing False -> JobGone jobId
+        Ops.VisibilityUpdateInfo jobId False (Just actual) False ->
           let jobAttempts = maybe 0 attempts (Map.lookup jobId jobMap)
            in JobReclaimed jobId jobAttempts actual
   pure $ map toResult infos

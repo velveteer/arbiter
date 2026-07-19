@@ -33,8 +33,8 @@ type SMRegistry = '[ '("arbiter_simple_sm_test", SMPayload)]
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   pool <- runIO (createSimplePool 40 connStr)
-  let env = createSimpleEnvWithPool (Proxy @SMRegistry) pool testSchema
-      run :: forall a. SimpleDb SMRegistry IO a -> IO a
+  env <- runIO (createSimpleEnvWithPool (Proxy @SMRegistry) pool testSchema)
+  let run :: forall a. SimpleDb SMRegistry IO a -> IO a
       run = runSimpleDb env
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource (fromJust (connectionPool (simplePool env)))

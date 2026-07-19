@@ -98,7 +98,7 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
-import Arbiter.Core.Worker (addClaimedByColumnSQL, createWorkersTableSQL)
+import Arbiter.Core.Worker (addCancelRequestedAtColumnSQL, addClaimedByColumnSQL, createWorkersTableSQL)
 import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
@@ -456,6 +456,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "set-job-queue-fillfactor-100" $
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
         , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
+        , script "add-cancel-requested-at-column" $ addCancelRequestedAtColumnSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

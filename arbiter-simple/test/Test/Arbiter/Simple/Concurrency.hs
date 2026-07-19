@@ -41,7 +41,7 @@ testTable = "arbiter_simple_concurrency_test"
 withCleanup
   :: Pool PG.Connection -> (SimpleEnv SimpleConcurrencyTestRegistry -> IO a) -> IO a
 withCleanup sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @SimpleConcurrencyTestRegistry) sharedPool testSchema
+  env <- createSimpleEnvWithPool (Proxy @SimpleConcurrencyTestRegistry) sharedPool testSchema
   cleanupSimpleTest env testSchema testTable
   action env
 

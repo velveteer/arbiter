@@ -124,6 +124,7 @@ import Arbiter.Core qualified as Arb
 import Arbiter.Simple qualified as ArbS
 import Data.Proxy (Proxy (..))
 
+-- A producer doesn't need to configure a worker pool env, it can use default settings
 env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
 
 ArbS.runSimpleDb env $ do
@@ -148,8 +149,10 @@ import Database.PostgreSQL.Simple qualified as PG
 
 main :: IO ()
 main = do
-  env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-  config <- Worker.transactionalWorkerConfig connStr 5 processEmail
+  -- 1 pool of 5 concurrent worker threads, using postgresql-simple via arbiter-simple backend
+  config <- Worker.transactionalWorkerConfig 5 processEmail
+  poolCfg <- Worker.poolConfigForWorkers [Worker.namedWorkerPool config]
+  env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
   ArbS.runSimpleDb env $ Worker.runWorkerPool config
 
 processEmail :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
@@ -168,12 +171,19 @@ processEmail conn job = do
         (recipient, orderId)
 ```
 
-`transactionalWorkerConfig`, above, wraps each handler in a transaction and acks for you. If the handler succeeds, the job is deleted and all its database work commits atomically. If it throws, the transaction rolls back and the job is retried or moved to the DLQ. The transaction stays open for the whole handler, so the handler's writes are guaranteed to land with the ack.
+`transactionalWorkerConfig`, above, wraps each handler in a transaction and
+acks for you. If the handler succeeds, the job is deleted and all its database
+work commits atomically. If it throws, the transaction rolls back and the job
+is retried or moved to the DLQ. The transaction stays open for the whole
+handler, so the handler's writes are guaranteed to land with the ack.
 
-`manualWorkerConfig` opens no transaction and hands you callbacks to finalize the job yourself - ack it, fail it, cancel it, or leave it to be reprocessed. You scope a transaction to just the writes that need one, and nothing is held while the rest of the handler runs:
+`manualWorkerConfig` opens no transaction and hands you callbacks to finalize
+the job yourself - ack it, fail it, cancel it, or leave it to be reprocessed.
+You scope a transaction to just the writes that need one, and nothing is held
+while the rest of the handler runs:
 
 ```haskell
-config <- Worker.manualWorkerConfig connStr 5 processEmail
+config <- Worker.manualWorkerConfig 5 processEmail
 
 processEmail
     :: Arb.JobRead EmailPayload
@@ -216,7 +226,8 @@ A group key runs a group **one job (or batch) at a time** - serial within the gr
 Jobs carry an integer `priority` (default `0`), and lower numbers are claimed first. Since every job defaults to `0`, give background work a higher number to defer it behind normal jobs.
 
 ```haskell
-job = (Arb.defaultJob payload) { Arb.priority = 10 }  -- runs behind default-priority work
+-- runs behind default-priority work
+job = (Arb.defaultJob payload) { Arb.priority = 10 }
 ```
 
 ### Deduplication
@@ -268,7 +279,10 @@ myTree = JT.rollup (Arb.defaultJob Aggregate)
   ]
 ```
 
-A parent fetches its children's results on demand with `Worker.mergedChildResults`, which returns the monoidal merge of its immediate children's results plus a map of any DLQ'd immediate children. Intermediate results are cleaned up automatically when the parent is acked.
+A parent fetches its children's results on demand with
+`Worker.mergedChildResults`, which returns the monoidal merge of its immediate
+children's results plus a map of any DLQ'd immediate children. Intermediate
+results are cleaned up automatically when the parent is acked.
 
 ```haskell
 handler :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
@@ -284,7 +298,7 @@ handler _conn job =
       (childResults, _) <- Worker.mergedChildResults job
       sendToS3 childResults
 
-config <- Worker.transactionalWorkerConfig connStr 4 handler
+config <- Worker.transactionalWorkerConfig 4 handler
 ```
 
 Tree-scoped cancellation:
@@ -350,7 +364,7 @@ Right marketOpen = Cron.cronJobInTimezone
   Cron.SkipOverlap
   (\_kind tick -> Arb.defaultJob (OpeningBell tick))
 
-config <- Worker.transactionalWorkerConfig connStr 4 processEmail
+config <- Worker.transactionalWorkerConfig 4 processEmail
 let configWithCron = config
       { Worker.cronJobs = [healthCheck, nightlyWithBackfill, marketOpen] }
 ```
@@ -388,15 +402,24 @@ Arb.throwBranchCancel "Subtask failed" -- cancel current branch
 Arb.throwNack                          -- reprocess later, not a failure (no attempt consumed)
 ```
 
-In a batched handler, the same dispositions are available per job through the `BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack`) so one job's outcome does not affect the rest of the batch. A throw applies to whichever jobs the handler has not yet finalized.
+In a batched handler, the same dispositions are available per job through the
+`BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`,
+`cancelTree`, `nack`) so one job's outcome does not affect the rest of the
+batch. A throw applies to whichever jobs the handler has not yet finalized.
 
-Any unrecognized exception is treated as retryable. Jobs have a configurable `maxAttempts` (default: 10). After exhausting attempts, the job moves to the DLQ.
+Any unrecognized exception is treated as retryable. Jobs have a configurable
+`maxAttempts` (default: 10). After exhausting attempts, the job moves to the
+DLQ.
 
 ### Rate Limiting
 
-Throttle jobs by an arbitrary key. A limit is shared by every queue in a registry, so one policy can govern a resource no matter which queues touch it.
+Throttle jobs by an arbitrary key. A limit is shared by every queue in a
+registry, so one policy can govern a resource no matter which queues touch it.
 
-Give a payload a `HasRateLimit` instance whose `rateLimitFor` selects a policy per job. The selector is a small DSL that the migration statically inspects to collect and seed every policy it can reach, so there is no separate policy list to keep in sync.
+Give a payload a `HasRateLimit` instance whose `rateLimitFor` selects a policy
+per job. The selector is a small DSL that the migration statically inspects to
+collect and seed every policy it can reach, so there is no separate policy list
+to keep in sync.
 
 ```haskell
 import Arbiter.RateLimit
@@ -416,11 +439,19 @@ instance HasRateLimit EmailPayload where
       (limitBy bulk recipientDomain)
 ```
 
-`tokenBucket prefix n period` reads as "n per period, with bursts up to n". To bound bursts independently of the sustained rate, build a `Policy` directly and set `policyMax` (burst) apart from `policyRefill` / `policyInterval` (rate). Weight expensive jobs with `rateLimitCost`, or top up a bucket manually with `addRateLimitTokens`.
+`tokenBucket prefix n period` reads as "n per period, with bursts up to n". To
+bound bursts independently of the sustained rate, build a `Policy` directly and
+set `policyMax` (burst) apart from `policyRefill` / `policyInterval` (rate).
+Weight expensive jobs with `rateLimitCost`, or top up a bucket manually with
+`addRateLimitTokens`.
 
-A job denied by its bucket is parked, not polled: it becomes invisible until the bucket can next afford it, then competes normally again. Throttled counts are visible per policy in the API and admin UI, and operators can override a policy's settings at runtime.
+A job denied by its bucket is parked, not polled: it becomes invisible until
+the bucket can next afford it, then competes normally again. Throttled counts
+are visible per policy in the API and admin UI, and operators can override a
+policy's settings at runtime.
 
-A fixed window is just a manual bucket: declare it with a refill of 0 and reset it at the boundary from a cron.
+A fixed window is just a manual bucket: declare it with a refill of 0 and reset
+it at the boundary from a cron.
 
 ```haskell
 daily :: Policy
@@ -436,23 +467,36 @@ daily =
 resetRateLimitBuckets "daily"
 ```
 
-Bucket state is not durable by default: after a database crash or a failover, buckets reset to full, so each key can burst up to its max once before settling back to the sustained rate. When that overshoot is unacceptable - strict external quotas, or manual buckets holding real credit - migrate the schema with durable buckets, and bucket state survives restarts at some throughput cost:
+Bucket state is not durable by default: after a database crash or a failover,
+buckets reset to full, so each key can burst up to its max once before settling
+back to the sustained rate. When that overshoot is unacceptable - strict
+external quotas, or manual buckets holding real credit - migrate the schema
+with durable buckets, and bucket state survives restarts at some throughput
+cost:
 
 ```haskell
 runMigrationsForRegistry (Proxy @AppRegistry) connStr "arbiter"
   defaultMigrationConfig { rateLimitDurability = Durable }
 ```
 
-Durability is a property of the migrated schema, not the registry type, so the same registry can back an unlogged staging schema and a durable production one.
+Durability is a property of the migrated schema, not the registry type, so the
+same registry can back an unlogged staging schema and a durable production one.
 
 > [!IMPORTANT]
-> Tokens are spent when a job is **claimed**, not when it finishes. A retry or a redelivery (worker crash, visibility timeout) spends again, so size policies against claims, not successful runs.
+> Tokens are spent when a job is **claimed**, not when it finishes. A retry or
+> a redelivery (worker crash, visibility timeout) spends again, so size
+> policies against claims, not successful runs.
 >
-> A `rateLimitCost` above the bucket's max clamps to the max: the job drains a full bucket and runs, rather than blocking forever. A rate limit bounds arrivals over time. To bound how many jobs run at once, use a concurrency limit.
+> A `rateLimitCost` above the bucket's max clamps to the max: the job drains a
+> full bucket and runs, rather than blocking forever. A rate limit bounds
+> arrivals over time. To bound how many jobs run at once, use a concurrency
+> limit.
 
 ### Concurrency Limiting
 
-Cap how many jobs sharing a key run at once. A `HasConcurrency` instance names a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are global, so a pool spans every queue in a registry.
+Cap how many jobs sharing a key run at once. A `HasConcurrency` instance names
+a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are
+global, so a pool spans every queue in a registry.
 
 ```haskell
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
@@ -462,7 +506,12 @@ instance HasConcurrency SyncPayload where
   concurrencyFor = concurrencyBy (concurrencyPool "tenant-sync" 2) syncTenant
 ```
 
-Build the selector from `noConcurrency` / `concurrencyBy` / `globalConcurrency` / `concurrencyByCase`. The limit lives on the pool, so every key under the prefix shares the same cap. Operators retune a whole pool live through the API or admin UI. An override takes precedence until cleared, then the declared default applies again. Setting an override of 0 pauses the pool entirely: nothing under it is claimed until the override is raised or cleared.
+Build the selector from `noConcurrency` / `concurrencyBy` / `globalConcurrency`
+/ `concurrencyByCase`. The limit lives on the pool, so every key under the
+prefix shares the same cap. Operators retune a whole pool live through the API
+or admin UI. An override takes precedence until cleared, then the declared
+default applies again. Setting an override of 0 pauses the pool entirely:
+nothing under it is claimed until the override is raised or cleared.
 
 #### Concurrency limit 1 vs. a group key
 
@@ -475,12 +524,18 @@ Both cap a key to one job in flight. The difference shows up **on failure**:
 | Ordering | eligible jobs run in insertion order within priority | none beyond the claim's sort |
 | Batching | claims an ordered batch per group | N independent jobs |
 
-Reach for a **group key** to serialize a sequence in order (event streams, state machines) - a failing job blocks the rest until it succeeds or dead-letters. Reach for **concurrency 1** as a mutex (one sync per tenant) - order doesn't matter and a backing-off job yields to the others. They're orthogonal, so a job can carry both.
+Reach for a **group key** to serialize a sequence in order (event streams,
+state machines) - a failing job blocks the rest until it succeeds or
+dead-letters. Reach for **concurrency 1** as a mutex (one sync per tenant) -
+order doesn't matter and a backing-off job yields to the others. They're
+orthogonal, so a job can carry both.
 
 > [!IMPORTANT]
-> The cap counts claims: a slot is held until its job is acked, retried, or reclaimed, so a timed-out-but-unacked job still occupies its slot until then.
+> The cap counts claims: a slot is held until its job is acked, retried, or
+> reclaimed, so a timed-out-but-unacked job still occupies its slot until then.
 >
-> Maintenance is automatic. Drained keys are cleaned up periodically, and a pool's in-flight accounting recovers on its own after a restart or failover.
+> Maintenance is automatic. Drained keys are cleaned up periodically, and a
+> pool's in-flight accounting recovers on its own after a restart or failover.
 
 ## Worker Configuration
 
@@ -488,11 +543,14 @@ See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-work
 
 ### Batched Handlers
 
-`defaultBatchedWorkerConfig` is `manualWorkerConfig` with more than one job per invocation: the handler receives a batch of up to `batchSize` jobs from a group, so it can amortize work across them. Finalize each one through the same callbacks.
+`defaultBatchedWorkerConfig` is `manualWorkerConfig` with more than one job per
+invocation: the handler receives a batch of up to `batchSize` jobs from a
+group, so it can amortize work across them. Finalize each one through the same
+callbacks.
 
 ```haskell
--- defaultBatchedWorkerConfig connStr <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedWorkerConfig connStr 10 5 batchHandler
+-- defaultBatchedWorkerConfig <workerCount> <batchSize> handler
+config <- Worker.defaultBatchedWorkerConfig 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
@@ -505,7 +563,9 @@ batchHandler jobs cbs = do
   Worker.ackAll cbs (toList jobs)
 ```
 
-Opting out of the worker transaction does not mean giving up atomicity where you want it. Each callback runs in its own transaction, and wrapping one in your own `withDbTransaction` commits the ack together with your writes:
+Opting out of the worker transaction does not mean giving up atomicity where
+you want it. Each callback runs in its own transaction, and wrapping one in
+your own `withDbTransaction` commits the ack together with your writes:
 
 ```haskell
 batchHandler jobs cbs =
@@ -514,15 +574,25 @@ batchHandler jobs cbs =
     Worker.ack cbs job
 ```
 
-So you pay for a transaction only around the work that needs one, rather than for the whole handler. Your writes commit with the ack, but `onJobSuccess` does not - it can fire for a job that is later reprocessed. Keep effects that must happen exactly once in the transaction next to the ack, not in the hook.
+So you pay for a transaction only around the work that needs one, rather than
+for the whole handler. Your writes commit with the ack, but `onJobSuccess` does
+not - it can fire for a job that is later reprocessed. Keep effects that must
+happen exactly once in the transaction next to the ack, not in the hook.
 
-Each job is finalized on its own via the [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`, `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure, cancel, or nack affects only that job - completed jobs stay done, an untouched job is reprocessed, and hooks fire per job.
+Each job is finalized on its own via the
+[`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
+record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`,
+`cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure,
+cancel, or nack affects only that job - completed jobs stay done, an untouched
+job is reprocessed, and hooks fire per job.
 
-To store a result per job - for a [job tree's](#job-trees-fan-outfan-in) rollup parent to collect - use `defaultBatchedResultWorkerConfig` and ack with `ackWith`/`ackAllWith`:
+To store a result per job - for a [job tree's](#job-trees-fan-outfan-in) rollup
+parent to collect - use `defaultBatchedResultWorkerConfig` and ack with
+`ackWith`/`ackAllWith`:
 
 ```haskell
--- defaultBatchedResultWorkerConfig connStr <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedResultWorkerConfig connStr 10 5 scoreHandler
+-- defaultBatchedResultWorkerConfig <workerCount> <batchSize> handler
+config <- Worker.defaultBatchedResultWorkerConfig 10 5 scoreHandler
 
 scoreHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
@@ -547,35 +617,30 @@ myHooks = Arb.defaultObservabilityHooks
       liftIO $ recordGauge "jobs.running_duration" (realToFrac $ diffUTCTime now startTime)
   }
 
-config <- Worker.transactionalWorkerConfig connStr 5 handler
+config <- Worker.transactionalWorkerConfig 5 handler
 let instrumented = config { Worker.observabilityHooks = myHooks }
 ```
 
 ### Graceful Shutdown
 
-Single-queue:
+Install signal handlers through the setup callback, which receives the shared
+shutdown state. One pool or several, it's the same shape - add entries to the
+list:
 
 ```haskell
 import System.Posix.Signals qualified as Signals
 
-config <- Worker.transactionalWorkerConfig connStr 10 processEmail
-Signals.installHandler Signals.sigTERM (Signals.Catch $ Worker.shutdownWorker config) Nothing
-Signals.installHandler Signals.sigINT (Signals.Catch $ Worker.shutdownWorker config) Nothing
-ArbS.runSimpleDb env $ Worker.runWorkerPool config
-```
+emailConfig <- Worker.transactionalWorkerConfig 3 processEmail
+imageConfig <- Worker.transactionalWorkerConfig 2 processImage
 
-Multi-queue - all pools share a single shutdown signal:
+let workers = [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]
+poolCfg <- Worker.poolConfigForWorkers workers
+env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
 
-```haskell
-emailConfig <- Worker.transactionalWorkerConfig connStr 3 processEmail
-imageConfig <- Worker.transactionalWorkerConfig connStr 2 processImage
-
-ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry)
-  [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]
-  $ \state -> do
-    let shutdown = Signals.Catch $ Worker.signalShutdown state
-    Signals.installHandler Signals.sigTERM shutdown Nothing
-    Signals.installHandler Signals.sigINT shutdown Nothing
+ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry) workers $ \state -> do
+  let shutdown = Signals.Catch $ Worker.signalShutdown state
+  void $ Signals.installHandler Signals.sigTERM shutdown Nothing
+  void $ Signals.installHandler Signals.sigINT shutdown Nothing
 ```
 
 The dispatcher stops claiming, in-flight jobs drain within `gracefulShutdownTimeout`, and the process exits.
@@ -593,6 +658,39 @@ config { Worker.jitter = EqualJitter }  -- delay/2 + random(0, delay/2) (default
 config { Worker.jitter = NoJitter }
 ```
 
+### Wakeups (LISTEN/NOTIFY)
+
+Workers wake immediately to claim new jobs, pause/resume, force-cancel (cancel
+already claimed jobs), and cron run-now through PostgreSQL's `LISTEN/NOTIFY`
+instead of waiting for the next poll. They will use the shared listener hub
+that is available from the supplied `MonadArbiter` instance (e.g. from
+`SimpleDb`, `HasqlDb`, your own monad).
+
+Without a listener, jobs are still claimed and processed reliably on the
+`pollInterval` cadence instead of instantly. The control paths that ride
+`LISTEN/NOTIFY` fall back to slower cadences: pause/resume is reconciled at the
+worker heartbeat (`workerHeartbeatInterval`), a cron run-now request waits for
+the scheduler's next tick, and force-cancel interrupts a running handler at the
+next job heartbeat (`jobHeartbeatInterval`) rather than instantly.
+
+The listener is lazy: it opens no connection until a worker pool starts on the
+env. Producers that only enqueue jobs never start one, so the listener stays
+dormant and costs nothing. There is nothing to disable.
+
+Once a worker pool does start, the listener holds one pool connection for as long as workers run.
+
+On the provided backends, you can give the listener its own connection with `useDedicatedListener`:
+
+```haskell
+env <- ArbS.useDedicatedListener connStr =<< ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+```
+
+And to run in poll-only mode, with no listener at all, use `disableListener`:
+
+```haskell
+env <- ArbS.disableListener <$> ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+```
+
 ### Other Options
 
 - **Logging** - structured JSON to stderr, fast-logger, or a custom callback
@@ -604,7 +702,7 @@ config { Worker.jitter = NoJitter }
     initialDelaySeconds: 30
     periodSeconds: 60
   ```
-- **Pool sizing** - `poolConfigForWorkers` auto-sizes based on worker count
+- **Pool sizing** - `poolConfigForWorkers` sizes the pool from the worker pools that will run
 - **Pause/resume** - at queue, worker, or job/tree level
 
 ## REST API and Admin UI
@@ -687,7 +785,7 @@ Arbiter's core is backend-agnostic via the `MonadArbiter` typeclass. Three offic
 
 If you're choosing a backend based on raw throughput, consider our benchmarks:
 
-Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro. hasql runs with prepared claim statements (recommended but not the default).
+Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro. hasql runs with prepared claim statements (the default).
 
 **Pre-loaded queue** (1M jobs, 50k groups):
 
@@ -746,7 +844,34 @@ See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-si
 
 ### arbiter-orville (orville-postgresql)
 
-Integrates with `orville-postgresql`. Handlers do not receive a connection parameter - Orville manages connections and transactions internally. Requires a custom monad with `MonadOrville` and `HasArbiterSchema` instances.
+Integrates with `orville-postgresql`. Handlers do not receive a connection
+parameter - Orville manages connections and transactions internally. Requires a
+custom monad with `MonadOrville`, `HasArbiterSchema`, and `MonadArbiter`
+instances.
+
+Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
+shared listener runs on its own dedicated connection. Build a `DedicatedListen`
+(from `Arbiter.Core.Listen`) with the same connection string as your Orville
+pool, keep it in your reader environment, and return it from `getListener`:
+
+```haskell
+import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)
+
+data AppEnv = AppEnv
+  { appSchema  :: SchemaName
+  , appOrville :: O.OrvilleState
+  , appListen  :: DedicatedListen
+  }
+
+main :: IO ()
+main = do
+  listen <- newDedicatedListen connStr
+  -- ... build AppEnv { appListen = listen, ... } and run your workers
+
+instance MonadArbiter AppM where
+  -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
+  getListener = asks (Just . dedicatedListener . appListen)
+```
 
 See the [arbiter-orville haddocks](https://velveteer.github.io/arbiter/arbiter-orville/Arbiter-Orville.html)
 

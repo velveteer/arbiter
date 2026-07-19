@@ -119,7 +119,7 @@ isRollup = isJust . parentState
 
 -- | Effective job status, derived (never stored) by the status SQL @CASE@ in the
 -- templates module, which is its sole definition.
-data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled
+data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled | Cancelled
   deriving stock (Bounded, Enum, Eq, Generic, Show)
 
 jobStatusToText :: JobStatus -> Text
@@ -129,6 +129,7 @@ jobStatusToText Backoff = "backoff"
 jobStatusToText Scheduled = "scheduled"
 jobStatusToText Suspended = "suspended"
 jobStatusToText Throttled = "throttled"
+jobStatusToText Cancelled = "cancelled"
 
 -- | Reverse of 'jobStatusToText' over all constructors.
 jobStatusFromTextMaybe :: Text -> Maybe JobStatus

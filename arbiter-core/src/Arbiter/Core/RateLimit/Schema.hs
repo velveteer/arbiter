@@ -37,11 +37,10 @@ import Arbiter.Core.Job.Schema
   , jobQueueDLQTable
   , jobQueueTable
   , maintenanceFunctionNames
-  , quoteIdentifier
   , statementTriggerSQL
   )
 import Arbiter.Core.RateLimit.Spec (Durability (..), Policy (..))
-import Arbiter.Core.SqlLiterals (doubleLiteral, textLiteral)
+import Arbiter.Core.SqlLiterals (doubleLiteral, quoteIdentifier, textLiteral)
 
 -- | A token-bucket policy as upsertable row fields.
 data PolicyRow = PolicyRow

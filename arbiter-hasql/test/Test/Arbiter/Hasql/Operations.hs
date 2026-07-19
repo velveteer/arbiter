@@ -35,7 +35,7 @@ testTable = "arbiter_hasql_ops_test"
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   sharedPool <- runIO (createHasqlPool 5 connStr)
-  let mkEnv = createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema
+  mkEnv <- runIO (createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema)
   around (\action -> cleanupHasqlTest connStr testSchema testTable >> action mkEnv) $ do
     operationsSpec @TestPayload TestMessage runHasqlDb
 

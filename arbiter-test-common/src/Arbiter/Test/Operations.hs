@@ -235,6 +235,23 @@ operationsSpec mkMessage runM = do
       length claimed2 `shouldBe` 1
       payload (head claimed2) `shouldBe` mkMessage "Second"
 
+    it "does not complete a force-cancel-flagged job" $ \env -> do
+      -- A handler that finishes and acks after force-cancel has flagged its job
+      -- must not complete it, else the cancel is lost to the completion race.
+      let job = defaultJob (mkMessage "cancel-then-ack")
+      Just inserted <- runM env (HL.insertJob job)
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 UUID.nil) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+
+      flagged <- runM env (HL.forceCancelJob @m @registry @payload (primaryKey inserted))
+      flagged `shouldBe` 1
+
+      acked <- runM env (HL.ackJob (head claimed))
+      acked `shouldBe` 0
+
+      -- The flagged row survives, left for the cancel path to reap.
+      getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
+
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
       let job = (defaultJob (mkMessage "Test")) {groupKey = Just "visibility-extend-test"}
@@ -891,6 +908,18 @@ operationsSpec mkMessage runM = do
 
       Just updated <- runM env (HL.getJobById @m @registry @payload (primaryKey claimedJob))
       claimedBy updated `shouldBe` Nothing
+    it "does not retry a force-cancel-flagged job" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-then-retry")))
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 UUID.nil) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+
+      flagged <- runM env (HL.forceCancelJob @m @registry @payload (primaryKey inserted))
+      flagged `shouldBe` 1
+
+      retried <- runM env (HL.updateJobForRetry 5 "boom" (head claimed))
+      retried `shouldBe` 0
+
+      getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
   describe "Dead Letter Queue Operations" $ do
     it "moveToDLQ moves failed job to DLQ and removes from main queue" $ \env -> do
       let job = (defaultJob (mkMessage "Failed")) {groupKey = Just "dlq-move-test"}

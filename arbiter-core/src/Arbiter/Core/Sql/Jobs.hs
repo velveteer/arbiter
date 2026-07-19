@@ -136,6 +136,7 @@ jobStatusCaseSQL :: Text
 jobStatusCaseSQL =
   [text|
     CASE
+      WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
       WHEN suspended THEN 'suspended'
       WHEN ${throttledPredicateSQL} THEN 'throttled'
       WHEN claimed_by IS NULL AND last_error IS NOT NULL AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'backoff'

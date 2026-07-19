@@ -22,6 +22,6 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema rateLimitTable False >> setupRateLimitPolicy connStr testSchema) $ do
     sharedPool <- runIO (createSimplePool 5 connStr)
-    let mkEnv = createSimpleEnvWithPool (Proxy @RLReg) sharedPool testSchema
+    mkEnv <- runIO (createSimpleEnvWithPool (Proxy @RLReg) sharedPool testSchema)
     around (\action -> cleanupSimpleTest mkEnv testSchema rateLimitTable >> action mkEnv) $
       rateLimitSpec runSimpleDb

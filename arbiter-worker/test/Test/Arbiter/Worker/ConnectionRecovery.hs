@@ -43,7 +43,7 @@ testTable = "arbiter_worker_recovery_test"
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  env <- createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
   action env
 
@@ -65,7 +65,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             void $
               HL.insertJob (defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))) {groupKey = Just "g1"}
 
-        config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+        config <- transactionalWorkerConfig 10 handler
         let workerConfig =
               config
                 { workerCount = 1
@@ -127,7 +127,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           void $
             HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1", maxAttempts = Just 3}
 
-        config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+        config <- transactionalWorkerConfig 10 handler
         let workerConfig =
               config
                 { workerCount = 1

@@ -3,6 +3,9 @@
 module Test.Arbiter.Orville.TestHelpers
   ( executeSql
   , setupOrvilleTest
+  , createOrvilleTestEnv
+  , destroyOrvilleTestEnv
+  , disableOrvilleListener
   , cleanupOrvilleTest
   , runOrvilleTest
   , OrvilleTestEnv (..)
@@ -10,6 +13,7 @@ module Test.Arbiter.Orville.TestHelpers
   ) where
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.Test.Setup qualified as TestSetup
@@ -22,6 +26,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Orville.PostgreSQL qualified as O
+import Orville.PostgreSQL.Raw.Connection (destroyIdleConnections)
 import Orville.PostgreSQL.Raw.RawSql qualified as RawSql
 import Orville.PostgreSQL.UnliftIO qualified as O
 import UnliftIO (MonadIO (..), MonadUnliftIO (..))
@@ -39,6 +44,8 @@ data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
   , testTableName :: Text
   , testConnStr :: ByteString
   , testOrvilleState :: O.OrvilleState
+  , testPool :: O.ConnectionPool
+  , testListen :: Maybe DedicatedListen
   }
 
 -- | Test monad that provides both OrvilleState and ArbiterEnv
@@ -65,6 +72,7 @@ instance MonadArbiter (TestOrville registry) where
   executeStatement = orvilleExecuteStatement
   withDbTransaction = orvilleWithDbTransaction
   runHandlerWithConnection = orvilleRunHandlerWithConnection
+  getListener = TestOrville $ asks (fmap dedicatedListener . testListen)
 
 -- Helper to execute raw SQL
 executeSql :: (O.MonadOrville m) => Text -> m ()
@@ -76,8 +84,12 @@ setupOrvilleTest :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv regi
 setupOrvilleTest connStr schemaName tableName maxConns = do
   -- Setup DDL using test-common helper
   TestSetup.setupOnce connStr schemaName tableName False
+  createOrvilleTestEnv connStr schemaName tableName maxConns
 
-  -- Create Orville connection pool
+-- | Build an env (Orville pool plus a dedicated LISTEN connection) against a
+-- schema whose tables already exist. The DDL is the caller's responsibility.
+createOrvilleTestEnv :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv registry)
+createOrvilleTestEnv connStr schemaName tableName maxConns = do
   let options =
         O.ConnectionOptions
           { O.connectionString = T.unpack (TE.decodeUtf8 connStr)
@@ -88,6 +100,7 @@ setupOrvilleTest connStr schemaName tableName maxConns = do
           }
   orvillePool <- O.createConnectionPool options
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
+  listen <- newDedicatedListen connStr
 
   pure $
     OrvilleTestEnv
@@ -95,7 +108,17 @@ setupOrvilleTest connStr schemaName tableName maxConns = do
       , testTableName = tableName
       , testConnStr = connStr
       , testOrvilleState = orvilleState
+      , testPool = orvillePool
+      , testListen = Just listen
       }
+
+-- | Release the env's Orville connection pool, closing its idle connections.
+destroyOrvilleTestEnv :: OrvilleTestEnv registry -> IO ()
+destroyOrvilleTestEnv = destroyIdleConnections . testPool
+
+-- | Drop the env's listener, leaving it poll-only.
+disableOrvilleListener :: OrvilleTestEnv registry -> OrvilleTestEnv registry
+disableOrvilleListener env = env {testListen = Nothing}
 
 cleanupOrvilleTest :: OrvilleTestEnv registry -> IO ()
 cleanupOrvilleTest env = do

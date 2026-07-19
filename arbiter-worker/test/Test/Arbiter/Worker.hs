@@ -12,6 +12,7 @@ import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
   ( Job (..)
+  , JobRead
   , ObservabilityHooks (..)
   , defaultJob
   , defaultObservabilityHooks
@@ -27,17 +28,22 @@ import Arbiter.Simple
   , SimpleDb
   , SimpleEnv (..)
   , createSimpleEnvWithPool
+  , disableListener
   , runSimpleDb
   )
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
 import Control.Concurrent (threadDelay)
+import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as BSC
+import Data.Either (isRight)
 import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust, isJust, isNothing)
@@ -50,7 +56,9 @@ import Data.Time (diffUTCTime, getCurrentTime)
 import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Database.PostgreSQL.Simple qualified as PG
+import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
 import System.Directory qualified as Dir
+import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , around
@@ -77,6 +85,7 @@ import Arbiter.Worker.Config
   , ackWith
   , defaultBatchedResultWorkerConfig
   , defaultBatchedWorkerConfig
+  , getListenerReady
   , getWorkerState
   , shutdownWorker
   , transactionalWorkerConfig
@@ -97,7 +106,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   around (withPool sharedPool) $ do
-    workerSpec @WorkerTestPayload @WorkerTestRegistry connStr SimpleTask FailingTask (\f _conn job -> f job) runSimpleDb
+    workerSpec @WorkerTestPayload @WorkerTestRegistry SimpleTask FailingTask (\f _conn job -> f job) runSimpleDb
 
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do
@@ -132,7 +141,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1", maxAttempts = Just 1}
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -161,7 +170,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillSucceed")) {groupKey = Just "g1"}
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -189,7 +198,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1", maxAttempts = Just 1}
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -224,7 +233,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJob job
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         let configWithTimeout =
               config
@@ -266,7 +275,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ runSimpleDb env $ HL.insertJob job
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         let configWithShortTimeout =
               config
@@ -303,7 +312,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let livenessPath = tmpDir <> "/arbiter-test-liveness"
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
         let configWithLiveness =
               config
                 { livenessFile = Just livenessPath
@@ -359,7 +368,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               ]
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+          defaultBatchedWorkerConfig 1 10 batchHandler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
           successes <- readIORef successRef
@@ -390,7 +399,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               defaultJob (SimpleTask "rb-reducer")
                 <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultBatchedResultWorkerConfig connStr 1 10 handler
+          defaultBatchedResultWorkerConfig 1 10 handler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
           final <- readIORef finalRef
@@ -422,7 +431,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -476,7 +485,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                      ]
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -520,7 +529,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultBatchedResultWorkerConfig connStr 3 1 handler
+          defaultBatchedResultWorkerConfig 3 1 handler
 
         withAsync
           ( runSimpleDb env $
@@ -573,7 +582,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ defaultBatchedResultWorkerConfig connStr 1 10 handler
+          defaultBatchedResultWorkerConfig 1 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -617,7 +626,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         let cfg =
               config
@@ -679,7 +688,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 10 handler
+          transactionalWorkerConfig 10 handler
 
         let cfg =
               config
@@ -722,7 +731,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 2 handler
+          transactionalWorkerConfig 2 handler
         let config = baseConfig {workerCount = 2, pollInterval = 0.1}
             wid = workerId config
 
@@ -756,7 +765,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler _conn _job = pure ()
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config =
               baseConfig
                 { workerCount = 1
@@ -786,7 +795,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler _conn _job = pure ()
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config =
               baseConfig
                 { workerCount = 1
@@ -866,7 +875,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config = baseConfig {workerCount = 1, pollInterval = 0.1}
 
         withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
@@ -882,7 +891,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config = baseConfig {workerCount = 1, pollInterval = 5.0}
 
             -- Steady-state toggles must complete via NOTIFY since the next
@@ -897,6 +906,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
           waitUntil 10_000 $ (== Running) <$> getWorkerState config
+          waitUntil 10_000 $ getListenerReady config
           timed True
           timed False
           timed True
@@ -908,11 +918,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler _conn _job =
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config = baseConfig {workerCount = 1, pollInterval = 2.0}
 
         withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
           waitUntil 10_000 $ (== Running) <$> getWorkerState config
+          waitUntil 10_000 $ getListenerReady config
 
           void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
           waitUntil 5_000 $ (== Paused) <$> getWorkerState config
@@ -929,9 +940,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
         baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
             widA = workerId cfgA
@@ -945,6 +956,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
               let ids = map WR.workerId rows
               pure (widA `elem` ids && widB `elem` ids)
+            -- And on subscription, so the pause NOTIFY is not sent before LISTEN.
+            waitUntil 10_000 $ getListenerReady cfgA
+            waitUntil 10_000 $ getListenerReady cfgB
 
             start <- getCurrentTime
             void $ runSimpleDb env $ Ops.setWorkerPaused testSchema widA True
@@ -959,9 +973,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
         baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
             widA = workerId cfgA
@@ -973,6 +987,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
               let ids = map WR.workerId rows
               pure (widA `elem` ids && widB `elem` ids)
+            -- And on subscription, so the pause NOTIFY is not sent before LISTEN.
+            waitUntil 10_000 $ getListenerReady cfgA
+            waitUntil 10_000 $ getListenerReady cfgB
 
             start <- getCurrentTime
             void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
@@ -992,7 +1009,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ writeIORef completedRef True
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "long"))
@@ -1036,7 +1053,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO go
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ transactionalWorkerConfig connStr 1 handler
+          transactionalWorkerConfig 1 handler
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "cpu"))
@@ -1073,7 +1090,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let firstId = primaryKey (head inserted)
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          runSimpleDb env $ defaultBatchedWorkerConfig connStr 1 10 batchHandler
+          defaultBatchedWorkerConfig 1 10 batchHandler
         threadDelay 100_000
 
         withAsync (runSimpleDb env $ runWorkerPool config {pollInterval = 0.1}) $ \_ -> do
@@ -1094,6 +1111,141 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           -- No DLQ entries from the cancel.
           dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
           dlqJobs `shouldBe` []
+
+      it "interrupts a running handler in poll-only mode via the flag" $ \env -> do
+        -- No listener, so the only path to interruption is the heartbeat
+        -- polling cancel_requested_at and throwing into the handler.
+        startedRef <- newIORef False
+        completedRef <- newIORef False
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = do
+              liftIO $ writeIORef startedRef True
+              liftIO $ threadDelay 30_000_000
+              liftIO $ writeIORef completedRef True
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+          transactionalWorkerConfig 1 handler
+        let config =
+              baseConfig
+                { workerCount = 1
+                , pollInterval = 0.2
+                , jobHeartbeatInterval = 0.3
+                , visibilityTimeout = 3
+                }
+
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "poll-cancel"))
+
+        withAsync (runSimpleDb (disableListener env) $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ readIORef startedRef
+
+          start <- getCurrentTime
+          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          n `shouldBe` 1
+
+          waitUntil 5_000 $ do
+            mJob <- runSimpleDb env $ HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload (primaryKey job)
+            pure (isNothing mJob)
+          elapsed <- (`diffUTCTime` start) <$> getCurrentTime
+          elapsed `shouldSatisfy` (< 3.0)
+
+          readIORef completedRef `shouldReturn` False
+          dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          dlqJobs `shouldBe` []
+
+      it "flags a job that is claimed concurrently with the force-cancel" $ \env -> do
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "concurrent-claim"))
+        let jid = primaryKey job
+            pool = fromJust (connectionPool (simplePool env))
+            claimSql =
+              fromString . T.unpack $
+                "UPDATE "
+                  <> testSchema
+                  <> "."
+                  <> testTable
+                  <> " SET claimed_by = '00000000-0000-0000-0000-000000000abc'::uuid"
+                  <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1 WHERE id = ?"
+
+        connB <- PG.connectPostgreSQL connStr
+        void $ PG.execute_ connB "BEGIN"
+        void $ PG.execute connB claimSql (Only jid)
+
+        cancelledCount <-
+          withAsync (runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid) $ \fc -> do
+            threadDelay 300_000
+            void $ PG.execute_ connB "COMMIT"
+            PG.close connB
+            Async.wait fc
+
+        cancelledCount `shouldBe` 1
+        [Only flagged] <-
+          withResource pool $ \c ->
+            PG.query
+              c
+              ( fromString . T.unpack $
+                  "SELECT cancel_requested_at IS NOT NULL FROM " <> testSchema <> "." <> testTable <> " WHERE id = ?"
+              )
+              (Only jid)
+              :: IO [Only Bool]
+        flagged `shouldBe` True
+
+      it "notifies the worker when force-cancel deletes its lease-lapsed claimed job" $ \env -> do
+        wid <- UUID.nextRandom
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "lapsed-cancel"))
+        let jid = primaryKey job
+            pool = fromJust (connectionPool (simplePool env))
+        claimed <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 wid) :: IO [JobRead WorkerTestPayload]
+        length claimed `shouldBe` 1
+
+        void $
+          withResource pool $ \c ->
+            PG.execute
+              c
+              ( fromString . T.unpack $
+                  "UPDATE " <> testSchema <> "." <> testTable <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
+              )
+              (Only jid)
+
+        lconn <- PG.connectPostgreSQL connStr
+        let chan = Schema.cancelNotifyChannel testSchema testTable
+        void $ PG.execute_ lconn (fromString . T.unpack $ "LISTEN \"" <> chan <> "\"")
+
+        n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid
+        n `shouldBe` 1
+
+        runSimpleDb env (HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload jid)
+          >>= (`shouldSatisfy` isNothing)
+
+        mNotif <- timeout 2_000_000 (getNotification lconn)
+        PG.close lconn
+        case mNotif of
+          Nothing -> expectationFailure "expected a cancel NOTIFY for the deleted lease-lapsed job"
+          Just notif -> notificationData notif `shouldSatisfy` BSC.isInfixOf (BSC.pack (show jid))
+
+      it "does not deadlock against a concurrent ack of the last child" $ \env -> do
+        Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-parent"))
+        let pid = primaryKey parent
+        Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-child")) {parentId = Just pid}
+        let cid = primaryKey child
+            lockSql =
+              fromString . T.unpack $
+                "SELECT id FROM " <> testSchema <> "." <> testTable <> " WHERE id = ? FOR UPDATE"
+            lockRow conn i = try (PG.query conn lockSql (Only i) :: IO [Only Int64]) :: IO (Either SomeException [Only Int64])
+
+        connA <- PG.connectPostgreSQL connStr
+        void $ PG.execute_ connA "BEGIN"
+        void $ lockRow connA cid
+
+        (efc, epA) <-
+          withAsync (try (runSimpleDb env $ Ops.forceCancelJob testSchema testTable pid) :: IO (Either SomeException Int64)) $ \fc -> do
+            threadDelay 300_000
+            epA <- lockRow connA pid
+            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+            efc <- Async.wait fc
+            pure (efc, epA)
+        PG.close connA
+
+        efc `shouldSatisfy` isRight
+        epA `shouldSatisfy` isRight
 
     describe "Sweeper" $ do
       it "deletes a stale unpaused worker row" $ \env -> do
@@ -1203,7 +1355,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 -- Create shared pool for all tests (5 connections)
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
+  env <- createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
   withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
   action env
 

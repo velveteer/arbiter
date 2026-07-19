@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
-
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
 -- 'JobException' is the user-facing decision sum. A handler throws one of
@@ -39,9 +37,10 @@ module Arbiter.Core.Exceptions
   , throwJobStolen
   ) where
 
-import Control.Exception (Exception)
+import Control.Exception (Exception (..))
 import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 import UnliftIO.Exception qualified as UE
 
@@ -55,59 +54,83 @@ data JobException
   | -- | Cascade-deletes the parent and all siblings.
     BranchCancel BranchCancelException
   deriving stock (Show)
-  deriving anyclass (Exception)
+
+instance Exception JobException where
+  displayException = \case
+    Retryable e -> displayException e
+    Permanent e -> displayException e
+    TreeCancel e -> displayException e
+    BranchCancel e -> displayException e
 
 -- | Transient failure - the job will be retried with backoff.
 newtype JobRetryableException = JobRetryableException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception JobRetryableException where
+  displayException (JobRetryableException msg) = T.unpack msg
 
 -- | Permanent failure - the job goes straight to the DLQ, no retries.
 newtype JobPermanentException = JobPermanentException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception JobPermanentException where
+  displayException (JobPermanentException msg) = T.unpack msg
 
 -- | Cancels an entire job tree from root to leaves.
 -- Use when a failure invalidates all work in the tree.
 newtype TreeCancelException = TreeCancelException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception TreeCancelException where
+  displayException (TreeCancelException msg) = T.unpack msg
 
 -- | Cancels the current branch (parent + all siblings).
 -- If the parent has a grandparent, the grandparent is resumed.
 newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception BranchCancelException where
+  displayException (BranchCancelException msg) = T.unpack msg
 
 -- | Reprocess the job later without recording a failure (a soft nack). The
 -- worker skips retry\/DLQ, hands back the attempt the claim consumed, and leaves
 -- the job to become visible again.
 data JobNackException = JobNackException
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception JobNackException where
+  displayException JobNackException = "job nacked for reprocessing"
 
 -- | Row decoding failure (engine-internal). Classified as a permanent failure
 -- by the worker.
 newtype ParsingException = ParsingException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception ParsingException where
+  displayException (ParsingException msg) = T.unpack msg
 
 -- | Generic engine-internal failure (e.g. missing connection, bad params).
 newtype InternalException = InternalException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception InternalException where
+  displayException (InternalException msg) = T.unpack msg
 
 -- | Job was deleted or reclaimed between claim and ack. The worker recognizes
 -- this signal via 'Arbiter.Worker.isJobGoneException' and skips retry/DLQ.
 newtype JobNotFoundException = JobNotFoundException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception JobNotFoundException where
+  displayException (JobNotFoundException msg) = T.unpack msg
 
 -- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
 -- combinator propagates this signal so the worker can stop duplicate work.
 newtype JobStolenException = JobStolenException Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (Exception)
+
+instance Exception JobStolenException where
+  displayException (JobStolenException msg) = T.unpack msg
 
 throwRetryable :: (MonadIO m) => Text -> m a
 throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))

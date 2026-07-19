@@ -8,7 +8,8 @@ import Arbiter.Core.Exceptions (throwJobStolen)
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
-import Control.Monad (forever, unless, void)
+import Control.Exception (throwIO)
+import Control.Monad (forever, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList, traverse_)
 import Data.List.NonEmpty (NonEmpty)
@@ -20,6 +21,7 @@ import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.STM (TMVar, atomically)
 import UnliftIO.STM qualified as STM
 
+import Arbiter.Worker.ChannelHandlers (JobForceCancelled (..))
 import Arbiter.Worker.Logger (LogConfig)
 import Arbiter.Worker.Logger.Internal (runHook, showJobIds, withJobContext, withJobContextOne)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
@@ -74,6 +76,8 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       threadDelay (ceiling (intervalSecs * 1_000_000))
       results <- Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
       atomically $ void $ STM.tryPutTMVar signal ()
+      when (any (\case Arb.JobCancelled {} -> True; _ -> False) results) $
+        liftIO (throwIO JobForceCancelled)
       let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
       unless (null stolenJobs) $
         throwJobStolen (showJobIds stolenJobs)

@@ -14,6 +14,9 @@ module Arbiter.Worker
   , runSelectedWorkerPools
   , getEnabledQueues
 
+    -- * Pool Sizing
+  , poolConfigForWorkers
+
     -- * Job Result
   , JobResult (..)
 
@@ -60,11 +63,13 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types qualified as Job
+import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.PoolConfig (PoolConfig (..), defaultPoolConfig)
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
-import Control.Exception (SomeException, fromException, toException)
+import Control.Exception (SomeException, displayException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
@@ -84,11 +89,11 @@ import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
 import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
-import System.Environment (lookupEnv)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
@@ -110,7 +115,7 @@ import UnliftIO
   )
 import UnliftIO.Async qualified as Async
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (TBQueue, TVar)
+import UnliftIO.STM (STM, TBQueue, TVar)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy
@@ -134,6 +139,7 @@ import Arbiter.Worker.Cron
   , runCronScheduler
   )
 import Arbiter.Worker.Dispatcher
+import Arbiter.Worker.EnabledQueues (enabledQueuesEnvVar, enabledQueuesForMonad, getEnabledQueues)
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal
@@ -143,7 +149,6 @@ import Arbiter.Worker.Logger.Internal
   , withJobContextList
   , withJobContextOne
   )
-import Arbiter.Worker.NotificationListener (runMultiChannelListener)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
 
@@ -225,7 +230,7 @@ runWorkerPools
 runWorkerPools registry pools setup = do
   sharedState <- liftIO newWorkerState
   liftIO $ setup sharedState
-  enabled <- liftIO $ getEnabledQueues "ARBITER_ENABLED_QUEUES" registry
+  enabled <- liftIO $ getEnabledQueues enabledQueuesEnvVar registry
   runSelectedWorkerPools sharedState enabled pools
 
 -- | Run only the worker pools whose names appear in the enabled list.
@@ -254,49 +259,21 @@ withPoolContext :: Text -> LogConfig -> LogConfig
 withPoolContext poolName lc =
   lc {additionalContext = (("pool" .= poolName) :) <$> additionalContext lc}
 
--- | Get enabled queues from an environment variable.
+-- | A single-stripe pool sized for the pools enabled by @ARBITER_ENABLED_QUEUES@:
+-- twice their combined worker count plus one for the shared listener (floor of 3).
 --
--- If the environment variable is set and non-empty, parses it as a
--- comma-separated list of queue names. Each name is validated against the
--- registry - invalid names cause an error. If not set or empty, returns all
--- queue names from the registry.
---
--- Example:
---
--- @
--- -- With ENABLED_QUEUES="email_jobs,notifications"
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
--- -- Returns: ["email_jobs", "notifications"]
---
--- -- With ENABLED_QUEUES unset or empty
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
--- -- Returns: all queues from registry
---
--- -- With ENABLED_QUEUES="email_jobs,invalid_queue"
--- -- Throws error: "Unknown queue names: invalid_queue"
--- @
-getEnabledQueues
-  :: (RegistryTables registry)
-  => String
-  -- ^ Environment variable name
-  -> Proxy registry
-  -- ^ Registry proxy
-  -> IO [Text]
-getEnabledQueues envVar registry = do
-  let allQueues = registryTableNames registry
-  mVal <- lookupEnv envVar
-  case mVal of
-    Nothing -> pure allQueues
-    Just val -> do
-      let tval = T.pack val
-      if T.null (T.strip tval)
-        then pure allQueues
-        else do
-          let requested = map T.strip $ T.splitOn "," tval
-              invalid = filter (`notElem` allQueues) requested
-          if null invalid
-            then pure requested
-            else throwIO . userError $ "Unknown queue names: " <> T.unpack (T.intercalate ", " invalid)
+-- A single stripe is intentional. @Data.Pool.withResource@ pins each thread to one
+-- stripe by its capability and does not search other stripes when its own is
+-- exhausted, so multiple stripes let one pool starve a stripe while others sit idle.
+poolConfigForWorkers
+  :: forall m registry
+   . (HasArbiterSchema m registry, RegistryTables registry)
+  => [NamedWorkerPool m]
+  -> IO PoolConfig
+poolConfigForWorkers pools = do
+  enabled <- enabledQueuesForMonad @m
+  let n = sum [workerCount cfg | NamedWorkerPool nm cfg <- pools, nm `elem` enabled]
+  pure defaultPoolConfig {poolSize = max 2 (2 * n) + 1}
 
 -- ---------------------------------------------------------------------------
 -- Worker Pool
@@ -331,10 +308,10 @@ runWorkerPool config = do
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
   cronRunVar <- STM.newTVarIO False
-  let createChannel = T.unpack (Schema.notificationChannelForTable queueName)
-      pauseChannel = T.unpack (Schema.pauseNotifyChannel schemaName queueName)
-      cancelChannel = T.unpack (Schema.cancelNotifyChannel schemaName queueName)
-      cronRunChannel = T.unpack (Schema.cronRunNotifyChannel schemaName)
+  let createChannel = TE.encodeUtf8 (Schema.notificationChannelForTable queueName)
+      pauseChannel = TE.encodeUtf8 (Schema.pauseNotifyChannel schemaName queueName)
+      cancelChannel = TE.encodeUtf8 (Schema.cancelNotifyChannel schemaName queueName)
+      cronRunChannel = TE.encodeUtf8 (Schema.cronRunNotifyChannel schemaName)
       cronNames = Set.fromList (map name (cronJobs config))
       cronHandlers =
         if null (cronJobs config)
@@ -347,16 +324,20 @@ runWorkerPool config = do
         ]
           <> cronHandlers
 
-  listenerReady <- STM.newTVarIO False
-
   evalContT $ do
     withLivenessFile config
-    listener <-
-      spawnRetried (workerStateVar config) (logConfig config) "Multi-channel listener" $
-        runMultiChannelListener (connStr config) handlers (logConfig config) listenerReady
-    lift . atomically $
-      (readTVar listenerReady >>= checkSTM)
-        `STM.orElse` void (Async.waitCatchSTM listener)
+    mListener <- lift getListener
+    listenerReady <- case mListener of
+      Nothing -> do
+        lift $ tryLog (logConfig config) Info "No listen connection, running poll-only"
+        pure (pure True)
+      Just listener ->
+        ContT $
+          Listen.withChannels
+            listener
+            (Listen.HubLog (tryLog (logConfig config) Warning) (tryLog (logConfig config) Error))
+            handlers
+    void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
     heartbeat <-
       spawnRetried (workerStateVar config) (logConfig config) "Worker heartbeat" $
         heartbeatLoop config schemaName queueName
@@ -375,13 +356,21 @@ runWorkerPool config = do
       spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
         reaperLoop (logConfig config) (reaperInterval config) (reaperTimeout config)
 
-    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : listener : crons <> workers)
+    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
     case res of
       Left e ->
-        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (show e)
+        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (displayException e)
       Right _ -> pure ()
 
     lift $ shutdownPool config schemaName workQueue busyWorkerCount
+
+-- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
+-- alongside the pool and never gates startup.
+publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload result -> STM Bool -> m ()
+publishListenerReady config ready =
+  atomically $ do
+    ready >>= checkSTM
+    writeTVar (listenerReadyVar config) True
 
 -- | Remove the liveness file when the pool exits, after the drain.
 withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
@@ -519,7 +508,7 @@ tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
 tryWarn logCfg label act = tryAny act >>= either (warnEx logCfg label) (const (pure ()))
 
 warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
-warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (show e)
+warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
 
 -- | Main loop for a single worker thread.
 workerLoop
@@ -568,11 +557,19 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
       case result of
         Right () -> pure ()
         Left e
-          | Just JobForceCancelled <- fromException e ->
+          | Just JobForceCancelled <- fromException e -> do
               tryLog batchLog Info "Job(s) force-cancelled"
+              schemaName <- getSchema
+              let (firstJob :| rest) = jobBatch
+              tryWarn batchLog "Deleting force-cancelled jobs failed" $
+                void $
+                  Ops.deleteCancelledJobs schemaName (Job.queueName firstJob) jobIds
+              unless (null rest) $
+                tryWarn batchLog "Releasing force-cancel batch siblings failed" $
+                  traverse_ (void . Arb.nackJob) (toList jobBatch)
           | Just Async.AsyncCancelled <- fromException e -> throwIO e
           | otherwise -> do
-              tryLog batchLog Error $ "Worker exception: " <> T.pack (show e)
+              tryLog batchLog Error $ "Worker exception: " <> T.pack (displayException e)
               threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
@@ -886,6 +883,13 @@ reaperLoop logCfg interval stmtTimeout = do
           when (n > 0) $ tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ"
       )
       mSwept
+    mCancelled <- gated "sweep-cancelled-jobs" interval $ Ops.sweepCancelledJobs schemaName queues
+    traverse_
+      ( \(n, failed) -> do
+          traverse_ (\queue -> tryLog logCfg Warning $ "Cancelled-job sweep failed for queue: " <> queue) failed
+          when (n > 0) $ tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)"
+      )
+      mCancelled
     when hasRateLimit $
       void $
         gated "prune-rate-limit-buckets" pruneInterval $

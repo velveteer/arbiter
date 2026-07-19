@@ -441,10 +441,6 @@ raceConditionSpec mkMessage runM = do
         length allClaimed `shouldBe` totalJobs
 
       it "batched claims from same group are contiguous (no interleaving)" $ \env -> do
-        -- Advisory locks serialize concurrent batched claims per group.
-        -- Without them, SKIP LOCKED causes interleaving: A gets [1,3,5],
-        -- B gets [2,4,6]. With advisory locks each worker gets a contiguous
-        -- block: A gets [1,2,3], then B gets [4,5,6].
         let numGroups = 5
             jobsPerGroup = 50
             numWorkers = 20

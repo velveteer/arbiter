@@ -61,7 +61,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO $ createSharedPool connStr
   let getEnv = do
-        let env = createSimpleEnvWithPool (Proxy @WorkerConcurrencyTestRegistry) sharedPool testSchema
+        env <- createSimpleEnvWithPool (Proxy @WorkerConcurrencyTestRegistry) sharedPool testSchema
         withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
         pure env
 
@@ -99,7 +99,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             liftIO $ atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
             pure ()
 
-      config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 jobHandler
+      config <- transactionalWorkerConfig 10 jobHandler
       let configWithHooks =
             config
               { observabilityHooks = hooks
@@ -149,7 +149,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
           jobHandler _conn _job = error "intentional failure"
 
-      config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 jobHandler
+      config <- transactionalWorkerConfig 10 jobHandler
       let configWithHooks =
             config
               { observabilityHooks = hooks
@@ -188,7 +188,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             -- Should never reach here: heartbeat detects theft and cancels via race
             atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
 
-      config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 jobHandler
+      config <- transactionalWorkerConfig 10 jobHandler
       let configWithHooks =
             config
               { pollInterval = 0.1
@@ -242,7 +242,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               FailingTask n | n > 0 -> error "Failing task"
               _ -> pure ()
 
-      config <- runSimpleDb env $ transactionalWorkerConfig connStr 10 jobHandler
+      config <- transactionalWorkerConfig 10 jobHandler
       let configWithHooks =
             config
               { observabilityHooks = hooks

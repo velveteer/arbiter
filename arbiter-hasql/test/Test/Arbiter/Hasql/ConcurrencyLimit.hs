@@ -27,8 +27,8 @@ spec connStr =
     sharedPool <- runIO (createHasqlPool 5 connStr)
     pgPool <- runIO (createSharedPool connStr)
     -- Prepared claims on, so this suite covers the prepared statement path.
-    let mkEnv = setPreparedStatements True (createHasqlEnvWithPool (Proxy @CLReg) sharedPool testSchema)
-        run :: forall a. HasqlDb CLReg IO a -> IO a
+    mkEnv <- runIO (setPreparedStatements True <$> createHasqlEnvWithPool (Proxy @CLReg) sharedPool testSchema)
+    let run :: forall a. HasqlDb CLReg IO a -> IO a
         run = runHasqlDb mkEnv
         withConn :: forall a. (PG.Connection -> IO a) -> IO a
         withConn = withResource pgPool

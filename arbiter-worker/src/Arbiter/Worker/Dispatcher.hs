@@ -7,12 +7,13 @@ module Arbiter.Worker.Dispatcher
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (JobRead)
+import Arbiter.Core.Listen (Notification)
 import Arbiter.Core.Operations qualified as Ops
+import Control.Exception (displayException)
 import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text qualified as T
-import Database.PostgreSQL.Simple.Notification qualified as PS
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
 import UnliftIO.STM qualified as STM
@@ -23,7 +24,7 @@ import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 
 -- | Wake on NOTIFY, poll timer, or worker-finished, then claim up to capacity.
--- @notifVar@ is filled by the shared "Arbiter.Worker.MultiChannelListener".
+-- @notifVar@ is filled from the shared hub in "Arbiter.Core.Listen".
 runDispatcher
   :: forall m registry payload result
    . ( MonadUnliftIO m
@@ -34,7 +35,7 @@ runDispatcher
   -> STM.TBQueue (NonEmpty (JobRead payload))
   -> STM.TVar Int
   -> STM.TVar Bool
-  -> STM.TVar (Maybe PS.Notification)
+  -> STM.TVar (Maybe Notification)
   -> m ()
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
@@ -64,7 +65,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
           Ops.claimJobsBatchedCached claimSql freeWorkers
       case eJobs of
         Left e ->
-          tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (show e)
+          tryLog (logConfig config) Error $ "Dispatcher exception: " <> T.pack (displayException e)
         Right batches ->
           STM.atomically $ traverse_ (STM.writeTBQueue workQueue) batches
       -- Pulse on every attempt so a failing claim path still proves liveness.

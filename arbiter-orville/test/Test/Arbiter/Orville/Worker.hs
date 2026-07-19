@@ -62,7 +62,7 @@ testTable = "arbiter_orville_worker_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry connStr SimpleTask FailingTask id runOrvilleTest
+  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry SimpleTask FailingTask id runOrvilleTest
 
   describe "Transactional Atomicity" $ do
     it "rolls back user operations when handler fails" $ \env -> do
@@ -94,7 +94,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool with max 1 attempt so it goes to DLQ
-      config <- transactionalWorkerConfig connStr 10 handler
+      config <- transactionalWorkerConfig 10 handler
       runOrvilleTest env
         $ withAsync
           ( runWorkerPool
@@ -162,7 +162,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool
-      config <- transactionalWorkerConfig connStr 10 handler
+      config <- transactionalWorkerConfig 10 handler
       runOrvilleTest env
         $ withAsync
           ( runWorkerPool

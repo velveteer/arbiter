@@ -51,6 +51,7 @@ test-suite arbiter-orville-tests
   other-modules:
     Test.Arbiter.Orville.Concurrency
     Test.Arbiter.Orville.ConcurrencyLimit
+    Test.Arbiter.Orville.Listener
     Test.Arbiter.Orville.Operations
     Test.Arbiter.Orville.RateLimit
     Test.Arbiter.Orville.StateMachine
@@ -59,7 +60,7 @@ test-suite arbiter-orville-tests
 
   build-depends:
     , aeson
-    , arbiter-core         <0.2
+    , arbiter-core            <0.2
     , arbiter-orville
     , arbiter-test-common
     , arbiter-worker
@@ -67,10 +68,10 @@ test-suite arbiter-orville-tests
     , base
     , bytestring
     , exceptions
-    , hspec                >=2.0 && <2.12
+    , hspec                   >=2.0 && <2.12
     , orville-postgresql
     , postgresql-simple
-    , resource-pool       >=0.4 && <0.6
+    , resource-pool           >=0.4 && <0.6
     , text
     , transformers
     , unliftio

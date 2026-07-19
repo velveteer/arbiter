@@ -8,6 +8,8 @@ module Arbiter.Core.Sql.Tree
   , descendantsCte
   , cancelJobCascadeSQL
   , forceCancelJobSQL
+  , deleteCancelledJobsSQL
+  , selectCancelledReapableJobsSQL
   , cancelJobTreeSQL
   , tryWakeAncestorSQL
   , descendantRollupIdsSQL
@@ -119,7 +121,7 @@ cancelJobCascadeSQL schema tableName =
         SELECT count(*) FROM deleted
       |]
 
--- | Cascade-delete like 'cancelJobCascadeSQL', plus a per-row cancel NOTIFY for each deleted claimed job.
+-- | Force-cancel a job subtree: flag still-live claimed jobs (bumping attempts to void their claim), delete the rest, and NOTIFY every claimed job affected.
 -- Parameters: job_id
 forceCancelJobSQL :: SchemaName -> TableName -> Text
 forceCancelJobSQL schema tableName =
@@ -128,20 +130,62 @@ forceCancelJobSQL schema tableName =
       chan = T.replace "'" "''" (cancelNotifyChannel schema tableName)
    in [text|
         ${cte},
+        locked AS (
+          SELECT id, claimed_by, not_visible_until
+          FROM ${tbl}
+          WHERE id IN (SELECT id FROM descendants)
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
+        cancelled AS (
+          UPDATE ${tbl} t SET cancel_requested_at = NOW(), attempts = t.attempts + 1
+          FROM locked l
+          WHERE t.id = l.id
+            AND l.claimed_by IS NOT NULL
+            AND l.not_visible_until IS NOT NULL AND l.not_visible_until > NOW()
+          RETURNING t.id, t.claimed_by
+        ),
         deleted AS (
-          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
-          RETURNING id, claimed_by
+          DELETE FROM ${tbl} t
+          USING locked l
+          WHERE t.id = l.id
+            AND (l.claimed_by IS NULL OR l.not_visible_until IS NULL OR l.not_visible_until <= NOW())
+          RETURNING t.id, t.claimed_by
         ),
         notif AS (
           SELECT pg_notify(
             '${chan}',
-            json_build_object('worker_id', d.claimed_by, 'job_id', d.id)::text
+            json_build_object('worker_id', n.claimed_by, 'job_id', n.id)::text
           )
-          FROM deleted d
-          WHERE d.claimed_by IS NOT NULL
+          FROM (
+            SELECT id, claimed_by FROM cancelled
+            UNION ALL
+            SELECT id, claimed_by FROM deleted WHERE claimed_by IS NOT NULL
+          ) n
         )
-        SELECT count(*)::int8 FROM deleted
+        SELECT ((SELECT count(*) FROM cancelled) + (SELECT count(*) FROM deleted))::int8 AS count
         WHERE (SELECT count(*) FROM notif) >= 0
+      |]
+
+-- | Delete force-cancel-flagged jobs by id, locking descending to match ack and force-cancel, returning each one's parent id.
+deleteCancelledJobsSQL :: SchemaName -> TableName -> Text
+deleteCancelledJobsSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+   in [text|WITH locked AS (SELECT id FROM ${tbl} WHERE id = ANY(?) AND cancel_requested_at IS NOT NULL ORDER BY id DESC FOR UPDATE) DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked) RETURNING parent_id|]
+
+-- | Flagged jobs whose lease has lapsed, so the claiming worker is no longer
+-- heartbeating and the reaper should delete them and resume their parents.
+selectCancelledReapableJobsSQL :: SchemaName -> TableName -> Int -> Text
+selectCancelledReapableJobsSQL schema tableName limit =
+  let tbl = jobQueueTable schema tableName
+      lim = T.pack (show limit)
+   in [text|
+        SELECT id
+        FROM ${tbl}
+        WHERE cancel_requested_at IS NOT NULL
+          AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+        ORDER BY id ASC
+        LIMIT ${lim}
       |]
 
 -- | Cancel an entire job tree by walking up from any node to the root,
