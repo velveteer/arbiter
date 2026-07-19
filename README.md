@@ -759,14 +759,6 @@ env <- ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
 ArbH.runHasqlDb env $ Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 ```
 
-When workers connect to PostgreSQL directly, enable prepared statements for the claim path - the claim is planned once per connection instead of on every poll, which is worth 25-70% more throughput on claim-heavy workloads:
-
-```haskell
-env <- ArbH.setPreparedStatements True <$> ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"
-```
-
-Leave it off (the default) when connections pass through a pooler that does not support server-side prepared statements.
-
 Share a transaction with external hasql work:
 
 ```haskell
