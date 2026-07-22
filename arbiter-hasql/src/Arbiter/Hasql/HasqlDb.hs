@@ -23,6 +23,9 @@ module Arbiter.Hasql.HasqlDb
   , createHasqlEnv
   , createHasqlEnvWithConfig
   , createHasqlEnvWithPool
+  , destroyHasqlEnv
+  , disableListener
+  , useDedicatedListener
   , setPreparedStatements
 
     -- * Hasql Settings
@@ -34,6 +37,7 @@ module Arbiter.Hasql.HasqlDb
 
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.Job.Schema (SchemaName)
+import Arbiter.Core.Listen (Listener, dedicatedListener, newDedicatedListen, newPoolListener)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.PoolConfig qualified as PC
@@ -44,7 +48,8 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, asks, local)
 import Control.Monad.Trans.Reader (ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
-import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
+import Data.Foldable (traverse_)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, setNumStripes, withResource)
 import Data.Proxy (Proxy (..))
 import Hasql.Connection qualified as Hasql
 import UnliftIO (MonadUnliftIO)
@@ -71,6 +76,8 @@ data HasqlEnv (registry :: JobPayloadRegistry) = HasqlEnv
   -- ^ Schema name
   , hasqlPool :: HasqlConnectionPool
   -- ^ The connection pool state
+  , listener :: Maybe Listener
+  -- ^ Resolved LISTEN source. 'Nothing' runs poll-only.
   }
 
 -- | Hasql database monad for Arbiter.
@@ -102,6 +109,27 @@ instance (Monad m, MonadIO m, MonadUnliftIO m) => MonadArbiter (HasqlDb registry
   executeStatement = hasqlExecuteStatement
   withDbTransaction = hasqlWithDbTransaction
   runHandlerWithConnection = hasqlRunHandlerWithConnection
+  getListener = asks listener
+
+-- | Release the env's connection pool, closing its open connections.
+destroyHasqlEnv :: (MonadIO m) => HasqlEnv registry -> m ()
+destroyHasqlEnv env =
+  liftIO $ traverse_ destroyAllResources (connectionPool (hasqlPool env))
+
+-- | Turn off the shared LISTEN listener for an env, running poll-only.
+disableListener :: HasqlEnv registry -> HasqlEnv registry
+disableListener env = env {listener = Nothing}
+
+-- | Give the env a dedicated LISTEN connection opened from a connection string,
+-- rather than borrowing a slot from the pool.
+useDedicatedListener :: (MonadIO m) => ByteString -> HasqlEnv registry -> m (HasqlEnv registry)
+useDedicatedListener connStr env = do
+  d <- newDedicatedListen connStr
+  pure env {listener = Just (dedicatedListener d)}
+
+-- | A listener that borrows one pool connection for the hub's lifetime.
+poolListener :: Pool Hasql.Connection -> IO Listener
+poolListener pool = newPoolListener (\action -> withResource pool (`Compat.withHasqlLibPQConnection` action))
 
 -- | Run a HasqlDb action with a HasqlEnv.
 runHasqlDb :: HasqlEnv registry -> HasqlDb registry m a -> m a
@@ -135,14 +163,15 @@ inTransaction conn schemaName action =
                 { connectionPool = Nothing
                 , activeConn = Just conn
                 , transactionDepth = 1
-                , preparedStatements = False
+                , preparedStatements = True
                 }
+          , listener = Nothing
           }
    in runHasqlDb env action
 
--- | Create a HasqlEnv with conservative defaults (10 connections, 300s idle timeout, 1 stripe).
+-- | Create a HasqlEnv with conservative defaults.
 --
--- For worker pools, consider using 'createHasqlEnvWithConfig' with @poolConfigForWorkers@
+-- For worker pools, use 'createHasqlEnvWithConfig' with @poolConfigForWorkers@
 -- to size the pool based on worker count.
 createHasqlEnv
   :: forall registry m
@@ -181,6 +210,7 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
           Hasql.release
           (fromIntegral $ poolIdleTimeout config)
           (poolSize config)
+  lstn <- poolListener connPool
   pure
     HasqlEnv
       { schema = schemaName
@@ -189,29 +219,38 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
             { connectionPool = Just connPool
             , activeConn = Nothing
             , transactionDepth = 0
-            , preparedStatements = False
+            , preparedStatements = True
             }
+      , listener = Just lstn
       }
 
--- | Create a HasqlEnv with a user-provided connection pool.
+-- | Create a HasqlEnv with a user-provided connection pool. The shared
+-- listener borrows one connection from that pool and holds it for the env's
+-- lifetime, so size the pool for the worker load plus one. Use 'disableListener'
+-- to run poll-only and reclaim that slot, or 'useDedicatedListener' to give the
+-- listener its own connection.
 createHasqlEnvWithPool
-  :: forall registry
-   . Proxy registry
+  :: forall registry m
+   . (MonadIO m)
+  => Proxy registry
   -> Pool Hasql.Connection
   -> SchemaName
   -- ^ Schema name
-  -> HasqlEnv registry
-createHasqlEnvWithPool _proxy connPool schemaName =
-  HasqlEnv
-    { schema = schemaName
-    , hasqlPool =
-        HasqlConnectionPool
-          { connectionPool = Just connPool
-          , activeConn = Nothing
-          , transactionDepth = 0
-          , preparedStatements = False
-          }
-    }
+  -> m (HasqlEnv registry)
+createHasqlEnvWithPool _proxy connPool schemaName = liftIO $ do
+  lstn <- poolListener connPool
+  pure
+    HasqlEnv
+      { schema = schemaName
+      , hasqlPool =
+          HasqlConnectionPool
+            { connectionPool = Just connPool
+            , activeConn = Nothing
+            , transactionDepth = 0
+            , preparedStatements = True
+            }
+      , listener = Just lstn
+      }
 
 -- | Enable or disable prepared hot statements (the claim). Prepared once per pooled
 -- connection, so the plan is reused instead of rebuilt every call. Requires direct

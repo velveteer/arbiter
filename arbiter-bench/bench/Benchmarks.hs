@@ -464,6 +464,7 @@ instance MonadArbiter BenchOrville where
   executeStatement = orvilleExecuteStatement
   withDbTransaction = orvilleWithDbTransaction
   runHandlerWithConnection = orvilleRunHandlerWithConnection
+  getListener = pure Nothing
 
 type OrvilleM = BenchOrville
 
@@ -472,10 +473,10 @@ simpleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool mo
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
       c <-
-        runM $ transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
+        runM $ transactionalWorkerConfig workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
+      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
@@ -485,11 +486,11 @@ hasqlWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool mod
     BenchSingleJobMode -> do
       c <-
         runM $
-          transactionalWorkerConfig benchConnStr workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
+          transactionalWorkerConfig workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
       c <-
-        runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
+        runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
@@ -497,10 +498,10 @@ orvilleWorkerTrial :: RunM OrvilleM -> Connection -> Int -> Int -> Int -> Int ->
 orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig benchConnStr workersPerPool (\job -> flakyGate (pure ()) job)
+      c <- runM $ transactionalWorkerConfig workersPerPool (\job -> flakyGate (pure ()) job)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
+      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
@@ -639,11 +640,11 @@ simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPe
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig benchConnStr workersPerPool $ \(_conn :: Connection) job ->
+      c <- runM $ transactionalWorkerConfig workersPerPool $ \(_conn :: Connection) job ->
         flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
@@ -655,11 +656,11 @@ hasqlSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPer
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig benchConnStr workersPerPool $ \(_conn :: Hasql.Connection) job ->
+      c <- runM $ transactionalWorkerConfig workersPerPool $ \(_conn :: Hasql.Connection) job ->
         flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
@@ -671,11 +672,11 @@ orvilleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersP
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig benchConnStr workersPerPool $ \job ->
+      c <- runM $ transactionalWorkerConfig workersPerPool $ \job ->
         flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
     BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig benchConnStr workersPerPool batchSize $ \jobs cb -> do
+      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
@@ -868,10 +869,10 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = 
   processedCounter <- newIORef (0 :: Int)
   cfg0 <- runM $ case mode of
     BenchSingleJobMode ->
-      transactionalWorkerConfig benchConnStr 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
+      transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         liftIO (atomicModifyIORef' processedCounter (\n -> (n + 1, ())))
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig benchConnStr 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) cb -> do
+      defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) cb -> do
         ackAll cb (toList jobs)
         liftIO (atomicModifyIORef' processedCounter (\n -> (n + length jobs, ())))
   let cfg = cfg0 {pollInterval = 0.1, logConfig = silentLogConfig}

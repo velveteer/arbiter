@@ -302,8 +302,9 @@ driftViolations schema table withConn = withConn $ \conn -> do
 -- churn (unlike the eventually-settled summary oracle):
 --
 --   * serialization: more than one in-flight (leased\/backoff) job per group
---   * attempt bound: a live job past its limit (the claim guard must cap
---     @attempts@ at @max_attempts@, so over-execution can never happen)
+--   * attempt bound: a live uncancelled job past its limit. The claim guard caps
+--     @attempts@ at @max_attempts@, and force-cancel's void-bump is not an execution
+--     (like the reaper's exhausted-to-DLQ sweep, cancelled rows are excluded)
 --   * dedup uniqueness: two live jobs sharing a @dedup_key@
 --   * rate-limit integrity: a bucket's tokens stay within [0, max]. Negative means
 --     the gate over-spent, above max means a refill\/top-up\/seed skipped the cap.
@@ -394,7 +395,12 @@ exactViolations schema table withConn = withConn $ \conn -> do
         <> " AND NOT suspended AND attempts > 0"
         <> " GROUP BY group_key HAVING COUNT(*) > 1"
     overSql =
-      "SELECT id FROM " <> tbl <> " WHERE attempts > COALESCE(max_attempts, " <> dma <> ")"
+      "SELECT id FROM "
+        <> tbl
+        <> " WHERE attempts > COALESCE(max_attempts, "
+        <> dma
+        <> ")"
+        <> " AND cancel_requested_at IS NULL"
     dupSql =
       "SELECT dedup_key FROM "
         <> tbl
@@ -1091,6 +1097,7 @@ data Act
   | AClaimAck
   | AClaimRetry
   | AClaimCancel
+  | AClaimForceCancel
   | AClaimExtend
   | AClaimRelease
   | AClaimToDLQ
@@ -1116,6 +1123,7 @@ genActionData =
     , (3, pure AClaimAck)
     , (2, pure AClaimRetry)
     , (2, pure AClaimCancel)
+    , (2, pure AClaimForceCancel)
     , (1, pure AClaimExtend)
     , (1, pure AClaimRelease)
     , (2, pure AClaimToDLQ)
@@ -1153,6 +1161,7 @@ interpret schema table withConn act = case act of
   AClaimAck -> claimAck @sm @registry
   AClaimRetry -> claimRetry @sm @registry
   AClaimCancel -> claimCancel @sm @registry
+  AClaimForceCancel -> claimForceCancel @sm @registry
   AClaimExtend -> claimExtend @sm @registry
   AClaimRelease -> claimRelease @sm @registry
   AClaimToDLQ -> claimToDLQ @sm @registry
@@ -1187,6 +1196,7 @@ claimThen f = do
 claimAck
   , claimRetry
   , claimCancel
+  , claimForceCancel
   , claimExtend
   , claimRelease
   , claimToDLQ
@@ -1194,6 +1204,8 @@ claimAck
 claimAck = claimThen @sm @registry (void . HL.ackJob)
 claimRetry = claimThen @sm @registry (void . HL.updateJobForRetry 30 "conc retry")
 claimCancel = claimThen @sm @registry (void . HL.cancelJob @sm @registry @SMPayload . primaryKey)
+-- Force-cancel while still leased hits the flag-claimed-live branch, so the job stays present and must keep blocking its group head.
+claimForceCancel = claimThen @sm @registry (void . HL.forceCancelJob @sm @registry @SMPayload . primaryKey)
 claimExtend = claimThen @sm @registry (void . HL.setVisibilityTimeout 60)
 claimRelease = claimThen @sm @registry (void . HL.setVisibilityTimeout 0)
 claimToDLQ = claimThen @sm @registry (void . HL.moveToDLQ "conc dlq")

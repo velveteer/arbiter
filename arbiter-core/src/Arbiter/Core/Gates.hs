@@ -12,7 +12,8 @@ module Arbiter.Core.Gates
 import Data.Text (Text)
 import Data.Text qualified as T
 
-import Arbiter.Core.Job.Schema (SchemaName, quoteIdentifier)
+import Arbiter.Core.Job.Schema (SchemaName)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | Qualified name of the gates table.
 arbiterGatesTable :: SchemaName -> Text

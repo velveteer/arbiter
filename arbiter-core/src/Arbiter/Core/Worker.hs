@@ -10,6 +10,7 @@ module Arbiter.Core.Worker
   , arbiterWorkersTable
   , createWorkersTableSQL
   , addClaimedByColumnSQL
+  , addCancelRequestedAtColumnSQL
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
@@ -21,7 +22,8 @@ import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable, quoteIdentifier)
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | Heartbeat-derived health of a worker, orthogonal to its 'paused' flag.
 data WorkerHealth
@@ -95,4 +97,17 @@ addClaimedByColumnSQL schemaName tableName =
   T.unlines
     [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
     , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS claimed_by UUID;"
+    ]
+
+-- | Idempotent migration adding the @cancel_requested_at@ column to a queue's
+-- job table, with a partial index backing the reaper's flagged-job sweep.
+addCancelRequestedAtColumnSQL :: SchemaName -> TableName -> Text
+addCancelRequestedAtColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;"
+    , "CREATE INDEX IF NOT EXISTS "
+        <> quoteIdentifier ("idx_" <> tableName <> "_cancel_requested")
+        <> " ON "
+        <> jobQueueTable schemaName tableName
+        <> " (id ASC) WHERE cancel_requested_at IS NOT NULL;"
     ]

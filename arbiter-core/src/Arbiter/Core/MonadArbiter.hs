@@ -17,6 +17,7 @@ import Data.Text (Text)
 
 import Arbiter.Core.Codec (ParamType (..), Params, RowCodec, SomeParam (..))
 import Arbiter.Core.Job.Types (JobRead)
+import Arbiter.Core.Listen (Listener)
 
 -- | Database abstraction for job queue operations. Each backend (postgresql-simple,
 -- hasql, orville) provides an instance that maps queries to its native driver.
@@ -40,6 +41,9 @@ class (Monad m, MonadIO m) => MonadArbiter m where
 
   -- | Run a handler with a database connection from the pool.
   runHandlerWithConnection :: Handler m jobs result -> jobs -> m result
+
+  -- | The env's shared LISTEN/NOTIFY listener, or 'Nothing' for poll-only.
+  getListener :: m (Maybe Listener)
 
 type JobHandler m payload result = Handler m (JobRead payload) result
 type BatchedJobHandler m payload result = Handler m (NonEmpty (JobRead payload)) result

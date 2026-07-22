@@ -2,10 +2,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Test.Arbiter.Hasql.Worker (spec) where
+module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
-import Arbiter.Test.Setup (setupOnce)
+import Arbiter.Test.Setup (addQueueTable, setupOnce)
 import Arbiter.Worker.TestKit (workerSpec)
+import Arbiter.Worker.TestKit qualified as TestKit
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Proxy (Proxy (..))
@@ -13,7 +14,13 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 import Test.Hspec
 
-import Arbiter.Hasql.HasqlDb (createHasqlEnvWithPool, runHasqlDb)
+import Arbiter.Hasql.HasqlDb
+  ( createHasqlEnv
+  , createHasqlEnvWithPool
+  , destroyHasqlEnv
+  , disableListener
+  , runHasqlDb
+  )
 import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 
 workerTestSchemaName :: Text
@@ -34,5 +41,68 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr workerTestSchemaName testTable False >> createHasqlPool 10 connStr) $
     beforeWith (\pool -> cleanupHasqlTest connStr workerTestSchemaName testTable >> pure pool) $ do
-      let runM pool = runHasqlDb (createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName)
-      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry connStr SimpleTask FailingTask (\f _conn job -> f job) runM
+      let runM pool act = do
+            env <- createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName
+            runHasqlDb env act
+      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry SimpleTask FailingTask (\f _conn job -> f job) runM
+
+listenSchema :: Text
+listenSchema = "arbiter_hasql_listen_test"
+
+type HasqlListenRegistry = '[ '("arbiter_hasql_listen_test", HasqlWorkerTestPayload)]
+
+listenerSpec :: ByteString -> Spec
+listenerSpec connStr =
+  beforeAll (setupOnce connStr listenSchema listenSchema True) $
+    TestKit.listenerSpec @HasqlWorkerTestPayload @HasqlListenRegistry
+      listenSchema
+      connStr
+      SimpleTask
+      (cleanupHasqlTest connStr listenSchema listenSchema >> createHasqlEnv (Proxy @HasqlListenRegistry) connStr listenSchema)
+      ( cleanupHasqlTest connStr listenSchema listenSchema
+          >> (disableListener <$> createHasqlEnv (Proxy @HasqlListenRegistry) connStr listenSchema)
+      )
+      destroyHasqlEnv
+      (\f _conn job -> f job)
+      runHasqlDb
+
+mqSchema :: Text
+mqSchema = "arbiter_hasql_mq_test"
+
+mqTableA :: Text
+mqTableA = "mqh_listen_a"
+
+mqTableB :: Text
+mqTableB = "mqh_listen_b"
+
+newtype MqAPayload = MqAPayload Text
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+newtype MqBPayload = MqBPayload Text
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+type HasqlMultiQRegistry =
+  '[ '("mqh_listen_a", MqAPayload)
+   , '("mqh_listen_b", MqBPayload)
+   ]
+
+multiQueueSpec :: ByteString -> Spec
+multiQueueSpec connStr =
+  beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
+    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @HasqlMultiQRegistry
+      mqTableA
+      mqTableB
+      connStr
+      MqAPayload
+      MqBPayload
+      mkEnv
+      destroyHasqlEnv
+      (\f _conn job -> f job)
+      runHasqlDb
+  where
+    mkEnv = do
+      cleanupHasqlTest connStr mqSchema mqTableA
+      cleanupHasqlTest connStr mqSchema mqTableB
+      createHasqlEnv (Proxy @HasqlMultiQRegistry) connStr mqSchema

@@ -1,72 +1,17 @@
-{-# LANGUAGE OverloadedStrings #-}
-
--- | Postgres LISTEN/NOTIFY plumbing: a multi-channel listener thread, and a
--- pause-aware consumer loop the dispatcher drives off it.
+-- | Pause-aware consumer loop the dispatcher drives off the shared listener.
 module Arbiter.Worker.NotificationListener
-  ( ChannelHandler
-  , runMultiChannelListener
-  , runNotificationConsumer
+  ( runNotificationConsumer
   ) where
 
-import Arbiter.Core.Job.Schema (quoteIdentifier)
-import Control.Monad (forever, void, when)
-import Data.ByteString.Char8 qualified as BSC
-import Data.Foldable (for_, traverse_)
-import Data.Map.Strict qualified as Map
-import Data.String (fromString)
-import Data.Text qualified as T
+import Arbiter.Core.Listen (Notification)
+import Control.Monad (when)
 import Data.Time (NominalDiffTime)
-import Database.PostgreSQL.Simple qualified as PS
-import Database.PostgreSQL.Simple.Notification qualified as PS
-import UnliftIO (MonadUnliftIO, liftIO)
-import UnliftIO.Exception (bracket, tryAny)
-import UnliftIO.STM (TVar)
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
-type ChannelHandler m = PS.Notification -> m ()
-
-type Action m a = Maybe PS.Notification -> m a
-
--- | LISTEN on every registered channel and dispatch notifications.
-runMultiChannelListener
-  :: (MonadUnliftIO m)
-  => BSC.ByteString
-  -> [(String, ChannelHandler m)]
-  -> LogConfig
-  -> TVar Bool
-  -- ^ Set to True once every channel is subscribed.
-  -> m ()
-runMultiChannelListener connStr handlers logCfg ready =
-  bracket
-    (liftIO $ PS.connectPostgreSQL connStr)
-    (liftIO . PS.close)
-    $ \conn -> do
-      for_ (Map.keys handlerMap) (liftIO . subscribe conn)
-      STM.atomically $ STM.writeTVar ready True
-      forever $ do
-        n <- liftIO $ PS.getNotification conn
-        let chan = BSC.unpack (PS.notificationChannel n)
-        traverse_ (dispatch n) (Map.lookup chan handlerMap)
-  where
-    handlerMap = Map.fromList handlers
-
-    dispatch n h = do
-      result <- tryAny (h n)
-      case result of
-        Right () -> pure ()
-        Left e ->
-          tryLog logCfg Warning $
-            "Channel handler exception: " <> T.pack (show e)
-
-    subscribe conn channel =
-      void $
-        PS.execute_
-          conn
-          (fromString ("LISTEN " <> T.unpack (quoteIdentifier (T.pack channel))))
+type Action m a = Maybe Notification -> m a
 
 -- | Loop until 'ShuttingDown'. Per iteration wait on notification, poll timer,
 -- wake trigger, or state change. Fires @action Nothing@ once at startup if the
@@ -75,7 +20,7 @@ runNotificationConsumer
   :: (MonadUnliftIO m)
   => STM.STM WorkerState
   -> NominalDiffTime
-  -> STM.TVar (Maybe PS.Notification)
+  -> STM.TVar (Maybe Notification)
   -> Maybe (STM.STM ())
   -> Action m ()
   -> m ()
@@ -145,5 +90,5 @@ runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
 data Command
   = Halt
   | PauseCmd
-  | NotificationRecv PS.Notification
+  | NotificationRecv Notification
   | TimerExpired

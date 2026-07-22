@@ -37,7 +37,6 @@ library
     Arbiter.Core.Admission
     Arbiter.Core.Array
     Arbiter.Core.Codec
-    Arbiter.Core.SqlLiterals
     Arbiter.Core.Concurrency.Schema
     Arbiter.Core.Concurrency.Spec
     Arbiter.Core.Concurrency.Stats
@@ -51,11 +50,12 @@ library
     Arbiter.Core.Job.Types
     Arbiter.Core.JobTree
     Arbiter.Core.Json
+    Arbiter.Core.Listen
     Arbiter.Core.MonadArbiter
     Arbiter.Core.Operations
     Arbiter.Core.PoolConfig
-    Arbiter.Core.Queues
     Arbiter.Core.QueueRegistry
+    Arbiter.Core.Queues
     Arbiter.Core.RateLimit.Schema
     Arbiter.Core.RateLimit.Spec
     Arbiter.Core.RateLimit.Stats
@@ -73,6 +73,7 @@ library
     Arbiter.Core.Sql.Stats
     Arbiter.Core.Sql.Tree
     Arbiter.Core.Sql.Workers
+    Arbiter.Core.SqlLiterals
     Arbiter.Core.Worker
     Arbiter.RateLimit
 
@@ -83,8 +84,10 @@ library
     , containers          >=0.6  && <0.9
     , free                >=5.1  && <5.3
     , neat-interpolation  >=0.5  && <0.6
+    , postgresql-libpq    >=0.10 && <0.12
     , postgresql-simple   >=0.6  && <0.8
     , selective           >=0.5  && <0.8
+    , stm                 >=2.5  && <2.6
     , text                >=1.2  && <2.2
     , time                >=1.9  && <1.16
     , unliftio            >=0.2  && <0.3

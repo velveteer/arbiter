@@ -20,5 +20,7 @@ main = do
     describe "Arbiter.Hasql.Concurrency" $ Concurrency.spec connStr
     describe "Arbiter.Hasql.StateMachine" $ StateMachine.spec connStr
     describe "Arbiter.Hasql.Worker" $ Worker.spec connStr
+    describe "Arbiter.Hasql.Listener" $ Worker.listenerSpec connStr
+    describe "Arbiter.Hasql.MultiQueueListener" $ Worker.multiQueueSpec connStr
     describe "Arbiter.Hasql.RateLimit" $ RateLimit.spec connStr
     describe "Arbiter.Hasql.ConcurrencyLimit" $ ConcurrencyLimit.spec connStr

@@ -35,9 +35,8 @@ import Arbiter.Core.Job.Schema
   , jobQueueDLQTable
   , jobQueueTable
   , maintenanceFunctionNames
-  , quoteIdentifier
   )
-import Arbiter.Core.SqlLiterals (intLiteral, textLiteral)
+import Arbiter.Core.SqlLiterals (intLiteral, quoteIdentifier, textLiteral)
 
 -- | Qualified name of the global per-key in-flight count table.
 arbiterConcurrencyTable :: SchemaName -> Text

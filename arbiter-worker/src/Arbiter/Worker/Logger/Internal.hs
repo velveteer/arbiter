@@ -14,6 +14,7 @@ module Arbiter.Worker.Logger.Internal
   ) where
 
 import Arbiter.Core.Job.Types qualified as Job
+import Control.Exception (displayException)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Logger qualified as ML
@@ -106,5 +107,5 @@ runHook
 runHook cfg hookName action = do
   result <- tryAny action
   case result of
-    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> T.pack (show e)
+    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> T.pack (displayException e)
     Right _ -> pure ()

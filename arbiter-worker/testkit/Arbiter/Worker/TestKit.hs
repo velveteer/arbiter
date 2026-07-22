@@ -5,6 +5,8 @@
 -- | Parameterized worker-pool test suite, instantiated for each 'MonadArbiter' backend.
 module Arbiter.Worker.TestKit
   ( workerSpec
+  , listenerSpec
+  , multiQueueListenerSpec
   ) where
 
 import Arbiter.Core.Exceptions
@@ -18,6 +20,7 @@ import Arbiter.Core.Exceptions
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
+import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
   ( Job (..)
   , JobRead
@@ -27,7 +30,8 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (JobHandler, withDbTransaction)
+import Arbiter.Core.Listen qualified as Listen
+import Arbiter.Core.MonadArbiter (JobHandler, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Test.Poll (waitUntil)
 import Control.Concurrent (threadDelay)
@@ -35,14 +39,18 @@ import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL)
+import Database.PostgreSQL.Simple qualified as PG
+import Database.PostgreSQL.Simple.Types (Identifier (..))
 import Test.Hspec
-import UnliftIO (MonadUnliftIO)
+import UnliftIO (MonadUnliftIO, atomically, bracket)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker (runWorkerPool)
@@ -75,9 +83,7 @@ workerSpec
      , RegistryTables registry
      , Show payload
      )
-  => ByteString
-  -- ^ Connection string
-  -> (Text -> payload)
+  => (Text -> payload)
   -- ^ Construct a simple task payload
   -> (Int -> payload)
   -- ^ Construct a failing task payload
@@ -86,7 +92,7 @@ workerSpec
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function (e.g. runSimpleDb env or runOrvilleTest env)
   -> SpecWith env
-workerSpec connStr mkSimple mkFailing mkHandler runM = do
+workerSpec mkSimple mkFailing mkHandler runM = do
   describe "Worker Pool" $ do
     it "processes jobs successfully" $ \env -> do
       completedRef <- newIORef []
@@ -1051,10 +1057,256 @@ workerSpec connStr mkSimple mkFailing mkHandler runM = do
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload ())
-    mkConfig h = transactionalWorkerConfig connStr 10 (mkHandler h)
+    mkConfig h = transactionalWorkerConfig 10 (mkHandler h)
     mkBatchedConfig
       :: Int
       -> Int
       -> (NonEmpty (JobRead payload) -> BatchCallbacks m payload () -> m ())
       -> IO (WorkerConfig m payload ())
-    mkBatchedConfig = defaultBatchedWorkerConfig connStr
+    mkBatchedConfig = defaultBatchedWorkerConfig
+
+-- | Env-owned LISTEN hub test suite, instantiated for each backend. A high
+-- @pollInterval@ makes the NOTIFY the only thing that could wake the dispatcher
+-- in time, so completion proves the listener fired.
+listenerSpec
+  :: forall payload registry env m
+   . ( MonadUnliftIO m
+     , QueueOperation m registry payload
+     , RegistryAdmissionPolicies registry
+     , RegistryTables registry
+     )
+  => Text
+  -- ^ Schema\/table name, also the LISTEN channel prefix
+  -> ByteString
+  -- ^ Connection string, for terminating the listener backend
+  -> (Text -> payload)
+  -- ^ Construct a task payload
+  -> IO env
+  -- ^ Create an env whose listener is enabled
+  -> IO env
+  -- ^ Create an env with the listener disabled (poll-only)
+  -> (env -> IO ())
+  -- ^ Release an env built by the actions above
+  -> ((JobRead payload -> m ()) -> JobHandler m payload ())
+  -- ^ Adapt a job action into the backend's handler shape
+  -> (forall a. env -> m a -> IO a)
+  -- ^ Runner function
+  -> Spec
+listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler runM =
+  describe "listener" $ do
+    around (bracket mkEnv destroyEnv) $ do
+      it "wakes the dispatcher on NOTIFY under a high poll interval" $ \env -> do
+        ref <- newIORef (0 :: Int)
+        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
+        withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
+          threadDelay 1_000_000
+          runM env $ void $ HL.insertJob (defaultJob (mkPayload "notify")) {groupKey = Just "g1"}
+          waitUntil 5_000 $ (== 1) <$> readIORef ref
+          readIORef ref >>= (`shouldBe` 1)
+
+      it "re-subscribes after a reconnect under a high poll interval" $ \env -> do
+        ref <- newIORef (0 :: Int)
+        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
+        withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
+          threadDelay 1_000_000
+          killListener connStr schema
+          threadDelay 3_000_000
+          runM env $ void $ HL.insertJob (defaultJob (mkPayload "after-reconnect")) {groupKey = Just "g1"}
+          waitUntil 8_000 $ (== 1) <$> readIORef ref
+          readIORef ref >>= (`shouldBe` 1)
+
+      it "shares one listener connection across registrants on the same env" $ \env ->
+        withSharedListener env $ \listener -> do
+          let chanA = TE.encodeUtf8 (schema <> "_dedup_a")
+              chanB = TE.encodeUtf8 (schema <> "_dedup_b")
+          Listen.withChannels listener quietHubLog [(chanA, ignoreNotif)] $ \readyA ->
+            Listen.withChannels listener quietHubLog [(chanB, ignoreNotif)] $ \readyB -> do
+              waitUntil 5_000 (atomically readyA)
+              waitUntil 5_000 (atomically readyB)
+              listenerConnectionCount connStr schema >>= (`shouldBe` 1)
+
+      it "keeps a shared channel live after an overlapping registrant leaves" $ \env ->
+        withSharedListener env $ \listener -> do
+          ref <- newIORef (0 :: Int)
+          let sharedName = schema <> "_shrink_shared"
+              extraName = schema <> "_shrink_extra"
+              sharedChan = TE.encodeUtf8 sharedName
+              extraChan = TE.encodeUtf8 extraName
+          Listen.withChannels listener quietHubLog [(sharedChan, bumpNotif ref)] $ \readyOuter -> do
+            waitUntil 5_000 (atomically readyOuter)
+            -- The inner registrant adds an extra channel, then leaves, shrinking the
+            -- desired set back to the shared channel and issuing an UNLISTEN.
+            Listen.withChannels listener quietHubLog [(sharedChan, ignoreNotif), (extraChan, ignoreNotif)] $ \readyInner ->
+              waitUntil 5_000 (atomically readyInner)
+            notifyChannel connStr sharedName
+            waitUntil 5_000 $ (== 1) <$> readIORef ref
+            readIORef ref >>= (`shouldBe` 1)
+
+      it "isolates a throwing channel handler from the others" $ \env ->
+        withSharedListener env $ \listener -> do
+          good <- newIORef (0 :: Int)
+          warned <- newIORef (0 :: Int)
+          let hubLog = Listen.HubLog (\_ -> bumpRef warned) (const (pure ()))
+              goodName = schema <> "_iso_good"
+              badName = schema <> "_iso_bad"
+              handlers =
+                [ (TE.encodeUtf8 badName, \_ -> ioError (userError "boom"))
+                , (TE.encodeUtf8 goodName, bumpNotif good)
+                ]
+          Listen.withChannels listener hubLog handlers $ \ready -> do
+            waitUntil 5_000 (atomically ready)
+            notifyChannel connStr badName
+            waitUntil 5_000 $ (== 1) <$> readIORef warned
+            notifyChannel connStr goodName
+            waitUntil 5_000 $ (== 1) <$> readIORef good
+            readIORef good >>= (`shouldBe` 1)
+
+    around (bracket mkEnvPollOnly destroyEnv) $
+      it "processes jobs poll-only when the listener is disabled" $ \env -> do
+        ref <- newIORef (0 :: Int)
+        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        let workerConfig = config {workerCount = 1, pollInterval = 0.2, jitter = NoJitter}
+        withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
+          runM env $ void $ HL.insertJob (defaultJob (mkPayload "poll")) {groupKey = Just "g1"}
+          waitUntil 10_000 $ (== 1) <$> readIORef ref
+          readIORef ref >>= (`shouldBe` 1)
+  where
+    counting ref _job = liftIO (bumpRef ref)
+    withSharedListener env k = do
+      mListener <- runM env getListener
+      case mListener of
+        Nothing -> expectationFailure "expected a shared listener, got poll-only"
+        Just listener -> k listener
+
+-- | A hub logger that swallows warn and error output.
+quietHubLog :: Listen.HubLog
+quietHubLog = Listen.HubLog (const (pure ())) (const (pure ()))
+
+-- | Channel handler that ignores the notification.
+ignoreNotif :: Listen.Notification -> IO ()
+ignoreNotif = const (pure ())
+
+-- | Channel handler that bumps a counter.
+bumpNotif :: IORef Int -> Listen.Notification -> IO ()
+bumpNotif ref = const (bumpRef ref)
+
+bumpRef :: IORef Int -> IO ()
+bumpRef ref = atomicModifyIORef' ref (\n -> (n + 1, ()))
+
+-- | Count distinct backends holding a LISTEN on any of this schema's channels.
+listenerConnectionCount :: ByteString -> Text -> IO Int
+listenerConnectionCount connStr schema =
+  bracket (connectPostgreSQL connStr) close $ \conn -> do
+    rows <-
+      PG.query @_ @(Only Int)
+        conn
+        "SELECT count(DISTINCT pid)::int \
+        \FROM pg_stat_activity \
+        \WHERE datname = current_database() \
+        \  AND query LIKE 'LISTEN%' \
+        \  AND query LIKE ?"
+        (Only ("%" <> schema <> "%" :: Text))
+    pure (maybe 0 fromOnly (listToMaybe rows))
+
+-- | Terminate the env's listener backend, forcing the hub to reconnect.
+killListener :: ByteString -> Text -> IO ()
+killListener connStr schema =
+  bracket (connectPostgreSQL connStr) close $ \conn ->
+    void $
+      PG.query @_ @(Only Bool)
+        conn
+        "SELECT pg_terminate_backend(pid) \
+        \FROM pg_stat_activity \
+        \WHERE pid <> pg_backend_pid() \
+        \  AND datname = current_database() \
+        \  AND query LIKE ?"
+        (Only ("LISTEN%" <> schema <> "%" :: Text))
+
+-- | Env-owned LISTEN hub test suite for two queues sharing one env, one worker
+-- pool per queue. Each queue's job-arrival channel is derived from its table
+-- name, so these check that a shared hub wakes each pool for its own queue and
+-- never spuriously for the other's jobs. The registry must map @payloadA@ to the
+-- @tableA@ queue and @payloadB@ to @tableB@.
+multiQueueListenerSpec
+  :: forall payloadA payloadB registry env m
+   . ( MonadUnliftIO m
+     , QueueOperation m registry payloadA
+     , QueueOperation m registry payloadB
+     , RegistryAdmissionPolicies registry
+     , RegistryTables registry
+     )
+  => Text
+  -- ^ Queue A table name, also its LISTEN channel prefix
+  -> Text
+  -- ^ Queue B table name, also its LISTEN channel prefix
+  -> ByteString
+  -- ^ Connection string, for issuing a raw NOTIFY
+  -> (Text -> payloadA)
+  -- ^ Construct a queue A payload
+  -> (Text -> payloadB)
+  -- ^ Construct a queue B payload
+  -> IO env
+  -- ^ Create an env whose listener is enabled, with both queue tables set up
+  -> (env -> IO ())
+  -- ^ Release an env built by the action above
+  -> (forall p. (JobRead p -> m ()) -> JobHandler m p ())
+  -- ^ Adapt a job action into the backend's handler shape
+  -> (forall a. env -> m a -> IO a)
+  -- ^ Runner function
+  -> Spec
+multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroyEnv mkHandler runM =
+  around (bracket mkEnv destroyEnv) $
+    describe "multi-queue listener" $ do
+      it "wakes each pool only for its own queue's jobs under a high poll interval" $ \env -> do
+        refA <- newIORef (0 :: Int)
+        refB <- newIORef (0 :: Int)
+        cfgA :: WorkerConfig m payloadA () <-
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m ()))
+        cfgB :: WorkerConfig m payloadB () <-
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m ()))
+        let poolA = cfgA {workerCount = 1, pollInterval = 300, jitter = NoJitter}
+            poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
+        withAsync (runM env $ runWorkerPool poolA) $ \_ ->
+          withAsync (runM env $ runWorkerPool poolB) $ \_ -> do
+            threadDelay 1_000_000
+            runM env $ void $ HL.insertJob (defaultJob (mkPayloadA "a1"))
+            waitUntil 5_000 $ (== 1) <$> readIORef refA
+            threadDelay 500_000
+            readIORef refB >>= (`shouldBe` 0)
+
+            runM env $ void $ HL.insertJob (defaultJob (mkPayloadB "b1"))
+            waitUntil 5_000 $ (== 1) <$> readIORef refB
+            threadDelay 500_000
+            readIORef refA >>= (`shouldBe` 1)
+
+      it "routes a NOTIFY only to the owning queue's channel handler" $ \env -> do
+        mListener <- runM env getListener
+        case mListener of
+          Nothing -> expectationFailure "expected a shared listener, got poll-only"
+          Just listener -> do
+            refA <- newIORef (0 :: Int)
+            refB <- newIORef (0 :: Int)
+            let chanA = TE.encodeUtf8 (Schema.notificationChannelForTable tableA)
+                chanB = TE.encodeUtf8 (Schema.notificationChannelForTable tableB)
+                handlers =
+                  [ (chanA, bumpNotif refA)
+                  , (chanB, bumpNotif refB)
+                  ]
+            Listen.withChannels listener quietHubLog handlers $ \ready -> do
+              waitUntil 5_000 (atomically ready)
+              notifyChannel connStr (Schema.notificationChannelForTable tableA)
+              waitUntil 5_000 $ (== 1) <$> readIORef refA
+              threadDelay 500_000
+              readIORef refA >>= (`shouldBe` 1)
+              readIORef refB >>= (`shouldBe` 0)
+  where
+    bumping :: IORef Int -> JobRead p -> m ()
+    bumping ref _job = liftIO (bumpRef ref)
+
+-- | Issue a raw @NOTIFY@ on a channel over a throwaway connection.
+notifyChannel :: ByteString -> Text -> IO ()
+notifyChannel connStr chan =
+  bracket (connectPostgreSQL connStr) close $ \conn ->
+    void $ PG.execute conn "NOTIFY ?" (Only (Identifier chan))

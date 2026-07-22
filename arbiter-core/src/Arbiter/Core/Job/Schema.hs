@@ -73,9 +73,6 @@ module Arbiter.Core.Job.Schema
   , createMaintenanceTriggersSQL
   , statementTriggerSQL
   , inFlightPredicate
-
-    -- * Identifier Quoting
-  , quoteIdentifier
   ) where
 
 import Data.Text (Text)
@@ -83,20 +80,13 @@ import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Types (defaultMaxAttempts)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
 
 -- | Unqualified table name within a schema, e.g. @"email_jobs"@.
 type TableName = Text
-
--- | Quote a PostgreSQL identifier (schema name, table name, column name).
---
--- This escapes double quotes by doubling them and wraps the identifier in quotes.
--- This prevents SQL injection when using dynamic identifiers.
-quoteIdentifier :: Text -> Text
-quoteIdentifier ident =
-  "\"" <> T.replace "\"" "\"\"" ident <> "\""
 
 -- | Default PostgreSQL schema name for Arbiter tables
 --

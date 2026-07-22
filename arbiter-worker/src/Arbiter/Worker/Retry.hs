@@ -13,6 +13,7 @@ import Arbiter.Core.Exceptions
   , JobNotFoundException
   , JobStolenException
   )
+import Control.Exception (displayException)
 import Control.Monad (forever)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Maybe (isJust)
@@ -31,7 +32,7 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 -- | Run an action in a retry loop, surviving transient failures.
 --
 -- On synchronous exceptions, checks the worker state - if 'ShuttingDown',
--- exits cleanly; otherwise logs the error and retries after a 5-second delay.
+-- exits cleanly. Otherwise logs the error and retries after a 5-second delay.
 retryOnException
   :: (MonadUnliftIO m)
   => TVar WorkerState
@@ -53,7 +54,7 @@ retryOnException stateVar logCfg label action = loop
             ShuttingDown -> pure ()
             _ -> do
               tryLog logCfg Error $
-                label <> " error (retrying): " <> T.pack (show e)
+                label <> " error (retrying): " <> T.pack (displayException e)
               sleepResult <-
                 race
                   ( liftIO . atomically $
@@ -90,7 +91,7 @@ retryOnExceptionForever logCfg label delay action = forever $ do
       | isJobSignal e -> throwIO e
       | otherwise -> do
           tryLog logCfg Error $
-            label <> " error (retrying): " <> T.pack (show e)
+            label <> " error (retrying): " <> T.pack (displayException e)
           liftIO $ threadDelay (ceiling (delay * 1_000_000))
 
 isJobSignal :: SomeException -> Bool

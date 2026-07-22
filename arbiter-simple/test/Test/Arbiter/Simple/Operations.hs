@@ -37,7 +37,7 @@ testTable = "arbiter_simple_test"
 withCleanup
   :: Pool.Pool PG.Connection -> (SimpleEnv SimpleOpsTestRegistry -> IO a) -> IO a
 withCleanup sharedPool action = do
-  let env = createSimpleEnvWithPool (Proxy @SimpleOpsTestRegistry) sharedPool testSchema
+  env <- createSimpleEnvWithPool (Proxy @SimpleOpsTestRegistry) sharedPool testSchema
   cleanupSimpleTest env testSchema testTable
   action env
 

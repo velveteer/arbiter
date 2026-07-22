@@ -22,6 +22,7 @@ import Arbiter.Worker
   ( WorkerConfig (..)
   , mergedChildResults
   , namedWorkerPool
+  , poolConfigForWorkers
   , runWorkerPools
   , signalShutdown
   , transactionalWorkerConfig
@@ -32,7 +33,6 @@ import Control.Concurrent.Async (race_)
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -161,12 +161,13 @@ main = do
     MigrationSuccess -> putStrLn "Migrations complete"
     MigrationError err -> die $ "Migration failed: " <> err
 
-  -- Create worker environment (its own pool)
-  workerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
+  -- Producer env for seeding and the background load generator. The worker
+  -- pools get their own pool from the managed runner below.
+  producerEnv <- createSimpleEnv (Proxy @DemoRegistry) connStr schema
 
   -- Seed demo data
   putStrLn "Seeding demo data..."
-  seedDemoData workerEnv schema
+  seedDemoData producerEnv schema
 
   -- Create server config (own connection pool for admin API)
   putStrLn ""
@@ -176,10 +177,10 @@ main = do
 
   -- Create worker configs with cron jobs
   putStrLn "Creating worker configs..."
-  demoWorkerCfg <- mkDemoWorker connStr
-  emailWorkerCfg <- mkEmailWorker connStr
-  notifWorkerCfg <- mkNotifWorker connStr
-  pipelineWorkerCfg <- mkPipelineWorker connStr
+  demoWorkerCfg <- mkDemoWorker
+  emailWorkerCfg <- mkEmailWorker
+  notifWorkerCfg <- mkNotifWorker
+  pipelineWorkerCfg <- mkPipelineWorker
   putStrLn "Workers configured"
 
   let policy =
@@ -231,8 +232,10 @@ main = do
   -- Background load generator: pulse a few jobs on an interval so the queues
   -- stay visibly active between cron ticks. A value of 0 disables it.
   pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
-  when (pulseSec > 0) $ void $ forkIO $ loadPulse workerEnv pulseSec
+  when (pulseSec > 0) $ void $ forkIO $ loadPulse producerEnv pulseSec
 
+  poolCfg <- poolConfigForWorkers workers
+  workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
   race_
     (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
@@ -243,9 +246,9 @@ main = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
-mkDemoWorker :: ByteString -> IO (WorkerConfig DemoM DemoPayload ())
-mkDemoWorker connStr = do
-  cfg <- transactionalWorkerConfig connStr 5 handler
+mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload ())
+mkDemoWorker = do
+  cfg <- transactionalWorkerConfig 5 handler
   pure
     cfg
       { cronJobs = demoCrons
@@ -263,9 +266,9 @@ mkDemoWorker connStr = do
             (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
       ]
 
-mkEmailWorker :: ByteString -> IO (WorkerConfig DemoM EmailPayload ())
-mkEmailWorker connStr = do
-  cfg <- transactionalWorkerConfig connStr 1 handler
+mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload ())
+mkEmailWorker = do
+  cfg <- transactionalWorkerConfig 1 handler
   pure
     cfg
       { cronJobs = emailCrons
@@ -283,9 +286,9 @@ mkEmailWorker connStr = do
             (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
       ]
 
-mkNotifWorker :: ByteString -> IO (WorkerConfig DemoM NotificationPayload ())
-mkNotifWorker connStr = do
-  cfg <- transactionalWorkerConfig connStr 1 handler
+mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload ())
+mkNotifWorker = do
+  cfg <- transactionalWorkerConfig 1 handler
   pure
     cfg
       { cronJobs = notifCrons
@@ -307,9 +310,9 @@ mkNotifWorker connStr = do
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
-mkPipelineWorker :: ByteString -> IO (WorkerConfig DemoM PipelinePayload [Text])
-mkPipelineWorker connStr = do
-  cfg <- transactionalWorkerConfig connStr 3 handler
+mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload [Text])
+mkPipelineWorker = do
+  cfg <- transactionalWorkerConfig 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}
   where
     handler _conn job = case payload job of

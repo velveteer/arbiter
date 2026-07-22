@@ -8,6 +8,7 @@ module Arbiter.Test.Setup
   , cleanupData
   , execute_
   , setupOnce
+  , addQueueTable
   , disableNoticeReporting
   , createSharedPool
   , truncateToMicros
@@ -143,6 +144,23 @@ setupOnce connStr schemaName tableName withNotify = do
   let config = defaultSetupConfig {setupEnableNotifications = withNotify}
   setupDDLWithConfig config schemaName tableName conn
   close conn
+
+-- | Add one more job-queue table to an existing schema without dropping it, for
+-- tests that exercise several queues in one schema.
+addQueueTable :: ByteString -> Text -> Text -> Bool -> IO ()
+addQueueTable connStr schemaName tableName withNotify = do
+  conn <- connectPostgreSQL connStr
+  disableNoticeReporting conn
+  let config =
+        defaultMigrationConfig
+          { enableNotifications = withNotify
+          , enableEventStreaming = False
+          }
+  traverse_ (runScript conn) (jobQueueMigrationsForTable schemaName tableName config allTableAdmission)
+  close conn
+  where
+    runScript conn (MigrationScript _ sql) = void $ execute conn (Query sql) ()
+    runScript _ _ = pure ()
 
 disableNoticeReporting :: Connection -> IO ()
 disableNoticeReporting conn =

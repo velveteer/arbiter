@@ -238,6 +238,7 @@ groupCandidateCtes groupsTbl tbl overfetch dma =
         FROM ${tbl} t
         WHERE t.group_key = el.group_key
           AND NOT t.suspended
+          AND t.cancel_requested_at IS NULL
           AND (t.not_visible_until IS NULL OR t.not_visible_until <= NOW())
           AND t.attempts < COALESCE(t.max_attempts, ${dma})
         ORDER BY t.priority ASC, t.id ASC
@@ -256,6 +257,7 @@ ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
         FROM ${tbl} j
         WHERE j.group_key IS NULL
           AND NOT j.suspended
+          AND j.cancel_requested_at IS NULL
           AND j.not_visible_until IS NULL
           AND j.attempts < COALESCE(j.max_attempts, ${dma})
           ${ccGate}
@@ -268,6 +270,7 @@ ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
         FROM ${tbl} j
         WHERE j.group_key IS NULL
           AND NOT j.suspended
+          AND j.cancel_requested_at IS NULL
           AND j.not_visible_until IS NOT NULL
           AND j.not_visible_until <= NOW()
           AND j.attempts < COALESCE(j.max_attempts, ${dma})
@@ -324,6 +327,7 @@ lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
         FROM ${tbl}
         WHERE group_key = flg.group_key
           AND NOT suspended
+          AND cancel_requested_at IS NULL
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
           AND attempts < COALESCE(max_attempts, ${dma})
         ORDER BY attempts DESC, priority ASC, id ASC
@@ -348,6 +352,7 @@ lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
       ) i
       INNER JOIN ${tbl} j ON j.id = i.id
       WHERE NOT j.suspended
+        AND j.cancel_requested_at IS NULL
         AND (j.not_visible_until IS NULL OR j.not_visible_until <= NOW())
         AND j.group_key IS NOT DISTINCT FROM i.expected_group
         AND j.attempts < COALESCE(j.max_attempts, ${dma})

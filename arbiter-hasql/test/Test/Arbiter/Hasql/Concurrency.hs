@@ -27,8 +27,9 @@ testTable = "arbiter_hasql_concurrency_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False >> createHasqlPool 10 connStr) $ beforeWith (\pool -> cleanupHasqlTest connStr testSchema testTable >> pure pool) $ do
-  let mkEnv pool = createHasqlEnvWithPool (Proxy @HasqlConcurrencyTestRegistry) pool testSchema
-      run pool = runHasqlDb (mkEnv pool)
+  let run pool act = do
+        env <- createHasqlEnvWithPool (Proxy @HasqlConcurrencyTestRegistry) pool testSchema
+        runHasqlDb env act
   concurrencySpec @TestPayload @HasqlConcurrencyTestRegistry
     TestMessage
     run

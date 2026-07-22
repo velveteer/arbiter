@@ -54,6 +54,7 @@ module Arbiter.Core.Operations
   , countDLQJobsByParent
   , deleteDLQJob
   , deleteDLQJobsBatch
+  , deleteCancelledJobs
 
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
@@ -106,6 +107,7 @@ module Arbiter.Core.Operations
   , refreshGroupsForQueue
   , refreshAllGroups
   , sweepExhaustedJobs
+  , sweepCancelledJobs
 
     -- * Cron Schedule Operations
   , upsertCronDefault
@@ -268,6 +270,7 @@ visibilityUpdateCodec =
     <$> col "id" CInt8
     <*> col "was_heartbeated" CBool
     <*> ncol "current_db_attempts" CInt4
+    <*> col "cancel_requested" CBool
 
 parentCountCodec :: RowCodec (Int64, (Int64, Int64))
 parentCountCodec =
@@ -1085,6 +1088,8 @@ data VisibilityUpdateInfo = VisibilityUpdateInfo
   -- ^ The current attempt count of the job in the database.
   -- This is used to distinguish between a stolen job (attempts changed)
   -- and an acked job (row is missing, so this is 'Nothing').
+  , vuiCancelRequested :: Bool
+  -- ^ 'True' if a force-cancel has flagged this job.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -1586,13 +1591,24 @@ deleteDLQJob schemaName tableName dlqId = withDbTransaction $ do
       pure 1
     _ -> pure 1
 
--- | Delete multiple jobs from the dead letter queue.
---
--- If any deleted jobs were children, tries to resume their parents when
--- no siblings remain. Parent IDs are deduplicated and sorted to prevent
--- deadlocks between concurrent batch deletes.
---
--- Returns the total number of DLQ jobs deleted.
+-- | Delete jobs by id via the given SQL, then resume any parents left childless.
+-- The SQL must return each deleted row's parent_id. Returns the rows deleted.
+deleteJobsResumingParents
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Text
+  -> [Int64]
+  -> m Int
+deleteJobsResumingParents _ _ _ [] = pure 0
+deleteJobsResumingParents schemaName tableName sql jobIds = withDbTransaction $ do
+  rows <- executeQuery sql [parr CInt8 jobIds] nullableInt64Codec
+  let parentIds = Set.toAscList . Set.fromList $ catMaybes rows
+  for_ parentIds $ tryResumeParent schemaName tableName
+  pure (length rows)
+
+-- | Delete multiple jobs from the dead letter queue, resuming any parents left
+-- childless. Returns the total number of DLQ jobs deleted.
 deleteDLQJobsBatch
   :: (MonadArbiter m)
   => SchemaName
@@ -1602,16 +1618,20 @@ deleteDLQJobsBatch
   -> [Int64]
   -- ^ DLQ job IDs
   -> m Int64
-deleteDLQJobsBatch _ _ [] = pure 0
-deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
-  rows <-
-    executeQuery
-      (Tmpl.deleteDLQJobsBatchSQL schemaName tableName)
-      [parr CInt8 dlqIds]
-      nullableInt64Codec
-  let parentIds = Set.toAscList . Set.fromList $ catMaybes rows
-  for_ parentIds $ tryResumeParent schemaName tableName
-  pure $ fromIntegral (length rows)
+deleteDLQJobsBatch schemaName tableName dlqIds =
+  fromIntegral
+    <$> deleteJobsResumingParents schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
+
+-- | Delete force-cancel-flagged jobs by id and resume any parents left
+-- childless. Returns the number of rows actually deleted.
+deleteCancelledJobs
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Int64]
+  -> m Int
+deleteCancelledJobs schemaName tableName jobIds =
+  deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName) jobIds
 
 -- * Admin Operations
 
@@ -1795,10 +1815,8 @@ promoteJob schemaName tableName jobId =
     (Tmpl.promoteJobSQL schemaName tableName)
     [pval CInt8 jobId]
 
--- | Per-status breakdown of a queue. The six status counts ('readyJobs',
--- 'inFlightJobs', 'scheduledJobs', 'backoffJobs', 'throttledJobs',
--- 'suspendedJobs') partition the queue and sum to 'totalJobs', mirroring the
--- derived job status taxonomy.
+-- | Per-status breakdown of a queue. The per-status counts partition the queue
+-- and sum to 'totalJobs', mirroring the derived job status taxonomy.
 data QueueStats = QueueStats
   { totalJobs :: Int64
   -- ^ Total number of jobs in the queue
@@ -1814,6 +1832,8 @@ data QueueStats = QueueStats
   -- ^ Jobs parked by a rate limit until tokens refill
   , suspendedJobs :: Int64
   -- ^ Suspended jobs (e.g. rollup finalizers awaiting their children)
+  , cancelledJobs :: Int64
+  -- ^ Force-cancelled jobs flagged for teardown, not yet reaped
   , oldestReadyAgeSeconds :: Maybe Double
   -- ^ Age in seconds of the oldest @ready@ job (Nothing if none are ready).
   -- Scheduled/backoff/leased jobs are excluded so a far-future delayed job
@@ -1834,6 +1854,7 @@ statsRowCodec =
     <*> col "backoff_jobs" CInt8
     <*> col "throttled_jobs" CInt8
     <*> col "suspended_jobs" CInt8
+    <*> col "cancelled_jobs" CInt8
     <*> ncol "oldest_ready_age_seconds" CFloat8
 
 -- | Get statistics about the job queue
@@ -1854,7 +1875,7 @@ getQueueStats schemaName tableName = do
   -- only guards against an unexpected truncation.
   pure $ case rows of
     (s : _) -> s
-    [] -> QueueStats 0 0 0 0 0 0 0 Nothing
+    [] -> QueueStats 0 0 0 0 0 0 0 0 Nothing
 
 -- | A landing-overview row: a queue's stats plus its pause state.
 data QueueOverview = QueueOverview
@@ -2076,8 +2097,8 @@ cancelJobTree schemaName tableName jobId =
     (Tmpl.cancelJobTreeSQL schemaName tableName)
     [pval CInt8 jobId]
 
--- | Cascade-cancel like 'cancelJobCascade', but also fans pg_notify messages
--- to the queue's cancel channel for every deleted in-flight job. Workers
+-- | Cascade-cancel a job subtree: flag still-live claimed jobs, delete the rest,
+-- and NOTIFY the queue's cancel channel for every claimed job affected. Workers
 -- async-cancel the matching handler thread on receipt.
 forceCancelJob
   :: (MonadArbiter m)
@@ -2162,6 +2183,20 @@ refreshAllGroups schemaName queues = do
       result <- tryAny (refreshGroupsForQueue schemaName queue)
       pure (either (const (Just queue)) (const Nothing) result)
 
+-- | Run a per-queue sweep over every queue, returning the total and the names
+-- of queues whose sweep threw.
+sweepQueues
+  :: (MonadUnliftIO m)
+  => (SchemaName -> TableName -> m Int64)
+  -> SchemaName
+  -> [TableName]
+  -> m (Int64, [Text])
+sweepQueues sweepOne schemaName queues = do
+  (failures, counts) <- partitionEithers <$> traverse run queues
+  pure (sum counts, failures)
+  where
+    run queue = first (const queue) <$> tryAny (sweepOne schemaName queue)
+
 -- | Sweep exhausted jobs across all queues. Returns the total moved and the
 -- names of queues whose sweep failed.
 sweepExhaustedJobs
@@ -2169,12 +2204,7 @@ sweepExhaustedJobs
   => SchemaName
   -> [TableName]
   -> m (Int64, [Text])
-sweepExhaustedJobs schemaName queues = do
-  (failures, counts) <- partitionEithers <$> traverse sweepOne queues
-  pure (sum counts, failures)
-  where
-    sweepOne queue =
-      first (const queue) <$> tryAny (sweepExhaustedForQueue schemaName queue)
+sweepExhaustedJobs = sweepQueues sweepExhaustedForQueue
 
 -- | Move each exhausted job to the DLQ via the tree-aware 'moveToDLQFields',
 -- one transaction per job, so cascades and parent resumes are handled.
@@ -2202,6 +2232,37 @@ exhaustedJobCodec =
     <*> col "attempts" CInt4
     <*> ncol "parent_id" CInt8
     <*> col "is_rollup" CBool
+
+-- | Sweep force-cancel-flagged jobs whose lease has lapsed across all queues.
+-- A live worker's heartbeat keeps its jobs' lease in the future, so those are
+-- left for the worker's own cancel handler. Returns the total deleted and the
+-- names of queues whose sweep failed.
+sweepCancelledJobs
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => SchemaName
+  -> [TableName]
+  -> m (Int64, [Text])
+sweepCancelledJobs = sweepQueues sweepCancelledForQueue
+
+-- | Delete one queue's lease-lapsed flagged jobs, resuming any parents left
+-- childless. 'deleteCancelledJobs' runs in its own transaction and re-checks
+-- the flag, so a concurrent worker cancel handler is harmless.
+sweepCancelledForQueue
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> m Int64
+sweepCancelledForQueue schemaName tableName = do
+  ids <-
+    executeQuery
+      (Tmpl.selectCancelledReapableJobsSQL schemaName tableName cancelledSweepBatch)
+      []
+      (col "id" CInt8)
+  fromIntegral <$> deleteCancelledJobs schemaName tableName ids
+
+-- | Per-queue cap on flagged jobs reaped in one pass.
+cancelledSweepBatch :: Int
+cancelledSweepBatch = 1000
 
 -- | Upsert a cron schedule's default expression and overlap policy.
 --

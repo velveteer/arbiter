@@ -20,7 +20,7 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 --
 -- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
 -- UI can distinguish actively-leased ('in_flight') jobs from merely delayed
--- ('scheduled'/'backoff'/'throttled') or 'suspended' ones. The six status counts
+-- ('scheduled'/'backoff'/'throttled') or 'suspended' ones. The status counts
 -- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
 -- far-future scheduled job no longer skews the queue's backlog latency.
 getQueueStatsSQL :: Text -> Text -> Text
@@ -43,6 +43,7 @@ statsAggColumns =
     COUNT(*) FILTER (WHERE status = 'backoff') AS backoff_jobs,
     COUNT(*) FILTER (WHERE status = 'throttled') AS throttled_jobs,
     COUNT(*) FILTER (WHERE status = 'suspended') AS suspended_jobs,
+    COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_jobs,
     EXTRACT(EPOCH FROM (NOW() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds
   |]
 

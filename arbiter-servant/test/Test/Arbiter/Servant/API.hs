@@ -95,7 +95,7 @@ spec connStr = do
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
 
-  let mkEnv = createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema
+  mkEnv <- runIO (createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema)
 
   describe "Jobs API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/jobs returns empty list initially" $ do

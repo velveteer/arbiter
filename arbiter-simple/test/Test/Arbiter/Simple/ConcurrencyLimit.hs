@@ -25,8 +25,8 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema concurrencyTable False) $ do
     sharedPool <- runIO (createSimplePool 5 connStr)
-    let mkEnv = createSimpleEnvWithPool (Proxy @CLReg) sharedPool testSchema
-        run :: forall a. SimpleDb CLReg IO a -> IO a
+    mkEnv <- runIO (createSimpleEnvWithPool (Proxy @CLReg) sharedPool testSchema)
+    let run :: forall a. SimpleDb CLReg IO a -> IO a
         run = runSimpleDb mkEnv
         withConn :: forall a. (PG.Connection -> IO a) -> IO a
         withConn = withResource sharedPool

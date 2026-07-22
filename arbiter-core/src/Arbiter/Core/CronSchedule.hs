@@ -41,8 +41,8 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Job.Schema (quoteIdentifier)
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | A row from the @cron_schedules@ table.
 data CronScheduleRow = CronScheduleRow

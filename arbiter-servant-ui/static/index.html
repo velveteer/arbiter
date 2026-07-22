@@ -112,7 +112,7 @@
   <!-- ============================================================ -->
   <!-- Area: Queue detail — the drilled-into queue's scoped sub-tabs -->
   <!-- ============================================================ -->
-  <template x-if="$store.app.view === 'queues' && $store.app.selectedQueue">
+  <template x-if="$store.app.view === 'queues' && $store.app.selectedQueue && $store.app.detailReady">
     <div x-init="$nextTick(() => activateSubTabFromHash(['stats','jobs','dlq','cron','workers']))">
       <!-- Breadcrumb + quick switcher + pause -->
       <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
@@ -287,6 +287,7 @@
           <option value="scheduled">Scheduled</option>
           <option value="throttled">Throttled</option>
           <option value="suspended">Suspended</option>
+          <option value="cancelled">Cancelled</option>
         </select>
 
         <!-- View -->
@@ -492,6 +493,7 @@
                     <span class="badge"
                       :class="{
                         'bg-warning-subtle text-warning-emphasis': job.status === 'suspended',
+                        'bg-dark-subtle text-dark-emphasis': job.status === 'cancelled',
                         'bg-primary-subtle text-primary-emphasis': job.status === 'in_flight',
                         'bg-danger-subtle text-danger-emphasis': job.status === 'backoff',
                         'bg-secondary-subtle text-secondary-emphasis': job.status === 'scheduled',

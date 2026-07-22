@@ -20,6 +20,7 @@ module Arbiter.Worker.Config
   , WorkerState (..)
   , shutdownWorker
   , getWorkerState
+  , getListenerReady
   , readEffectiveState
   ) where
 
@@ -27,7 +28,6 @@ import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservability
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
-import Data.ByteString (ByteString)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -46,9 +46,7 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload result = WorkerConfig
-  { connStr :: ByteString
-  -- ^ PostgreSQL connection string (used for LISTEN/NOTIFY).
-  , workerCount :: Int
+  { workerCount :: Int
   -- ^ Number of concurrent worker threads.
   , handlerMode :: HandlerMode m payload result
   -- ^ Job handler and claiming strategy. Set by the @default*WorkerConfig@ helpers.
@@ -113,6 +111,9 @@ data WorkerConfig m payload result = WorkerConfig
   -- Default: @300@ (5 minutes).
   , heartbeatSignal :: TMVar ()
   -- ^ Worker-level proof-of-work signal pulsed by the dispatcher and per-job heartbeats.
+  , listenerReadyVar :: TVar Bool
+  -- ^ True once this pool's LISTEN channels are subscribed, or immediately when
+  -- there is no listener. Observability only, startup never blocks on it.
   }
 
 -- | Per-job finalizers handed to a batched handler. Untouched jobs are
@@ -162,20 +163,16 @@ data HandlerMode m payload result
 -- held for the duration of the handler.
 transactionalWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> JobHandler n payload result
   -> m (WorkerConfig n payload result)
-transactionalWorkerConfig connStrVal workerCnt handler =
-  mkDefaultConfig connStrVal workerCnt (singleJobMode handler)
+transactionalWorkerConfig workerCnt handler =
+  mkDefaultConfig workerCnt (singleJobMode handler)
 
 defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> JobHandler n payload result
   -> m (WorkerConfig n payload result)
@@ -191,9 +188,7 @@ defaultWorkerConfig = transactionalWorkerConfig
 -- a result per job, see 'defaultBatchedResultWorkerConfig'.
 defaultBatchedWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
@@ -206,36 +201,30 @@ defaultBatchedWorkerConfig = defaultBatchedResultWorkerConfig
 -- reprocessed.
 manualWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> (JobRead payload -> BatchCallbacks n payload () -> n ())
   -> m (WorkerConfig n payload ())
-manualWorkerConfig connStrVal workerCnt handler =
-  defaultBatchedWorkerConfig connStrVal workerCnt 1 (\(job :| _) -> handler job)
+manualWorkerConfig workerCnt handler =
+  defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
 
 -- | 'defaultBatchedWorkerConfig' where each job carries a result. Store one with
 -- 'ackWith' or 'ackAllWith'. Fetch a parent's child results with
 -- 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
 defaultBatchedResultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
   -> m (WorkerConfig n payload result)
-defaultBatchedResultWorkerConfig connStrVal workerCnt batchSize handler =
-  mkDefaultConfig connStrVal workerCnt (BatchedJobsMode batchSize handler)
+defaultBatchedResultWorkerConfig workerCnt batchSize handler =
+  mkDefaultConfig workerCnt (BatchedJobsMode batchSize handler)
 
 defaultBatchedRollupWorkerConfig
   :: (MonadArbiter n, MonadIO m)
-  => ByteString
-  -- ^ Connection string
-  -> Int
+  => Int
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
@@ -252,22 +241,21 @@ singleJobMode = SingleJobMode
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
-  => ByteString
-  -> Int
+  => Int
   -> HandlerMode n payload result
   -> m (WorkerConfig n payload result)
-mkDefaultConfig connStrVal workerCnt mode = do
+mkDefaultConfig workerCnt mode = do
   heartbeatTMVar <- liftIO newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
   pauseTVar <- newTVarIO False
+  listenerReadyTVar <- newTVarIO False
   uuid <- liftIO UUID.nextRandom
   tmpDir <- liftIO getTemporaryDirectory
   host <- liftIO getHostName
   let livenessPath = tmpDir <> "/arbiter-worker-" <> toString uuid
   pure
     WorkerConfig
-      { connStr = connStrVal
-      , workerCount = workerCnt
+      { workerCount = workerCnt
       , handlerMode = mode
       , pollInterval = 5
       , visibilityTimeout = 60
@@ -289,6 +277,7 @@ mkDefaultConfig connStrVal workerCnt mode = do
       , workerMetadata = Nothing
       , workerStaleThreshold = 300
       , heartbeatSignal = heartbeatTMVar
+      , listenerReadyVar = listenerReadyTVar
       }
 
 withWorkerIdContext :: UUID -> LogConfig -> LogConfig
@@ -303,6 +292,10 @@ shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar 
 
 getWorkerState :: (MonadIO m) => WorkerConfig n payload result -> m WorkerState
 getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
+
+-- | Whether this pool's LISTEN channels are subscribed (or there is no listener).
+getListenerReady :: (MonadIO m) => WorkerConfig n payload result -> m Bool
+getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
 
 readEffectiveState :: WorkerConfig n payload result -> STM.STM WorkerState
 readEffectiveState config = do

@@ -22,6 +22,6 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema rateLimitTable False >> setupRateLimitPolicy connStr testSchema) $ do
     sharedPool <- runIO (createHasqlPool 5 connStr)
-    let mkEnv = createHasqlEnvWithPool (Proxy @RLReg) sharedPool testSchema
+    mkEnv <- runIO (createHasqlEnvWithPool (Proxy @RLReg) sharedPool testSchema)
     around (\action -> cleanupHasqlTest connStr testSchema rateLimitTable >> action mkEnv) $
       rateLimitSpec runHasqlDb

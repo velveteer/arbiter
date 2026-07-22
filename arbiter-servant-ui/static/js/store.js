@@ -14,6 +14,7 @@ document.addEventListener('alpine:init', () => {
     showLoader: false,
     _loaderTimer: null,
     _deepLinkPending: false,
+    detailReady: false,
     connected: false,
     sseDisabled: false,
     eventSource: null,
@@ -48,6 +49,18 @@ document.addEventListener('alpine:init', () => {
     },
 
     async init() {
+      // Mount the detail one frame after the list unmounts. A same-flush
+      // list-unmount plus detail-mount skips the last tab pane's Alpine init.
+      Alpine.effect(() => {
+        const show = this.view === 'queues' && !!this.selectedQueue;
+        if (!show) {
+          this.detailReady = false;
+          return;
+        }
+        requestAnimationFrame(() => {
+          if (this.view === 'queues' && this.selectedQueue) this.detailReady = true;
+        });
+      });
       // A system view is queue-independent, so resolve it up front. A deep-linked
       // queue is mounted only after listQueues confirms it exists, so a stale link
       // never mounts a detail view or fires sub-tab loads against a missing table.

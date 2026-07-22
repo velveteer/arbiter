@@ -26,7 +26,7 @@ import Arbiter.Core.Job.Schema (jobQueueTable)
 --    remaining siblings in the queue, resume the parent for its
 --    completion round.
 --
--- Returns @rows_affected@ (1 on success, 0 if stolen/gone).
+-- Returns @rows_affected@ (1 on success, 0 if stolen/gone/cancelled).
 -- Parameters: job_id, attempts, job_id, job_id, attempts, job_id
 smartAckJobSQL :: Text -> Text -> Text
 smartAckJobSQL schema tableName =
@@ -128,8 +128,9 @@ setVisibilityTimeoutSQL schema tableName =
 -- the detailed status of each job in a single query.
 --
 -- This is used for heartbeating. The query attempts to update all jobs, and
--- then reports on which ones succeeded, which were missing (acked), and which
--- had a different attempts count (stolen).
+-- then reports on which ones succeeded, which were missing (acked), which are
+-- force-cancel-flagged (cancelled), and which had a different attempts count
+-- (stolen).
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Text -> Text
 setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
   let tbl = jobQueueTable schema tableName
@@ -149,7 +150,8 @@ setVisibilityTimeoutBatchSQL schema tableName valuesPlaceholder =
         SELECT
           ij.id,
           (u.id IS NOT NULL) as was_heartbeated,
-          j.attempts as current_db_attempts
+          j.attempts as current_db_attempts,
+          (j.cancel_requested_at IS NOT NULL) as cancel_requested
         FROM input_jobs ij
         LEFT JOIN updated u ON ij.id = u.id
         LEFT JOIN ${tbl} j ON j.id = ij.id

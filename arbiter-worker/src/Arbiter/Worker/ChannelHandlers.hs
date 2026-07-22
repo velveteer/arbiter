@@ -13,6 +13,7 @@ module Arbiter.Worker.ChannelHandlers
   ) where
 
 import Arbiter.Core.Job.Types ()
+import Arbiter.Core.Listen (Notification, notificationData)
 import Control.Concurrent (forkIO)
 import Control.Exception
   ( Exception (..)
@@ -30,7 +31,6 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8Lenient)
 import Data.UUID (UUID)
-import Database.PostgreSQL.Simple.Notification qualified as PS
 import UnliftIO (MonadUnliftIO, atomically, liftIO)
 import UnliftIO.Async qualified as Async
 import UnliftIO.Exception (throwTo)
@@ -46,10 +46,10 @@ type RunningJobs = TVar (Map.Map Int64 (Async.Async ()))
 handlePauseNotif
   :: (MonadUnliftIO m)
   => WorkerConfig n payload result
-  -> PS.Notification
+  -> Notification
   -> m ()
 handlePauseNotif config notif =
-  case Aeson.decodeStrict (PS.notificationData notif) :: Maybe PausePayload of
+  case Aeson.decodeStrict (notificationData notif) :: Maybe PausePayload of
     Just (PausePayload wid p) | wid == workerId config -> atomically $ do
       st <- STM.readTVar (workerStateVar config)
       unless (st == ShuttingDown) $ STM.writeTVar (pauseVar config) p
@@ -61,10 +61,10 @@ handleCancelNotif
   :: (MonadUnliftIO m)
   => WorkerConfig n payload result
   -> RunningJobs
-  -> PS.Notification
+  -> Notification
   -> m ()
 handleCancelNotif config runningJobs notif =
-  case Aeson.decodeStrict (PS.notificationData notif) :: Maybe CancelPayload of
+  case Aeson.decodeStrict (notificationData notif) :: Maybe CancelPayload of
     Just (CancelPayload wid jid) | wid == workerId config -> do
       mAsync <- atomically $ Map.lookup jid <$> readTVar runningJobs
       traverse_ fireCancel mAsync
@@ -82,10 +82,10 @@ handleCronRunNotif
   => Set Text
   -- ^ This pool's own cron schedule names
   -> TVar Bool
-  -> PS.Notification
+  -> Notification
   -> m ()
 handleCronRunNotif ownNames runNowVar notif =
-  when (Set.member (decodeUtf8Lenient (PS.notificationData notif)) ownNames) $
+  when (Set.member (decodeUtf8Lenient (notificationData notif)) ownNames) $
     atomically $
       STM.writeTVar runNowVar True
 
