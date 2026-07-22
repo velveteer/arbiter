@@ -13,6 +13,7 @@ module Arbiter.Servant.API
   , TableAPI (..)
   , JobsAPI (..)
   , DLQAPI (..)
+  , ArchiveAPI (..)
   , StatsAPI (..)
   , QueuesAPI (..)
   , EventsAPI
@@ -25,9 +26,11 @@ module Arbiter.Servant.API
 import Arbiter.Core.Job.Types (JobStatus, jobStatusToText)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.Core.Sql.Jobs
-  ( DLQSortColumn
+  ( ArchiveSortColumn
+  , DLQSortColumn
   , JobSortColumn
   , SortDir
+  , archiveSortColumnName
   , dlqSortColumnName
   , jobSortColumnName
   , sortDirSql
@@ -64,6 +67,12 @@ instance FromHttpApiData DLQSortColumn where
 instance ToHttpApiData DLQSortColumn where
   toUrlPiece = dlqSortColumnName
 
+instance FromHttpApiData ArchiveSortColumn where
+  parseQueryParam = parseEnum archiveSortColumnName
+
+instance ToHttpApiData ArchiveSortColumn where
+  toUrlPiece = archiveSortColumnName
+
 instance FromHttpApiData SortDir where
   parseQueryParam = parseEnum sortDirSql
 
@@ -78,13 +87,14 @@ instance ToHttpApiData JobStatus where
 
 -- | Jobs API routes - manage jobs in a specific table
 data JobsAPI payload mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&roots_only&status=S&sort_by=...&sort_dir=...
+  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&sort_by=...&sort_dir=...
     listJobs
       :: mode
         :- QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> QueryParam "parent_id" Int64
+          :> QueryParam "job_id" Int64
           :> QueryFlag "roots_only"
           :> QueryParam "status" JobStatus
           :> QueryParam "sort_by" JobSortColumn
@@ -158,12 +168,13 @@ data JobsAPI payload mode = JobsAPI
 
 -- | DLQ API routes - manage failed jobs in a specific table
 data DLQAPI payload mode = DLQAPI
-  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&group_key=X&sort_by=...&sort_dir=...
+  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
     listDLQ
       :: mode
         :- QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> QueryParam "parent_id" Int64
+          :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
@@ -188,6 +199,39 @@ data DLQAPI payload mode = DLQAPI
   }
   deriving stock (Generic)
 
+-- | Archive API routes - browse and manage completed jobs for a specific table
+data ArchiveAPI payload mode = ArchiveAPI
+  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
+    listArchive
+      :: mode
+        :- QueryParam "limit" Int
+          :> QueryParam "offset" Int
+          :> QueryParam "parent_id" Int64
+          :> QueryParam "job_id" Int64
+          :> QueryParam "group_key" Text
+          :> QueryParam "sort_by" ArchiveSortColumn
+          :> QueryParam "sort_dir" SortDir
+          :> Get '[JSON] (ArchiveResponse payload)
+  , -- POST /:table/archive/:id/reenqueue (re-run as a fresh job)
+    reEnqueueArchive
+      :: mode
+        :- Capture "id" Int64
+          :> "reenqueue"
+          :> PostNoContent
+  , -- DELETE /:table/archive/:id (purge one)
+    deleteArchive
+      :: mode
+        :- Capture "id" Int64
+          :> DeleteNoContent
+  , -- POST /:table/archive/batch-delete (bulk purge)
+    deleteArchiveBatch
+      :: mode
+        :- "batch-delete"
+          :> ReqBody '[JSON] BatchDeleteRequest
+          :> Post '[JSON] BatchDeleteResponse
+  }
+  deriving stock (Generic)
+
 -- | Stats API routes - queue statistics for a specific table
 data StatsAPI mode = StatsAPI
   { -- GET /:table/stats
@@ -201,6 +245,7 @@ data StatsAPI mode = StatsAPI
 data TableAPI payload mode = TableAPI
   { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload)
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
+  , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
   }
   deriving stock (Generic)
@@ -364,6 +409,6 @@ type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
     (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
--- prefix is generated from the registry; see 'RegistryToAPI' for the shape.
+-- prefix is generated from the registry. See 'RegistryToAPI' for the shape.
 type ArbiterAPI :: JobPayloadRegistry -> Type
 type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry

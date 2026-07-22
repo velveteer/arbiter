@@ -16,6 +16,7 @@ import Data.Text (Text)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (jobQueueTable)
+import Arbiter.Core.Sql.Archive (archiveAckCte)
 
 -- | Smart ack CTE for job dependencies.
 --
@@ -28,16 +29,20 @@ import Arbiter.Core.Job.Schema (jobQueueTable)
 --
 -- Returns @rows_affected@ (1 on success, 0 if stolen/gone/cancelled).
 -- Parameters: job_id, attempts, job_id, job_id, attempts, job_id
-smartAckJobSQL :: Text -> Text -> Text
-smartAckJobSQL schema tableName =
+--
+-- When @archiveEnabled@, the deleted row is teed into the archive per-row on @archive_for@.
+smartAckJobSQL :: Bool -> Text -> Text -> Text
+smartAckJobSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
+      returning = if archiveEnabled then "*" else "id, parent_id"
+      archived = if archiveEnabled then archiveAckCte schema tableName "ack" else ""
    in [text|
         WITH ack AS (
           DELETE FROM ${tbl}
           WHERE id = ? AND attempts = ?
             AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = ?)
-          RETURNING id, parent_id
-        ),
+          RETURNING ${returning}
+        )${archived},
         suspend AS (
           UPDATE ${tbl}
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
@@ -68,9 +73,11 @@ smartAckJobSQL schema tableName =
 -- sibling CTE's deletes are not visible within the same statement. Returns the
 -- acked ids. Reclaimed jobs (attempts no longer match) are absent. The caller
 -- holds the parent locks.
-smartAckJobsBatchSQL :: Text -> Text -> Text
-smartAckJobsBatchSQL schema tableName =
+smartAckJobsBatchSQL :: Bool -> Text -> Text -> Text
+smartAckJobsBatchSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
+      returning = if archiveEnabled then "j.*" else "j.id, j.parent_id"
+      archived = if archiveEnabled then archiveAckCte schema tableName "ack" else ""
    in [text|
         WITH input AS (
           SELECT unnest(?::bigint[]) AS id, unnest(?::int[]) AS att
@@ -80,8 +87,8 @@ smartAckJobsBatchSQL schema tableName =
           USING input i
           WHERE j.id = i.id AND j.attempts = i.att
             AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
-          RETURNING j.id, j.parent_id
-        ),
+          RETURNING ${returning}
+        )${archived},
         suspend AS (
           UPDATE ${tbl} j
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()

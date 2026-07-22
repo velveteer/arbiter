@@ -141,13 +141,13 @@ retryFromDLQSQL schema tableName =
         tree AS (
           SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
                  d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix
+                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
           FROM ${dlqTbl} d
           WHERE d.job_id = (SELECT job_id FROM root_job_id)
           UNION ALL
           SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
                  d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix
+                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
           FROM ${dlqTbl} d
           JOIN tree t ON d.parent_id = t.job_id
         ),
@@ -156,17 +156,17 @@ retryFromDLQSQL schema tableName =
           DELETE FROM ${dlqTbl}
           WHERE id IN (SELECT dlq_id FROM tree)
             AND (SELECT val FROM can_retry)
-          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix
+          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for
         ),
         -- Re-insert into main queue with computed suspended state:
         -- rollup finalizers are suspended if they have children (in this
         -- retry batch OR already in the main queue).
         inserted AS (
           INSERT INTO ${tbl} (id, payload, group_key, attempts, priority, max_attempts,
-                              parent_id, parent_state, suspended, rate_limit_key, rate_limit_prefix,
+                              parent_id, parent_state, archive_for, suspended, rate_limit_key, rate_limit_prefix,
                               rate_limit_cost, concurrency_key, concurrency_prefix)
           SELECT d.job_id, d.payload, d.group_key, 0, d.priority, d.max_attempts,
-                 d.parent_id, d.parent_state,
+                 d.parent_id, d.parent_state, d.archive_for,
                  CASE WHEN d.parent_state IS NOT NULL
                    THEN EXISTS (SELECT 1 FROM deleted c WHERE c.parent_id = d.job_id)
                      OR EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = d.job_id)

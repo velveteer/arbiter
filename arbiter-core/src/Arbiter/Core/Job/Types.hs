@@ -9,6 +9,7 @@ module Arbiter.Core.Job.Types
   , defaultJob
   , defaultGroupedJob
   , defaultMaxAttempts
+  , defaultArchiveFor
   , isRollup
 
     -- * Derived status
@@ -93,6 +94,10 @@ data Job payload key q insertedAt adm = Job
   -- or operator-paused jobs.
   , claimedBy :: Maybe UUID
   -- ^ Worker pool UUID that last claimed this job.
+  , archiveFor :: Maybe Int32
+  -- ^ Retention in seconds for this job's completed-job archive entry.
+  -- @Just n@ archives the job on ack and keeps the entry for @n@ seconds.
+  -- @Nothing@ (the default) deletes on ack with no archive write.
   , admission :: adm
   -- ^ @()@ in 'JobWrite'. 'AdmissionKeys' in 'JobRead', stamped at enqueue from
   -- the payload's admission selectors.
@@ -112,8 +117,12 @@ data AdmissionKeys = AdmissionKeys
 defaultMaxAttempts :: Int32
 defaultMaxAttempts = 10
 
+-- | Convenience 24h retention constant for opting a job into archiving via @archiveFor = Just defaultArchiveFor@.
+defaultArchiveFor :: Int32
+defaultArchiveFor = 86400
+
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
--- (an empty object on insert; the merged child results before a DLQ move).
+-- (an empty object on insert, the merged child results before a DLQ move).
 isRollup :: Job p k q t adm -> Bool
 isRollup = isJust . parentState
 
@@ -168,6 +177,7 @@ defaultJob p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , archiveFor = Nothing
     , admission = ()
     }
 
@@ -196,6 +206,7 @@ defaultGroupedJob gk p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , archiveFor = Nothing
     , admission = ()
     }
 
@@ -246,7 +257,7 @@ type BackoffDelay = NominalDiffTime
 -- | A set of callbacks invoked at key points in the job lifecycle.
 --
 -- Use these hooks to integrate with metrics, logging, or tracing systems.
--- Hooks are exception-safe; any exception thrown within a hook is caught
+-- Hooks are exception-safe. Any exception thrown within a hook is caught
 -- and ignored to prevent crashing the worker.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed

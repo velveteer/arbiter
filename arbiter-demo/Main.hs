@@ -41,7 +41,7 @@ import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (addUTCTime, diffTimeToPicoseconds, getCurrentTime, utctDayTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout)
@@ -234,6 +234,11 @@ main = do
   pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
   when (pulseSec > 0) $ void $ forkIO $ loadPulse producerEnv pulseSec
 
+  -- Emit a small archivable pipeline on an interval so completed runs accumulate
+  -- in the archive with visible results. A value of 0 disables it.
+  pipeSec <- maybe 2 read <$> lookupEnv "PIPELINE_PULSE_SECONDS"
+  when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv schema pipeSec
+
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
   race_
@@ -347,10 +352,12 @@ seedDemoData env schemaName = runSimpleDb env $ do
   liftIO $ putStrLn "  Seeded jobs across demo_queue, email_queue, notifications, and pipeline"
 
 -- | A 3-level rollup pipeline. Results flow up from leaves through finalizers.
+-- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: Text -> DemoM ()
 seedPipeline schemaName = do
-  let chunk = JT.leaf . defaultJob . ProcessChunk
-      agg name = JT.rollup (defaultJob (AggregateResults name))
+  let bg p = (defaultJob p) {priority = 10}
+      chunk = JT.leaf . bg . ProcessChunk
+      agg name = JT.rollup (bg (AggregateResults name))
   result <-
     JT.insertJobTree schemaName "pipeline" $
       agg
@@ -448,13 +455,44 @@ demoTasks =
 loadPulse :: SimpleEnv DemoRegistry -> Int -> IO ()
 loadPulse env sec = go 0
   where
+    -- Archive one job in @k@ so ordinary completed jobs also fill the archive.
+    keepEvery k n = if n `mod` k == 0 then Just 3600 else Nothing
     go :: Int -> IO ()
     go n = do
       threadDelay (sec * 1_000_000)
       runSimpleDb env $ do
-        void $ HL.insertJob ((defaultJob (TestMessage ("pulse #" <> tshow n))) {priority = fromIntegral (n `mod` 5)})
-        when (even n) $ void $ HL.insertJob (defaultJob (SendEmail ("digest #" <> tshow n)))
-        when (n `mod` 3 == 0) $ void $ HL.insertJob (defaultJob (PushNotification ("alert #" <> tshow n)))
+        void $
+          HL.insertJob
+            ((defaultJob (TestMessage ("pulse #" <> tshow n))) {priority = fromIntegral (n `mod` 5), archiveFor = keepEvery 4 n})
+        when (even n) $ void $ HL.insertJob ((defaultJob (SendEmail ("digest #" <> tshow n))) {archiveFor = keepEvery 6 n})
+        when (n `mod` 3 == 0) $
+          void $
+            HL.insertJob ((defaultJob (PushNotification ("alert #" <> tshow n))) {archiveFor = keepEvery 9 n})
+      go (n + 1)
+
+-- | Chunk sets a quick pipeline picks from, for variety across runs.
+quickChunkSets :: [[Text]]
+quickChunkSets =
+  [ ["revenue-data", "expense-data", "forecast-data"]
+  , ["inventory-data", "shipping-data", "support-data"]
+  , ["revenue-data", "churn-data"]
+  , ["forecast-data", "support-data", "churn-data"]
+  ]
+
+-- | Insert a small rollup every @sec@ seconds whose root archives its merged
+-- result, so finished runs accumulate in the archive with visible results.
+pipelinePulse :: SimpleEnv DemoRegistry -> Text -> Int -> IO ()
+pipelinePulse env schemaName sec = go 0
+  where
+    go :: Int -> IO ()
+    go n = do
+      threadDelay (sec * 1_000_000)
+      t <- getCurrentTime
+      let seed = fromInteger (diffTimeToPicoseconds (utctDayTime t)) :: Int
+          chosen = quickChunkSets !! (seed `mod` length quickChunkSets)
+          root = (defaultJob (AggregateResults ("quick-report-" <> tshow n))) {archiveFor = Just 3600}
+          leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
+      runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
       go (n + 1)
 
 tshow :: (Show a) => a -> Text

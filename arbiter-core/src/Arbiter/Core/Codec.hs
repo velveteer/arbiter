@@ -33,6 +33,7 @@ module Arbiter.Core.Codec
     -- * Job codecs
   , jobRowCodec
   , dlqRowCodec
+  , archiveRowCodec
   , countCodec
   , rateLimitPolicyViewCodec
   , rateLimitBucketCodec
@@ -162,6 +163,7 @@ jobRowCodec queueName =
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
+    <*> ncol "archive_for" CInt4
     <*> admissionKeysCodec
 
 admissionKeysCodec :: RowCodec AdmissionKeys
@@ -189,12 +191,23 @@ rateLimitCodec = prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimit
 concurrencyCodec :: RowCodec (Maybe ConcurrencyKey)
 concurrencyCodec = prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey
 
-dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
-dlqRowCodec queueName =
+-- | Envelope codec for the DLQ/archive tables: @id@, a timestamp column, and the job snapshot (@job_id@ for @id@).
+jobEnvelopeCodec :: Text -> Text -> RowCodec (Int64, UTCTime, JobRead Value)
+jobEnvelopeCodec tsColumn queueName =
   (,,)
     <$> col "id" CInt8
-    <*> col "failed_at" CTimestamptz
+    <*> col tsColumn CTimestamptz
     <*> jobRowCodecWithJobId queueName
+
+dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
+dlqRowCodec = jobEnvelopeCodec "failed_at"
+
+-- | Archive envelope: the shared job snapshot plus the @result@ a completed root job stored.
+archiveRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value, Maybe Value)
+archiveRowCodec queueName =
+  (\(i, t, j) r -> (i, t, j, r))
+    <$> jobEnvelopeCodec "completed_at" queueName
+    <*> ncol "result" CJsonb
 
 jobRowCodecWithJobId :: Text -> RowCodec (JobRead Value)
 jobRowCodecWithJobId queueName =
@@ -216,6 +229,7 @@ jobRowCodecWithJobId queueName =
     <*> ncol "parent_state" CJsonb
     <*> col "suspended" CBool
     <*> ncol "claimed_by" CUuid
+    <*> ncol "archive_for" CInt4
     <*> admissionKeysCodec
 
 countCodec :: RowCodec Int64

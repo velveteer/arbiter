@@ -11,6 +11,7 @@ module Arbiter.Core.Worker
   , createWorkersTableSQL
   , addClaimedByColumnSQL
   , addCancelRequestedAtColumnSQL
+  , addArchiveForColumnSQL
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
@@ -110,4 +111,12 @@ addCancelRequestedAtColumnSQL schemaName tableName =
         <> " ON "
         <> jobQueueTable schemaName tableName
         <> " (id ASC) WHERE cancel_requested_at IS NOT NULL;"
+    ]
+
+-- | Idempotent migration adding the @archive_for@ column to a queue's job and DLQ tables.
+addArchiveForColumnSQL :: SchemaName -> TableName -> Text
+addArchiveForColumnSQL schemaName tableName =
+  T.unlines
+    [ "ALTER TABLE " <> jobQueueTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
+    , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS archive_for INT;"
     ]

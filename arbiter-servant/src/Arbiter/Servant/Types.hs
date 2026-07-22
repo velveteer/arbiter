@@ -23,6 +23,7 @@ import Arbiter.Core.Concurrency.Stats
   , ConcurrencyPolicyView (..)
   )
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
+import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
@@ -34,7 +35,7 @@ import Arbiter.Core.RateLimit.Stats
   , RateLimitPolicyView (..)
   )
 import Arbiter.Core.Worker (WorkerRow (..))
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:!), (.:?), (.=))
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -80,6 +81,7 @@ apiJobPairs job =
   , "isRollup" .= isRollup job
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
+  , "archiveFor" .= archiveFor job
   , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
   , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
   ]
@@ -111,6 +113,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .:? "parentState"
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
+        <*> v .:? "archiveFor"
         <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
     pure $ ApiJob job
 
@@ -129,6 +132,7 @@ instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
       , "notVisibleUntil" .= notVisibleUntil job
       , "dedupKey" .= dedupKey job
       , "maxAttempts" .= maxAttempts job
+      , "archiveFor" .= archiveFor job
       ]
 
 instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
@@ -152,6 +156,8 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> pure Nothing -- parentState: managed internally
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
+        -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.
+        <*> v .:! "archiveFor" .!= Nothing
         <*> pure () -- admission: server attaches from the payload's selectors
 
 newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
@@ -174,6 +180,39 @@ instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
         <*> v .: "failedAt"
         <*> pure (unApiJob apiJob)
     pure $ ApiDLQJob dlq
+
+newtype ApiArchiveJob payload = ApiArchiveJob {unApiArchiveJob :: Archive.ArchiveJob payload}
+  deriving stock (Eq, Show)
+
+instance (ToJSON payload) => ToJSON (ApiArchiveJob payload) where
+  toJSON (ApiArchiveJob a) =
+    object
+      [ "archivePrimaryKey" .= Archive.archivePrimaryKey a
+      , "completedAt" .= Archive.completedAt a
+      , "jobSnapshot" .= ApiJob (Archive.jobSnapshot a)
+      , "result" .= Archive.archivedResult a
+      ]
+
+instance (FromJSON payload) => FromJSON (ApiArchiveJob payload) where
+  parseJSON = withObject "ArchiveJob" $ \v -> do
+    apiJob <- v .: "jobSnapshot"
+    a <-
+      Archive.ArchiveJob
+        <$> v .: "archivePrimaryKey"
+        <*> v .: "completedAt"
+        <*> pure (unApiJob apiJob)
+        <*> v .:? "result"
+    pure $ ApiArchiveJob a
+
+-- | Response wrapper for archived jobs
+data ArchiveResponse payload = ArchiveResponse
+  { archiveJobs :: [ApiArchiveJob payload]
+  , archiveTotal :: Int
+  , archiveOffset :: Int
+  , archiveLimit :: Int
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Single-job response envelope, parameterized over the job representation
 -- ('ApiJob' for insert, 'ApiJobWithStatus' for the detail endpoint).

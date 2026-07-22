@@ -157,8 +157,8 @@ import Arbiter.Worker.WorkerState
 -- ---------------------------------------------------------------------------
 
 -- | Handler result types. @()@ is fire-and-forget. any @(ToJSON a, FromJSON a)@
--- is stored in the results table when the job has a parent and decoded when
--- read by a rollup finalizer.
+-- from a job with a parent is stored in the results table and decoded when read
+-- by a rollup finalizer. A root job's result is stored on its archive row, if archived.
 class JobResult a where
   encodeJobResult :: a -> Maybe Value
   decodeJobResult :: Value -> Either Text a
@@ -169,6 +169,13 @@ instance JobResult () where
 
 instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
   encodeJobResult = Just . toJSON
+  decodeJobResult v = case Aeson.fromJSON v of
+    Aeson.Success a -> Right a
+    Aeson.Error err -> Left (T.pack err)
+
+-- | A @Maybe@ result is optional: @Nothing@ stores nothing, @Just x@ stores @x@.
+instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
+  encodeJobResult = fmap toJSON
   decodeJobResult v = case Aeson.fromJSON v of
     Aeson.Success a -> Right a
     Aeson.Error err -> Left (T.pack err)
@@ -624,8 +631,8 @@ processJobsWithRetry config jobs = do
         finalize j
       ackOneWith j r = do
         withDbTransaction $ do
-          storeJobResult schemaName j r
           ackJobOrSkip j
+          storeJobResult schemaName j r
         finalize j
       ackBatch pairs = do
         let js = map fst pairs
@@ -668,8 +675,8 @@ processJobsWithRetry config jobs = do
           let (job :| _) = jobs
           withDbTransaction $ do
             handlerResult <- runHandlerWithConnection @_ @_ @result handler job
-            storeJobResult schemaName job handlerResult
             ackJobOrSkip job
+            storeJobResult schemaName job handlerResult
           finalize job
         BatchedJobsMode _ handler -> handler jobs callbacks
   endTime <- liftIO getCurrentTime
@@ -751,6 +758,9 @@ storeJobResult schemaName job result =
   case (Job.parentId job, encodeJobResult result) of
     (Just pid, Just val) ->
       void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
+    (Nothing, Just val)
+      | Ops.archivesOnAck job ->
+          void $ Ops.updateArchiveResult schemaName (Job.queueName job) (Job.primaryKey job) val
     _ -> pure ()
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
@@ -846,9 +856,9 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
               runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
 
--- | Refreshes the groups tables, sweeps stale worker registry rows, and moves
--- exhausted jobs to the DLQ (all schema-wide). Each gated via 'Ops.runGated' so
--- only one pool runs it per interval.
+-- | Refreshes the groups tables, sweeps stale worker registry rows, moves
+-- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
+-- Each gated so only one pool runs it per interval.
 reaperLoop
   :: forall m registry
    . ( Arb.RegistryAdmissionPolicies registry
@@ -897,6 +907,13 @@ reaperLoop logCfg interval stmtTimeout = do
     when hasConcurrency $ do
       void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m @registry
       void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m @registry
+    mPurged <- gated "purge-archives" interval $ Ops.purgeArchives schemaName queues
+    traverse_
+      ( \(n, failed) -> do
+          traverse_ (\queue -> tryLog logCfg Warning $ "Archive purge failed for queue: " <> queue) failed
+          when (n > 0) $ tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)"
+      )
+      mPurged
     threadDelay (intervalSecs * 1_000_000)
 
 -- | Run one gated reaper op, logging and swallowing failures so the loop survives.

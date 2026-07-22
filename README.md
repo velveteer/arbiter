@@ -5,16 +5,16 @@
 
 An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-2ea44f?style=for-the-badge&logo=postgresql&logoColor=white)](https://demo.arbiterq.dev/)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-d97706?style=for-the-badge&logo=postgresql&logoColor=white)](https://demo.arbiterq.dev/)
 [![API Docs](https://img.shields.io/badge/API_Docs-5e5086?style=for-the-badge&logo=haskell&logoColor=white)](https://velveteer.github.io/arbiter/)
 [![CI](https://img.shields.io/github/actions/workflow/status/velveteer/arbiter/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/velveteer/arbiter/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](./LICENSE)
 
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
 - Per-group ordering (partitioned FIFO)
-- Concurrent worker pools with `LISTEN/NOTIFY` and polling fallback
+- Concurrent worker pools with `LISTEN/NOTIFY` wakeups and polling fallback
 - Dead-letter queues
+- Opt-in archiving of completed jobs with per-job retention
 - Job trees with fan-out/fan-in result collection
 - Cron/periodic job scheduling
 - Job deduplication via unique keys
@@ -240,6 +240,51 @@ job1 = (Arb.defaultJob payload) { Arb.dedupKey = Just (IgnoreDuplicate "order-12
 
 -- ReplaceDuplicate: update existing job's payload and reset attempts
 job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-123") }
+```
+
+### Job Results
+
+A handler can return a value - its **result**. Return `()` for fire-and-forget
+work, or any `ToJSON`/`FromJSON` value otherwise. Returning a result does not
+store it on its own - whether it is kept, and where, depends on the job:
+
+- **A job with a parent** (a node in a [tree](#job-trees-fan-outfan-in)) - the
+  result is kept for the parent to collect with `Worker.childResults`/`Worker.mergedChildResults`,
+  then cleaned up once the parent completes.
+- **A standalone (root) job** - the result is recorded on the job's
+  [archive](#archiving-completed-jobs) entry, if the job is archived. Without
+  archiving there is nowhere to keep it, so it is dropped.
+
+The mapping between a result value and stored JSON is the `JobResult` typeclass:
+
+```haskell
+class JobResult a where
+  encodeJobResult :: a -> Maybe Value        -- Nothing means store nothing
+  decodeJobResult :: Value -> Either Text a  -- read a stored result back
+```
+
+Any `ToJSON`/`FromJSON` type gets an instance for free (`Maybe a` skips on
+`Nothing` - everything else is always recorded), so your own records and sum
+types work as results directly.
+
+```haskell
+import Arbiter.Worker (JobResult (..))
+import Data.Aeson (FromJSON, ToJSON, toJSON)
+import Data.Aeson qualified as Aeson
+import Data.Text qualified as T
+import GHC.Generics (Generic)
+
+data SyncReport = SyncReport { rowsChanged :: Int, notes :: [Text] }
+  deriving stock (Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
+instance JobResult SyncReport where
+  encodeJobResult r
+    | rowsChanged r == 0 = Nothing
+    | otherwise          = Just (toJSON r)
+  decodeJobResult v = case Aeson.fromJSON v of
+    Aeson.Success r -> Right r
+    Aeson.Error err -> Left (T.pack err)
 ```
 
 ### Job Trees (Fan-out/Fan-in)
@@ -537,6 +582,22 @@ orthogonal, so a job can carry both.
 > Maintenance is automatic. Drained keys are cleaned up periodically, and a
 > pool's in-flight accounting recovers on its own after a restart or failover.
 
+### Archiving Completed Jobs
+
+Completed jobs are deleted on ack by default. Set `archiveFor` to keep a copy in
+a per-queue archive for that many seconds after completion.
+
+```haskell
+job1 = (Arb.defaultJob payload) { Arb.archiveFor = Just Arb.defaultArchiveFor }  -- 24h
+job2 = (Arb.defaultJob payload) { Arb.archiveFor = Just 604800 }                 -- 1 week
+```
+
+Archiving is opt-in per job (`archiveFor = Nothing` deletes as before), and
+expired entries are purged automatically. If the job's handler returned a
+[result](#job-results), it is kept on the archive entry - so the archive is also
+where you read back what a standalone job produced. Archived jobs can be listed,
+re-enqueued as fresh jobs, or deleted from the REST API and admin UI.
+
 ## Worker Configuration
 
 See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html) for all options.
@@ -586,9 +647,9 @@ record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`,
 cancel, or nack affects only that job - completed jobs stay done, an untouched
 job is reprocessed, and hooks fire per job.
 
-To store a result per job - for a [job tree's](#job-trees-fan-outfan-in) rollup
-parent to collect - use `defaultBatchedResultWorkerConfig` and ack with
-`ackWith`/`ackAllWith`:
+To attach a [result](#job-results) per job - for a rollup parent to collect, or
+to keep on an archived job's entry - use `defaultBatchedResultWorkerConfig` and
+ack with `ackWith`/`ackAllWith`:
 
 ```haskell
 -- defaultBatchedResultWorkerConfig <workerCount> <batchSize> handler
@@ -753,6 +814,10 @@ Per-queue endpoints under `/api/v1/:queue/`:
 | `POST` | `dlq/:id/retry` | Retry from DLQ |
 | `DELETE` | `dlq/:id` | Delete from DLQ |
 | `POST` | `dlq/batch-delete` | Batch delete multiple DLQ entries |
+| `GET` | `archive` | List archived (completed) jobs |
+| `POST` | `archive/:id/reenqueue` | Re-run an archived job as a fresh job |
+| `DELETE` | `archive/:id` | Purge one archive entry |
+| `POST` | `archive/batch-delete` | Batch purge archive entries |
 | `GET` | `stats` | Queue statistics |
 
 Global endpoints under `/api/v1/`:

@@ -45,6 +45,7 @@ library
     Arbiter.Core.Gates
     Arbiter.Core.HasArbiterSchema
     Arbiter.Core.HighLevel
+    Arbiter.Core.Job.Archive
     Arbiter.Core.Job.DLQ
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Types
@@ -60,6 +61,7 @@ library
     Arbiter.Core.RateLimit.Spec
     Arbiter.Core.RateLimit.Stats
     Arbiter.Core.Selector
+    Arbiter.Core.Sql.Archive
     Arbiter.Core.Sql.Claim
     Arbiter.Core.Sql.Concurrency
     Arbiter.Core.Sql.Cron

@@ -19,12 +19,14 @@ import Arbiter.Core.Exceptions
   )
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
+import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
   ( Job (..)
   , JobRead
   , ObservabilityHooks (..)
+  , defaultArchiveFor
   , defaultJob
   , defaultObservabilityHooks
   )
@@ -37,10 +39,12 @@ import Arbiter.Test.Poll (waitUntil)
 import Control.Concurrent (threadDelay)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
+import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (isNothing, listToMaybe)
 import Data.Text (Text)
@@ -87,8 +91,8 @@ workerSpec
   -- ^ Construct a simple task payload
   -> (Int -> payload)
   -- ^ Construct a failing task payload
-  -> ((JobRead payload -> m ()) -> JobHandler m payload ())
-  -- ^ Adapt a job action into the backend's handler shape
+  -> (forall r. (JobRead payload -> m r) -> JobHandler m payload r)
+  -- ^ Adapt a job action into the backend's handler shape, result-polymorphic
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function (e.g. runSimpleDb env or runOrvilleTest env)
   -> SpecWith env
@@ -167,6 +171,219 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         let dlqJob = head dlqJobs
         payload (DLQ.jobSnapshot dlqJob) `shouldBe` mkSimple "Doomed"
         attempts (DLQ.jobSnapshot dlqJob) `shouldBe` 1
+
+    it "archives a completed job when archiveFor is set" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkSimple "arch-done")) {groupKey = Just "g1", archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "arch-done") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        map (payload . Archive.jobSnapshot) arch `shouldBe` [mkSimple "arch-done"]
+
+    it "fetches an archived job by id" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkSimple "arch-byid")) {groupKey = Just "gk", archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "arch-byid") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let jid = primaryKey (Archive.jobSnapshot (head arch))
+        found <- runM env $ HL.getArchivedJobById @m @registry @payload jid
+        fmap (payload . Archive.jobSnapshot) found `shouldBe` Just (mkSimple "arch-byid")
+        miss <- runM env $ HL.getArchivedJobById @m @registry @payload 999999
+        (miss :: Maybe (Archive.ArchiveJob payload)) `shouldBe` Nothing
+
+    it "lists archived jobs by group key" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      let jobs =
+            [ (defaultJob (mkSimple "g-a")) {groupKey = Just "ga", archiveFor = Just defaultArchiveFor}
+            , (defaultJob (mkSimple "g-b")) {groupKey = Just "ga", archiveFor = Just defaultArchiveFor}
+            , (defaultJob (mkSimple "other")) {groupKey = Just "gb", archiveFor = Just defaultArchiveFor}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          inGa <- runM env $ HL.listArchivedJobsByGroupKey @m @registry @payload "ga" 100 0
+          pure (length inGa == 2)
+        inGa <- runM env $ HL.listArchivedJobsByGroupKey @m @registry @payload "ga" 100 0
+        map (payload . Archive.jobSnapshot) inGa `shouldMatchList` [mkSimple "g-a", mkSimple "g-b"]
+
+    it "does not archive a job whose archiveFor is Nothing" $ \env -> do
+      doneRef <- newIORef False
+      config <- mkConfig $ \_job -> liftIO $ writeIORef doneRef True
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "no-arch")) {groupKey = Just "g1", archiveFor = Nothing})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ readIORef doneRef
+        threadDelay 300_000
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        map (payload . Archive.jobSnapshot) arch `shouldBe` []
+
+    it "reaper purges archived jobs past their archiveFor window" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "arch-purge")) {groupKey = Just "g1", archiveFor = Just 1})
+
+      withAsync
+        (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, reaperInterval = 0.5})
+        $ \_ -> do
+          -- First archived, then purged once it ages past the 1s window.
+          waitUntil 10_000 $ do
+            arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+            pure (any ((== mkSimple "arch-purge") . payload . Archive.jobSnapshot) arch)
+          waitUntil 15_000 $ do
+            arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+            pure (not (any ((== mkSimple "arch-purge") . payload . Archive.jobSnapshot) arch))
+
+    it "re-enqueues an archived job, keeping the archive row" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkSimple "re-job")) {groupKey = Just "rg", archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        let countReJob arch = length (filter ((== mkSimple "re-job") . payload . Archive.jobSnapshot) arch)
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (countReJob arch == 1)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let pk = Archive.archivePrimaryKey (head arch)
+        reEnq <- runM env $ HL.reEnqueueFromArchive @m @registry @payload pk
+        (payload <$> reEnq) `shouldBe` Just (mkSimple "re-job")
+        -- Original archive row is kept. The re-run is processed and archived too.
+        waitUntil 10_000 $ do
+          arch2 <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (countReJob arch2 == 2)
+
+    it "purges an archived job by id" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkSimple "purge-one")) {groupKey = Just "pg", archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "purge-one") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let pk = Archive.archivePrimaryKey (head arch)
+        deleted <- runM env $ HL.deleteArchiveJob @m @registry @payload pk
+        deleted `shouldBe` 1
+        arch2 <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        map (payload . Archive.jobSnapshot) arch2 `shouldBe` []
+
+    it "bulk-purges archived jobs" $ \env -> do
+      config <- mkConfig $ \_job -> pure ()
+      let jobs =
+            [ (defaultJob (mkSimple "bp-1")) {groupKey = Just "b1", archiveFor = Just defaultArchiveFor}
+            , (defaultJob (mkSimple "bp-2")) {groupKey = Just "b2", archiveFor = Just defaultArchiveFor}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (length arch == 2)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let pks = map Archive.archivePrimaryKey arch
+        deleted <- runM env $ HL.deleteArchiveJobsBatch @m @registry @payload pks
+        deleted `shouldBe` 2
+        arch2 <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        map (payload . Archive.jobSnapshot) arch2 `shouldBe` []
+
+    it "DLQ-retried job retains archiveFor and is archived on later success" $ \env -> do
+      callsRef <- newIORef (0 :: Int)
+      config <- mkConfig $ \_job -> do
+        n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
+        when (n == 1) $ throwPermanent "fail first time"
+      void $
+        runM env $
+          HL.insertJob
+            ((defaultJob (mkSimple "dlq-arch")) {groupKey = Just "da", maxAttempts = Just 1, archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+          pure (any ((== mkSimple "dlq-arch") . payload . DLQ.jobSnapshot) dlq)
+        dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+        let dlqId = DLQ.dlqPrimaryKey (head dlq)
+        void $ runM env $ HL.retryFromDLQ @m @registry @payload dlqId
+        -- On the retry it succeeds. archive_for survived the DLQ round-trip, so it is archived.
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "dlq-arch") . payload . Archive.jobSnapshot) arch)
+
+    it "stores a root job's result on its archive row" $ \env -> do
+      (cfg :: WorkerConfig m payload Text) <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure ("root-result" :: Text)))
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "with-result")) {archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "with-result") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let mine = find ((== mkSimple "with-result") . payload . Archive.jobSnapshot) arch
+        (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ("root-result" :: Text))
+
+    it "archives the row but stores no result for a Nothing result" $ \env -> do
+      (cfg :: WorkerConfig m payload (Maybe Text)) <-
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Nothing :: Maybe Text)))
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "null-result") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let mine = find ((== mkSimple "null-result") . payload . Archive.jobSnapshot) arch
+        (Archive.archivedResult =<< mine) `shouldBe` Nothing
+
+    it "stores the wrapped value for a Just result" $ \env -> do
+      (cfg :: WorkerConfig m payload (Maybe Text)) <-
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ("kept" :: Text))))
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just defaultArchiveFor})
+
+      withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "just-result") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let mine = find ((== mkSimple "just-result") . payload . Archive.jobSnapshot) arch
+        (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ("kept" :: Text))
+
+    it "does not archive a result when archiveFor is unset" $ \env -> do
+      doneRef <- newIORef False
+      (cfg :: WorkerConfig m payload Text) <-
+        transactionalWorkerConfig 1 (mkHandler (\_job -> liftIO (writeIORef doneRef True) >> pure ("unkept" :: Text)))
+      void $ runM env $ HL.insertJob (defaultJob (mkSimple "no-arch-result"))
+
+      withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ readIORef doneRef
+        threadDelay 300_000
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        map (payload . Archive.jobSnapshot) arch `shouldBe` []
+
+    it "stores a child's result in the tree, not on its archive row" $ \env -> do
+      (cfg :: WorkerConfig m payload Text) <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure ("child-result" :: Text)))
+      let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just defaultArchiveFor}
+      void $ runM env $ HL.insertJobTree $ defaultJob (mkSimple "arch-root") <~~ (child :| [])
+
+      withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
+        waitUntil 10_000 $ do
+          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+          pure (any ((== mkSimple "arch-child") . payload . Archive.jobSnapshot) arch)
+        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+        let childRow = find ((== mkSimple "arch-child") . payload . Archive.jobSnapshot) arch
+        (Archive.archivedResult =<< childRow) `shouldBe` Nothing
 
     it "processes all jobs from different groups" $ \env -> do
       processingRef <- newIORef []
@@ -856,7 +1073,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           threadDelay 300_000
           successes <- readIORef successRef
-          -- The nack (call 1) fires no success hook; only the ack (call 2) does.
+          -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
 
     it "a thrown JobStolenException skips retry and leaves the job to reprocess" $ \env -> do

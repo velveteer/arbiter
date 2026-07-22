@@ -55,6 +55,12 @@ module Arbiter.Core.HighLevel
   , moveToDLQ
   , moveToDLQBatch
   , listDLQJobs
+  , listArchiveJobs
+  , getArchivedJobById
+  , listArchivedJobsByGroupKey
+  , deleteArchiveJob
+  , deleteArchiveJobsBatch
+  , reEnqueueFromArchive
   , retryFromDLQ
   , dlqJobExists
   , deleteDLQJob
@@ -147,6 +153,7 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
 import Arbiter.Core.JobTree qualified as JT
@@ -593,6 +600,85 @@ listDLQJobs limit offset = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.listDLQJobs schemaName tableName limit offset
+
+-- | Lists completed jobs in the archive with pagination (most recent first).
+listArchiveJobs
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int
+  -- ^ The maximum number of jobs to return.
+  -> Int
+  -- ^ The number of jobs to skip (for pagination).
+  -> m [Archive.ArchiveJob payload]
+listArchiveJobs limit offset = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.listArchiveJobs schemaName tableName limit offset
+
+-- | Fetch a single archived job by its original job id.
+getArchivedJobById
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int64
+  -- ^ Original job id.
+  -> m (Maybe (Archive.ArchiveJob payload))
+getArchivedJobById jobId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.getArchivedJobById schemaName tableName jobId
+
+-- | List archived jobs in a group, most recent first, with pagination.
+listArchivedJobsByGroupKey
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Text
+  -- ^ Group key.
+  -> Int
+  -- ^ Limit.
+  -> Int
+  -- ^ Offset.
+  -> m [Archive.ArchiveJob payload]
+listArchivedJobsByGroupKey groupKey limit offset = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.listArchivedJobsByGroupKey schemaName tableName groupKey limit offset
+
+-- | Delete one archived job by its archive primary key. Returns rows deleted.
+deleteArchiveJob
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int64
+  -- ^ Archive primary key.
+  -> m Int64
+deleteArchiveJob archiveId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.deleteArchiveJob schemaName tableName archiveId
+
+-- | Delete archived jobs by archive primary key. Returns rows deleted.
+deleteArchiveJobsBatch
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => [Int64]
+  -- ^ Archive primary keys.
+  -> m Int64
+deleteArchiveJobsBatch archiveIds = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
+
+-- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
+-- row. Returns the new job, or @Nothing@ if the archive row no longer exists.
+reEnqueueFromArchive
+  :: forall m registry payload
+   . (QueueOperation m registry payload)
+  => Int64
+  -- ^ Archive primary key.
+  -> m (Maybe (JobRead payload))
+reEnqueueFromArchive archiveId = do
+  schemaName <- getSchema
+  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+  Ops.reEnqueueFromArchive schemaName tableName archiveId
 
 -- | Retry a DLQ job (re-insert into main queue with attempts reset).
 -- Returns @Nothing@ if the DLQ job no longer exists.

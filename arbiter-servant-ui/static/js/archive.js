@@ -1,31 +1,30 @@
 /**
- * Alpine component: DLQ table + retry/delete
+ * Alpine component: completed-job archive with re-enqueue and purge actions.
  */
-// Ordered column registry. Order must match the table header and cell order.
-const DLQ_COLUMNS = [
+// Order must match the table header and cell order.
+const ARCHIVE_COLUMNS = [
   { key: 'select', label: 'Select', weight: 4, required: true },
-  { key: 'dlqid', label: 'DLQ ID', weight: 7 },
-  { key: 'jobid', label: 'Job ID', weight: 7 },
-  { key: 'parent', label: 'Parent', weight: 7 },
+  { key: 'archiveid', label: 'Archive ID', weight: 6 },
+  { key: 'jobid', label: 'Job ID', weight: 6 },
+  { key: 'parent', label: 'Parent', weight: 6 },
   { key: 'group', label: 'Group', weight: 8 },
-  { key: 'payload', label: 'Payload', weight: 13 },
-  { key: 'failed', label: 'Failed At', weight: 12 },
+  { key: 'payload', label: 'Payload', weight: 18 },
+  { key: 'hasresult', label: 'Results?', weight: 7 },
+  { key: 'inserted', label: 'Inserted At', weight: 12 },
+  { key: 'completed', label: 'Completed At', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8 },
-  { key: 'error', label: 'Last Error', weight: 13 },
-  { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
-  { key: 'concurrency', label: 'Concurrency', weight: 10 },
-  { key: 'actions', label: 'Actions', weight: 12 },
+  { key: 'actions', label: 'Actions', weight: 14 },
 ];
 
 document.addEventListener('alpine:init', () => {
-  Alpine.data('dlqTab', () => withPagination(withSelection({
-    ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols'),
-    ...tableTab('loadDLQ', 'arb.dlqRefresh'),
-    dlqJobs: [],
+  Alpine.data('archiveTab', () => withPagination(withSelection({
+    ...columnPrefs(ARCHIVE_COLUMNS, 'arb.archiveCols'),
+    ...tableTab('loadArchive', 'arb.archiveRefresh'),
+    archiveJobs: [],
     total: 0,
     loading: false,
     active: false,
-    selectedDLQJob: null,
+    selectedArchiveJob: null,
     bulkBusy: false,
     parentIdFilter: '',
     groupKeyFilter: '',
@@ -38,19 +37,18 @@ document.addEventListener('alpine:init', () => {
     _loadErrored: false,
 
     _syncFiltersToUrl() {
-      writeFiltersToUrl({
-        groupKey: this._appliedGroupKey,
-        parentId: this._appliedParentId,
-        jobId: this._appliedJobId,
-        sortBy: this.sortBy,
-        sortDir: this.sortDir,
-      });
+      writeFiltersToUrl({ groupKey: this._appliedGroupKey, parentId: this._appliedParentId, jobId: this._appliedJobId, sortBy: this.sortBy, sortDir: this.sortDir });
+    },
+
+    toggleSort(col) {
+      this._cycleSort(col);
+      this._resetView();
     },
 
     init() {
       this._loadColPrefs();
       const f = readFiltersFromUrl();
-      if (location.hash.replace('#', '') === 'dlq') {
+      if (location.hash.replace('#', '') === 'archive') {
         this.groupKeyFilter = f.groupKey;
         this._appliedGroupKey = f.groupKey;
         this.parentIdFilter = f.parentId;
@@ -60,21 +58,20 @@ document.addEventListener('alpine:init', () => {
         this.sortBy = f.sortBy;
         this.sortDir = f.sortDir;
       }
-      trackTabActive(this, '#tab-dlq', {
-        onShow: () => { this.loadDLQ(); this._startTimer(); },
+      trackTabActive(this, '#tab-archive', {
+        onShow: () => { this.loadArchive(); this._startTimer(); },
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           releaseInitialLoad(this);
-          hideModal('dlqDetailModal');
+          hideModal('archiveDetailModal');
           this._stopTimer();
         },
       });
+      // No SSE event correlates with archival, so only queue switches and
+      // reconnects trigger a reload. Routine updates ride the refresh timer.
       this._bindTableEvents({
         onQueueReset: () => { this.selected = {}; },
-        relevant: (events) => {
-          const queue = Alpine.store('app').selectedQueue;
-          return events.filter(evt => evt.table === queue && evt.event === 'job_dlq').length;
-        },
+        relevant: () => 0,
       });
     },
 
@@ -84,15 +81,14 @@ document.addEventListener('alpine:init', () => {
       this._stopTimer();
     },
 
-    async loadDLQ(filterOverrides) {
+    async loadArchive(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
       const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
       const jid = filterOverrides?.jobId ?? this._appliedJobId;
-      const startingPending = this.pendingChanges;
-      await guardedLoad(this, 'Failed to load DLQ', async (seq, isStale) => {
-        const data = await ArbiterAPI.listDLQ(queue, {
+      await guardedLoad(this, 'Failed to load archive', async (seq, isStale) => {
+        const data = await ArbiterAPI.listArchive(queue, {
           limit: this.limit,
           offset: this.offset,
           parentId: pid || undefined,
@@ -105,45 +101,41 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this._appliedJobId = jid;
-        this.dlqJobs = data.dlqJobs || [];
-        this.total = data.dlqTotal || 0;
-        // Drop selections for rows no longer on the current page (deleted, retried, paged away).
-        const present = new Set(this.dlqJobs.map(j => String(j.dlqPrimaryKey)));
+        this.archiveJobs = data.archiveJobs || [];
+        this.total = data.archiveTotal || 0;
+        // Drop selections for rows no longer on the current page.
+        const present = new Set(this.archiveJobs.map(j => String(j.archivePrimaryKey)));
         const pruned = {};
         for (const id of Object.keys(this.selected)) {
           if (this.selected[id] && present.has(id)) pruned[id] = true;
         }
         this.selected = pruned;
-        this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
 
-        // Clamp offset if past last page (e.g. after a delete dropped the total).
+        // Clamp offset if past the last page (e.g. after a purge dropped the total).
         if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
           this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
-          this.loadDLQ();
+          this.loadArchive();
         }
       });
     },
 
-    async bulkRetry() {
+    async bulkReEnqueue() {
       const ids = this.selectedIds;
       if (ids.length === 0 || this.bulkBusy) return;
-      if (!this.confirmArmed('bulkRetry')) return;
+      if (!this.confirmArmed('bulkReEnqueue')) return;
       const queue = Alpine.store('app').selectedQueue;
       this.bulkBusy = true;
-      // No batch-retry endpoint, so retry each entry individually, capped at 5
-      // concurrent requests so a large selection doesn't flood the server.
       try {
-        const results = await mapLimit(ids, ARB_TIMING.bulkConcurrency, id => ArbiterAPI.retryFromDLQ(queue, id));
-        // Bail if the queue switched mid-op. _onQueueChanged already cleared selection.
+        const results = await mapLimit(ids, ARB_TIMING.bulkConcurrency, id => ArbiterAPI.reEnqueueArchive(queue, id));
         if (Alpine.store('app').selectedQueue !== queue) return;
         const failedIds = ids.filter((id, i) => results[i].status === 'rejected');
         const next = {};
         for (const id of failedIds) next[id] = true;
         this.selected = next;
-        this.loadDLQ();
-        if (failedIds.length > 0) showToast(`${failedIds.length} of ${ids.length} retries failed`);
-        else showToast(`Retried ${ids.length} ${ids.length === 1 ? 'entry' : 'entries'}`, 'success');
+        this.loadArchive();
+        if (failedIds.length > 0) showToast(`${failedIds.length} of ${ids.length} re-enqueues failed`);
+        else showToast(`Re-enqueued ${ids.length} ${ids.length === 1 ? 'job' : 'jobs'}`, 'success');
       } finally {
         this.bulkBusy = false;
       }
@@ -156,32 +148,30 @@ document.addEventListener('alpine:init', () => {
       const queue = Alpine.store('app').selectedQueue;
       this.bulkBusy = true;
       try {
-        const res = await ArbiterAPI.deleteDLQBatch(queue, ids);
-        // Bail if the queue switched mid-op. _onQueueChanged already cleared selection.
+        const res = await ArbiterAPI.deleteArchiveBatch(queue, ids);
         if (Alpine.store('app').selectedQueue !== queue) return;
         this.selected = {};
-        this.loadDLQ();
+        this.loadArchive();
         const deleted = res?.deleted ?? ids.length;
-        if (deleted < ids.length) {
-          showToast(`Deleted ${deleted} of ${ids.length}; ${ids.length - deleted} no longer present`, 'warning');
-        } else {
-          showToast(`Deleted ${deleted} ${deleted === 1 ? 'entry' : 'entries'}`, 'success');
-        }
+        showToast(`Purged ${deleted} ${deleted === 1 ? 'entry' : 'entries'}`, 'success');
       } catch (e) {
-        showToast('Failed to delete: ' + e.message);
+        showToast('Failed to purge: ' + e.message);
       } finally {
         this.bulkBusy = false;
       }
     },
 
-    async retryJob(id) {
+    async reEnqueueJob(id, el) {
+      if (this.busyRows[id]) return;
+      if (!this.confirmArmed('reenq:' + id)) return;
+      closeDropdown(el);
       await this.withBusyRow(id, async () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
-          await ArbiterAPI.retryFromDLQ(queue, id);
-          await this.loadDLQ();
+          await ArbiterAPI.reEnqueueArchive(queue, id);
+          showToast('Re-enqueued', 'success');
         } catch (e) {
-          showToast('Failed to retry: ' + e.message);
+          showToast('Failed to re-enqueue: ' + e.message);
         }
       });
     },
@@ -193,28 +183,23 @@ document.addEventListener('alpine:init', () => {
       await this.withBusyRow(id, async () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
-          await ArbiterAPI.deleteDLQ(queue, id);
-          await this.loadDLQ();
+          await ArbiterAPI.deleteArchive(queue, id);
+          await this.loadArchive();
         } catch (e) {
-          showToast('Failed to delete: ' + e.message);
+          showToast('Failed to purge: ' + e.message);
         }
       });
     },
 
     _resetView(filterOverrides) {
       this.offset = 0;
-      this.loadDLQ(filterOverrides);
+      this.loadArchive(filterOverrides);
       this._startTimer();
     },
 
-    toggleSort(col) {
-      this._cycleSort(col);
-      this._resetView();
-    },
-
     viewDetail(job) {
-      this.selectedDLQJob = job;
-      showModal('dlqDetailModal');
+      this.selectedArchiveJob = job;
+      showModal('archiveDetailModal');
     },
-  }, 'dlqJobs', 'dlqPrimaryKey'), 'loadDLQ'));
+  }, 'archiveJobs', 'archivePrimaryKey'), 'loadArchive'));
 });

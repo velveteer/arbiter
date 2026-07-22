@@ -69,10 +69,11 @@ const ArbiterAPI = {
   },
 
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, status, rootsOnly, sortBy, sortDir } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
+    if (jobId) qs += `&job_id=${jobId}`;
     if (status) qs += `&status=${encodeURIComponent(status)}`;
     if (rootsOnly) qs += `&roots_only=true`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
@@ -124,9 +125,10 @@ const ArbiterAPI = {
   },
 
   // DLQ
-  listDLQ(table, { limit = 50, offset = 0, parentId, groupKey, sortBy, sortDir } = {}) {
+  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
+    if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
@@ -143,6 +145,32 @@ const ArbiterAPI = {
 
   deleteDLQBatch(table, ids) {
     return this._fetch(`/${table}/dlq/batch-delete`, {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  // Archive (completed jobs)
+  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, sortBy, sortDir } = {}) {
+    let qs = `?limit=${limit}&offset=${offset}`;
+    if (parentId) qs += `&parent_id=${parentId}`;
+    if (jobId) qs += `&job_id=${jobId}`;
+    if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
+    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
+    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
+    return this._fetch(`/${table}/archive${qs}`);
+  },
+
+  reEnqueueArchive(table, id) {
+    return this._fetch(`/${table}/archive/${id}/reenqueue`, { method: 'POST' });
+  },
+
+  deleteArchive(table, id) {
+    return this._fetch(`/${table}/archive/${id}`, { method: 'DELETE' });
+  },
+
+  deleteArchiveBatch(table, ids) {
+    return this._fetch(`/${table}/archive/batch-delete`, {
       method: 'POST',
       body: JSON.stringify({ ids }),
     });

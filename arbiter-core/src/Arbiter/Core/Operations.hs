@@ -40,6 +40,7 @@ module Arbiter.Core.Operations
   , reconcileAndPruneConcurrency
   , ackJob
   , ackJobsBatch
+  , archivesOnAck
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , VisibilityUpdateInfo (..)
@@ -55,6 +56,18 @@ module Arbiter.Core.Operations
   , deleteDLQJob
   , deleteDLQJobsBatch
   , deleteCancelledJobs
+
+    -- * Completed-Job Archive
+  , listArchiveJobs
+  , listArchiveFiltered
+  , getArchivedJobById
+  , listArchivedJobsByGroupKey
+  , countArchiveFiltered
+  , purgeArchives
+  , deleteArchiveJob
+  , deleteArchiveJobsBatch
+  , reEnqueueFromArchive
+  , updateArchiveResult
 
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
@@ -179,6 +192,7 @@ import Arbiter.Core.Codec
   ( Col (..)
   , Params
   , RowCodec
+  , archiveRowCodec
   , col
   , concurrencyKeyViewCodec
   , concurrencyPolicyViewCodec
@@ -207,6 +221,7 @@ import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpda
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwParsing)
+import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
@@ -232,6 +247,7 @@ import Arbiter.Core.RateLimit.Spec
   )
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate (..), RateLimitPolicyView)
 import Arbiter.Core.Selector (usesAnyPolicy)
+import Arbiter.Core.Sql.Archive qualified as Tmpl
 import Arbiter.Core.Sql.Claim qualified as Claim
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Arbiter.Core.Sql.Cron qualified as Tmpl
@@ -305,6 +321,8 @@ filterToClause (Tmpl.FilterGroupKey gk) = ("group_key = ?", [pval CText gk])
 filterToClause (Tmpl.FilterParentId pid) = ("parent_id = ?", [pval CInt8 pid])
 filterToClause Tmpl.FilterRootsOnly = ("parent_id IS NULL", [])
 filterToClause (Tmpl.FilterStatus s) = ("status = ?", [pval CText (jobStatusToText s)])
+filterToClause (Tmpl.FilterId i) = ("id = ?", [pval CInt8 i])
+filterToClause (Tmpl.FilterJobId i) = ("job_id = ?", [pval CInt8 i])
 
 -- | Execute a count/rows-affected query returning a single Int64.
 -- Returns 0 if the result set is empty or unexpected.
@@ -385,6 +403,7 @@ insertJobUnsafe schemaName tableName job = withDbTransaction $ do
         , pval CFloat8 (acRateLimitCost ac)
         , pnul CText (acConcurrencyKey ac)
         , pnul CText (acConcurrencyPrefix ac)
+        , pnul CInt4 (archiveFor job)
         ]
 
   rawJobs <- executeQuery sql params (jobRowCodec tableName)
@@ -774,6 +793,7 @@ buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
             , colRateLimitCosts = f (acRateLimitCost ac) (colRateLimitCosts cols)
             , colConcurrencyKeys = f (acConcurrencyKey ac) (colConcurrencyKeys cols)
             , colConcurrencyPrefixes = f (acConcurrencyPrefix ac) (colConcurrencyPrefixes cols)
+            , colArchiveFors = f (archiveFor job) (colArchiveFors cols)
             }
 
 dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
@@ -802,6 +822,7 @@ data BatchColumns = BatchColumns
   , colRateLimitCosts :: !(Seq Double)
   , colConcurrencyKeys :: !(Seq (Maybe Text))
   , colConcurrencyPrefixes :: !(Seq (Maybe Text))
+  , colArchiveFors :: !(Seq (Maybe Int32))
   }
   deriving stock (Generic)
   deriving (Monoid, Semigroup) via Generically BatchColumns
@@ -809,7 +830,7 @@ data BatchColumns = BatchColumns
 emptyColumns :: BatchColumns
 emptyColumns = mempty
 
--- | The 15 array params for a batch insert, in the column order both batch
+-- | The array params for a batch insert, in the column order both batch
 -- statements expect.
 batchInsertParams :: BatchColumns -> Params
 batchInsertParams cols =
@@ -828,6 +849,7 @@ batchInsertParams cols =
   , parr CFloat8 (toList $ colRateLimitCosts cols)
   , pnarr CText (toList $ colConcurrencyKeys cols)
   , pnarr CText (toList $ colConcurrencyPrefixes cols)
+  , pnarr CInt4 (toList $ colArchiveFors cols)
   ]
 
 -- | The 'Claim.ClaimAdmission' for this payload type.
@@ -974,6 +996,10 @@ chunksOfNE n (x :| xs) = go (x : xs)
       let (chunk, rest) = splitAt (n - 1) ys
        in (y :| chunk) : go rest
 
+-- | Whether acking this job tees it into the archive (positive @archiveFor@).
+archivesOnAck :: JobRead payload -> Bool
+archivesOnAck = maybe False (> 0) . archiveFor
+
 -- | Acknowledge a job as completed (smart ack).
 --
 -- Deletes standalone jobs. Suspends parents waiting for children. Wakes
@@ -1007,7 +1033,7 @@ ackJobInner schemaName tableName job = do
   let jid = primaryKey job
       jatt = attempts job
       params = [pval CInt8 jid, pval CInt4 jatt, pval CInt8 jid, pval CInt8 jid, pval CInt4 jatt, pval CInt8 jid]
-  rows <- executeQuery (Tmpl.smartAckJobSQL schemaName tableName) params int64Codec
+  rows <- executeQuery (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName) params int64Codec
   case rows of
     [n] -> pure n
     _ -> pure 0
@@ -1052,7 +1078,7 @@ ackJobsBatch schemaName tableName jobs = withDbTransaction $ do
         [pval CText (schemaName <> "." <> tableName), pval CInt8 pid]
         (ncol "result" CText)
   executeQuery
-    (Tmpl.smartAckJobsBatchSQL schemaName tableName)
+    (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName)
     [parr CInt8 (map primaryKey jobs), parr CInt4 (map attempts jobs)]
     (col "id" CInt8)
 
@@ -1522,6 +1548,139 @@ decodeDLQRow (dlqId, dlqFailedAt, rawJob) = do
       , DLQ.failedAt = dlqFailedAt
       , DLQ.jobSnapshot = jobSnapshot
       }
+
+-- | List archived (completed) jobs with composable filters and a typed sort
+-- (defaulting to most recent first).
+listArchiveFiltered
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Tmpl.JobFilter]
+  -> Maybe Tmpl.ArchiveSortColumn
+  -> Maybe Tmpl.SortDir
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [Archive.ArchiveJob payload]
+listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset = do
+  let (whereClause, filterParams) = buildWhereClause filters
+      orderBy = Tmpl.buildArchiveOrderBy mSortBy mSortDir
+      sql = Tmpl.listArchiveFilteredSQL schemaName tableName whereClause orderBy
+      params = filterParams <> [pval CInt8 (fromIntegral limit), pval CInt8 (fromIntegral offset)]
+  rawRows <- executeQuery sql params (archiveRowCodec tableName)
+  traverse decodeArchiveRow rawRows
+
+-- | List archived jobs (most recent first).
+listArchiveJobs
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int
+  -> Int
+  -> m [Archive.ArchiveJob payload]
+listArchiveJobs schemaName tableName = listArchiveFiltered schemaName tableName [] Nothing Nothing
+
+-- | Fetch a single archived job by its original job id.
+getArchivedJobById
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int64
+  -> m (Maybe (Archive.ArchiveJob payload))
+getArchivedJobById schemaName tableName jobId = do
+  rows <-
+    executeQuery
+      (Tmpl.getArchiveJobByIdSQL schemaName tableName)
+      [pval CInt8 jobId]
+      (archiveRowCodec tableName)
+  traverse decodeArchiveRow (listToMaybe rows)
+
+-- | Delete one archived job by its archive primary key. Returns rows deleted.
+deleteArchiveJob :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m Int64
+deleteArchiveJob schemaName tableName archiveId =
+  executeStatement (Tmpl.deleteArchiveJobSQL schemaName tableName) [pval CInt8 archiveId]
+
+-- | Delete archived jobs by archive primary key. Returns rows deleted.
+deleteArchiveJobsBatch :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m Int64
+deleteArchiveJobsBatch _ _ [] = pure 0
+deleteArchiveJobsBatch schemaName tableName archiveIds =
+  executeStatement (Tmpl.deleteArchiveJobsBatchSQL schemaName tableName) [parr CInt8 archiveIds]
+
+-- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
+-- row. Returns the new job, or @Nothing@ if the archive row no longer exists.
+reEnqueueFromArchive
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName -> TableName -> Int64 -> m (Maybe (JobRead payload))
+reEnqueueFromArchive schemaName tableName archiveId = withDbTransaction $ do
+  rawJobs <-
+    executeQuery
+      (Tmpl.reEnqueueFromArchiveSQL schemaName tableName)
+      [pval CInt8 archiveId]
+      (jobRowCodec tableName)
+  traverse decodePayload (listToMaybe rawJobs)
+
+-- | Store a completed root job's result on its archive row. No-ops when the job
+-- was not archived. Returns rows updated.
+updateArchiveResult
+  :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> Value -> m Int64
+updateArchiveResult schemaName tableName jobId result =
+  executeStatement
+    (Tmpl.updateArchiveResultSQL schemaName tableName)
+    [pval CJsonb result, pval CInt8 jobId]
+
+-- | List archived jobs in a group, most recent first.
+listArchivedJobsByGroupKey
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Text
+  -> Int
+  -> Int
+  -> m [Archive.ArchiveJob payload]
+listArchivedJobsByGroupKey schemaName tableName groupKey =
+  listArchiveFiltered schemaName tableName [Tmpl.FilterGroupKey groupKey] Nothing Nothing
+
+-- | Count archived jobs with composable filters.
+countArchiveFiltered
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Tmpl.JobFilter]
+  -> m Int64
+countArchiveFiltered schemaName tableName filters = do
+  let (whereClause, filterParams) = buildWhereClause filters
+      sql = Tmpl.countArchiveFilteredSQL schemaName tableName whereClause
+  queryCountStrict "countArchiveFiltered" sql filterParams
+
+decodeArchiveRow
+  :: (JobPayload payload, MonadArbiter m)
+  => (Int64, UTCTime, JobRead Value, Maybe Value)
+  -> m (Archive.ArchiveJob payload)
+decodeArchiveRow (aId, aCompletedAt, rawJob, aResult) = do
+  jobSnapshot <- decodePayload rawJob
+  pure $
+    Archive.ArchiveJob
+      { Archive.archivePrimaryKey = aId
+      , Archive.completedAt = aCompletedAt
+      , Archive.jobSnapshot = jobSnapshot
+      , Archive.archivedResult = aResult
+      }
+
+-- | Purge expired archived jobs (per-row @archive_expires_at@) across all queues.
+-- Returns the total rows purged and the queues whose purge errored. Designed to
+-- run once per reaper tick, so steady-state each call deletes only a small slice.
+purgeArchives
+  :: (MonadArbiter m, MonadUnliftIO m)
+  => SchemaName -> [TableName] -> m (Int64, [Text])
+purgeArchives =
+  sweepQueues $ \schemaName queue ->
+    withDbTransaction (executeStatement (Tmpl.purgeArchiveSQL schemaName queue) [])
 
 -- | List jobs in the dead letter queue
 --

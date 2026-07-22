@@ -14,6 +14,7 @@ module Arbiter.Core.Job.Schema
     -- * Table Creation SQL
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
+  , createJobQueueArchiveTableSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
@@ -24,6 +25,11 @@ module Arbiter.Core.Job.Schema
   , createDLQGroupKeyIndexSQL
   , createDLQFailedAtIndexSQL
   , createDLQParentIdIndexSQL
+  , createArchiveCompletedAtIndexSQL
+  , createArchiveExpiresAtIndexSQL
+  , createArchiveJobIdIndexSQL
+  , createArchiveParentIdIndexSQL
+  , createArchiveGroupKeyIndexSQL
   , createDedupKeyIndexSQL
   , createParentIdIndexSQL
 
@@ -56,6 +62,7 @@ module Arbiter.Core.Job.Schema
     -- * Table Name Helpers
   , jobQueueTable
   , jobQueueDLQTable
+  , jobQueueArchiveTable
   , jobQueueResultsTable
   , jobQueueGroupsTable
 
@@ -160,6 +167,10 @@ jobQueueTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteI
 jobQueueDLQTable :: SchemaName -> TableName -> Text
 jobQueueDLQTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_dlq")
 
+-- | Qualified archive table name: @jobQueueArchiveTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_archive"@
+jobQueueArchiveTable :: SchemaName -> TableName -> Text
+jobQueueArchiveTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_archive")
+
 -- | Backfill NULL @max_attempts@ to the default and set the column default.
 -- Left nullable for rolling-deploy safety (old code may still insert NULL).
 setMaxAttemptsDefaultSQL :: SchemaName -> TableName -> Text
@@ -239,6 +250,78 @@ createJobQueueDLQTableSQL schemaName tableName =
     [ "CREATE TABLE IF NOT EXISTS " <> jobQueueDLQTable schemaName tableName <> " ("
     , jobColumnsForDLQ
     , ");"
+    ]
+
+-- | Archive table columns: every Job read column (@job_id@ for @id@) plus the write-only @rate_limit_cost@, the completed root job's @result@, and the @completed_at@/@archive_expires_at@ metadata.
+jobColumnsForArchive :: Text
+jobColumnsForArchive =
+  T.unlines
+    [ "  id BIGSERIAL PRIMARY KEY,"
+    , "  completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  archive_expires_at TIMESTAMPTZ NOT NULL,"
+    , "  job_id BIGINT NOT NULL,"
+    ]
+    <> T.unlines (drop 1 jobColumns)
+    <> T.unlines
+      [ "  ,claimed_by UUID"
+      , "  ,archive_for INT"
+      , "  ,rate_limit_key TEXT"
+      , "  ,rate_limit_prefix TEXT"
+      , "  ,rate_limit_cost DOUBLE PRECISION"
+      , "  ,concurrency_key TEXT"
+      , "  ,concurrency_prefix TEXT"
+      , "  ,result JSONB"
+      ]
+
+-- | Create the completed-job archive table. Logged, since it is the only copy of
+-- completed-job history and must survive an unclean shutdown and reach replicas.
+createJobQueueArchiveTableSQL :: Text -> Text -> Text
+createJobQueueArchiveTableSQL schemaName tableName =
+  T.unlines
+    [ "CREATE TABLE IF NOT EXISTS " <> jobQueueArchiveTable schemaName tableName <> " ("
+    , jobColumnsForArchive
+    , ");"
+    ]
+
+-- | Index on archive @completed_at@ for the most-recent-first history listing.
+createArchiveCompletedAtIndexSQL :: Text -> Text -> Text
+createArchiveCompletedAtIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_archive_completed_at")
+    , "ON " <> jobQueueArchiveTable schemaName tableName <> " (completed_at DESC);"
+    ]
+
+-- | Index on archive @archive_expires_at@. Drives the retention purge sweep.
+createArchiveExpiresAtIndexSQL :: Text -> Text -> Text
+createArchiveExpiresAtIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_archive_expires_at")
+    , "ON " <> jobQueueArchiveTable schemaName tableName <> " (archive_expires_at);"
+    ]
+
+-- | Index on archive @job_id@ for by-id lookups ('getArchivedJobById').
+createArchiveJobIdIndexSQL :: Text -> Text -> Text
+createArchiveJobIdIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_archive_job_id")
+    , "ON " <> jobQueueArchiveTable schemaName tableName <> " (job_id);"
+    ]
+
+-- | Index on archive @parent_id@ for per-tree history lookups.
+createArchiveParentIdIndexSQL :: Text -> Text -> Text
+createArchiveParentIdIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_archive_parent_id")
+    , "ON " <> jobQueueArchiveTable schemaName tableName <> " (parent_id)"
+    , "WHERE parent_id IS NOT NULL;"
+    ]
+
+-- | Index on archive @group_key@ for per-group history lookups.
+createArchiveGroupKeyIndexSQL :: Text -> Text -> Text
+createArchiveGroupKeyIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_archive_group_key")
+    , "ON " <> jobQueueArchiveTable schemaName tableName <> " (group_key);"
     ]
 
 -- | SQL to create a partial index on group_key for efficient per-group lookups.

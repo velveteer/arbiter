@@ -91,6 +91,109 @@
   color: var(--arb-teal-on-bg);
 }
 
+.filter-builder {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.25rem 0.15rem 0.55rem;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  border: 1px solid var(--arb-border-accent);
+  border-radius: 999px;
+  background-color: var(--arb-surface);
+  color: var(--arb-text);
+  white-space: nowrap;
+  max-width: 16rem;
+}
+
+.filter-chip .filter-chip-label {
+  color: var(--arb-text-muted);
+}
+
+.filter-chip .filter-chip-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.filter-chip .filter-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--arb-text-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.filter-chip .filter-chip-x:hover {
+  background-color: var(--arb-surface-hover);
+  color: var(--arb-text);
+}
+
+.copy-wrap {
+  position: relative;
+}
+
+.copy-wrap .copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  font-size: 0.9rem;
+  border: 1px solid var(--arb-border);
+  border-radius: 4px;
+  background-color: var(--arb-surface);
+  color: var(--arb-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.copy-wrap:hover .copy-btn,
+.copy-wrap .copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.copy-wrap .copy-btn:hover {
+  color: var(--arb-teal-on-bg);
+  border-color: var(--arb-border-accent);
+  box-shadow: var(--arb-glow);
+}
+
+.copy-btn::before {
+  content: "\29C9";
+}
+
+.copy-btn.copied {
+  opacity: 1;
+  color: var(--arb-teal-on-bg);
+  border-color: var(--arb-border-accent);
+}
+
+.copy-btn.copied::before {
+  content: "\2713";
+}
+
 .event-log {
   max-height: 500px;
   overflow-y: auto;
@@ -338,6 +441,13 @@
 .spin {
   display: inline-block;
   animation: spin 0.8s linear infinite;
+}
+
+/* The Refresh button is disabled mid-poll, which would dim it to Bootstrap's
+   disabled opacity and then brighten the instant the spin ends. The spinner
+   already signals activity, so keep it full opacity to avoid that flash. */
+.btn:disabled:has(.spin) {
+  opacity: 1;
 }
 
 @keyframes spin {

@@ -48,7 +48,7 @@ withJobContext config jobs
 withJobContextOne :: LogConfig -> Job.JobRead payload -> LogConfig
 withJobContextOne config job = withJobContext config (job :| [])
 
--- | 'withJobContext' scoped to a job list; no context when the list is empty.
+-- | 'withJobContext' scoped to a job list. No context when the list is empty.
 withJobContextList :: LogConfig -> [Job.JobRead payload] -> LogConfig
 withJobContextList config = maybe config (withJobContext config) . nonEmpty
 

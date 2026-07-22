@@ -54,6 +54,11 @@ import Arbiter.Core.Gates (createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , createArchiveCompletedAtIndexSQL
+  , createArchiveExpiresAtIndexSQL
+  , createArchiveGroupKeyIndexSQL
+  , createArchiveJobIdIndexSQL
+  , createArchiveParentIdIndexSQL
   , createDLQFailedAtIndexSQL
   , createDLQGroupKeyIndexSQL
   , createDLQParentIdIndexSQL
@@ -63,6 +68,7 @@ import Arbiter.Core.Job.Schema
   , createGroupsTableSQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
+  , createJobQueueArchiveTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueGroupKeyIndexSQL
   , createJobQueueTableSQL
@@ -98,7 +104,12 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
-import Arbiter.Core.Worker (addCancelRequestedAtColumnSQL, addClaimedByColumnSQL, createWorkersTableSQL)
+import Arbiter.Core.Worker
+  ( addArchiveForColumnSQL
+  , addCancelRequestedAtColumnSQL
+  , addClaimedByColumnSQL
+  , createWorkersTableSQL
+  )
 import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
@@ -457,6 +468,13 @@ jobQueueMigrationsForTable schemaName tableName config adm =
             "ALTER TABLE " <> jobQueueTable schemaName tableName <> " SET (fillfactor = 100);"
         , script "set-max-attempts-default" $ setMaxAttemptsDefaultSQL schemaName tableName
         , script "add-cancel-requested-at-column" $ addCancelRequestedAtColumnSQL schemaName tableName
+        , script "add-archive-for-column" $ addArchiveForColumnSQL schemaName tableName
+        , script "create-archive-table" $ createJobQueueArchiveTableSQL schemaName tableName
+        , script "create-archive-completed-at-index" $ createArchiveCompletedAtIndexSQL schemaName tableName
+        , script "create-archive-expires-at-index" $ createArchiveExpiresAtIndexSQL schemaName tableName
+        , script "create-archive-job-id-index" $ createArchiveJobIdIndexSQL schemaName tableName
+        , script "create-archive-parent-id-index" $ createArchiveParentIdIndexSQL schemaName tableName
+        , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =
