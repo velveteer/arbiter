@@ -178,14 +178,14 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Monoid (Ap (..), Sum (..))
 import Data.Proxy (Proxy (..))
-import Data.Sequence (Seq, (|>))
+import Data.Sequence ((|>))
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
-import GHC.Generics (Generic, Generically (..))
+import GHC.Generics (Generic)
 import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
@@ -193,16 +193,19 @@ import Arbiter.Core.Codec
   , Params
   , RowCodec
   , archiveRowCodec
+  , cArray
+  , cDecode
+  , cScalar
   , col
   , concurrencyKeyViewCodec
   , concurrencyPolicyViewCodec
   , countCodec
   , cronScheduleRowCodec
   , dlqRowCodec
+  , jobCodec
   , jobRowCodec
   , ncol
   , parr
-  , pnarr
   , pnul
   , pval
   , queueRowCodec
@@ -225,12 +228,14 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
-  ( DedupKey (IgnoreDuplicate, ReplaceDuplicate)
+  ( AdmissionColumns (..)
+  , DedupKey (IgnoreDuplicate, ReplaceDuplicate)
   , Job (..)
   , JobPayload
   , JobRead
   , JobStatus
   , JobWrite
+  , dedupParts
   , isRollup
   , jobStatusFromText
   , jobStatusToText
@@ -341,15 +346,7 @@ queryCountStrict label sql params = do
     [n] -> pure n
     _ -> throwParsing $ label <> ": unexpected result"
 
--- | The admission columns stored with a job, derived once from its payload.
-data AdmissionColumns = AdmissionColumns
-  { acRateLimitKey :: Maybe Text
-  , acRateLimitPrefix :: Maybe Text
-  , acRateLimitCost :: Double
-  , acConcurrencyKey :: Maybe Text
-  , acConcurrencyPrefix :: Maybe Text
-  }
-
+-- | The admission columns for a job, derived from its payload.
 admissionColumns
   :: forall payload. (HasConcurrency payload, HasRateLimit payload) => payload -> AdmissionColumns
 admissionColumns p =
@@ -378,35 +375,13 @@ insertJobUnsafe
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
 insertJobUnsafe schemaName tableName job = withDbTransaction $ do
-  let (sql, dedupKeyParam, dedupStrategyParam) = case dedupKey job of
-        Nothing -> (Tmpl.insertJobSQL schemaName tableName, pnul CText Nothing, pnul CText Nothing)
-        Just (IgnoreDuplicate k) -> (Tmpl.insertJobSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "ignore"))
-        Just (ReplaceDuplicate k) -> (Tmpl.insertJobReplaceSQL schemaName tableName, pnul CText (Just k), pnul CText (Just "replace"))
+  let codec = jobCodec tableName
+      sql = case dedupKey job of
+        Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName
+        _ -> Tmpl.insertJobSQL schemaName tableName
+      params = cScalar codec (job, admissionColumns (payload job))
 
-      ac = admissionColumns (payload job)
-
-      params =
-        [ pval CJsonb (toJSON $ payload job)
-        , pnul CText (groupKey job)
-        , pval CInt4 (attempts job)
-        , pnul CText (lastError job)
-        , pval CInt4 (priority job)
-        , dedupKeyParam
-        , dedupStrategyParam
-        , pnul CInt4 (maxAttempts job)
-        , pnul CInt8 (parentId job)
-        , pnul CJsonb (parentState job)
-        , pval CBool (suspended job)
-        , pnul CTimestamptz (notVisibleUntil job)
-        , pnul CText (acRateLimitKey ac)
-        , pnul CText (acRateLimitPrefix ac)
-        , pval CFloat8 (acRateLimitCost ac)
-        , pnul CText (acConcurrencyKey ac)
-        , pnul CText (acConcurrencyPrefix ac)
-        , pnul CInt4 (archiveFor job)
-        ]
-
-  rawJobs <- executeQuery sql params (jobRowCodec tableName)
+  rawJobs <- executeQuery sql params (cDecode codec)
   case rawJobs of
     [] -> case dedupKey job of
       Just (IgnoreDuplicate _) -> pure Nothing
@@ -637,10 +612,10 @@ insertJobsBatch
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
 insertJobsBatch schemaName tableName jobs = withDbTransaction $ do
-  let cols = buildBatchColumns jobs
-      params = batchInsertParams cols
+  let codec = jobCodec tableName
+      params = cArray codec [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
 
-  rawJobs <- executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName) params (jobRowCodec tableName)
+  rawJobs <- executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName) params (cDecode codec)
   traverse decodePayload rawJobs
 
 insertJobsBatch_
@@ -652,8 +627,7 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
 insertJobsBatch_ schemaName tableName jobs = withDbTransaction $ do
-  let cols = buildBatchColumns jobs
-      params = batchInsertParams cols
+  let params = cArray (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
   executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName) params
 
 -- | Insert a child's result into the results table.
@@ -740,117 +714,34 @@ persistParentState schemaName tableName jobId state =
     (Tmpl.persistParentStateSQL schemaName tableName)
     [pval CJsonb state, pval CInt8 jobId]
 
--- | Build batch columns with within-batch dedup, preserving input order.
+-- | Deduplicate a batch within itself, preserving input order.
 --
--- A single fold over the input list. Non-keyed jobs are appended. Keyed
--- jobs occupy the slot of their first occurrence, with O(log n) positional
--- updates via 'Seq' when a later 'ReplaceDuplicate' overwrites an earlier
--- entry for the same key.
+-- A single fold over the input list. Non-keyed jobs are appended. Keyed jobs
+-- occupy the slot of their first occurrence, with an O(log n) positional update
+-- via 'Seq' when a later 'ReplaceDuplicate' overwrites an earlier entry.
 --
 -- Dedup semantics (matching sequential 'insertJob' behaviour):
 --
 --   * All 'IgnoreDuplicate' for a key -> first occurrence wins
 --   * All 'ReplaceDuplicate' for a key -> last occurrence wins
 --   * Mixed strategies for the same key -> 'ReplaceDuplicate' takes precedence
-buildBatchColumns
-  :: forall payload. (HasConcurrency payload, HasRateLimit payload, ToJSON payload) => [JobWrite payload] -> BatchColumns
-buildBatchColumns = extractCols . foldl' step (Map.empty, 0, emptyColumns)
+dedupBatch :: [JobWrite payload] -> [JobWrite payload]
+dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
   where
-    extractCols (_, _, cols) = cols
-
-    step (!seen, !n, !cols) job = case dedupKeyText (dedupKey job) of
-      Nothing -> (seen, n + 1, snocJob cols job)
+    step (!seen, !rows) job = case dedupKeyText (dedupKey job) of
+      Nothing -> (seen, rows |> job)
       Just k -> case Map.lookup k seen of
-        Nothing -> (Map.insert k n seen, n + 1, snocJob cols job)
+        Nothing -> (Map.insert k (Seq.length rows) seen, rows |> job)
         Just idx
-          | isReplace job -> (seen, n, updateJob idx cols job)
-          | otherwise -> (seen, n, cols)
+          | isReplace job -> (seen, Seq.update idx job rows)
+          | otherwise -> (seen, rows)
 
     isReplace job = case dedupKey job of
       Just (ReplaceDuplicate _) -> True
       _ -> False
 
-    snocJob = withJob (flip (|>))
-    updateJob idx = withJob (Seq.update idx)
-
-    withJob :: (forall a. a -> Seq a -> Seq a) -> BatchColumns -> JobWrite payload -> BatchColumns
-    withJob f cols job =
-      let (dk, ds) = dedupParts (dedupKey job)
-          ac = admissionColumns (payload job)
-       in BatchColumns
-            { colPayloads = f (toJSON (payload job)) (colPayloads cols)
-            , colGroupKeys = f (groupKey job) (colGroupKeys cols)
-            , colPriorities = f (priority job) (colPriorities cols)
-            , colDedupKeys = f dk (colDedupKeys cols)
-            , colDedupStrategies = f ds (colDedupStrategies cols)
-            , colMaxAttempts = f (maxAttempts job) (colMaxAttempts cols)
-            , colParentIds = f (parentId job) (colParentIds cols)
-            , colParentStates = f (parentState job) (colParentStates cols)
-            , colSuspended = f (suspended job) (colSuspended cols)
-            , colNotVisibleUntils = f (notVisibleUntil job) (colNotVisibleUntils cols)
-            , colRateLimitKeys = f (acRateLimitKey ac) (colRateLimitKeys cols)
-            , colRateLimitPrefixes = f (acRateLimitPrefix ac) (colRateLimitPrefixes cols)
-            , colRateLimitCosts = f (acRateLimitCost ac) (colRateLimitCosts cols)
-            , colConcurrencyKeys = f (acConcurrencyKey ac) (colConcurrencyKeys cols)
-            , colConcurrencyPrefixes = f (acConcurrencyPrefix ac) (colConcurrencyPrefixes cols)
-            , colArchiveFors = f (archiveFor job) (colArchiveFors cols)
-            }
-
-dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
-dedupParts Nothing = (Nothing, Nothing)
-dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
-dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
-
 dedupKeyText :: Maybe DedupKey -> Maybe Text
-dedupKeyText Nothing = Nothing
-dedupKeyText (Just (IgnoreDuplicate k)) = Just k
-dedupKeyText (Just (ReplaceDuplicate k)) = Just k
-
-data BatchColumns = BatchColumns
-  { colPayloads :: !(Seq Value)
-  , colGroupKeys :: !(Seq (Maybe Text))
-  , colPriorities :: !(Seq Int32)
-  , colDedupKeys :: !(Seq (Maybe Text))
-  , colDedupStrategies :: !(Seq (Maybe Text))
-  , colMaxAttempts :: !(Seq (Maybe Int32))
-  , colParentIds :: !(Seq (Maybe Int64))
-  , colParentStates :: !(Seq (Maybe Value))
-  , colSuspended :: !(Seq Bool)
-  , colNotVisibleUntils :: !(Seq (Maybe UTCTime))
-  , colRateLimitKeys :: !(Seq (Maybe Text))
-  , colRateLimitPrefixes :: !(Seq (Maybe Text))
-  , colRateLimitCosts :: !(Seq Double)
-  , colConcurrencyKeys :: !(Seq (Maybe Text))
-  , colConcurrencyPrefixes :: !(Seq (Maybe Text))
-  , colArchiveFors :: !(Seq (Maybe Int32))
-  }
-  deriving stock (Generic)
-  deriving (Monoid, Semigroup) via Generically BatchColumns
-
-emptyColumns :: BatchColumns
-emptyColumns = mempty
-
--- | The array params for a batch insert, in the column order both batch
--- statements expect.
-batchInsertParams :: BatchColumns -> Params
-batchInsertParams cols =
-  [ parr CJsonb (toList $ colPayloads cols)
-  , pnarr CText (toList $ colGroupKeys cols)
-  , parr CInt4 (toList $ colPriorities cols)
-  , pnarr CText (toList $ colDedupKeys cols)
-  , pnarr CText (toList $ colDedupStrategies cols)
-  , pnarr CInt4 (toList $ colMaxAttempts cols)
-  , pnarr CInt8 (toList $ colParentIds cols)
-  , pnarr CJsonb (toList $ colParentStates cols)
-  , parr CBool (toList $ colSuspended cols)
-  , pnarr CTimestamptz (toList $ colNotVisibleUntils cols)
-  , pnarr CText (toList $ colRateLimitKeys cols)
-  , pnarr CText (toList $ colRateLimitPrefixes cols)
-  , parr CFloat8 (toList $ colRateLimitCosts cols)
-  , pnarr CText (toList $ colConcurrencyKeys cols)
-  , pnarr CText (toList $ colConcurrencyPrefixes cols)
-  , pnarr CInt4 (toList $ colArchiveFors cols)
-  ]
+dedupKeyText = fst . dedupParts
 
 -- | The 'Claim.ClaimAdmission' for this payload type.
 claimAdmissionFor :: forall payload. (HasConcurrency payload, HasRateLimit payload) => Claim.ClaimAdmission
@@ -1591,13 +1482,9 @@ getArchivedJobById
   -> TableName
   -> Int64
   -> m (Maybe (Archive.ArchiveJob payload))
-getArchivedJobById schemaName tableName jobId = do
-  rows <-
-    executeQuery
-      (Tmpl.getArchiveJobByIdSQL schemaName tableName)
-      [pval CInt8 jobId]
-      (archiveRowCodec tableName)
-  traverse decodeArchiveRow (listToMaybe rows)
+getArchivedJobById schemaName tableName jobId =
+  listToMaybe
+    <$> listArchiveFiltered schemaName tableName [Tmpl.FilterJobId jobId] Nothing Nothing 1 0
 
 -- | Delete one archived job by its archive primary key. Returns rows deleted.
 deleteArchiveJob :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m Int64

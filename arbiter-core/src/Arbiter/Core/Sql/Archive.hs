@@ -9,7 +9,6 @@ module Arbiter.Core.Sql.Archive
   , archivePurgeBatch
   , listArchiveFilteredSQL
   , countArchiveFilteredSQL
-  , getArchiveJobByIdSQL
   , deleteArchiveJobSQL
   , deleteArchiveJobsBatchSQL
   , reEnqueueFromArchiveSQL
@@ -89,18 +88,6 @@ countArchiveFilteredSQL :: Text -> Text -> Text -> Text
 countArchiveFilteredSQL schema tableName whereClause =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [text|SELECT COUNT(*) FROM ${archiveTbl} ${whereClause}|]
-
--- | Fetch a single archived job by its original job id. Parameters: job_id
-getArchiveJobByIdSQL :: Text -> Text -> Text
-getArchiveJobByIdSQL schema tableName =
-  let archiveTbl = jobQueueArchiveTable schema tableName
-      columns = T.intercalate ", " allArchiveColumns
-   in [text|
-        SELECT ${columns}
-        FROM ${archiveTbl}
-        WHERE job_id = ?
-        LIMIT 1
-      |]
 
 -- | Delete one archived job by its archive primary key. Parameters: id
 deleteArchiveJobSQL :: Text -> Text -> Text

@@ -4,6 +4,7 @@ module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job (..)
   , AdmissionKeys (..)
+  , AdmissionColumns (..)
   , JobRead
   , JobWrite
   , defaultJob
@@ -23,6 +24,7 @@ module Arbiter.Core.Job.Types
 
     -- * Deduplication
   , DedupKey (..)
+  , dedupParts
 
     -- * Observability
   , ObservabilityHooks (..)
@@ -110,6 +112,17 @@ data AdmissionKeys = AdmissionKeys
   -- ^ From the payload's 'Arbiter.Core.RateLimit.Spec.HasRateLimit' instance.
   , jobConcurrencyKey :: Maybe ConcurrencyKey
   -- ^ From the payload's 'Arbiter.Core.Concurrency.Spec.HasConcurrency' instance.
+  }
+  deriving stock (Eq, Generic, Show)
+
+-- | The writable admission columns, resolved from a payload at enqueue. The @key@
+-- and @prefix@ columns round-trip via 'AdmissionKeys'. @cost@ is write-only.
+data AdmissionColumns = AdmissionColumns
+  { acRateLimitKey :: Maybe Text
+  , acRateLimitPrefix :: Maybe Text
+  , acRateLimitCost :: Double
+  , acConcurrencyKey :: Maybe Text
+  , acConcurrencyPrefix :: Maybe Text
   }
   deriving stock (Eq, Generic, Show)
 
@@ -246,6 +259,12 @@ instance FromJSON DedupKey where
       "ignore" -> pure $ IgnoreDuplicate key
       "replace" -> pure $ ReplaceDuplicate key
       _ -> fail $ "Unknown dedup strategy: " <> show strategy
+
+-- | The @dedup_key@ and @dedup_strategy@ column values for a 'DedupKey'.
+dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
+dedupParts Nothing = (Nothing, Nothing)
+dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
+dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
 
 type ClaimTime = UTCTime
 type CurrentTime = UTCTime

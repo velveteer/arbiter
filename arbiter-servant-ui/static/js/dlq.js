@@ -37,16 +37,6 @@ document.addEventListener('alpine:init', () => {
     sortDir: '',
     _loadErrored: false,
 
-    _syncFiltersToUrl() {
-      writeFiltersToUrl({
-        groupKey: this._appliedGroupKey,
-        parentId: this._appliedParentId,
-        jobId: this._appliedJobId,
-        sortBy: this.sortBy,
-        sortDir: this.sortDir,
-      });
-    },
-
     init() {
       this._loadColPrefs();
       const f = readFiltersFromUrl();
@@ -199,17 +189,6 @@ document.addEventListener('alpine:init', () => {
           showToast('Failed to delete: ' + e.message);
         }
       });
-    },
-
-    _resetView(filterOverrides) {
-      this.offset = 0;
-      this.loadDLQ(filterOverrides);
-      this._startTimer();
-    },
-
-    toggleSort(col) {
-      this._cycleSort(col);
-      this._resetView();
     },
 
     viewDetail(job) {

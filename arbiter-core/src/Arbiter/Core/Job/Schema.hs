@@ -231,7 +231,6 @@ jobColumnsForDLQ =
 -- | SQL to create the main job queue table within a schema
 --
 -- This table stores pending and in-progress jobs.
--- Completed jobs are deleted, failed jobs are moved to the DLQ.
 createJobQueueTableSQL :: Text -> Text -> Text
 createJobQueueTableSQL schemaName tableName =
   T.unlines

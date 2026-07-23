@@ -27,6 +27,7 @@ module Arbiter.Core.Admission
     -- * SQL fragments
   , effectivePolicyCol
   , touchColumn
+  , excludedAssignment
   , policyUpsertSQL
   , policyViewScope
   ) where
@@ -95,11 +96,15 @@ touchColumn :: Text -> Text -> Text
 touchColumn name sqlType =
   name <> " = CASE WHEN ?::bool THEN ?::" <> sqlType <> " ELSE " <> name <> " END"
 
+-- | An @ON CONFLICT DO UPDATE SET@ assignment copying a column from the excluded row.
+excludedAssignment :: Text -> Text
+excludedAssignment n = n <> " = EXCLUDED." <> n
+
 -- | Upsert a policy row's defaults keyed on prefix_id, preserving operator overrides.
 policyUpsertSQL :: Text -> Text -> [(Text, Text)] -> Text
 policyUpsertSQL policiesTable prefixLit defaults =
   let names = map fst defaults
-      setClause = T.intercalate ", " (map (\n -> n <> " = EXCLUDED." <> n) names)
+      setClause = T.intercalate ", " (map excludedAssignment names)
    in T.concat
         [ "INSERT INTO "
         , policiesTable

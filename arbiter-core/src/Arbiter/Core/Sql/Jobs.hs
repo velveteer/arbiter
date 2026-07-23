@@ -54,14 +54,23 @@ import Data.UUID.Types (UUID)
 import Data.UUID.Types qualified as UUID
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec)
+import Arbiter.Core.Admission (excludedAssignment)
+import Arbiter.Core.Codec
+  ( batchUnnest
+  , codecColumns
+  , dlqRowCodec
+  , insertColumns
+  , insertValues
+  , jobRowCodec
+  , writeColumnNames
+  )
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
   , jobQueueDLQTable
   , jobQueueTable
   )
-import Arbiter.Core.Job.Types (JobStatus, defaultMaxAttempts)
+import Arbiter.Core.Job.Types (JobStatus)
 
 data JobFilter
   = FilterGroupKey Text
@@ -340,15 +349,42 @@ jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
 
+-- | @DO UPDATE SET@ body for a replace-dedup upsert. Copies each writable column
+-- from the excluded row, then re-arms the replaced job for a fresh run.
+dedupUpdateSet :: Text
+dedupUpdateSet = T.intercalate ", " (copied <> rearm)
+  where
+    -- dedup_key is the conflict key. attempts and last_error are re-armed below.
+    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "last_error"]) writeColumnNames)
+    rearm =
+      [ "attempts = 0"
+      , "last_error = NULL"
+      , "updated_at = NOW()"
+      , "throttled_until = NULL"
+      , "last_attempted_at = NULL"
+      , "claimed_by = NULL"
+      ]
+
+-- | Guard: an existing row may be replaced only if idle and childless.
+replaceableGuard :: Text -> Text -> Text
+replaceableGuard tbl dlqTbl =
+  [text|
+    (${tbl}.attempts = 0
+      OR ${tbl}.not_visible_until IS NULL
+      OR ${tbl}.not_visible_until <= NOW()
+      OR ${tbl}.last_error IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
+      AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+  |]
+
 -- | Insert a job. Parameters bind the INSERT column list in order.
 insertJobSQL :: Text -> Text -> Text
 insertJobSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
-      dma = T.pack (show defaultMaxAttempts)
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (${insertColumns})
+        VALUES (${insertValues})
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
         RETURNING ${columns}
       |]
@@ -368,38 +404,13 @@ insertJobReplaceSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       columns = jobColumns Nothing
-      dma = T.pack (show defaultMaxAttempts)
+      guard = replaceableGuard tbl dlqTbl
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (${insertColumns})
+        VALUES (${insertValues})
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          payload = EXCLUDED.payload,
-          group_key = EXCLUDED.group_key,
-          attempts = 0,
-          last_error = NULL,
-          priority = EXCLUDED.priority,
-          dedup_strategy = EXCLUDED.dedup_strategy,
-          max_attempts = EXCLUDED.max_attempts,
-          updated_at = NOW(),
-          parent_id = EXCLUDED.parent_id,
-          parent_state = EXCLUDED.parent_state,
-          suspended = EXCLUDED.suspended,
-          not_visible_until = EXCLUDED.not_visible_until,
-          rate_limit_key = EXCLUDED.rate_limit_key,
-          rate_limit_prefix = EXCLUDED.rate_limit_prefix,
-          rate_limit_cost = EXCLUDED.rate_limit_cost,
-          concurrency_key = EXCLUDED.concurrency_key,
-          concurrency_prefix = EXCLUDED.concurrency_prefix,
-          archive_for = EXCLUDED.archive_for,
-          throttled_until = NULL,
-          last_attempted_at = NULL,
-          claimed_by = NULL
-        WHERE (${tbl}.attempts = 0
-          OR ${tbl}.not_visible_until IS NULL
-          OR ${tbl}.not_visible_until <= NOW()
-          OR ${tbl}.last_error IS NOT NULL)
-          AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
-          AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+          ${dedupUpdateSet}
+        WHERE ${guard}
         RETURNING ${columns}
       |]
 
@@ -424,62 +435,19 @@ insertJobsBatchBase :: Text -> Text -> Text -> Text
 insertJobsBatchBase schema tableName returning =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
-      dma = T.pack (show defaultMaxAttempts)
+      guard = replaceableGuard tbl dlqTbl
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for)
-        SELECT
-          payload, group_key, 0, NULL, priority, dedup_key, dedup_strategy, COALESCE(max_attempts, ${dma}), parent_id,
-          parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for
+        INSERT INTO ${tbl} (${insertColumns})
+        SELECT ${insertColumns}
         FROM (
-          SELECT
-            unnest(?::jsonb[]) AS payload,
-            unnest(?::text[]) AS group_key,
-            unnest(?::int[]) AS priority,
-            unnest(?::text[]) AS dedup_key,
-            unnest(?::text[]) AS dedup_strategy,
-            unnest(?::int[]) AS max_attempts,
-            unnest(?::bigint[]) AS parent_id,
-            unnest(?::jsonb[]) AS parent_state,
-            unnest(?::boolean[]) AS suspended,
-            unnest(?::timestamptz[]) AS not_visible_until,
-            unnest(?::text[]) AS rate_limit_key,
-            unnest(?::text[]) AS rate_limit_prefix,
-            unnest(?::float8[]) AS rate_limit_cost,
-            unnest(?::text[]) AS concurrency_key,
-            unnest(?::text[]) AS concurrency_prefix,
-            unnest(?::int[]) AS archive_for
+          SELECT ${batchUnnest}
         ) src
         WHERE (src.parent_id IS NULL
             OR EXISTS (SELECT 1 FROM ${tbl} p WHERE p.id = src.parent_id))
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          payload = EXCLUDED.payload,
-          group_key = EXCLUDED.group_key,
-          attempts = 0,
-          last_error = NULL,
-          priority = EXCLUDED.priority,
-          dedup_strategy = EXCLUDED.dedup_strategy,
-          max_attempts = EXCLUDED.max_attempts,
-          updated_at = NOW(),
-          parent_id = EXCLUDED.parent_id,
-          parent_state = EXCLUDED.parent_state,
-          suspended = EXCLUDED.suspended,
-          not_visible_until = EXCLUDED.not_visible_until,
-          rate_limit_key = EXCLUDED.rate_limit_key,
-          rate_limit_prefix = EXCLUDED.rate_limit_prefix,
-          rate_limit_cost = EXCLUDED.rate_limit_cost,
-          concurrency_key = EXCLUDED.concurrency_key,
-          concurrency_prefix = EXCLUDED.concurrency_prefix,
-          archive_for = EXCLUDED.archive_for,
-          throttled_until = NULL,
-          last_attempted_at = NULL,
-          claimed_by = NULL
+          ${dedupUpdateSet}
         WHERE EXCLUDED.dedup_strategy = 'replace'
-          AND (${tbl}.attempts = 0
-            OR ${tbl}.not_visible_until IS NULL
-            OR ${tbl}.not_visible_until <= NOW()
-            OR ${tbl}.last_error IS NOT NULL)
-          AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
-          AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+          AND ${guard}
         ${returning}
       |]
 

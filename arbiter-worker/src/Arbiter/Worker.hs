@@ -167,18 +167,19 @@ instance JobResult () where
   encodeJobResult _ = Nothing
   decodeJobResult _ = Right ()
 
+decodeJobResultAeson :: (FromJSON a) => Value -> Either Text a
+decodeJobResultAeson v = case Aeson.fromJSON v of
+  Aeson.Success a -> Right a
+  Aeson.Error err -> Left (T.pack err)
+
 instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
   encodeJobResult = Just . toJSON
-  decodeJobResult v = case Aeson.fromJSON v of
-    Aeson.Success a -> Right a
-    Aeson.Error err -> Left (T.pack err)
+  decodeJobResult = decodeJobResultAeson
 
 -- | A @Maybe@ result is optional: @Nothing@ stores nothing, @Just x@ stores @x@.
 instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
   encodeJobResult = fmap toJSON
-  decodeJobResult v = case Aeson.fromJSON v of
-    Aeson.Success a -> Right a
-    Aeson.Error err -> Left (T.pack err)
+  decodeJobResult = decodeJobResultAeson
 
 -- ---------------------------------------------------------------------------
 -- Multi-Queue Workers

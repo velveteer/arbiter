@@ -379,6 +379,23 @@ function tableTab(loadMethod, refreshStorageKey) {
       return this.sortDir === 'asc' ? ' ▲' : ' ▼';
     },
 
+    // Default sort/reset/url-sync for a flat tab. Tabs with expansion state
+    // (jobs) override these.
+    toggleSort(col) {
+      this._cycleSort(col);
+      this._resetView();
+    },
+
+    _resetView(filterOverrides) {
+      this.offset = 0;
+      this[loadMethod](filterOverrides);
+      this._startTimer();
+    },
+
+    _syncFiltersToUrl() {
+      writeFiltersToUrl({ groupKey: this._appliedGroupKey, parentId: this._appliedParentId, jobId: this._appliedJobId, sortBy: this.sortBy, sortDir: this.sortDir });
+    },
+
     applyFilter() {
       const pid = this.parentIdFilter.trim();
       const jid = (this.jobIdFilter || '').trim();
