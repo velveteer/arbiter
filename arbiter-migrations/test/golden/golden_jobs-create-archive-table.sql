@@ -3,6 +3,14 @@ CREATE TABLE IF NOT EXISTS "arbiter"."golden_jobs_archive" (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   archive_expires_at TIMESTAMPTZ NOT NULL,
   job_id BIGINT NOT NULL,
+  claimed_by UUID,
+  archive_for INT,
+  rate_limit_key TEXT,
+  rate_limit_prefix TEXT,
+  rate_limit_cost DOUBLE PRECISION,
+  concurrency_key TEXT,
+  concurrency_prefix TEXT,
+  result JSONB,
   payload JSONB NOT NULL,
   group_key TEXT,
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -18,13 +26,5 @@ CREATE TABLE IF NOT EXISTS "arbiter"."golden_jobs_archive" (
   parent_id BIGINT,
   parent_state JSONB,
   suspended BOOLEAN NOT NULL DEFAULT FALSE
-  ,claimed_by UUID
-  ,archive_for INT
-  ,rate_limit_key TEXT
-  ,rate_limit_prefix TEXT
-  ,rate_limit_cost DOUBLE PRECISION
-  ,concurrency_key TEXT
-  ,concurrency_prefix TEXT
-  ,result JSONB
 
 );
