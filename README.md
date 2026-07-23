@@ -588,8 +588,8 @@ Completed jobs are deleted on ack by default. Set `archiveFor` to keep a copy in
 a per-queue archive for that many seconds after completion.
 
 ```haskell
-job1 = (Arb.defaultJob payload) { Arb.archiveFor = Just Arb.defaultArchiveFor }  -- 24h
-job2 = (Arb.defaultJob payload) { Arb.archiveFor = Just 604800 }                 -- 1 week
+job1 = (Arb.defaultJob payload) { Arb.archiveFor = Just Arb.dayRetention }       -- 24h
+job2 = (Arb.defaultJob payload) { Arb.archiveFor = Just (Arb.dayRetention * 7) } -- 1 week
 ```
 
 Archiving is opt-in per job (`archiveFor = Nothing` deletes as before), and

@@ -10,7 +10,7 @@ module Arbiter.Core.Job.Types
   , defaultJob
   , defaultGroupedJob
   , defaultMaxAttempts
-  , defaultArchiveFor
+  , dayRetention
   , isRollup
 
     -- * Derived status
@@ -130,9 +130,9 @@ data AdmissionColumns = AdmissionColumns
 defaultMaxAttempts :: Int32
 defaultMaxAttempts = 10
 
--- | Convenience 24h retention constant for opting a job into archiving via @archiveFor = Just defaultArchiveFor@.
-defaultArchiveFor :: Int32
-defaultArchiveFor = 86400
+-- | 24h in seconds, a convenience value for 'archiveFor'.
+dayRetention :: Int32
+dayRetention = 86400
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
 -- (an empty object on insert, the merged child results before a DLQ move).

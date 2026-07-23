@@ -26,7 +26,7 @@ import Arbiter.Core.Job.Types
   ( Job (..)
   , JobRead
   , ObservabilityHooks (..)
-  , defaultArchiveFor
+  , dayRetention
   , defaultJob
   , defaultObservabilityHooks
   )
@@ -176,7 +176,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> pure ()
       void $
         runM env $
-          HL.insertJob ((defaultJob (mkSimple "arch-done")) {groupKey = Just "g1", archiveFor = Just defaultArchiveFor})
+          HL.insertJob ((defaultJob (mkSimple "arch-done")) {groupKey = Just "g1", archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -189,7 +189,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> pure ()
       void $
         runM env $
-          HL.insertJob ((defaultJob (mkSimple "arch-byid")) {groupKey = Just "gk", archiveFor = Just defaultArchiveFor})
+          HL.insertJob ((defaultJob (mkSimple "arch-byid")) {groupKey = Just "gk", archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -205,9 +205,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "lists archived jobs by group key" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
       let jobs =
-            [ (defaultJob (mkSimple "g-a")) {groupKey = Just "ga", archiveFor = Just defaultArchiveFor}
-            , (defaultJob (mkSimple "g-b")) {groupKey = Just "ga", archiveFor = Just defaultArchiveFor}
-            , (defaultJob (mkSimple "other")) {groupKey = Just "gb", archiveFor = Just defaultArchiveFor}
+            [ (defaultJob (mkSimple "g-a")) {groupKey = Just "ga", archiveFor = Just dayRetention}
+            , (defaultJob (mkSimple "g-b")) {groupKey = Just "ga", archiveFor = Just dayRetention}
+            , (defaultJob (mkSimple "other")) {groupKey = Just "gb", archiveFor = Just dayRetention}
             ]
       runM env $ traverse_ HL.insertJob jobs
 
@@ -248,7 +248,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> pure ()
       void $
         runM env $
-          HL.insertJob ((defaultJob (mkSimple "re-job")) {groupKey = Just "rg", archiveFor = Just defaultArchiveFor})
+          HL.insertJob ((defaultJob (mkSimple "re-job")) {groupKey = Just "rg", archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         let countReJob arch = length (filter ((== mkSimple "re-job") . payload . Archive.jobSnapshot) arch)
@@ -268,7 +268,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> pure ()
       void $
         runM env $
-          HL.insertJob ((defaultJob (mkSimple "purge-one")) {groupKey = Just "pg", archiveFor = Just defaultArchiveFor})
+          HL.insertJob ((defaultJob (mkSimple "purge-one")) {groupKey = Just "pg", archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -284,8 +284,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "bulk-purges archived jobs" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
       let jobs =
-            [ (defaultJob (mkSimple "bp-1")) {groupKey = Just "b1", archiveFor = Just defaultArchiveFor}
-            , (defaultJob (mkSimple "bp-2")) {groupKey = Just "b2", archiveFor = Just defaultArchiveFor}
+            [ (defaultJob (mkSimple "bp-1")) {groupKey = Just "b1", archiveFor = Just dayRetention}
+            , (defaultJob (mkSimple "bp-2")) {groupKey = Just "b2", archiveFor = Just dayRetention}
             ]
       runM env $ traverse_ HL.insertJob jobs
 
@@ -308,7 +308,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       void $
         runM env $
           HL.insertJob
-            ((defaultJob (mkSimple "dlq-arch")) {groupKey = Just "da", maxAttempts = Just 1, archiveFor = Just defaultArchiveFor})
+            ((defaultJob (mkSimple "dlq-arch")) {groupKey = Just "da", maxAttempts = Just 1, archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -324,7 +324,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "stores a root job's result on its archive row" $ \env -> do
       (cfg :: WorkerConfig m payload Text) <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure ("root-result" :: Text)))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "with-result")) {archiveFor = Just defaultArchiveFor})
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "with-result")) {archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -337,7 +337,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "archives the row but stores no result for a Nothing result" $ \env -> do
       (cfg :: WorkerConfig m payload (Maybe Text)) <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Nothing :: Maybe Text)))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just defaultArchiveFor})
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -350,7 +350,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "stores the wrapped value for a Just result" $ \env -> do
       (cfg :: WorkerConfig m payload (Maybe Text)) <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ("kept" :: Text))))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just defaultArchiveFor})
+      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -374,7 +374,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "stores a child's result in the tree, not on its archive row" $ \env -> do
       (cfg :: WorkerConfig m payload Text) <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure ("child-result" :: Text)))
-      let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just defaultArchiveFor}
+      let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just dayRetention}
       void $ runM env $ HL.insertJobTree $ defaultJob (mkSimple "arch-root") <~~ (child :| [])
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
@@ -393,7 +393,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       void $
         runM env $
           HL.insertJob
-            ((defaultJob (mkSimple "arch-attempts")) {groupKey = Just "aa", maxAttempts = Just 5, archiveFor = Just defaultArchiveFor})
+            ((defaultJob (mkSimple "arch-attempts")) {groupKey = Just "aa", maxAttempts = Just 5, archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, jitter = NoJitter}) $ \_ -> do
         waitUntil 15_000 $ do
@@ -407,8 +407,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "preserves a child's parent linkage on its archived row" $ \env -> do
       (cfg :: WorkerConfig m payload Text) <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure ("ok" :: Text)))
-      let child = (defaultJob (mkSimple "pl-child")) {archiveFor = Just defaultArchiveFor}
-          root = (defaultJob (mkSimple "pl-root")) {archiveFor = Just defaultArchiveFor}
+      let child = (defaultJob (mkSimple "pl-child")) {archiveFor = Just dayRetention}
+          root = (defaultJob (mkSimple "pl-root")) {archiveFor = Just dayRetention}
       void $ runM env $ HL.insertJobTree $ root <~~ (child :| [])
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
@@ -426,7 +426,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         traverse_
           HL.insertJob
           [ (defaultJob (mkSimple "purge-expired")) {groupKey = Just "pe1", archiveFor = Just 1}
-          , (defaultJob (mkSimple "purge-kept")) {groupKey = Just "pe2", archiveFor = Just defaultArchiveFor}
+          , (defaultJob (mkSimple "purge-kept")) {groupKey = Just "pe2", archiveFor = Just dayRetention}
           ]
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, reaperInterval = 0.5}) $ \_ -> do
