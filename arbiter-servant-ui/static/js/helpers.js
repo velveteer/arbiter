@@ -17,6 +17,71 @@ function closeDropdown(el) {
   if (toggle) bootstrap.Dropdown.getOrCreateInstance(toggle).hide();
 }
 
+// Shared filter-builder markup (chips + field dropdown + value adder), stamped
+// into each table toolbar with x-html. Its bindings resolve against the tableTab
+// mixin, so every tab that spreads tableTab renders an identical builder.
+const FILTER_BUILDER_HTML = `
+  <template x-for="chip in activeFilterChips()" :key="chip.field">
+    <span class="filter-chip">
+      <span class="filter-chip-label" x-text="chip.label + ':'"></span>
+      <span class="filter-chip-value" x-text="chip.value"></span>
+      <button type="button" class="filter-chip-x" @click="removeFilter(chip.field)" :aria-label="'Remove ' + chip.label + ' filter'">&#x2715;</button>
+    </span>
+  </template>
+  <div class="input-group input-group-sm" style="width: auto;">
+    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Filter field" x-text="currentFilterField().label"></button>
+    <ul class="dropdown-menu">
+      <template x-for="f in filterFields" :key="f.field">
+        <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field" x-text="f.label"></a></li>
+      </template>
+    </ul>
+    <input type="text" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+  </div>`;
+
+// x-copyable="expr" turns its host into a copy-wrap: a copy button plus a
+// payload <pre> bound to expr. Copies the rendered text, so expr appears once.
+document.addEventListener('alpine:init', () => {
+  Alpine.directive('copyable', (el, { expression }, { evaluateLater, effect }) => {
+    el.classList.add('copy-wrap');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.title = 'Copy';
+    btn.setAttribute('aria-label', 'Copy to clipboard');
+    const pre = document.createElement('pre');
+    pre.className = 'payload-display p-2 rounded';
+    el.append(btn, pre);
+    btn.addEventListener('click', () => copyText(pre.textContent, btn));
+    const getText = evaluateLater(expression);
+    effect(() => getText((v) => { pre.textContent = v == null ? '' : String(v); }));
+  });
+});
+
+// Copy text to the clipboard, flashing the triggering button on success.
+async function copyText(text, btn) {
+  const value = text == null ? '' : String(text);
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    if (btn) {
+      btn.classList.add('copied');
+      setTimeout(() => btn.classList.remove('copied'), 1200);
+    }
+  } catch (e) {
+    showToast('Copy failed: ' + e.message);
+  }
+}
+
 function showModal(id) {
   const el = document.getElementById(id);
   if (el && window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).show();
@@ -222,7 +287,58 @@ function tableTab(loadMethod, refreshStorageKey) {
     refreshMode: (refreshStorageKey && localStorage.getItem(refreshStorageKey)) || '5s',
     _refreshTimer: null,
     _lastInvalidParentId: null,
+    _lastInvalidJobId: null,
     pendingChanges: 0,
+
+    // Filter builder: the group/parent/job filters, surfaced as chips plus one
+    // "field + value" adder. Each maps onto existing filter state, so applyFilter
+    // and the URL sync are unchanged.
+    filterFields: [
+      { field: 'group', label: 'Group', model: 'groupKeyFilter', applied: '_appliedGroupKey', numeric: false },
+      { field: 'parent', label: 'Parent ID', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+      // Job ID locates a single row, so it does not combine with the others.
+      { field: 'job', label: 'Job ID', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+    ],
+    newFilterField: 'group',
+    newFilterValue: '',
+
+    currentFilterField() {
+      return this.filterFields.find((f) => f.field === this.newFilterField) || this.filterFields[0];
+    },
+    currentFilterPlaceholder() {
+      return this.currentFilterField().label + '…';
+    },
+    activeFilterChips() {
+      return this.filterFields
+        .filter((f) => (this[f.applied] || '') !== '')
+        .map((f) => ({ field: f.field, label: f.label, value: this[f.applied] }));
+    },
+
+    addFilter() {
+      const f = this.currentFilterField();
+      const v = (this.newFilterValue || '').trim();
+      if (!v) return;
+      if (f.numeric && !/^\d+$/.test(v)) {
+        showToast(f.label + ' must be a positive integer', 'warning');
+        return;
+      }
+      // An exclusive field (Job ID) clears every other filter. Any other field
+      // clears the exclusive ones but coexists with its non-exclusive siblings.
+      this.filterFields.forEach((x) => {
+        if (x.field === f.field) return;
+        if (f.exclusive || x.exclusive) this[x.model] = '';
+      });
+      this[f.model] = v;
+      this.newFilterValue = '';
+      this.applyFilter();
+    },
+
+    removeFilter(field) {
+      const f = this.filterFields.find((x) => x.field === field);
+      if (!f) return;
+      this[f.model] = '';
+      this.applyFilter();
+    },
 
     _startTimer() {
       this._stopTimer();
@@ -263,26 +379,54 @@ function tableTab(loadMethod, refreshStorageKey) {
       return this.sortDir === 'asc' ? ' ▲' : ' ▼';
     },
 
+    // Default sort/reset/url-sync for a flat tab. Tabs with expansion state
+    // (jobs) override these.
+    toggleSort(col) {
+      this._cycleSort(col);
+      this._resetView();
+    },
+
+    _resetView(filterOverrides) {
+      this.offset = 0;
+      this[loadMethod](filterOverrides);
+      this._startTimer();
+    },
+
+    _syncFiltersToUrl() {
+      writeFiltersToUrl({ groupKey: this._appliedGroupKey, parentId: this._appliedParentId, jobId: this._appliedJobId, sortBy: this.sortBy, sortDir: this.sortDir });
+    },
+
     applyFilter() {
-      const trimmed = this.parentIdFilter.trim();
-      if (trimmed && !/^\d+$/.test(trimmed)) {
-        // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
-        if (this._lastInvalidParentId !== trimmed) {
+      const pid = this.parentIdFilter.trim();
+      const jid = (this.jobIdFilter || '').trim();
+      // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
+      if (pid && !/^\d+$/.test(pid)) {
+        if (this._lastInvalidParentId !== pid) {
           showToast('Parent ID must be a positive integer', 'warning');
-          this._lastInvalidParentId = trimmed;
+          this._lastInvalidParentId = pid;
         }
         return;
       }
       this._lastInvalidParentId = null;
-      if (trimmed === this._appliedParentId && this.groupKeyFilter === this._appliedGroupKey) return;
-      this.parentIdFilter = trimmed;
-      this._resetView({ groupKey: this.groupKeyFilter, parentId: trimmed });
+      if (jid && !/^\d+$/.test(jid)) {
+        if (this._lastInvalidJobId !== jid) {
+          showToast('Job ID must be a positive integer', 'warning');
+          this._lastInvalidJobId = jid;
+        }
+        return;
+      }
+      this._lastInvalidJobId = null;
+      if (pid === this._appliedParentId && jid === (this._appliedJobId || '') && this.groupKeyFilter === this._appliedGroupKey) return;
+      this.parentIdFilter = pid;
+      this.jobIdFilter = jid;
+      this._resetView({ groupKey: this.groupKeyFilter, parentId: pid, jobId: jid });
     },
 
     filterByParent(id) {
       this.parentIdFilter = String(id);
       this.groupKeyFilter = '';
-      this._resetView({ groupKey: '', parentId: String(id) });
+      this.jobIdFilter = '';
+      this._resetView({ groupKey: '', parentId: String(id), jobId: '' });
     },
 
     _bindTableEvents(opts) {
@@ -291,8 +435,11 @@ function tableTab(loadMethod, refreshStorageKey) {
         this.disarm();
         this.groupKeyFilter = '';
         this.parentIdFilter = '';
+        this.jobIdFilter = '';
+        this.newFilterValue = '';
         this._appliedGroupKey = '';
         this._appliedParentId = '';
+        this._appliedJobId = '';
         this.sortBy = '';
         this.sortDir = '';
         // Reset paging even while inactive, so the tab reopens on page 1 of the new
@@ -362,7 +509,7 @@ function pollingTab(loadMethod, intervalMs) {
       }
     },
 
-    // opts.onQueueChange() runs on a queue switch (before reload); opts.onHide()
+    // opts.onQueueChange() runs on a queue switch (before reload). opts.onHide()
     // runs when the tab is hidden (before polling stops).
     initPolling(tabTarget, opts = {}) {
       trackTabActive(this, tabTarget, {
@@ -652,6 +799,53 @@ function withPagination(component, loadMethod) {
   return result;
 }
 
+// Row-selection state for bulk actions: a `selected` map keyed by row id plus the
+// select/toggle/all helpers. rowsProp names the component's row array, idField the
+// per-row primary-key field. Wraps like withPagination to preserve getters.
+function withSelection(component, rowsProp, idField) {
+  const selection = {
+    selected: {},
+
+    isSelected(id) {
+      return !!this.selected[id];
+    },
+
+    toggleSelect(id) {
+      const next = { ...this.selected };
+      if (next[id]) delete next[id]; else next[id] = true;
+      this.selected = next;
+    },
+
+    get selectedIds() {
+      return Object.keys(this.selected).filter(k => this.selected[k]).map(Number);
+    },
+
+    get selectedCount() {
+      return this.selectedIds.length;
+    },
+
+    get allSelected() {
+      const rows = this[rowsProp];
+      return rows.length > 0 && rows.every(j => this.selected[j[idField]]);
+    },
+
+    toggleSelectAll() {
+      if (this.allSelected) {
+        this.selected = {};
+      } else {
+        const next = {};
+        for (const j of this[rowsProp]) next[j[idField]] = true;
+        this.selected = next;
+      }
+    },
+  };
+
+  const result = {};
+  Object.defineProperties(result, Object.getOwnPropertyDescriptors(component));
+  Object.defineProperties(result, Object.getOwnPropertyDescriptors(selection));
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Column show/hide preferences
 // ---------------------------------------------------------------------------
@@ -704,13 +898,14 @@ function columnPrefs(columns, storageKey) {
 // ---------------------------------------------------------------------------
 
 // Filter keys cleared on tab switch.
-const _filterKeys = ['group_key', 'parent_id', 'status', 'sort_by', 'sort_dir'];
+const _filterKeys = ['group_key', 'parent_id', 'job_id', 'status', 'sort_by', 'sort_dir'];
 
 function readFiltersFromUrl() {
   const p = new URLSearchParams(location.search);
   return {
     groupKey: p.get('group_key') || '',
     parentId: p.get('parent_id') || '',
+    jobId: p.get('job_id') || '',
     status: p.get('status') || '',
     sortBy: p.get('sort_by') || '',
     sortDir: p.get('sort_dir') || '',
@@ -722,6 +917,7 @@ function writeFiltersToUrl(filters) {
   for (const k of _filterKeys) url.searchParams.delete(k);
   if (filters.groupKey) url.searchParams.set('group_key', filters.groupKey);
   if (filters.parentId) url.searchParams.set('parent_id', filters.parentId);
+  if (filters.jobId) url.searchParams.set('job_id', filters.jobId);
   if (filters.status) url.searchParams.set('status', filters.status);
   if (filters.sortBy) url.searchParams.set('sort_by', filters.sortBy);
   if (filters.sortDir) url.searchParams.set('sort_dir', filters.sortDir);
@@ -744,7 +940,7 @@ function queueJobsUrl(queue, status) {
 }
 
 // Anchor click guard: true if this is a plain left-click to handle as an SPA nav
-// (and preventDefault); false for modifier/middle clicks, which fall through to the
+// (and preventDefault). False for modifier/middle clicks, which fall through to the
 // href so the browser opens it in a new tab.
 function plainNavClick(e) {
   if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return false;

@@ -77,6 +77,7 @@ library testkit
   hs-source-dirs:  testkit
   exposed-modules: Arbiter.Worker.TestKit
   build-depends:
+    , aeson                >=2.0  && <2.3
     , arbiter-core         <0.2
     , arbiter-test-common
     , arbiter-worker

@@ -8,6 +8,8 @@ module Arbiter.Core.Sql.Jobs
   , jobSortColumnName
   , DLQSortColumn (..)
   , dlqSortColumnName
+  , ArchiveSortColumn (..)
+  , archiveSortColumnName
   , SortDir (..)
   , sortDirSql
   , throttledPredicateSQL
@@ -24,10 +26,12 @@ module Arbiter.Core.Sql.Jobs
   , dlqColumnNulls
   , buildJobsOrderBy
   , buildDLQOrderBy
+  , buildArchiveOrderBy
   , countDLQFilteredSQL
   , allJobColumns
   , allDLQColumns
   , jobColsExceptError
+  , jobColsExceptId
   , dlqCarriedCols
   , jobColumns
   , insertJobSQL
@@ -50,20 +54,31 @@ import Data.UUID.Types (UUID)
 import Data.UUID.Types qualified as UUID
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (codecColumns, dlqRowCodec, jobRowCodec)
+import Arbiter.Core.Admission (excludedAssignment)
+import Arbiter.Core.Codec
+  ( batchUnnest
+  , codecColumns
+  , dlqRowCodec
+  , insertColumns
+  , insertValues
+  , jobRowCodec
+  , writeColumnNames
+  )
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
   , jobQueueDLQTable
   , jobQueueTable
   )
-import Arbiter.Core.Job.Types (JobStatus, defaultMaxAttempts)
+import Arbiter.Core.Job.Types (JobStatus)
 
 data JobFilter
   = FilterGroupKey Text
   | FilterParentId Int64
   | FilterRootsOnly
   | FilterStatus JobStatus
+  | FilterId Int64
+  | FilterJobId Int64
   deriving stock (Eq, Show)
 
 -- | Sortable columns on the main jobs table. Closed enum so the SQL builder
@@ -116,6 +131,28 @@ dlqSortColumnName = \case
   DlqGroupKey -> "group_key"
   DlqParentId -> "parent_id"
   DlqLastAttemptedAt -> "last_attempted_at"
+
+-- | Sortable columns on the archive table. @ArchiveId@ is the archive primary
+-- key (distinct from the original job id, which is @ArchiveJobId@).
+data ArchiveSortColumn
+  = ArchiveId
+  | ArchiveCompletedAt
+  | ArchiveInsertedAt
+  | ArchiveJobId
+  | ArchiveAttempts
+  | ArchiveGroupKey
+  | ArchiveParentId
+  deriving stock (Bounded, Enum, Eq, Show)
+
+archiveSortColumnName :: ArchiveSortColumn -> Text
+archiveSortColumnName = \case
+  ArchiveId -> "id"
+  ArchiveCompletedAt -> "completed_at"
+  ArchiveInsertedAt -> "inserted_at"
+  ArchiveJobId -> "job_id"
+  ArchiveAttempts -> "attempts"
+  ArchiveGroupKey -> "group_key"
+  ArchiveParentId -> "parent_id"
 
 -- | Sort direction.
 data SortDir = SortAsc | SortDesc
@@ -244,30 +281,38 @@ dlqColumnNulls = \case
   DlqParentId -> NullsAsAbsent
   DlqLastAttemptedAt -> NullsAsMinimum
 
--- | Build the ORDER BY clause for the jobs table from a typed sort spec.
--- Defaults are @id DESC@. NULL placement is column-specific (see
--- 'jobColumnNulls'). A stable @id@ tie-breaker in the same direction as the
--- primary sort is appended when sorting by anything other than @id@.
-buildJobsOrderBy :: Maybe JobSortColumn -> Maybe SortDir -> Text
-buildJobsOrderBy mCol mDir =
-  let col = fromMaybe JsId mCol
-      dir = fromMaybe SortDesc mDir
-      dirText = sortDirSql dir
-      primaryNulls = nullsClause (jobColumnNulls col) dir
-      tieBreaker = if col == JsId then "" else ", id " <> dirText
-   in jobSortColumnName col <> " " <> dirText <> primaryNulls <> tieBreaker
+archiveColumnNulls :: ArchiveSortColumn -> NullsBehavior
+archiveColumnNulls = \case
+  ArchiveId -> NullsNotApplicable
+  ArchiveCompletedAt -> NullsNotApplicable
+  ArchiveInsertedAt -> NullsNotApplicable
+  ArchiveJobId -> NullsNotApplicable
+  ArchiveAttempts -> NullsNotApplicable
+  ArchiveGroupKey -> NullsAsAbsent
+  ArchiveParentId -> NullsAsAbsent
 
--- | Build the ORDER BY clause for the DLQ table. Defaults are
--- @failed_at DESC@. NULL semantics as in 'buildJobsOrderBy' but using
--- 'dlqColumnNulls'.
-buildDLQOrderBy :: Maybe DLQSortColumn -> Maybe SortDir -> Text
-buildDLQOrderBy mCol mDir =
-  let col = fromMaybe DlqFailedAt mCol
+-- | Build an ORDER BY clause from a typed sort spec. NULL placement is
+-- column-specific via @nullsFn@. A stable @id@ tie-breaker in the primary
+-- sort's direction is appended unless the sort column is @idCol@ itself.
+buildOrderBy :: (Eq a) => (a -> Text) -> (a -> NullsBehavior) -> a -> a -> Maybe a -> Maybe SortDir -> Text
+buildOrderBy nameFn nullsFn defCol idCol mCol mDir =
+  let col = fromMaybe defCol mCol
       dir = fromMaybe SortDesc mDir
       dirText = sortDirSql dir
-      primaryNulls = nullsClause (dlqColumnNulls col) dir
-      tieBreaker = if col == DlqId then "" else ", id " <> dirText
-   in dlqSortColumnName col <> " " <> dirText <> primaryNulls <> tieBreaker
+      tieBreaker = if col == idCol then "" else ", id " <> dirText
+   in nameFn col <> " " <> dirText <> nullsClause (nullsFn col) dir <> tieBreaker
+
+-- | ORDER BY for the jobs table. Defaults to @id DESC@.
+buildJobsOrderBy :: Maybe JobSortColumn -> Maybe SortDir -> Text
+buildJobsOrderBy = buildOrderBy jobSortColumnName jobColumnNulls JsId JsId
+
+-- | ORDER BY for the DLQ table. Defaults to @failed_at DESC@.
+buildDLQOrderBy :: Maybe DLQSortColumn -> Maybe SortDir -> Text
+buildDLQOrderBy = buildOrderBy dlqSortColumnName dlqColumnNulls DlqFailedAt DlqId
+
+-- | ORDER BY for the archive table. Defaults to @completed_at DESC@.
+buildArchiveOrderBy :: Maybe ArchiveSortColumn -> Maybe SortDir -> Text
+buildArchiveOrderBy = buildOrderBy archiveSortColumnName archiveColumnNulls ArchiveCompletedAt ArchiveId
 
 -- | Generic SQL for counting DLQ jobs with dynamic WHERE clause.
 countDLQFilteredSQL :: Text -> Text -> Text -> Text
@@ -288,6 +333,12 @@ allDLQColumns = codecColumns (dlqRowCodec "")
 jobColsExceptError :: Text
 jobColsExceptError = T.intercalate ", " $ filter (/= "last_error") (drop 1 allJobColumns)
 
+-- | All job read columns except @id@, comma-separated. Used for the archive
+-- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
+-- other read column is copied verbatim.
+jobColsExceptId :: Text
+jobColsExceptId = T.intercalate ", " (drop 1 allJobColumns)
+
 -- | Job columns carried through a DLQ round-trip: the read columns plus write-only rate_limit_cost.
 dlqCarriedCols :: Text
 dlqCarriedCols = jobColsExceptError <> ", rate_limit_cost"
@@ -298,15 +349,42 @@ jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
 
+-- | @DO UPDATE SET@ body for a replace-dedup upsert. Copies each writable column
+-- from the excluded row, then re-arms the replaced job for a fresh run.
+dedupUpdateSet :: Text
+dedupUpdateSet = T.intercalate ", " (copied <> rearm)
+  where
+    -- dedup_key is the conflict key. attempts and last_error are re-armed below.
+    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "last_error"]) writeColumnNames)
+    rearm =
+      [ "attempts = 0"
+      , "last_error = NULL"
+      , "updated_at = NOW()"
+      , "throttled_until = NULL"
+      , "last_attempted_at = NULL"
+      , "claimed_by = NULL"
+      ]
+
+-- | Guard: an existing row may be replaced only if idle and childless.
+replaceableGuard :: Text -> Text -> Text
+replaceableGuard tbl dlqTbl =
+  [text|
+    (${tbl}.attempts = 0
+      OR ${tbl}.not_visible_until IS NULL
+      OR ${tbl}.not_visible_until <= NOW()
+      OR ${tbl}.last_error IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
+      AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+  |]
+
 -- | Insert a job. Parameters bind the INSERT column list in order.
 insertJobSQL :: Text -> Text -> Text
 insertJobSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
-      dma = T.pack (show defaultMaxAttempts)
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (${insertColumns})
+        VALUES (${insertValues})
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
         RETURNING ${columns}
       |]
@@ -326,37 +404,13 @@ insertJobReplaceSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       columns = jobColumns Nothing
-      dma = T.pack (show defaultMaxAttempts)
+      guard = replaceableGuard tbl dlqTbl
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${dma}), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ${tbl} (${insertColumns})
+        VALUES (${insertValues})
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          payload = EXCLUDED.payload,
-          group_key = EXCLUDED.group_key,
-          attempts = 0,
-          last_error = NULL,
-          priority = EXCLUDED.priority,
-          dedup_strategy = EXCLUDED.dedup_strategy,
-          max_attempts = EXCLUDED.max_attempts,
-          updated_at = NOW(),
-          parent_id = EXCLUDED.parent_id,
-          parent_state = EXCLUDED.parent_state,
-          suspended = EXCLUDED.suspended,
-          not_visible_until = EXCLUDED.not_visible_until,
-          rate_limit_key = EXCLUDED.rate_limit_key,
-          rate_limit_prefix = EXCLUDED.rate_limit_prefix,
-          rate_limit_cost = EXCLUDED.rate_limit_cost,
-          concurrency_key = EXCLUDED.concurrency_key,
-          concurrency_prefix = EXCLUDED.concurrency_prefix,
-          throttled_until = NULL,
-          last_attempted_at = NULL,
-          claimed_by = NULL
-        WHERE (${tbl}.attempts = 0
-          OR ${tbl}.not_visible_until IS NULL
-          OR ${tbl}.not_visible_until <= NOW()
-          OR ${tbl}.last_error IS NOT NULL)
-          AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
-          AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+          ${dedupUpdateSet}
+        WHERE ${guard}
         RETURNING ${columns}
       |]
 
@@ -381,60 +435,19 @@ insertJobsBatchBase :: Text -> Text -> Text -> Text
 insertJobsBatchBase schema tableName returning =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
-      dma = T.pack (show defaultMaxAttempts)
+      guard = replaceableGuard tbl dlqTbl
    in [text|
-        INSERT INTO ${tbl} (payload, group_key, attempts, last_error, priority, dedup_key, dedup_strategy, max_attempts, parent_id, parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-        SELECT
-          payload, group_key, 0, NULL, priority, dedup_key, dedup_strategy, COALESCE(max_attempts, ${dma}), parent_id,
-          parent_state, suspended, not_visible_until, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix
+        INSERT INTO ${tbl} (${insertColumns})
+        SELECT ${insertColumns}
         FROM (
-          SELECT
-            unnest(?::jsonb[]) AS payload,
-            unnest(?::text[]) AS group_key,
-            unnest(?::int[]) AS priority,
-            unnest(?::text[]) AS dedup_key,
-            unnest(?::text[]) AS dedup_strategy,
-            unnest(?::int[]) AS max_attempts,
-            unnest(?::bigint[]) AS parent_id,
-            unnest(?::jsonb[]) AS parent_state,
-            unnest(?::boolean[]) AS suspended,
-            unnest(?::timestamptz[]) AS not_visible_until,
-            unnest(?::text[]) AS rate_limit_key,
-            unnest(?::text[]) AS rate_limit_prefix,
-            unnest(?::float8[]) AS rate_limit_cost,
-            unnest(?::text[]) AS concurrency_key,
-            unnest(?::text[]) AS concurrency_prefix
+          SELECT ${batchUnnest}
         ) src
         WHERE (src.parent_id IS NULL
             OR EXISTS (SELECT 1 FROM ${tbl} p WHERE p.id = src.parent_id))
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          payload = EXCLUDED.payload,
-          group_key = EXCLUDED.group_key,
-          attempts = 0,
-          last_error = NULL,
-          priority = EXCLUDED.priority,
-          dedup_strategy = EXCLUDED.dedup_strategy,
-          max_attempts = EXCLUDED.max_attempts,
-          updated_at = NOW(),
-          parent_id = EXCLUDED.parent_id,
-          parent_state = EXCLUDED.parent_state,
-          suspended = EXCLUDED.suspended,
-          not_visible_until = EXCLUDED.not_visible_until,
-          rate_limit_key = EXCLUDED.rate_limit_key,
-          rate_limit_prefix = EXCLUDED.rate_limit_prefix,
-          rate_limit_cost = EXCLUDED.rate_limit_cost,
-          concurrency_key = EXCLUDED.concurrency_key,
-          concurrency_prefix = EXCLUDED.concurrency_prefix,
-          throttled_until = NULL,
-          last_attempted_at = NULL,
-          claimed_by = NULL
+          ${dedupUpdateSet}
         WHERE EXCLUDED.dedup_strategy = 'replace'
-          AND (${tbl}.attempts = 0
-            OR ${tbl}.not_visible_until IS NULL
-            OR ${tbl}.not_visible_until <= NOW()
-            OR ${tbl}.last_error IS NOT NULL)
-          AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
-          AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
+          AND ${guard}
         ${returning}
       |]
 

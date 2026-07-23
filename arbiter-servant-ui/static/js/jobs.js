@@ -27,9 +27,11 @@ document.addEventListener('alpine:init', () => {
     total: 0,
     groupKeyFilter: '',
     parentIdFilter: '',
+    jobIdFilter: '',
     stateFilter: '',
     _appliedGroupKey: '',
     _appliedParentId: '',
+    _appliedJobId: '',
     childCounts: {},
     dlqChildCounts: {},
     expandedParents: {},
@@ -194,6 +196,7 @@ document.addEventListener('alpine:init', () => {
       writeFiltersToUrl({
         groupKey: this._appliedGroupKey,
         parentId: this._appliedParentId,
+        jobId: this._appliedJobId,
         status: this.stateFilter,
         sortBy: this.sortBy,
         sortDir: this.sortDir,
@@ -208,6 +211,8 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = f.groupKey;
         this.parentIdFilter = f.parentId;
         this._appliedParentId = f.parentId;
+        this.jobIdFilter = f.jobId;
+        this._appliedJobId = f.jobId;
         this.stateFilter = f.status;
         this.sortBy = f.sortBy;
         this.sortDir = f.sortDir;
@@ -258,6 +263,8 @@ document.addEventListener('alpine:init', () => {
       this._appliedGroupKey = '';
       this.parentIdFilter = '';
       this._appliedParentId = '';
+      this.jobIdFilter = '';
+      this._appliedJobId = '';
       this.offset = 0;
       this.expandedParents = {};
       this._expandSeq = {};
@@ -275,14 +282,16 @@ document.addEventListener('alpine:init', () => {
       if (!queue) return;
       const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
       const pid = filterOverrides?.parentId ?? this._appliedParentId;
+      const jid = filterOverrides?.jobId ?? this._appliedJobId;
       const startingPending = this.pendingChanges;
       await guardedLoad(this, 'Failed to load jobs', async (seq, isStale) => {
-        const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !pid && !gk;
+        const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !pid && !gk && !jid;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
           offset: this.offset,
           groupKey: gk || undefined,
           parentId: pid || undefined,
+          jobId: jid || undefined,
           status: this.stateFilter || undefined,
           rootsOnly,
           sortBy: this.sortBy || undefined,
@@ -292,6 +301,7 @@ document.addEventListener('alpine:init', () => {
         const jobs = data.jobs || [];
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
+        this._appliedJobId = jid;
         this.jobs = jobs;
         this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
@@ -483,7 +493,7 @@ document.addEventListener('alpine:init', () => {
         }
       }
 
-      // datetime-local is wall-clock in the browser's zone; send it as UTC ISO.
+      // datetime-local is wall-clock in the browser's zone. Send it as UTC ISO.
       let notVisibleUntil = null;
       if (this.insertNotVisibleUntil) {
         const d = new Date(this.insertNotVisibleUntil);

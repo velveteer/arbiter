@@ -107,6 +107,8 @@ cleanupData schemaName tableName conn = do
           <> ", "
           <> Schema.jobQueueDLQTable schemaName tableName
           <> ", "
+          <> Schema.jobQueueArchiveTable schemaName tableName
+          <> ", "
           <> Schema.jobQueueGroupsTable schemaName tableName
           <> ", "
           <> W.arbiterWorkersTable schemaName

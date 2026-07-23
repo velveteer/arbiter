@@ -4,11 +4,13 @@ module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job (..)
   , AdmissionKeys (..)
+  , AdmissionColumns (..)
   , JobRead
   , JobWrite
   , defaultJob
   , defaultGroupedJob
   , defaultMaxAttempts
+  , dayRetention
   , isRollup
 
     -- * Derived status
@@ -22,6 +24,7 @@ module Arbiter.Core.Job.Types
 
     -- * Deduplication
   , DedupKey (..)
+  , dedupParts
 
     -- * Observability
   , ObservabilityHooks (..)
@@ -93,6 +96,10 @@ data Job payload key q insertedAt adm = Job
   -- or operator-paused jobs.
   , claimedBy :: Maybe UUID
   -- ^ Worker pool UUID that last claimed this job.
+  , archiveFor :: Maybe Int32
+  -- ^ Retention in seconds for this job's completed-job archive entry.
+  -- @Just n@ archives the job on ack and keeps the entry for @n@ seconds.
+  -- @Nothing@ (the default) deletes on ack with no archive write.
   , admission :: adm
   -- ^ @()@ in 'JobWrite'. 'AdmissionKeys' in 'JobRead', stamped at enqueue from
   -- the payload's admission selectors.
@@ -108,12 +115,27 @@ data AdmissionKeys = AdmissionKeys
   }
   deriving stock (Eq, Generic, Show)
 
+-- | The writable admission columns, resolved from a payload at enqueue. The @key@
+-- and @prefix@ columns round-trip via 'AdmissionKeys'. @cost@ is write-only.
+data AdmissionColumns = AdmissionColumns
+  { acRateLimitKey :: Maybe Text
+  , acRateLimitPrefix :: Maybe Text
+  , acRateLimitCost :: Double
+  , acConcurrencyKey :: Maybe Text
+  , acConcurrencyPrefix :: Maybe Text
+  }
+  deriving stock (Eq, Generic, Show)
+
 -- | Default attempt limit stamped onto jobs whose 'maxAttempts' is unset.
 defaultMaxAttempts :: Int32
 defaultMaxAttempts = 10
 
+-- | 24h in seconds, a convenience value for 'archiveFor'.
+dayRetention :: Int32
+dayRetention = 86400
+
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
--- (an empty object on insert; the merged child results before a DLQ move).
+-- (an empty object on insert, the merged child results before a DLQ move).
 isRollup :: Job p k q t adm -> Bool
 isRollup = isJust . parentState
 
@@ -168,6 +190,7 @@ defaultJob p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , archiveFor = Nothing
     , admission = ()
     }
 
@@ -196,6 +219,7 @@ defaultGroupedJob gk p =
     , parentState = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , archiveFor = Nothing
     , admission = ()
     }
 
@@ -236,6 +260,12 @@ instance FromJSON DedupKey where
       "replace" -> pure $ ReplaceDuplicate key
       _ -> fail $ "Unknown dedup strategy: " <> show strategy
 
+-- | The @dedup_key@ and @dedup_strategy@ column values for a 'DedupKey'.
+dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
+dedupParts Nothing = (Nothing, Nothing)
+dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
+dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
+
 type ClaimTime = UTCTime
 type CurrentTime = UTCTime
 type StartTime = UTCTime
@@ -246,7 +276,7 @@ type BackoffDelay = NominalDiffTime
 -- | A set of callbacks invoked at key points in the job lifecycle.
 --
 -- Use these hooks to integrate with metrics, logging, or tracing systems.
--- Hooks are exception-safe; any exception thrown within a hook is caught
+-- Hooks are exception-safe. Any exception thrown within a hook is caught
 -- and ignored to prevent crashing the worker.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed

@@ -17,7 +17,6 @@ module Arbiter.Core.Codec
   , RowCodec
   , col
   , ncol
-  , pureVal
   , runCodec
   , codecColumns
 
@@ -30,9 +29,21 @@ module Arbiter.Core.Codec
   , parr
   , pnarr
 
+    -- * Bidirectional job write codec
+  , Codec
+  , cDecode
+  , cScalar
+  , cArray
+  , jobCodec
+  , writeColumnNames
+  , insertColumns
+  , insertValues
+  , batchUnnest
+
     -- * Job codecs
   , jobRowCodec
   , dlqRowCodec
+  , archiveRowCodec
   , countCodec
   , rateLimitPolicyViewCodec
   , rateLimitBucketCodec
@@ -50,9 +61,11 @@ module Arbiter.Core.Codec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
-import Data.Aeson (Value)
+import Data.Aeson (ToJSON (..), Value)
 import Data.Int (Int32, Int64)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 
@@ -60,7 +73,16 @@ import Arbiter.Core.Admission (splitPrefixedSuffix)
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView (..), ConcurrencyPolicyView (..))
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
-import Arbiter.Core.Job.Types (AdmissionKeys (..), DedupKey (..), Job (..), JobRead)
+import Arbiter.Core.Job.Types
+  ( AdmissionColumns (..)
+  , AdmissionKeys (..)
+  , DedupKey (..)
+  , Job (..)
+  , JobRead
+  , JobWrite
+  , dedupParts
+  , defaultMaxAttempts
+  )
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
@@ -94,10 +116,6 @@ col name c = liftAp (NotNull name c)
 -- | A nullable column.
 ncol :: Text -> Col a -> RowCodec (Maybe a)
 ncol name c = liftAp (Nullable name c)
-
--- | Inject a pure value (not read from the database).
-pureVal :: a -> RowCodec a
-pureVal = pure
 
 -- | Interpret a 'RowCodec' by providing a natural transformation
 -- from 'NullCol' to some 'Applicative'.
@@ -139,84 +157,193 @@ pnarr :: Col a -> [Maybe a] -> SomeParam
 pnarr c v = SomeParam (PNullArray c) v
 
 -- ---------------------------------------------------------------------------
+-- Bidirectional (profunctor) codec
+-- ---------------------------------------------------------------------------
+
+-- | A profunctor codec: write source @s@ to INSERT columns/params, decoded value @a@ back.
+data Codec s a = Codec
+  { cDecode :: RowCodec a
+  , cWrite :: [WriteCol s]
+  }
+
+-- | One writable column: its name, 'Col', and accessor. Split by nullability.
+data WriteCol s where
+  WCol :: Text -> Col a -> (s -> a) -> WriteCol s
+  WNCol :: Text -> Col a -> (s -> Maybe a) -> WriteCol s
+
+-- | Writable (column name, PostgreSQL type) pairs, in order.
+cColumns :: Codec s a -> [(Text, Text)]
+cColumns codec = map nameType (cWrite codec)
+  where
+    nameType (WCol name c _) = (name, pgType c)
+    nameType (WNCol name c _) = (name, pgType c)
+
+-- | Single-row parameters, one per column.
+cScalar :: Codec s a -> s -> Params
+cScalar codec s = map param (cWrite codec)
+  where
+    param (WCol _ c get) = pval c (get s)
+    param (WNCol _ c get) = pnul c (get s)
+
+-- | Batch parameters, one array per column.
+cArray :: Codec s a -> [s] -> Params
+cArray codec rows = map param (cWrite codec)
+  where
+    param (WCol _ c get) = parr c (map get rows)
+    param (WNCol _ c get) = pnarr c (map get rows)
+
+-- | Retarget a codec's write source.
+lmap :: (t -> s) -> Codec s a -> Codec t a
+lmap f (Codec d w) = Codec d (map retarget w)
+  where
+    retarget (WCol name c get) = WCol name c (get . f)
+    retarget (WNCol name c get) = WNCol name c (get . f)
+
+instance Functor (Codec s) where
+  fmap g (Codec d w) = Codec (fmap g d) w
+
+instance Applicative (Codec s) where
+  pure a = Codec (pure a) []
+  Codec df w1 <*> Codec dx w2 = Codec (df <*> dx) (w1 <> w2)
+
+-- | A read-write column bound to its own value.
+rw :: Text -> Col a -> Codec a a
+rw name c = Codec (col name c) [WCol name c id]
+
+-- | A nullable read-write column bound to its own value.
+rwN :: Text -> Col a -> Codec (Maybe a) (Maybe a)
+rwN name c = Codec (ncol name c) [WNCol name c id]
+
+-- | A read-only column: decoded, never written.
+ro :: RowCodec a -> Codec s a
+ro d = Codec d []
+
+-- | A write-only column: emits a parameter, reads no column. Attach with '<*'.
+wo :: Text -> Col a -> (s -> a) -> Codec s ()
+wo name c f = Codec (pure ()) [WCol name c f]
+
+-- | PostgreSQL type name for a scalar column, used for @unnest@ array casts.
+pgType :: Col a -> Text
+pgType = \case
+  CInt4 -> "int"
+  CInt8 -> "bigint"
+  CText -> "text"
+  CBool -> "boolean"
+  CTimestamptz -> "timestamptz"
+  CJsonb -> "jsonb"
+  CFloat8 -> "float8"
+  CUuid -> "uuid"
+
+-- ---------------------------------------------------------------------------
 -- Job codecs
 -- ---------------------------------------------------------------------------
 
-jobRowCodec :: Text -> RowCodec (JobRead Value)
-jobRowCodec queueName =
+-- | A job codec pinned to a @Value@ payload, for the decode and column-list
+-- projections that ignore the write source.
+type JobCodec a = Codec (JobWrite Value, AdmissionColumns) a
+
+-- | The bidirectional main-table job codec. 'cDecode' is 'jobRowCodec'. The write
+-- side turns a 'JobWrite' and its resolved 'AdmissionColumns' into the INSERT
+-- column list and parameters.
+jobCodec :: (ToJSON payload) => Text -> Codec (JobWrite payload, AdmissionColumns) (JobRead Value)
+jobCodec = jobCodecWith "id"
+
+-- | 'jobCodec' with the primary-key column named explicitly. The main table uses
+-- @id@. The DLQ and archive snapshots store it as @job_id@.
+jobCodecWith :: (ToJSON payload) => Text -> Text -> Codec (JobWrite payload, AdmissionColumns) (JobRead Value)
+jobCodecWith idColumn queueName =
   Job
-    <$> col "id" CInt8
-    <*> col "payload" CJsonb
-    <*> pureVal queueName
-    <*> ncol "group_key" CText
-    <*> col "inserted_at" CTimestamptz
-    <*> ncol "updated_at" CTimestamptz
-    <*> col "attempts" CInt4
-    <*> ncol "last_error" CText
-    <*> col "priority" CInt4
-    <*> ncol "last_attempted_at" CTimestamptz
-    <*> ncol "not_visible_until" CTimestamptz
-    <*> dedupKeyCodec
-    <*> ncol "max_attempts" CInt4
-    <*> ncol "parent_id" CInt8
-    <*> ncol "parent_state" CJsonb
-    <*> col "suspended" CBool
-    <*> ncol "claimed_by" CUuid
-    <*> admissionKeysCodec
+    <$> ro (col idColumn CInt8)
+    <*> lmap (toJSON . payload . fst) (rw "payload" CJsonb)
+    <*> pure queueName
+    <*> lmap (groupKey . fst) (rwN "group_key" CText)
+    <*> ro (col "inserted_at" CTimestamptz)
+    <*> ro (ncol "updated_at" CTimestamptz)
+    <*> lmap (attempts . fst) (rw "attempts" CInt4)
+    <*> lmap (lastError . fst) (rwN "last_error" CText)
+    <*> lmap (priority . fst) (rw "priority" CInt4)
+    <*> ro (ncol "last_attempted_at" CTimestamptz)
+    <*> lmap (notVisibleUntil . fst) (rwN "not_visible_until" CTimestamptz)
+    <*> dedupCodec
+    <*> lmap (Just . fromMaybe defaultMaxAttempts . maxAttempts . fst) (rwN "max_attempts" CInt4)
+    <*> lmap (parentId . fst) (rwN "parent_id" CInt8)
+    <*> lmap (parentState . fst) (rwN "parent_state" CJsonb)
+    <*> lmap (suspended . fst) (rw "suspended" CBool)
+    <*> ro (ncol "claimed_by" CUuid)
+    <*> lmap (archiveFor . fst) (rwN "archive_for" CInt4)
+    <*> lmap snd admissionCodec
 
-admissionKeysCodec :: RowCodec AdmissionKeys
-admissionKeysCodec = AdmissionKeys <$> rateLimitCodec <*> concurrencyCodec
+-- | Decoder for a main-table job row.
+jobRowCodec :: Text -> RowCodec (JobRead Value)
+jobRowCodec queueName = cDecode (jobCodec queueName :: JobCodec (JobRead Value))
 
-dedupKeyCodec :: RowCodec (Maybe DedupKey)
-dedupKeyCodec = toDedupKey <$> ncol "dedup_key" CText <*> ncol "dedup_strategy" CText
+dedupCodec :: Codec (JobWrite payload, AdmissionColumns) (Maybe DedupKey)
+dedupCodec =
+  toDedupKey
+    <$> lmap (fst . dedupParts . dedupKey . fst) (rwN "dedup_key" CText)
+    <*> lmap (snd . dedupParts . dedupKey . fst) (rwN "dedup_strategy" CText)
   where
     toDedupKey Nothing _ = Nothing
     toDedupKey (Just k) (Just "replace") = Just (ReplaceDuplicate k)
     toDedupKey (Just k) _ = Just (IgnoreDuplicate k)
 
+admissionCodec :: Codec AdmissionColumns AdmissionKeys
+admissionCodec =
+  AdmissionKeys
+    <$> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey acRateLimitKey acRateLimitPrefix
+    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey acConcurrencyKey acConcurrencyPrefix
+    <* wo "rate_limit_cost" CFloat8 acRateLimitCost
+
 -- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
 -- prefix columns, recovering the suffix by dropping the @prefix:@ part (so suffixes
--- containing @:@ survive).
-prefixedKeyCodec :: Text -> Text -> (Text -> Text -> k) -> RowCodec (Maybe k)
-prefixedKeyCodec keyCol prefixCol ctor = toKey <$> ncol keyCol CText <*> ncol prefixCol CText
+-- containing @:@ survive). @keyOf@ and @prefixOf@ project the two columns for writes.
+prefixedKeyCodec :: Text -> Text -> (Text -> Text -> k) -> (s -> Maybe Text) -> (s -> Maybe Text) -> Codec s (Maybe k)
+prefixedKeyCodec keyCol prefixCol ctor keyOf prefixOf =
+  toKey
+    <$> lmap keyOf (rwN keyCol CText)
+    <*> lmap prefixOf (rwN prefixCol CText)
   where
     toKey (Just key) (Just prefix) = Just (ctor prefix (splitPrefixedSuffix prefix key))
     toKey _ _ = Nothing
 
-rateLimitCodec :: RowCodec (Maybe RateLimitKey)
-rateLimitCodec = prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey
+-- | Writable job columns with PostgreSQL types, in insert order.
+jobWriteColumns :: [(Text, Text)]
+jobWriteColumns = cColumns (jobCodec "" :: JobCodec (JobRead Value))
 
-concurrencyCodec :: RowCodec (Maybe ConcurrencyKey)
-concurrencyCodec = prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey
+-- | Writable job column names, in insert order.
+writeColumnNames :: [Text]
+writeColumnNames = map fst jobWriteColumns
 
-dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
-dlqRowCodec queueName =
+-- | Writable INSERT column list, shared by the single and batch inserts.
+insertColumns :: Text
+insertColumns = T.intercalate ", " writeColumnNames
+
+-- | VALUES placeholders for a single-row insert, one per column.
+insertValues :: Text
+insertValues = T.intercalate ", " (map (const "?") writeColumnNames)
+
+-- | @unnest@ source list for a batch insert, one array cast per column.
+batchUnnest :: Text
+batchUnnest =
+  T.intercalate ", " ["unnest(?::" <> ty <> "[]) AS " <> name | (name, ty) <- jobWriteColumns]
+
+-- | Envelope codec for the DLQ/archive tables: @id@, a timestamp column, and the job snapshot (@job_id@ for @id@).
+jobEnvelopeCodec :: Text -> Text -> RowCodec (Int64, UTCTime, JobRead Value)
+jobEnvelopeCodec tsColumn queueName =
   (,,)
     <$> col "id" CInt8
-    <*> col "failed_at" CTimestamptz
-    <*> jobRowCodecWithJobId queueName
+    <*> col tsColumn CTimestamptz
+    <*> cDecode (jobCodecWith "job_id" queueName :: JobCodec (JobRead Value))
 
-jobRowCodecWithJobId :: Text -> RowCodec (JobRead Value)
-jobRowCodecWithJobId queueName =
-  Job
-    <$> col "job_id" CInt8
-    <*> col "payload" CJsonb
-    <*> pureVal queueName
-    <*> ncol "group_key" CText
-    <*> col "inserted_at" CTimestamptz
-    <*> ncol "updated_at" CTimestamptz
-    <*> col "attempts" CInt4
-    <*> ncol "last_error" CText
-    <*> col "priority" CInt4
-    <*> ncol "last_attempted_at" CTimestamptz
-    <*> ncol "not_visible_until" CTimestamptz
-    <*> dedupKeyCodec
-    <*> ncol "max_attempts" CInt4
-    <*> ncol "parent_id" CInt8
-    <*> ncol "parent_state" CJsonb
-    <*> col "suspended" CBool
-    <*> ncol "claimed_by" CUuid
-    <*> admissionKeysCodec
+dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
+dlqRowCodec = jobEnvelopeCodec "failed_at"
+
+-- | Archive envelope: the shared job snapshot plus the @result@ a completed root job stored.
+archiveRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value, Maybe Value)
+archiveRowCodec queueName =
+  (\(i, t, j) r -> (i, t, j, r))
+    <$> jobEnvelopeCodec "completed_at" queueName
+    <*> ncol "result" CJsonb
 
 countCodec :: RowCodec Int64
 countCodec = col "count" CInt8

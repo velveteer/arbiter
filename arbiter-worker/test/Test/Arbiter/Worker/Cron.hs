@@ -239,7 +239,7 @@ spec connStr = do
           fireBerlin = filter (matchesInTimezone tzBerlin sched) day
       length fireNy `shouldBe` 1
       length fireBerlin `shouldBe` 1
-      -- NY 09:00 EDT = 13:00 UTC; Berlin 09:00 CEST = 07:00 UTC. Different.
+      -- NY 09:00 EDT = 13:00 UTC. Berlin 09:00 CEST = 07:00 UTC. Different.
       fireNy `shouldNotBe` fireBerlin
 
     it "UTC default behavior unchanged when timezone is Nothing" $ do

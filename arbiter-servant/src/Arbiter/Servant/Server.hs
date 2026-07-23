@@ -27,7 +27,7 @@ import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
-import Arbiter.Core.Sql.Jobs (DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
+import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
@@ -80,6 +80,7 @@ import System.Timeout (timeout)
 
 import Arbiter.Servant.API
   ( ArbiterAPI
+  , ArchiveAPI (..)
   , ConcurrencyAPI (..)
   , CronAPI (..)
   , DLQAPI (..)
@@ -190,12 +191,13 @@ listJobsHandler
   -> Maybe Int
   -> Maybe Text
   -> Maybe Int64
+  -> Maybe Int64
   -> Bool
   -> Maybe JobStatus
   -> Maybe JobSortColumn
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mStatus mSortBy mSortDir = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -203,6 +205,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId rootsOnly mS
         catMaybes
           [ FilterGroupKey <$> mGroupKey
           , FilterParentId <$> mParentId
+          , FilterId <$> mJobId
           , FilterRootsOnly <$ guard rootsOnly
           , FilterStatus <$> mStatus
           ]
@@ -511,17 +514,19 @@ listDLQHandler
   -> Maybe Int
   -> Maybe Int
   -> Maybe Int64
+  -> Maybe Int64
   -> Maybe Text
   -> Maybe DLQSortColumn
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
-listDLQHandler tableName config mLimit mOffset mParentId mGroupKey mSortBy mSortDir = do
+listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
       filters =
         catMaybes
           [ FilterParentId <$> mParentId
+          , FilterJobId <$> mJobId
           , FilterGroupKey <$> mGroupKey
           ]
 
@@ -593,6 +598,103 @@ deleteDLQBatchHandler tableName config (BatchDeleteRequest dlqIds) = do
   rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteDLQJobsBatch schemaName tableName dlqIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
+-- | Archive API handler for a specific table
+archiveServer
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> ArchiveAPI payload (AsServerT Handler)
+archiveServer table config =
+  ArchiveAPI
+    { listArchive = listArchiveHandler @registry @payload table config
+    , reEnqueueArchive = reEnqueueArchiveHandler @registry @payload table config
+    , deleteArchive = deleteArchiveHandler @registry table config
+    , deleteArchiveBatch = deleteArchiveBatchHandler @registry table config
+    }
+
+-- | List archived jobs with pagination and composable filters
+listArchiveHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Maybe Int
+  -> Maybe Int
+  -> Maybe Int64
+  -> Maybe Int64
+  -> Maybe Text
+  -> Maybe ArchiveSortColumn
+  -> Maybe SortDir
+  -> Handler (ArchiveResponse payload)
+listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortBy mSortDir = do
+  let (limit, offset) = validatePagination 50 mLimit mOffset
+      env = serverEnv config
+      schemaName = schema env
+      filters =
+        catMaybes
+          [ FilterParentId <$> mParentId
+          , FilterJobId <$> mJobId
+          , FilterGroupKey <$> mGroupKey
+          ]
+
+  (archived, total) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+    j <- Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset
+    c <- Ops.countArchiveFiltered schemaName tableName filters
+    pure (j, c)
+
+  pure $
+    ArchiveResponse
+      { archiveJobs = map ApiArchiveJob archived
+      , archiveTotal = fromIntegral total
+      , archiveOffset = offset
+      , archiveLimit = limit
+      }
+
+-- | Re-enqueue an archived job as a fresh job. 404 if the archive row is gone.
+reEnqueueArchiveHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> Handler NoContent
+reEnqueueArchiveHandler tableName config archiveId = do
+  let env = serverEnv config
+      schemaName = schema env
+  mJob <- liftIO $ runSimpleDb env $ Ops.reEnqueueFromArchive @_ @payload schemaName tableName archiveId
+  case mJob of
+    Just _ -> pure NoContent
+    Nothing -> throwError err404 {errBody = "Archived job not found"}
+
+-- | Purge one archived job by its archive primary key.
+deleteArchiveHandler
+  :: forall registry
+   . Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> Handler NoContent
+deleteArchiveHandler tableName config archiveId = do
+  let env = serverEnv config
+      schemaName = schema env
+  rowsAffected <- liftIO $ runSimpleDb env $ Ops.deleteArchiveJob schemaName tableName archiveId
+  if rowsAffected > 0
+    then pure NoContent
+    else throwError err404 {errBody = "Archived job not found"}
+
+-- | Bulk-purge archived jobs by archive primary key.
+deleteArchiveBatchHandler
+  :: forall registry
+   . Text
+  -> ArbiterServerConfig registry
+  -> BatchDeleteRequest
+  -> Handler BatchDeleteResponse
+deleteArchiveBatchHandler tableName config (BatchDeleteRequest archiveIds) = do
+  let env = serverEnv config
+      schemaName = schema env
+  rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
+  pure $ BatchDeleteResponse {deleted = rowsDeleted}
+
 -- | Stats API handler for a specific table
 statsServer
   :: forall registry
@@ -647,6 +749,7 @@ tableServer table config =
   TableAPI
     { jobs = jobsServer @registry @payload table config
     , dlq = dlqServer @registry @payload table config
+    , archive = archiveServer @registry @payload table config
     , stats = statsServer @registry table config
     }
 

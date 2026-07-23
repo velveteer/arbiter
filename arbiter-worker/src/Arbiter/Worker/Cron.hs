@@ -152,7 +152,9 @@ data CronJob payload = CronJob
 -- @
 -- let Right cj = cronJob "nightly-report" "0 3 * * *" AllowOverlap
 --       (\\kind tick -> (defaultJob (GenerateReport tick))
---          { priority = case kind of Replay -> 10; Live -> 0 })
+--          { priority = case kind of
+--              Replay -> 10
+--              Live -> 0 })
 -- in cj { backfill = Backfill 86400 }  -- replay up to 24 hours
 -- @
 --
