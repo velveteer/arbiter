@@ -35,6 +35,21 @@ import Arbiter.Simple
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
+import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
+import Arbiter.Worker.Config
+  ( WorkerConfig (..)
+  , ackAll
+  , ackAllWith
+  , ackWith
+  , defaultBatchedResultWorkerConfig
+  , defaultBatchedWorkerConfig
+  , getListenerReady
+  , getWorkerState
+  , shutdownWorker
+  , transactionalWorkerConfig
+  )
+import Arbiter.Worker.Logger (silentLogConfig)
+import Arbiter.Worker.WorkerState (WorkerState (..))
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
@@ -78,22 +93,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
-import Arbiter.Worker.Config
-  ( WorkerConfig (..)
-  , ackAll
-  , ackAllWith
-  , ackWith
-  , defaultBatchedResultWorkerConfig
-  , defaultBatchedWorkerConfig
-  , getListenerReady
-  , getWorkerState
-  , shutdownWorker
-  , transactionalWorkerConfig
-  )
-import Arbiter.Worker.Logger (silentLogConfig)
 import Arbiter.Worker.TestKit (workerSpec)
-import Arbiter.Worker.WorkerState (WorkerState (..))
 
 type WorkerTestRegistry = '[ '("arbiter_worker_test", WorkerTestPayload)]
 

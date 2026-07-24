@@ -64,7 +64,7 @@ test-suite arbiter-orville-tests
     , arbiter-orville
     , arbiter-test-common
     , arbiter-worker
-    , arbiter-worker:testkit
+    , arbiter-worker-testkit
     , base
     , bytestring
     , exceptions

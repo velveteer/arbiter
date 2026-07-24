@@ -8,7 +8,7 @@ on:
         required: true
 
 env:
-  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui
 
 jobs:
   promote:
@@ -30,7 +30,9 @@ jobs:
         run: |
           for pkg in $RELEASE_PACKAGES; do
             cabal sdist $pkg
-            tarball=$(find dist-newstyle/sdist -name "${pkg}-*.tar.gz" | head -1)
+            version=$(awk '/^version:/ { print $2; exit }' "$pkg/$pkg.cabal")
+            tarball="dist-newstyle/sdist/${pkg}-${version}.tar.gz"
+            test -f "$tarball" || { echo "No sdist at $tarball"; exit 1; }
             echo "Promoting $tarball..."
             cabal upload --publish --username="$HACKAGE_USERNAME" --password="$HACKAGE_PASSWORD" "$tarball"
           done

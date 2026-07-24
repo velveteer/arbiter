@@ -20,6 +20,9 @@ import Arbiter.Simple
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, setupOnce)
+import Arbiter.Worker (runWorkerPool)
+import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
+import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
@@ -32,9 +35,6 @@ import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Test.Hspec (Spec, beforeAll, describe, it, shouldBe)
 import UnliftIO.Async (withAsync)
 
-import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 import Arbiter.Worker.TestKit (listenerSpec)
 
 type ListenTestRegistry = '[ '("arbiter_worker_listen_test", WorkerTestPayload)]

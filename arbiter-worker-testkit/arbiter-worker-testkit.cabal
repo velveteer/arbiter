@@ -1,12 +1,15 @@
 cabal-version:   3.0
-name:            arbiter-hasql
+name:            arbiter-worker-testkit
 version:         0.1.0.0
-synopsis:        Hasql backend for arbiter
-description:     Hasql backend for arbiter.
+synopsis:        Backend-parameterized worker-pool test suite for arbiter
+description:
+  Reusable hspec specs that exercise the arbiter worker pool against any
+  MonadArbiter backend, instantiated by each backend's own test suite.
+
 license:         MIT
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
-category:        Database
+category:        Testing
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
 homepage:        https://github.com/velveteer/arbiter
@@ -29,52 +32,44 @@ common shared-properties
 library
   import:          shared-properties
   hs-source-dirs:  src
-  exposed-modules:
-    Arbiter.Hasql
-    Arbiter.Hasql.Compat
-    Arbiter.Hasql.Decode
-    Arbiter.Hasql.Encode
-    Arbiter.Hasql.HasqlDb
-    Arbiter.Hasql.MonadArbiter
-
+  exposed-modules: Arbiter.Worker.TestKit
   build-depends:
-    , arbiter-core      <0.2
-    , base              >=4.14 && <5
-    , bytestring        >=0.10 && <0.13
-    , exceptions        >=0.10 && <0.11
-    , hasql             >=1.9  && <1.11
-    , mtl               >=2.2  && <2.4
-    , postgresql-libpq  >=0.10 && <0.12
-    , resource-pool     >=0.4  && <0.6
-    , text              >=1.2  && <2.2
-    , transformers      >=0.5  && <0.7
-    , unliftio          >=0.2  && <0.3
+    , aeson              >=2.0  && <2.3
+    , arbiter-core       <0.2
+    , arbiter-worker     <0.2
+    , base               >=4.14 && <5
+    , bytestring         >=0.10 && <0.13
+    , hspec              >=2.0  && <2.12
+    , postgresql-simple  >=0.6  && <0.8
+    , text               >=1.2  && <2.2
+    , unliftio           >=0.2  && <0.3
 
-test-suite arbiter-hasql-tests
+test-suite arbiter-worker-testkit-tests
   import:         shared-properties
   type:           exitcode-stdio-1.0
   hs-source-dirs: test
   main-is:        Spec.hs
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   other-modules:
-    Test.Arbiter.Hasql.Concurrency
-    Test.Arbiter.Hasql.ConcurrencyLimit
-    Test.Arbiter.Hasql.Operations
-    Test.Arbiter.Hasql.RateLimit
-    Test.Arbiter.Hasql.StateMachine
-    Test.Arbiter.Hasql.TestHelpers
-    Test.Arbiter.Hasql.Worker
+    Test.Arbiter.Worker
+    Test.Arbiter.Worker.MultiQueueListener
+    Test.Arbiter.Worker.SharedListener
 
   build-depends:
     , aeson
     , arbiter-core            <0.2
-    , arbiter-hasql
+    , arbiter-simple
     , arbiter-test-common
+    , arbiter-worker
     , arbiter-worker-testkit
     , base
     , bytestring
-    , hasql
-    , hspec                   >=2.0 && <2.12
+    , containers
+    , directory
+    , hspec
     , postgresql-simple
     , resource-pool
     , text
+    , time
+    , unliftio
+    , uuid

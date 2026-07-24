@@ -3,20 +3,15 @@
 import Arbiter.Test.Config (getTestConnectionString)
 import Test.Hspec
 
-import Test.Arbiter.Worker qualified as Worker
 import Test.Arbiter.Worker.Concurrency qualified as Concurrency
 import Test.Arbiter.Worker.ConnectionRecovery qualified as ConnRecovery
 import Test.Arbiter.Worker.Cron qualified as Cron
-import Test.Arbiter.Worker.MultiQueueListener qualified as MultiQueueListener
 import Test.Arbiter.Worker.PoolSizing qualified as PoolSizing
-import Test.Arbiter.Worker.SharedListener qualified as SharedListener
 
 main :: IO ()
 main = do
   connStr <- getTestConnectionString
   hspec $ do
-    describe "Worker Pool Integration Tests" $
-      Worker.spec connStr
     describe "Concurrency & Exception Safety" $
       Concurrency.spec connStr
     describe "Connection Recovery" $
@@ -25,7 +20,3 @@ main = do
       Cron.spec connStr
     describe "Pool Sizing" $
       PoolSizing.spec connStr
-    describe "Shared Listener" $
-      SharedListener.spec connStr
-    describe "Multi-Queue Shared Listener" $
-      MultiQueueListener.spec connStr

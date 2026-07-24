@@ -35,9 +35,23 @@ import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (JobHandler, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Worker (runWorkerPool)
+import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
+import Arbiter.Worker.Config
+  ( BatchCallbacks
+  , WorkerConfig (..)
+  , ack
+  , ackAll
+  , cancelBranch
+  , cancelTree
+  , defaultBatchedWorkerConfig
+  , failPermanent
+  , failRetry
+  , nack
+  , transactionalWorkerConfig
+  )
 import Control.Concurrent (threadDelay)
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
@@ -56,22 +70,6 @@ import Database.PostgreSQL.Simple.Types (Identifier (..))
 import Test.Hspec
 import UnliftIO (MonadUnliftIO, atomically, bracket)
 import UnliftIO.Async (withAsync)
-
-import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config
-  ( BatchCallbacks
-  , WorkerConfig (..)
-  , ack
-  , ackAll
-  , cancelBranch
-  , cancelTree
-  , defaultBatchedWorkerConfig
-  , failPermanent
-  , failRetry
-  , nack
-  , transactionalWorkerConfig
-  )
 
 -- | Build a worker-pool test suite for the given 'MonadArbiter' runner.
 --
@@ -1593,3 +1591,16 @@ notifyChannel :: ByteString -> Text -> IO ()
 notifyChannel connStr chan =
   bracket (connectPostgreSQL connStr) close $ \conn ->
     void $ PG.execute conn "NOTIFY ?" (Only (Identifier chan))
+
+-- | Poll every 100 ms until the predicate returns 'True'.
+-- Fails with 'expectationFailure' after @timeoutMs@ milliseconds.
+waitUntil :: (HasCallStack) => Int -> IO Bool -> IO ()
+waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
+  where
+    go :: (HasCallStack) => Int -> IO ()
+    go 0 = expectationFailure "waitUntil: timed out waiting for condition"
+    go n = do
+      ok <- check
+      unless ok $ do
+        threadDelay 100_000
+        go (n - 1)

@@ -2,6 +2,7 @@ packages:
   arbiter-core
   arbiter-migrations
   arbiter-worker
+  arbiter-worker-testkit
   arbiter-simple
   arbiter-hasql
   arbiter-orville
