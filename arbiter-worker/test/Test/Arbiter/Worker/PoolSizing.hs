@@ -52,8 +52,8 @@ spec connStr =
       it "sizes the pool for the workers and processes jobs" $ do
         cleanup connStr
         ref <- newIORef (0 :: Int)
-        let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
+        let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload (Maybe [Text])
+            handler _conn _job = liftIO (atomicModifyIORef' ref $ \n -> (n + 1, ())) >> pure mempty
         config <- transactionalWorkerConfig 3 handler
         let pools = [namedWorkerPool config {pollInterval = 0.2, jitter = NoJitter}]
         poolCfg <- poolConfigForWorkers pools

@@ -210,7 +210,7 @@ flakyGate onAck job
 
 -- | Batched handler body: failRetry the flaky-first jobs, ack the rest, and
 -- return the acked count for throughput accounting.
-flakyBatch :: (Monad m) => BatchCallbacks m BenchPayload () -> NonEmpty (JobRead BenchPayload) -> m Int
+flakyBatch :: (Monad m) => BatchCallbacks m BenchPayload -> NonEmpty (JobRead BenchPayload) -> m Int
 flakyBatch cb jobs = do
   let (toFail, toAck) = partition isFlakyFirst (toList jobs)
   traverse_ (\job -> failRetry cb job "bench-induced backoff") toFail

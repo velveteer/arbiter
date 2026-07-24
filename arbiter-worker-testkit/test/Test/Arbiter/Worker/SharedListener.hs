@@ -70,8 +70,8 @@ dedicatedListenerSpec connStr =
       pool <- newPool $ setNumStripes (Just 1) $ defaultPoolConfig (connectPostgreSQL connStr) close 60 1
       env <- useDedicatedListener connStr =<< createSimpleEnvWithPool (Proxy @ListenTestRegistry) pool testSchema
       ref <- newIORef (0 :: Int)
-      let handler :: JobHandler (SimpleDb ListenTestRegistry IO) WorkerTestPayload ()
-          handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
+      let handler :: JobHandler (SimpleDb ListenTestRegistry IO) WorkerTestPayload (Maybe [Text])
+          handler _conn _job = liftIO (atomicModifyIORef' ref $ \n -> (n + 1, ())) >> pure mempty
       config <- transactionalWorkerConfig 1 handler
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
       withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do

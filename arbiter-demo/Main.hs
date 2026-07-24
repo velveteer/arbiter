@@ -12,6 +12,7 @@ module Main (main) where
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
+import Arbiter.Core.JobResult (HasJobResult (..))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
@@ -62,17 +63,17 @@ import System.Posix.Signals qualified as Signals
 data DemoPayload
   = TestMessage Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 data EmailPayload
   = SendEmail Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 data NotificationPayload
   = PushNotification Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 -- | Pipeline payload for the rollup demo.
 --
@@ -83,6 +84,10 @@ data PipelinePayload
   | AggregateResults Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+-- Chunk jobs contribute their lines, the finalizer merges them.
+instance HasJobResult PipelinePayload where
+  type ResultOf PipelinePayload = [Text]
 
 -- | Demo registry with multiple queues
 type DemoRegistry =
@@ -251,7 +256,7 @@ main = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
-mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload ())
+mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
   cfg <- transactionalWorkerConfig 5 handler
   pure
@@ -271,7 +276,7 @@ mkDemoWorker = do
             (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
       ]
 
-mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload ())
+mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload)
 mkEmailWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -291,7 +296,7 @@ mkEmailWorker = do
             (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
       ]
 
-mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload ())
+mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload)
 mkNotifWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -315,7 +320,7 @@ mkNotifWorker = do
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
-mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload [Text])
+mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
   cfg <- transactionalWorkerConfig 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}

@@ -4,6 +4,7 @@
 
 module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
+import Arbiter.Core.JobResult (HasJobResult (..))
 import Arbiter.Test.Setup (addQueueTable, setupOnce)
 import Arbiter.Worker.TestKit (workerSpec)
 import Arbiter.Worker.TestKit qualified as TestKit
@@ -31,6 +32,9 @@ data HasqlWorkerTestPayload
   | FailingTask Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+instance HasJobResult HasqlWorkerTestPayload where
+  type ResultOf HasqlWorkerTestPayload = Maybe [Text]
 
 type HasqlWorkerTestRegistry = '[ '("arbiter_hasql_worker_test", HasqlWorkerTestPayload)]
 
@@ -77,11 +81,11 @@ mqTableB = "mqh_listen_b"
 
 newtype MqAPayload = MqAPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 newtype MqBPayload = MqBPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 type HasqlMultiQRegistry =
   '[ '("mqh_listen_a", MqAPayload)

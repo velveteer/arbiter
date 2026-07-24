@@ -55,9 +55,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "processes jobs inserted before and after a connection kill" $ \env -> do
         completedRef <- newIORef (0 :: Int)
 
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text])
             handler _conn _job = do
               liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
+              pure mempty
 
         -- Insert 3 jobs before the kill
         forM_ [1 :: Int .. 3] $ \i ->
@@ -106,7 +107,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         completedRef <- newIORef (0 :: Int)
         killOnceRef <- newIORef True
 
-        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text])
             handler conn job = do
               case payload job of
                 SlowTask _ -> do
@@ -121,6 +122,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 -- The next DB operation on conn will fail
                 _ -> pure ()
               liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
+              pure mempty
 
         -- Insert the slow job that will get its connection killed
         runSimpleDb env $

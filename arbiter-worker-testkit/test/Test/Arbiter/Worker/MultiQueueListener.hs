@@ -5,6 +5,7 @@
 -- | Multi-queue shared-listener tests on the postgresql-simple backend.
 module Test.Arbiter.Worker.MultiQueueListener (spec) where
 
+import Arbiter.Core.JobResult (HasJobResult)
 import Arbiter.Simple (createSimpleEnv, destroySimpleEnv, runSimpleDb)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Data.Aeson (FromJSON, ToJSON)
@@ -19,11 +20,11 @@ import Arbiter.Worker.TestKit (multiQueueListenerSpec)
 
 newtype QueueAPayload = QueueAPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 newtype QueueBPayload = QueueBPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 type MultiQRegistry =
   '[ '("mq_listen_a", QueueAPayload)

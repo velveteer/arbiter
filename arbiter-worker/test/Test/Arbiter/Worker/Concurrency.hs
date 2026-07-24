@@ -15,6 +15,7 @@ import Arbiter.Core.Job.Types
   , ObservabilityHooks (..)
   , defaultJob
   )
+import Arbiter.Core.JobResult (HasJobResult)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Simple (SimpleDb, createSimpleEnvWithPool, runSimpleDb)
@@ -48,7 +49,7 @@ data WorkerConcurrencyTestPayload
   | FailingTask Int
   | SlowTask Int
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 -- | Local test registry
 type WorkerConcurrencyTestRegistry = '[ '("arbiter_worker_concurrency_test", WorkerConcurrencyTestPayload)]

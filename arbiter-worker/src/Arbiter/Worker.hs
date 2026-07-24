@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Entry point for running a worker pool that fetches and executes jobs.
@@ -18,7 +19,7 @@ module Arbiter.Worker
   , poolConfigForWorkers
 
     -- * Job Result
-  , JobResult (..)
+  , module Arbiter.Core.JobResult
 
     -- * Rollup Child Results
   , childResults
@@ -63,6 +64,7 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types qualified as Job
+import Arbiter.Core.JobResult
 import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
@@ -74,9 +76,7 @@ import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
-import Data.Aeson qualified as Aeson
-import Data.Bifunctor (second)
+import Data.Aeson (toJSON)
 import Data.Foldable (fold, foldMap', for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
@@ -153,35 +153,6 @@ import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
 
 -- ---------------------------------------------------------------------------
--- Job Result
--- ---------------------------------------------------------------------------
-
--- | Handler result types. @()@ is fire-and-forget. any @(ToJSON a, FromJSON a)@
--- from a job with a parent is stored in the results table and decoded when read
--- by a rollup finalizer. A root job's result is stored on its archive row, if archived.
-class JobResult a where
-  encodeJobResult :: a -> Maybe Value
-  decodeJobResult :: Value -> Either Text a
-
-instance JobResult () where
-  encodeJobResult _ = Nothing
-  decodeJobResult _ = Right ()
-
-decodeJobResultAeson :: (FromJSON a) => Value -> Either Text a
-decodeJobResultAeson v = case Aeson.fromJSON v of
-  Aeson.Success a -> Right a
-  Aeson.Error err -> Left (T.pack err)
-
-instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
-  encodeJobResult = Just . toJSON
-  decodeJobResult = decodeJobResultAeson
-
--- | A @Maybe@ result is optional: @Nothing@ stores nothing, @Just x@ stores @x@.
-instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
-  encodeJobResult = fmap toJSON
-  decodeJobResult = decodeJobResultAeson
-
--- ---------------------------------------------------------------------------
 -- Multi-Queue Workers
 -- ---------------------------------------------------------------------------
 
@@ -196,28 +167,28 @@ instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
 -- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
-  = forall registry payload result.
+  = forall registry payload.
   ( Arb.RegistryAdmissionPolicies registry
-  , JobResult result
+  , HasJobResult payload
   , QueueOperation m registry payload
   , RegistryTables registry
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
   -- ^ Queue name from the type-level registry
-  , workerPoolConfig :: WorkerConfig m payload result
+  , workerPoolConfig :: WorkerConfig m payload
   -- ^ The worker configuration
   }
 
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
-  :: forall m registry payload result
+  :: forall m registry payload
    . ( Arb.RegistryAdmissionPolicies registry
-     , JobResult result
+     , HasJobResult payload
      , QueueOperation m registry payload
      , RegistryTables registry
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
@@ -289,14 +260,14 @@ poolConfigForWorkers pools = do
 
 -- | Starts a worker pool with a dispatcher and N worker threads.
 runWorkerPool
-  :: forall m registry payload result
+  :: forall m registry payload
    . ( Arb.RegistryAdmissionPolicies registry
-     , JobResult result
+     , HasJobResult payload
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
@@ -374,14 +345,14 @@ runWorkerPool config = do
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool and never gates startup.
-publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload result -> STM Bool -> m ()
+publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload -> STM Bool -> m ()
 publishListenerReady config ready =
   atomically $ do
     ready >>= checkSTM
     writeTVar (listenerReadyVar config) True
 
 -- | Remove the liveness file when the pool exits, after the drain.
-withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
+withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload -> ContT r m ()
 withLivenessFile config = case livenessFile config of
   Nothing -> pure ()
   Just path -> ContT $ \k ->
@@ -392,7 +363,7 @@ withLivenessFile config = case livenessFile config of
 
 -- | Re-insert the worker's registry row from the config + schema/queue.
 -- Returns the effective paused state so the caller can seed 'pauseVar'.
-registerSelf :: (MonadArbiter m) => WorkerConfig n payload result -> SchemaName -> Text -> m (Maybe Bool)
+registerSelf :: (MonadArbiter m) => WorkerConfig n payload -> SchemaName -> Text -> m (Maybe Bool)
 registerSelf config schemaName queueName =
   Ops.registerWorker
     schemaName
@@ -407,7 +378,7 @@ registerSelf config schemaName queueName =
 -- writes are best-effort and logged on failure.
 shutdownPool
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> SchemaName
   -> TBQueue a
   -> TVar Int
@@ -469,7 +440,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
 -- the row.
 heartbeatLoop
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> SchemaName
   -> Text
   -- ^ Queue name (used when the row needs re-registering).
@@ -520,12 +491,12 @@ warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (display
 
 -- | Main loop for a single worker thread.
 workerLoop
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
-     , JobResult result
+  :: forall m registry payload
+   . ( HasJobResult payload
+     , JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
@@ -584,7 +555,7 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
 -- Decode failures appear as @Left decodeError@ - the child succeeded but
 -- its result JSON doesn't match the expected type.
 readChildResults
-  :: (JobResult a, MonadArbiter m)
+  :: (DecodeJobResult a, MonadArbiter m)
   => Text
   -> Job.JobRead payload
   -> m (Map.Map Int64 (Either Text a), Map.Map Int64 T.Text)
@@ -596,12 +567,12 @@ readChildResults schemaName job = do
   pure (merged, dlqFailures)
 
 processJobsWithRetry
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
-     , JobResult result
+  :: forall m registry payload
+   . ( HasJobResult payload
+     , JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> NonEmpty (Job.JobRead payload)
   -> m ()
 processJobsWithRetry config jobs = do
@@ -627,9 +598,6 @@ processJobsWithRetry config jobs = do
         withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
-      ackOne j = do
-        withDbTransaction $ ackJobOrSkip j
-        finalize j
       ackOneWith j r = do
         withDbTransaction $ do
           ackJobOrSkip j
@@ -640,7 +608,7 @@ processJobsWithRetry config jobs = do
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, mr) -> when (isAcked ackedSet j) $ traverse_ (storeJobResult schemaName j) mr
+          for_ pairs $ \(j, r) -> when (isAcked ackedSet j) $ storeJobResult schemaName j r
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -651,10 +619,8 @@ processJobsWithRetry config jobs = do
         traverse_ finalize done
       callbacks =
         BatchCallbacks
-          { ack = ackOne
-          , ackWith = ackOneWith
-          , ackAll = \js -> ackBatch (map (\j -> (j, Nothing)) js)
-          , ackAllWith = \pairs -> ackBatch (map (second Just) pairs)
+          { ackWith = ackOneWith
+          , ackAllWith = ackBatch
           , failRetry = failAs (Retryable . JobRetryableException)
           , failPermanent = failAs (Permanent . JobPermanentException)
           , cancelBranch = failAs (BranchCancel . BranchCancelException)
@@ -675,7 +641,7 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @result handler job
+            handlerResult <- runHandlerWithConnection @_ @_ @(ResultOf payload) handler job
             ackJobOrSkip job
             storeJobResult schemaName job handlerResult
           finalize job
@@ -687,9 +653,9 @@ processJobsWithRetry config jobs = do
 -- | Interpret a finished batch: warn when the handler left jobs unfinalized,
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
-  :: forall m registry payload result
+  :: forall m registry payload
    . (JobOperation m registry payload, MonadUnliftIO m)
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> Job.ObservabilityHooks m payload
   -> UTCTime
   -> UTCTime
@@ -727,9 +693,9 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m)
+  :: (DecodeJobResult (ResultOf payload), HasArbiterSchema m registry, MonadArbiter m)
   => Job.JobRead payload
-  -> m (Map.Map Int64 (Either Text result), Map.Map Int64 T.Text)
+  -> m (Map.Map Int64 (Either Text (ResultOf payload)), Map.Map Int64 T.Text)
 childResults job = do
   schemaName <- getSchema
   readChildResults schemaName job
@@ -737,9 +703,13 @@ childResults job = do
 -- | 'childResults' with the child results 'Monoid'-merged (decode failures
 -- contribute 'mempty').
 mergedChildResults
-  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m, Monoid result)
+  :: ( DecodeJobResult (ResultOf payload)
+     , HasArbiterSchema m registry
+     , MonadArbiter m
+     , Monoid (ResultOf payload)
+     )
   => Job.JobRead payload
-  -> m (result, Map.Map Int64 T.Text)
+  -> m (ResultOf payload, Map.Map Int64 T.Text)
 mergedChildResults job = do
   (results, dlqFailures) <- childResults job
   pure (mergeChildResults results, dlqFailures)
@@ -750,7 +720,7 @@ mergeChildResults = foldMap' fold
 
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult
-  :: (JobResult result, MonadArbiter m)
+  :: (EncodeJobResult result, MonadArbiter m)
   => Text
   -> Job.JobRead payload
   -> result
@@ -792,11 +762,11 @@ classifyException e
 
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
-  :: forall m registry payload result
+  :: forall m registry payload
    . ( JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> Job.ObservabilityHooks m payload
   -> SomeException
   -> Int32

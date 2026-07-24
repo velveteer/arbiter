@@ -6,6 +6,7 @@
 -- and multiple queues sharing one env's dedicated LISTEN connection.
 module Test.Arbiter.Orville.Listener (listenerSpec, multiQueueSpec) where
 
+import Arbiter.Core.JobResult (HasJobResult)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Arbiter.Worker.TestKit qualified as TestKit
 import Data.Aeson (FromJSON, ToJSON)
@@ -24,7 +25,7 @@ import Test.Arbiter.Orville.TestHelpers
 
 newtype ListenPayload = ListenPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 listenSchema :: Text
 listenSchema = "arbiter_orville_listen_test"
@@ -57,11 +58,11 @@ mqTableB = "mqo_listen_b"
 
 newtype MqAPayload = MqAPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 newtype MqBPayload = MqBPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, HasJobResult, ToJSON)
 
 type OrvilleMultiQRegistry =
   '[ '("mqo_listen_a", MqAPayload)

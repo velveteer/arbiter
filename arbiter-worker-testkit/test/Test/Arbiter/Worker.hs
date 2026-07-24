@@ -38,10 +38,8 @@ import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
 import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
-  , ackAll
   , ackAllWith
   , ackWith
-  , defaultBatchedResultWorkerConfig
   , defaultBatchedWorkerConfig
   , getListenerReady
   , getWorkerState
@@ -62,7 +60,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromJust, isJust, isNothing)
+import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -96,6 +94,10 @@ import UnliftIO.Async qualified as Async
 import Arbiter.Worker.TestKit (workerSpec)
 
 type WorkerTestRegistry = '[ '("arbiter_worker_test", WorkerTestPayload)]
+
+-- | Adapt a handler that stores nothing to this queue's result type.
+noResult :: (Monad n, Monoid r) => (c -> j -> n ()) -> c -> j -> n r
+noResult h conn job = h conn job >> pure mempty
 
 testSchema :: Text
 testSchema = "arbiter_worker_test"
@@ -141,8 +143,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1", maxAttempts = Just 1}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -170,8 +172,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillSucceed")) {groupKey = Just "g1"}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -198,8 +200,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           runSimpleDb env $
             HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1", maxAttempts = Just 1}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
           (runSimpleDb env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1})
@@ -233,8 +235,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job = (defaultJob (SimpleTask "LongJob")) {groupKey = Just "g1"}
         void $ runSimpleDb env $ HL.insertJob job
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
 
         let configWithTimeout =
               config
@@ -275,8 +277,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job = (defaultJob (SimpleTask "VeryLongJob")) {groupKey = Just "g1"}
         void $ runSimpleDb env $ HL.insertJob job
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
 
         let configWithShortTimeout =
               config
@@ -312,8 +314,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         tmpDir <- Dir.getTemporaryDirectory
         let livenessPath = tmpDir <> "/arbiter-test-liveness"
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
         let configWithLiveness =
               config
                 { livenessFile = Just livenessPath
@@ -361,14 +363,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                               (Only (primaryKey j))
                   )
                   js
-              ackAll cbs js
+              ackAllWith cbs (map (\j -> (j, Nothing)) js)
         let jobs =
               [ (defaultJob (SimpleTask "ca-keep1")) {groupKey = Just "ca"}
               , (defaultJob (SimpleTask "ca-stolen")) {groupKey = Just "ca"}
               , (defaultJob (SimpleTask "ca-keep2")) {groupKey = Just "ca"}
               ]
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           defaultBatchedWorkerConfig 1 10 batchHandler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
@@ -378,10 +380,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "rollup ackAllWith stores each job's result for the parent" $ \env -> do
         finalRef <- newIORef ([] :: [Text])
-        let resultFor p = case p of
-              SimpleTask "rb-ca" -> ["alpha"]
-              SimpleTask "rb-cb" -> ["beta"]
-              _ -> []
+        let resultFor :: WorkerTestPayload -> Maybe [Text]
+            resultFor p = case p of
+              SimpleTask "rb-ca" -> Just ["alpha"]
+              SimpleTask "rb-cb" -> Just ["beta"]
+              _ -> Nothing
             isReducer p = case p of SimpleTask "rb-reducer" -> True; _ -> False
             handler jobs cbs =
               if all (isReducer . payload) jobs
@@ -389,7 +392,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   traverse_
                     ( \j -> do
                         (merged, _dlq) <- mergedChildResults j
-                        liftIO $ atomicModifyIORef' finalRef $ \_ -> (merged, ())
+                        liftIO $ atomicModifyIORef' finalRef $ \_ -> (fromMaybe [] merged, ())
                         ackWith cbs j merged
                     )
                     (toList jobs)
@@ -399,8 +402,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             HL.insertJobTree $
               defaultJob (SimpleTask "rb-reducer")
                 <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          defaultBatchedResultWorkerConfig 1 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 handler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
           final <- readIORef finalRef
@@ -411,14 +414,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         finalResultRef <- newIORef ([] :: [Text])
 
         let handler _conn job = case payload job of
-              SimpleTask "mapper-a" -> pure ["sales", "growth"]
-              SimpleTask "mapper-b" -> pure ["revenue"]
-              SimpleTask "mapper-c" -> pure ["forecast", "trend"]
+              SimpleTask "mapper-a" -> pure (Just ["sales", "growth"])
+              SimpleTask "mapper-b" -> pure (Just ["revenue"])
+              SimpleTask "mapper-c" -> pure (Just ["forecast", "trend"])
               SimpleTask "reducer" -> do
                 (merged, _dlq) <- mergedChildResults job
-                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (fromMaybe [] merged, ())
                 pure merged
-              _ -> pure []
+              _ -> pure Nothing
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -431,7 +434,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                            ]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
 
         withAsync
@@ -462,17 +465,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         finalResultRef <- newIORef ([] :: [Text])
 
         let handler _conn job = case payload job of
-              SimpleTask "mapper-1a" -> pure ["sales", "growth"]
-              SimpleTask "mapper-1b" -> pure ["revenue"]
-              SimpleTask "mapper-2a" -> pure ["forecast"]
-              SimpleTask "mapper-2b" -> pure ["trend"]
+              SimpleTask "mapper-1a" -> pure (Just ["sales", "growth"])
+              SimpleTask "mapper-1b" -> pure (Just ["revenue"])
+              SimpleTask "mapper-2a" -> pure (Just ["forecast"])
+              SimpleTask "mapper-2b" -> pure (Just ["trend"])
               SimpleTask "section-1" -> fst <$> mergedChildResults job
               SimpleTask "section-2" -> fst <$> mergedChildResults job
               SimpleTask "root" -> do
                 (merged, _dlq) <- mergedChildResults job
-                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (fromMaybe [] merged, ())
                 pure merged
-              _ -> pure []
+              _ -> pure Nothing
 
         runSimpleDb env $
           void $
@@ -485,7 +488,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                          <~~ (defaultJob (SimpleTask "mapper-2a") :| [defaultJob (SimpleTask "mapper-2b")])
                      ]
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
 
         withAsync
@@ -512,13 +515,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler (job :| _) cbs =
               case payload job of
                 -- ackWith stores the child result for the parent and acks it
-                SimpleTask "child-a" -> ackWith cbs job (["alpha"] :: [Text])
-                SimpleTask "child-b" -> ackWith cbs job ["beta", "gamma"]
+                SimpleTask "child-a" -> ackWith cbs job (Just ["alpha"])
+                SimpleTask "child-b" -> ackWith cbs job (Just ["beta", "gamma"])
                 SimpleTask "manual-reducer" -> do
                   (merged, _dlq) <- mergedChildResults job
-                  liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                  liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (fromMaybe [] merged, ())
                   ackWith cbs job merged
-                _ -> ackWith cbs job []
+                _ -> ackWith cbs job Nothing
 
         -- Insert the rollup tree
         runSimpleDb env $
@@ -529,8 +532,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                         :| [defaultJob (SimpleTask "child-b")]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          defaultBatchedResultWorkerConfig 3 1 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 3 1 handler
 
         withAsync
           ( runSimpleDb env $
@@ -559,15 +562,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   atomicModifyIORef' batchSizeRef $
                     \n -> (max n reducerCount, ())
               for_ jobs $ \job -> case payload job of
-                SimpleTask "child-1a" -> ackWith cbs job ["a1"]
-                SimpleTask "child-1b" -> ackWith cbs job ["b1"]
-                SimpleTask "child-2a" -> ackWith cbs job ["a2"]
-                SimpleTask "child-2b" -> ackWith cbs job ["b2"]
+                SimpleTask "child-1a" -> ackWith cbs job (Just ["a1"])
+                SimpleTask "child-1b" -> ackWith cbs job (Just ["b1"])
+                SimpleTask "child-2a" -> ackWith cbs job (Just ["a2"])
+                SimpleTask "child-2b" -> ackWith cbs job (Just ["b2"])
                 SimpleTask name -> do
                   (merged, _dlq) <- mergedChildResults job
-                  liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name merged m, ())
+                  liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name (fromMaybe [] merged) m, ())
                   ackWith cbs job merged
-                _ -> ackWith cbs job []
+                _ -> ackWith cbs job Nothing
 
         -- Two independent rollup trees, all ungrouped. The four children drain in
         -- one ungrouped batch, then both parents unblock and batch together.
@@ -582,8 +585,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               defaultJob (SimpleTask "reducer-2")
                 <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
-          defaultBatchedResultWorkerConfig 1 10 handler
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 handler
 
         withAsync
           ( runSimpleDb env $
@@ -605,17 +608,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         finalResultRef <- newIORef ([] :: [Text])
 
         let handler _conn job = case payload job of
-              SimpleTask "dlq-child-a" -> pure ["x"]
-              SimpleTask "dlq-child-b" -> pure ["y", "z"]
+              SimpleTask "dlq-child-a" -> pure (Just ["x"])
+              SimpleTask "dlq-child-b" -> pure (Just ["y", "z"])
               SimpleTask "dlq-reducer" -> do
                 attempt <- liftIO $ atomicModifyIORef' attemptRef $ \n -> (n + 1, n + 1)
                 if attempt == 1
                   then throwRetryable "Intentional failure on first attempt"
                   else do
                     (merged, _dlq) <- mergedChildResults job
-                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (fromMaybe [] merged, ())
                     pure merged
-              _ -> pure []
+              _ -> pure Nothing
 
         -- Insert the rollup tree
         Right (_parent :| _children) <-
@@ -626,7 +629,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                         :| [defaultJob (SimpleTask "dlq-child-b")]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
 
         let cfg =
@@ -666,7 +669,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         finalResultRef <- newIORef ([] :: [Text])
 
         let handler _conn job = case payload job of
-              SimpleTask "recover-child-ok" -> pure ["alpha"]
+              SimpleTask "recover-child-ok" -> pure (Just ["alpha"])
               SimpleTask "recover-child-fail" -> throwRetryable "Permanent child failure"
               SimpleTask "recover-reducer" -> do
                 attempt <- liftIO $ atomicModifyIORef' attemptRef $ \n -> (n + 1, n + 1)
@@ -674,9 +677,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   then throwRetryable "Reducer fails first time"
                   else do
                     (merged, _dlq) <- mergedChildResults job
-                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (merged, ())
+                    liftIO $ atomicModifyIORef' finalResultRef $ \_ -> (fromMaybe [] merged, ())
                     pure merged
-              _ -> pure []
+              _ -> pure Nothing
 
         -- Insert rollup tree: reducer + 2 children
         Right (_parent :| _children) <-
@@ -688,7 +691,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload [Text] <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
 
         let cfg =
@@ -731,8 +734,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler _conn _job =
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 2 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 2 (noResult handler)
         let config = baseConfig {workerCount = 2, pollInterval = 0.1}
             wid = workerId config
 
@@ -765,8 +768,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig
                 { workerCount = 1
@@ -795,8 +798,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig
                 { workerCount = 1
@@ -875,8 +878,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "propagates queue pause to local pauseVar via heartbeat reconcile" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.1}
 
         withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
@@ -891,8 +894,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "propagates queue pause via NOTIFY at steady state under one pollInterval" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 5.0}
 
             -- Steady-state toggles must complete via NOTIFY since the next
@@ -918,8 +921,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job =
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 2.0}
 
         withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
@@ -940,10 +943,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "setWorkerPaused only targets the addressed worker" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
-        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
             widA = workerId cfgA
@@ -973,10 +976,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "setQueuePaused fans out to every worker in the queue" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
-        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
             widA = workerId cfgA
@@ -1009,8 +1012,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ threadDelay 30_000_000
               liftIO $ writeIORef completedRef True
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "long"))
@@ -1053,8 +1056,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     go
               liftIO go
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "cpu"))
@@ -1090,7 +1093,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           defaultBatchedWorkerConfig 1 10 batchHandler
         threadDelay 100_000
 
@@ -1124,8 +1127,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ threadDelay 30_000_000
               liftIO $ writeIORef completedRef True
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload () <-
-          transactionalWorkerConfig 1 handler
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig
                 { workerCount = 1

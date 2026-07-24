@@ -66,20 +66,25 @@ Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on 
 
 ### Payload Types
 
-Define payload types with `ToJSON` and `FromJSON` instances.
+Define payload types with `ToJSON` and `FromJSON` instances, and declare each
+queue's [result type](#job-results) with `HasJobResult`. It defaults to `()`, so
+a queue that stores no results just derives it.
 
 ```haskell
 data EmailPayload
   = SendWelcome Text Text
   | SendReceipt Text Int
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (ToJSON, FromJSON)
+  deriving anyclass (ToJSON, FromJSON, HasJobResult)
 
 data ImagePayload
   = ResizeImage Text Int Int
   | GenerateThumbnail Text
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
+
+instance HasJobResult ImagePayload where
+  type ResultOf ImagePayload = Score
 ```
 
 ### Type-Level Registry
@@ -187,7 +192,7 @@ config <- Worker.manualWorkerConfig 5 processEmail
 
 processEmail
     :: Arb.JobRead EmailPayload
-    -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
+    -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload
     -> ArbS.SimpleDb AppRegistry IO ()
 processEmail job cbs = do
   liftIO $ sendEmail (Arb.payload job)
@@ -244,9 +249,24 @@ job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-1
 
 ### Job Results
 
-A handler can return a value - its **result**. Return `()` for fire-and-forget
-work, or any `ToJSON`/`FromJSON` value otherwise. Returning a result does not
-store it on its own - whether it is kept, and where, depends on the job:
+A handler can produce a value - its **result** - by returning it under
+`transactionalWorkerConfig`, or by passing it to `ackWith`/`ackAllWith` under a
+manual or batched config.
+
+The type is fixed per queue by `ResultOf`, not per config, so a rollup parent
+reads back exactly the type its children stored and a mismatch is a compile
+error. It defaults to `()` for fire-and-forget queues. A queue that mixes
+result-carrying and fire-and-forget jobs typically uses `Maybe a`, since
+`Nothing` stores nothing.
+
+```haskell
+class HasJobResult payload where
+  type ResultOf payload
+  type ResultOf payload = ()
+```
+
+Producing a result does not store it on its own - whether it is kept, and
+where, depends on the job:
 
 - **A job with a parent** (a node in a [tree](#job-trees-fan-outfan-in)) - the
   result is kept for the parent to collect with `Worker.childResults`/`Worker.mergedChildResults`,
@@ -255,20 +275,24 @@ store it on its own - whether it is kept, and where, depends on the job:
   [archive](#archiving-completed-jobs) entry, if the job is archived. Without
   archiving there is nowhere to keep it, so it is dropped.
 
-The mapping between a result value and stored JSON is the `JobResult` typeclass:
+The mapping between a result value and stored JSON is a pair of typeclasses,
+one per direction:
 
 ```haskell
-class JobResult a where
+class EncodeJobResult a where
   encodeJobResult :: a -> Maybe Value        -- Nothing means store nothing
+
+class DecodeJobResult a where
   decodeJobResult :: Value -> Either Text a  -- read a stored result back
 ```
 
-Any `ToJSON`/`FromJSON` type gets an instance for free (`Maybe a` skips on
-`Nothing` - everything else is always recorded), so your own records and sum
-types work as results directly.
+Any `ToJSON` type can be stored and any `FromJSON` type can be read back for
+free (`Maybe a` skips on `Nothing` - everything else is always recorded), so
+your own records and sum types work as results directly. `JobResult a` is a
+constraint for both halves at once.
 
 ```haskell
-import Arbiter.Worker (JobResult (..))
+import Arbiter.Worker (DecodeJobResult (..), EncodeJobResult (..))
 import Data.Aeson (FromJSON, ToJSON, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Text qualified as T
@@ -278,10 +302,12 @@ data SyncReport = SyncReport { rowsChanged :: Int, notes :: [Text] }
   deriving stock (Generic)
   deriving anyclass (ToJSON, FromJSON)
 
-instance JobResult SyncReport where
+instance EncodeJobResult SyncReport where
   encodeJobResult r
     | rowsChanged r == 0 = Nothing
     | otherwise          = Just (toJSON r)
+
+instance DecodeJobResult SyncReport where
   decodeJobResult v = case Aeson.fromJSON v of
     Aeson.Success r -> Right r
     Aeson.Error err -> Left (T.pack err)
@@ -615,13 +641,13 @@ config <- Worker.defaultBatchedWorkerConfig 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload ()
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
   -> ArbS.SimpleDb AppRegistry IO ()
 batchHandler jobs cbs = do
   let urls = map (getUrl . Arb.payload) (toList jobs)
-  liftIO $ bulkProcess urls
+  scores <- liftIO $ bulkProcess urls
   -- Bulk-ack the whole batch in one transaction.
-  Worker.ackAll cbs (toList jobs)
+  Worker.ackAllWith cbs (zip (toList jobs) scores)
 ```
 
 Opting out of the worker transaction does not mean giving up atomicity where
@@ -642,22 +668,22 @@ happen exactly once in the transaction next to the ack, not in the hook.
 
 Each job is finalized on its own via the
 [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
-record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`,
+record - `ackWith`/`ackAllWith` (per-job or bulk ack), `failRetry`/`failPermanent`,
 `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure,
 cancel, or nack affects only that job - completed jobs stay done, an untouched
 job is reprocessed, and hooks fire per job.
 
-To attach a [result](#job-results) per job - for a rollup parent to collect, or
-to keep on an archived job's entry - use `defaultBatchedResultWorkerConfig` and
-ack with `ackWith`/`ackAllWith`:
+Every ack carries the queue's [result](#job-results) - kept for a rollup parent
+to collect, or on an archived job's entry. `ack`/`ackAll` are the shorthand for
+a queue whose `ResultOf` is `()`.
 
 ```haskell
--- defaultBatchedResultWorkerConfig <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedResultWorkerConfig 10 5 scoreHandler
+-- defaultBatchedWorkerConfig <workerCount> <batchSize> handler
+config <- Worker.defaultBatchedWorkerConfig 10 5 scoreHandler
 
 scoreHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
   -> ArbS.SimpleDb AppRegistry IO ()
 scoreHandler jobs cbs =
   for_ jobs $ \job -> do

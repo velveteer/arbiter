@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Configuration types for the arbiter worker pool.
 module Arbiter.Worker.Config
@@ -9,12 +10,13 @@ module Arbiter.Worker.Config
   , defaultWorkerConfig
   , defaultBatchedWorkerConfig
   , defaultBatchedResultWorkerConfig
-  , defaultBatchedRollupWorkerConfig
   , singleJobMode
   , HandlerMode (..)
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
+  , ack
+  , ackAll
 
     -- * Worker State
   , WorkerState (..)
@@ -25,6 +27,7 @@ module Arbiter.Worker.Config
   ) where
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
+import Arbiter.Core.JobResult (ResultOf)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
@@ -45,10 +48,10 @@ import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Configuration for a worker pool.
-data WorkerConfig m payload result = WorkerConfig
+data WorkerConfig m payload = WorkerConfig
   { workerCount :: Int
   -- ^ Number of concurrent worker threads.
-  , handlerMode :: HandlerMode m payload result
+  , handlerMode :: HandlerMode m payload
   -- ^ Job handler and claiming strategy. Set by the @default*WorkerConfig@ helpers.
   , pollInterval :: NominalDiffTime
   -- ^ Cadence floor in seconds for the dispatcher poll.
@@ -117,7 +120,8 @@ data WorkerConfig m payload result = WorkerConfig
   }
 
 -- | Per-job finalizers handed to a batched handler. Untouched jobs are
--- reprocessed. The @With@ variants store a result for the job's parent rollup.
+-- reprocessed. The @With@ variants store a result for the job's parent rollup
+-- or its archive entry.
 --
 -- Each callback runs in its own transaction and commits on return. Call them at
 -- the top level of the handler. Wrapping one in your own 'withDbTransaction'
@@ -125,15 +129,14 @@ data WorkerConfig m payload result = WorkerConfig
 -- with your writes. The success hook then fires at savepoint release, not at
 -- your outer commit, so an outer rollback reprocesses the job after the
 -- visibility timeout.
-data BatchCallbacks m payload result = BatchCallbacks
-  { ack :: JobRead payload -> m ()
-  -- ^ Ack and fire onJobSuccess.
-  , ackWith :: JobRead payload -> result -> m ()
-  -- ^ Ack, store the result for the parent rollup, fire onJobSuccess.
-  , ackAll :: [JobRead payload] -> m ()
-  -- ^ Bulk-ack in one parent-aware transaction. Fires onJobSuccess per acked job.
-  , ackAllWith :: [(JobRead payload, result)] -> m ()
-  -- ^ 'ackAll' storing each job's result for its parent rollup.
+data BatchCallbacks m payload = BatchCallbacks
+  { ackWith :: JobRead payload -> ResultOf payload -> m ()
+  -- ^ Ack, store the result for the parent rollup or the job's archive entry,
+  -- fire onJobSuccess. Every ack goes through here, so a queue that declares a
+  -- result type cannot drop it. See 'ack' for the @()@ case.
+  , ackAllWith :: [(JobRead payload, ResultOf payload)] -> m ()
+  -- ^ Bulk-ack in one parent-aware transaction, storing each job's result for
+  -- its parent rollup or archive entry. Fires onJobSuccess per acked job.
   , failRetry :: JobRead payload -> Text -> m ()
   -- ^ Retry with backoff, then DLQ at the job's maxAttempts.
   , failPermanent :: JobRead payload -> Text -> m ()
@@ -147,17 +150,27 @@ data BatchCallbacks m payload result = BatchCallbacks
   -- attempt consumed.
   }
 
+-- | Ack and fire onJobSuccess. Available only for a queue with no result type,
+-- so a queue that declares one has to 'ackWith' it.
+ack :: (ResultOf payload ~ ()) => BatchCallbacks m payload -> JobRead payload -> m ()
+ack cbs job = ackWith cbs job ()
+
+-- | Bulk-'ack' in one parent-aware transaction. Available only for a queue with
+-- no result type, so a queue that declares one has to 'ackAllWith' it.
+ackAll :: (ResultOf payload ~ ()) => BatchCallbacks m payload -> [JobRead payload] -> m ()
+ackAll cbs jobs = ackAllWith cbs (map (\job -> (job, ())) jobs)
+
 -- | How the worker claims and runs jobs. Set by the @default*WorkerConfig@ helpers.
-data HandlerMode m payload result
+data HandlerMode m payload
   = -- | Automatic single-job mode: claim one job per group and run the handler
     -- in a worker transaction, storing its result and acking atomically.
-    SingleJobMode (JobHandler m payload result)
+    SingleJobMode (JobHandler m payload (ResultOf payload))
   | -- | Batched callback mode: claim up to N jobs per group and hand the batch to
     -- the handler with a 'BatchCallbacks' record to finalize each job. No worker
     -- transaction. Batch size 1 is the manual single-job case.
     BatchedJobsMode
       Int
-      (NonEmpty (JobRead payload) -> BatchCallbacks m payload result -> m ())
+      (NonEmpty (JobRead payload) -> BatchCallbacks m payload -> m ())
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
@@ -165,8 +178,8 @@ transactionalWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
-  -> JobHandler n payload result
-  -> m (WorkerConfig n payload result)
+  -> JobHandler n payload (ResultOf payload)
+  -> m (WorkerConfig n payload)
 transactionalWorkerConfig workerCnt handler =
   mkDefaultConfig workerCnt (singleJobMode handler)
 
@@ -174,8 +187,8 @@ defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
-  -> JobHandler n payload result
-  -> m (WorkerConfig n payload result)
+  -> JobHandler n payload (ResultOf payload)
+  -> m (WorkerConfig n payload)
 defaultWorkerConfig = transactionalWorkerConfig
 {-# DEPRECATED
   defaultWorkerConfig
@@ -185,16 +198,17 @@ defaultWorkerConfig = transactionalWorkerConfig
 -- | Create a t'WorkerConfig' for batched job processing, no worker transaction.
 -- The handler receives the batch and a 'BatchCallbacks' record to finalize each
 -- job (ack, fail, cancel, or nack). Jobs left untouched are reprocessed. To store
--- a result per job, see 'defaultBatchedResultWorkerConfig'.
+-- a result per job, ack with 'ackWith' or 'ackAllWith'.
 defaultBatchedWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload () -> n ())
-  -> m (WorkerConfig n payload ())
-defaultBatchedWorkerConfig = defaultBatchedResultWorkerConfig
+  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload -> n ())
+  -> m (WorkerConfig n payload)
+defaultBatchedWorkerConfig workerCnt batchSize handler =
+  mkDefaultConfig workerCnt (BatchedJobsMode batchSize handler)
 
 -- | Create a t'WorkerConfig' running one job at a time, no worker transaction.
 -- The handler finalizes the job through 'BatchCallbacks'. An unfinalized job is
@@ -203,47 +217,36 @@ manualWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
-  -> (JobRead payload -> BatchCallbacks n payload () -> n ())
-  -> m (WorkerConfig n payload ())
+  -> (JobRead payload -> BatchCallbacks n payload -> n ())
+  -> m (WorkerConfig n payload)
 manualWorkerConfig workerCnt handler =
   defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
 
--- | 'defaultBatchedWorkerConfig' where each job carries a result. Store one with
--- 'ackWith' or 'ackAllWith'. Fetch a parent's child results with
--- 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
 defaultBatchedResultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
-  -> m (WorkerConfig n payload result)
-defaultBatchedResultWorkerConfig workerCnt batchSize handler =
-  mkDefaultConfig workerCnt (BatchedJobsMode batchSize handler)
-
-defaultBatchedRollupWorkerConfig
-  :: (MonadArbiter n, MonadIO m)
-  => Int
-  -- ^ Worker count
-  -> Int
-  -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload result -> n ())
-  -> m (WorkerConfig n payload result)
-defaultBatchedRollupWorkerConfig = defaultBatchedResultWorkerConfig
-{-# DEPRECATED defaultBatchedRollupWorkerConfig "Use defaultBatchedResultWorkerConfig." #-}
+  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload -> n ())
+  -> m (WorkerConfig n payload)
+defaultBatchedResultWorkerConfig = defaultBatchedWorkerConfig
+{-# DEPRECATED
+  defaultBatchedResultWorkerConfig
+  "Use defaultBatchedWorkerConfig. A queue's result type comes from ResultOf."
+  #-}
 
 -- | Handler that runs a single job. Use for regular jobs, leaf children, and
 -- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').
-singleJobMode :: JobHandler m payload result -> HandlerMode m payload result
+singleJobMode :: JobHandler m payload (ResultOf payload) -> HandlerMode m payload
 singleJobMode = SingleJobMode
 
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
   => Int
-  -> HandlerMode n payload result
-  -> m (WorkerConfig n payload result)
+  -> HandlerMode n payload
+  -> m (WorkerConfig n payload)
 mkDefaultConfig workerCnt mode = do
   heartbeatTMVar <- liftIO newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
@@ -287,17 +290,17 @@ withWorkerIdContext workerId lc =
 -- | Initiate graceful shutdown of the worker pool
 --
 -- Stops claiming new jobs. In-flight jobs will complete, then the pool exits.
-shutdownWorker :: (MonadIO m) => WorkerConfig n payload result -> m ()
+shutdownWorker :: (MonadIO m) => WorkerConfig n payload -> m ()
 shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
-getWorkerState :: (MonadIO m) => WorkerConfig n payload result -> m WorkerState
+getWorkerState :: (MonadIO m) => WorkerConfig n payload -> m WorkerState
 getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
 
 -- | Whether this pool's LISTEN channels are subscribed (or there is no listener).
-getListenerReady :: (MonadIO m) => WorkerConfig n payload result -> m Bool
+getListenerReady :: (MonadIO m) => WorkerConfig n payload -> m Bool
 getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
 
-readEffectiveState :: WorkerConfig n payload result -> STM.STM WorkerState
+readEffectiveState :: WorkerConfig n payload -> STM.STM WorkerState
 readEffectiveState config = do
   st <- STM.readTVar (workerStateVar config)
   case st of
