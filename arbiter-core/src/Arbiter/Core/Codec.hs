@@ -32,19 +32,16 @@ module Arbiter.Core.Codec
     -- * Bidirectional job write codec
   , Codec
   , cDecode
+  , cColumns
   , cScalar
   , cArray
   , jobCodec
   , writeColumnNames
-  , insertColumns
-  , insertValues
-  , batchUnnest
 
     -- * Job codecs
   , jobRowCodec
   , dlqRowCodec
   , archiveRowCodec
-  , countCodec
   , rateLimitPolicyViewCodec
   , rateLimitBucketCodec
   , concurrencyPolicyViewCodec
@@ -65,7 +62,6 @@ import Data.Aeson (ToJSON (..), Value)
 import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 
@@ -314,19 +310,6 @@ jobWriteColumns = cColumns (jobCodec "" :: JobCodec (JobRead Value))
 writeColumnNames :: [Text]
 writeColumnNames = map fst jobWriteColumns
 
--- | Writable INSERT column list, shared by the single and batch inserts.
-insertColumns :: Text
-insertColumns = T.intercalate ", " writeColumnNames
-
--- | VALUES placeholders for a single-row insert, one per column.
-insertValues :: Text
-insertValues = T.intercalate ", " (map (const "?") writeColumnNames)
-
--- | @unnest@ source list for a batch insert, one array cast per column.
-batchUnnest :: Text
-batchUnnest =
-  T.intercalate ", " ["unnest(?::" <> ty <> "[]) AS " <> name | (name, ty) <- jobWriteColumns]
-
 -- | Envelope codec for the DLQ/archive tables: @id@, a timestamp column, and the job snapshot (@job_id@ for @id@).
 jobEnvelopeCodec :: Text -> Text -> RowCodec (Int64, UTCTime, JobRead Value)
 jobEnvelopeCodec tsColumn queueName =
@@ -344,9 +327,6 @@ archiveRowCodec queueName =
   (\(i, t, j) r -> (i, t, j, r))
     <$> jobEnvelopeCodec "completed_at" queueName
     <*> ncol "result" CJsonb
-
-countCodec :: RowCodec Int64
-countCodec = col "count" CInt8
 
 -- | A policy row with bucket aggregates and live throttled count.
 rateLimitPolicyViewCodec :: RowCodec RateLimitPolicyView

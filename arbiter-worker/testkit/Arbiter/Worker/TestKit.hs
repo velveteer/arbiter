@@ -199,7 +199,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         let jid = primaryKey (Archive.jobSnapshot (head arch))
         found <- runM env $ HL.getArchivedJobById @m @registry @payload jid
         fmap (payload . Archive.jobSnapshot) found `shouldBe` Just (mkSimple "arch-byid")
-        miss <- runM env $ HL.getArchivedJobById @m @registry @payload 999999
+        miss <- runM env $ HL.getArchivedJobById @m @registry @payload 999_999
         (miss :: Maybe (Archive.ArchiveJob payload)) `shouldBe` Nothing
 
     it "lists archived jobs by group key" $ \env -> do

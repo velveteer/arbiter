@@ -22,6 +22,7 @@ import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (JobHandler, executeStatement)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.Queues qualified as Q
+import Arbiter.Core.Sql.Query (raw)
 import Arbiter.Core.Worker qualified as WR
 import Arbiter.Simple
   ( SimpleConnectionPool (..)
@@ -110,7 +111,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do
-        let sleep = void $ executeStatement "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$" []
+        let sleep = void $ executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$")
         r <-
           runSimpleDb env $
             runReaperOp silentLogConfig testSchema 1 "test-reaper-slow-op" 0 $ do
@@ -123,7 +124,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         r <-
           runSimpleDb env $
             runReaperOp silentLogConfig testSchema 0.5 "test-reaper-stuck-op" 0 $
-              executeStatement "DO $$ BEGIN PERFORM pg_sleep(5); END $$" []
+              executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(5); END $$")
         r `shouldBe` Nothing
 
     describe "Transactional Atomicity" $ do

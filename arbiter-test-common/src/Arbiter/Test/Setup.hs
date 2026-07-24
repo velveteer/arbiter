@@ -7,6 +7,8 @@ module Arbiter.Test.Setup
   , setupDDLWithNotify
   , cleanupData
   , execute_
+  , execStatement
+  , execQuery
   , setupOnce
   , addQueueTable
   , disableNoticeReporting
@@ -16,10 +18,13 @@ module Arbiter.Test.Setup
   , drainWith
   ) where
 
+import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Concurrency.Schema qualified as CC
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..))
 import Arbiter.Core.Gates qualified as Gates
 import Arbiter.Core.Job.Schema qualified as Schema
+import Arbiter.Core.MonadArbiter (MonadArbiter, Params)
+import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.RateLimit.Schema qualified as RL
 import Arbiter.Core.SqlLiterals (textLiteral)
@@ -36,7 +41,7 @@ import Control.Exception (throwIO, try)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -138,6 +143,14 @@ cleanupData schemaName tableName conn = do
 
 execute_ :: Connection -> Text -> IO ()
 execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
+
+-- | Run a pre-rendered statement with positional parameters (test setup only).
+execStatement :: (MonadArbiter m) => Text -> Params -> m Int64
+execStatement sql params = MA.executeStatement (MA.Query sql params (pure ()))
+
+-- | Run a pre-rendered query with positional parameters and a decoder (test setup only).
+execQuery :: (MonadArbiter m) => Text -> Params -> RowCodec a -> m [a]
+execQuery sql params codec = MA.executeQuery (MA.Query sql params codec)
 
 setupOnce :: ByteString -> Text -> Text -> Bool -> IO ()
 setupOnce connStr schemaName tableName withNotify = do

@@ -32,7 +32,8 @@ module Arbiter.Hasql.MonadArbiter
 
 import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.MonadArbiter (Params)
+import Arbiter.Core.MonadArbiter (Params, Query (..))
+import Arbiter.Core.Sql.Query (numberPlaceholders)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString.Char8 qualified as BSC
@@ -79,29 +80,25 @@ localHasqlConnection conn = localHasqlPool (\pool -> pool {activeConn = Just con
 
 hasqlExecuteQuery
   :: (HasHasqlPool m, MonadIO m)
-  => Text
-  -> Params
-  -> RowCodec a
+  => Query a
   -> m [a]
-hasqlExecuteQuery sql params codec = withConn $ \conn ->
+hasqlExecuteQuery (Query sql params codec) = withConn $ \conn ->
   runQueryStatement False conn sql params codec
 
 -- | 'hasqlExecuteQuery' that prepares the statement once per connection and reuses
 -- the plan, when the pool enables prepared statements.
 hasqlExecuteQueryPrepared
   :: (HasHasqlPool m, MonadIO m)
-  => Text
-  -> Params
-  -> RowCodec a
+  => Query a
   -> m [a]
-hasqlExecuteQueryPrepared sql params codec = do
+hasqlExecuteQueryPrepared (Query sql params codec) = do
   pool <- getHasqlPool
   withConn $ \conn -> runQueryStatement (preparedStatements pool) conn sql params codec
 
 runQueryStatement :: Bool -> Hasql.Connection -> Text -> Params -> RowCodec a -> IO [a]
 runQueryStatement prepare conn sql params codec = do
   let mk = if prepare then S.preparable else S.unpreparable
-      stmt = mk (Encode.convertPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
+      stmt = mk (numberPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
     Right rows -> pure rows
@@ -109,10 +106,9 @@ runQueryStatement prepare conn sql params codec = do
 
 hasqlExecuteStatement
   :: (HasHasqlPool m, MonadIO m)
-  => Text
-  -> Params
+  => Query a
   -> m Int64
-hasqlExecuteStatement sql params = withConn $ \conn -> liftIO $ do
+hasqlExecuteStatement (Query sql params _) = withConn $ \conn -> liftIO $ do
   let stmt = Encode.buildStatementRowCount sql params
   result <- Hasql.use conn (Session.statement () stmt)
   case result of

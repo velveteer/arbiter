@@ -17,7 +17,7 @@ module Arbiter.Test.ConcurrencyLimit
   , concurrencyLimitSpec
   ) where
 
-import Arbiter.Core.Codec (Col (..), col, parr, pval)
+import Arbiter.Core.Codec (Col (..), col, pval)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyFor
@@ -45,7 +45,8 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter, executeQuery, executeStatement, withDbTransaction)
+import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -65,7 +66,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 import UnliftIO.Async (async, mapConcurrently, wait)
 
-import Arbiter.Test.Setup (drainWith, seedConcurrencyPoolSQL)
+import Arbiter.Test.Setup (drainWith, execQuery, execStatement, seedConcurrencyPoolSQL)
 
 newtype CLPayload = CLPayload Text
   deriving stock (Eq, Generic, Show)
@@ -135,31 +136,31 @@ concurrencyLimitSpec runM = do
       truncateCounts env =
         runM env $ do
           schema <- getSchema
-          void $ executeStatement ("DELETE FROM " <> arbiterConcurrencyTable schema) []
+          void $ execStatement ("DELETE FROM " <> arbiterConcurrencyTable schema) []
       -- Seed the declpool default limit and clear any override (all example tests share this prefix).
       seed env (lim :: Int) =
         runM env $ do
           schema <- getSchema
-          traverse_ (\s -> void (executeStatement s [])) (seedConcurrencyPoolSQL schema "declpool" (fromIntegral lim))
+          traverse_ (\s -> void (execStatement s [])) (seedConcurrencyPoolSQL schema "declpool" (fromIntegral lim))
       corrupt env key n =
         runM env $ do
           schema <- getSchema
           void $
-            executeStatement
+            execStatement
               ("UPDATE " <> arbiterConcurrencyTable schema <> " SET in_flight = " <> tshow n <> " WHERE concurrency_key = ?")
               [pval CText key]
       deleteRow env key =
         runM env $ do
           schema <- getSchema
           void $
-            executeStatement
+            execStatement
               ("DELETE FROM " <> arbiterConcurrencyTable schema <> " WHERE concurrency_key = ?")
               [pval CText key]
       inFlight env key =
         runM env $ do
           schema <- getSchema
           rows <-
-            executeQuery
+            execQuery
               ("SELECT in_flight FROM " <> arbiterConcurrencyTable schema <> " WHERE concurrency_key = ?")
               [pval CText key]
               (col "in_flight" CInt4)
@@ -169,7 +170,7 @@ concurrencyLimitSpec runM = do
       timeOut env secs = runM env $ do
         schema <- getSchema
         void $
-          executeStatement
+          execStatement
             ( "UPDATE "
                 <> jobQueueTable schema concurrencyTable
                 <> " SET not_visible_until = not_visible_until - "
@@ -450,14 +451,12 @@ concurrencyLimitSpec runM = do
     resume <- newEmptyMVar
     a <- async $ runM env $ withDbTransaction $ do
       schema <- getSchema
-      held <- executeQuery (Tmpl.lockConcurrencyCountsSQL schema) [] (col "concurrency_key" CText)
+      held <- MA.executeQuery (Tmpl.lockConcurrencyCountsSQL schema)
       liftIO $ putMVar lockTaken ()
       liftIO $ takeMVar resume
       void $
-        executeQuery
-          (Tmpl.reconcileConcurrencyCountsSQL schema [concurrencyTable])
-          [parr CText held]
-          (col "reconciled" CInt8)
+        MA.executeQuery
+          (Tmpl.reconcileConcurrencyCountsSQL schema [concurrencyTable] held)
     takeMVar lockTaken
     enqueue env [job "lateseed" "a"]
     claimed <- newEmptyMVar
@@ -559,7 +558,7 @@ concurrencyLimitSpec runM = do
     _ <- mapConcurrently (const (claimAs env)) [1 .. 8 :: Int]
     overCap <- runM env $ do
       schema <- getSchema
-      executeQuery
+      execQuery
         ( "SELECT concurrency_key FROM "
             <> jobQueueTable schema concurrencyTable
             <> " WHERE concurrency_key IS NOT NULL GROUP BY concurrency_key"

@@ -5,7 +5,7 @@
 
 An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-d97706?style=for-the-badge&logo=postgresql&logoColor=white)](https://demo.arbiterq.dev/)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-0e7490?style=for-the-badge&logo=rocket&logoColor=white)](https://demo.arbiterq.dev/)
 [![API Docs](https://img.shields.io/badge/API_Docs-5e5086?style=for-the-badge&logo=haskell&logoColor=white)](https://velveteer.github.io/arbiter/)
 [![CI](https://img.shields.io/github/actions/workflow/status/velveteer/arbiter/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/velveteer/arbiter/actions/workflows/ci.yml)
 

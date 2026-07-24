@@ -8,12 +8,15 @@ module Arbiter.Core.Sql.Stats
   , countChildrenBatchSQL
   ) where
 
+import Data.Int (Int64)
 import Data.Text (Text)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Sql.Jobs (jobStatusCaseSQL, unionAllOverQueueTables)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
 -- | Per-status queue counts plus the age of the oldest @ready@ job.
@@ -71,16 +74,15 @@ allQueueStatsSQL schema tableNames =
 -- Parent-Child Operations
 -- ---------------------------------------------------------------------------
 
--- | Batch child count: returns (parent_id, total_count, suspended_count) for a set of job IDs
---
--- Parameters: array of job IDs
-countChildrenBatchSQL :: Text -> Text -> Text
-countChildrenBatchSQL schema tableName =
+-- | Batch child count: returns (parent_id, total_count, suspended_count) for a set of job IDs.
+-- The caller attaches the row decoder.
+countChildrenBatchSQL :: Text -> Text -> [Int64] -> Query ()
+countChildrenBatchSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
-   in [text|
+   in [sql|
         SELECT parent_id, COUNT(*),
                COUNT(*) FILTER (WHERE suspended)
         FROM ${tbl}
-        WHERE parent_id = ANY(?)
+        WHERE parent_id = ANY(#{jobIds :: [CInt8]})
         GROUP BY parent_id
       |]

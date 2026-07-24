@@ -36,7 +36,7 @@ import Arbiter.Core.Job.Types
   , jobRateLimitKey
   , payload
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter, executeStatement)
+import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.RateLimit.Schema
   ( arbiterRateLimitPoliciesTable
   , arbiterRateLimitsTable
@@ -80,7 +80,7 @@ import Hedgehog.Range qualified as Range
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently)
 
-import Arbiter.Test.Setup (drainWith, execute_)
+import Arbiter.Test.Setup (drainWith, execStatement, execute_)
 
 data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
   deriving stock (Eq, Generic, Show)
@@ -129,11 +129,11 @@ rateLimitSpec runM = do
       -- Delete every bucket, as the reaper's prune does to a full idle bucket.
       deleteBuckets env = runM env $ do
         schema <- getSchema
-        void $ executeStatement ("DELETE FROM " <> arbiterRateLimitsTable schema) []
+        void $ execStatement ("DELETE FROM " <> arbiterRateLimitsTable schema) []
       -- Clear the queue, leaving the buckets, so a model step starts from an empty queue.
       deleteJobs env = runM env $ do
         schema <- getSchema
-        void $ executeStatement ("DELETE FROM " <> jobQueueTable schema rateLimitTable) []
+        void $ execStatement ("DELETE FROM " <> jobQueueTable schema rateLimitTable) []
       -- Fast-forward time by backdating every bucket and job timer, so window-based
       -- tests are deterministic instead of sleeping. The job UPDATE fires the groups
       -- trigger, which recomputes in_flight_until so a stalled group resumes.
@@ -141,7 +141,7 @@ rateLimitSpec runM = do
         schema <- getSchema
         let by = " - " <> tshow secs <> " * interval '1 second'"
         void $
-          executeStatement
+          execStatement
             ( "UPDATE "
                 <> arbiterRateLimitsTable schema
                 <> " SET last_refill = last_refill"
@@ -149,7 +149,7 @@ rateLimitSpec runM = do
             )
             []
         void $
-          executeStatement
+          execStatement
             ( "UPDATE "
                 <> jobQueueTable schema rateLimitTable
                 <> " SET not_visible_until = not_visible_until"
@@ -404,7 +404,7 @@ rateLimitSpec runM = do
     runM env $ do
       schema <- getSchema
       void $
-        executeStatement
+        execStatement
           ( "UPDATE "
               <> jobQueueTable schema rateLimitTable
               <> " SET throttled_until = NOW() + interval '60 second'"
@@ -511,11 +511,11 @@ rateLimitSpec runM = do
     -- With no policy row the gate has no limit to apply, so every job runs.
     let restore = runM env $ do
           schema <- getSchema
-          void $ executeStatement (upsertPolicyRowSQL schema (toPolicyRow rlPolicy)) []
+          void $ execStatement (upsertPolicyRowSQL schema (toPolicyRow rlPolicy)) []
     flip finally restore $ do
       runM env $ do
         schema <- getSchema
-        void $ executeStatement ("DELETE FROM " <> arbiterRateLimitPoliciesTable schema <> " WHERE prefix_id = 'rl'") []
+        void $ execStatement ("DELETE FROM " <> arbiterRateLimitPoliciesTable schema <> " WHERE prefix_id = 'rl'") []
       enqueue env (replicate 5 (job "failopen"))
       admitted <- claim env
       length admitted `shouldBe` 5

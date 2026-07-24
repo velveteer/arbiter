@@ -17,24 +17,36 @@ module Arbiter.Core.Sql.Concurrency
   , concurrencyCountsStaleSQL
   ) where
 
+import Control.Monad (join)
+import Data.Int (Int32, Int64)
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import NeatInterpolation (text)
 
-import Arbiter.Core.Admission (effectivePolicyCol, policyViewScope, touchColumn)
+import Arbiter.Core.Admission (effectivePolicyCol, policyViewScope)
+import Arbiter.Core.Codec (concurrencyKeyViewCodec, concurrencyPolicyViewCodec)
 import Arbiter.Core.Concurrency.Schema
   ( arbiterConcurrencyPoliciesTable
   , arbiterConcurrencyTable
   , concurrencyAdvisoryLockExpr
   )
+import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyView)
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Sql.Jobs (unionAllOverQueueTables)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query, rows)
 
--- | Set (or clear, with NULL) a pool's operator override limit when the guard flag is true. Affects every key under the prefix.
-updateConcurrencyPolicyOverrideSQL :: SchemaName -> Text
-updateConcurrencyPolicyOverrideSQL schema =
+-- | Set a pool's operator override limit. @Nothing@ leaves it untouched;
+-- @Just v@ writes @v@ (a null clears the override back to the default).
+updateConcurrencyPolicyOverrideSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
+updateConcurrencyPolicyOverrideSQL schema mLimit prefix =
   let policies = arbiterConcurrencyPoliciesTable schema
-      touch = touchColumn "override_limit" "int"
-   in [text| UPDATE ${policies} SET ${touch} WHERE prefix_id = ? |]
+      touch = isJust mLimit
+      limit = join mLimit
+   in [sql|
+        UPDATE ${policies}
+        SET override_limit = CASE WHEN #{touch :: CBool}::boolean THEN #{limit :: Maybe CInt4}::int ELSE override_limit END
+        WHERE prefix_id = #{prefix :: CText}
+      |]
 
 -- | Every concurrency_key held by a live job, unioned across the queue tables.
 liveConcurrencyKeysUnion :: SchemaName -> [TableName] -> Text
@@ -43,12 +55,12 @@ liveConcurrencyKeysUnion schema tableNames =
     "SELECT concurrency_key FROM " <> t <> " WHERE concurrency_key IS NOT NULL"
 
 -- | Lock count rows with no live job, in key order to match the triggers. Returns the locked keys.
-lockDeadConcurrencyKeysSQL :: SchemaName -> [TableName] -> Text
+lockDeadConcurrencyKeysSQL :: SchemaName -> [TableName] -> Query Text
 lockDeadConcurrencyKeysSQL schema tableNames =
   let concTbl = arbiterConcurrencyTable schema
       live = liveConcurrencyKeysUnion schema tableNames
-   in [text|
-        SELECT c.concurrency_key
+   in [sql|
+        SELECT @{concurrency_key :: CText}
         FROM ${concTbl} c
         WHERE NOT EXISTS (
           SELECT 1 FROM ( ${live} ) live WHERE live.concurrency_key = c.concurrency_key
@@ -59,13 +71,13 @@ lockDeadConcurrencyKeysSQL schema tableNames =
 
 -- | Delete the passed locked keys that are still dead under a fresh snapshot, so a key whose
 -- job committed after the lock pass (and is held by a concurrent seed) is not stranded.
-pruneLockedConcurrencyKeysSQL :: SchemaName -> [TableName] -> Text
-pruneLockedConcurrencyKeysSQL schema tableNames =
+pruneLockedConcurrencyKeysSQL :: SchemaName -> [TableName] -> [Text] -> Query ()
+pruneLockedConcurrencyKeysSQL schema tableNames lockedKeys =
   let concTbl = arbiterConcurrencyTable schema
       live = liveConcurrencyKeysUnion schema tableNames
-   in [text|
+   in [sql|
         DELETE FROM ${concTbl} c
-        WHERE c.concurrency_key = ANY(?)
+        WHERE c.concurrency_key = ANY(#{lockedKeys :: [CText]})
           AND NOT EXISTS (
             SELECT 1 FROM ( ${live} ) live WHERE live.concurrency_key = c.concurrency_key
           )
@@ -73,21 +85,21 @@ pruneLockedConcurrencyKeysSQL schema tableNames =
 
 -- | Try an exclusive per-key advisory lock over the dead keys, pairing the insert trigger's shared lock.
 -- Never waits, so it cannot deadlock with or stall behind an open enqueue transaction. Returns the keys acquired.
-tryLockDeadConcurrencyAdvisorySQL :: Text
-tryLockDeadConcurrencyAdvisorySQL =
+tryLockDeadConcurrencyAdvisorySQL :: [Text] -> Query Text
+tryLockDeadConcurrencyAdvisorySQL deadKeys =
   let lockExpr = concurrencyAdvisoryLockExpr "k"
-   in [text|
-        SELECT k AS concurrency_key
-        FROM unnest(?::text[]) AS t(k)
+   in [sql|
+        SELECT k AS @{concurrency_key :: CText}
+        FROM unnest(#{deadKeys :: [CText]}::text[]) AS t(k)
         WHERE pg_try_advisory_xact_lock(${lockExpr})
       |]
 
 -- | Lock every count row in key order, so a reconcile recount after it sees committed claims.
-lockConcurrencyCountsSQL :: SchemaName -> Text
+lockConcurrencyCountsSQL :: SchemaName -> Query Text
 lockConcurrencyCountsSQL schema =
   let concTbl = arbiterConcurrencyTable schema
-   in [text|
-        SELECT concurrency_key FROM ${concTbl} ORDER BY concurrency_key FOR UPDATE
+   in [sql|
+        SELECT @{concurrency_key :: CText} FROM ${concTbl} ORDER BY concurrency_key FOR UPDATE
       |]
 
 -- | Recount in_flight for the passed locked keys and seed a row for a live key that
@@ -95,12 +107,12 @@ lockConcurrencyCountsSQL schema =
 -- conflict), so a key seeded after the lock pass keeps its trigger-maintained count
 -- and a concurrent claim is never overwritten. Run after 'lockConcurrencyCountsSQL'
 -- in one transaction. Returns the number repaired. Parameter: locked keys.
-reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> Text
-reconcileConcurrencyCountsSQL schema tableNames =
+reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> [Text] -> Query Int64
+reconcileConcurrencyCountsSQL schema tableNames heldKeys =
   let concTbl = arbiterConcurrencyTable schema
       union = unionAllOverQueueTables schema tableNames $ \_ t ->
         "SELECT concurrency_key, claimed_by, concurrency_prefix FROM " <> t <> " WHERE concurrency_key IS NOT NULL"
-   in [text|
+   in [sql|
         WITH live AS (
           SELECT concurrency_key,
                  COUNT(*) FILTER (WHERE claimed_by IS NOT NULL) AS inflight,
@@ -109,7 +121,7 @@ reconcileConcurrencyCountsSQL schema tableNames =
           GROUP BY concurrency_key
         ),
         held AS (
-          SELECT k AS concurrency_key FROM unnest(?::text[]) AS t(k)
+          SELECT k AS concurrency_key FROM unnest(#{heldKeys :: [CText]}::text[]) AS t(k)
         ),
         fixed AS (
           UPDATE ${concTbl} c
@@ -130,24 +142,27 @@ reconcileConcurrencyCountsSQL schema tableNames =
           ON CONFLICT (concurrency_key) DO NOTHING
           RETURNING concurrency_key
         )
-        SELECT ((SELECT COUNT(*) FROM fixed) + (SELECT COUNT(*) FROM seeded))::int8 AS reconciled
+        SELECT ((SELECT COUNT(*) FROM fixed) + (SELECT COUNT(*) FROM seeded))::int8 AS @{reconciled :: CInt8}
       |]
 
 -- | List every concurrency pool with its default/override limit and live key and
--- in-flight aggregates. No parameters.
-listConcurrencyPoliciesSQL :: SchemaName -> Text
-listConcurrencyPoliciesSQL schema = concurrencyPoliciesSQL schema False
+-- in-flight aggregates.
+listConcurrencyPoliciesSQL :: SchemaName -> Query ConcurrencyPolicyView
+listConcurrencyPoliciesSQL schema = concurrencyPoliciesSQL schema Nothing
 
--- | Single-prefix variant of 'listConcurrencyPoliciesSQL'. Parameter: prefix.
-getConcurrencyPolicySQL :: SchemaName -> Text
-getConcurrencyPolicySQL schema = concurrencyPoliciesSQL schema True
+-- | Single-prefix variant of 'listConcurrencyPoliciesSQL'.
+getConcurrencyPolicySQL :: SchemaName -> Text -> Query ConcurrencyPolicyView
+getConcurrencyPolicySQL schema prefix = concurrencyPoliciesSQL schema (Just prefix)
 
-concurrencyPoliciesSQL :: SchemaName -> Bool -> Text
-concurrencyPoliciesSQL schema single =
+concurrencyPoliciesSQL :: SchemaName -> Maybe Text -> Query ConcurrencyPolicyView
+concurrencyPoliciesSQL schema mPrefix =
   let policies = arbiterConcurrencyPoliciesTable schema
       counts = arbiterConcurrencyTable schema
-      (kCte, aggWhere, scope) = policyViewScope single "c.concurrency_prefix"
-   in [text|
+      kCte = foldMap (\p -> [sql|WITH k AS (SELECT #{p :: CText}::text AS prefix)|]) mPrefix
+      (aggWhere, scope) = policyViewScope (isJust mPrefix) "c.concurrency_prefix"
+   in rows
+        concurrencyPolicyViewCodec
+        [sql|
         ${kCte}
         SELECT p.prefix_id, p.default_limit, p.override_limit,
                COALESCE(agg.key_count, 0) AS key_count,
@@ -165,40 +180,42 @@ concurrencyPoliciesSQL schema single =
       |]
 
 -- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
--- Parameters: concurrency_prefix, limit, offset.
-listConcurrencyKeysSQL :: SchemaName -> Text
-listConcurrencyKeysSQL schema =
+listConcurrencyKeysSQL :: SchemaName -> Text -> Int64 -> Int64 -> Query ConcurrencyKeyView
+listConcurrencyKeysSQL schema prefix limit offset =
   let policies = arbiterConcurrencyPoliciesTable schema
       counts = arbiterConcurrencyTable schema
       effLimit = effectivePolicyCol "p" "limit"
-   in [text|
-        SELECT concurrency_key, concurrency_prefix, in_flight, effective_limit,
-               in_flight::float8 / NULLIF(effective_limit, 0) AS fill_fraction
-        FROM (
-          SELECT c.concurrency_key, c.concurrency_prefix, c.in_flight,
-                 ${effLimit} AS effective_limit
-          FROM ${counts} c
-          JOIN ${policies} p ON p.prefix_id = c.concurrency_prefix
-          WHERE c.concurrency_prefix = ?
-        ) r
-        ORDER BY fill_fraction DESC NULLS LAST, concurrency_key
-        LIMIT ? OFFSET ?
-      |]
+   in rows
+        concurrencyKeyViewCodec
+        [sql|
+          SELECT concurrency_key, concurrency_prefix, in_flight, effective_limit,
+                 in_flight::float8 / NULLIF(effective_limit, 0) AS fill_fraction
+          FROM (
+            SELECT c.concurrency_key, c.concurrency_prefix, c.in_flight,
+                   ${effLimit} AS effective_limit
+            FROM ${counts} c
+            JOIN ${policies} p ON p.prefix_id = c.concurrency_prefix
+            WHERE c.concurrency_prefix = #{prefix :: CText}
+          ) r
+          ORDER BY fill_fraction DESC NULLS LAST, concurrency_key
+          LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
+        |]
 
 -- | Whether any concurrency key exists, to skip the full reconcile/prune scan otherwise.
-concurrencyHasAnyKeySQL :: SchemaName -> Text
+concurrencyHasAnyKeySQL :: SchemaName -> Query Bool
 concurrencyHasAnyKeySQL schema =
-  "SELECT EXISTS (SELECT 1 FROM " <> arbiterConcurrencyTable schema <> ") AS present"
+  let concTbl = arbiterConcurrencyTable schema
+   in [sql|SELECT EXISTS (SELECT 1 FROM ${concTbl}) AS @{present :: CBool}|]
 
 -- | Whether a crash truncated the count table (a live keyed job has no count row).
 -- Enqueues re-seed only their own keys, so any missing row means lost counts.
-concurrencyCountsStaleSQL :: SchemaName -> [TableName] -> Text
+concurrencyCountsStaleSQL :: SchemaName -> [TableName] -> Query Bool
 concurrencyCountsStaleSQL schema tableNames =
   let concTbl = arbiterConcurrencyTable schema
       keyed = liveConcurrencyKeysUnion schema tableNames
-   in [text|
+   in [sql|
         SELECT EXISTS (
           SELECT 1 FROM ( ${keyed} ) k
           WHERE NOT EXISTS (SELECT 1 FROM ${concTbl} c WHERE c.concurrency_key = k.concurrency_key)
-        ) AS stale
+        ) AS @{stale :: CBool}
       |]
