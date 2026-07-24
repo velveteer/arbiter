@@ -19,11 +19,13 @@ module Arbiter.Core.Sql.Cron
 
 import Data.Text (Text)
 import Data.Text qualified as T
-import NeatInterpolation (text)
+import Data.Time (UTCTime)
 
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec)
-import Arbiter.Core.CronSchedule (cronSchedulesTable)
+import Arbiter.Core.CronSchedule (CronScheduleRow, cronSchedulesTable)
 import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.SqlLiterals (textLiteral)
 
 allCronColumns :: Text
@@ -38,77 +40,70 @@ cronReadColumns = T.intercalate ", " (map expire (codecColumns cronScheduleRowCo
     expire c = c
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
--- Parameters: name, queue_name, default_expression, default_overlap, default_timezone
-upsertCronDefaultSQL :: Text -> Text
-upsertCronDefaultSQL schemaName =
+upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Query ()
+upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
   let tbl = cronSchedulesTable schemaName
-   in "INSERT INTO "
-        <> tbl
-        <> " (name, queue_name, default_expression, default_overlap, default_timezone) VALUES (?, ?, ?, ?, ?)"
-        <> " ON CONFLICT (name) DO UPDATE SET"
-        <> " queue_name = EXCLUDED.queue_name,"
-        <> " default_expression = EXCLUDED.default_expression,"
-        <> " default_overlap = EXCLUDED.default_overlap,"
-        <> " default_timezone = EXCLUDED.default_timezone,"
-        <> " updated_at = NOW()"
-
--- | List cron schedules ordered by name, optionally filtered by queue.
--- Parameters: queue_name (NULL = all queues)
-listCronSchedulesSQL :: Text -> Text
-listCronSchedulesSQL schemaName =
-  let tbl = cronSchedulesTable schemaName
-   in [text|
-        SELECT ${cronReadColumns} FROM ${tbl}
-        WHERE ?::text IS NULL OR queue_name = ?::text
-        ORDER BY name
+   in [sql|
+        INSERT INTO ${tbl} (name, queue_name, default_expression, default_overlap, default_timezone)
+        VALUES (#{name :: CText}, #{queueName :: CText}, #{defaultExpr :: CText}, #{defaultOv :: CText}, #{defaultTz :: Maybe CText})
+        ON CONFLICT (name) DO UPDATE SET
+          queue_name = EXCLUDED.queue_name,
+          default_expression = EXCLUDED.default_expression,
+          default_overlap = EXCLUDED.default_overlap,
+          default_timezone = EXCLUDED.default_timezone,
+          updated_at = NOW()
       |]
 
--- | Get a single cron schedule by name.
---
--- Parameters: schedule name
-getCronScheduleByNameSQL :: Text -> Text
-getCronScheduleByNameSQL schemaName =
+-- | List cron schedules ordered by name, optionally filtered by queue.
+listCronSchedulesSQL :: Text -> Maybe Text -> Query CronScheduleRow
+listCronSchedulesSQL schemaName queue =
   let tbl = cronSchedulesTable schemaName
-   in "SELECT " <> cronReadColumns <> " FROM " <> tbl <> " WHERE name = ?"
+   in rows
+        cronScheduleRowCodec
+        [sql|
+          SELECT ${cronReadColumns} FROM ${tbl}
+          WHERE #{queue :: Maybe CText}::text IS NULL OR queue_name = #{queue :: Maybe CText}::text
+          ORDER BY name
+        |]
+
+-- | Get a single cron schedule by name.
+getCronScheduleByNameSQL :: Text -> Text -> Query CronScheduleRow
+getCronScheduleByNameSQL schemaName name =
+  let tbl = cronSchedulesTable schemaName
+   in rows cronScheduleRowCodec [sql|SELECT ${cronReadColumns} FROM ${tbl} WHERE name = #{name :: CText}|]
 
 -- | Set @last_fired_at@ to NOW() for a schedule.
-touchCronLastFiredSQL :: Text -> Text
-touchCronLastFiredSQL schemaName =
+touchCronLastFiredSQL :: Text -> Text -> Query ()
+touchCronLastFiredSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET last_fired_at = NOW() WHERE name = ?"
+   in [sql|UPDATE ${tbl} SET last_fired_at = NOW() WHERE name = #{name :: CText}|]
 
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
 -- schedule names. The watermark must be the minute boundary the scheduler
 -- finished evaluating (not DB @NOW()@) so a slow iteration cannot leapfrog
 -- @last_checked_at@ past minutes it never tested. 'GREATEST' guards against
 -- backward motion under concurrent worker pools with skewed clocks.
---
--- Parameters: watermark timestamp, schedule names (text array)
-touchCronCheckedSQL :: Text -> Text
-touchCronCheckedSQL schemaName =
+touchCronCheckedSQL :: Text -> UTCTime -> [Text] -> Query ()
+touchCronCheckedSQL schemaName watermark names =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE "
-        <> tbl
-        <> " SET last_checked_at = GREATEST(last_checked_at, ?) WHERE name = ANY(?)"
+   in [sql|UPDATE ${tbl} SET last_checked_at = GREATEST(last_checked_at, #{watermark :: CTimestamptz}) WHERE name = ANY(#{names :: [CText]})|]
 
 -- | Fire-once-per-minute gate. Advances @last_fired_at@ to the minute floor
 -- only if the existing value is strictly less. 0 rows = another pool won.
---
--- Parameters: minute floor, schedule name, minute floor
-tryFireCronGateSQL :: Text -> Text
-tryFireCronGateSQL schemaName =
+tryFireCronGateSQL :: Text -> UTCTime -> Text -> Query ()
+tryFireCronGateSQL schemaName minuteFloor name =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE "
-        <> tbl
-        <> " SET last_fired_at = GREATEST(last_fired_at, ?)"
-        <> " WHERE name = ?"
-        <> " AND (last_fired_at IS NULL OR last_fired_at < ?)"
+   in [sql|
+        UPDATE ${tbl}
+        SET last_fired_at = GREATEST(last_fired_at, #{minuteFloor :: CTimestamptz})
+        WHERE name = #{name :: CText}
+          AND (last_fired_at IS NULL OR last_fired_at < #{minuteFloor :: CTimestamptz})
+      |]
 
 -- | Per-(schema, queue, name) transaction-scoped advisory lock for cron.
--- Parameters: schema, queue, name.
-tryAcquireCronLeaderSQL :: Text
-tryAcquireCronLeaderSQL =
-  "SELECT pg_try_advisory_xact_lock(hashtextextended(? || ':' || ? || ':' || ?, 0)) AS result"
+tryAcquireCronLeaderSQL :: Text -> Text -> Text -> Query Bool
+tryAcquireCronLeaderSQL schema queue name =
+  [sql|SELECT pg_try_advisory_xact_lock(hashtextextended(#{schema :: CText} || ':' || #{queue :: CText} || ':' || #{name :: CText}, 0)) AS @{result :: CBool}|]
 
 -- | How long a run request stays claimable. Only a pool serving the queue can
 -- claim one, so a request older than this had no pool to take it and expires
@@ -121,52 +116,43 @@ cronRunPending :: Text
 cronRunPending = "(run_requested_at IS NOT NULL AND run_requested_at > NOW() - " <> cronRunRequestTtl <> ")"
 
 -- | Stamp a run request on an enabled schedule and NOTIFY, returning a status.
-requestCronRunSQL :: Text -> Text
-requestCronRunSQL schemaName =
+requestCronRunSQL :: Text -> Text -> Query Text
+requestCronRunSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
-   in "WITH found AS (SELECT enabled, run_requested_at FROM "
-        <> tbl
-        <> " WHERE name = ? FOR UPDATE),"
-        <> " upd AS ("
-        <> "UPDATE "
-        <> tbl
-        <> " SET run_requested_at = NOW(), updated_at = NOW()"
-        <> " WHERE name = ? AND enabled AND NOT "
-        <> cronRunPending
-        <> " RETURNING pg_notify("
-        <> textLiteral (cronRunNotifyChannel schemaName)
-        <> ", name))"
-        <> " SELECT CASE"
-        <> " WHEN EXISTS (SELECT 1 FROM upd) THEN 'stamped'"
-        <> " WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND "
-        <> cronRunPending
-        <> ") THEN 'pending'"
-        <> " WHEN EXISTS (SELECT 1 FROM found) THEN 'disabled'"
-        <> " ELSE 'not_found' END AS status"
+      chan = textLiteral (cronRunNotifyChannel schemaName)
+   in [sql|
+        WITH found AS (SELECT enabled, run_requested_at FROM ${tbl} WHERE name = #{name :: CText} FOR UPDATE),
+        upd AS (
+          UPDATE ${tbl} SET run_requested_at = NOW(), updated_at = NOW()
+          WHERE name = #{name :: CText} AND enabled AND NOT ${cronRunPending}
+          RETURNING pg_notify(${chan}, name))
+        SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM upd) THEN 'stamped'
+          WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND ${cronRunPending}) THEN 'pending'
+          WHEN EXISTS (SELECT 1 FROM found) THEN 'disabled'
+          ELSE 'not_found' END AS @{status :: CText}
+      |]
 
 -- | Claim a pending run request, clearing the flag and returning the claimed row.
-claimCronRunSQL :: Text -> Text
-claimCronRunSQL schemaName =
+claimCronRunSQL :: Text -> Text -> Query CronScheduleRow
+claimCronRunSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE "
-        <> tbl
-        <> " SET run_requested_at = NULL, updated_at = NOW()"
-        <> " WHERE name = ? AND enabled AND "
-        <> cronRunPending
-        <> " RETURNING "
-        <> allCronColumns
+   in rows
+        cronScheduleRowCodec
+        [sql|
+          UPDATE ${tbl} SET run_requested_at = NULL, updated_at = NOW()
+          WHERE name = #{name :: CText} AND enabled AND ${cronRunPending}
+          RETURNING ${allCronColumns}
+        |]
 
 -- | Record when a manual run last fired a job.
-touchCronManualRunSQL :: Text -> Text
-touchCronManualRunSQL schemaName =
+touchCronManualRunSQL :: Text -> UTCTime -> Text -> Query ()
+touchCronManualRunSQL schemaName firedAt name =
   let tbl = cronSchedulesTable schemaName
-   in "UPDATE " <> tbl <> " SET last_manual_run_at = GREATEST(last_manual_run_at, ?), updated_at = NOW() WHERE name = ?"
+   in [sql|UPDATE ${tbl} SET last_manual_run_at = GREATEST(last_manual_run_at, #{firedAt :: CTimestamptz}), updated_at = NOW() WHERE name = #{name :: CText}|]
 
 -- | Names of enabled schedules with a pending run request among the given names.
-pendingCronRunsSQL :: Text -> Text
-pendingCronRunsSQL schemaName =
+pendingCronRunsSQL :: Text -> [Text] -> Query Text
+pendingCronRunsSQL schemaName names =
   let tbl = cronSchedulesTable schemaName
-   in "SELECT name FROM "
-        <> tbl
-        <> " WHERE name = ANY(?) AND enabled AND "
-        <> cronRunPending
+   in [sql|SELECT @{name :: CText} FROM ${tbl} WHERE name = ANY(#{names :: [CText]}) AND enabled AND ${cronRunPending}|]

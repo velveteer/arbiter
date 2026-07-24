@@ -8,10 +8,10 @@ module Arbiter.Orville.MonadArbiter
   ) where
 
 import Arbiter.Core.Array qualified as Array
-import Arbiter.Core.Codec (Col (..), NullCol (..), ParamType (..), RowCodec, SomeParam (..), runCodec)
+import Arbiter.Core.Codec (Col (..), NullCol (..), ParamType (..), SomeParam (..), runCodec)
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.MonadArbiter (Params)
-import Control.Monad (foldM)
+import Arbiter.Core.MonadArbiter (Query (..))
+import Arbiter.Core.Sql.Query (numberPlaceholders)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, eitherDecodeStrict', encode)
 import Data.ByteString (ByteString)
@@ -25,21 +25,19 @@ import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Orville.PostgreSQL qualified as O
 import Orville.PostgreSQL.Marshall.FieldDefinition qualified as FieldDef
 import Orville.PostgreSQL.Marshall.SqlMarshaller qualified as O
+import Orville.PostgreSQL.Raw.Connection qualified as Conn
+import Orville.PostgreSQL.Raw.PgTextFormatValue (PgTextFormatValue)
 import Orville.PostgreSQL.Raw.PgTextFormatValue qualified as PgText
-import Orville.PostgreSQL.Raw.RawSql (RawSql)
-import Orville.PostgreSQL.Raw.RawSql qualified as RawSql
 import Orville.PostgreSQL.Raw.SqlValue (SqlValue)
 import Orville.PostgreSQL.Raw.SqlValue qualified as SqlValue
 
 orvilleExecuteQuery
   :: (O.MonadOrville m)
-  => Text
-  -> Params
-  -> RowCodec a
+  => Query a
   -> m [a]
-orvilleExecuteQuery sql params codec = O.withConnection $ \conn -> do
-  rawSql <- validateAndBuildRawSql sql params
-  result <- liftIO $ RawSql.execute conn rawSql
+orvilleExecuteQuery (Query sql params codec) = O.withConnection $ \conn -> do
+  pgParams <- encodeParams params
+  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (numberPlaceholders sql)) pgParams
   let marshaller = O.annotateSqlMarshallerEmptyAnnotation (O.marshallReadOnly (runCodec orvilleCol codec))
   decoded <- liftIO $ O.marshallResultFromSql O.defaultErrorDetailLevel marshaller result
   case decoded of
@@ -48,12 +46,11 @@ orvilleExecuteQuery sql params codec = O.withConnection $ \conn -> do
 
 orvilleExecuteStatement
   :: (O.MonadOrville m)
-  => Text
-  -> Params
+  => Query a
   -> m Int64
-orvilleExecuteStatement sql params = O.withConnection $ \conn -> do
-  rawSql <- validateAndBuildRawSql sql params
-  result <- liftIO $ RawSql.execute conn rawSql
+orvilleExecuteStatement (Query sql params _) = O.withConnection $ \conn -> do
+  pgParams <- encodeParams params
+  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (numberPlaceholders sql)) pgParams
   liftIO $ readRowCount result
 
 orvilleWithDbTransaction :: (O.MonadOrville m) => m a -> m a
@@ -88,25 +85,20 @@ sqlValueToBytes =
     (const $ Left "sqlValueToBytes: got composite row, expected scalar")
     (Left "sqlValueToBytes: got NULL, expected non-null scalar")
 
-validateAndBuildRawSql :: (MonadIO m) => Text -> Params -> m RawSql
-validateAndBuildRawSql sqlTemplate params =
-  case T.splitOn "?" sqlTemplate of
-    [] -> pure mempty
-    (first : rest)
-      | length params /= length rest ->
-          throwInternal $
-            "SQL parameter count mismatch: expected "
-              <> T.pack (show (length rest))
-              <> " but got "
-              <> T.pack (show (length params))
-      | otherwise ->
-          foldM
-            ( \acc (p, txt) -> case someParamToSqlValue p of
-                Left err -> throwInternal $ "param encoding error: " <> err
-                Right sv -> pure $ acc <> RawSql.parameter sv <> RawSql.fromText txt
-            )
-            (RawSql.fromText first)
-            (zip params rest)
+sqlValueToParam :: SqlValue -> Either Text (Maybe PgTextFormatValue)
+sqlValueToParam =
+  SqlValue.foldSqlValue
+    (Right . Just)
+    (const $ Left "sqlValueToParam: got composite row, expected scalar")
+    (Right Nothing)
+
+-- | Encode the ordered params into the libpq values 'Conn.executeRaw' consumes.
+encodeParams :: (MonadIO m) => [SomeParam] -> m [Maybe PgTextFormatValue]
+encodeParams = traverse toPgParam
+  where
+    toPgParam p = case someParamToSqlValue p >>= sqlValueToParam of
+      Left err -> throwInternal $ "param encoding error: " <> err
+      Right pgv -> pure pgv
 
 orvilleCol :: NullCol a -> O.SqlMarshaller () a
 orvilleCol (NotNull name c) = O.marshallReadOnly $ O.marshallField id (colFieldDef name c)

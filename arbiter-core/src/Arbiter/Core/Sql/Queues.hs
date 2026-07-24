@@ -10,41 +10,40 @@ module Arbiter.Core.Sql.Queues
   , listQueuesSQL
   ) where
 
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
-import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, queueRowCodec)
 import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
-import Arbiter.Core.Queues (arbiterQueuesTable)
+import Arbiter.Core.Queues (QueueRow, arbiterQueuesTable)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
 queueColumnList :: Text
 queueColumnList = T.intercalate ", " (codecColumns queueRowCodec)
 
 -- | Insert an arbiter_queues row with defaults if one doesn't already exist.
---
--- Parameters: queue_name
-ensureQueueSQL :: SchemaName -> Text
-ensureQueueSQL schemaName =
+ensureQueueSQL :: SchemaName -> Text -> Query ()
+ensureQueueSQL schemaName queue =
   let tbl = arbiterQueuesTable schemaName
-   in [text|
-        INSERT INTO ${tbl} (queue_name) VALUES (?)
+   in [sql|
+        INSERT INTO ${tbl} (queue_name) VALUES (#{queue :: CText})
         ON CONFLICT (queue_name) DO NOTHING
       |]
 
 -- | Upsert the queue's paused flag and fan one NOTIFY per worker in the queue.
 -- @paused_at@ is set on first pause, cleared on resume, untouched on re-pause.
--- Parameters: queue_name, paused, paused (repeated for the CASE expression)
-setQueuePausedSQL :: SchemaName -> Text
-setQueuePausedSQL schemaName =
+setQueuePausedSQL :: SchemaName -> Text -> Bool -> Query Int64
+setQueuePausedSQL schemaName queue paused =
   let tbl = arbiterQueuesTable schemaName
       wTbl = arbiterWorkersTable schemaName
       chanPrefix = pauseNotifyChannelPrefix schemaName
-   in [text|
+   in [sql|
         WITH upsert AS (
           INSERT INTO ${tbl} (queue_name, paused, paused_at)
-            VALUES (?, ?, CASE WHEN ?::boolean THEN NOW() ELSE NULL END)
+            VALUES (#{queue :: CText}, #{paused :: CBool}, CASE WHEN #{paused :: CBool}::boolean THEN NOW() ELSE NULL END)
           ON CONFLICT (queue_name) DO UPDATE
             SET paused = EXCLUDED.paused,
                 paused_at = CASE
@@ -66,22 +65,20 @@ setQueuePausedSQL schemaName =
           FROM upsert u
           JOIN ${wTbl} w ON w.queue_name = u.queue_name
         )
-        SELECT count(*)::int8 AS count FROM upsert
+        SELECT count(*)::int8 AS @{count :: CInt8} FROM upsert
         WHERE (SELECT count(*) FROM notif) >= 0
       |]
 
 -- | Get the arbiter_queues row for a single queue.
---
--- Parameters: queue_name
-getQueueSQL :: SchemaName -> Text
-getQueueSQL schemaName =
+getQueueSQL :: SchemaName -> Text -> Query QueueRow
+getQueueSQL schemaName queue =
   let tbl = arbiterQueuesTable schemaName
       cols = queueColumnList
-   in [text|SELECT ${cols} FROM ${tbl} WHERE queue_name = ?|]
+   in rows queueRowCodec [sql|SELECT ${cols} FROM ${tbl} WHERE queue_name = #{queue :: CText}|]
 
 -- | List all arbiter_queues rows.
-listQueuesSQL :: SchemaName -> Text
+listQueuesSQL :: SchemaName -> Query QueueRow
 listQueuesSQL schemaName =
   let tbl = arbiterQueuesTable schemaName
       cols = queueColumnList
-   in [text|SELECT ${cols} FROM ${tbl} ORDER BY queue_name|]
+   in rows queueRowCodec [sql|SELECT ${cols} FROM ${tbl} ORDER BY queue_name|]

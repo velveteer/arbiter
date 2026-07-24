@@ -12,15 +12,15 @@ module Arbiter.Simple.MonadArbiter
   , simpleRunHandlerWithConnection
   ) where
 
-import Arbiter.Core.Codec (Col (..), NullCol (..), RowCodec, runCodec)
+import Arbiter.Core.Codec (Col (..), NullCol (..), runCodec)
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.MonadArbiter
+import Arbiter.Core.MonadArbiter hiding (Query (..))
+import Arbiter.Core.MonadArbiter qualified as MA
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Int (Int64)
 import Data.Pool (Pool, withResource)
-import Data.Text (Text)
 import Data.Text.Encoding qualified as T
 import Database.PostgreSQL.Simple (Connection)
 import Database.PostgreSQL.Simple qualified as PG
@@ -41,11 +41,9 @@ class (Monad m) => HasSimplePool m where
 
 simpleExecuteQuery
   :: (HasSimplePool m, MonadUnliftIO m)
-  => Text
-  -> Params
-  -> RowCodec a
+  => MA.Query a
   -> m [a]
-simpleExecuteQuery sqlTemplate params codec = do
+simpleExecuteQuery (MA.Query sqlTemplate params codec) = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
       parser = runCodec interpretNullCol codec
   withConn $ \conn -> liftIO $ case params of
@@ -54,10 +52,9 @@ simpleExecuteQuery sqlTemplate params codec = do
 
 simpleExecuteStatement
   :: (HasSimplePool m, MonadUnliftIO m)
-  => Text
-  -> Params
+  => MA.Query a
   -> m Int64
-simpleExecuteStatement sqlTemplate params = do
+simpleExecuteStatement (MA.Query sqlTemplate params _) = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
   withConn $ \conn -> liftIO $ case params of
     [] -> PG.execute_ conn sql

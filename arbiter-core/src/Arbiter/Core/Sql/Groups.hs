@@ -8,28 +8,29 @@ module Arbiter.Core.Sql.Groups
   ) where
 
 import Data.Text (Text)
-import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query)
 
 -- | @FOR UPDATE SKIP LOCKED@ over the groups rows, returning the locked keys for
 -- the reaper to recompute. Claim-locked groups are skipped.
-lockGroupsSQL :: Text -> Text -> Text
+lockGroupsSQL :: Text -> Text -> Query Text
 lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
-   in [text|SELECT group_key FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
+   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
 
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
 -- A separate statement, so its snapshot post-dates the lock and cannot clobber a
 -- concurrent claim's @in_flight_until@. The INSERT only repairs missing rows.
-refreshGroupsSQL :: Text -> Text -> Text
-refreshGroupsSQL schema tableName =
+refreshGroupsSQL :: Text -> Text -> [Text] -> Query ()
+refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       ifBucket = inFlightPredicate ""
-   in [text|
+   in [sql|
         WITH params AS (
-          SELECT unnest(?::text[]) AS group_key
+          SELECT unnest(#{keys :: [CText]}::text[]) AS group_key
         ),
         current AS (
           SELECT group_key,

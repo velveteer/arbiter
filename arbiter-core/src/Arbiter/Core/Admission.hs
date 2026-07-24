@@ -26,7 +26,6 @@ module Arbiter.Core.Admission
 
     -- * SQL fragments
   , effectivePolicyCol
-  , touchColumn
   , excludedAssignment
   , policyUpsertSQL
   , policyViewScope
@@ -90,12 +89,6 @@ effectivePolicyCol :: Text -> Text -> Text
 effectivePolicyCol p name =
   "COALESCE(" <> p <> ".override_" <> name <> ", " <> p <> ".default_" <> name <> ")"
 
--- | An UPDATE assignment guarded by a boolean touch flag, binding flag then value.
--- An untouched column keeps its current value.
-touchColumn :: Text -> Text -> Text
-touchColumn name sqlType =
-  name <> " = CASE WHEN ?::bool THEN ?::" <> sqlType <> " ELSE " <> name <> " END"
-
 -- | An @ON CONFLICT DO UPDATE SET@ assignment copying a column from the excluded row.
 excludedAssignment :: Text -> Text
 excludedAssignment n = n <> " = EXCLUDED." <> n
@@ -119,17 +112,16 @@ policyUpsertSQL policiesTable prefixLit defaults =
         , ";"
         ]
 
--- | Single-vs-list scaffolding for the policy views. Single mode binds the prefix
--- param in CTE @k@ and scopes both the aggregate (via @aggPrefixCol@) and the outer
--- query to it.
-policyViewScope :: Bool -> Text -> (Text, Text, Text)
+-- | Single-vs-list scoping for the policy views. Single mode scopes both the
+-- aggregate (via @aggPrefixCol@) and the outer query to the prefix bound in CTE
+-- @k@, which the caller supplies. Returns @(aggWhere, scope)@.
+policyViewScope :: Bool -> Text -> (Text, Text)
 policyViewScope single aggPrefixCol
   | single =
-      ( "WITH k AS (SELECT ?::text AS prefix)"
-      , "WHERE " <> aggPrefixCol <> " = (SELECT prefix FROM k)"
+      ( "WHERE " <> aggPrefixCol <> " = (SELECT prefix FROM k)"
       , "WHERE p.prefix_id = (SELECT prefix FROM k)"
       )
-  | otherwise = ("", "", "ORDER BY p.prefix_id")
+  | otherwise = ("", "ORDER BY p.prefix_id")
 
 -- Registry reflection --------------------------------------------------------
 

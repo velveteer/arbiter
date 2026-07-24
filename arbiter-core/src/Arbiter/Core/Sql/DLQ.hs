@@ -14,13 +14,17 @@ module Arbiter.Core.Sql.DLQ
   , countDLQChildrenBatchSQL
   ) where
 
+import Data.Aeson (Value)
+import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
-import NeatInterpolation (text)
 
+import Arbiter.Core.Codec (jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueTable)
-import Arbiter.Core.Job.Types (defaultMaxAttempts)
+import Arbiter.Core.Job.Types (JobRead, defaultMaxAttempts)
 import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query, rows)
 
 -- | SQL template for moving job to DLQ atomically
 --
@@ -28,17 +32,15 @@ import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns)
 -- The operation is atomic: the job is deleted from the main queue and
 -- inserted into the DLQ in a single statement. The final error message
 -- is passed as a parameter to capture the error that caused the DLQ move.
---
--- Parameters: job_id, attempts, last_error
-moveToDLQSQL :: Text -> Text -> Text
-moveToDLQSQL schema tableName =
+moveToDLQSQL :: Text -> Text -> Int64 -> Int32 -> Text -> Query Int64
+moveToDLQSQL schema tableName jobId att errorMsg =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
-   in [text|
+   in [sql|
         WITH deleted_job AS (
           DELETE FROM ${tbl}
-          WHERE id = ? AND attempts = ?
+          WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4}
           RETURNING *
         ),
         inserted_dlq AS (
@@ -46,23 +48,23 @@ moveToDLQSQL schema tableName =
             job_id, ${cols}, last_error
           )
           SELECT
-            id, ${cols}, ?
+            id, ${cols}, #{errorMsg :: CText}
           FROM deleted_job
         )
-        SELECT count(*) FROM deleted_job
+        SELECT count(*) AS @{count :: CInt8} FROM deleted_job
       |]
 
 -- | Select up to @limit@ claimable jobs whose attempts reached their limit,
 -- with the scalar fields the tree-aware DLQ move needs. Each row is then moved
 -- via 'moveToDLQFields'. The cap drains a large backlog over several passes
 -- rather than fetching an unbounded set at once.
-selectExhaustedJobsSQL :: Text -> Text -> Int -> Text
+selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int32, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
       dma = T.pack (show defaultMaxAttempts)
       lim = T.pack (show limit)
-   in [text|
-        SELECT id, attempts, parent_id, (parent_state IS NOT NULL) AS is_rollup
+   in [sql|
+        SELECT @{id :: CInt8}, @{attempts :: CInt4}, @{parent_id :: Maybe CInt8}, (parent_state IS NOT NULL) AS @{is_rollup :: CBool}
         FROM ${tbl}
         WHERE NOT suspended
           AND cancel_requested_at IS NULL
@@ -92,17 +94,17 @@ selectExhaustedJobsSQL schema tableName limit =
 -- Retried rollup finalizers get @suspended = TRUE@ when they have children
 -- being retried alongside them. @dedup_key@ and @dedup_strategy@ are
 -- intentionally dropped on retry (columns omitted → NULL defaults).
---
--- Parameters: id (the DLQ primary key)
-retryFromDLQSQL :: Text -> Text -> Text
-retryFromDLQSQL schema tableName =
+retryFromDLQSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
+retryFromDLQSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
-   in [text|
+   in rows
+        (jobRowCodec tableName)
+        [sql|
         WITH RECURSIVE
         target AS (
-          SELECT * FROM ${dlqTbl} WHERE id = ?
+          SELECT * FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}
         ),
         -- Walk up through DLQ ancestors to find the root of the tree.
         -- Stops when parent_id IS NULL, parent is in main queue, or
@@ -190,38 +192,31 @@ retryFromDLQSQL schema tableName =
       |]
 
 -- | Check whether a DLQ job exists by ID.
---
--- Parameters: dlq_id
-dlqJobExistsSQL :: Text -> Text -> Text
-dlqJobExistsSQL schema tableName =
+dlqJobExistsSQL :: Text -> Text -> Int64 -> Query Bool
+dlqJobExistsSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [text|SELECT EXISTS (SELECT 1 FROM ${dlqTbl} WHERE id = ?) AS result|]
+   in [sql|SELECT EXISTS (SELECT 1 FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}) AS @{result :: CBool}|]
 
--- | SQL template for deleting a DLQ job
---
--- Parameters: id (the DLQ primary key)
--- Returns: parent_id of the deleted job (NULL if no parent)
-deleteDLQJobSQL :: Text -> Text -> Text
-deleteDLQJobSQL schema tableName =
+-- | SQL template for deleting a DLQ job. Returns the deleted job's parent_id (NULL if no parent).
+deleteDLQJobSQL :: Text -> Text -> Int64 -> Query (Maybe Int64)
+deleteDLQJobSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [text|DELETE FROM ${dlqTbl} WHERE id = ? RETURNING parent_id|]
+   in [sql|DELETE FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8} RETURNING @{parent_id :: Maybe CInt8}|]
 
 -- | SQL template for moving multiple jobs to DLQ in a single operation
 --
 -- Uses unnest to process multiple (id, attempts, error_msg) tuples.
 -- Returns the number of jobs moved.
---
--- Parameters: Array of job IDs, array of attempts, array of error messages
-moveToDLQBatchSQL :: Text -> Text -> Text
-moveToDLQBatchSQL schema tableName =
+moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int32] -> [Text] -> Query Int64
+moveToDLQBatchSQL schema tableName ids atts errs =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
-   in [text|
+   in [sql|
         WITH input_jobs AS (
-          SELECT unnest(?::bigint[]) AS id,
-                 unnest(?::int[]) AS expected_attempts,
-                 unnest(?::text[]) AS error_msg
+          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id,
+                 unnest(#{atts :: [CInt4]}::int[]) AS expected_attempts,
+                 unnest(#{errs :: [CText]}::text[]) AS error_msg
         ),
         deleted_jobs AS (
           DELETE FROM ${tbl} j
@@ -234,17 +229,16 @@ moveToDLQBatchSQL schema tableName =
           SELECT id, NOW(), ${cols}, new_error
           FROM deleted_jobs
         )
-        SELECT count(*) FROM deleted_jobs
+        SELECT count(*) AS @{count :: CInt8} FROM deleted_jobs
       |]
 
 -- | SQL template for deleting multiple DLQ jobs by ID
 --
--- Parameters: Array of DLQ job IDs
--- Returns: parent_id of each deleted job (NULL if no parent)
-deleteDLQJobsBatchSQL :: Text -> Text -> Text
-deleteDLQJobsBatchSQL schema tableName =
+-- | Delete multiple DLQ jobs by id, returning each deleted job's parent_id (NULL if no parent).
+deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [text|DELETE FROM ${dlqTbl} WHERE id = ANY(?) RETURNING parent_id|]
+   in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{parent_id :: Maybe CInt8}|]
 
 -- | Cascade all descendants of a rollup parent to the DLQ.
 --
@@ -252,16 +246,14 @@ deleteDLQJobsBatchSQL schema tableName =
 -- to the DLQ in a single operation. Used when a rollup parent is moved
 -- to DLQ to prevent orphaned children from hitting FK violations on
 -- the results table.
---
--- Parameters: parent_job_id, error_message
-cascadeChildrenToDLQSQL :: Text -> Text -> Text
-cascadeChildrenToDLQSQL schema tableName =
+cascadeChildrenToDLQSQL :: Text -> Text -> Int64 -> Text -> Query Int64
+cascadeChildrenToDLQSQL schema tableName parentId errorMsg =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
-   in [text|
+   in [sql|
         WITH RECURSIVE descendants AS (
-          SELECT id FROM ${tbl} WHERE parent_id = ?
+          SELECT id FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
           UNION ALL
           SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         ),
@@ -272,21 +264,19 @@ cascadeChildrenToDLQSQL schema tableName =
         ),
         inserted_dlq AS (
           INSERT INTO ${dlqTbl} (job_id, ${cols}, last_error)
-          SELECT id, ${cols}, ?
+          SELECT id, ${cols}, #{errorMsg :: CText}
           FROM deleted
         )
-        SELECT count(*) FROM deleted
+        SELECT count(*) AS @{count :: CInt8} FROM deleted
       |]
 
--- | Batch DLQ child count: returns (parent_id, count) for a set of job IDs
---
--- Parameters: array of job IDs
-countDLQChildrenBatchSQL :: Text -> Text -> Text
-countDLQChildrenBatchSQL schema tableName =
+-- | Batch DLQ child count: returns (parent_id, count) for a set of job IDs.
+countDLQChildrenBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Int64)
+countDLQChildrenBatchSQL schema tableName jobIds =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [text|
-        SELECT parent_id, COUNT(*)
+   in [sql|
+        SELECT @{parent_id :: CInt8}, COUNT(*) AS @{count :: CInt8}
         FROM ${dlqTbl}
-        WHERE parent_id = ANY(?)
+        WHERE parent_id = ANY(#{jobIds :: [CInt8]})
         GROUP BY parent_id
       |]

@@ -1,25 +1,22 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Arbiter.Hasql.Encode
   ( buildEncoder
   , buildStatementRowCount
-  , convertPlaceholders
   , encodeSomeParam
   , colEncoder
   ) where
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), Params, SomeParam (..))
+import Arbiter.Core.Sql.Query (numberPlaceholders)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Statement qualified as S
 
 buildStatementRowCount :: Text -> Params -> S.Statement () Int64
 buildStatementRowCount sql ps =
-  S.unpreparable (convertPlaceholders sql) (buildEncoder ps) D.rowsAffected
+  S.unpreparable (numberPlaceholders sql) (buildEncoder ps) D.rowsAffected
 
 buildEncoder :: Params -> E.Params ()
 buildEncoder = mconcat . map encodeSomeParam
@@ -41,10 +38,3 @@ colEncoder CTimestamptz = E.timestamptz
 colEncoder CJsonb = E.jsonb
 colEncoder CFloat8 = E.float8
 colEncoder CUuid = E.uuid
-
-convertPlaceholders :: Text -> Text
-convertPlaceholders sql =
-  case T.splitOn "?" sql of
-    [] -> ""
-    (first : rest) ->
-      first <> mconcat (zipWith (\i part -> "$" <> T.pack (show (i :: Int)) <> part) [1 ..] rest)
