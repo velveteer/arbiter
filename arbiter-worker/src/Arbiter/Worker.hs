@@ -214,7 +214,8 @@ runWorkerPools registry pools setup = do
 
 -- | Run only the worker pools whose names appear in the enabled list.
 runSelectedWorkerPools
-  :: (MonadUnliftIO m)
+  :: forall m
+   . (MonadUnliftIO m)
   => TVar WorkerState
   -> [Text]
   -> [NamedWorkerPool m]
@@ -223,14 +224,17 @@ runSelectedWorkerPools sharedState enabled pools =
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
     [] -> pure ()
     selected -> evalContT $ do
-      asyncs <- for selected $ \(NamedWorkerPool name cfg) ->
-        let cfg' =
-              cfg
-                { workerStateVar = sharedState
-                , logConfig = withPoolContext name (logConfig cfg)
-                }
-         in ContT $ \k -> Async.withAsync (runWorkerPool cfg') k
+      asyncs <- for selected withPoolAsync
       lift $ traverse_ Async.waitCatch asyncs
+  where
+    withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
+    withPoolAsync (NamedWorkerPool name cfg) =
+      let cfg' =
+            cfg
+              { workerStateVar = sharedState
+              , logConfig = withPoolContext name (logConfig cfg)
+              }
+       in ContT $ Async.withAsync (runWorkerPool cfg')
 
 -- | Inject the pool name into log context. User-supplied pairs come after
 -- so they win on key collision.
