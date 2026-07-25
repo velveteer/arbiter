@@ -4,7 +4,7 @@
 
 module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Setup (addQueueTable, setupOnce)
 import Arbiter.Worker.TestKit (workerSpec)
 import Arbiter.Worker.TestKit qualified as TestKit

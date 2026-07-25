@@ -1431,12 +1431,12 @@ decodeArchiveRow
   => (Int64, UTCTime, JobRead Value, Maybe Value)
   -> m (Archive.ArchiveJob payload)
 decodeArchiveRow (aId, aCompletedAt, rawJob, aResult) = do
-  jobSnapshot <- decodePayload rawJob
+  snapshot <- decodePayload rawJob
   pure $
     Archive.ArchiveJob
       { Archive.archivePrimaryKey = aId
       , Archive.completedAt = aCompletedAt
-      , Archive.jobSnapshot = jobSnapshot
+      , Archive.archivedSnapshot = snapshot
       , Archive.archivedResult = aResult
       }
 

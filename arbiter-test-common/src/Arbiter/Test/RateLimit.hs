@@ -37,7 +37,7 @@ import Arbiter.Core.Job.Types
   , payload
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter)
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema
   ( arbiterRateLimitPoliciesTable
   , arbiterRateLimitsTable

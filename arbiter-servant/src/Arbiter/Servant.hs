@@ -20,6 +20,7 @@
 module Arbiter.Servant
   ( -- * Registry
     QueueSpec (..)
+  , Queue
 
     -- * Server
   , arbiterServer
@@ -58,7 +59,7 @@ module Arbiter.Servant
   , CronScheduleUpdate (..)
   ) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 
 import Arbiter.Servant.API
 import Arbiter.Servant.Server

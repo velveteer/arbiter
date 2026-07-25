@@ -26,4 +26,20 @@ type ArbiterSchema m (registry :: JobPayloadRegistry) =
   (HasArbiterSchema m, RegistryOf m ~ registry)
 
 -- | The result type declared by @payload@'s registry entry.
+--
+-- Not injective. A signature mentioning @ResultOf@ without naming @payload@
+-- concretely is ambiguous, and the error names 'ResultFor' and
+-- 'Arbiter.Core.QueueRegistry.SpecForPayload' rather than the user's own code.
+-- Add an equality constraint:
+--
+-- @
+-- -- rejected
+-- runAll :: (HasArbiterSchema m) => ResultOf m payload -> m ()
+-- -- accepted
+-- runAll :: (HasArbiterSchema m, ResultOf m payload ~ r) => r -> m ()
+-- @
+--
+-- The worker types take @result@ as an ordinary parameter for this reason, so
+-- only code that names @ResultOf@ itself, such as
+-- 'Arbiter.Worker.mergedChildResults', needs the constraint.
 type ResultOf m (payload :: Type) = ResultFor payload (RegistryOf m)

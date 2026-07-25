@@ -8,7 +8,7 @@
 -- | Simple backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Simple.StateMachine (spec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (setupOnce)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)

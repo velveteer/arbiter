@@ -91,7 +91,7 @@ queue whose handlers store no result. `QueueWithResult` adds the
 [result type](#job-results) its handlers produce.
 
 ```haskell
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 
 type AppRegistry =
   '[ Queue "email_queue" EmailPayload
@@ -99,7 +99,11 @@ type AppRegistry =
    ]
 ```
 
-The registry is enforced at compile time - each payload type maps to exactly one table, and duplicate table names are a type error.
+`Queue name payload` is a synonym for `QueueWithResult name payload ()`, so type
+errors and haddocks print the expanded form.
+
+The registry is enforced at compile time - each payload type maps to exactly one
+table, and a duplicate table name or a duplicate payload type is a type error.
 
 ### Migrations
 
@@ -193,7 +197,7 @@ config <- Worker.manualWorkerConfig 5 processEmail
 
 processEmail
     :: Arb.JobRead EmailPayload
-    -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload
+    -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
     -> ArbS.SimpleDb AppRegistry IO ()
 processEmail job cbs = do
   liftIO $ sendEmail (Arb.payload job)
@@ -304,6 +308,12 @@ instance EncodeJobResult SyncReport where
     | rowsChanged r == 0 = Nothing
     | otherwise          = Just (toJSON r)
 ```
+
+Two constraints on a hand-written instance. It must encode something its own
+`FromJSON` accepts, since reads do not go through it - a decode failure is
+folded to `mempty` by `mergedChildResults` rather than raised, so the parent
+sees an empty aggregate. And it must be defined alongside the result type: an
+orphan instance the ack site does not import loses to the `ToJSON` fallback.
 
 ### Job Trees (Fan-out/Fan-in)
 
@@ -639,13 +649,13 @@ config <- Worker.defaultBatchedWorkerConfig 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
   -> ArbS.SimpleDb AppRegistry IO ()
 batchHandler jobs cbs = do
-  let urls = map (getUrl . Arb.payload) (toList jobs)
-  scores <- liftIO $ bulkProcess urls
+  -- bulkProcess :: [Arb.JobRead ImagePayload] -> IO [(Arb.JobRead ImagePayload, Score)]
+  scored <- liftIO $ bulkProcess (toList jobs)
   -- Bulk-ack the whole batch in one transaction.
-  Worker.ackAllWith cbs (zip (toList jobs) scores)
+  Worker.ackAllWith cbs scored
 ```
 
 Opting out of the worker transaction does not mean giving up atomicity where
@@ -683,7 +693,7 @@ config <- Worker.defaultBatchedWorkerConfig 10 5 scoreHandler
 
 scoreHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
   -> ArbS.SimpleDb AppRegistry IO ()
 scoreHandler jobs cbs =
   for_ jobs $ \job -> do
@@ -938,7 +948,13 @@ See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-si
 Integrates with `orville-postgresql`. Handlers do not receive a connection
 parameter - Orville manages connections and transactions internally. Requires a
 custom monad with `MonadOrville`, `HasArbiterSchema`, and `MonadArbiter`
-instances.
+instances:
+
+```haskell
+instance HasArbiterSchema AppM where
+  type RegistryOf AppM = AppRegistry
+  getSchema = asks appSchema
+```
 
 Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
 shared listener runs on its own dedicated connection. Build a `DedicatedListen`

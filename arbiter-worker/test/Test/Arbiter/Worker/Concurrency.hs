@@ -18,7 +18,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult ()
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)

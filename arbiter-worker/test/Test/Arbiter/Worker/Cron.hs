@@ -9,7 +9,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), Job (..), JobRead, defaultJob)
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)

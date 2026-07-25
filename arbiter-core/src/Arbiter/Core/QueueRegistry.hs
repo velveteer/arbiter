@@ -9,12 +9,14 @@
 --
 --   1. Each payload type maps to exactly one queue name (via 'TableForPayload')
 --   2. All queue names are unique (via 'AllQueuesUnique')
---   3. Workers can only claim jobs for payloads they're registered to handle
---   4. Each queue has one handler result type (via 'ResultFor')
+--   3. All payload types are unique (also via 'AllQueuesUnique')
+--   4. Workers can only claim jobs for payloads they're registered to handle
+--   5. Each queue has one handler result type (via 'ResultFor')
 module Arbiter.Core.QueueRegistry
   ( -- * Registry type
     JobPayloadRegistry
   , QueueSpec (..)
+  , Queue
 
     -- * Registry lookups
   , TableForPayload
@@ -37,15 +39,18 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 
--- | A queue's table name and payload type, plus a result type for
--- @QueueWithResult@. A @Queue@ entry produces @()@.
+-- | A queue's table name, payload type, and handler result type.
 --
--- These are @type data@ constructors, so they live in the type namespace and
--- take no promotion tick. A module with its own @Queue@ type needs
--- @import Arbiter.Core hiding (Queue)@ or a qualified import.
-type data QueueSpec
-  = Queue Symbol Type
-  | QueueWithResult Symbol Type Type
+-- This is a @type data@ constructor, so it lives in the type namespace and takes
+-- no promotion tick.
+type data QueueSpec = QueueWithResult Symbol Type Type
+
+-- | A queue whose handlers store no result. Type errors and haddock print the
+-- expanded 'QueueWithResult' form.
+--
+-- A module with its own @Queue@ type needs @import Arbiter.Core hiding (Queue)@
+-- or a qualified import.
+type Queue (table :: Symbol) (payload :: Type) = QueueWithResult table payload ()
 
 -- | A type-level registry mapping table names to payload types.
 --
@@ -60,22 +65,19 @@ type JobPayloadRegistry = [QueueSpec]
 
 -- | A queue's table name.
 type family SpecName (spec :: QueueSpec) :: Symbol where
-  SpecName (Queue table _) = table
   SpecName (QueueWithResult table _ _) = table
 
 -- | A queue's payload type.
 type family SpecPayload (spec :: QueueSpec) :: Type where
-  SpecPayload (Queue _ payload) = payload
   SpecPayload (QueueWithResult _ payload _) = payload
 
--- | A queue's result type. A @Queue@ entry produces @()@.
+-- | A queue's result type. A 'Queue' entry produces @()@.
 type family SpecResult (spec :: QueueSpec) :: Type where
-  SpecResult (Queue _ _) = ()
   SpecResult (QueueWithResult _ _ result) = result
 
--- | Look up a payload type's registry entry. Compile-time error if not registered.
+-- | Look up a payload type's registry entry. Compile-time error if not
+-- registered. Takes the first match, which 'AllQueuesUnique' makes the only one.
 type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: QueueSpec where
-  SpecForPayload payload (Queue table payload ': _) = Queue table payload
   SpecForPayload payload (QueueWithResult table payload result ': _) = QueueWithResult table payload result
   SpecForPayload payload (_ ': rest) = SpecForPayload payload rest
   SpecForPayload payload '[] = PayloadNotRegistered payload
@@ -97,18 +99,27 @@ type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :
 type family ResultFor (payload :: Type) (registry :: JobPayloadRegistry) :: Type where
   ResultFor payload registry = SpecResult (SpecForPayload payload registry)
 
--- | Compile-time check that no two payload types share a queue name.
+-- | Compile-time check that no two entries share a queue name or a payload type.
+-- The payload half matters because 'SpecForPayload' takes the first match.
 type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
   AllQueuesUnique '[] = ()
   AllQueuesUnique (spec ': rest) =
-    (NotInTables (SpecName spec) rest, AllQueuesUnique rest)
+    ( NotInTables (SpecName spec) rest
+    , NotInPayloads (SpecPayload spec) rest
+    , AllQueuesUnique rest
+    )
 
 -- | Check that a table name doesn't appear in the rest of the registry.
 type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Constraint where
   NotInTables _ '[] = ()
-  NotInTables table (Queue table _ ': _) = DuplicateTable table
   NotInTables table (QueueWithResult table _ _ ': _) = DuplicateTable table
   NotInTables table (_ ': rest) = NotInTables table rest
+
+-- | Check that a payload type doesn't appear in the rest of the registry.
+type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: Constraint where
+  NotInPayloads _ '[] = ()
+  NotInPayloads payload (QueueWithResult _ payload _ ': _) = DuplicatePayload payload
+  NotInPayloads payload (_ ': rest) = NotInPayloads payload rest
 
 type family DuplicateTable (table :: Symbol) :: Constraint where
   DuplicateTable table =
@@ -120,6 +131,16 @@ type family DuplicateTable (table :: Symbol) :: Constraint where
           ':$$: 'Text "Hint: Multiple payload types cannot share the same table."
       )
 
+type family DuplicatePayload (payload :: Type) :: Constraint where
+  DuplicatePayload payload =
+    TypeError
+      ( 'Text "Duplicate payload type: "
+          ':<>: 'ShowType payload
+          ':$$: 'Text "Each payload type can only be used once in the registry."
+          ':$$: 'Text "Hint: a payload's table name and result type resolve to its"
+          ':$$: 'Text "first registry entry, so a second entry would never be used."
+      )
+
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
   registryTableNames :: Proxy registry -> [Text]
@@ -128,7 +149,11 @@ instance RegistryTables '[] where
   registryTableNames _ = []
 
 instance
-  (KnownSymbol (SpecName spec), NotInTables (SpecName spec) rest, RegistryTables rest)
+  ( KnownSymbol (SpecName spec)
+  , NotInPayloads (SpecPayload spec) rest
+  , NotInTables (SpecName spec) rest
+  , RegistryTables rest
+  )
   => RegistryTables (spec ': rest)
   where
   registryTableNames _ =

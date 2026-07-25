@@ -8,7 +8,7 @@
 -- | Orville backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Orville.StateMachine (spec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (createSharedPool)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)

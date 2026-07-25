@@ -143,7 +143,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1", maxAttempts = Just 1}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
@@ -172,7 +172,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillSucceed")) {groupKey = Just "g1"}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
@@ -200,7 +200,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           runSimpleDb env $
             HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1", maxAttempts = Just 1}
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
 
         withAsync
@@ -235,7 +235,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job = (defaultJob (SimpleTask "LongJob")) {groupKey = Just "g1"}
         void $ runSimpleDb env $ HL.insertJob job
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
 
         let configWithTimeout =
@@ -277,7 +277,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let job = (defaultJob (SimpleTask "VeryLongJob")) {groupKey = Just "g1"}
         void $ runSimpleDb env $ HL.insertJob job
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
 
         let configWithShortTimeout =
@@ -314,7 +314,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         tmpDir <- Dir.getTemporaryDirectory
         let livenessPath = tmpDir <> "/arbiter-test-liveness"
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 (noResult handler)
         let configWithLiveness =
               config
@@ -370,7 +370,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               , (defaultJob (SimpleTask "ca-keep2")) {groupKey = Just "ca"}
               ]
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           defaultBatchedWorkerConfig 1 10 batchHandler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
@@ -402,7 +402,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             HL.insertJobTree $
               defaultJob (SimpleTask "rb-reducer")
                 <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           defaultBatchedWorkerConfig 1 10 handler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
@@ -434,7 +434,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                            ]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 handler
 
         withAsync
@@ -488,7 +488,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                          <~~ (defaultJob (SimpleTask "mapper-2a") :| [defaultJob (SimpleTask "mapper-2b")])
                      ]
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 handler
 
         withAsync
@@ -532,7 +532,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                         :| [defaultJob (SimpleTask "child-b")]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           defaultBatchedWorkerConfig 3 1 handler
 
         withAsync
@@ -585,7 +585,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               defaultJob (SimpleTask "reducer-2")
                 <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           defaultBatchedWorkerConfig 1 10 handler
 
         withAsync
@@ -629,7 +629,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                         :| [defaultJob (SimpleTask "dlq-child-b")]
                     )
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 handler
 
         let cfg =
@@ -691,7 +691,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 10 handler
 
         let cfg =
@@ -734,7 +734,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler _conn _job =
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 2 (noResult handler)
         let config = baseConfig {workerCount = 2, pollInterval = 0.1}
             wid = workerId config
@@ -768,7 +768,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig
@@ -798,7 +798,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig
@@ -878,7 +878,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "propagates queue pause to local pauseVar via heartbeat reconcile" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.1}
 
@@ -894,7 +894,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "propagates queue pause via NOTIFY at steady state under one pollInterval" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 5.0}
 
@@ -921,7 +921,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job =
               liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 2.0}
 
@@ -943,9 +943,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "setWorkerPaused only targets the addressed worker" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
-        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
@@ -976,9 +976,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "setQueuePaused fans out to every worker in the queue" $ \env -> do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = pure ()
-        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseA :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
-        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseB :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let cfgA = baseA {workerCount = 1, pollInterval = 5.0}
             cfgB = baseB {workerCount = 1, pollInterval = 5.0}
@@ -1012,7 +1012,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ threadDelay 30_000_000
               liftIO $ writeIORef completedRef True
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
@@ -1056,7 +1056,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     go
               liftIO go
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 0.2}
 
@@ -1093,7 +1093,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
 
-        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           defaultBatchedWorkerConfig 1 10 batchHandler
         threadDelay 100_000
 
@@ -1127,7 +1127,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ threadDelay 30_000_000
               liftIO $ writeIORef completedRef True
 
-        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload (Maybe [Text]) <-
           transactionalWorkerConfig 1 (noResult handler)
         let config =
               baseConfig

@@ -8,7 +8,7 @@
 
 module Test.Arbiter.Simple.MigrationDurability (spec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTableName)
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (Durability (..))

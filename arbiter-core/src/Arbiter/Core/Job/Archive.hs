@@ -3,7 +3,6 @@
 -- 'Arbiter.Core.HighLevel.reEnqueueFromArchive'.
 module Arbiter.Core.Job.Archive
   ( ArchiveJob (..)
-  , archivedSnapshot
   ) where
 
 import Data.Aeson (Value)
@@ -19,14 +18,9 @@ data ArchiveJob payload = ArchiveJob
   -- ^ Archive table primary key (distinct from the original job ID in the snapshot)
   , completedAt :: UTCTime
   -- ^ When the job was acked and archived
-  , jobSnapshot :: JobSnapshot payload
+  , archivedSnapshot :: JobSnapshot payload
   -- ^ Full job state at time of completion (payload, attempts, etc.)
   , archivedResult :: Maybe Value
   -- ^ Handler result stored for a completed root job (one with no parent).
   }
   deriving stock (Eq, Generic, Show)
-
--- | 'jobSnapshot' under a name that does not clash with
--- 'Arbiter.Core.Job.DLQ.jobSnapshot' in modules importing both.
-archivedSnapshot :: ArchiveJob payload -> JobSnapshot payload
-archivedSnapshot = jobSnapshot

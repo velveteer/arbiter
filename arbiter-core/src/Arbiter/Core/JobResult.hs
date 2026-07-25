@@ -14,6 +14,15 @@ import Data.Text qualified as T
 -- | Results a handler can store. @()@ is fire-and-forget. Any @ToJSON a@ from a
 -- job with a parent is stored in the results table for the parent rollup to
 -- collect. A root job's result is stored on its archive entry, if archived.
+--
+-- A hand-written instance must encode a value its own @FromJSON@ accepts:
+-- nothing checks it against 'decodeJobResult'. A decode failure is not raised -
+-- 'Arbiter.Worker.mergedChildResults' folds it to 'mempty'. Use
+-- 'Arbiter.Worker.childResults' for the per-child errors.
+--
+-- Define the instance alongside the result type. The @OVERLAPPABLE@ @ToJSON@
+-- instance below wins whenever a more specific one is not in scope at the ack
+-- site, so an orphan instance is silently skipped.
 class EncodeJobResult a where
   encodeJobResult :: a -> Maybe Value
 
@@ -29,7 +38,8 @@ instance {-# OVERLAPPING #-} (EncodeJobResult a) => EncodeJobResult (Maybe a) wh
   encodeJobResult = (encodeJobResult =<<)
 
 -- | Read a stored result back, for 'Arbiter.Worker.childResults' or
--- 'Arbiter.Worker.mergedChildResults'.
+-- 'Arbiter.Worker.mergedChildResults'. The counterpart to 'encodeJobResult',
+-- though the pairing is not enforced: see 'EncodeJobResult'.
 decodeJobResult :: (FromJSON a) => Value -> Either Text a
 decodeJobResult v = case Aeson.fromJSON v of
   Aeson.Success a -> Right a

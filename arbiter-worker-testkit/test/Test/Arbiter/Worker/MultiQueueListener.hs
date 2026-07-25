@@ -6,7 +6,7 @@
 module Test.Arbiter.Worker.MultiQueueListener (spec) where
 
 import Arbiter.Core.JobResult ()
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (createSimpleEnv, destroySimpleEnv, runSimpleDb)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Data.Aeson (FromJSON, ToJSON)

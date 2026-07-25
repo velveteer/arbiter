@@ -8,7 +8,7 @@ module Test.Arbiter.Worker.SharedListener (spec) where
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple
   ( SimpleDb
   , createSimpleEnv

@@ -3,7 +3,7 @@
 
 module Test.Arbiter.Hasql.Concurrency (spec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Concurrency
   ( concurrencySpec
   , raceConditionSpec

@@ -167,28 +167,28 @@ import Arbiter.Worker.WorkerState
 -- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
-  = forall registry payload.
+  = forall registry payload result.
   ( Arb.RegistryAdmissionPolicies registry
-  , EncodeJobResult (ResultOf m payload)
+  , EncodeJobResult result
   , QueueOperation m registry payload
   , RegistryTables registry
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
   -- ^ Queue name from the type-level registry
-  , workerPoolConfig :: WorkerConfig m payload
+  , workerPoolConfig :: WorkerConfig m payload result
   -- ^ The worker configuration
   }
 
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
-  :: forall m registry payload
+  :: forall m registry payload result
    . ( Arb.RegistryAdmissionPolicies registry
-     , EncodeJobResult (ResultOf m payload)
+     , EncodeJobResult result
      , QueueOperation m registry payload
      , RegistryTables registry
      )
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
@@ -260,14 +260,14 @@ poolConfigForWorkers pools = do
 
 -- | Starts a worker pool with a dispatcher and N worker threads.
 runWorkerPool
-  :: forall m registry payload
+  :: forall m registry payload result
    . ( Arb.RegistryAdmissionPolicies registry
-     , EncodeJobResult (ResultOf m payload)
+     , EncodeJobResult result
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
      )
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
@@ -345,14 +345,14 @@ runWorkerPool config = do
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool and never gates startup.
-publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload -> STM Bool -> m ()
+publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload result -> STM Bool -> m ()
 publishListenerReady config ready =
   atomically $ do
     ready >>= checkSTM
     writeTVar (listenerReadyVar config) True
 
 -- | Remove the liveness file when the pool exits, after the drain.
-withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload -> ContT r m ()
+withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
 withLivenessFile config = case livenessFile config of
   Nothing -> pure ()
   Just path -> ContT $ \k ->
@@ -363,7 +363,7 @@ withLivenessFile config = case livenessFile config of
 
 -- | Re-insert the worker's registry row from the config + schema/queue.
 -- Returns the effective paused state so the caller can seed 'pauseVar'.
-registerSelf :: (MonadArbiter m) => WorkerConfig n payload -> SchemaName -> Text -> m (Maybe Bool)
+registerSelf :: (MonadArbiter m) => WorkerConfig n payload result -> SchemaName -> Text -> m (Maybe Bool)
 registerSelf config schemaName queueName =
   Ops.registerWorker
     schemaName
@@ -378,7 +378,7 @@ registerSelf config schemaName queueName =
 -- writes are best-effort and logged on failure.
 shutdownPool
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload
+  => WorkerConfig n payload result
   -> SchemaName
   -> TBQueue a
   -> TVar Int
@@ -440,7 +440,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
 -- the row.
 heartbeatLoop
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload
+  => WorkerConfig n payload result
   -> SchemaName
   -> Text
   -- ^ Queue name (used when the row needs re-registering).
@@ -491,12 +491,12 @@ warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (display
 
 -- | Main loop for a single worker thread.
 workerLoop
-  :: forall m registry payload
-   . ( EncodeJobResult (ResultOf m payload)
+  :: forall m registry payload result
+   . ( EncodeJobResult result
      , JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
@@ -567,12 +567,12 @@ readChildResults schemaName job = do
   pure (merged, dlqFailures)
 
 processJobsWithRetry
-  :: forall m registry payload
-   . ( EncodeJobResult (ResultOf m payload)
+  :: forall m registry payload result
+   . ( EncodeJobResult result
      , JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> NonEmpty (Job.JobRead payload)
   -> m ()
 processJobsWithRetry config jobs = do
@@ -643,7 +643,7 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @(ResultOf m payload) handler job
+            handlerResult <- runHandlerWithConnection @_ @_ @result handler job
             ackJobOrSkip job
             storeJobResult schemaName job handlerResult
           finalize job
@@ -655,9 +655,9 @@ processJobsWithRetry config jobs = do
 -- | Interpret a finished batch: warn when the handler left jobs unfinalized,
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
-  :: forall m registry payload
+  :: forall m registry payload result
    . (JobOperation m registry payload, MonadUnliftIO m)
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> Job.ObservabilityHooks m payload
   -> UTCTime
   -> UTCTime
@@ -773,11 +773,11 @@ classifyException e
 
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
-  :: forall m registry payload
+  :: forall m registry payload result
    . ( JobOperation m registry payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload
+  => WorkerConfig m payload result
   -> Job.ObservabilityHooks m payload
   -> SomeException
   -> Int32

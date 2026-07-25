@@ -19,8 +19,7 @@ module Arbiter.Core
   , module Arbiter.Core.JobResult
 
     -- * Archived jobs
-  , ArchiveJob (archivePrimaryKey, completedAt, archivedResult)
-  , archivedSnapshot
+  , ArchiveJob (..)
 
     -- * Typed codecs and parameters
   , module Arbiter.Core.Codec
@@ -32,21 +31,14 @@ module Arbiter.Core
   , module Arbiter.Core.Exceptions
 
     -- * Cron schedule overrides and worker health
+
+  --
+
+    -- | 'CronScheduleRow' fields (@name@, @enabled@, @queueName@) are too
+    -- generically named to re-export: @import Arbiter.Core.CronSchedule@ for
+    -- raw field access.
   , CronScheduleRow
-    ( name
-    , queueName
-    , defaultExpression
-    , defaultOverlap
-    , defaultTimezone
-    , overrideExpression
-    , overrideOverlap
-    , overrideTimezone
-    , enabled
-    , lastFiredAt
-    , lastCheckedAt
-    , runRequestedAt
-    , lastManualRunAt
-    )
+  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -70,7 +62,8 @@ module Arbiter.Core
 
 import Arbiter.Core.Codec
 import Arbiter.Core.CronSchedule
-  ( CronScheduleRow (..)
+  ( CronScheduleRow
+  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -78,7 +71,7 @@ import Arbiter.Core.CronSchedule
 import Arbiter.Core.Exceptions
 import Arbiter.Core.HasArbiterSchema
 import Arbiter.Core.HighLevel
-import Arbiter.Core.Job.Archive (ArchiveJob (..), archivedSnapshot)
+import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema
 import Arbiter.Core.Job.Types

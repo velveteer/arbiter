@@ -9,7 +9,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.PoolConfig (poolSize)
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple
   ( SimpleDb
   , createSimpleEnv

@@ -12,8 +12,12 @@
 -- Migration history is stored in a @schema_migrations@ table inside the
 -- target schema (e.g., @arbiter.schema_migrations@).
 module Arbiter.Migrations
-  ( -- * Configuration
-    MigrationConfig (..)
+  ( -- * Registry
+    QueueSpec (..)
+  , Queue
+
+    -- * Configuration
+  , MigrationConfig (..)
   , defaultMigrationConfig
 
     -- * Tracked Migrations
@@ -83,7 +87,7 @@ import Arbiter.Core.Job.Schema
   , setMaxAttemptsDefaultSQL
   )
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
-import Arbiter.Core.QueueRegistry (RegistryTables (..))
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
 import Arbiter.Core.RateLimit.Schema
   ( PolicyRow (..)

@@ -8,7 +8,7 @@
 -- | Hasql backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Hasql.StateMachine (spec) where
 
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (createSharedPool, setupOnce)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)

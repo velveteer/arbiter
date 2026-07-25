@@ -126,6 +126,11 @@ module Arbiter.Core.HighLevel
   , listQueues
   , QueueRow (..)
 
+    -- * Cron Schedule Operations
+  , listCronSchedules
+  , getCronScheduleByName
+  , updateCronSchedule
+
     -- * Global Gate
   , runGated
 
@@ -152,6 +157,7 @@ import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
+import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
 import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -1364,6 +1370,45 @@ listQueues
 listQueues = do
   schemaName <- getSchema
   Ops.listQueues schemaName
+
+-- ---------------------------------------------------------------------------
+-- Cron Schedules
+-- ---------------------------------------------------------------------------
+
+-- | List cron schedules ordered by name, optionally filtered by queue.
+listCronSchedules
+  :: forall m registry
+   . (ArbiterSchema m registry, MonadArbiter m)
+  => Maybe Text
+  -- ^ Queue filter. 'Nothing' returns schedules for all queues.
+  -> m [CronScheduleRow]
+listCronSchedules mQueue = do
+  schemaName <- getSchema
+  Ops.listCronSchedules schemaName mQueue
+
+-- | Get a single cron schedule by name.
+getCronScheduleByName
+  :: forall m registry
+   . (ArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Schedule name
+  -> m (Maybe CronScheduleRow)
+getCronScheduleByName scheduleName = do
+  schemaName <- getSchema
+  Ops.getCronScheduleByName schemaName scheduleName
+
+-- | Update a cron schedule (patch semantics). Returns rows affected
+-- (0 = not found, 1 = updated).
+updateCronSchedule
+  :: forall m registry
+   . (ArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -- ^ Schedule name
+  -> CronScheduleUpdate
+  -> m Int64
+updateCronSchedule scheduleName upd = do
+  schemaName <- getSchema
+  Ops.updateCronSchedule schemaName scheduleName upd
 
 -- ---------------------------------------------------------------------------
 -- Global Gate

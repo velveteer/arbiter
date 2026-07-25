@@ -10,13 +10,14 @@ module Test.Arbiter.Worker.PlainResult (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
-import Arbiter.Core.Job.Types (Job (..), JobRead, dayRetention, defaultJob, payload)
+import Arbiter.Core.Job.Types (Job (..), JobRead, dayRetention, defaultJob, isRollup, payload)
+import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (JobHandler)
-import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Simple (SimpleDb, createSimpleEnv, destroySimpleEnv, runSimpleDb)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
-import Arbiter.Worker (runWorkerPool)
+import Arbiter.Worker (mergedChildResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks (..)
@@ -28,10 +29,11 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON, toJSON)
 import Data.ByteString (ByteString)
-import Data.Foldable (toList)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.List (find)
-import Data.List.NonEmpty (NonEmpty)
+import Data.Foldable (toList, traverse_)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (find, partition)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (isJust)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
@@ -79,7 +81,7 @@ spec connStr =
           ackedRef <- newIORef (0 :: Int)
           let handler
                 :: NonEmpty (JobRead NoResultPayload)
-                -> BatchCallbacks (SimpleDb PlainRegistry IO) NoResultPayload
+                -> BatchCallbacks (SimpleDb PlainRegistry IO) NoResultPayload ()
                 -> SimpleDb PlainRegistry IO ()
               handler jobs cbs = case toList jobs of
                 [] -> pure ()
@@ -93,15 +95,15 @@ spec connStr =
               (\i -> void $ HL.insertJob ((defaultJob (NoResultTask i)) {archiveFor = Just dayRetention}))
               ["a", "b", "c"]
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
-            waitUntil 10_000 $ (== 0) <$> runSimpleDb env (HL.countJobs @_ @PlainRegistry @NoResultPayload)
+            waitUntil 10_000 $ (== 3) <$> readIORef ackedRef
           readIORef ackedRef >>= (`shouldBe` 3)
           runSimpleDb env (HL.countJobs @_ @PlainRegistry @NoResultPayload) `shouldReturn` 0
           arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @NoResultPayload 100 0
-          map (payload . Archive.jobSnapshot) arch
+          map (payload . Archive.archivedSnapshot) arch
             `shouldMatchList` [NoResultTask "a", NoResultTask "b", NoResultTask "c"]
           map Archive.archivedResult arch `shouldBe` [Nothing, Nothing, Nothing]
 
-    describe "plain result type" $
+    describe "plain result type" $ do
       it "stores a non-Maybe result on the archive row" $ do
         cleanup connStr
         withEnv $ \env -> do
@@ -114,9 +116,42 @@ spec connStr =
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ do
               arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-              pure (any ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch)
+              pure (any ((== PlainResultTask "archived") . payload . Archive.archivedSnapshot) arch)
           arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-          let mine = find ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch
+          let mine = find ((== PlainResultTask "archived") . payload . Archive.archivedSnapshot) arch
           (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["alpha", "beta" :: Text])
+
+      it "passes plain ackWith and ackAllWith results to a rollup parent" $ do
+        cleanup connStr
+        withEnv $ \env -> do
+          mergedRef <- newIORef (Nothing :: Maybe [Text])
+          let taskName j = case payload j of PlainResultTask t -> t
+              handler
+                :: NonEmpty (JobRead PlainResultPayload)
+                -> BatchCallbacks (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
+                -> SimpleDb PlainRegistry IO ()
+              handler jobs cbs = do
+                let (parents, children) = partition isRollup (toList jobs)
+                case children of
+                  [] -> pure ()
+                  (c : rest) -> do
+                    ackWith cbs c ["from-" <> taskName c]
+                    ackAllWith cbs (map (\r -> (r, ["from-" <> taskName r])) rest)
+                traverse_
+                  ( \p -> do
+                      (merged, _) <- mergedChildResults p
+                      liftIO $ writeIORef mergedRef (Just merged)
+                      ack cbs p
+                  )
+                  parents
+          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          void $
+            runSimpleDb env $
+              HL.insertJobTree $
+                defaultJob (PlainResultTask "parent")
+                  <~~ (defaultJob (PlainResultTask "kid1") :| [defaultJob (PlainResultTask "kid2")])
+          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+            waitUntil 10_000 $ isJust <$> readIORef mergedRef
+          readIORef mergedRef >>= (`shouldBe` Just ["from-kid1", "from-kid2"])
   where
     withEnv = bracket (createSimpleEnv (Proxy @PlainRegistry) connStr testSchema) destroySimpleEnv
