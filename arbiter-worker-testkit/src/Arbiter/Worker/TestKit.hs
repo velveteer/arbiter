@@ -32,7 +32,6 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   )
-import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
@@ -323,18 +322,6 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         waitUntil 10_000 $ do
           arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
           pure (any ((== mkSimple "dlq-arch") . payload . Archive.jobSnapshot) arch)
-
-    it "stores a root job's result on its archive row" $ \env -> do
-      cfg :: WorkerConfig m payload <- transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["root-result" :: Text])))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "with-result")) {archiveFor = Just dayRetention})
-
-      withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
-        waitUntil 10_000 $ do
-          arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
-          pure (any ((== mkSimple "with-result") . payload . Archive.jobSnapshot) arch)
-        arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
-        let mine = find ((== mkSimple "with-result") . payload . Archive.jobSnapshot) arch
-        (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["root-result" :: Text])
 
     it "archives the row but stores no result for a Nothing result" $ \env -> do
       cfg :: WorkerConfig m payload <-
@@ -1359,12 +1346,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 -- in time, so completion proves the listener fired.
 listenerSpec
   :: forall payload registry env m
-   . ( EncodeJobResult (ResultOf m payload)
-     , MonadUnliftIO m
-     , Monoid (ResultOf m payload)
+   . ( MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryAdmissionPolicies registry
      , RegistryTables registry
+     , ResultOf m payload ~ ()
      )
   => Text
   -- ^ Schema\/table name, also the LISTEN channel prefix
@@ -1378,8 +1364,8 @@ listenerSpec
   -- ^ Create an env with the listener disabled (poll-only)
   -> (env -> IO ())
   -- ^ Release an env built by the actions above
-  -> (forall r. (JobRead payload -> m r) -> JobHandler m payload r)
-  -- ^ Adapt a job action into the backend's handler shape, result-polymorphic
+  -> ((JobRead payload -> m ()) -> JobHandler m payload ())
+  -- ^ Adapt a job action into the backend's handler shape
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function
   -> Spec
@@ -1464,8 +1450,8 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
           waitUntil 10_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
   where
-    counting :: IORef Int -> JobRead payload -> m (ResultOf m payload)
-    counting ref _job = liftIO (bumpRef ref) >> pure mempty
+    counting :: IORef Int -> JobRead payload -> m ()
+    counting ref _job = liftIO (bumpRef ref)
     withSharedListener env k = do
       mListener <- runM env getListener
       case mListener of
@@ -1523,15 +1509,13 @@ killListener connStr schema =
 -- @tableA@ queue and @payloadB@ to @tableB@.
 multiQueueListenerSpec
   :: forall payloadA payloadB registry env m
-   . ( EncodeJobResult (ResultOf m payloadA)
-     , EncodeJobResult (ResultOf m payloadB)
-     , MonadUnliftIO m
-     , Monoid (ResultOf m payloadA)
-     , Monoid (ResultOf m payloadB)
+   . ( MonadUnliftIO m
      , QueueOperation m registry payloadA
      , QueueOperation m registry payloadB
      , RegistryAdmissionPolicies registry
      , RegistryTables registry
+     , ResultOf m payloadA ~ ()
+     , ResultOf m payloadB ~ ()
      )
   => Text
   -- ^ Queue A table name, also its LISTEN channel prefix
@@ -1547,8 +1531,8 @@ multiQueueListenerSpec
   -- ^ Create an env whose listener is enabled, with both queue tables set up
   -> (env -> IO ())
   -- ^ Release an env built by the action above
-  -> (forall p r. (JobRead p -> m r) -> JobHandler m p r)
-  -- ^ Adapt a job action into the backend's handler shape, result-polymorphic
+  -> (forall p. (JobRead p -> m ()) -> JobHandler m p ())
+  -- ^ Adapt a job action into the backend's handler shape
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function
   -> Spec
@@ -1559,9 +1543,9 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
         refA <- newIORef (0 :: Int)
         refB <- newIORef (0 :: Int)
         cfgA :: WorkerConfig m payloadA <-
-          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m (ResultOf m payloadA)))
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m ()))
         cfgB :: WorkerConfig m payloadB <-
-          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m (ResultOf m payloadB)))
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m ()))
         let poolA = cfgA {workerCount = 1, pollInterval = 300, jitter = NoJitter}
             poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool poolA) $ \_ ->
@@ -1598,8 +1582,8 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
               readIORef refA >>= (`shouldBe` 1)
               readIORef refB >>= (`shouldBe` 0)
   where
-    bumping :: (Monoid (ResultOf m p)) => IORef Int -> JobRead p -> m (ResultOf m p)
-    bumping ref _job = liftIO (bumpRef ref) >> pure mempty
+    bumping :: IORef Int -> JobRead p -> m ()
+    bumping ref _job = liftIO (bumpRef ref)
 
 -- | Issue a raw @NOTIFY@ on a channel over a throwaway connection.
 notifyChannel :: ByteString -> Text -> IO ()

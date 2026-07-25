@@ -87,10 +87,10 @@ data PipelinePayload
 
 -- | Demo registry with multiple queues
 type DemoRegistry =
-  '[ 'Queue "demo_queue" DemoPayload
-   , 'Queue "email_queue" EmailPayload
-   , 'Queue "notifications" NotificationPayload
-   , 'QueueWithResult "pipeline" PipelinePayload [Text]
+  '[ Queue "demo_queue" DemoPayload
+   , Queue "email_queue" EmailPayload
+   , Queue "notifications" NotificationPayload
+   , QueueWithResult "pipeline" PipelinePayload [Text]
    ]
 
 -- | Email recipient tiers, each rate-limited separately.

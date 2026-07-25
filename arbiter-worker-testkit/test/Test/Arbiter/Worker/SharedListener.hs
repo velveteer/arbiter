@@ -38,7 +38,7 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker.TestKit (listenerSpec)
 
-type ListenTestRegistry = '[ 'Queue "arbiter_worker_listen_test" WorkerTestPayload]
+type ListenTestRegistry = '[Queue "arbiter_worker_listen_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_listen_test"

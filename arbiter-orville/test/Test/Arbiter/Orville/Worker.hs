@@ -57,7 +57,7 @@ data OrvilleWorkerTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 type OrvilleWorkerTestRegistry =
-  '[ 'QueueWithResult "arbiter_orville_worker_test" OrvilleWorkerTestPayload (Maybe [Text])]
+  '[QueueWithResult "arbiter_orville_worker_test" OrvilleWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_orville_worker_test"

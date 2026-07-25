@@ -34,7 +34,7 @@ import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
-type WorkerTestRegistry = '[ 'Queue "arbiter_worker_recovery_test" WorkerTestPayload]
+type WorkerTestRegistry = '[Queue "arbiter_worker_recovery_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_recovery_test"

@@ -74,7 +74,7 @@ data ServantTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Test registry
-type ServantTestRegistry = '[ 'Queue "arbiter_servant_test" ServantTestPayload]
+type ServantTestRegistry = '[Queue "arbiter_servant_test" ServantTestPayload]
 
 -- Table name for tests
 testTable :: Text

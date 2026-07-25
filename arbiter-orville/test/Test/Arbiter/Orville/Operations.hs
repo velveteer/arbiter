@@ -21,7 +21,7 @@ import Test.Arbiter.Orville.TestHelpers (cleanupOrvilleTest, runOrvilleTest, set
 testSchema :: Text
 testSchema = "arbiter_orville_ops_test"
 
-type OrvilleOpsTestRegistry = '[ 'Queue "arbiter_orville_ops_test" TestPayload]
+type OrvilleOpsTestRegistry = '[Queue "arbiter_orville_ops_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_orville_ops_test"

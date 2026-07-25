@@ -26,7 +26,7 @@ newtype DurPayload = DurPayload Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type DurReg = '[ 'Queue "durability_q" DurPayload]
+type DurReg = '[Queue "durability_q" DurPayload]
 
 testSchema :: Text
 testSchema = "arbiter_simple_durability_test"

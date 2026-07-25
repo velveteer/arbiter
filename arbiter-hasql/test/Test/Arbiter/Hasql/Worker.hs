@@ -33,7 +33,7 @@ data HasqlWorkerTestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type HasqlWorkerTestRegistry = '[ 'QueueWithResult "arbiter_hasql_worker_test" HasqlWorkerTestPayload (Maybe [Text])]
+type HasqlWorkerTestRegistry = '[QueueWithResult "arbiter_hasql_worker_test" HasqlWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_hasql_worker_test"
@@ -50,7 +50,7 @@ spec connStr =
 listenSchema :: Text
 listenSchema = "arbiter_hasql_listen_test"
 
-type HasqlListenRegistry = '[ 'Queue "arbiter_hasql_listen_test" HasqlWorkerTestPayload]
+type HasqlListenRegistry = '[Queue "arbiter_hasql_listen_test" HasqlWorkerTestPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
@@ -85,8 +85,8 @@ newtype MqBPayload = MqBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type HasqlMultiQRegistry =
-  '[ 'Queue "mqh_listen_a" MqAPayload
-   , 'Queue "mqh_listen_b" MqBPayload
+  '[ Queue "mqh_listen_a" MqAPayload
+   , Queue "mqh_listen_b" MqBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec

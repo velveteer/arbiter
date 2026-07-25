@@ -174,8 +174,8 @@ defaultMigrationConfig =
 --
 -- @
 -- type AppRegistry =
---   '[ 'Queue "email_jobs" EmailPayload
---    , 'Queue "order_jobs" OrderPayload
+--   '[ Queue "email_jobs" EmailPayload
+--    , Queue "order_jobs" OrderPayload
 --    ]
 --
 -- main :: IO ()

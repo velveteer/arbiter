@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
@@ -35,8 +36,8 @@ import Data.Text qualified as T
 import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 
 -- | A queue's table name and payload type, plus a result type for
--- 'QueueWithResult'. A 'Queue' entry produces @()@.
-data QueueSpec
+-- @QueueWithResult@. A @Queue@ entry produces @()@.
+type data QueueSpec
   = Queue Symbol Type
   | QueueWithResult Symbol Type Type
 
@@ -45,34 +46,39 @@ data QueueSpec
 -- Example:
 -- @
 -- type MyAppRegistry =
---   '[ 'Queue "email_jobs" EmailPayload
---    , 'QueueWithResult "image_jobs" ImagePayload Score
+--   '[ Queue "email_jobs" EmailPayload
+--    , QueueWithResult "image_jobs" ImagePayload Score
 --    ]
 -- @
 type JobPayloadRegistry = [QueueSpec]
 
 -- | A queue's table name.
 type family SpecName (spec :: QueueSpec) :: Symbol where
-  SpecName ('Queue table _) = table
-  SpecName ('QueueWithResult table _ _) = table
+  SpecName (Queue table _) = table
+  SpecName (QueueWithResult table _ _) = table
 
 -- | A queue's payload type.
 type family SpecPayload (spec :: QueueSpec) :: Type where
-  SpecPayload ('Queue _ payload) = payload
-  SpecPayload ('QueueWithResult _ payload _) = payload
+  SpecPayload (Queue _ payload) = payload
+  SpecPayload (QueueWithResult _ payload _) = payload
 
 -- | Look up the table name for a payload type. Compile-time error if not registered.
 type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: Symbol where
-  TableForPayload payload ('Queue table payload ': _) = table
-  TableForPayload payload ('QueueWithResult table payload _ ': _) = table
+  TableForPayload payload (Queue table payload ': _) = table
+  TableForPayload payload (QueueWithResult table payload _ ': _) = table
   TableForPayload payload (_ ': rest) = TableForPayload payload rest
   TableForPayload payload '[] =
-    TypeError ('Text "Payload type " ':<>: 'ShowType payload ':<>: 'Text " not found in registry")
+    TypeError
+      ( 'Text "Payload type "
+          ':<>: 'ShowType payload
+          ':<>: 'Text " not found in registry"
+          ':$$: 'Text "Add a Queue entry, or QueueWithResult to store a result."
+      )
 
 -- | The result type a queue's handlers produce.
 type family ResultFor (payload :: Type) (registry :: JobPayloadRegistry) :: Type where
-  ResultFor payload ('Queue _ payload ': _) = ()
-  ResultFor payload ('QueueWithResult _ payload result ': _) = result
+  ResultFor payload (Queue _ payload ': _) = ()
+  ResultFor payload (QueueWithResult _ payload result ': _) = result
   ResultFor payload (_ ': rest) = ResultFor payload rest
   ResultFor payload '[] =
     TypeError
@@ -91,8 +97,8 @@ type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
 -- | Check that a table name doesn't appear in the rest of the registry.
 type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Constraint where
   NotInTables _ '[] = ()
-  NotInTables table ('Queue table _ ': _) = DuplicateTable table
-  NotInTables table ('QueueWithResult table _ _ ': _) = DuplicateTable table
+  NotInTables table (Queue table _ ': _) = DuplicateTable table
+  NotInTables table (QueueWithResult table _ _ ': _) = DuplicateTable table
   NotInTables table (_ ': rest) = NotInTables table rest
 
 type family DuplicateTable (table :: Symbol) :: Constraint where

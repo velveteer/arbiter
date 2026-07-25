@@ -35,7 +35,7 @@ import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
-type SizingTestRegistry = '[ 'Queue "arbiter_worker_sizing_test" WorkerTestPayload]
+type SizingTestRegistry = '[Queue "arbiter_worker_sizing_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_sizing_test"

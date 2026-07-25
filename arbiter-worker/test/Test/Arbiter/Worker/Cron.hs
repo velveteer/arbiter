@@ -66,7 +66,7 @@ import Arbiter.Worker.Cron
   )
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
 
-type WorkerTestRegistry = '[ 'Queue "arbiter_cron_test" WorkerTestPayload]
+type WorkerTestRegistry = '[Queue "arbiter_cron_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_cron_test"

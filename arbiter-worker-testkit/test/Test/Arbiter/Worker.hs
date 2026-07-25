@@ -94,7 +94,7 @@ import UnliftIO.Async qualified as Async
 
 import Arbiter.Worker.TestKit (workerSpec)
 
-type WorkerTestRegistry = '[ 'QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
+type WorkerTestRegistry = '[QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
 
 noResult :: (Monad n, Monoid r) => (c -> j -> n ()) -> c -> j -> n r
 noResult h conn job = h conn job >> pure mempty

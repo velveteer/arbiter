@@ -31,7 +31,7 @@ newtype ListenPayload = ListenPayload Text
 listenSchema :: Text
 listenSchema = "arbiter_orville_listen_test"
 
-type OrvilleListenRegistry = '[ 'Queue "arbiter_orville_listen_test" ListenPayload]
+type OrvilleListenRegistry = '[Queue "arbiter_orville_listen_test" ListenPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
@@ -66,8 +66,8 @@ newtype MqBPayload = MqBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type OrvilleMultiQRegistry =
-  '[ 'Queue "mqo_listen_a" MqAPayload
-   , 'Queue "mqo_listen_b" MqBPayload
+  '[ Queue "mqo_listen_a" MqAPayload
+   , Queue "mqo_listen_b" MqBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec

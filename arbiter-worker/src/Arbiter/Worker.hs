@@ -76,7 +76,7 @@ import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (toJSON)
+import Data.Aeson (FromJSON, toJSON)
 import Data.Foldable (fold, foldMap', for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
@@ -555,7 +555,7 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
 -- Decode failures appear as @Left decodeError@ - the child succeeded but
 -- its result JSON doesn't match the expected type.
 readChildResults
-  :: (DecodeJobResult a, MonadArbiter m)
+  :: (FromJSON a, MonadArbiter m)
   => Text
   -> Job.JobRead payload
   -> m (Map.Map Int64 (Either Text a), Map.Map Int64 T.Text)
@@ -695,7 +695,7 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (ArbiterSchema m registry, DecodeJobResult (ResultOf m payload), MonadArbiter m)
+  :: (ArbiterSchema m registry, FromJSON (ResultOf m payload), MonadArbiter m)
   => Job.JobRead payload
   -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
 childResults job = do
@@ -706,7 +706,7 @@ childResults job = do
 -- contribute 'mempty').
 mergedChildResults
   :: ( ArbiterSchema m registry
-     , DecodeJobResult (ResultOf m payload)
+     , FromJSON (ResultOf m payload)
      , MonadArbiter m
      , Monoid (ResultOf m payload)
      )

@@ -34,7 +34,7 @@ import Test.Arbiter.Simple.TestHelpers (cleanupSimpleTest, createSimplePool)
 testSchema :: Text
 testSchema = "arbiter_simple_concurrency_test"
 
-type SimpleConcurrencyTestRegistry = '[ 'Queue "arbiter_simple_concurrency_test" TestPayload]
+type SimpleConcurrencyTestRegistry = '[Queue "arbiter_simple_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_simple_concurrency_test"

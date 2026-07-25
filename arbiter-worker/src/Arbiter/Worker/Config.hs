@@ -9,8 +9,6 @@ module Arbiter.Worker.Config
   , manualWorkerConfig
   , defaultWorkerConfig
   , defaultBatchedWorkerConfig
-  , defaultBatchedResultWorkerConfig
-  , singleJobMode
   , HandlerMode (..)
 
     -- * Batch Callbacks
@@ -172,7 +170,7 @@ transactionalWorkerConfig
   -> JobHandler n payload (ResultOf n payload)
   -> m (WorkerConfig n payload)
 transactionalWorkerConfig workerCnt handler =
-  mkDefaultConfig workerCnt (singleJobMode handler)
+  mkDefaultConfig workerCnt (SingleJobMode handler)
 
 defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
@@ -212,25 +210,6 @@ manualWorkerConfig
   -> m (WorkerConfig n payload)
 manualWorkerConfig workerCnt handler =
   defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
-
-defaultBatchedResultWorkerConfig
-  :: (MonadArbiter n, MonadIO m)
-  => Int
-  -- ^ Worker count
-  -> Int
-  -- ^ Batch size (max jobs per group to claim together)
-  -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload -> n ())
-  -> m (WorkerConfig n payload)
-defaultBatchedResultWorkerConfig = defaultBatchedWorkerConfig
-{-# DEPRECATED
-  defaultBatchedResultWorkerConfig
-  "Use defaultBatchedWorkerConfig."
-  #-}
-
--- | Handler that runs a single job. Use for regular jobs, leaf children, and
--- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').
-singleJobMode :: JobHandler m payload (ResultOf m payload) -> HandlerMode m payload
-singleJobMode = SingleJobMode
 
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig

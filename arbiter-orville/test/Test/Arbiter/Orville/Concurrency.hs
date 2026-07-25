@@ -22,7 +22,7 @@ import Test.Arbiter.Orville.TestHelpers
 testSchema :: Text
 testSchema = "arbiter_orville_concurrency_test"
 
-type OrvilleConcurrencyTestRegistry = '[ 'Queue "arbiter_orville_concurrency_test" TestPayload]
+type OrvilleConcurrencyTestRegistry = '[Queue "arbiter_orville_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_orville_concurrency_test"

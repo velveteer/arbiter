@@ -28,7 +28,7 @@ import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 testSchema :: Text
 testSchema = "arbiter_hasql_ops_test"
 
-type HasqlOpsTestRegistry = '[ 'Queue "arbiter_hasql_ops_test" TestPayload]
+type HasqlOpsTestRegistry = '[Queue "arbiter_hasql_ops_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_hasql_ops_test"

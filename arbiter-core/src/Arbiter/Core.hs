@@ -19,7 +19,7 @@ module Arbiter.Core
   , module Arbiter.Core.JobResult
 
     -- * Archived jobs
-  , module Arbiter.Core.Job.Archive
+  , ArchiveJob (archivePrimaryKey, completedAt, archivedResult)
 
     -- * Typed codecs and parameters
   , module Arbiter.Core.Codec
@@ -32,7 +32,6 @@ module Arbiter.Core
 
     -- * Cron schedule overrides and worker health
   , CronScheduleRow (..)
-  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -43,13 +42,19 @@ module Arbiter.Core
   , module Arbiter.Core.PoolConfig
 
     -- * Listener types
-  , module Arbiter.Core.Listen
+  , Listener
+  , RunningHub
+  , HubLog (..)
+  , withChannels
+  , newPoolListener
+  , DedicatedListen
+  , newDedicatedListen
+  , dedicatedListener
   ) where
 
 import Arbiter.Core.Codec
 import Arbiter.Core.CronSchedule
   ( CronScheduleRow (..)
-  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -57,13 +62,22 @@ import Arbiter.Core.CronSchedule
 import Arbiter.Core.Exceptions
 import Arbiter.Core.HasArbiterSchema
 import Arbiter.Core.HighLevel
-import Arbiter.Core.Job.Archive
+import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema
 import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult
 import Arbiter.Core.JobTree hiding (insertJobTree) -- use HighLevel.insertJobTree
 import Arbiter.Core.Listen
+  ( DedicatedListen
+  , HubLog (..)
+  , Listener
+  , RunningHub
+  , dedicatedListener
+  , newDedicatedListen
+  , newPoolListener
+  , withChannels
+  )
 import Arbiter.Core.MonadArbiter
 import Arbiter.Core.PoolConfig
 import Arbiter.Core.QueueRegistry

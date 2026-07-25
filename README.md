@@ -91,9 +91,11 @@ queue whose handlers store no result. `QueueWithResult` adds the
 [result type](#job-results) its handlers produce.
 
 ```haskell
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
+
 type AppRegistry =
-  '[ 'Queue "email_queue" EmailPayload
-   , 'QueueWithResult "image_queue" ImagePayload Score
+  '[ Queue "email_queue" EmailPayload
+   , QueueWithResult "image_queue" ImagePayload Score
    ]
 ```
 
@@ -260,8 +262,8 @@ result-carrying and fire-and-forget jobs typically declares `Maybe a`, since
 
 ```haskell
 type AppRegistry =
-  '[ 'Queue "email_queue" EmailPayload -- ResultOf m EmailPayload ~ ()
-   , 'QueueWithResult "image_queue" ImagePayload Score
+  '[ Queue "email_queue" EmailPayload -- ResultOf m EmailPayload ~ ()
+   , QueueWithResult "image_queue" ImagePayload Score
    ]
 ```
 
@@ -275,27 +277,22 @@ where, depends on the job:
   [archive](#archiving-completed-jobs) entry, if the job is archived. Without
   archiving there is nowhere to keep it, so it is dropped.
 
-The mapping between a result value and stored JSON is a pair of typeclasses,
-one per direction:
+Storing a result goes through one typeclass, so a type can decline to be
+stored at all. Reading one back is plain `FromJSON`:
 
 ```haskell
 class EncodeJobResult a where
   encodeJobResult :: a -> Maybe Value        -- Nothing means store nothing
-
-class DecodeJobResult a where
-  decodeJobResult :: Value -> Either Text a  -- read a stored result back
 ```
 
 Any `ToJSON` type can be stored and any `FromJSON` type can be read back for
-free (`Maybe a` skips on `Nothing` - everything else is always recorded), so
-your own records and sum types work as results directly. `JobResult a` is a
-constraint for both halves at once.
+free (`Maybe a` skips on `Nothing` and otherwise defers to `a`'s own instance,
+so a hand-written encoder still runs), so your own records and sum types work as
+results directly.
 
 ```haskell
-import Arbiter.Worker (DecodeJobResult (..), EncodeJobResult (..))
+import Arbiter.Worker (EncodeJobResult (..))
 import Data.Aeson (FromJSON, ToJSON, toJSON)
-import Data.Aeson qualified as Aeson
-import Data.Text qualified as T
 import GHC.Generics (Generic)
 
 data SyncReport = SyncReport { rowsChanged :: Int, notes :: [Text] }
@@ -306,11 +303,6 @@ instance EncodeJobResult SyncReport where
   encodeJobResult r
     | rowsChanged r == 0 = Nothing
     | otherwise          = Just (toJSON r)
-
-instance DecodeJobResult SyncReport where
-  decodeJobResult v = case Aeson.fromJSON v of
-    Aeson.Success r -> Right r
-    Aeson.Error err -> Left (T.pack err)
 ```
 
 ### Job Trees (Fan-out/Fan-in)
@@ -658,7 +650,8 @@ your own `withDbTransaction` commits the ack together with your writes:
 batchHandler jobs cbs =
   for_ jobs $ \job -> Arb.withDbTransaction $ do
     recordCharge (Arb.payload job)
-    Worker.ack cbs job
+    score <- liftIO $ scoreImage (Arb.payload job)
+    Worker.ackWith cbs job score
 ```
 
 So you pay for a transaction only around the work that needs one, rather than

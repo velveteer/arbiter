@@ -21,7 +21,7 @@ import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 testSchema :: Text
 testSchema = "arbiter_hasql_concurrency_test"
 
-type HasqlConcurrencyTestRegistry = '[ 'Queue "arbiter_hasql_concurrency_test" TestPayload]
+type HasqlConcurrencyTestRegistry = '[Queue "arbiter_hasql_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_hasql_concurrency_test"

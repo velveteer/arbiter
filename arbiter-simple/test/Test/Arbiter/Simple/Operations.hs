@@ -30,7 +30,7 @@ import Test.Arbiter.Simple.TestHelpers (cleanupSimpleTest, createSimplePool)
 testSchema :: Text
 testSchema = "arbiter_simple_test"
 
-type SimpleOpsTestRegistry = '[ 'Queue "arbiter_simple_test" TestPayload]
+type SimpleOpsTestRegistry = '[Queue "arbiter_simple_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_simple_test"

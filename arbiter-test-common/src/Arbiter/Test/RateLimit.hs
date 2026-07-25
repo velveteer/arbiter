@@ -87,7 +87,7 @@ data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type RLReg = '[ 'Queue "arbiter_ratelimit_test" RLPayload]
+type RLReg = '[Queue "arbiter_ratelimit_test" RLPayload]
 
 -- 3 tokens, burst 3, refilling 3 every 2 seconds (1.5 tokens/sec).
 rlPolicy :: Policy

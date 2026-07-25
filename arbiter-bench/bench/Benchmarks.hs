@@ -137,10 +137,10 @@ instance HasConcurrency BenchBoth where
   concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth i) -> gateKey2 i)
 
 type BenchRegistry =
-  '[ 'Queue "bench_queue" BenchPayload
-   , 'Queue "bench_rl_queue" BenchRl
-   , 'Queue "bench_cc_queue" BenchCc
-   , 'Queue "bench_both_queue" BenchBoth
+  '[ Queue "bench_queue" BenchPayload
+   , Queue "bench_rl_queue" BenchRl
+   , Queue "bench_cc_queue" BenchCc
+   , Queue "bench_both_queue" BenchBoth
    ]
 
 data QueueFlavor

@@ -27,7 +27,7 @@ import Data.Proxy (Proxy(..))
 data EmailJob = SendEmail { to :: Text, subject :: Text, body :: Text }
   deriving (Generic, ToJSON, FromJSON)
 
-type MyRegistry = '[ 'Queue "email_jobs" EmailJob ]
+type MyRegistry = '[ Queue "email_jobs" EmailJob ]
 
 main :: IO ()
 main = do

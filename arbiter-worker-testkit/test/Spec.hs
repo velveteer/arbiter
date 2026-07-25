@@ -5,6 +5,7 @@ import Test.Hspec
 
 import Test.Arbiter.Worker qualified as Worker
 import Test.Arbiter.Worker.MultiQueueListener qualified as MultiQueueListener
+import Test.Arbiter.Worker.PlainResult qualified as PlainResult
 import Test.Arbiter.Worker.SharedListener qualified as SharedListener
 
 main :: IO ()
@@ -15,5 +16,7 @@ main = do
       Worker.spec connStr
     describe "Shared Listener" $
       SharedListener.spec connStr
+    describe "Plain Result Path" $
+      PlainResult.spec connStr
     describe "Multi-Queue Shared Listener" $
       MultiQueueListener.spec connStr

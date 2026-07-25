@@ -90,7 +90,7 @@ instance HasConcurrency CLPayload where
       sel CLMy = concurrencyBy (concurrencyPool "my" 2) (const "k")
       sel CLMz = concurrencyBy (concurrencyPool "mz" 3) (const "k")
 
-type CLReg = '[ 'Queue "arbiter_concurrency_test" CLPayload]
+type CLReg = '[Queue "arbiter_concurrency_test" CLPayload]
 
 -- | A second payload declaring a different pool, with a two-payload registry, so the
 -- registry-collection test exercises the cross-payload union (not just one payload).
@@ -101,7 +101,7 @@ newtype CLPayload2 = CLPayload2 Text
 instance HasConcurrency CLPayload2 where
   concurrencyFor = concurrencyBy (concurrencyPool "declpool2" 5) (\(CLPayload2 t) -> t)
 
-type CLReg2 = '[ 'Queue "clq1" CLPayload, 'Queue "clq2" CLPayload2]
+type CLReg2 = '[Queue "clq1" CLPayload, Queue "clq2" CLPayload2]
 
 -- | Table name for 'CLReg', shared across backends (each in its own schema).
 concurrencyTable :: Text

@@ -28,8 +28,8 @@ newtype QueueBPayload = QueueBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type MultiQRegistry =
-  '[ 'Queue "mq_listen_a" QueueAPayload
-   , 'Queue "mq_listen_b" QueueBPayload
+  '[ Queue "mq_listen_a" QueueAPayload
+   , Queue "mq_listen_b" QueueBPayload
    ]
 
 schemaName :: Text

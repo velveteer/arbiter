@@ -18,8 +18,11 @@
 --   runArbiterAPI 8080 config
 -- @
 module Arbiter.Servant
-  ( -- * Server
-    arbiterServer
+  ( -- * Registry
+    QueueSpec (..)
+
+    -- * Server
+  , arbiterServer
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
@@ -54,6 +57,8 @@ module Arbiter.Servant
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   ) where
+
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 
 import Arbiter.Servant.API
 import Arbiter.Servant.Server

@@ -53,7 +53,7 @@ data WorkerConcurrencyTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Local test registry
-type WorkerConcurrencyTestRegistry = '[ 'Queue "arbiter_worker_concurrency_test" WorkerConcurrencyTestPayload]
+type WorkerConcurrencyTestRegistry = '[Queue "arbiter_worker_concurrency_test" WorkerConcurrencyTestPayload]
 
 -- Table name for tests
 testTable :: T.Text

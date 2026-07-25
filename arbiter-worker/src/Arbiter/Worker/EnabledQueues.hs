@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | Resolving which queues a worker process should run from
 -- @ARBITER_ENABLED_QUEUES@.
@@ -70,6 +71,6 @@ getEnabledQueues envVar registry = do
 -- the monad through 'RegistryOf' instead of a passed 'Proxy'.
 enabledQueuesForMonad
   :: forall m
-   . (RegistryTables (RegistryOf m))
+   . (HasArbiterSchema m, RegistryTables (RegistryOf m))
   => IO [Text]
 enabledQueuesForMonad = getEnabledQueues enabledQueuesEnvVar (Proxy @(RegistryOf m))

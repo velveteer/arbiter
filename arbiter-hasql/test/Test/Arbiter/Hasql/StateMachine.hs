@@ -27,7 +27,7 @@ testSchema = "arbiter_hasql_sm_test"
 testTable :: Text
 testTable = "arbiter_hasql_sm_test"
 
-type SMRegistry = '[ 'Queue "arbiter_hasql_sm_test" SMPayload]
+type SMRegistry = '[Queue "arbiter_hasql_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do

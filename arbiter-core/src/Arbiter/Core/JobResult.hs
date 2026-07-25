@@ -1,11 +1,9 @@
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Encoding and decoding of handler results.
 module Arbiter.Core.JobResult
-  ( JobResult
-  , EncodeJobResult (..)
-  , DecodeJobResult (..)
+  ( EncodeJobResult (..)
+  , decodeJobResult
   ) where
 
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
@@ -19,34 +17,20 @@ import Data.Text qualified as T
 class EncodeJobResult a where
   encodeJobResult :: a -> Maybe Value
 
--- | Results a rollup finalizer can read back with
--- 'Arbiter.Worker.childResults' or 'Arbiter.Worker.mergedChildResults'.
-class DecodeJobResult a where
-  decodeJobResult :: Value -> Either Text a
-
--- | Both halves, for a type that is stored by one handler and read by another.
-type JobResult a = (EncodeJobResult a, DecodeJobResult a)
-
 instance EncodeJobResult () where
   encodeJobResult _ = Nothing
-
-instance DecodeJobResult () where
-  decodeJobResult _ = Right ()
 
 instance {-# OVERLAPPABLE #-} (ToJSON a) => EncodeJobResult a where
   encodeJobResult = Just . toJSON
 
-instance {-# OVERLAPPABLE #-} (FromJSON a) => DecodeJobResult a where
-  decodeJobResult = decodeJobResultAeson
+-- | An optional result. @Nothing@ stores nothing, @Just@ defers to @a@'s
+-- instance, which may also store nothing.
+instance {-# OVERLAPPING #-} (EncodeJobResult a) => EncodeJobResult (Maybe a) where
+  encodeJobResult = (encodeJobResult =<<)
 
--- | A @Maybe@ result is optional: @Nothing@ stores nothing, @Just x@ stores @x@.
-instance {-# OVERLAPPING #-} (ToJSON a) => EncodeJobResult (Maybe a) where
-  encodeJobResult = fmap toJSON
-
-instance {-# OVERLAPPING #-} (FromJSON a) => DecodeJobResult (Maybe a) where
-  decodeJobResult = decodeJobResultAeson
-
-decodeJobResultAeson :: (FromJSON a) => Value -> Either Text a
-decodeJobResultAeson v = case Aeson.fromJSON v of
+-- | Read a stored result back, for 'Arbiter.Worker.childResults' or
+-- 'Arbiter.Worker.mergedChildResults'.
+decodeJobResult :: (FromJSON a) => Value -> Either Text a
+decodeJobResult v = case Aeson.fromJSON v of
   Aeson.Success a -> Right a
   Aeson.Error err -> Left (T.pack err)
