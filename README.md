@@ -258,12 +258,6 @@ A handler can produce a value - its **result** - by returning it under
 `transactionalWorkerConfig`, or by passing it to `ackWith`/`ackAllWith` under a
 manual or batched config.
 
-The type comes from the queue's registry entry, so a
-rollup parent reads back exactly the type its children stored and a mismatch is
-a compile error. A `Queue` entry produces `()`. A queue that mixes
-result-carrying and fire-and-forget jobs typically declares `Maybe a`, since
-`Nothing` stores nothing.
-
 ```haskell
 type AppRegistry =
   '[ Queue "email_queue" EmailPayload -- ResultOf m EmailPayload ~ ()
@@ -281,39 +275,8 @@ where, depends on the job:
   [archive](#archiving-completed-jobs) entry, if the job is archived. Without
   archiving there is nowhere to keep it, so it is dropped.
 
-Storing a result goes through one typeclass, so a type can decline to be
-stored at all. Reading one back is plain `FromJSON`:
-
-```haskell
-class EncodeJobResult a where
-  encodeJobResult :: a -> Maybe Value        -- Nothing means store nothing
-```
-
-Any `ToJSON` type can be stored and any `FromJSON` type can be read back for
-free (`Maybe a` skips on `Nothing` and otherwise defers to `a`'s own instance,
-so a hand-written encoder still runs), so your own records and sum types work as
-results directly.
-
-```haskell
-import Arbiter.Worker (EncodeJobResult (..))
-import Data.Aeson (FromJSON, ToJSON, toJSON)
-import GHC.Generics (Generic)
-
-data SyncReport = SyncReport { rowsChanged :: Int, notes :: [Text] }
-  deriving stock (Generic)
-  deriving anyclass (ToJSON, FromJSON)
-
-instance EncodeJobResult SyncReport where
-  encodeJobResult r
-    | rowsChanged r == 0 = Nothing
-    | otherwise          = Just (toJSON r)
-```
-
-Two constraints on a hand-written instance. It must encode something its own
-`FromJSON` accepts, since reads do not go through it - a decode failure is
-folded to `mempty` by `mergedChildResults` rather than raised, so the parent
-sees an empty aggregate. And it must be defined alongside the result type: an
-orphan instance the ack site does not import loses to the `ToJSON` fallback.
+A result is stored with its `ToJSON` and read back with its `FromJSON`, so your
+own records and sum types work as results directly.
 
 ### Job Trees (Fan-out/Fan-in)
 
@@ -373,6 +336,7 @@ handler _conn job =
     Aggregate -> do
       (childResults, _) <- Worker.mergedChildResults job
       sendToS3 childResults
+      pure childResults
 
 config <- Worker.transactionalWorkerConfig 4 handler
 ```

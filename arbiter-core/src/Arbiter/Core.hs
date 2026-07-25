@@ -32,8 +32,6 @@ module Arbiter.Core
 
     -- * Cron schedule overrides and worker health
 
-  --
-
     -- | 'CronScheduleRow' fields (@name@, @enabled@, @queueName@) are too
     -- generically named to re-export: @import Arbiter.Core.CronSchedule@ for
     -- raw field access.
