@@ -42,6 +42,8 @@ import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks
   , WorkerConfig (..)
+  , ack
+  , ackAll
   , ackAllWith
   , ackWith
   , cancelBranch
@@ -573,6 +575,27 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
       successes <- readIORef successRef
       length successes `shouldBe` 0
+
+    it "ackWith and ackAllWith store each job's result on its archive row" $ \env -> do
+      let handler jobs cbs = case toList jobs of
+            [] -> pure ()
+            (j : rest) -> do
+              ackWith cbs j (Just ["first"])
+              ackAllWith cbs (map (\r -> (r, Just ["rest"])) rest)
+      runM env $
+        traverse_
+          (\n -> void $ HL.insertJob ((defaultJob (mkSimple n)) {groupKey = Just "aw", archiveFor = Just dayRetention}))
+          ["aw-1", "aw-2", "aw-3"]
+      config <- mkBatchedConfig 1 3 handler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+        waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @m @registry @payload)
+
+      arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
+      let resultFor p = Archive.archivedResult =<< find ((== mkSimple p) . payload . Archive.jobSnapshot) arch
+      resultFor "aw-1" `shouldBe` Just (toJSON ["first" :: Text])
+      resultFor "aw-2" `shouldBe` Just (toJSON ["rest" :: Text])
+      resultFor "aw-3" `shouldBe` Just (toJSON ["rest" :: Text])
 
   describe "Group Ordering" $ do
     it "processes jobs in the same group serially" $ \env -> do
@@ -1329,9 +1352,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
     ackNoResult :: BatchCallbacks m payload -> JobRead payload -> m ()
-    ackNoResult cbs job = ackWith cbs job mempty
+    ackNoResult = ack
     ackAllNoResult :: BatchCallbacks m payload -> [JobRead payload] -> m ()
-    ackAllNoResult cbs jobs = ackAllWith cbs (map (\job -> (job, mempty)) jobs)
+    ackAllNoResult = ackAll
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload)
     mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (mempty :: ResultOf m payload)))
     mkBatchedConfig

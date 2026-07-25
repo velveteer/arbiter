@@ -19,8 +19,10 @@ module Arbiter.Core.QueueRegistry
     -- * Registry lookups
   , TableForPayload
   , ResultFor
+  , SpecForPayload
   , SpecName
   , SpecPayload
+  , SpecResult
 
     -- * Registry validation
   , AllQueuesUnique
@@ -37,6 +39,10 @@ import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVa
 
 -- | A queue's table name and payload type, plus a result type for
 -- @QueueWithResult@. A @Queue@ entry produces @()@.
+--
+-- These are @type data@ constructors, so they live in the type namespace and
+-- take no promotion tick. A module with its own @Queue@ type needs
+-- @import Arbiter.Core hiding (Queue)@ or a qualified import.
 type data QueueSpec
   = Queue Symbol Type
   | QueueWithResult Symbol Type Type
@@ -62,12 +68,20 @@ type family SpecPayload (spec :: QueueSpec) :: Type where
   SpecPayload (Queue _ payload) = payload
   SpecPayload (QueueWithResult _ payload _) = payload
 
--- | Look up the table name for a payload type. Compile-time error if not registered.
-type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: Symbol where
-  TableForPayload payload (Queue table payload ': _) = table
-  TableForPayload payload (QueueWithResult table payload _ ': _) = table
-  TableForPayload payload (_ ': rest) = TableForPayload payload rest
-  TableForPayload payload '[] =
+-- | A queue's result type. A @Queue@ entry produces @()@.
+type family SpecResult (spec :: QueueSpec) :: Type where
+  SpecResult (Queue _ _) = ()
+  SpecResult (QueueWithResult _ _ result) = result
+
+-- | Look up a payload type's registry entry. Compile-time error if not registered.
+type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: QueueSpec where
+  SpecForPayload payload (Queue table payload ': _) = Queue table payload
+  SpecForPayload payload (QueueWithResult table payload result ': _) = QueueWithResult table payload result
+  SpecForPayload payload (_ ': rest) = SpecForPayload payload rest
+  SpecForPayload payload '[] = PayloadNotRegistered payload
+
+type family PayloadNotRegistered (payload :: Type) :: QueueSpec where
+  PayloadNotRegistered payload =
     TypeError
       ( 'Text "Payload type "
           ':<>: 'ShowType payload
@@ -75,18 +89,13 @@ type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :
           ':$$: 'Text "Add a Queue entry, or QueueWithResult to store a result."
       )
 
+-- | Look up the table name for a payload type. Compile-time error if not registered.
+type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: Symbol where
+  TableForPayload payload registry = SpecName (SpecForPayload payload registry)
+
 -- | The result type a queue's handlers produce.
 type family ResultFor (payload :: Type) (registry :: JobPayloadRegistry) :: Type where
-  ResultFor payload (Queue _ payload ': _) = ()
-  ResultFor payload (QueueWithResult _ payload result ': _) = result
-  ResultFor payload (_ ': rest) = ResultFor payload rest
-  ResultFor payload '[] =
-    TypeError
-      ( 'Text "Payload type "
-          ':<>: 'ShowType payload
-          ':<>: 'Text " not found in registry"
-          ':$$: 'Text "Add a Queue entry, or QueueWithResult to store a result."
-      )
+  ResultFor payload registry = SpecResult (SpecForPayload payload registry)
 
 -- | Compile-time check that no two payload types share a queue name.
 type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where

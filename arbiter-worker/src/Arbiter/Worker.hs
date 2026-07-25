@@ -76,7 +76,7 @@ import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (FromJSON, toJSON)
+import Data.Aeson (FromJSON, Value, toJSON)
 import Data.Foldable (fold, foldMap', for_, toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
@@ -598,17 +598,17 @@ processJobsWithRetry config jobs = do
         withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
-      ackOneWith j r = do
+      ackOneStoring j mVal = do
         withDbTransaction $ do
           ackJobOrSkip j
-          storeJobResult schemaName j r
+          storeEncodedResult schemaName j mVal
         finalize j
-      ackBatch pairs = do
+      ackBatchStoring pairs = do
         let js = map fst pairs
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, r) -> when (isAcked ackedSet j) $ storeJobResult schemaName j r
+          for_ pairs $ \(j, mVal) -> when (isAcked ackedSet j) $ storeEncodedResult schemaName j mVal
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -619,10 +619,10 @@ processJobsWithRetry config jobs = do
         traverse_ finalize done
       callbacks =
         BatchCallbacks
-          { ack = \job -> ackOneWith job ()
-          , ackWith = ackOneWith
-          , ackAll = \js -> ackBatch (map (\j -> (j, ())) js)
-          , ackAllWith = ackBatch
+          { ack = \job -> ackOneStoring job Nothing
+          , ackWith = \job r -> ackOneStoring job (encodeJobResult r)
+          , ackAll = \js -> ackBatchStoring (map (\j -> (j, Nothing)) js)
+          , ackAllWith = \prs -> ackBatchStoring (map (\(j, r) -> (j, encodeJobResult r)) prs)
           , failRetry = failAs (Retryable . JobRetryableException)
           , failPermanent = failAs (Permanent . JobPermanentException)
           , cancelBranch = failAs (BranchCancel . BranchCancelException)
@@ -727,8 +727,17 @@ storeJobResult
   -> Job.JobRead payload
   -> result
   -> m ()
-storeJobResult schemaName job result =
-  case (Job.parentId job, encodeJobResult result) of
+storeJobResult schemaName job = storeEncodedResult schemaName job . encodeJobResult
+
+-- | 'storeJobResult' on an already-encoded result. 'Nothing' stores nothing.
+storeEncodedResult
+  :: (MonadArbiter m)
+  => Text
+  -> Job.JobRead payload
+  -> Maybe Value
+  -> m ()
+storeEncodedResult schemaName job mVal =
+  case (Job.parentId job, mVal) of
     (Just pid, Just val) ->
       void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
     (Nothing, Just val)

@@ -20,6 +20,7 @@ module Arbiter.Core
 
     -- * Archived jobs
   , ArchiveJob (archivePrimaryKey, completedAt, archivedResult)
+  , archivedSnapshot
 
     -- * Typed codecs and parameters
   , module Arbiter.Core.Codec
@@ -31,7 +32,21 @@ module Arbiter.Core
   , module Arbiter.Core.Exceptions
 
     -- * Cron schedule overrides and worker health
-  , CronScheduleRow (..)
+  , CronScheduleRow
+    ( name
+    , queueName
+    , defaultExpression
+    , defaultOverlap
+    , defaultTimezone
+    , overrideExpression
+    , overrideOverlap
+    , overrideTimezone
+    , enabled
+    , lastFiredAt
+    , lastCheckedAt
+    , runRequestedAt
+    , lastManualRunAt
+    )
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -42,6 +57,7 @@ module Arbiter.Core
   , module Arbiter.Core.PoolConfig
 
     -- * Listener types
+  , Notification (..)
   , Listener
   , RunningHub
   , HubLog (..)
@@ -62,7 +78,7 @@ import Arbiter.Core.CronSchedule
 import Arbiter.Core.Exceptions
 import Arbiter.Core.HasArbiterSchema
 import Arbiter.Core.HighLevel
-import Arbiter.Core.Job.Archive (ArchiveJob (..))
+import Arbiter.Core.Job.Archive (ArchiveJob (..), archivedSnapshot)
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema
 import Arbiter.Core.Job.Types
@@ -72,6 +88,7 @@ import Arbiter.Core.Listen
   ( DedicatedListen
   , HubLog (..)
   , Listener
+  , Notification (..)
   , RunningHub
   , dedicatedListener
   , newDedicatedListen

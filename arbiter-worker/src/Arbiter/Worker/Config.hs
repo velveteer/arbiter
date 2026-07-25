@@ -126,14 +126,16 @@ data WorkerConfig m payload = WorkerConfig
 -- your outer commit, so an outer rollback reprocesses the job after the
 -- visibility timeout.
 data BatchCallbacks m payload = BatchCallbacks
-  { ack :: (ResultOf m payload ~ ()) => JobRead payload -> m ()
-  -- ^ Ack and fire onJobSuccess, for a queue whose 'ResultOf' is @()@.
+  { ack :: JobRead payload -> m ()
+  -- ^ Ack and fire onJobSuccess, storing no result. Available on any queue: a
+  -- job acked this way is absent from its parent rollup's child results and
+  -- leaves its archive entry's result @NULL@.
   , ackWith :: JobRead payload -> ResultOf m payload -> m ()
   -- ^ Ack, store the result for the parent rollup or the job's archive entry,
   -- fire onJobSuccess.
-  , ackAll :: (ResultOf m payload ~ ()) => [JobRead payload] -> m ()
-  -- ^ Bulk-'ack' in one parent-aware transaction, for a queue whose 'ResultOf'
-  -- is @()@. Fires onJobSuccess per acked job.
+  , ackAll :: [JobRead payload] -> m ()
+  -- ^ Bulk-'ack' in one parent-aware transaction, storing no results. Fires
+  -- onJobSuccess per acked job.
   , ackAllWith :: [(JobRead payload, ResultOf m payload)] -> m ()
   -- ^ 'ackAll' storing each job's result for its parent rollup or archive entry.
   , failRetry :: JobRead payload -> Text -> m ()
@@ -163,6 +165,11 @@ data HandlerMode m payload
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
+--
+-- The handler returns the result type @payload@'s registry entry declares.
+-- 'ResultOf' is not injective, so code polymorphic in @payload@ cannot infer
+-- that type: give such a wrapper a @ResultOf n payload ~ r@ constraint naming
+-- the result it returns.
 transactionalWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int

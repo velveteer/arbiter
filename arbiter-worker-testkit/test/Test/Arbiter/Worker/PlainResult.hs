@@ -5,7 +5,7 @@
 
 -- | Covers the two paths 'Arbiter.Worker.TestKit.workerSpec' cannot reach,
 -- because its registry declares a @Maybe@ result: a plain non-@Maybe@ result
--- type, and the @ResultOf ~ ()@ 'ack' and 'ackAll' callbacks.
+-- type, and a @Queue@ entry, whose 'Arbiter.Core.ResultOf' is @()@.
 module Test.Arbiter.Worker.PlainResult (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
@@ -36,7 +36,8 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.Generics (Generic)
-import Test.Hspec (Spec, beforeAll, describe, it, shouldBe)
+import Test.Hspec (Spec, beforeAll, describe, it, shouldBe, shouldMatchList, shouldReturn)
+import UnliftIO (bracket)
 import UnliftIO.Async (withAsync)
 
 newtype NoResultPayload = NoResultTask Text
@@ -72,45 +73,50 @@ spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema noResultTable True >> addQueueTable connStr testSchema resultTable True) $ do
     describe "unparameterized ack callbacks" $
-      it "acks a batch through ack and ackAll on a ResultOf ~ () queue" $ do
+      it "acks a batch through ack and ackAll, storing no result" $ do
         cleanup connStr
-        env <- createSimpleEnv (Proxy @PlainRegistry) connStr testSchema
-        ackedRef <- newIORef (0 :: Int)
-        let handler
-              :: NonEmpty (JobRead NoResultPayload)
-              -> BatchCallbacks (SimpleDb PlainRegistry IO) NoResultPayload
-              -> SimpleDb PlainRegistry IO ()
-            handler jobs cbs = case toList jobs of
-              [] -> pure ()
-              (j : rest) -> do
-                ack cbs j
-                ackAll cbs rest
-                liftIO $ atomicModifyIORef' ackedRef $ \n -> (n + 1 + length rest, ())
-        cfg <- defaultBatchedWorkerConfig 1 10 handler
-        runSimpleDb env $
-          mapM_
-            (\i -> void $ HL.insertJob (defaultJob (NoResultTask i)))
-            ["a", "b", "c"]
-        withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
-          waitUntil 10_000 $ (== 3) <$> readIORef ackedRef
-        readIORef ackedRef >>= (`shouldBe` 3)
-        destroySimpleEnv env
+        withEnv $ \env -> do
+          ackedRef <- newIORef (0 :: Int)
+          let handler
+                :: NonEmpty (JobRead NoResultPayload)
+                -> BatchCallbacks (SimpleDb PlainRegistry IO) NoResultPayload
+                -> SimpleDb PlainRegistry IO ()
+              handler jobs cbs = case toList jobs of
+                [] -> pure ()
+                (j : rest) -> do
+                  ack cbs j
+                  ackAll cbs rest
+                  liftIO $ atomicModifyIORef' ackedRef $ \n -> (n + 1 + length rest, ())
+          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          runSimpleDb env $
+            mapM_
+              (\i -> void $ HL.insertJob ((defaultJob (NoResultTask i)) {archiveFor = Just dayRetention}))
+              ["a", "b", "c"]
+          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+            waitUntil 10_000 $ (== 0) <$> runSimpleDb env (HL.countJobs @_ @PlainRegistry @NoResultPayload)
+          readIORef ackedRef >>= (`shouldBe` 3)
+          runSimpleDb env (HL.countJobs @_ @PlainRegistry @NoResultPayload) `shouldReturn` 0
+          arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @NoResultPayload 100 0
+          map (payload . Archive.jobSnapshot) arch
+            `shouldMatchList` [NoResultTask "a", NoResultTask "b", NoResultTask "c"]
+          map Archive.archivedResult arch `shouldBe` [Nothing, Nothing, Nothing]
 
     describe "plain result type" $
       it "stores a non-Maybe result on the archive row" $ do
         cleanup connStr
-        env <- createSimpleEnv (Proxy @PlainRegistry) connStr testSchema
-        let handler :: JobHandler (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
-            handler _conn _job = pure ["alpha", "beta"]
-        cfg <- transactionalWorkerConfig 1 handler
-        void $
-          runSimpleDb env $
-            HL.insertJob ((defaultJob (PlainResultTask "archived")) {archiveFor = Just dayRetention})
-        withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
-          waitUntil 10_000 $ do
-            arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-            pure (any ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch)
-        arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-        let mine = find ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch
-        (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["alpha", "beta" :: Text])
-        destroySimpleEnv env
+        withEnv $ \env -> do
+          let handler :: JobHandler (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
+              handler _conn _job = pure ["alpha", "beta"]
+          cfg <- transactionalWorkerConfig 1 handler
+          void $
+            runSimpleDb env $
+              HL.insertJob ((defaultJob (PlainResultTask "archived")) {archiveFor = Just dayRetention})
+          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+            waitUntil 10_000 $ do
+              arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
+              pure (any ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch)
+          arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
+          let mine = find ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch
+          (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["alpha", "beta" :: Text])
+  where
+    withEnv = bracket (createSimpleEnv (Proxy @PlainRegistry) connStr testSchema) destroySimpleEnv

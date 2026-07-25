@@ -320,6 +320,9 @@ data PipelinePayload
   deriving stock (Generic)
   deriving anyclass (ToJSON, FromJSON)
 
+-- One entry for the whole tree: children and parents share the queue.
+type PipelineRegistry = '[ QueueWithResult "pipeline_queue" PipelinePayload [Text] ]
+
 myTree = Arb.defaultJob Aggregate <~~
   [ Arb.defaultJob (ProcessChunk "chunk-1")
   , Arb.defaultJob (ProcessChunk "chunk-2")
@@ -348,7 +351,7 @@ children's results plus a map of any DLQ'd immediate children. Intermediate
 results are cleaned up automatically when the parent is acked.
 
 ```haskell
-handler :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
+handler :: Arb.JobHandler (ArbS.SimpleDb PipelineRegistry IO) PipelinePayload [Text]
 handler _conn job =
   case Arb.payload job of
     ProcessChunk name -> pure ["processed: " <> name]
@@ -379,6 +382,9 @@ Use a job tree to replace a staging table. Each child job carries its chunk of r
 data MigrationJob
   = MigrateChunk [Int64]
   | MigrationComplete
+
+type MigrationRegistry =
+  '[ QueueWithResult "migration_queue" MigrationJob (Sum Int) ]
 
 rowIds <- findRowsToMigrate  -- SELECT id FROM orders WHERE needs_migration
 let chunks = chunksOf 1000 rowIds  -- from the split package
@@ -648,10 +654,11 @@ your own `withDbTransaction` commits the ack together with your writes:
 
 ```haskell
 batchHandler jobs cbs =
-  for_ jobs $ \job -> Arb.withDbTransaction $ do
-    recordCharge (Arb.payload job)
+  for_ jobs $ \job -> do
     score <- liftIO $ scoreImage (Arb.payload job)
-    Worker.ackWith cbs job score
+    Arb.withDbTransaction $ do
+      recordCharge (Arb.payload job)
+      Worker.ackWith cbs job score
 ```
 
 So you pay for a transaction only around the work that needs one, rather than
@@ -661,14 +668,14 @@ happen exactly once in the transaction next to the ack, not in the hook.
 
 Each job is finalized on its own via the
 [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
-record - `ackWith`/`ackAllWith` (per-job or bulk ack), `failRetry`/`failPermanent`,
+record - `ack`/`ackAll` or `ackWith`/`ackAllWith` (per-job or bulk ack), `failRetry`/`failPermanent`,
 `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure,
 cancel, or nack affects only that job - completed jobs stay done, an untouched
 job is reprocessed, and hooks fire per job.
 
-Every ack carries the queue's [result](#job-results) - kept for a rollup parent
-to collect, or on an archived job's entry. `ack`/`ackAll` are the shorthand for
-a queue whose `ResultOf` is `()`.
+`ackWith`/`ackAllWith` carry the queue's [result](#job-results) - kept for a
+rollup parent to collect, or on an archived job's entry. `ack`/`ackAll` finalize
+a job without storing anything, on any queue.
 
 ```haskell
 -- defaultBatchedWorkerConfig <workerCount> <batchSize> handler

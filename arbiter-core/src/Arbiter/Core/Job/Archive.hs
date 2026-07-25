@@ -3,6 +3,7 @@
 -- 'Arbiter.Core.HighLevel.reEnqueueFromArchive'.
 module Arbiter.Core.Job.Archive
   ( ArchiveJob (..)
+  , archivedSnapshot
   ) where
 
 import Data.Aeson (Value)
@@ -24,3 +25,8 @@ data ArchiveJob payload = ArchiveJob
   -- ^ Handler result stored for a completed root job (one with no parent).
   }
   deriving stock (Eq, Generic, Show)
+
+-- | 'jobSnapshot' under a name that does not clash with
+-- 'Arbiter.Core.Job.DLQ.jobSnapshot' in modules importing both.
+archivedSnapshot :: ArchiveJob payload -> JobSnapshot payload
+archivedSnapshot = jobSnapshot
