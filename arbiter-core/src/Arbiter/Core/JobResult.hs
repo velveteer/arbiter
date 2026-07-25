@@ -1,11 +1,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
--- | The result type of a queue's jobs, and how results are stored and read back.
+-- | Encoding and decoding of handler results.
 module Arbiter.Core.JobResult
-  ( HasJobResult
-  , ResultOf
-  , JobResult
+  ( JobResult
   , EncodeJobResult (..)
   , DecodeJobResult (..)
   ) where
@@ -14,29 +12,6 @@ import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
-
--- | The result type a queue's jobs produce, keyed on the payload type.
---
--- A rollup parent and its children are jobs in the same queue, so this is what
--- makes them agree: the child stores @ResultOf payload@ and the parent reads
--- @ResultOf payload@, and a mismatch is a type error rather than a result that
--- silently fails to decode.
---
--- The result type must be storable, which the superclass enforces, so a handler
--- can always store what the queue declares.
---
--- Defaults to @()@, so a queue that stores nothing can derive it:
---
--- @
--- data EmailPayload = ...
---   deriving anyclass (FromJSON, ToJSON, HasJobResult)
---
--- instance HasJobResult ImagePayload where
---   type ResultOf ImagePayload = Score
--- @
-class (EncodeJobResult (ResultOf payload)) => HasJobResult payload where
-  type ResultOf payload
-  type ResultOf _payload = ()
 
 -- | Results a handler can store. @()@ is fire-and-forget. Any @ToJSON a@ from a
 -- job with a parent is stored in the results table for the parent rollup to

@@ -15,8 +15,6 @@ module Arbiter.Worker.Config
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
-  , ack
-  , ackAll
 
     -- * Worker State
   , WorkerState (..)
@@ -26,8 +24,8 @@ module Arbiter.Worker.Config
   , readEffectiveState
   ) where
 
+import Arbiter.Core.HasArbiterSchema (ResultOf)
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
-import Arbiter.Core.JobResult (ResultOf)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
@@ -130,13 +128,16 @@ data WorkerConfig m payload = WorkerConfig
 -- your outer commit, so an outer rollback reprocesses the job after the
 -- visibility timeout.
 data BatchCallbacks m payload = BatchCallbacks
-  { ackWith :: JobRead payload -> ResultOf payload -> m ()
+  { ack :: (ResultOf m payload ~ ()) => JobRead payload -> m ()
+  -- ^ Ack and fire onJobSuccess, for a queue whose 'ResultOf' is @()@.
+  , ackWith :: JobRead payload -> ResultOf m payload -> m ()
   -- ^ Ack, store the result for the parent rollup or the job's archive entry,
-  -- fire onJobSuccess. Every ack goes through here, so a queue that declares a
-  -- result type cannot drop it. See 'ack' for the @()@ case.
-  , ackAllWith :: [(JobRead payload, ResultOf payload)] -> m ()
-  -- ^ Bulk-ack in one parent-aware transaction, storing each job's result for
-  -- its parent rollup or archive entry. Fires onJobSuccess per acked job.
+  -- fire onJobSuccess.
+  , ackAll :: (ResultOf m payload ~ ()) => [JobRead payload] -> m ()
+  -- ^ Bulk-'ack' in one parent-aware transaction, for a queue whose 'ResultOf'
+  -- is @()@. Fires onJobSuccess per acked job.
+  , ackAllWith :: [(JobRead payload, ResultOf m payload)] -> m ()
+  -- ^ 'ackAll' storing each job's result for its parent rollup or archive entry.
   , failRetry :: JobRead payload -> Text -> m ()
   -- ^ Retry with backoff, then DLQ at the job's maxAttempts.
   , failPermanent :: JobRead payload -> Text -> m ()
@@ -150,21 +151,11 @@ data BatchCallbacks m payload = BatchCallbacks
   -- attempt consumed.
   }
 
--- | Ack and fire onJobSuccess. Available only for a queue with no result type,
--- so a queue that declares one has to 'ackWith' it.
-ack :: (ResultOf payload ~ ()) => BatchCallbacks m payload -> JobRead payload -> m ()
-ack cbs job = ackWith cbs job ()
-
--- | Bulk-'ack' in one parent-aware transaction. Available only for a queue with
--- no result type, so a queue that declares one has to 'ackAllWith' it.
-ackAll :: (ResultOf payload ~ ()) => BatchCallbacks m payload -> [JobRead payload] -> m ()
-ackAll cbs jobs = ackAllWith cbs (map (\job -> (job, ())) jobs)
-
 -- | How the worker claims and runs jobs. Set by the @default*WorkerConfig@ helpers.
 data HandlerMode m payload
   = -- | Automatic single-job mode: claim one job per group and run the handler
     -- in a worker transaction, storing its result and acking atomically.
-    SingleJobMode (JobHandler m payload (ResultOf payload))
+    SingleJobMode (JobHandler m payload (ResultOf m payload))
   | -- | Batched callback mode: claim up to N jobs per group and hand the batch to
     -- the handler with a 'BatchCallbacks' record to finalize each job. No worker
     -- transaction. Batch size 1 is the manual single-job case.
@@ -178,7 +169,7 @@ transactionalWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
-  -> JobHandler n payload (ResultOf payload)
+  -> JobHandler n payload (ResultOf n payload)
   -> m (WorkerConfig n payload)
 transactionalWorkerConfig workerCnt handler =
   mkDefaultConfig workerCnt (singleJobMode handler)
@@ -187,7 +178,7 @@ defaultWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
-  -> JobHandler n payload (ResultOf payload)
+  -> JobHandler n payload (ResultOf n payload)
   -> m (WorkerConfig n payload)
 defaultWorkerConfig = transactionalWorkerConfig
 {-# DEPRECATED
@@ -233,12 +224,12 @@ defaultBatchedResultWorkerConfig
 defaultBatchedResultWorkerConfig = defaultBatchedWorkerConfig
 {-# DEPRECATED
   defaultBatchedResultWorkerConfig
-  "Use defaultBatchedWorkerConfig. A queue's result type comes from ResultOf."
+  "Use defaultBatchedWorkerConfig."
   #-}
 
 -- | Handler that runs a single job. Use for regular jobs, leaf children, and
 -- rollup parents (fetch results with 'Arbiter.Worker.mergedChildResults').
-singleJobMode :: JobHandler m payload (ResultOf payload) -> HandlerMode m payload
+singleJobMode :: JobHandler m payload (ResultOf m payload) -> HandlerMode m payload
 singleJobMode = SingleJobMode
 
 -- | Internal helper to create a config with the given handler mode.

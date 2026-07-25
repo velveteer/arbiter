@@ -19,7 +19,7 @@ module Arbiter.Test.RateLimit
   , rateLimitSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -37,6 +37,7 @@ import Arbiter.Core.Job.Types
   , payload
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.RateLimit.Schema
   ( arbiterRateLimitPoliciesTable
   , arbiterRateLimitsTable
@@ -86,7 +87,7 @@ data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type RLReg = '[ '("arbiter_ratelimit_test", RLPayload)]
+type RLReg = '[ 'Queue "arbiter_ratelimit_test" RLPayload]
 
 -- 3 tokens, burst 3, refilling 3 every 2 seconds (1.5 tokens/sec).
 rlPolicy :: Policy
@@ -119,7 +120,7 @@ groupedJob gk tenant = defaultGroupedJob gk (RLPayload tenant 1)
 
 rateLimitSpec
   :: forall env m
-   . (HasArbiterSchema m RLReg, MonadArbiter m)
+   . (ArbiterSchema m RLReg, MonadArbiter m)
   => (forall a. env -> m a -> IO a)
   -> SpecWith env
 rateLimitSpec runM = do

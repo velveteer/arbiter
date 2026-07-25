@@ -33,7 +33,7 @@ import Arbiter.Core.Concurrency.Spec
   , runConcurrencyFor
   )
 import Arbiter.Core.Concurrency.Stats (ConcurrencyPolicyUpdate (..))
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -47,6 +47,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -89,7 +90,7 @@ instance HasConcurrency CLPayload where
       sel CLMy = concurrencyBy (concurrencyPool "my" 2) (const "k")
       sel CLMz = concurrencyBy (concurrencyPool "mz" 3) (const "k")
 
-type CLReg = '[ '("arbiter_concurrency_test", CLPayload)]
+type CLReg = '[ 'Queue "arbiter_concurrency_test" CLPayload]
 
 -- | A second payload declaring a different pool, with a two-payload registry, so the
 -- registry-collection test exercises the cross-payload union (not just one payload).
@@ -100,7 +101,7 @@ newtype CLPayload2 = CLPayload2 Text
 instance HasConcurrency CLPayload2 where
   concurrencyFor = concurrencyBy (concurrencyPool "declpool2" 5) (\(CLPayload2 t) -> t)
 
-type CLReg2 = '[ '("clq1", CLPayload), '("clq2", CLPayload2)]
+type CLReg2 = '[ 'Queue "clq1" CLPayload, 'Queue "clq2" CLPayload2]
 
 -- | Table name for 'CLReg', shared across backends (each in its own schema).
 concurrencyTable :: Text
@@ -117,7 +118,7 @@ groupedJob gk pool suffix = defaultGroupedJob gk (CLPayload (pool <> ":" <> suff
 
 concurrencyLimitSpec
   :: forall env m
-   . (HasArbiterSchema m CLReg, MonadArbiter m)
+   . (ArbiterSchema m CLReg, MonadArbiter m)
   => (forall a. env -> m a -> IO a)
   -> SpecWith env
 concurrencyLimitSpec runM = do

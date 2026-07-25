@@ -4,7 +4,7 @@
 
 module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
-import Arbiter.Core.JobResult (HasJobResult (..))
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Setup (addQueueTable, setupOnce)
 import Arbiter.Worker.TestKit (workerSpec)
 import Arbiter.Worker.TestKit qualified as TestKit
@@ -33,10 +33,7 @@ data HasqlWorkerTestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-instance HasJobResult HasqlWorkerTestPayload where
-  type ResultOf HasqlWorkerTestPayload = Maybe [Text]
-
-type HasqlWorkerTestRegistry = '[ '("arbiter_hasql_worker_test", HasqlWorkerTestPayload)]
+type HasqlWorkerTestRegistry = '[ 'QueueWithResult "arbiter_hasql_worker_test" HasqlWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_hasql_worker_test"
@@ -53,7 +50,7 @@ spec connStr =
 listenSchema :: Text
 listenSchema = "arbiter_hasql_listen_test"
 
-type HasqlListenRegistry = '[ '("arbiter_hasql_listen_test", HasqlWorkerTestPayload)]
+type HasqlListenRegistry = '[ 'Queue "arbiter_hasql_listen_test" HasqlWorkerTestPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
@@ -81,15 +78,15 @@ mqTableB = "mqh_listen_b"
 
 newtype MqAPayload = MqAPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasJobResult, ToJSON)
+  deriving anyclass (FromJSON, ToJSON)
 
 newtype MqBPayload = MqBPayload Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasJobResult, ToJSON)
+  deriving anyclass (FromJSON, ToJSON)
 
 type HasqlMultiQRegistry =
-  '[ '("mqh_listen_a", MqAPayload)
-   , '("mqh_listen_b", MqBPayload)
+  '[ 'Queue "mqh_listen_a" MqAPayload
+   , 'Queue "mqh_listen_b" MqBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec

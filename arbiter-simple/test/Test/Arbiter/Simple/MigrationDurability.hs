@@ -8,6 +8,7 @@
 
 module Test.Arbiter.Simple.MigrationDurability (spec) where
 
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTableName)
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (Durability (..))
@@ -25,7 +26,7 @@ newtype DurPayload = DurPayload Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type DurReg = '[ '("durability_q", DurPayload)]
+type DurReg = '[ 'Queue "durability_q" DurPayload]
 
 testSchema :: Text
 testSchema = "arbiter_simple_durability_test"

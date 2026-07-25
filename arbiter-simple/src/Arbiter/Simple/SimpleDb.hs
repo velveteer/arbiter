@@ -80,7 +80,9 @@ newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: 
     , MonadUnliftIO
     )
 
-instance (Monad m) => HasArbiterSchema (SimpleDb registry m) registry where
+instance (Monad m) => HasArbiterSchema (SimpleDb registry m) where
+  type RegistryOf (SimpleDb registry m) = registry
+
   getSchema = asks schema
 
 instance (Monad m) => HasSimplePool (SimpleDb registry m) where

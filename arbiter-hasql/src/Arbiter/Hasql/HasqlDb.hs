@@ -95,7 +95,9 @@ newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb {unHasqlDb :: Rea
     , MonadUnliftIO
     )
 
-instance (Monad m) => HasArbiterSchema (HasqlDb registry m) registry where
+instance (Monad m) => HasArbiterSchema (HasqlDb registry m) where
+  type RegistryOf (HasqlDb registry m) = registry
+
   getSchema = asks schema
 
 instance (Monad m) => HasHasqlPool (HasqlDb registry m) where

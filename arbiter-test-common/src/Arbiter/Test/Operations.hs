@@ -7,7 +7,7 @@ module Arbiter.Test.Operations
   ( operationsSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -38,8 +38,8 @@ import Arbiter.Test.Setup (truncateToMicros)
 -- | Build a test suite for the given 'MonadArbiter' runner.
 operationsSpec
   :: forall payload registry env m
-   . ( Eq payload
-     , HasArbiterSchema m registry
+   . ( ArbiterSchema m registry
+     , Eq payload
      , JobPayload payload
      , KnownSymbol (TableForPayload payload registry)
      , MonadArbiter m

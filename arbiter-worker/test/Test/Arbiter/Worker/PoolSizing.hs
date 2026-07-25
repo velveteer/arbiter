@@ -9,6 +9,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.PoolConfig (poolSize)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Simple
   ( SimpleDb
   , createSimpleEnv
@@ -34,7 +35,7 @@ import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
-type SizingTestRegistry = '[ '("arbiter_worker_sizing_test", WorkerTestPayload)]
+type SizingTestRegistry = '[ 'Queue "arbiter_worker_sizing_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_sizing_test"
@@ -52,8 +53,8 @@ spec connStr =
       it "sizes the pool for the workers and processes jobs" $ do
         cleanup connStr
         ref <- newIORef (0 :: Int)
-        let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload (Maybe [Text])
-            handler _conn _job = liftIO (atomicModifyIORef' ref $ \n -> (n + 1, ())) >> pure mempty
+        let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
         config <- transactionalWorkerConfig 3 handler
         let pools = [namedWorkerPool config {pollInterval = 0.2, jitter = NoJitter}]
         poolCfg <- poolConfigForWorkers pools

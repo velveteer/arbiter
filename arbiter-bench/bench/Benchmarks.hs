@@ -6,7 +6,7 @@ module Main (main) where
 
 import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.Exceptions (throwRetryable)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
@@ -20,6 +20,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb, setPreparedStatements)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
@@ -136,10 +137,10 @@ instance HasConcurrency BenchBoth where
   concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth i) -> gateKey2 i)
 
 type BenchRegistry =
-  '[ '("bench_queue", BenchPayload)
-   , '("bench_rl_queue", BenchRl)
-   , '("bench_cc_queue", BenchCc)
-   , '("bench_both_queue", BenchBoth)
+  '[ 'Queue "bench_queue" BenchPayload
+   , 'Queue "bench_rl_queue" BenchRl
+   , 'Queue "bench_cc_queue" BenchCc
+   , 'Queue "bench_both_queue" BenchBoth
    ]
 
 data QueueFlavor
@@ -210,7 +211,8 @@ flakyGate onAck job
 
 -- | Batched handler body: failRetry the flaky-first jobs, ack the rest, and
 -- return the acked count for throughput accounting.
-flakyBatch :: (Monad m) => BatchCallbacks m BenchPayload -> NonEmpty (JobRead BenchPayload) -> m Int
+flakyBatch
+  :: (Monad m, ResultOf m BenchPayload ~ ()) => BatchCallbacks m BenchPayload -> NonEmpty (JobRead BenchPayload) -> m Int
 flakyBatch cb jobs = do
   let (toFail, toAck) = partition isFlakyFirst (toList jobs)
   traverse_ (\job -> failRetry cb job "bench-induced backoff") toFail
@@ -455,7 +457,9 @@ instance O.MonadOrvilleControl BenchOrville where
   liftCatch = O.liftCatchViaUnliftIO
   liftMask = O.liftMaskViaUnliftIO
 
-instance HasArbiterSchema BenchOrville BenchRegistry where
+instance HasArbiterSchema BenchOrville where
+  type RegistryOf BenchOrville = BenchRegistry
+
   getSchema = BenchOrville $ asks fst
 
 instance MonadArbiter BenchOrville where
@@ -506,8 +510,8 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 runWorkerTrial
-  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
-  => RunM m -> Connection -> [WorkerConfig m BenchPayload ()] -> Int -> Int -> IO SteadyResult
+  :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
     start <- getCurrentTime
@@ -570,14 +574,14 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
 runSteadyStateTrial
-  :: (HasArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
   => RunM m
   -- ^ Runner for workers
   -> RunM SimpleM
   -- ^ Runner for producers (separate pool)
   -> Connection
   -- ^ Stats connection for WAL/churn snapshots (used only on the timer thread)
-  -> [WorkerConfig m BenchPayload ()]
+  -> [WorkerConfig m BenchPayload]
   -> IORef Int
   -- ^ Counter that handlers increment per job processed
   -> Int
@@ -832,11 +836,12 @@ runGatedSteadyTrial
   :: ( MonadUnliftIO m
      , QueueOperation SimpleM BenchRegistry payload
      , QueueOperation m BenchRegistry payload
+     , ResultOf m payload ~ ()
      )
   => RunM m
   -> RunM SimpleM
   -> Connection
-  -> WorkerConfig m payload ()
+  -> WorkerConfig m payload
   -> IORef Int
   -> Text
   -> (Int -> JobWrite payload)
@@ -863,7 +868,10 @@ runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob
 
 hasqlGatedSteadyTrial
   :: forall payload
-   . (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+   . ( QueueOperation HasqlM BenchRegistry payload
+     , QueueOperation SimpleM BenchRegistry payload
+     , ResultOf HasqlM payload ~ ()
+     )
   => RunM HasqlM -> RunM SimpleM -> Connection -> BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
 hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = do
   processedCounter <- newIORef (0 :: Int)
@@ -883,7 +891,10 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = 
 gatingBenches
   :: IO ()
   -> ( forall payload
-        . (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+        . ( QueueOperation HasqlM BenchRegistry payload
+          , QueueOperation SimpleM BenchRegistry payload
+          , ResultOf HasqlM payload ~ ()
+          )
        => BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
      )
   -> [Benchmark]
@@ -902,7 +913,10 @@ gatingBenches settle trial =
       , profile "both" "bench_both_queue" (wrap BenchBoth)
       ]
     profile
-      :: (QueueOperation HasqlM BenchRegistry payload, QueueOperation SimpleM BenchRegistry payload)
+      :: ( QueueOperation HasqlM BenchRegistry payload
+         , QueueOperation SimpleM BenchRegistry payload
+         , ResultOf HasqlM payload ~ ()
+         )
       => String -> Text -> (Int -> JobWrite payload) -> Benchmark
     profile name table mkJob =
       bgroup

@@ -13,6 +13,7 @@ import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
@@ -73,7 +74,7 @@ data ServantTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Test registry
-type ServantTestRegistry = '[ '("arbiter_servant_test", ServantTestPayload)]
+type ServantTestRegistry = '[ 'Queue "arbiter_servant_test" ServantTestPayload]
 
 -- Table name for tests
 testTable :: Text

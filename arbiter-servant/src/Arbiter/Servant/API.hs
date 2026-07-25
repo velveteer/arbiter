@@ -24,7 +24,7 @@ module Arbiter.Servant.API
   ) where
 
 import Arbiter.Core.Job.Types (JobStatus, jobStatusToText)
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
   , DLQSortColumn
@@ -41,7 +41,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import GHC.TypeLits (Symbol)
 import Servant.API
 
 import Arbiter.Servant.Types
@@ -401,12 +400,12 @@ type SharedAPI =
 
 -- | Generates a 'TableAPI' route per registry entry, followed by the shared
 -- top-level routes.
-type family RegistryToAPI (registry :: [(Symbol, Type)]) :: Type where
+type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
   RegistryToAPI '[] = SharedAPI
-  RegistryToAPI ('(tableName, payload) ': '[]) =
-    tableName :> NamedRoutes (TableAPI payload) :<|> SharedAPI
-  RegistryToAPI ('(tableName, payload) ': rest) =
-    (tableName :> NamedRoutes (TableAPI payload)) :<|> RegistryToAPI rest
+  RegistryToAPI (spec ': '[]) =
+    SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec)) :<|> SharedAPI
+  RegistryToAPI (spec ': rest) =
+    (SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec))) :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
 -- prefix is generated from the registry. See 'RegistryToAPI' for the shape.

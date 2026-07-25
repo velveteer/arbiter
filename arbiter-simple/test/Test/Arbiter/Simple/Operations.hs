@@ -7,6 +7,7 @@ module Test.Arbiter.Simple.Operations (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (execute_, setupOnce)
@@ -29,7 +30,7 @@ import Test.Arbiter.Simple.TestHelpers (cleanupSimpleTest, createSimplePool)
 testSchema :: Text
 testSchema = "arbiter_simple_test"
 
-type SimpleOpsTestRegistry = '[ '("arbiter_simple_test", TestPayload)]
+type SimpleOpsTestRegistry = '[ 'Queue "arbiter_simple_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_simple_test"

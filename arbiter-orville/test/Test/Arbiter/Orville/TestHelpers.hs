@@ -63,7 +63,9 @@ instance O.MonadOrvilleControl (TestOrville registry) where
   liftCatch = O.liftCatchViaUnliftIO
   liftMask = O.liftMaskViaUnliftIO
 
-instance HasArbiterSchema (TestOrville registry) registry where
+instance HasArbiterSchema (TestOrville registry) where
+  type RegistryOf (TestOrville registry) = registry
+
   getSchema = TestOrville $ asks testSchema
 
 instance MonadArbiter (TestOrville registry) where

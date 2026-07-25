@@ -12,8 +12,8 @@ module Main (main) where
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
-import Arbiter.Core.JobResult (HasJobResult (..))
 import Arbiter.Core.JobTree qualified as JT
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
@@ -63,17 +63,17 @@ import System.Posix.Signals qualified as Signals
 data DemoPayload
   = TestMessage Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasJobResult, ToJSON)
+  deriving anyclass (FromJSON, ToJSON)
 
 data EmailPayload
   = SendEmail Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasJobResult, ToJSON)
+  deriving anyclass (FromJSON, ToJSON)
 
 data NotificationPayload
   = PushNotification Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasJobResult, ToJSON)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Pipeline payload for the rollup demo.
 --
@@ -85,16 +85,12 @@ data PipelinePayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- Chunk jobs contribute their lines, the finalizer merges them.
-instance HasJobResult PipelinePayload where
-  type ResultOf PipelinePayload = [Text]
-
 -- | Demo registry with multiple queues
 type DemoRegistry =
-  '[ '("demo_queue", DemoPayload)
-   , '("email_queue", EmailPayload)
-   , '("notifications", NotificationPayload)
-   , '("pipeline", PipelinePayload)
+  '[ 'Queue "demo_queue" DemoPayload
+   , 'Queue "email_queue" EmailPayload
+   , 'Queue "notifications" NotificationPayload
+   , 'QueueWithResult "pipeline" PipelinePayload [Text]
    ]
 
 -- | Email recipient tiers, each rate-limited separately.

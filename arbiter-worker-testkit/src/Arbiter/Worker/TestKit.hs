@@ -18,6 +18,7 @@ import Arbiter.Core.Exceptions
   , throwRetryable
   , throwTreeCancel
   )
+import Arbiter.Core.HasArbiterSchema (ResultOf)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
@@ -31,7 +32,7 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   )
-import Arbiter.Core.JobResult (HasJobResult, ResultOf)
+import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
@@ -81,12 +82,11 @@ import UnliftIO.Async (withAsync)
 workerSpec
   :: forall payload registry env m
    . ( Eq payload
-     , HasJobResult payload
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryAdmissionPolicies registry
      , RegistryTables registry
-     , ResultOf payload ~ Maybe [Text]
+     , ResultOf m payload ~ Maybe [Text]
      , Show payload
      )
   => (Text -> payload)
@@ -1341,13 +1341,12 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let allPayloads = [mkSimple "bc-root", mkSimple "bc-mid", mkSimple "bc-leaf1", mkSimple "bc-leaf2"]
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
-    -- This queue declares a result type; these acks deliberately store none.
     ackNoResult :: BatchCallbacks m payload -> JobRead payload -> m ()
     ackNoResult cbs job = ackWith cbs job mempty
     ackAllNoResult :: BatchCallbacks m payload -> [JobRead payload] -> m ()
     ackAllNoResult cbs jobs = ackAllWith cbs (map (\job -> (job, mempty)) jobs)
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload)
-    mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (mempty :: ResultOf payload)))
+    mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (mempty :: ResultOf m payload)))
     mkBatchedConfig
       :: Int
       -> Int
@@ -1360,9 +1359,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 -- in time, so completion proves the listener fired.
 listenerSpec
   :: forall payload registry env m
-   . ( HasJobResult payload
+   . ( EncodeJobResult (ResultOf m payload)
      , MonadUnliftIO m
-     , Monoid (ResultOf payload)
+     , Monoid (ResultOf m payload)
      , QueueOperation m registry payload
      , RegistryAdmissionPolicies registry
      , RegistryTables registry
@@ -1465,7 +1464,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
           waitUntil 10_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
   where
-    counting :: IORef Int -> JobRead payload -> m (ResultOf payload)
+    counting :: IORef Int -> JobRead payload -> m (ResultOf m payload)
     counting ref _job = liftIO (bumpRef ref) >> pure mempty
     withSharedListener env k = do
       mListener <- runM env getListener
@@ -1524,11 +1523,11 @@ killListener connStr schema =
 -- @tableA@ queue and @payloadB@ to @tableB@.
 multiQueueListenerSpec
   :: forall payloadA payloadB registry env m
-   . ( HasJobResult payloadA
-     , HasJobResult payloadB
+   . ( EncodeJobResult (ResultOf m payloadA)
+     , EncodeJobResult (ResultOf m payloadB)
      , MonadUnliftIO m
-     , Monoid (ResultOf payloadA)
-     , Monoid (ResultOf payloadB)
+     , Monoid (ResultOf m payloadA)
+     , Monoid (ResultOf m payloadB)
      , QueueOperation m registry payloadA
      , QueueOperation m registry payloadB
      , RegistryAdmissionPolicies registry
@@ -1560,9 +1559,9 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
         refA <- newIORef (0 :: Int)
         refB <- newIORef (0 :: Int)
         cfgA :: WorkerConfig m payloadA <-
-          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m (ResultOf payloadA)))
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m (ResultOf m payloadA)))
         cfgB :: WorkerConfig m payloadB <-
-          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m (ResultOf payloadB)))
+          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m (ResultOf m payloadB)))
         let poolA = cfgA {workerCount = 1, pollInterval = 300, jitter = NoJitter}
             poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool poolA) $ \_ ->
@@ -1599,7 +1598,7 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
               readIORef refA >>= (`shouldBe` 1)
               readIORef refB >>= (`shouldBe` 0)
   where
-    bumping :: (Monoid (ResultOf p)) => IORef Int -> JobRead p -> m (ResultOf p)
+    bumping :: (Monoid (ResultOf m p)) => IORef Int -> JobRead p -> m (ResultOf m p)
     bumping ref _job = liftIO (bumpRef ref) >> pure mempty
 
 -- | Issue a raw @NOTIFY@ on a channel over a throwaway connection.

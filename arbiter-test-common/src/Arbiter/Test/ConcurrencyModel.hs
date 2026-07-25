@@ -14,7 +14,7 @@ module Arbiter.Test.ConcurrencyModel
 
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
 import Arbiter.Core.Concurrency.Stats (ConcurrencyPolicyUpdate (..))
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Job.Types (DedupKey (..), JobRead, dedupKey, defaultJob, maxAttempts, payload)
@@ -63,7 +63,7 @@ claimBatch = 500
 
 concurrencyModelSpec
   :: forall sm
-   . (HasArbiterSchema sm CLReg, MonadArbiter sm)
+   . (ArbiterSchema sm CLReg, MonadArbiter sm)
   => (forall a. sm a -> IO a)
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> Text
@@ -150,7 +150,7 @@ claimDeltas :: Ov -> MM -> Map Text Int
 claimDeltas ov = Map.mapWithKey (\k ks -> min (ksPending ks) (max 0 (eff ov k ks - ksClaimed ks)))
 
 prop_model
-  :: (HasArbiterSchema sm CLReg, MonadArbiter sm)
+  :: (ArbiterSchema sm CLReg, MonadArbiter sm)
   => (forall a. sm a -> IO a)
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> Text
@@ -165,7 +165,7 @@ prop_model run withConn schema = withTests 60 $ property $ do
 type Held = Map Text [JobRead CLPayload]
 
 step
-  :: (HasArbiterSchema sm CLReg, MonadArbiter sm)
+  :: (ArbiterSchema sm CLReg, MonadArbiter sm)
   => (forall a. sm a -> IO a)
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> Text
@@ -229,7 +229,7 @@ step run withConn schema (m, ov, held) op = do
   pure (m', ov', held')
 
 prop_concurrent
-  :: (HasArbiterSchema sm CLReg, MonadArbiter sm)
+  :: (ArbiterSchema sm CLReg, MonadArbiter sm)
   => (forall a. sm a -> IO a)
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> Text

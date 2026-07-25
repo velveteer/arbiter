@@ -21,6 +21,7 @@ import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (JobHandler, executeStatement)
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Sql.Query (raw)
 import Arbiter.Core.Worker qualified as WR
@@ -93,9 +94,8 @@ import UnliftIO.Async qualified as Async
 
 import Arbiter.Worker.TestKit (workerSpec)
 
-type WorkerTestRegistry = '[ '("arbiter_worker_test", WorkerTestPayload)]
+type WorkerTestRegistry = '[ 'QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
 
--- | Adapt a handler that stores nothing to this queue's result type.
 noResult :: (Monad n, Monoid r) => (c -> j -> n ()) -> c -> j -> n r
 noResult h conn job = h conn job >> pure mempty
 

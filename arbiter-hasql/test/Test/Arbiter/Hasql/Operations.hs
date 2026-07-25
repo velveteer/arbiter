@@ -7,6 +7,7 @@ module Test.Arbiter.Hasql.Operations (spec) where
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
 import Arbiter.Core.MonadArbiter (withDbTransaction)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (setupOnce)
@@ -27,7 +28,7 @@ import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 testSchema :: Text
 testSchema = "arbiter_hasql_ops_test"
 
-type HasqlOpsTestRegistry = '[ '("arbiter_hasql_ops_test", TestPayload)]
+type HasqlOpsTestRegistry = '[ 'Queue "arbiter_hasql_ops_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_hasql_ops_test"

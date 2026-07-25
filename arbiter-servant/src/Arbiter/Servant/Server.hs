@@ -3,6 +3,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | REST API server for the Arbiter job queue (SimpleDb backend).
 --
@@ -26,7 +27,7 @@ import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, i
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..))
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
@@ -56,7 +57,6 @@ import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
-import Data.Kind (Type)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Pool qualified as Pool
@@ -68,7 +68,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
-import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import GHC.TypeLits (KnownSymbol, symbolVal)
 import Network.HTTP.Types (status200)
 import Network.Wai (responseStream)
 import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort, setTimeout)
@@ -1272,7 +1272,7 @@ sharedServer config =
     :<|> concurrencyServer config
 
 -- | Type class to build server implementations for registry entries
-class BuildServer registry (reg :: [(Symbol, Type)]) where
+class BuildServer registry (reg :: JobPayloadRegistry) where
   buildServer :: ArbiterServerConfig registry -> ServerT (RegistryToAPI reg) Handler
 
 -- Base case: empty registry, just the shared top-level routes
@@ -1284,29 +1284,29 @@ instance
 
 -- Single table case: table endpoints :<|> shared top-level routes
 instance
-  ( JobPayload payload
-  , KnownSymbol tableName
+  ( JobPayload (SpecPayload spec)
+  , KnownSymbol (SpecName spec)
   , RegistryTables registry
   )
-  => BuildServer registry ('(tableName, payload) ': '[])
+  => BuildServer registry (spec ': '[])
   where
   buildServer config =
-    let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
+    let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
+     in tableServer @registry @(SpecPayload spec) tableName config
           :<|> sharedServer config
 
 -- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
 instance
-  ( BuildServer registry (nextTable ': moreRest)
-  , JobPayload payload
-  , KnownSymbol tableName
+  ( BuildServer registry (nextSpec ': moreRest)
+  , JobPayload (SpecPayload spec)
+  , KnownSymbol (SpecName spec)
   )
-  => BuildServer registry ('(tableName, payload) ': (nextTable ': moreRest))
+  => BuildServer registry (spec ': (nextSpec ': moreRest))
   where
   buildServer config =
-    let tableName = T.pack $ symbolVal (Proxy @tableName)
-     in tableServer @registry @payload tableName config
-          :<|> buildServer @registry @(nextTable ': moreRest) config
+    let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
+     in tableServer @registry @(SpecPayload spec) tableName config
+          :<|> buildServer @registry @(nextSpec ': moreRest) config
 
 -- | Complete Arbiter server at @\/api\/v1\/...@
 arbiterServer

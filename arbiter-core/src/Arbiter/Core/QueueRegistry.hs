@@ -9,12 +9,19 @@
 --   1. Each payload type maps to exactly one queue name (via 'TableForPayload')
 --   2. All queue names are unique (via 'AllQueuesUnique')
 --   3. Workers can only claim jobs for payloads they're registered to handle
+--   4. Each queue has one handler result type (via 'ResultFor')
 module Arbiter.Core.QueueRegistry
   ( -- * Registry type
     JobPayloadRegistry
+  , QueueSpec (..)
+
+    -- * Registry lookups
+  , TableForPayload
+  , ResultFor
+  , SpecName
+  , SpecPayload
 
     -- * Registry validation
-  , TableForPayload
   , AllQueuesUnique
 
     -- * Runtime utilities
@@ -27,35 +34,69 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 
+-- | A queue's table name and payload type, plus a result type for
+-- 'QueueWithResult'. A 'Queue' entry produces @()@.
+data QueueSpec
+  = Queue Symbol Type
+  | QueueWithResult Symbol Type Type
+
 -- | A type-level registry mapping table names to payload types.
 --
 -- Example:
 -- @
 -- type MyAppRegistry =
---   '[ '("email_jobs", EmailPayload)
---    , '("image_jobs", ImagePayload)
+--   '[ 'Queue "email_jobs" EmailPayload
+--    , 'QueueWithResult "image_jobs" ImagePayload Score
 --    ]
 -- @
-type JobPayloadRegistry = [(Symbol, Type)]
+type JobPayloadRegistry = [QueueSpec]
+
+-- | A queue's table name.
+type family SpecName (spec :: QueueSpec) :: Symbol where
+  SpecName ('Queue table _) = table
+  SpecName ('QueueWithResult table _ _) = table
+
+-- | A queue's payload type.
+type family SpecPayload (spec :: QueueSpec) :: Type where
+  SpecPayload ('Queue _ payload) = payload
+  SpecPayload ('QueueWithResult _ payload _) = payload
 
 -- | Look up the table name for a payload type. Compile-time error if not registered.
 type family TableForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: Symbol where
-  TableForPayload payload ('(table, payload) ': _) = table
-  TableForPayload payload ('(_, _) ': rest) =
-    TableForPayload payload rest
+  TableForPayload payload ('Queue table payload ': _) = table
+  TableForPayload payload ('QueueWithResult table payload _ ': _) = table
+  TableForPayload payload (_ ': rest) = TableForPayload payload rest
   TableForPayload payload '[] =
     TypeError ('Text "Payload type " ':<>: 'ShowType payload ':<>: 'Text " not found in registry")
+
+-- | The result type a queue's handlers produce.
+type family ResultFor (payload :: Type) (registry :: JobPayloadRegistry) :: Type where
+  ResultFor payload ('Queue _ payload ': _) = ()
+  ResultFor payload ('QueueWithResult _ payload result ': _) = result
+  ResultFor payload (_ ': rest) = ResultFor payload rest
+  ResultFor payload '[] =
+    TypeError
+      ( 'Text "Payload type "
+          ':<>: 'ShowType payload
+          ':<>: 'Text " not found in registry"
+          ':$$: 'Text "Add a Queue entry, or QueueWithResult to store a result."
+      )
 
 -- | Compile-time check that no two payload types share a queue name.
 type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
   AllQueuesUnique '[] = ()
-  AllQueuesUnique ('(table, _) ': rest) =
-    (NotInTables table rest, AllQueuesUnique rest)
+  AllQueuesUnique (spec ': rest) =
+    (NotInTables (SpecName spec) rest, AllQueuesUnique rest)
 
 -- | Check that a table name doesn't appear in the rest of the registry.
 type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Constraint where
   NotInTables _ '[] = ()
-  NotInTables table ('(table, _) ': _) =
+  NotInTables table ('Queue table _ ': _) = DuplicateTable table
+  NotInTables table ('QueueWithResult table _ _ ': _) = DuplicateTable table
+  NotInTables table (_ ': rest) = NotInTables table rest
+
+type family DuplicateTable (table :: Symbol) :: Constraint where
+  DuplicateTable table =
     TypeError
       ( 'Text "Duplicate table name: "
           ':<>: 'ShowType table
@@ -63,7 +104,6 @@ type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Co
           ':$$: 'Text "Each table can only be used once in the registry."
           ':$$: 'Text "Hint: Multiple payload types cannot share the same table."
       )
-  NotInTables table ('(_, _) ': rest) = NotInTables table rest
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
@@ -72,6 +112,9 @@ class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegist
 instance RegistryTables '[] where
   registryTableNames _ = []
 
-instance (KnownSymbol table, NotInTables table rest, RegistryTables rest) => RegistryTables ('(table, payload) ': rest) where
+instance
+  (KnownSymbol (SpecName spec), NotInTables (SpecName spec) rest, RegistryTables rest)
+  => RegistryTables (spec ': rest)
+  where
   registryTableNames _ =
-    T.pack (symbolVal (Proxy @table)) : registryTableNames (Proxy @rest)
+    T.pack (symbolVal (Proxy @(SpecName spec))) : registryTableNames (Proxy @rest)

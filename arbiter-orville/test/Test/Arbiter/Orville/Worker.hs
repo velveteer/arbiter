@@ -11,7 +11,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
-import Arbiter.Core.JobResult (HasJobResult (..))
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
@@ -56,10 +56,8 @@ data OrvilleWorkerTestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-instance HasJobResult OrvilleWorkerTestPayload where
-  type ResultOf OrvilleWorkerTestPayload = Maybe [Text]
-
-type OrvilleWorkerTestRegistry = '[ '("arbiter_orville_worker_test", OrvilleWorkerTestPayload)]
+type OrvilleWorkerTestRegistry =
+  '[ 'QueueWithResult "arbiter_orville_worker_test" OrvilleWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_orville_worker_test"

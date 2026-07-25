@@ -152,7 +152,7 @@ import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
@@ -167,7 +167,7 @@ import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
 type QueueOperation m registry payload =
-  ( HasArbiterSchema m registry
+  ( ArbiterSchema m registry
   , JobPayload payload
   , KnownSymbol (TableForPayload payload registry)
   , MonadArbiter m
@@ -175,7 +175,7 @@ type QueueOperation m registry payload =
 
 -- | Constraints for job operations (table name stored in job).
 type JobOperation m registry payload =
-  ( HasArbiterSchema m registry
+  ( ArbiterSchema m registry
   , JobPayload payload
   , MonadArbiter m
   )
@@ -236,7 +236,7 @@ claimNextVisibleJobs limit timeout = do
 -- mid-wait. A no-op without a policy.
 addRateLimitTokens
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => RateLimitKey
   -> Double
   -> m ()
@@ -251,7 +251,7 @@ addRateLimitTokens key amount = withDbTransaction $ do
 -- no burst.
 pruneRateLimitBuckets
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => NominalDiffTime
   -> m Int64
 pruneRateLimitBuckets idle = do
@@ -263,7 +263,7 @@ pruneRateLimitBuckets idle = do
 -- at the boundary is a fixed window.
 resetRateLimitBuckets
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => Text
   -> m Int64
 resetRateLimitBuckets prefix = withDbTransaction $ do
@@ -277,7 +277,7 @@ resetRateLimitBuckets prefix = withDbTransaction $ do
 -- of currently-throttled jobs per prefix across the registry's queues.
 listRateLimitPolicies
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => m [RateLimitPolicyView]
 listRateLimitPolicies = do
   schemaName <- getSchema
@@ -287,7 +287,7 @@ listRateLimitPolicies = do
 -- count. 'Nothing' when the prefix has no policy.
 getRateLimitPolicy
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => Text
   -> m (Maybe RateLimitPolicyView)
 getRateLimitPolicy prefix = do
@@ -297,7 +297,7 @@ getRateLimitPolicy prefix = do
 -- | Whether a rate-limit policy exists for a prefix.
 rateLimitPolicyExists
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -> m Bool
 rateLimitPolicyExists prefix = do
@@ -307,7 +307,7 @@ rateLimitPolicyExists prefix = do
 -- | List a prefix's buckets with fill levels, paginated.
 listRateLimitBuckets
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -> Int
   -> Int
@@ -320,7 +320,7 @@ listRateLimitBuckets prefix limit offset = do
 -- rows affected (0 if absent).
 updateRateLimitPolicyOverrides
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => Text
   -> RateLimitPolicyUpdate
   -> m Int64
@@ -337,7 +337,7 @@ updateRateLimitPolicyOverrides prefix upd = do
 -- in-flight aggregates.
 listConcurrencyPolicies
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => m [ConcurrencyPolicyView]
 listConcurrencyPolicies = do
   schemaName <- getSchema
@@ -347,7 +347,7 @@ listConcurrencyPolicies = do
 -- 'Nothing' when the prefix has no pool.
 getConcurrencyPolicy
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -> m (Maybe ConcurrencyPolicyView)
 getConcurrencyPolicy prefix = do
@@ -357,7 +357,7 @@ getConcurrencyPolicy prefix = do
 -- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
 listConcurrencyKeys
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -> Int
   -> Int
@@ -371,7 +371,7 @@ listConcurrencyKeys prefix limit offset = do
 -- Returns rows affected.
 updateConcurrencyPolicyOverrides
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -> ConcurrencyPolicyUpdate
   -> m Int64
@@ -382,7 +382,7 @@ updateConcurrencyPolicyOverrides prefix upd = do
 -- | Delete drained concurrency rows with no live job. The reaper runs this.
 pruneConcurrencyKeys
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => m Int64
 pruneConcurrencyKeys = do
   schemaName <- getSchema
@@ -391,7 +391,7 @@ pruneConcurrencyKeys = do
 -- | Recompute the concurrency counts from live jobs, repairing any trigger drift.
 reconcileConcurrencyCounts
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => m Int64
 reconcileConcurrencyCounts = do
   schemaName <- getSchema
@@ -401,7 +401,7 @@ reconcileConcurrencyCounts = do
 -- reaper runs this periodically.
 reconcileConcurrencyCountsIfStale
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => m ()
 reconcileConcurrencyCountsIfStale = do
   schemaName <- getSchema
@@ -410,7 +410,7 @@ reconcileConcurrencyCountsIfStale = do
 -- | Reconcile then prune. The reaper runs this.
 reconcileAndPruneConcurrency
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, RegistryTables registry)
   => m ()
 reconcileAndPruneConcurrency = do
   schemaName <- getSchema
@@ -1224,7 +1224,7 @@ getParentStateSnapshot jobId = do
 -- one pool runs it per interval.
 refreshAllGroups
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
+   . (ArbiterSchema m registry, MonadArbiter m, MonadUnliftIO m, RegistryTables registry)
   => m [Text]
 refreshAllGroups = do
   schemaName <- getSchema
@@ -1237,7 +1237,7 @@ refreshAllGroups = do
 -- | Register a worker pool. See 'Ops.registerWorker'.
 registerWorker
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => UUID
   -> Text
   -- ^ Queue name
@@ -1257,7 +1257,7 @@ registerWorker workerId queue host threads staleThreshold metadata = do
 -- | Bump a worker's heartbeat. See 'Ops.heartbeatWorker'.
 heartbeatWorker
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => UUID
   -> m (Maybe Bool)
 heartbeatWorker workerId = do
@@ -1267,7 +1267,7 @@ heartbeatWorker workerId = do
 -- | Set the @paused@ flag for a registered worker.
 setWorkerPaused
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => UUID
   -> Bool
   -> m Int64
@@ -1278,7 +1278,7 @@ setWorkerPaused workerId p = do
 -- | Mark a worker as gracefully draining.
 markWorkerShuttingDown
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => UUID
   -> m Int64
 markWorkerShuttingDown workerId = do
@@ -1288,7 +1288,7 @@ markWorkerShuttingDown workerId = do
 -- | Remove a worker row.
 deregisterWorker
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => UUID
   -> m Int64
 deregisterWorker workerId = do
@@ -1298,7 +1298,7 @@ deregisterWorker workerId = do
 -- | List workers, optionally scoped to a queue and a heartbeat-age threshold.
 listWorkers
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Maybe Text
   -- ^ Queue name. 'Nothing' returns workers from all queues.
   -> Maybe NominalDiffTime
@@ -1311,7 +1311,7 @@ listWorkers mQueue mLiveSecs = do
 -- | Delete worker rows older than each row's own @stale_threshold_secs@.
 sweepStaleWorkers
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => m Int64
 sweepStaleWorkers = do
   schemaName <- getSchema
@@ -1324,7 +1324,7 @@ sweepStaleWorkers = do
 -- | Insert an @arbiter_queues@ row with defaults if one doesn't already exist.
 ensureQueue
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -- ^ Queue name
   -> m Int64
@@ -1336,7 +1336,7 @@ ensureQueue queue = do
 -- on the queue.
 setQueuePaused
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -- ^ Queue name
   -> Bool
@@ -1348,7 +1348,7 @@ setQueuePaused queue p = do
 -- | Get the queue's row. 'Nothing' if absent.
 getQueue
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -- ^ Queue name
   -> m (Maybe QueueRow)
@@ -1359,7 +1359,7 @@ getQueue queue = do
 -- | List all queues registered in this schema.
 listQueues
   :: forall m registry
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => m [QueueRow]
 listQueues = do
   schemaName <- getSchema
@@ -1373,7 +1373,7 @@ listQueues = do
 -- the same schema. See 'Ops.runGated'.
 runGated
   :: forall m registry a
-   . (HasArbiterSchema m registry, MonadArbiter m)
+   . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -- ^ Task identifier
   -> NominalDiffTime

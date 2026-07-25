@@ -58,7 +58,7 @@ import Arbiter.Core.Exceptions
   , TreeCancelException (..)
   , throwJobNotFound
   )
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -169,7 +169,7 @@ import Arbiter.Worker.WorkerState
 data NamedWorkerPool m
   = forall registry payload.
   ( Arb.RegistryAdmissionPolicies registry
-  , HasJobResult payload
+  , EncodeJobResult (ResultOf m payload)
   , QueueOperation m registry payload
   , RegistryTables registry
   ) =>
@@ -184,7 +184,7 @@ data NamedWorkerPool m
 namedWorkerPool
   :: forall m registry payload
    . ( Arb.RegistryAdmissionPolicies registry
-     , HasJobResult payload
+     , EncodeJobResult (ResultOf m payload)
      , QueueOperation m registry payload
      , RegistryTables registry
      )
@@ -246,7 +246,7 @@ withPoolContext poolName lc =
 -- exhausted, so multiple stripes let one pool starve a stripe while others sit idle.
 poolConfigForWorkers
   :: forall m registry
-   . (HasArbiterSchema m registry, RegistryTables registry)
+   . (ArbiterSchema m registry, RegistryTables registry)
   => [NamedWorkerPool m]
   -> IO PoolConfig
 poolConfigForWorkers pools = do
@@ -262,7 +262,7 @@ poolConfigForWorkers pools = do
 runWorkerPool
   :: forall m registry payload
    . ( Arb.RegistryAdmissionPolicies registry
-     , HasJobResult payload
+     , EncodeJobResult (ResultOf m payload)
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
@@ -492,7 +492,7 @@ warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (display
 -- | Main loop for a single worker thread.
 workerLoop
   :: forall m registry payload
-   . ( HasJobResult payload
+   . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m registry payload
      , MonadUnliftIO m
      )
@@ -568,7 +568,7 @@ readChildResults schemaName job = do
 
 processJobsWithRetry
   :: forall m registry payload
-   . ( HasJobResult payload
+   . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m registry payload
      , MonadUnliftIO m
      )
@@ -619,7 +619,9 @@ processJobsWithRetry config jobs = do
         traverse_ finalize done
       callbacks =
         BatchCallbacks
-          { ackWith = ackOneWith
+          { ack = \job -> ackOneWith job ()
+          , ackWith = ackOneWith
+          , ackAll = \js -> ackBatch (map (\j -> (j, ())) js)
           , ackAllWith = ackBatch
           , failRetry = failAs (Retryable . JobRetryableException)
           , failPermanent = failAs (Permanent . JobPermanentException)
@@ -641,7 +643,7 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @(ResultOf payload) handler job
+            handlerResult <- runHandlerWithConnection @_ @_ @(ResultOf m payload) handler job
             ackJobOrSkip job
             storeJobResult schemaName job handlerResult
           finalize job
@@ -693,9 +695,9 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (DecodeJobResult (ResultOf payload), HasArbiterSchema m registry, MonadArbiter m)
+  :: (ArbiterSchema m registry, DecodeJobResult (ResultOf m payload), MonadArbiter m)
   => Job.JobRead payload
-  -> m (Map.Map Int64 (Either Text (ResultOf payload)), Map.Map Int64 T.Text)
+  -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
 childResults job = do
   schemaName <- getSchema
   readChildResults schemaName job
@@ -703,13 +705,13 @@ childResults job = do
 -- | 'childResults' with the child results 'Monoid'-merged (decode failures
 -- contribute 'mempty').
 mergedChildResults
-  :: ( DecodeJobResult (ResultOf payload)
-     , HasArbiterSchema m registry
+  :: ( ArbiterSchema m registry
+     , DecodeJobResult (ResultOf m payload)
      , MonadArbiter m
-     , Monoid (ResultOf payload)
+     , Monoid (ResultOf m payload)
      )
   => Job.JobRead payload
-  -> m (ResultOf payload, Map.Map Int64 T.Text)
+  -> m (ResultOf m payload, Map.Map Int64 T.Text)
 mergedChildResults job = do
   (results, dlqFailures) <- childResults job
   pure (mergeChildResults results, dlqFailures)
@@ -833,7 +835,7 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
 reaperLoop
   :: forall m registry
    . ( Arb.RegistryAdmissionPolicies registry
-     , HasArbiterSchema m registry
+     , ArbiterSchema m registry
      , MonadArbiter m
      , MonadUnliftIO m
      , RegistryTables registry

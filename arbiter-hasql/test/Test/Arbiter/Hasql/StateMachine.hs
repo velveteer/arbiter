@@ -8,6 +8,7 @@
 -- | Hasql backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Hasql.StateMachine (spec) where
 
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Setup (createSharedPool, setupOnce)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
@@ -26,7 +27,7 @@ testSchema = "arbiter_hasql_sm_test"
 testTable :: Text
 testTable = "arbiter_hasql_sm_test"
 
-type SMRegistry = '[ '("arbiter_hasql_sm_test", SMPayload)]
+type SMRegistry = '[ 'Queue "arbiter_hasql_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do

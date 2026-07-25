@@ -52,7 +52,7 @@ import Arbiter.Core.Concurrency.Spec
   , concurrencyPool
   , noConcurrency
   )
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (inFlightPredicate)
 import Arbiter.Core.Job.Types
@@ -121,7 +121,7 @@ import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
 
 -- | Constraints every HL-issuing helper in this module needs.
 type ArbiterC m registry =
-  ( HasArbiterSchema m registry
+  ( ArbiterSchema m registry
   , KnownSymbol (TableForPayload SMPayload registry)
   , MonadArbiter m
   , MonadUnliftIO m
@@ -1048,7 +1048,7 @@ data Refresh (v :: Type -> Type) = Refresh
 -- the DLQ. Both are backstops, so neither may break an invariant.
 runReaper
   :: forall sm registry
-   . (HasArbiterSchema sm registry, MonadArbiter sm, MonadUnliftIO sm, RegistryTables registry)
+   . (ArbiterSchema sm registry, MonadArbiter sm, MonadUnliftIO sm, RegistryTables registry)
   => Text
   -> Text
   -> sm ()
