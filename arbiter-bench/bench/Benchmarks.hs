@@ -212,7 +212,7 @@ flakyGate onAck job
 -- | Batched handler body: failRetry the flaky-first jobs, ack the rest, and
 -- return the acked count for throughput accounting.
 flakyBatch
-  :: (Monad m, ResultOf m BenchPayload ~ ()) => BatchCallbacks m BenchPayload -> NonEmpty (JobRead BenchPayload) -> m Int
+  :: (Monad m) => BatchCallbacks m BenchPayload () -> NonEmpty (JobRead BenchPayload) -> m Int
 flakyBatch cb jobs = do
   let (toFail, toAck) = partition isFlakyFirst (toList jobs)
   traverse_ (\job -> failRetry cb job "bench-induced backoff") toFail
@@ -511,7 +511,7 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
 
 runWorkerTrial
   :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
-  => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
+  => RunM m -> Connection -> [WorkerConfig m BenchPayload ()] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
     start <- getCurrentTime
@@ -581,7 +581,7 @@ runSteadyStateTrial
   -- ^ Runner for producers (separate pool)
   -> Connection
   -- ^ Stats connection for WAL/churn snapshots (used only on the timer thread)
-  -> [WorkerConfig m BenchPayload]
+  -> [WorkerConfig m BenchPayload ()]
   -> IORef Int
   -- ^ Counter that handlers increment per job processed
   -> Int
@@ -836,12 +836,11 @@ runGatedSteadyTrial
   :: ( MonadUnliftIO m
      , QueueOperation SimpleM BenchRegistry payload
      , QueueOperation m BenchRegistry payload
-     , ResultOf m payload ~ ()
      )
   => RunM m
   -> RunM SimpleM
   -> Connection
-  -> WorkerConfig m payload
+  -> WorkerConfig m payload ()
   -> IORef Int
   -> Text
   -> (Int -> JobWrite payload)

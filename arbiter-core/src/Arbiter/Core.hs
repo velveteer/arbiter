@@ -1,5 +1,3 @@
-{-# LANGUAGE DuplicateRecordFields #-}
-
 -- | Re-exports commonly used Arbiter functionality.
 module Arbiter.Core
   ( -- * Core types
@@ -32,11 +30,12 @@ module Arbiter.Core
 
     -- * Cron schedule overrides and worker health
 
-    -- | 'CronScheduleRow' fields (@name@, @enabled@, @queueName@) are too
-    -- generically named to re-export: @import Arbiter.Core.CronSchedule@ for
-    -- raw field access.
+    -- | The admin row records ('CronScheduleRow', 'CronScheduleUpdate',
+    -- 'QueueRow', 'WorkerRow') are exported as types only. Their fields collide
+    -- with each other and with 'Job', so import the owning module for them:
+    -- @Arbiter.Core.CronSchedule@, @Arbiter.Core.Queues@, @Arbiter.Core.Worker@.
   , CronScheduleRow
-  , CronScheduleUpdate (..)
+  , CronScheduleUpdate
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -47,7 +46,9 @@ module Arbiter.Core
   , module Arbiter.Core.PoolConfig
 
     -- * Listener types
-  , Notification (..)
+
+    -- | @import Arbiter.Core.Listen@ for 'Arbiter.Core.Listen.Notification',
+    -- which collides with @Database.PostgreSQL.Simple.Notification@.
   , Listener
   , RunningHub
   , HubLog (..)
@@ -61,7 +62,7 @@ module Arbiter.Core
 import Arbiter.Core.Codec
 import Arbiter.Core.CronSchedule
   ( CronScheduleRow
-  , CronScheduleUpdate (..)
+  , CronScheduleUpdate
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -79,7 +80,6 @@ import Arbiter.Core.Listen
   ( DedicatedListen
   , HubLog (..)
   , Listener
-  , Notification (..)
   , RunningHub
   , dedicatedListener
   , newDedicatedListen

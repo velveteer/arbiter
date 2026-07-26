@@ -25,6 +25,8 @@ module Arbiter.Worker.Cron
     -- * Helpers
   , overlapPolicyToText
   , overlapPolicyFromText
+  , validateCronScheduleUpdate
+  , updateCronScheduleChecked
   , resolveTZ
   , matchesInTimezone
   , formatMinuteInTimezone
@@ -43,6 +45,7 @@ module Arbiter.Worker.Cron
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -53,8 +56,10 @@ import Control.Concurrent.STM (retry)
 import Control.Exception (displayException)
 import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Either (isRight)
+import Data.Int (Int64)
 import Data.List (unfoldr)
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -111,6 +116,30 @@ overlapPolicyFromText :: Text -> Maybe OverlapPolicy
 overlapPolicyFromText "SkipOverlap" = Just SkipOverlap
 overlapPolicyFromText "AllowOverlap" = Just AllowOverlap
 overlapPolicyFromText _ = Nothing
+
+-- | Check a cron patch before it is written. The scheduler does not reject a
+-- bad override at tick time: it stops firing, or falls back to the default.
+validateCronScheduleUpdate :: CS.CronScheduleUpdate -> Either Text ()
+validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
+  check mExpr (isRight . parseCronSchedule) "Invalid cron expression"
+  check mOverlap (isJust . overlapPolicyFromText) "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
+  check mTz (isJust . resolveTZ) "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
+  where
+    check field ok message = case field of
+      Just (Just v) | not (ok v) -> Left message
+      _ -> Right ()
+
+-- | 'Arbiter.Core.HighLevel.updateCronSchedule' behind
+-- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
+updateCronScheduleChecked
+  :: (ArbiterSchema m registry, MonadArbiter m)
+  => Text
+  -> CS.CronScheduleUpdate
+  -> m (Either Text Int64)
+updateCronScheduleChecked scheduleName upd =
+  case validateCronScheduleUpdate upd of
+    Left err -> pure (Left err)
+    Right () -> Right <$> HL.updateCronSchedule scheduleName upd
 
 -- | A cron schedule definition.
 --

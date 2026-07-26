@@ -88,10 +88,18 @@ data ImagePayload
 
 Map queue table names to payload types at the type level. `Queue` declares a
 queue whose handlers store no result. `QueueWithResult` adds the
-[result type](#job-results) its handlers produce.
+[result type](#job-results) its handlers produce, which needs `ToJSON` to be
+stored and `FromJSON` to be read back.
 
 ```haskell
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
+
+data Score = Score
+  { sharpness :: Double
+  , sizeBytes :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 type AppRegistry =
   '[ Queue "email_queue" EmailPayload
@@ -277,6 +285,21 @@ where, depends on the job:
 
 A result is stored with its `ToJSON` and read back with its `FromJSON`, so your
 own records and sum types work as results directly.
+
+To decide per run whether there is anything worth keeping, make the queue's
+result type a `Maybe`. `Nothing` stores nothing at all - no archive entry
+result, and no row for a rollup parent to collect, so that child is absent from
+`childResults` rather than present with an empty value. `Just v` stores `v`.
+
+```haskell
+type AppRegistry =
+  '[ QueueWithResult "sync_queue" SyncPayload (Maybe SyncReport)
+   ]
+
+syncHandler job = do
+  report <- runSync (Arb.payload job)
+  pure $ if rowsChanged report == 0 then Nothing else Just report
+```
 
 ### Job Trees (Fan-out/Fan-in)
 
@@ -650,21 +673,6 @@ job is reprocessed, and hooks fire per job.
 `ackWith`/`ackAllWith` carry the queue's [result](#job-results) - kept for a
 rollup parent to collect, or on an archived job's entry. `ack`/`ackAll` finalize
 a job without storing anything, on any queue.
-
-```haskell
--- defaultBatchedWorkerConfig <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedWorkerConfig 10 5 scoreHandler
-
-scoreHandler
-  :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
-  -> ArbS.SimpleDb AppRegistry IO ()
-scoreHandler jobs cbs =
-  for_ jobs $ \job -> do
-    score <- liftIO $ scoreImage (Arb.payload job)
-    -- The score lands with the ack, for the rollup parent to collect.
-    Worker.ackWith cbs job score
-```
 
 ### Observability Hooks
 

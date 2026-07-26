@@ -5,7 +5,6 @@
 -- | Multi-queue shared-listener tests on the postgresql-simple backend.
 module Test.Arbiter.Worker.MultiQueueListener (spec) where
 
-import Arbiter.Core.JobResult ()
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (createSimpleEnv, destroySimpleEnv, runSimpleDb)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)

@@ -6,7 +6,6 @@
 -- and multiple queues sharing one env's dedicated LISTEN connection.
 module Test.Arbiter.Orville.Listener (listenerSpec, multiQueueSpec) where
 
-import Arbiter.Core.JobResult ()
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Arbiter.Worker.TestKit qualified as TestKit

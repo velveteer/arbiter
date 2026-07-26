@@ -117,14 +117,14 @@ module Arbiter.Core.HighLevel
   , deregisterWorker
   , listWorkers
   , sweepStaleWorkers
-  , WorkerRow (..)
+  , WorkerRow
 
     -- * Queue Operations
   , ensureQueue
   , setQueuePaused
   , getQueue
   , listQueues
-  , QueueRow (..)
+  , QueueRow
 
     -- * Cron Schedule Operations
   , listCronSchedules
@@ -1399,6 +1399,9 @@ getCronScheduleByName scheduleName = do
 
 -- | Update a cron schedule (patch semantics). Returns rows affected
 -- (0 = not found, 1 = updated).
+--
+-- Writes the overrides as given. @Arbiter.Worker.updateCronScheduleChecked@
+-- rejects ones the scheduler cannot parse.
 updateCronSchedule
   :: forall m registry
    . (ArbiterSchema m registry, MonadArbiter m)

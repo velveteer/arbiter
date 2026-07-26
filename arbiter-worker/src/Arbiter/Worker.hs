@@ -43,6 +43,8 @@ module Arbiter.Worker
   , initCronSchedules
   , overlapPolicyToText
   , overlapPolicyFromText
+  , validateCronScheduleUpdate
+  , updateCronScheduleChecked
   ) where
 
 import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
@@ -137,6 +139,8 @@ import Arbiter.Worker.Cron
   , overlapPolicyFromText
   , overlapPolicyToText
   , runCronScheduler
+  , updateCronScheduleChecked
+  , validateCronScheduleUpdate
   )
 import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.EnabledQueues (enabledQueuesEnvVar, enabledQueuesForMonad, getEnabledQueues)

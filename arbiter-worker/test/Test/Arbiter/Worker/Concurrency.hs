@@ -15,7 +15,6 @@ import Arbiter.Core.Job.Types
   , ObservabilityHooks (..)
   , defaultJob
   )
-import Arbiter.Core.JobResult ()
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)

@@ -20,7 +20,6 @@ module Arbiter.Servant.Server
   , BuildServer (..)
   ) where
 
-import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
@@ -30,7 +29,7 @@ import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
-import Arbiter.Worker.Cron (overlapPolicyFromText, resolveTZ)
+import Arbiter.Worker.Cron (validateCronScheduleUpdate)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
@@ -63,6 +62,7 @@ import Data.Pool qualified as Pool
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
@@ -74,7 +74,6 @@ import Network.Wai (responseStream)
 import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort, setTimeout)
 import Servant
 import Servant.Server.Generic (AsServerT)
-import System.Cron (parseCronSchedule)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 
@@ -971,41 +970,13 @@ updateCronScheduleHandler
   -> Text
   -> CronScheduleUpdate
   -> Handler CronScheduleRow
-updateCronScheduleHandler config name update@(CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
+updateCronScheduleHandler config name update = do
   let env = serverEnv config
       schemaName = schema env
 
-  -- Validate cron expression if provided
-  case mExpr of
-    Just (Just expr) ->
-      case parseCronSchedule expr of
-        Left _ -> throwError err400 {errBody = "Invalid cron expression"}
-        Right _ -> pure ()
-    _ -> pure ()
-
-  -- Validate overlap policy if provided
-  case mOverlap of
-    Just (Just ov) ->
-      case overlapPolicyFromText ov of
-        Nothing ->
-          throwError
-            err400
-              { errBody = "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
-              }
-        Just _ -> pure ()
-    _ -> pure ()
-
-  -- Validate timezone if provided
-  case mTz of
-    Just (Just tzName) ->
-      case resolveTZ tzName of
-        Nothing ->
-          throwError
-            err400
-              { errBody = "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
-              }
-        Just _ -> pure ()
-    _ -> pure ()
+  case validateCronScheduleUpdate update of
+    Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
+    Right () -> pure ()
 
   result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
     _ <- Ops.updateCronSchedule schemaName name update

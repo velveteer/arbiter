@@ -92,7 +92,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Worker.TestKit (workerSpec)
+import Arbiter.Worker.TestKit (maybeListProbe, workerSpec)
 
 type WorkerTestRegistry = '[QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
 
@@ -109,7 +109,12 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   around (withPool sharedPool) $ do
-    workerSpec @WorkerTestPayload @WorkerTestRegistry SimpleTask FailingTask (\f _conn job -> f job) runSimpleDb
+    workerSpec @WorkerTestPayload @WorkerTestRegistry
+      SimpleTask
+      FailingTask
+      (\f _conn job -> f job)
+      maybeListProbe
+      runSimpleDb
 
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do

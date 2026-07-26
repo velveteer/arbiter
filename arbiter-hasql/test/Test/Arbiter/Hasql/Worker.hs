@@ -6,7 +6,7 @@ module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Setup (addQueueTable, setupOnce)
-import Arbiter.Worker.TestKit (workerSpec)
+import Arbiter.Worker.TestKit (maybeListProbe, workerSpec)
 import Arbiter.Worker.TestKit qualified as TestKit
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -45,7 +45,12 @@ spec connStr =
       let runM pool act = do
             env <- createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName
             runHasqlDb env act
-      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry SimpleTask FailingTask (\f _conn job -> f job) runM
+      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry
+        SimpleTask
+        FailingTask
+        (\f _conn job -> f job)
+        maybeListProbe
+        runM
 
 listenSchema :: Text
 listenSchema = "arbiter_hasql_listen_test"
