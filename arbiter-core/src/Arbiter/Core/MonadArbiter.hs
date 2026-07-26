@@ -11,7 +11,7 @@ module Arbiter.Core.MonadArbiter
   , Query (..)
   ) where
 
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
@@ -22,6 +22,7 @@ import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.Listen (Listener)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, ResultFor)
 import Arbiter.Core.Sql.Query (Query (..))
+import Arbiter.Core.Trace (TraceContext, currentTraceContext)
 
 -- | Database abstraction for job queue operations. Each backend (postgresql-simple,
 -- hasql, orville) provides an instance that maps queries to its native driver.
@@ -76,6 +77,11 @@ class (MonadIO m) => MonadArbiter m where
 
   -- | The env's shared LISTEN/NOTIFY listener, or 'Nothing' for poll-only.
   getListener :: m (Maybe Listener)
+
+  -- | The trace context stamped on jobs this env enqueues. Defaults to the ambient
+  -- span's, which is untraced until an OpenTelemetry SDK is installed.
+  getTraceContext :: m TraceContext
+  getTraceContext = liftIO currentTraceContext
 
 -- | A handler for @payload@'s queue. @result@ is what its registry entry declares.
 type JobHandler m (payload :: Type) result = Handler m (JobRead payload) result

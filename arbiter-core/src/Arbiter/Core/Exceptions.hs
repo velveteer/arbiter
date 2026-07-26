@@ -24,6 +24,7 @@ module Arbiter.Core.Exceptions
   , InternalException (..)
   , JobNotFoundException (..)
   , JobStolenException (..)
+  , JobForceCancelled (..)
 
     -- * Helpers
   , throwRetryable
@@ -34,11 +35,14 @@ module Arbiter.Core.Exceptions
   , throwParsing
   , throwInternal
   , throwJobNotFound
+  , throwJobNotFoundIds
   , throwJobStolen
+  , throwJobStolenIds
   ) where
 
-import Control.Exception (Exception (..))
+import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -117,20 +121,30 @@ instance Exception InternalException where
   displayException (InternalException msg) = T.unpack msg
 
 -- | Job was deleted or reclaimed between claim and ack. The worker recognizes
--- this signal via 'Arbiter.Worker.isJobGoneException' and skips retry/DLQ.
-newtype JobNotFoundException = JobNotFoundException Text
+-- this signal and skips retry/DLQ.
+-- The ids are the jobs actually gone, empty when the thrower did not name them.
+data JobNotFoundException = JobNotFoundException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobNotFoundException where
-  displayException (JobNotFoundException msg) = T.unpack msg
+  displayException (JobNotFoundException msg _) = T.unpack msg
 
 -- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
 -- combinator propagates this signal so the worker can stop duplicate work.
-newtype JobStolenException = JobStolenException Text
+-- The ids are the jobs actually reclaimed, empty when the thrower did not name them.
+data JobStolenException = JobStolenException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobStolenException where
-  displayException (JobStolenException msg) = T.unpack msg
+  displayException (JobStolenException msg _) = T.unpack msg
+
+-- | Async exception for user-initiated force-cancel, naming the jobs it cancels.
+data JobForceCancelled = JobForceCancelled [Int64]
+  deriving stock (Show)
+
+instance Exception JobForceCancelled where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
 
 throwRetryable :: (MonadIO m) => Text -> m a
 throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
@@ -154,7 +168,17 @@ throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
 throwJobNotFound :: (MonadIO m) => Text -> m a
-throwJobNotFound msg = UE.throwIO (JobNotFoundException msg)
+throwJobNotFound msg = throwJobNotFoundIds msg []
+
+-- | 'throwJobNotFound' naming the jobs that went away, so the worker can tell them
+-- from the rest of the batch.
+throwJobNotFoundIds :: (MonadIO m) => Text -> [Int64] -> m a
+throwJobNotFoundIds msg ids = UE.throwIO (JobNotFoundException msg ids)
 
 throwJobStolen :: (MonadIO m) => Text -> m a
-throwJobStolen msg = UE.throwIO (JobStolenException msg)
+throwJobStolen msg = UE.throwIO (JobStolenException msg [])
+
+-- | 'throwJobStolen' naming the reclaimed jobs, so the worker can tell them from
+-- the rest of the batch.
+throwJobStolenIds :: (MonadIO m) => [Int64] -> m a
+throwJobStolenIds ids = UE.throwIO (JobStolenException (T.intercalate (T.pack ", ") (map (T.pack . show) ids)) ids)

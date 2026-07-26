@@ -45,6 +45,8 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
+import UnliftIO (MonadUnliftIO)
+import UnliftIO.Exception (finally)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
@@ -90,6 +92,9 @@ data Job payload key q insertedAt adm = Job
   -- rollup finalizer, and overwrites it with the final results map before
   -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
   -- results table. 'isRollup' is derived from whether this is non-null.
+  , traceparent :: Maybe Text
+  -- ^ W3C trace context captured at enqueue.
+  , tracestate :: Maybe Text
   , suspended :: Bool
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
@@ -188,6 +193,8 @@ defaultJob p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceparent = Nothing
+    , tracestate = Nothing
     , suspended = False
     , claimedBy = Nothing
     , archiveFor = Nothing
@@ -217,6 +224,8 @@ defaultGroupedJob gk p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceparent = Nothing
+    , tracestate = Nothing
     , suspended = False
     , claimedBy = Nothing
     , archiveFor = Nothing
@@ -300,8 +309,9 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> StartTime
       -> EndTime
       -> m ()
-  -- ^ Called after a job handler fails. Use @diffUTCTime@ on the timestamps
-  -- to calculate job duration.
+  -- ^ Called after a job handler fails and the job was retried or dead-lettered.
+  -- A deliberate cancel reports through 'onJobCancelled' instead. Use @diffUTCTime@
+  -- on the timestamps to calculate job duration.
   , onJobRetry
       :: (JobPayload payload)
       => JobRead payload
@@ -314,6 +324,18 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> JobRead payload
       -> m ()
   -- ^ Called when a job is successfully moved to the dead-letter queue.
+  , onJobCancelled
+      :: (JobPayload payload)
+      => JobRead payload
+      -> ErrorMsg
+      -> m ()
+  -- ^ Called when a handler cancelled the job's tree or branch and the rows were deleted.
+  , onJobUnavailable
+      :: (JobPayload payload)
+      => JobRead payload
+      -> ErrorMsg
+      -> m ()
+  -- ^ Called when a claimed job went away mid-flight and will not be retried here.
   , onJobHeartbeat
       :: (JobPayload payload)
       => JobRead payload
@@ -340,5 +362,25 @@ defaultObservabilityHooks =
     , onJobFailure = \_ _ _ _ -> pure ()
     , onJobRetry = \_ _ -> pure ()
     , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+    , onJobCancelled = \_ _ -> pure ()
+    , onJobUnavailable = \_ _ -> pure ()
     , onJobHeartbeat = \_ _ _ -> pure ()
     }
+
+-- | Runs both hooks at each lifecycle point, left before right. The right one runs
+-- however the left ended, and the left's failure is the one that propagates.
+instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
+  a <> b =
+    ObservabilityHooks
+      { onJobClaimed = \j t -> onJobClaimed a j t `finally` onJobClaimed b j t
+      , onJobSuccess = \j s e -> onJobSuccess a j s e `finally` onJobSuccess b j s e
+      , onJobFailure = \j msg s e -> onJobFailure a j msg s e `finally` onJobFailure b j msg s e
+      , onJobRetry = \j d -> onJobRetry a j d `finally` onJobRetry b j d
+      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j `finally` onJobFailedAndMovedToDLQ b msg j
+      , onJobCancelled = \j msg -> onJobCancelled a j msg `finally` onJobCancelled b j msg
+      , onJobUnavailable = \j msg -> onJobUnavailable a j msg `finally` onJobUnavailable b j msg
+      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s `finally` onJobHeartbeat b j c s
+      }
+
+instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
+  mempty = defaultObservabilityHooks

@@ -4,6 +4,9 @@
 #
 #   DEMO_DOMAIN=demo.example.com docker compose -f arbiter-demo/compose.yml up -d
 #
+# Run from the repository root: the observability configs are mounted from
+# arbiter-otel/deploy/observability. Grafana is served at /grafana.
+#
 # Postgres is intentionally stateless (no volume): the demo drops and reseeds
 # its schema on every boot, so a fresh start is the desired behavior.
 name: arbiter-demo
@@ -32,14 +35,73 @@ services:
       # Self-restart cadence: the watchdog raises SIGTERM after this many
       # minutes, the process exits, and restart:always reseeds a clean demo.
       RESET_INTERVAL_MINUTES: "20"
+      # Traces and logs to the collector, metrics scraped from 9464.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_METRICS_EXPORTER: prometheus
+      OTEL_SERVICE_NAME: arbiter-demo
     labels:
       com.centurylinklabs.watchtower.enable: "true"
+    restart: always
+
+  # Configs shared with the local stack under arbiter-otel/deploy/observability.
+  # Only grafana is reachable outside, through caddy.
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: always
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ../arbiter-otel/deploy/observability/tempo.yaml:/etc/tempo.yaml:ro
+    restart: always
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: ["-config.file=/etc/loki.yaml"]
+    volumes:
+      - ../arbiter-otel/deploy/observability/loki.yaml:/etc/loki.yaml:ro
+    restart: always
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/collector.yaml"]
+    volumes:
+      - ../arbiter-otel/deploy/observability/collector.yaml:/etc/collector.yaml:ro
+    depends_on:
+      - tempo
+      - loki
+    restart: always
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    environment:
+      # Caddy serves it under a subpath.
+      GF_SERVER_ROOT_URL: "https://${DEMO_DOMAIN}/grafana"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Public: read-only, no login form. The local stack grants Admin instead.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../arbiter-otel/deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../arbiter-otel/deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: always
 
   caddy:
     image: caddy:2
     depends_on:
       - demo
+      - grafana
     ports:
       - "80:80"
       - "443:443"

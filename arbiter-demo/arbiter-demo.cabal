@@ -29,22 +29,24 @@ executable arbiter-demo
   main-is:        Main.hs
   hs-source-dirs: .
   build-depends:
-    , aeson               >=2.0
+    , aeson                                 >=2.0
     , arbiter-core
     , arbiter-migrations
+    , arbiter-otel
     , arbiter-servant
     , arbiter-servant-ui
     , arbiter-simple
     , arbiter-worker
-    , async               >=2.2
-    , base                >=4.14 && <5
-    , bytestring          >=0.10
-    , postgresql-simple   >=0.6
-    , text                >=1.2
-    , time                >=1.9
-    , unix                >=2.7
-    , wai-cors            >=0.2
-    , wai-extra           >=3.0
+    , async                                 >=2.2
+    , base                                  >=4.14 && <5
+    , bytestring                            >=0.10
+    , hs-opentelemetry-instrumentation-wai  >=1.0  && <1.1
+    , postgresql-simple                     >=0.6
+    , text                                  >=1.2
+    , time                                  >=1.9
+    , unix                                  >=2.7
+    , wai-cors                              >=0.2
+    , wai-extra                             >=3.0
     , warp
 
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N

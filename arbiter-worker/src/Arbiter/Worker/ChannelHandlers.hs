@@ -5,22 +5,16 @@
 -- addresses this worker.
 module Arbiter.Worker.ChannelHandlers
   ( RunningJobs
-  , JobForceCancelled (..)
   , handlePauseNotif
   , handleCancelNotif
   , handleCronRunNotif
   , withRegisteredJobs
   ) where
 
-import Arbiter.Core.Job.Types ()
+import Arbiter.Core.Exceptions (JobForceCancelled (..))
 import Arbiter.Core.Listen (Notification, notificationData)
 import Control.Concurrent (forkIO)
-import Control.Exception
-  ( Exception (..)
-  , SomeException
-  , asyncExceptionFromException
-  , asyncExceptionToException
-  )
+import Control.Exception (SomeException)
 import Control.Monad (unless, void, when)
 import Data.Aeson qualified as Aeson
 import Data.Foldable (traverse_)
@@ -67,12 +61,12 @@ handleCancelNotif config runningJobs notif =
   case Aeson.decodeStrict (notificationData notif) :: Maybe CancelPayload of
     Just (CancelPayload wid jid) | wid == workerId config -> do
       mAsync <- atomically $ Map.lookup jid <$> readTVar runningJobs
-      traverse_ fireCancel mAsync
+      traverse_ (fireCancel jid) mAsync
     _ -> pure ()
   where
     -- Fork so throwTo can't block the listener on the target unwinding.
-    fireCancel a =
-      liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) JobForceCancelled
+    fireCancel jid a =
+      liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) (JobForceCancelled [jid])
 
 -- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
 -- The cron-run channel is per-schema, so pools that do not own the named
@@ -121,11 +115,3 @@ data CancelPayload = CancelPayload UUID Int64
 instance Aeson.FromJSON CancelPayload where
   parseJSON = Aeson.withObject "CancelPayload" $ \o ->
     CancelPayload <$> o Aeson..: "worker_id" <*> o Aeson..: "job_id"
-
--- | Async exception for user-initiated force-cancel.
-data JobForceCancelled = JobForceCancelled
-  deriving stock (Show)
-
-instance Exception JobForceCancelled where
-  toException = asyncExceptionToException
-  fromException = asyncExceptionFromException

@@ -8,7 +8,11 @@ module Arbiter.Worker.Config
   , transactionalWorkerConfig
   , manualWorkerConfig
   , defaultBatchedWorkerConfig
+  , withHooks
   , HandlerMode (..)
+  , handlerBatchSize
+  , MaintenanceOp (..)
+  , maintenanceOpName
   , ResultOf
 
     -- * Batch Callbacks
@@ -26,6 +30,7 @@ import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservability
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -41,6 +46,30 @@ import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponential
 import Arbiter.Worker.Cron (CronJob)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
+
+-- | Which reaper op a maintenance report came from.
+data MaintenanceOp
+  = RefreshGroups
+  | SweepStaleWorkers
+  | SweepExhaustedJobs
+  | SweepCancelledJobs
+  | PruneRateLimitBuckets
+  | ReconcileConcurrencyStale
+  | ReconcilePruneConcurrency
+  | PurgeArchives
+  deriving stock (Bounded, Enum, Eq, Ord, Show)
+
+-- | The op's stable name, used to coordinate replicas and to label its metrics.
+maintenanceOpName :: MaintenanceOp -> Text
+maintenanceOpName op = case op of
+  RefreshGroups -> "refresh-all-groups"
+  SweepStaleWorkers -> "sweep-stale-workers"
+  SweepExhaustedJobs -> "sweep-exhausted-jobs"
+  SweepCancelledJobs -> "sweep-cancelled-jobs"
+  PruneRateLimitBuckets -> "prune-rate-limit-buckets"
+  ReconcileConcurrencyStale -> "reconcile-concurrency-stale"
+  ReconcilePruneConcurrency -> "reconcile-prune-concurrency"
+  PurgeArchives -> "purge-archives"
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload = WorkerConfig
@@ -67,6 +96,9 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Jitter strategy for retry delays. Default: 'EqualJitter'.
   , observabilityHooks :: ObservabilityHooks m payload
   -- ^ Callbacks for metrics or tracing. Default: no-op hooks.
+  , onMaintenance :: MaintenanceOp -> Int64 -> m ()
+  -- ^ Called after a reaper op this pool won the gate for, with the rows it touched.
+  -- Reaper work is schema-wide, so it carries no queue. Default: no-op.
   , workerStateVar :: TVar WorkerState
   -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
   -- Shared across pools in multi-pool setups.
@@ -161,6 +193,12 @@ data HandlerMode m payload
       Int
       (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
 
+-- | How many jobs a pool claims per group.
+handlerBatchSize :: WorkerConfig m payload -> Int
+handlerBatchSize config = case handlerMode config of
+  SingleJobMode _ -> 1
+  BatchedJobsMode n _ -> n
+
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
 --
@@ -201,6 +239,13 @@ manualWorkerConfig
 manualWorkerConfig workerCnt handler =
   defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
 
+-- | Rework a pool's observability hooks.
+withHooks
+  :: (ObservabilityHooks m payload -> ObservabilityHooks m payload)
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+withHooks f cfg = cfg {observabilityHooks = f (observabilityHooks cfg)}
+
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
@@ -227,6 +272,7 @@ mkDefaultConfig workerCnt mode = do
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter
       , observabilityHooks = defaultObservabilityHooks
+      , onMaintenance = \_ _ -> pure ()
       , workerStateVar = shutdownTVar
       , pauseVar = pauseTVar
       , livenessFile = Just livenessPath

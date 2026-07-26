@@ -18,7 +18,7 @@ import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), readEffectiveState)
+import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), handlerBatchSize, readEffectiveState)
 import Arbiter.Worker.Logger (LogLevel (..))
 import Arbiter.Worker.Logger.Internal (tryLog)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
@@ -40,10 +40,7 @@ runDispatcher
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
   claimSql <-
-    let batchSize = case handlerMode config of
-          SingleJobMode _ -> 1
-          BatchedJobsMode n _ -> n
-     in Arb.mkClaimSql @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
+    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (Just (workerId config))
   let
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do

@@ -9,7 +9,6 @@ module Arbiter.Worker.Logger.Internal
   , withJobContext
   , withJobContextOne
   , withJobContextList
-  , showJobIds
   , runHook
   ) where
 
@@ -22,11 +21,10 @@ import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
-import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, tryAny)
+import UnliftIO (MonadUnliftIO, finally, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
 
@@ -58,10 +56,6 @@ loggingActive config = case logDestination config of
   LogDiscard -> False
   _ -> True
 
--- | Comma-separated job ids for log messages.
-showJobIds :: [Int64] -> Text
-showJobIds = T.intercalate ", " . map (T.pack . show)
-
 -- | Build structured context for a batch of jobs.
 buildJobContext :: NonEmpty (Job.JobRead payload) -> [Pair]
 buildJobContext jobs = ["jobs" .= map (object . mkContext) (toList jobs)]
@@ -83,6 +77,8 @@ runWithDestination dest ctx level msg = case dest of
   LogCallback cb -> do
     threadCtx <- KM.toList <$> MLA.myThreadContext
     cb level msg (threadCtx <> ctx)
+  LogTee base extra ->
+    runWithDestination base ctx level msg `finally` runWithDestination extra ctx level msg
   LogDiscard -> pure ()
   where
     logAt :: (ML.MonadLogger m) => LogLevel -> Text -> m ()

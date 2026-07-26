@@ -14,6 +14,7 @@ import Arbiter.Core.Job.Types
   , JobRead
   , ObservabilityHooks (..)
   , defaultJob
+  , defaultObservabilityHooks
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
@@ -73,16 +74,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       -- Track which hooks were called
       failureCalls <- newIORef (0 :: Int)
       successCalls <- newIORef (0 :: Int)
+      unavailableCalls <- newIORef (0 :: Int)
       handlerCompleted <- newIORef False
 
       let hooks =
-            ObservabilityHooks
-              { onJobClaimed = \_ _ -> pure ()
-              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
+            defaultObservabilityHooks
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
-              , onJobRetry = \_ _ -> pure ()
-              , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
-              , onJobHeartbeat = \_ _ _ -> pure ()
+              , onJobUnavailable = \_ _ -> liftIO $ atomicModifyIORef' unavailableCalls (\n -> (n + 1, ()))
               }
 
       -- Insert a job
@@ -112,7 +111,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         (runSimpleDb env $ runWorkerPool configWithHooks)
         $ \_ -> do
           waitUntil 10_000 $ readIORef handlerCompleted
-          -- Allow time for ack failure and isJobGoneException path to complete
+          -- Allow time for ack failure and the job-gone path to complete
           threadDelay 500_000
 
       -- Verify: neither hook was called (job-gone path skips both)
@@ -120,6 +119,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       successCount <- readIORef successCalls
       failureCount `shouldBe` 0
       successCount `shouldBe` 0
+
+      -- Verify: the job-gone path reported the job unavailable exactly once
+      unavailableCount <- readIORef unavailableCalls
+      unavailableCount `shouldBe` 1
 
       -- Verify: Job is still in queue (ack failed, transaction rolled back)
       allJobs <- runSimpleDb env $ Ops.listJobs testSchema testTable 10 0 :: IO [JobRead WorkerConcurrencyTestPayload]
@@ -132,13 +135,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       successCalls <- newIORef (0 :: Int)
 
       let hooks =
-            ObservabilityHooks
-              { onJobClaimed = \_ _ -> pure ()
-              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
+            defaultObservabilityHooks
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
-              , onJobRetry = \_ _ -> pure ()
-              , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
-              , onJobHeartbeat = \_ _ _ -> pure ()
               }
 
       -- Insert a job
@@ -221,13 +220,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       processedCount <- newIORef (0 :: Int)
 
       let hooks =
-            ObservabilityHooks
-              { onJobClaimed = \_ _ -> pure ()
-              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
+            defaultObservabilityHooks
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
               , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
-              , onJobRetry = \_ _ -> pure ()
-              , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
-              , onJobHeartbeat = \_ _ _ -> pure ()
               }
 
       -- Insert jobs that always fail (FailingTask 999 means fail 999 times)

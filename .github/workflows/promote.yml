@@ -8,7 +8,7 @@ on:
         required: true
 
 env:
-  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui arbiter-otel
 
 jobs:
   promote:

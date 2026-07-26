@@ -54,6 +54,8 @@ data LogDestination
     -- in defaultLogConfig { logDestination = LogCallback cb }
     -- @
     LogCallback (LogLevel -> Text -> [Pair] -> IO ())
+  | -- | Emit every message to both destinations, the first one before the second.
+    LogTee LogDestination LogDestination
   | -- | Discard all logs (silent mode)
     LogDiscard
 

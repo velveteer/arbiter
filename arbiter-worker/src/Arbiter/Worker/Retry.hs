@@ -13,6 +13,7 @@ import Arbiter.Core.Exceptions
   , JobNotFoundException
   , JobStolenException
   )
+import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Exception (displayException)
 import Control.Monad (forever)
 import Control.Monad.Trans.Cont (ContT (..))
@@ -107,9 +108,13 @@ spawnRetried
   => TVar WorkerState
   -> LogConfig
   -> T.Text
-  -- ^ Label for log messages.
+  -- ^ The queue this thread serves, for its RTS label.
+  -> T.Text
+  -- ^ Label for log messages, and the role in its RTS label.
   -> m ()
   -- ^ Action to run.
   -> ContT r m (Async ())
-spawnRetried stateVar logCfg label action =
-  ContT . withAsync $ retryOnException stateVar logCfg label action
+spawnRetried stateVar logCfg queue label action =
+  ContT . withAsync $ do
+    labelArbiterThread label (Just queue)
+    retryOnException stateVar logCfg label action

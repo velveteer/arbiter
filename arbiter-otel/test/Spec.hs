@@ -1,0 +1,295 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
+
+-- | The three signals against a real Postgres (ARBITER_TEST_CONN_STRING).
+module Main (main) where
+
+import Arbiter.Concurrency (HasConcurrency)
+import Arbiter.Core.Job.Archive (ArchiveJob (..))
+import Arbiter.Core.Job.DLQ (DLQJob (dlqPrimaryKey))
+import Arbiter.Core.Job.Types (Job (..), ObservabilityHooks (..), defaultJob)
+import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.Trace
+  ( capturingContext
+  , consumeSpanFor
+  , currentTraceContext
+  , markSpanError
+  , recordJobFailure
+  , resolveTracer
+  , withConsumeSpan
+  )
+import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.RateLimit (HasRateLimit)
+import Arbiter.Simple (createSimpleEnv, runSimpleDb)
+import Arbiter.Test.Config (getTestConnectionString)
+import Arbiter.Test.Setup (execute_)
+import Arbiter.Worker (MaintenanceOp (..), defaultLogConfig)
+import Control.Exception (bracket)
+import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (FromJSON, ToJSON)
+import Data.ByteString (ByteString)
+import Data.ByteString.Builder (toLazyByteString)
+import Data.ByteString.Lazy.Char8 qualified as BL8
+import Data.Char (isAsciiLower)
+import Data.Foldable (toList, traverse_)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List (isInfixOf)
+import Data.Maybe (listToMaybe)
+import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
+import Data.Text.IO qualified as TIO
+import Data.Time (getCurrentTime)
+import Database.PostgreSQL.Simple (close, connectPostgreSQL)
+import GHC.Generics (Generic)
+import Network.Wai (Application, defaultRequest, responseToStream)
+import Network.Wai.Internal (ResponseReceived (..))
+import OpenTelemetry.Context (empty, insertSpan)
+import OpenTelemetry.Context.ThreadLocal (attachContext, detachContext)
+import OpenTelemetry.Processor.Span (SpanProcessor (..))
+import OpenTelemetry.Propagator.W3CTraceContext (decodeSpanContext)
+import OpenTelemetry.Trace.Core
+  ( Event (..)
+  , FlushResult (..)
+  , ImmutableSpan (..)
+  , Link (..)
+  , ShutdownResult (..)
+  , SpanContext (..)
+  , SpanHot (..)
+  , SpanKind (..)
+  , SpanStatus (..)
+  , TracerProvider
+  , createTracerProvider
+  , emptyTracerProviderOptions
+  , setGlobalTracerProvider
+  , wrapSpanContext
+  )
+import OpenTelemetry.Util (appendOnlyBoundedCollectionValues)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import Test.Hspec
+import UnliftIO.Async (withAsync)
+import UnliftIO.Concurrent (threadDelay)
+
+import Arbiter.Otel qualified as Otel
+
+newtype Greeting = Greeting Text
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, HasConcurrency, HasRateLimit, ToJSON)
+
+type Reg = '[Queue "greetings" Greeting]
+
+schema :: Text
+schema = "arbiter_otel_test"
+
+queue :: Text
+queue = "greetings"
+
+-- | A known-good W3C header.
+sampleTraceparent :: ByteString
+sampleTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+sampleTraceId :: Text
+sampleTraceId = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+-- | Run an action with a frozen span attached to this thread, as an enclosing @inSpan@
+-- would leave it.
+withAttachedSpan :: ByteString -> IO a -> IO a
+withAttachedSpan traceparent action = case decodeSpanContext (Just traceparent) Nothing of
+  Nothing -> expectationFailure "sample traceparent did not decode" >> error "unreachable"
+  Just sc -> bracket (attachContext (insertSpan (wrapSpanContext sc) empty)) detachContext (const action)
+
+-- | Drop and re-migrate the test schema.
+freshSchema :: ByteString -> IO ()
+freshSchema connStr = do
+  bracket (connectPostgreSQL connStr) close $ \conn -> do
+    execute_ conn "SET client_min_messages = warning"
+    execute_ conn ("DROP SCHEMA IF EXISTS " <> quoteIdentifier schema <> " CASCADE")
+  migrated <- runMigrationsForRegistry (Proxy @Reg) connStr schema defaultMigrationConfig
+  migrated `shouldBe` MigrationSuccess
+
+-- | A tracer provider whose processor keeps every span it ends.
+recordingTracerProvider :: IO (IORef [ImmutableSpan], TracerProvider)
+recordingTracerProvider = do
+  ref <- newIORef []
+  let processor =
+        SpanProcessor
+          { spanProcessorOnStart = \_ _ -> pure ()
+          , spanProcessorOnEnd = \sp -> modifyIORef' ref (sp :)
+          , spanProcessorShutdown = pure ShutdownSuccess
+          , spanProcessorForceFlush = pure FlushSuccess
+          }
+  (,) ref <$> createTracerProvider [processor] emptyTracerProviderOptions
+
+-- | Pin the SDK's environment for the duration of the action, restoring whatever the
+-- shell had. The variables under test are the same ones an operator sets, so an
+-- ambient @OTEL_METRICS_EXPORTER=none@ would otherwise decide the assertions and an
+-- ambient endpoint would have the suite push to a real collector.
+withPinnedOtelEnv :: IO a -> IO a
+withPinnedOtelEnv = bracket save restore . const
+  where
+    pinned =
+      [ ("OTEL_METRICS_EXPORTER", Just "prometheus")
+      , ("OTEL_TRACES_EXPORTER", Just "none")
+      , ("OTEL_LOGS_EXPORTER", Just "none")
+      , ("OTEL_SDK_DISABLED", Just "false")
+      , ("OTEL_EXPORTER_OTLP_ENDPOINT", Nothing)
+      , ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", Nothing)
+      , ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", Nothing)
+      , ("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", Nothing)
+      ]
+    save = do
+      previous <- traverse (\(k, _) -> (,) k <$> lookupEnv k) pinned
+      traverse_ (uncurry apply) pinned
+      pure previous
+    restore = traverse_ (uncurry apply)
+    apply k = maybe (unsetEnv k) (setEnv k)
+
+-- | Paths are package-relative, which is where cabal runs a test suite from.
+dashboardPath :: FilePath
+dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
+
+metricSources :: [FilePath]
+metricSources = ["src/Arbiter/Otel/Metrics.hs", "src/Arbiter/Otel/Gauges.hs"]
+
+-- | Every @arbiter_*@ family the dashboard names, Prometheus having flattened the dots.
+-- Read from the whole file rather than the queries alone: a metric named in a panel
+-- description should be just as real as one in a query.
+dashboardMetrics :: Text -> [Text]
+dashboardMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
+  where
+    nameChar c = isAsciiLower c || c == '_'
+
+-- | Every instrument name the source registers, as Prometheus renders it. Quoted, so
+-- a haddock mention of a metric does not count as declaring one.
+declaredMetrics :: Text -> [Text]
+declaredMetrics = map (T.replace "." "_" . T.takeWhile nameChar . T.drop 1 . snd) . T.breakOnAll "\"arbiter."
+  where
+    nameChar c = isAsciiLower c || c == '_' || c == '.'
+
+-- | Read a WAI application's whole response body.
+scrape :: Application -> IO String
+scrape app = do
+  ref <- newIORef mempty
+  void . app defaultRequest $ \res -> do
+    let (_, _, withBody) = responseToStream res
+    withBody $ \streamingBody -> streamingBody (\b -> modifyIORef' ref (<> b)) (pure ())
+    pure ResponseReceived
+  BL8.unpack . toLazyByteString <$> readIORef ref
+
+main :: IO ()
+main = hspec spec
+
+spec :: Spec
+spec = do
+  connStr <- runIO getTestConnectionString
+  runIO (freshSchema connStr)
+  plainEnv <- runIO (createSimpleEnv (Proxy @Reg) connStr schema)
+
+  describe "trace context" $ do
+    it "stamps the ambient span onto an enqueued job" $ do
+      stored <- withAttachedSpan sampleTraceparent $ enqueue plainEnv (Greeting "traced")
+      fmap (T.isInfixOf sampleTraceId) (traceparent stored) `shouldBe` Just True
+
+    it "leaves the columns null when no span is active" $ do
+      stored <- enqueue plainEnv (Greeting "no-span")
+      traceparent stored `shouldBe` Nothing
+
+    it "does not overwrite a trace context the caller set" $ do
+      let job = (defaultJob (Greeting "preset")) {traceparent = Just "caller-set"}
+      stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
+      traceparent stored `shouldBe` Just "caller-set"
+
+    it "survives the queue-to-archive copy" $ do
+      let job = (defaultJob (Greeting "archived")) {archiveFor = Just 3600}
+      stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
+      void $ runSimpleDb plainEnv (Ops.ackJob schema queue stored)
+      archived <- runSimpleDb plainEnv (Ops.getArchivedJobById @_ @Greeting schema queue (primaryKey stored))
+      fmap (traceparent . jobSnapshot) archived `shouldBe` Just (traceparent stored)
+
+    it "survives the DLQ round trip" $ do
+      stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv (defaultJob (Greeting "dlq'd"))
+      entry <- runSimpleDb plainEnv $ do
+        void $ Ops.moveToDLQ schema queue "boom" stored
+        listToMaybe <$> Ops.listDLQJobs @_ @Greeting schema queue 1 0
+      retried <- traverse (runSimpleDb plainEnv . Ops.retryFromDLQ @_ @Greeting schema queue . dlqPrimaryKey) entry
+      fmap (fmap traceparent) retried `shouldBe` Just (Just (traceparent stored))
+
+  describe "telemetry" $
+    it "exports job metrics and queue-depth gauges on the scrape endpoint" $
+      withPinnedOtelEnv $
+        Otel.withTelemetry $ \tel -> do
+          job <- enqueue plainEnv (Greeting "measured")
+          now <- getCurrentTime
+          let hooks = Otel.otelHooks (Otel.meters tel) queue
+          onJobClaimed hooks job now
+          onJobSuccess hooks job now now
+          onJobFailedAndMovedToDLQ hooks "boom" job
+          onJobCancelled hooks job "cancelled"
+          onJobUnavailable hooks job "no longer available"
+          Otel.otelMaintenance (Otel.meters tel) SweepExhaustedJobs 3
+
+          loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
+          withAsync loop $ \_ -> do
+            threadDelay 3_000_000
+            text <- maybe (expectationFailure "no scrape app" >> error "unreachable") scrape (Otel.metricsApp tel)
+            text `shouldSatisfy` isInfixOf "arbiter_jobs_processed"
+            text `shouldSatisfy` isInfixOf "outcome=\"success\""
+            text `shouldSatisfy` isInfixOf "outcome=\"dlq\""
+            text `shouldSatisfy` isInfixOf "outcome=\"cancelled\""
+            text `shouldSatisfy` isInfixOf "outcome=\"unavailable\""
+            text `shouldSatisfy` isInfixOf "arbiter_maintenance_rows"
+            text `shouldSatisfy` isInfixOf "op=\"sweep-exhausted-jobs\""
+            text `shouldSatisfy` isInfixOf "arbiter_queue_depth"
+            text `shouldSatisfy` isInfixOf ("queue=\"" <> T.unpack queue <> "\"")
+            text `shouldSatisfy` isInfixOf "arbiter_pg_backends"
+
+  -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
+  describe "provisioned dashboard" $ do
+    declared <- runIO (foldMap declaredMetrics <$> traverse TIO.readFile metricSources)
+    referenced <- runIO (dashboardMetrics <$> TIO.readFile dashboardPath)
+
+    it "queries only metrics the library registers" $
+      filter (\r -> not (any (`T.isPrefixOf` r) declared)) referenced `shouldBe` []
+
+    it "has a panel for every metric the library registers" $
+      filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declared `shouldBe` []
+
+  describe "consumer spans" $ do
+    (recorded, provider) <- runIO recordingTracerProvider
+
+    it "links the job's producer, records its failure, and reattaches across a fork" $ do
+      setGlobalTracerProvider provider
+      job <- withAttachedSpan sampleTraceparent $ enqueue plainEnv (Greeting "spanned")
+      tracer <- resolveTracer
+      inherited <- runSimpleDb plainEnv . withConsumeSpan tracer (consumeSpanFor queue []) job $ do
+        reattach <- capturingContext
+        recordJobFailure job "boom"
+        markSpanError "boom"
+        reattach (liftIO (fst <$> currentTraceContext))
+
+      spans <- readIORef recorded
+      sp <- case spans of
+        [one] -> pure one
+        _ -> expectationFailure "expected exactly one consumer span" >> error "unreachable"
+      hot <- readIORef (spanHot sp)
+      hotName hot `shouldBe` "process " <> queue
+      spanKind sp `shouldBe` Consumer
+      hotStatus hot `shouldBe` Error "boom"
+      map eventName (values (hotEvents hot)) `shouldBe` ["job.failed"]
+      -- Linked to the enqueue's trace, and running under a trace of its own.
+      map (traceId . frozenLinkContext) (values (hotLinks hot))
+        `shouldBe` map traceId (toList (spanContextOf =<< traceparent job))
+      (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext sp))
+  where
+    values = toList . appendOnlyBoundedCollectionValues
+    spanContextOf tp = decodeSpanContext (Just (encodeUtf8 tp)) Nothing
+    enqueue env p = insertRaw env (defaultJob p)
+    insertRaw env job = do
+      inserted <- runSimpleDb env (Ops.insertJob schema queue job)
+      maybe (expectationFailure "insert returned no row" >> error "unreachable") pure inserted

@@ -19,7 +19,7 @@ import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce, truncateToMicros)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, toJSON, (.=))
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
@@ -830,6 +830,42 @@ spec connStr = do
         visible <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         length visible `shouldBe` 1
         primaryKey (head visible) `shouldBe` jobId
+
+  -- QueueOverview's instances are also how a gauge snapshot round-trips through the
+  -- shared gate, so a change made for that payload would silently reshape this response.
+  describe "Landing overview wire contract" $ do
+    let overview =
+          Ops.QueueOverview
+            { Ops.overviewQueue = "greetings"
+            , Ops.overviewStats = Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5)
+            , Ops.overviewQueuePaused = True
+            , Ops.overviewWorkersLive = 4
+            , Ops.overviewWorkersPaused = 1
+            }
+
+    it "encodes one queue's entry exactly" $
+      toJSON overview
+        `shouldBe` [aesonQQ|
+          { "queue": "greetings"
+          , "paused": true
+          , "workersLive": 4
+          , "workersPaused": 1
+          , "stats":
+              { "totalJobs": 8
+              , "readyJobs": 3
+              , "inFlightJobs": 2
+              , "scheduledJobs": 1
+              , "backoffJobs": 1
+              , "throttledJobs": 0
+              , "suspendedJobs": 1
+              , "cancelledJobs": 0
+              , "oldestReadyAgeSeconds": 12.5
+              }
+          }
+        |]
+
+    it "round-trips, which is what the shared gauge payload relies on" $
+      decode (encode overview) `shouldBe` Just overview
 
   describe "Stats API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/stats returns zero counts for empty queue" $ do

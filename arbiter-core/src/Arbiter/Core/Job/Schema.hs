@@ -15,6 +15,8 @@ module Arbiter.Core.Job.Schema
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueArchiveTableSQL
+  , queueTableNames
+  , addTraceContextColumnSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
@@ -190,6 +192,11 @@ jobQueueResultsTable schemaName tableName = quoteIdentifier schemaName <> "." <>
 jobQueueGroupsTable :: Text -> Text -> Text
 jobQueueGroupsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_groups")
 
+-- | A queue's own table and its companions, unqualified and unquoted, for callers that
+-- match on @pg_catalog@ relnames.
+queueTableNames :: TableName -> [TableName]
+queueTableNames tableName = tableName : map (tableName <>) ["_dlq", "_archive", "_results", "_groups"]
+
 -- | SQL to create the schema for Arbiter tables
 createSchemaSQL :: SchemaName -> Text
 createSchemaSQL schemaName =
@@ -198,6 +205,8 @@ createSchemaSQL schemaName =
 -- | Common job column definitions (matches the Job type structure)
 --
 -- These columns are shared between job_queue and dead_letter_queue tables.
+--
+-- Checksummed by the create-table migration: a new column ships as its own ALTER script.
 jobColumns :: [Text]
 jobColumns =
   [ "  id BIGSERIAL PRIMARY KEY,"
@@ -217,6 +226,18 @@ jobColumns =
   , "  parent_state JSONB,"
   , "  suspended BOOLEAN NOT NULL DEFAULT FALSE"
   ]
+
+-- | Add the W3C trace-context columns to a queue's three job tables.
+addTraceContextColumnSQL :: Text -> Text -> Text
+addTraceContextColumnSQL schemaName tableName =
+  T.unlines
+    [ alter table column
+    | table <-
+        [jobQueueTable schemaName tableName, jobQueueDLQTable schemaName tableName, jobQueueArchiveTable schemaName tableName]
+    , column <- ["traceparent", "tracestate"]
+    ]
+  where
+    alter table column = "ALTER TABLE " <> table <> " ADD COLUMN IF NOT EXISTS " <> column <> " TEXT;"
 
 -- | Job column definitions for DLQ table (with job_id instead of id)
 jobColumnsForDLQ :: Text

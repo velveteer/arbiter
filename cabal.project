@@ -8,6 +8,7 @@ packages:
   arbiter-orville
   arbiter-servant
   arbiter-servant-ui
+  arbiter-otel
   arbiter-demo
   arbiter-test-common
   arbiter-bench

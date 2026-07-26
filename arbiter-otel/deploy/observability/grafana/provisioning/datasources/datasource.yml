@@ -1,0 +1,47 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: arbiter-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  - name: Tempo
+    uid: arbiter-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToMetrics:
+        datasourceUid: arbiter-prometheus
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        queries:
+          - name: 'Handler duration p95'
+            query: 'histogram_quantile(0.95, sum by (le) (rate(arbiter_job_handler_duration_bucket[5m])))'
+      # Matched on structured metadata, not the line body, so the query names
+      # trace_id explicitly rather than letting Grafana add a line filter.
+      tracesToLogsV2:
+        datasourceUid: arbiter-loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        filterByTraceID: false
+        customQuery: true
+        # Leading zeros: Tempo can render an id 31 characters wide, the log record keeps 32.
+        query: '{service_name=~".+"} | trace_id=~"0*$${__span.traceId}"'
+  - name: Loki
+    uid: arbiter-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # Every log record arbiter emits carries the job's trace, so each line can
+      # open the waterfall it came from.
+      derivedFields:
+        - name: TraceID
+          datasourceUid: arbiter-tempo
+          matcherType: label
+          matcherRegex: trace_id
+          url: '$${__value.raw}'

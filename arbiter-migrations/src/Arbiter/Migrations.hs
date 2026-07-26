@@ -54,10 +54,11 @@ import Arbiter.Core.CronSchedule
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
   )
-import Arbiter.Core.Gates (createGatesTableSQL)
+import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , addTraceContextColumnSQL
   , createArchiveCompletedAtIndexSQL
   , createArchiveExpiresAtIndexSQL
   , createArchiveGroupKeyIndexSQL
@@ -419,6 +420,7 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
   , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
   , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)
+  , MigrationScript "arbiter-gates-add-metadata" (encodeUtf8 $ addGateMetadataColumnSQL schemaName)
   , MigrationScript "create-arbiter-rate-limit-policies" (encodeUtf8 $ createRateLimitPoliciesTableSQL schemaName)
   , MigrationScript "create-arbiter-rate-limits" (encodeUtf8 $ createRateLimitsTableSQL schemaName)
   , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
@@ -479,6 +481,8 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "create-archive-job-id-index" $ createArchiveJobIdIndexSQL schemaName tableName
         , script "create-archive-parent-id-index" $ createArchiveParentIdIndexSQL schemaName tableName
         , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
+        , -- After the archive table exists, since it alters that too.
+          script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

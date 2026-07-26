@@ -58,6 +58,7 @@ module Arbiter.Core.Operations
   , deleteDLQJob
   , deleteDLQJobsBatch
   , deleteCancelledJobs
+  , deleteCancelledJobsReturning
 
     -- * Completed-Job Archive
   , listArchiveJobs
@@ -158,6 +159,9 @@ module Arbiter.Core.Operations
     -- * Global Gate Operations
   , runGated
   , runGatedBounded
+  , runGatedShared
+  , gateNameFor
+  , Shared (..)
 
     -- * Internal Operations
   , getParentStateSnapshot
@@ -166,14 +170,15 @@ module Arbiter.Core.Operations
   ) where
 
 import Control.Monad (foldM, void, when)
-import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
+import Data.Aeson.Types (parseEither)
 import Data.Bifunctor (first)
 import Data.Bitraversable (bitraverse)
 import Data.Either (partitionEithers)
-import Data.Foldable (for_, toList)
+import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.IntMap qualified as IntMap
-import Data.List (groupBy, sortOn)
+import Data.List (groupBy, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -225,7 +230,7 @@ import Arbiter.Core.Job.Types
   , jobStatusFromText
   , jobStatusToText
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter (MonadArbiter, getTraceContext, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.RateLimit.Spec
@@ -255,6 +260,7 @@ import Arbiter.Core.Sql.RateLimit qualified as Tmpl
 import Arbiter.Core.Sql.Stats qualified as Tmpl
 import Arbiter.Core.Sql.Tree qualified as Tmpl
 import Arbiter.Core.Sql.Workers qualified as Tmpl
+import Arbiter.Core.Trace (stampTraceContext)
 import Arbiter.Core.Worker (WorkerRow)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
@@ -340,20 +346,22 @@ insertJobUnsafe
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafe schemaName tableName job = withDbTransaction $ do
+insertJobUnsafe schemaName tableName job0 = do
+  job <- flip stampTraceContext job0 <$> getTraceContext
   let codec = jobCodec tableName
       valuesFrag = insertFrag codec (job, admissionColumns (payload job))
       query = case dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
         _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
 
-  rawJobs <- MA.executeQuery query
-  case rawJobs of
-    [] -> case dedupKey job of
-      Just (IgnoreDuplicate _) -> pure Nothing
-      Just (ReplaceDuplicate _) -> pure Nothing
-      Nothing -> throwParsing "insertJob: No rows returned from INSERT"
-    (raw : _) -> Just <$> decodePayload raw
+  withDbTransaction $ do
+    rawJobs <- MA.executeQuery query
+    case rawJobs of
+      [] -> case dedupKey job of
+        Just (IgnoreDuplicate _) -> pure Nothing
+        Just (ReplaceDuplicate _) -> pure Nothing
+        Nothing -> throwParsing "insertJob: No rows returned from INSERT"
+      (raw : _) -> Just <$> decodePayload raw
 
 -- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
 -- manually-refilled policies.
@@ -554,12 +562,15 @@ insertJobsBatch
   -- ^ Jobs to insert
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
-insertJobsBatch schemaName tableName jobs = withDbTransaction $ do
-  let codec = jobCodec tableName
+insertJobsBatch schemaName tableName jobs0 = do
+  ctx <- getTraceContext
+  let jobs = map (stampTraceContext ctx) jobs0
+      codec = jobCodec tableName
       batchSrc = batchFrag codec [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
 
-  rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
-  traverse decodePayload rawJobs
+  withDbTransaction $ do
+    rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
+    traverse decodePayload rawJobs
 
 insertJobsBatch_
   :: forall m payload
@@ -569,9 +580,11 @@ insertJobsBatch_
   -> [JobWrite payload]
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
-insertJobsBatch_ schemaName tableName jobs = withDbTransaction $ do
-  let batchSrc = batchFrag (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
-  MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc)
+insertJobsBatch_ schemaName tableName jobs0 = do
+  ctx <- getTraceContext
+  let jobs = map (stampTraceContext ctx) jobs0
+      batchSrc = batchFrag (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
+  withDbTransaction (MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc))
 
 -- | Insert a child's result into the results table.
 --
@@ -1534,20 +1547,21 @@ deleteDLQJob schemaName tableName dlqId = withDbTransaction $ do
     _ -> pure 1
 
 -- | Delete jobs by id via the given query builder, then resume any parents left
--- childless. The query must return each deleted row's parent_id. Returns the rows deleted.
+-- childless. The query must return each deleted row's parent_id alongside whatever
+-- the caller wants back. Returns that per-row payload for the rows deleted.
 deleteJobsResumingParents
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
-  -> ([Int64] -> Q.Query (Maybe Int64))
+  -> ([Int64] -> Q.Query (a, Maybe Int64))
   -> [Int64]
-  -> m Int
-deleteJobsResumingParents _ _ _ [] = pure 0
+  -> m [a]
+deleteJobsResumingParents _ _ _ [] = pure []
 deleteJobsResumingParents schemaName tableName mkSql jobIds = withDbTransaction $ do
   rows <- MA.executeQuery (mkSql jobIds)
-  let parentIds = Set.toAscList . Set.fromList $ catMaybes rows
+  let parentIds = Set.toAscList . Set.fromList $ mapMaybe snd rows
   for_ parentIds $ tryResumeParent schemaName tableName
-  pure (length rows)
+  pure (map fst rows)
 
 -- | Delete multiple jobs from the dead letter queue, resuming any parents left
 -- childless. Returns the total number of DLQ jobs deleted.
@@ -1561,7 +1575,7 @@ deleteDLQJobsBatch
   -- ^ DLQ job IDs
   -> m Int64
 deleteDLQJobsBatch schemaName tableName dlqIds =
-  fromIntegral
+  fromIntegral . length
     <$> deleteJobsResumingParents schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
 
 -- | Delete force-cancel-flagged jobs by id and resume any parents left
@@ -1573,7 +1587,17 @@ deleteCancelledJobs
   -> [Int64]
   -> m Int
 deleteCancelledJobs schemaName tableName jobIds =
-  deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName) jobIds
+  length <$> deleteCancelledJobsReturning schemaName tableName jobIds
+
+-- | 'deleteCancelledJobs' reporting the ids it deleted.
+deleteCancelledJobsReturning
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> [Int64]
+  -> m [Int64]
+deleteCancelledJobsReturning schemaName tableName =
+  deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName)
 
 -- * Admin Operations
 
@@ -1805,6 +1829,25 @@ data QueueOverview = QueueOverview
   , overviewWorkersPaused :: Int64
   }
   deriving stock (Eq, Generic, Show)
+
+instance ToJSON QueueOverview where
+  toJSON o =
+    object
+      [ "queue" .= overviewQueue o
+      , "stats" .= overviewStats o
+      , "paused" .= overviewQueuePaused o
+      , "workersLive" .= overviewWorkersLive o
+      , "workersPaused" .= overviewWorkersPaused o
+      ]
+
+instance FromJSON QueueOverview where
+  parseJSON = withObject "QueueOverview" $ \o ->
+    QueueOverview
+      <$> o .: "queue"
+      <*> o .: "stats"
+      <*> o .: "paused"
+      <*> o .: "workersLive"
+      <*> o .: "workersPaused"
 
 allStatsRowCodec :: RowCodec QueueOverview
 allStatsRowCodec =
@@ -2567,6 +2610,62 @@ runGated schemaName task interval work = do
     tryClaimGate = do
       rows <- MA.executeQuery (Tmpl.tryClaimGateSQL schemaName task intervalSecs)
       pure $ not (null rows)
+
+-- | A gate name for a set of parts: the sorted set itself while it fits the gate's
+-- key, an md5 digest of it beyond that.
+gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
+gateNameFor prefix parts
+  | T.length joined <= maxGateNameLength = pure (prefix <> ":" <> joined)
+  | otherwise = do
+      rows <- MA.executeQuery (Tmpl.gateNameDigestSQL joined)
+      pure (prefix <> ":#" <> fromMaybe joined (listToMaybe rows))
+  where
+    joined = T.intercalate "," (sort parts)
+
+-- | Well under the btree index-row limit the gates table's primary key sits on.
+maxGateNameLength :: Int
+maxGateNameLength = 200
+
+-- | Where a shared result came from.
+data Shared a
+  = -- | This caller won the gate and ran the work itself.
+    Ran a
+  | -- | Read from the gate, with its age in seconds.
+    Published Double a
+  deriving stock (Eq, Functor, Show)
+
+-- | 'runGated' where the callers that lost the gate read the winner's published
+-- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
+-- after the gate transaction commits, so a slow scan holds neither the gate row
+-- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
+-- restarts from the publish.
+runGatedShared
+  :: (FromJSON a, MonadArbiter m, ToJSON a)
+  => SchemaName
+  -> Text
+  -> NominalDiffTime
+  -- ^ Minimum interval between runs.
+  -> NominalDiffTime
+  -- ^ How long a published result stands.
+  -> m a
+  -> m (Maybe (Shared a))
+runGatedShared schemaName task interval maxAge work =
+  runGated schemaName task interval claimedAt
+    >>= maybe (readGateMetadata schemaName task maxAge) (fmap (Just . Ran) . publish)
+  where
+    claimedAt = listToMaybe <$> MA.executeQuery Tmpl.gateClaimedAtSQL
+    publish at = do
+      a <- work
+      traverse_ (\t -> MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) t task)) at
+      pure a
+
+-- | What a task published on its gate row within @maxAge@. Throws on a payload that does not decode.
+readGateMetadata :: (FromJSON a, MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> m (Maybe (Shared a))
+readGateMetadata schemaName task maxAge = do
+  rows <- MA.executeQuery (Tmpl.gateMetadataSQL schemaName task (realToFrac maxAge))
+  traverse (\(v, age) -> Published age <$> decode v) (listToMaybe rows)
+  where
+    decode = either (\e -> throwParsing (task <> " gate payload: " <> T.pack e)) pure . parseEither parseJSON
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

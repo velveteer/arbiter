@@ -4,9 +4,17 @@
 
 {$DEMO_DOMAIN} {
 	encode zstd gzip
+
+	# Grafana runs with serve_from_sub_path, so it keeps the prefix.
+	handle /grafana* {
+		reverse_proxy grafana:3000
+	}
+
 	# flush_interval -1 disables response buffering so the admin UI's SSE
 	# stream (/api/v1/events/stream) reaches the browser live.
-	reverse_proxy demo:8080 {
-		flush_interval -1
+	handle {
+		reverse_proxy demo:8080 {
+			flush_interval -1
+		}
 	}
 }

@@ -731,11 +731,7 @@ getAllStatsHandler config tables =
   liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
     let env = serverEnv config
         schemaName = schema env
-    rows <- runSimpleDb env $ Ops.getAllQueueStats schemaName tables
-    pure $ AllStatsResponse {queues = map toEntry rows}
-  where
-    toEntry (Ops.QueueOverview q s qp wl wp) =
-      QueueStatsEntry {queue = q, stats = s, paused = qp, workersLive = fromIntegral wl, workersPaused = fromIntegral wp}
+    AllStatsResponse <$> runSimpleDb env (Ops.getAllQueueStats schemaName tables)
 
 -- | Table API handlers for a specific table
 tableServer

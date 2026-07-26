@@ -15,12 +15,14 @@ import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.Otel qualified as Otel
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
 import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( WorkerConfig (..)
+  , defaultLogConfig
   , mergedChildResults
   , namedWorkerPool
   , poolConfigForWorkers
@@ -37,7 +39,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
@@ -52,6 +54,7 @@ import Network.Wai.Middleware.Cors
   , simpleCorsResourcePolicy
   )
 import Network.Wai.Middleware.RequestLogger (logStdout)
+import OpenTelemetry.Instrumentation.Wai (newOpenTelemetryWaiMiddleware)
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
@@ -136,7 +139,11 @@ emailKeySuffix :: EmailPayload -> Text
 emailKeySuffix = fromMaybe "system" . emailDomain
 
 main :: IO ()
-main = do
+main = Otel.withTelemetryFromEnv runDemo
+
+-- | The demo proper.
+runDemo :: Otel.Telemetry -> IO ()
+runDemo tel = do
   -- Get config from environment or use defaults
   connStr <-
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
@@ -192,7 +199,8 @@ main = do
 
   -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
   mDevDir <- lookupEnv "ADMIN_DEV_DIR"
-  let app = case mDevDir of
+  traceHttp <- newOpenTelemetryWaiMiddleware
+  let app = traceHttp $ case mDevDir of
         Just dir -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
         Nothing -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdmin @DemoRegistry serverConfig
 
@@ -211,12 +219,14 @@ main = do
 
   -- Build worker pool list
   let workers =
-        [ namedWorkerPool demoWorkerCfg
-        , namedWorkerPool emailWorkerCfg
-        , namedWorkerPool notifWorkerCfg
-        , namedWorkerPool pipelineWorkerCfg
-        ]
-      handler = Signals.Catch $ shutdownPools workers
+        Otel.instrumentPools
+          tel
+          [ namedWorkerPool demoWorkerCfg
+          , namedWorkerPool emailWorkerCfg
+          , namedWorkerPool notifWorkerCfg
+          , namedWorkerPool pipelineWorkerCfg
+          ]
+  let handler = Signals.Catch $ shutdownPools workers
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
 
@@ -241,9 +251,20 @@ main = do
 
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
-  race_
-    (runSimpleDb workerEnv $ runWorkerPools workers)
-    (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
+
+  let serve =
+        race_
+          (runSimpleDb workerEnv $ runWorkerPools workers)
+          (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
+
+  when (isJust (Otel.metricsApp tel)) $ putStrLn $ "Metrics: http://localhost:" <> show metricsPort <> "/metrics"
+  putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
+  Otel.withMetricsEndpoint tel defaultLogConfig metricsPort $
+    runSimpleDb producerEnv $
+      Otel.withGauges tel defaultLogConfig 15 (liftIO serve)
+  where
+    metricsPort :: Int
+    metricsPort = 9464
 
 -- ---------------------------------------------------------------------------
 -- Worker configs

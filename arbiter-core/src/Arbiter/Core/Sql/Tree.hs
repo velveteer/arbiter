@@ -165,10 +165,10 @@ forceCancelJobSQL schema tableName jobId =
       |]
 
 -- | Delete force-cancel-flagged jobs by id, locking descending to match ack and force-cancel, returning each one's parent id.
-deleteCancelledJobsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
+deleteCancelledJobsSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
 deleteCancelledJobsSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
-   in [sql|WITH locked AS (SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND cancel_requested_at IS NOT NULL ORDER BY id DESC FOR UPDATE) DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked) RETURNING @{parent_id :: Maybe CInt8}|]
+   in [sql|WITH locked AS (SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND cancel_requested_at IS NOT NULL ORDER BY id DESC FOR UPDATE) DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
 
 -- | Flagged jobs whose lease has lapsed, so the claiming worker is no longer
 -- heartbeating and the reaper should delete them and resume their parents.

@@ -7,6 +7,7 @@ module Arbiter.Servant.Types
   ( module Arbiter.Servant.Types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
+  , QueueOverview (..)
   , QueueRow (..)
   , WorkerRow (..)
   , RateLimitPolicyView (..)
@@ -27,7 +28,7 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
 import Arbiter.Core.Job.Types qualified as Arb
-import Arbiter.Core.Operations (QueueStats)
+import Arbiter.Core.Operations (QueueOverview (..), QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Stats
   ( RateLimitBucketView (..)
@@ -79,6 +80,8 @@ apiJobPairs job =
   , "parentId" .= parentId job
   , "parentState" .= parentState job
   , "isRollup" .= isRollup job
+  , "traceparent" .= traceparent job
+  , "tracestate" .= tracestate job
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
   , "archiveFor" .= archiveFor job
@@ -111,6 +114,8 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .: "maxAttempts"
         <*> v .:? "parentId"
         <*> v .:? "parentState"
+        <*> v .:? "traceparent"
+        <*> v .:? "tracestate"
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
         <*> v .:? "archiveFor"
@@ -154,6 +159,8 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> v .:? "maxAttempts"
         <*> pure Nothing -- parentId: managed internally
         <*> pure Nothing -- parentState: managed internally
+        <*> pure Nothing -- traceparent: stamped at enqueue
+        <*> pure Nothing -- tracestate: stamped at enqueue
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
         -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.
@@ -253,21 +260,9 @@ data StatsResponse = StatsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | One queue's stats in the bulk landing response, with pause state: the queue's
--- own paused flag, plus how many of its live workers are paused.
-data QueueStatsEntry = QueueStatsEntry
-  { queue :: Text
-  , stats :: QueueStats
-  , paused :: Bool
-  , workersLive :: Int
-  , workersPaused :: Int
-  }
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
 -- | Every queue's stats, for the landing overview.
 data AllStatsResponse = AllStatsResponse
-  { queues :: [QueueStatsEntry]
+  { queues :: [QueueOverview]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

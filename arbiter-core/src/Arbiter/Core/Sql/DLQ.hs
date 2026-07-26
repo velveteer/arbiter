@@ -143,13 +143,15 @@ retryFromDLQSQL schema tableName dlqId =
         tree AS (
           SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
                  d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
+                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for,
+                 d.traceparent, d.tracestate
           FROM ${dlqTbl} d
           WHERE d.job_id = (SELECT job_id FROM root_job_id)
           UNION ALL
           SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
                  d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
+                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for,
+                 d.traceparent, d.tracestate
           FROM ${dlqTbl} d
           JOIN tree t ON d.parent_id = t.job_id
         ),
@@ -158,7 +160,7 @@ retryFromDLQSQL schema tableName dlqId =
           DELETE FROM ${dlqTbl}
           WHERE id IN (SELECT dlq_id FROM tree)
             AND (SELECT val FROM can_retry)
-          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for
+          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for, traceparent, tracestate
         ),
         -- Re-insert into main queue with computed suspended state:
         -- rollup finalizers are suspended if they have children (in this
@@ -166,7 +168,7 @@ retryFromDLQSQL schema tableName dlqId =
         inserted AS (
           INSERT INTO ${tbl} (id, payload, group_key, attempts, priority, max_attempts,
                               parent_id, parent_state, archive_for, suspended, rate_limit_key, rate_limit_prefix,
-                              rate_limit_cost, concurrency_key, concurrency_prefix)
+                              rate_limit_cost, concurrency_key, concurrency_prefix, traceparent, tracestate)
           SELECT d.job_id, d.payload, d.group_key, 0, d.priority, d.max_attempts,
                  d.parent_id, d.parent_state, d.archive_for,
                  CASE WHEN d.parent_state IS NOT NULL
@@ -174,7 +176,8 @@ retryFromDLQSQL schema tableName dlqId =
                      OR EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = d.job_id)
                    ELSE FALSE
                  END,
-                 d.rate_limit_key, d.rate_limit_prefix, d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix
+                 d.rate_limit_key, d.rate_limit_prefix, d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix,
+                 d.traceparent, d.tracestate
           FROM deleted d
           RETURNING *
         ),
@@ -235,10 +238,10 @@ moveToDLQBatchSQL schema tableName ids atts errs =
 -- | SQL template for deleting multiple DLQ jobs by ID
 --
 -- | Delete multiple DLQ jobs by id, returning each deleted job's parent_id (NULL if no parent).
-deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Maybe Int64)
 deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{parent_id :: Maybe CInt8}|]
+   in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
 
 -- | Cascade all descendants of a rollup parent to the DLQ.
 --

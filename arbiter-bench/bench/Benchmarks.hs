@@ -30,6 +30,7 @@ import Arbiter.Orville
   , orvilleRunHandlerWithConnection
   , orvilleWithDbTransaction
   )
+import Arbiter.Otel qualified as Otel
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
   ( BatchCallbacks (..)
@@ -42,6 +43,7 @@ import Arbiter.Worker
   )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race_)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -64,9 +66,23 @@ import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql
 import Numeric (showFFloat)
+import OpenTelemetry.Exporter.Span (ExportResult (..), SpanExporter (..))
+import OpenTelemetry.Metric (createMeterProvider, defaultSdkMeterProviderOptions)
+import OpenTelemetry.Metric.Core (setGlobalMeterProvider)
+import OpenTelemetry.Processor.Batch.Span (batchProcessor, batchTimeoutConfig)
+import OpenTelemetry.Resource (materializeResources, mkResource)
+import OpenTelemetry.Trace.Core
+  ( FlushResult (..)
+  , ShutdownResult (..)
+  , TracerProvider
+  , createTracerProvider
+  , emptyTracerProviderOptions
+  , setGlobalTracerProvider
+  )
 import Orville.PostgreSQL qualified as O
 import Orville.PostgreSQL.UnliftIO qualified as O
 import System.Exit (die)
+import System.IO.Unsafe (unsafePerformIO)
 import Test.Tasty (localOption, mkTimeout)
 import Test.Tasty.Bench
 import Test.Tasty.Providers (IsTest (..), singleTest, testPassed)
@@ -158,10 +174,56 @@ data QueueFlavor
   | -- | Ungrouped 'GroupedDormant': half the backlog parked 30 days out, half
     -- ready, exercising the ungrouped ready/due index split.
     UngroupedDormant
+  deriving stock (Eq)
 
 data BenchMode
   = BenchSingleJobMode
   | BenchBatchedJobsMode Int
+
+-- | Whether a trial's pools carry OpenTelemetry, measuring what instrumenting costs.
+data Instrumentation = Plain | Instrumented
+  deriving stock (Eq)
+
+-- | The SDK the instrumented trials record into: real span and metric machinery,
+-- exporting nowhere, so a trial measures instrumentation and not a collector.
+-- Built once, every trial sharing the one provider pair.
+benchTelemetry :: IO (TracerProvider, Otel.Telemetry)
+benchTelemetry = modifyMVar benchTelemetryVar $ \case
+  Just built -> pure (Just built, built)
+  Nothing -> do
+    processor <- batchProcessor batchTimeoutConfig discardSpans
+    tp <- createTracerProvider [processor] emptyTracerProviderOptions
+    (mp, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+    setGlobalMeterProvider mp
+    -- The handle holds nothing bracketed, so it outlives the call.
+    tel <- Otel.withExternalTelemetry mp Nothing pure
+    pure (Just (tp, tel), (tp, tel))
+  where
+    discardSpans =
+      SpanExporter
+        { spanExporterExport = const (pure Success)
+        , spanExporterShutdown = pure ShutdownSuccess
+        , spanExporterForceFlush = pure FlushSuccess
+        }
+
+benchTelemetryVar :: MVar (Maybe (TracerProvider, Otel.Telemetry))
+benchTelemetryVar = unsafePerformIO (newMVar Nothing)
+{-# NOINLINE benchTelemetryVar #-}
+
+-- | Instrument a trial's pools, or hand them back untouched. Each trial installs the
+-- global tracer provider it measures.
+instrumentPools
+  :: (MonadUnliftIO m)
+  => Instrumentation
+  -> [WorkerConfig m BenchPayload]
+  -> IO [WorkerConfig m BenchPayload]
+instrumentPools Plain configs = do
+  setGlobalTracerProvider =<< createTracerProvider [] emptyTracerProviderOptions
+  pure configs
+instrumentPools Instrumented configs = do
+  (tp, tel) <- benchTelemetry
+  setGlobalTracerProvider tp
+  pure (map (Otel.instrumentPool tel "bench_queue") configs)
 
 -- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
 -- flaky (fail once into backoff), a fifth are scheduled into the near future,
@@ -636,8 +698,18 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
   pure (mkSteadyResult throughput processed snap0 snap1 trg)
 
 simpleSteadyStateTrial
-  :: RunM SimpleM -> RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult
-simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  :: RunM SimpleM
+  -> RunM SimpleM
+  -> Connection
+  -> Int
+  -> Int
+  -> Int
+  -> Int
+  -> BenchMode
+  -> QueueFlavor
+  -> Instrumentation
+  -> IO SteadyResult
+simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
@@ -649,11 +721,32 @@ simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPe
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM statsConn configs processedCounter producerBatchSize 10 50_000 flavor durationUs
+  instrumented <- instrumentPools otel configs
+  runSteadyStateTrial
+    runM
+    producerRunM
+    statsConn
+    instrumented
+    processedCounter
+    producerBatchSize
+    10
+    50_000
+    flavor
+    durationUs
 
 hasqlSteadyStateTrial
-  :: RunM HasqlM -> RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult
-hasqlSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  :: RunM HasqlM
+  -> RunM SimpleM
+  -> Connection
+  -> Int
+  -> Int
+  -> Int
+  -> Int
+  -> BenchMode
+  -> QueueFlavor
+  -> Instrumentation
+  -> IO SteadyResult
+hasqlSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
@@ -665,11 +758,32 @@ hasqlSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPer
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM statsConn configs processedCounter producerBatchSize 10 50_000 flavor durationUs
+  instrumented <- instrumentPools otel configs
+  runSteadyStateTrial
+    runM
+    producerRunM
+    statsConn
+    instrumented
+    processedCounter
+    producerBatchSize
+    10
+    50_000
+    flavor
+    durationUs
 
 orvilleSteadyStateTrial
-  :: RunM OrvilleM -> RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult
-orvilleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor = do
+  :: RunM OrvilleM
+  -> RunM SimpleM
+  -> Connection
+  -> Int
+  -> Int
+  -> Int
+  -> Int
+  -> BenchMode
+  -> QueueFlavor
+  -> Instrumentation
+  -> IO SteadyResult
+orvilleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
   processedCounter <- newIORef (0 :: Int)
   configs <- replicateM numPools $ case modeConfig of
     BenchSingleJobMode -> do
@@ -681,7 +795,18 @@ orvilleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersP
         acked <- flakyBatch cb jobs
         liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
       pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-  runSteadyStateTrial runM producerRunM statsConn configs processedCounter producerBatchSize 10 50_000 flavor durationUs
+  instrumented <- instrumentPools otel configs
+  runSteadyStateTrial
+    runM
+    producerRunM
+    statsConn
+    instrumented
+    processedCounter
+    producerBatchSize
+    10
+    50_000
+    flavor
+    durationUs
 
 -- Setup
 
@@ -1029,13 +1154,13 @@ main = do
       , bgroup "Worker Throughput (orville)" $
           orvilleWorkerBenches statsConn simpleEnv orvilleRun
       , bgroup "Steady-State Throughput (simple)" $
-          steadyStateBenches (\d p w b m f -> simpleSteadyStateTrial simpleRun producerRun statsConn d p w b m f)
+          steadyStateBenches (simpleSteadyStateTrial simpleRun producerRun statsConn)
       , bgroup "Steady-State Throughput (hasql)" $
-          steadyStateBenches (\d p w b m f -> hasqlSteadyStateTrial hasqlPreparedRun producerRun statsConn d p w b m f)
+          steadyStateBenches (hasqlSteadyStateTrial hasqlPreparedRun producerRun statsConn)
       , bgroup "Steady-State Throughput (orville)" $
-          steadyStateBenches (\d p w b m f -> orvilleSteadyStateTrial orvilleRun producerRun statsConn d p w b m f)
+          steadyStateBenches (orvilleSteadyStateTrial orvilleRun producerRun statsConn)
       , bgroup "Gating Overhead (hasql)" $
-          gatingBenches settleGated (\m t j d -> hasqlGatedSteadyTrial hasqlPreparedRun producerRun statsConn m t j d)
+          gatingBenches settleGated (hasqlGatedSteadyTrial hasqlPreparedRun producerRun statsConn)
       ]
 
 _claimBenches :: SimpleEnv BenchRegistry -> Int -> [(String, QueueFlavor)] -> [Benchmark]
@@ -1140,24 +1265,26 @@ mkWorkerFlavorBenches simpleEnv trial pools workers flavors =
               ]
 
 steadyStateBenches
-  :: (Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> IO SteadyResult)
+  :: (Int -> Int -> Int -> Int -> BenchMode -> QueueFlavor -> Instrumentation -> IO SteadyResult)
   -> [Benchmark]
 steadyStateBenches trial =
   [ bgroup "4 pools x 10 workers" $
       flip map steadyStateFlavors $ \(label, flavor) ->
         let producerBatch = 100
-            mkBench name mode =
+            mkBench name mode otel =
               singleTest name $
                 ThroughputBench $
                   multiTrialSteady
                     trialCount
                     cleanupFresh
-                    (trial trialDurationUs 4 10 producerBatch mode flavor)
-         in bgroup
-              label
-              [ mkBench "single job mode" BenchSingleJobMode
-              , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10)
+                    (trial trialDurationUs 4 10 producerBatch mode flavor otel)
+         in bgroup label $
+              [ mkBench "single job mode" BenchSingleJobMode Plain
+              , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10) Plain
               ]
+                -- One flavor carries the OTel comparison, the cost being per job
+                -- rather than per queue shape.
+                <> [mkBench "single job mode (instrumented)" BenchSingleJobMode Instrumented | flavor == Ungrouped]
   ]
   where
     steadyStateFlavors :: [(String, QueueFlavor)]

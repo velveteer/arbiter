@@ -20,6 +20,7 @@ An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 - Job deduplication via unique keys
 - Cross-queue per-job rate limiting with operator-tunable token-bucket policies
 - Cross-queue per-job concurrency limits - at most N jobs sharing a key in flight
+- OpenTelemetry traces built in, metrics and logs via `arbiter-otel`
 - Observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes / systemd
@@ -846,6 +847,136 @@ Global endpoints under `/api/v1/`:
 | `GET` | `concurrency/:prefix/keys` | List a pool's per-key in-flight counts |
 | `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
 | `POST` | `concurrency/reconcile` | Repair a pool's in-flight counts |
+
+## OpenTelemetry
+
+Spans and W3C trace-context propagation are built in: an enqueue stamps the ambient
+span onto the job, and a worker runs each claim inside a `process <queue>` consumer span
+linked back to it. Nothing is exported until an SDK is installed, so this costs an
+untraced deployment nothing.
+
+`arbiter-otel` installs that SDK, and adds metrics, gauges and OTel log records.
+
+```haskell
+import Arbiter.Otel qualified as Otel
+import Arbiter.Simple (createSimpleEnv, runSimpleDb)
+import Data.Text (unpack)
+
+main :: IO ()
+main = Otel.withTelemetryFromEnv $ \tel -> do
+  putStrLn (unpack (Otel.telemetrySummary tel))
+  env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+  let pools = Otel.instrumentPools tel [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
+
+  Otel.withMetricsEndpoint tel defaultLogConfig 9464 $
+    runSimpleDb env $
+      Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
+```
+
+That prints what the handle turned on, so an empty dashboard is explained at startup:
+
+```
+traces=otlp, metrics=scrape+otlp, logs=off, service.name=orders
+```
+
+A signal whose exporter fails to start is logged, reported `off`, and does not take the process down.
+
+### Entry points
+
+| Function | Installs the SDK |
+| --- | --- |
+| `withTelemetryFromEnv` | Once a signal names an exporter or endpoint, never under `OTEL_SDK_DISABLED` |
+| `withTelemetryIf cond` | When your own config says so |
+| `withTelemetry` | Always |
+| `withExternalTelemetry mp mlp` | Never - binds to the meter provider you hand it, and to the logger provider when you pass one |
+
+An unconfigured handle is inert - no SDK, no gauge scan, no scrape port - so the wiring above is the same either way.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | One collector for all three signals. Per-signal variables override it |
+| `OTEL_SERVICE_NAME` | Reported on every signal |
+| `OTEL_METRICS_EXPORTER=prometheus` | Scrape endpoint only, no push - for a traces-only backend |
+| `OTEL_METRICS_EXPORTER=none` | Metrics off: no scrape endpoint, no health scan. Traces and logs untouched |
+| `OTEL_LOGS_EXPORTER=none` | Logs stay on your own destination only |
+| `OTEL_SDK_DISABLED=true` | Nothing installed |
+
+A signal with no exporter named and no endpoint set is off, rather than exported to a
+collector on localhost. Name its exporter (`OTEL_TRACES_EXPORTER=otlp`) or set an
+endpoint to turn it on. What each signal ended up doing is in the startup summary.
+
+### Traces
+
+Every enqueue carries the ambient span, and every claim opens a consumer span linked
+back to it - across process boundaries, and across jobs when a handler enqueues
+children. No wiring, and `instrumentPools` is not needed for any of it.
+
+The span helpers live in `Arbiter.Core.Trace`:
+
+| Call | Use |
+| --- | --- |
+| `addSpanAttributes` | Annotate the job's own span from a handler |
+| `withSpan` | A child span inside a handler |
+| `withPublishSpan` | A producer span around an enqueue outside a handler |
+| `withJobParent` | Run under the job's stored context rather than linking to it, for a queue you know is processed promptly |
+
+A handler that overrides `getTraceContext` decides for itself what an enqueue stamps.
+
+### Metrics
+
+| Source | Reported |
+| --- | --- |
+| Jobs | Throughput by terminal outcome, retries, claim counts, handler latency |
+| Queues | Depth by status |
+| Admission | What each policy admitted, keys governed, slots in use against the cap, tokens left - keyed by policy, never by the admission key |
+| Reaper | Rows each op touched |
+| Postgres | Connections, dead tuples, transaction age, cache hits |
+
+- `withGauges` scans the queues your registry declares. One handle runs one set of gauges, so wrap the whole process, not each pool.
+- Postgres health covers arbiter's own role unless you grant it `pg_read_all_stats`.
+- One replica scans per interval and the rest export its reading, so the scan cost does not grow with the fleet. An age gauge tells a fresh scan from one that stopped.
+
+Aggregating across replicas:
+
+| Metric | Aggregate |
+| --- | --- |
+| Queue depth, Postgres health | `max` - `sum` multiplies by replica count |
+| Processed, retries, latency | `sum` |
+
+The bundled dashboard does both.
+
+Pushing through a collector: its `prometheus` exporter needs `add_metric_suffixes: false`, or metrics arrive as `arbiter_jobs_processed_total` and panels built on the direct scrape go blank. `arbiter-otel/deploy/observability/collector.yaml` sets it.
+
+### Logs
+
+OTel log records carrying the job's trace, id, queue, and attempt, sent alongside your configured destination rather than instead of it.
+
+### HTTP
+
+- `withMetricsEndpoint tel defaultLogConfig 9464` serves the scrape endpoint on its own port.
+- Or mount `Otel.metricsApp` elsewhere: it answers at its mount root and at `/metrics`, 404s anything else.
+- Server spans come from `newOpenTelemetryWaiMiddleware` (`hs-opentelemetry-instrumentation-wai`).
+
+An enqueue over the REST API joins the request's trace on its own, the server span being
+ambient when the handler runs.
+
+### Local stack
+
+Grafana + Prometheus + Tempo + Loki with an arbiter dashboard provisioned, under `arbiter-otel/deploy/observability`:
+
+```
+docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+  OTEL_METRICS_EXPORTER=prometheus OTEL_SERVICE_NAME=arbiter-demo \
+  cabal run arbiter-demo
+```
+
+Tempo takes the traces, Loki the logs, and Prometheus scrapes the metrics.
+
+The [live demo](https://demo.arbiterq.dev/) runs the same stack from the same configs, with
+its dashboard at [/grafana](https://demo.arbiterq.dev/grafana) as an anonymous viewer.
 
 ## Backend Integration
 

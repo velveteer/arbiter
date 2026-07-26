@@ -264,6 +264,8 @@ jobCodecWith idColumn queueName =
     <*> lmap (Just . fromMaybe defaultMaxAttempts . maxAttempts . fst) (rwN "max_attempts" CInt4)
     <*> lmap (parentId . fst) (rwN "parent_id" CInt8)
     <*> lmap (parentState . fst) (rwN "parent_state" CJsonb)
+    <*> lmap (traceparent . fst) (rwN "traceparent" CText)
+    <*> lmap (tracestate . fst) (rwN "tracestate" CText)
     <*> lmap (suspended . fst) (rw "suspended" CBool)
     <*> ro (ncol "claimed_by" CUuid)
     <*> lmap (archiveFor . fst) (rwN "archive_for" CInt4)
