@@ -129,7 +129,7 @@ module Arbiter.Core.HighLevel
     -- * Cron Schedule Operations
   , listCronSchedules
   , getCronScheduleByName
-  , updateCronSchedule
+  , updateCronScheduleUnchecked
 
     -- * Global Gate
   , runGated
@@ -1402,14 +1402,14 @@ getCronScheduleByName scheduleName = do
 --
 -- Writes the overrides as given. @Arbiter.Worker.updateCronScheduleChecked@
 -- rejects ones the scheduler cannot parse.
-updateCronSchedule
+updateCronScheduleUnchecked
   :: forall m registry
    . (ArbiterSchema m registry, MonadArbiter m)
   => Text
   -- ^ Schedule name
   -> CronScheduleUpdate
   -> m Int64
-updateCronSchedule scheduleName upd = do
+updateCronScheduleUnchecked scheduleName upd = do
   schemaName <- getSchema
   Ops.updateCronSchedule schemaName scheduleName upd
 

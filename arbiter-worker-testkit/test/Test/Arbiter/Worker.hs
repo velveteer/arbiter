@@ -92,7 +92,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Async qualified as Async
 
-import Arbiter.Worker.TestKit (maybeListProbe, workerSpec)
+import Arbiter.Worker.TestKit (workerSpec)
 
 type WorkerTestRegistry = '[QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
 
@@ -113,7 +113,6 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       SimpleTask
       FailingTask
       (\f _conn job -> f job)
-      maybeListProbe
       runSimpleDb
 
     describe "Reaper op bounding" $ do

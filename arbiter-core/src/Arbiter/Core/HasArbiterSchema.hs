@@ -42,8 +42,6 @@ type ArbiterSchema m (registry :: JobPayloadRegistry) =
 -- @
 --
 -- Otherwise pin the result type itself with @ResultOf m payload ~ ()@. Worker
--- configs take @result@ as an ordinary parameter, so this reaches only code
--- that names @ResultOf@: 'Arbiter.Worker.mergedChildResults' directly, or a
--- polymorphic wrapper around 'Arbiter.Worker.transactionalWorkerConfig' and
--- 'Arbiter.Worker.defaultBatchedWorkerConfig', which return it.
+-- configs take @result@ as an ordinary parameter, so this reaches only code that
+-- names @ResultOf@ in its own signature.
 type ResultOf m (payload :: Type) = ResultFor payload (RegistryOf m)

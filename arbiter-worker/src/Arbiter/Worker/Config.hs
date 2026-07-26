@@ -9,6 +9,7 @@ module Arbiter.Worker.Config
   , manualWorkerConfig
   , defaultBatchedWorkerConfig
   , HandlerMode (..)
+  , ResultOf
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
@@ -43,12 +44,12 @@ import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Configuration for a worker pool. @result@ is pinned to
--- @'ResultOf' m payload@ by 'transactionalWorkerConfig' and 'defaultBatchedWorkerConfig'.
+-- @'ResultOf' m payload@ by this module's config constructors.
 data WorkerConfig m payload result = WorkerConfig
   { workerCount :: Int
   -- ^ Number of concurrent worker threads.
   , handlerMode :: HandlerMode m payload result
-  -- ^ Job handler and claiming strategy. Set by 'transactionalWorkerConfig' or 'defaultBatchedWorkerConfig'.
+  -- ^ Job handler and claiming strategy. Set by this module's config constructors.
   , pollInterval :: NominalDiffTime
   -- ^ Cadence floor in seconds for the dispatcher poll.
   -- Default: 5.
@@ -151,7 +152,7 @@ data BatchCallbacks m payload result = BatchCallbacks
   -- attempt consumed.
   }
 
--- | How the worker claims and runs jobs. Set by 'transactionalWorkerConfig' or 'defaultBatchedWorkerConfig'.
+-- | How the worker claims and runs jobs. Set by this module's config constructors.
 data HandlerMode m payload result
   = -- | Automatic single-job mode: claim one job per group and run the handler
     -- in a worker transaction, storing its result and acking atomically.

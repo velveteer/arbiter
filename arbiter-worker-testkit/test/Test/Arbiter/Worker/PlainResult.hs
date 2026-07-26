@@ -91,7 +91,7 @@ spec connStr =
                   liftIO $ atomicModifyIORef' ackedRef $ \n -> (n + 1 + length rest, ())
           cfg <- defaultBatchedWorkerConfig 1 10 handler
           runSimpleDb env $
-            mapM_
+            traverse_
               (\i -> void $ HL.insertJob ((defaultJob (NoResultTask i)) {archiveFor = Just dayRetention}))
               ["a", "b", "c"]
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->

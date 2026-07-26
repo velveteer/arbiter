@@ -9,6 +9,7 @@ module Arbiter.Core.JobResult
 
 import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
 import Data.Aeson qualified as Aeson
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -27,10 +28,9 @@ instance EncodeJobResult () where
 
 instance {-# OVERLAPPABLE #-} (ToJSON a) => EncodeJobResult a
 
--- | An optional result. @Nothing@ stores nothing, @Just@ defers to @a@'s
--- instance, which may also store nothing.
-instance {-# OVERLAPPING #-} (EncodeJobResult a) => EncodeJobResult (Maybe a) where
-  shouldStore = maybe False shouldStore
+-- | An optional result. @Nothing@ stores nothing, @Just@ stores the wrapped value.
+instance {-# OVERLAPPING #-} (ToJSON a) => EncodeJobResult (Maybe a) where
+  shouldStore = isJust
 
 -- | A result's stored JSON, or 'Nothing' when its instance declines to store it.
 encodeJobResult :: (EncodeJobResult a) => a -> Maybe Value

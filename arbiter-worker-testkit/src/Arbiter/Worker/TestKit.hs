@@ -6,8 +6,6 @@
 -- | Parameterized worker-pool test suite, instantiated for each 'MonadArbiter' backend.
 module Arbiter.Worker.TestKit
   ( workerSpec
-  , ResultProbe (..)
-  , maybeListProbe
   , listenerSpec
   , multiQueueListenerSpec
   ) where
@@ -34,7 +32,6 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   )
-import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
@@ -60,7 +57,7 @@ import Arbiter.Worker.Config
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (Value, toJSON)
+import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -83,34 +80,16 @@ import UnliftIO.Async (withAsync)
 -- @mkSimple@/@mkFailing@ construct the backend's payload, @mkHandler@ adapts a
 -- plain job action into the backend's 'JobHandler' shape (some backends pass a
 -- connection, others do not), and @runM@ runs a backend action in 'IO'.
--- | How a backend builds and reads back its queue's result type, so the
--- result-storage tests do not have to pin one.
-data ResultProbe result = ResultProbe
-  { resultStored :: [Text] -> result
-  -- ^ A result that stores the given values
-  , resultAbsent :: result
-  -- ^ A result that stores nothing
-  , resultJson :: [Text] -> Value
-  -- ^ The JSON 'resultStored' is expected to persist as
-  }
-
--- | 'ResultProbe' for a @Maybe [Text]@ result.
-maybeListProbe :: ResultProbe (Maybe [Text])
-maybeListProbe =
-  ResultProbe
-    { resultStored = Just
-    , resultAbsent = Nothing
-    , resultJson = toJSON
-    }
-
+--
+-- The queue under test declares @Maybe [Text]@ as its result type.
 workerSpec
   :: forall payload registry env m
-   . ( EncodeJobResult (ResultOf m payload)
-     , Eq payload
+   . ( Eq payload
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryAdmissionPolicies registry
      , RegistryTables registry
+     , ResultOf m payload ~ Maybe [Text]
      , Show payload
      )
   => (Text -> payload)
@@ -119,12 +98,10 @@ workerSpec
   -- ^ Construct a failing task payload
   -> (forall r. (JobRead payload -> m r) -> JobHandler m payload r)
   -- ^ Adapt a job action into the backend's handler shape, result-polymorphic
-  -> ResultProbe (ResultOf m payload)
-  -- ^ Build and read back the queue's result type
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function (e.g. runSimpleDb env or runOrvilleTest env)
   -> SpecWith env
-workerSpec mkSimple mkFailing mkHandler probe runM = do
+workerSpec mkSimple mkFailing mkHandler runM = do
   describe "Worker Pool" $ do
     it "processes jobs successfully" $ \env -> do
       completedRef <- newIORef []
@@ -352,7 +329,7 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
 
     it "archives the row but stores no result for a Nothing result" $ \env -> do
       cfg :: WorkerConfig m payload (ResultOf m payload) <-
-        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (resultAbsent probe)))
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Nothing :: Maybe [Text])))
       void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
@@ -365,7 +342,7 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
 
     it "stores the wrapped value for a Just result" $ \env -> do
       cfg :: WorkerConfig m payload (ResultOf m payload) <-
-        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (resultStored probe ["kept"])))
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["kept"] :: Maybe [Text])))
       void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just dayRetention})
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
@@ -374,14 +351,14 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
           pure (any ((== mkSimple "just-result") . payload . Archive.archivedSnapshot) arch)
         arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
         let mine = find ((== mkSimple "just-result") . payload . Archive.archivedSnapshot) arch
-        (Archive.archivedResult =<< mine) `shouldBe` Just (resultJson probe ["kept"])
+        (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["kept" :: Text])
 
     it "does not archive a result when archiveFor is unset" $ \env -> do
       doneRef <- newIORef False
       cfg :: WorkerConfig m payload (ResultOf m payload) <-
         transactionalWorkerConfig
           1
-          (mkHandler (\_job -> liftIO (writeIORef doneRef True) >> pure (resultStored probe ["unkept"])))
+          (mkHandler (\_job -> liftIO (writeIORef doneRef True) >> pure (Just ["unkept"] :: Maybe [Text])))
       void $ runM env $ HL.insertJob (defaultJob (mkSimple "no-arch-result"))
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
@@ -392,7 +369,7 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
 
     it "stores a child's result in the tree, not on its archive row" $ \env -> do
       cfg :: WorkerConfig m payload (ResultOf m payload) <-
-        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (resultStored probe ["child-result"])))
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["child-result"] :: Maybe [Text])))
       let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just dayRetention}
       void $ runM env $ HL.insertJobTree $ defaultJob (mkSimple "arch-root") <~~ (child :| [])
 
@@ -426,7 +403,7 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
 
     it "preserves a child's parent linkage on its archived row" $ \env -> do
       cfg :: WorkerConfig m payload (ResultOf m payload) <-
-        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (resultStored probe ["ok"])))
+        transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["ok"] :: Maybe [Text])))
       let child = (defaultJob (mkSimple "pl-child")) {archiveFor = Just dayRetention}
           root = (defaultJob (mkSimple "pl-root")) {archiveFor = Just dayRetention}
       void $ runM env $ HL.insertJobTree $ root <~~ (child :| [])
@@ -609,8 +586,8 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
       let handler jobs cbs = case toList jobs of
             [] -> pure ()
             (j : rest) -> do
-              ackWith cbs j (resultStored probe ["first"])
-              ackAllWith cbs (map (\r -> (r, resultStored probe ["rest"])) rest)
+              ackWith cbs j (Just ["first"])
+              ackAllWith cbs (map (\r -> (r, Just ["rest"])) rest)
       runM env $
         traverse_
           (\n -> void $ HL.insertJob ((defaultJob (mkSimple n)) {groupKey = Just "aw", archiveFor = Just dayRetention}))
@@ -622,9 +599,9 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
 
       arch <- runM env $ HL.listArchiveJobs @m @registry @payload 100 0
       let resultFor p = Archive.archivedResult =<< find ((== mkSimple p) . payload . Archive.archivedSnapshot) arch
-      resultFor "aw-1" `shouldBe` Just (resultJson probe ["first"])
-      resultFor "aw-2" `shouldBe` Just (resultJson probe ["rest"])
-      resultFor "aw-3" `shouldBe` Just (resultJson probe ["rest"])
+      resultFor "aw-1" `shouldBe` Just (toJSON ["first" :: Text])
+      resultFor "aw-2" `shouldBe` Just (toJSON ["rest" :: Text])
+      resultFor "aw-3" `shouldBe` Just (toJSON ["rest" :: Text])
 
   describe "Group Ordering" $ do
     it "processes jobs in the same group serially" $ \env -> do
@@ -1381,7 +1358,7 @@ workerSpec mkSimple mkFailing mkHandler probe runM = do
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload (ResultOf m payload))
-    mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (resultAbsent probe)))
+    mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (Nothing :: Maybe [Text])))
     mkBatchedConfig
       :: Int
       -> Int

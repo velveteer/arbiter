@@ -15,7 +15,7 @@ import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
-import Arbiter.Worker.TestKit (maybeListProbe, workerSpec)
+import Arbiter.Worker.TestKit (workerSpec)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
@@ -64,7 +64,7 @@ testTable = "arbiter_orville_worker_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry SimpleTask FailingTask id maybeListProbe runOrvilleTest
+  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry SimpleTask FailingTask id runOrvilleTest
 
   describe "Transactional Atomicity" $ do
     it "rolls back user operations when handler fails" $ \env -> do

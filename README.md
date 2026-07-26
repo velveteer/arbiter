@@ -266,13 +266,6 @@ A handler can produce a value - its **result** - by returning it under
 `transactionalWorkerConfig`, or by passing it to `ackWith`/`ackAllWith` under a
 manual or batched config.
 
-```haskell
-type AppRegistry =
-  '[ Queue "email_queue" EmailPayload -- ResultOf m EmailPayload ~ ()
-   , QueueWithResult "image_queue" ImagePayload Score
-   ]
-```
-
 Producing a result does not store it on its own - whether it is kept, and
 where, depends on the job:
 
@@ -288,15 +281,20 @@ own records and sum types work as results directly.
 
 To decide per run whether there is anything worth keeping, make the queue's
 result type a `Maybe`. `Nothing` stores nothing at all - no archive entry
-result, and no row for a rollup parent to collect, so that child is absent from
-`childResults` rather than present with an empty value. `Just v` stores `v`.
+result, and no row for a rollup parent to collect.
 
 ```haskell
-type AppRegistry =
-  '[ QueueWithResult "sync_queue" SyncPayload (Maybe SyncReport)
-   ]
+data SyncReport = SyncReport
+  { rowsChanged :: Int
+  , notes :: [Text]
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
-syncHandler job = do
+type SyncRegistry = '[ QueueWithResult "sync_queue" SyncPayload (Maybe SyncReport) ]
+
+syncHandler :: Arb.JobHandler (ArbS.SimpleDb SyncRegistry IO) SyncPayload (Maybe SyncReport)
+syncHandler _conn job = do
   report <- runSync (Arb.payload job)
   pure $ if rowsChanged report == 0 then Nothing else Just report
 ```
@@ -923,6 +921,8 @@ custom monad with `MonadOrville`, `HasArbiterSchema`, and `MonadArbiter`
 instances:
 
 ```haskell
+{-# LANGUAGE TypeFamilies #-}
+
 instance HasArbiterSchema AppM where
   type RegistryOf AppM = AppRegistry
   getSchema = asks appSchema

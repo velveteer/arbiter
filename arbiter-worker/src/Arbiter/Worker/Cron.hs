@@ -129,7 +129,7 @@ validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
       Just (Just v) | not (ok v) -> Left message
       _ -> Right ()
 
--- | 'Arbiter.Core.HighLevel.updateCronSchedule' behind
+-- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
 -- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
 updateCronScheduleChecked
   :: (ArbiterSchema m registry, MonadArbiter m)
@@ -139,7 +139,7 @@ updateCronScheduleChecked
 updateCronScheduleChecked scheduleName upd =
   case validateCronScheduleUpdate upd of
     Left err -> pure (Left err)
-    Right () -> Right <$> HL.updateCronSchedule scheduleName upd
+    Right () -> Right <$> HL.updateCronScheduleUnchecked scheduleName upd
 
 -- | A cron schedule definition.
 --
