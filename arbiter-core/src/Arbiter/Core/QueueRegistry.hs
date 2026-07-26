@@ -39,17 +39,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 
--- | A queue's table name, payload type, and handler result type.
---
--- This is a @type data@ constructor, so it lives in the type namespace and takes
--- no promotion tick.
+-- | A queue's table name, payload type, and handler result type. A @type data@
+-- constructor, so it takes no promotion tick.
 type data QueueSpec = QueueWithResult Symbol Type Type
 
--- | A queue whose handlers store no result. Type errors and haddock print the
--- expanded 'QueueWithResult' form.
---
--- A module with its own @Queue@ type needs @import Arbiter.Core hiding (Queue)@
--- or a qualified import.
+-- | A queue whose handlers store no result. A module with its own @Queue@ type
+-- needs @import Arbiter.Core hiding (Queue)@ or a qualified import.
 type Queue (table :: Symbol) (payload :: Type) = QueueWithResult table payload ()
 
 -- | A type-level registry mapping table names to payload types.

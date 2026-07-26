@@ -25,23 +25,6 @@ class (Monad m) => HasArbiterSchema m where
 type ArbiterSchema m (registry :: JobPayloadRegistry) =
   (HasArbiterSchema m, RegistryOf m ~ registry)
 
--- | The result type declared by @payload@'s registry entry.
---
--- Not injective, so a signature that mentions @ResultOf@ without pinning
--- @payload@ elsewhere is ambiguous, and the error names 'ResultFor' and
--- 'Arbiter.Core.QueueRegistry.SpecForPayload' rather than the user's own code.
--- An equality constraint does not settle it, since @payload@ stays free on both
--- sides. Another argument has to determine @payload@:
---
--- @
--- -- rejected
--- runAll :: (HasArbiterSchema m) => ResultOf m payload -> m ()
--- runAll :: (HasArbiterSchema m, ResultOf m payload ~ r) => r -> m ()
--- -- accepted
--- runAll :: (HasArbiterSchema m) => JobRead payload -> ResultOf m payload -> m ()
--- @
---
--- Otherwise pin the result type itself with @ResultOf m payload ~ ()@. Worker
--- configs take @result@ as an ordinary parameter, so this reaches only code that
--- names @ResultOf@ in its own signature.
+-- | The result type declared by @payload@'s registry entry. Not injective, so a
+-- signature naming it needs another argument to determine @payload@.
 type ResultOf m (payload :: Type) = ResultFor payload (RegistryOf m)

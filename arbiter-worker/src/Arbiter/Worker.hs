@@ -176,6 +176,7 @@ data NamedWorkerPool m
   , EncodeJobResult result
   , QueueOperation m registry payload
   , RegistryTables registry
+  , result ~ ResultOf m payload
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
@@ -191,6 +192,7 @@ namedWorkerPool
      , EncodeJobResult result
      , QueueOperation m registry payload
      , RegistryTables registry
+     , result ~ ResultOf m payload
      )
   => WorkerConfig m payload result
   -> NamedWorkerPool m
@@ -274,6 +276,7 @@ runWorkerPool
      , MonadUnliftIO m
      , QueueOperation m registry payload
      , RegistryTables registry
+     , result ~ ResultOf m payload
      )
   => WorkerConfig m payload result
   -> m ()
