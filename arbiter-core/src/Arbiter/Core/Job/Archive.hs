@@ -18,7 +18,7 @@ data ArchiveJob payload = ArchiveJob
   -- ^ Archive table primary key (distinct from the original job ID in the snapshot)
   , completedAt :: UTCTime
   -- ^ When the job was acked and archived
-  , archivedSnapshot :: JobSnapshot payload
+  , jobSnapshot :: JobSnapshot payload
   -- ^ Full job state at time of completion (payload, attempts, etc.)
   , archivedResult :: Maybe Value
   -- ^ Handler result stored for a completed root job (one with no parent).

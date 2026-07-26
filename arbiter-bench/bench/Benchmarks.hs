@@ -867,12 +867,16 @@ runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob
       durationUs
   pure (mkGatedResult throughput processed snap0 snap1 trg)
 
+-- | What a payload must satisfy to drive the gated benches.
+type GatedPayload payload =
+  ( QueueOperation HasqlM BenchRegistry payload
+  , QueueOperation SimpleM BenchRegistry payload
+  , ResultOf HasqlM payload ~ ()
+  )
+
 hasqlGatedSteadyTrial
   :: forall payload
-   . ( QueueOperation HasqlM BenchRegistry payload
-     , QueueOperation SimpleM BenchRegistry payload
-     , ResultOf HasqlM payload ~ ()
-     )
+   . (GatedPayload payload)
   => RunM HasqlM -> RunM SimpleM -> Connection -> BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
 hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = do
   processedCounter <- newIORef (0 :: Int)
@@ -892,10 +896,7 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = 
 gatingBenches
   :: IO ()
   -> ( forall payload
-        . ( QueueOperation HasqlM BenchRegistry payload
-          , QueueOperation SimpleM BenchRegistry payload
-          , ResultOf HasqlM payload ~ ()
-          )
+        . (GatedPayload payload)
        => BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
      )
   -> [Benchmark]
@@ -914,10 +915,7 @@ gatingBenches settle trial =
       , profile "both" "bench_both_queue" (wrap BenchBoth)
       ]
     profile
-      :: ( QueueOperation HasqlM BenchRegistry payload
-         , QueueOperation SimpleM BenchRegistry payload
-         , ResultOf HasqlM payload ~ ()
-         )
+      :: (GatedPayload payload)
       => String -> Text -> (Int -> JobWrite payload) -> Benchmark
     profile name table mkJob =
       bgroup

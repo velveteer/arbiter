@@ -143,7 +143,7 @@ import Arbiter.Worker.Cron
   , validateCronScheduleUpdate
   )
 import Arbiter.Worker.Dispatcher
-import Arbiter.Worker.EnabledQueues (enabledQueuesEnvVar, enabledQueuesForMonad, getEnabledQueues)
+import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad, getEnabledQueues)
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal
@@ -168,7 +168,7 @@ import Arbiter.Worker.WorkerState
 --   , namedWorkerPool imageConfig      -- "image_jobs"
 --   ]
 --
--- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
+-- main = runWorkerPools allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
   = forall registry payload.
@@ -204,16 +204,15 @@ namedWorkerPool cfg =
 -- in @ARBITER_ENABLED_QUEUES@ (all if unset). The setup action receives the
 -- shared 'TVar' for installing signal handlers.
 runWorkerPools
-  :: forall m registry
-   . (MonadUnliftIO m, RegistryTables registry)
-  => Proxy registry
-  -> [NamedWorkerPool m]
+  :: forall m
+   . (MonadUnliftIO m, RegistryTables (RegistryOf m))
+  => [NamedWorkerPool m]
   -> (TVar WorkerState -> IO ())
   -> m ()
-runWorkerPools registry pools setup = do
+runWorkerPools pools setup = do
   sharedState <- liftIO newWorkerState
   liftIO $ setup sharedState
-  enabled <- liftIO $ getEnabledQueues enabledQueuesEnvVar registry
+  enabled <- liftIO $ enabledQueuesForMonad @m
   runSelectedWorkerPools sharedState enabled pools
 
 -- | Run only the worker pools whose names appear in the enabled list.

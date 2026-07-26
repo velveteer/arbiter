@@ -99,7 +99,7 @@ spec connStr =
           readIORef ackedRef >>= (`shouldBe` 3)
           runSimpleDb env (HL.countJobs @_ @PlainRegistry @NoResultPayload) `shouldReturn` 0
           arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @NoResultPayload 100 0
-          map (payload . Archive.archivedSnapshot) arch
+          map (payload . Archive.jobSnapshot) arch
             `shouldMatchList` [NoResultTask "a", NoResultTask "b", NoResultTask "c"]
           map Archive.archivedResult arch `shouldBe` [Nothing, Nothing, Nothing]
 
@@ -116,9 +116,9 @@ spec connStr =
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ do
               arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-              pure (any ((== PlainResultTask "archived") . payload . Archive.archivedSnapshot) arch)
+              pure (any ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch)
           arch <- runSimpleDb env $ HL.listArchiveJobs @_ @PlainRegistry @PlainResultPayload 100 0
-          let mine = find ((== PlainResultTask "archived") . payload . Archive.archivedSnapshot) arch
+          let mine = find ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch
           (Archive.archivedResult =<< mine) `shouldBe` Just (toJSON ["alpha", "beta" :: Text])
 
       it "passes plain ackWith and ackAllWith results to a rollup parent" $ do

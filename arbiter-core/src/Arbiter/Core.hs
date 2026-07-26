@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+
 -- | Re-exports commonly used Arbiter functionality.
 module Arbiter.Core
   ( -- * Core types
@@ -30,12 +32,10 @@ module Arbiter.Core
 
     -- * Cron schedule overrides and worker health
 
-    -- | The admin row records ('CronScheduleRow', 'CronScheduleUpdate',
-    -- 'QueueRow', 'WorkerRow') are exported as types only. Their fields collide
-    -- with each other and with 'Job', so import the owning module for them:
-    -- @Arbiter.Core.CronSchedule@, @Arbiter.Core.Queues@, @Arbiter.Core.Worker@.
-  , CronScheduleRow
-  , CronScheduleUpdate
+    -- | The admin row records share field names with each other and with 'Job',
+    -- so unqualified use needs @DuplicateRecordFields@ or @OverloadedRecordDot@.
+  , CronScheduleRow (..)
+  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
@@ -61,8 +61,8 @@ module Arbiter.Core
 
 import Arbiter.Core.Codec
 import Arbiter.Core.CronSchedule
-  ( CronScheduleRow
-  , CronScheduleUpdate
+  ( CronScheduleRow (..)
+  , CronScheduleUpdate (..)
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone

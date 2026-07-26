@@ -189,7 +189,7 @@ instance (ToJSON payload) => ToJSON (ApiArchiveJob payload) where
     object
       [ "archivePrimaryKey" .= Archive.archivePrimaryKey a
       , "completedAt" .= Archive.completedAt a
-      , "jobSnapshot" .= ApiJob (Archive.archivedSnapshot a)
+      , "jobSnapshot" .= ApiJob (Archive.jobSnapshot a)
       , "result" .= Archive.archivedResult a
       ]
 

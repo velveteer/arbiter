@@ -243,7 +243,7 @@ main = do
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
   race_
-    (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
+    (runSimpleDb workerEnv $ runWorkerPools workers installSignals)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------

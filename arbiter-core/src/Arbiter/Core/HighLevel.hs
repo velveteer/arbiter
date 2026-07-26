@@ -117,14 +117,14 @@ module Arbiter.Core.HighLevel
   , deregisterWorker
   , listWorkers
   , sweepStaleWorkers
-  , WorkerRow
+  , WorkerRow (..)
 
     -- * Queue Operations
   , ensureQueue
   , setQueuePaused
   , getQueue
   , listQueues
-  , QueueRow
+  , QueueRow (..)
 
     -- * Cron Schedule Operations
   , listCronSchedules

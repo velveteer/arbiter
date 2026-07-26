@@ -1436,7 +1436,7 @@ decodeArchiveRow (aId, aCompletedAt, rawJob, aResult) = do
     Archive.ArchiveJob
       { Archive.archivePrimaryKey = aId
       , Archive.completedAt = aCompletedAt
-      , Archive.archivedSnapshot = snapshot
+      , Archive.jobSnapshot = snapshot
       , Archive.archivedResult = aResult
       }
 

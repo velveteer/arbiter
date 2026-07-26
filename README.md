@@ -704,7 +704,7 @@ let workers = [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageC
 poolCfg <- Worker.poolConfigForWorkers workers
 env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
 
-ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry) workers $ \state -> do
+ArbS.runSimpleDb env $ Worker.runWorkerPools workers $ \state -> do
   let shutdown = Signals.Catch $ Worker.signalShutdown state
   void $ Signals.installHandler Signals.sigTERM shutdown Nothing
   void $ Signals.installHandler Signals.sigINT shutdown Nothing
