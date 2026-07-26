@@ -28,7 +28,7 @@ testTable = "arbiter_orville_ops_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  operationsSpec @TestPayload @OrvilleOpsTestRegistry TestMessage pure (runOrvilleTest @OrvilleOpsTestRegistry)
+  operationsSpec @TestPayload TestMessage pure (runOrvilleTest @OrvilleOpsTestRegistry)
 
   describe "Transaction Participation" $ do
     it "commits job insertion within user transaction" $ \env -> do

@@ -6,8 +6,8 @@ module Main (main) where
 
 import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.Exceptions (throwRetryable)
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..), ResultOf)
-import Arbiter.Core.HighLevel (QueueOperation)
+import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), HasRegistry, ResultOf)
+import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
   ( JobRead
@@ -20,7 +20,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb, setPreparedStatements)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
@@ -511,7 +511,7 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 runWorkerTrial
-  :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
   => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
@@ -520,7 +520,7 @@ runWorkerTrial runM statsConn configs totalJobs durationUs =
       (mapConcurrently_ (\c -> runM $ runWorkerPool c) configs)
       (threadDelay durationUs)
     end <- getCurrentTime
-    remaining <- runM (HL.countJobs @_ @BenchRegistry @BenchPayload)
+    remaining <- runM (HL.countJobs @BenchPayload)
     let processed = totalJobs - fromIntegral remaining :: Int
         elapsed = realToFrac (diffUTCTime end start) :: Double
     pure (fromIntegral processed / elapsed, processed)
@@ -575,7 +575,7 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
 runSteadyStateTrial
-  :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
   => RunM m
   -- ^ Runner for workers
   -> RunM SimpleM
@@ -836,8 +836,10 @@ multiTrialGated n setup measure = formatGated <$> replicateM n (setup >> measure
 runGatedSteadyTrial
   :: ( EncodeJobResult (ResultOf m payload)
      , MonadUnliftIO m
-     , QueueOperation SimpleM BenchRegistry payload
-     , QueueOperation m BenchRegistry payload
+     , QueueOperation SimpleM payload
+     , QueueOperation m payload
+     , RegistryAdmissionPolicies (RegistryOf m)
+     , RegistryTables (RegistryOf m)
      )
   => RunM m
   -> RunM SimpleM
@@ -869,8 +871,8 @@ runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob
 
 -- | What a payload must satisfy to drive the gated benches.
 type GatedPayload payload =
-  ( QueueOperation HasqlM BenchRegistry payload
-  , QueueOperation SimpleM BenchRegistry payload
+  ( QueueOperation HasqlM payload
+  , QueueOperation SimpleM payload
   , ResultOf HasqlM payload ~ ()
   )
 
@@ -964,7 +966,7 @@ setupQueue simpleEnv totalJobs flavor = do
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue DISABLE TRIGGER USER")
   go 0
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue ENABLE TRIGGER USER")
-  runSimpleDb simpleEnv $ void $ HL.refreshAllGroups @_ @BenchRegistry
+  runSimpleDb simpleEnv $ void $ HL.refreshAllGroups
 
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")

@@ -40,7 +40,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource (fromJust (connectionPool (simplePool env)))
       reset = cleanupSimpleTest env testSchema testTable
-  stateMachineSpec @(SimpleDb SMRegistry IO) @SMRegistry
+  stateMachineSpec @(SimpleDb SMRegistry IO)
     run
     testSchema
     testTable

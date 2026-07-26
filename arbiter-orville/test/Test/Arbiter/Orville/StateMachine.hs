@@ -41,7 +41,7 @@ spec connStr = do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource pgPool
       reset = cleanupOrvilleTest env
-  stateMachineSpec @(TestOrville SMRegistry) @SMRegistry
+  stateMachineSpec @(TestOrville SMRegistry)
     run
     testSchema
     testTable

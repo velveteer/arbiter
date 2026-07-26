@@ -64,7 +64,7 @@ testTable = "arbiter_orville_worker_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry SimpleTask FailingTask id runOrvilleTest
+  workerSpec @OrvilleWorkerTestPayload SimpleTask FailingTask id runOrvilleTest
 
   describe "Transactional Atomicity" $ do
     it "rolls back user operations when handler fails" $ \env -> do
@@ -110,11 +110,11 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
           do
             -- Wait for job to be processed and moved to DLQ
             liftIO $ waitUntil 10_000 $ do
-              dlqJobs <- runOrvilleTest env $ HL.listDLQJobs @_ @_ @OrvilleWorkerTestPayload 10 0
+              dlqJobs <- runOrvilleTest env $ HL.listDLQJobs @OrvilleWorkerTestPayload 10 0
               pure (length dlqJobs == 1)
 
             -- Verify the job is in the DLQ with the correct payload
-            dlqJobs <- HL.listDLQJobs @_ @_ @OrvilleWorkerTestPayload 10 0
+            dlqJobs <- HL.listDLQJobs @OrvilleWorkerTestPayload 10 0
             liftIO $ length dlqJobs `shouldBe` 1
             liftIO $ (payload $ DLQ.jobSnapshot (head dlqJobs)) `shouldBe` SimpleTask "WillFail"
 
@@ -178,7 +178,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
         $ \_ -> do
           -- Wait for job to be processed
           liftIO $ waitUntil 10_000 $ do
-            jobs <- runOrvilleTest env $ HL.listJobs @_ @OrvilleWorkerTestRegistry @OrvilleWorkerTestPayload 10 0
+            jobs <- runOrvilleTest env $ HL.listJobs @OrvilleWorkerTestPayload 10 0
             pure (null jobs)
 
           -- Verify the job is NOT in the queue anymore

@@ -732,7 +732,7 @@ spec connStr = do
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
         -- Cancel parent (cascade) - removes the suspended parent
-        _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @_ @ServantTestRegistry @ServantTestPayload (primaryKey parent)
+        _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @ServantTestPayload (primaryKey parent)
         -- Get DLQ job ID
         dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
         pure $ dlqPrimaryKey (head dlqs)

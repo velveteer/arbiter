@@ -52,7 +52,7 @@ cleanup connStr = do
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema testSchema True) $ do
-    listenerSpec @WorkerTestPayload @ListenTestRegistry
+    listenerSpec @WorkerTestPayload
       testSchema
       connStr
       SimpleTask

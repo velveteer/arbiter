@@ -31,9 +31,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False >> create
   let run pool act = do
         env <- createHasqlEnvWithPool (Proxy @HasqlConcurrencyTestRegistry) pool testSchema
         runHasqlDb env act
-  concurrencySpec @TestPayload @HasqlConcurrencyTestRegistry
+  concurrencySpec @TestPayload
     TestMessage
     run
-  raceConditionSpec @TestPayload @HasqlConcurrencyTestRegistry
+  raceConditionSpec @TestPayload
     TestMessage
     run

@@ -3,7 +3,7 @@
 -- | Associates a monad with its PostgreSQL schema name and queue registry.
 module Arbiter.Core.HasArbiterSchema
   ( HasArbiterSchema (..)
-  , ArbiterSchema
+  , HasRegistry
   , ResultOf
   ) where
 
@@ -22,7 +22,7 @@ class (Monad m) => HasArbiterSchema m where
   getSchema :: m SchemaName
 
 -- | 'HasArbiterSchema' with the registry named, for signatures that mention it.
-type ArbiterSchema m (registry :: JobPayloadRegistry) =
+type HasRegistry m (registry :: JobPayloadRegistry) =
   (HasArbiterSchema m, RegistryOf m ~ registry)
 
 -- | The result type declared by @payload@'s registry entry. Not injective, so a

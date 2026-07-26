@@ -45,7 +45,7 @@ module Arbiter.Worker.Cron
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -132,7 +132,7 @@ validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
 -- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
 -- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
 updateCronScheduleChecked
-  :: (ArbiterSchema m registry, MonadArbiter m)
+  :: (HasArbiterSchema m, MonadArbiter m)
   => Text
   -> CS.CronScheduleUpdate
   -> m (Either Text Int64)
@@ -277,7 +277,7 @@ initCronSchedules schemaName queueName jobs logCfg = do
 -- | Scheduler entry point. Exits cleanly when the worker state becomes
 -- 'ShuttingDown' so graceful shutdown stops creating new jobs.
 runCronScheduler
-  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  :: (MonadUnliftIO m, QueueOperation m payload)
   => TVar WorkerState
   -> TVar Bool
   -- ^ Set by the run-now listener when a schedule this pool owns is requested.
@@ -318,7 +318,7 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
 -- | Scheduler catch-up step. Each cron runs in its own transaction.
 -- Backfill schedules hold a per-(schema, queue, name) advisory lock.
 processCronCatchUp
-  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  :: (MonadUnliftIO m, QueueOperation m payload)
   => LogConfig
   -> Text
   -> Text
@@ -444,7 +444,7 @@ resolveAndParse cj mRow =
 -- either fails the other rolls back, so a successful fire is always paired
 -- with a watermark advance to that tick.
 tryInsertCronJob
-  :: (MonadUnliftIO m, QueueOperation m registry payload)
+  :: (MonadUnliftIO m, QueueOperation m payload)
   => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m Bool
 tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
   result <- tryAny . withDbTransaction $ do
@@ -471,8 +471,8 @@ data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
 --
 -- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
-  :: forall m registry payload
-   . (MonadUnliftIO m, QueueOperation m registry payload)
+  :: forall payload m
+   . (MonadUnliftIO m, QueueOperation m payload)
   => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
@@ -511,7 +511,7 @@ processRunRequests logCfg schemaName jobs now = do
         Nothing -> do
           parentGone <- case parentId jobWrite of
             Nothing -> pure False
-            Just pid -> not <$> HL.jobExists @m @registry @payload pid
+            Just pid -> not <$> HL.jobExists @payload pid
           pure $ if parentGone then Dropped else Skipped
 
 -- | Log a cron message, swallowing logger failures.

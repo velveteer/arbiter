@@ -45,7 +45,7 @@ spec connStr =
       let runM pool act = do
             env <- createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName
             runHasqlDb env act
-      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry
+      workerSpec @HasqlWorkerTestPayload
         SimpleTask
         FailingTask
         (\f _conn job -> f job)
@@ -59,7 +59,7 @@ type HasqlListenRegistry = '[Queue "arbiter_hasql_listen_test" HasqlWorkerTestPa
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
   beforeAll (setupOnce connStr listenSchema listenSchema True) $
-    TestKit.listenerSpec @HasqlWorkerTestPayload @HasqlListenRegistry
+    TestKit.listenerSpec @HasqlWorkerTestPayload
       listenSchema
       connStr
       SimpleTask
@@ -96,7 +96,7 @@ type HasqlMultiQRegistry =
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @HasqlMultiQRegistry
+    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload
       mqTableA
       mqTableB
       connStr

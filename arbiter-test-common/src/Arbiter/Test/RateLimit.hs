@@ -19,7 +19,7 @@ module Arbiter.Test.RateLimit
   , rateLimitSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), HasRegistry)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -120,7 +120,7 @@ groupedJob gk tenant = defaultGroupedJob gk (RLPayload tenant 1)
 
 rateLimitSpec
   :: forall env m
-   . (ArbiterSchema m RLReg, MonadArbiter m)
+   . (HasRegistry m RLReg, MonadArbiter m)
   => (forall a. env -> m a -> IO a)
   -> SpecWith env
 rateLimitSpec runM = do
@@ -336,7 +336,7 @@ rateLimitSpec runM = do
   it "reports a throttle-deferred job as throttled status" $ \env -> do
     enqueue env (replicate 5 (job "statuskey"))
     _ <- claim env
-    throttled <- runM env (HL.countJobsFiltered @m @RLReg @RLPayload [HL.FilterStatus Throttled])
+    throttled <- runM env (HL.countJobsFiltered @RLPayload [HL.FilterStatus Throttled])
     throttled `shouldBe` 2
 
   it "spends a job's cost, not just one token" $ \env -> do

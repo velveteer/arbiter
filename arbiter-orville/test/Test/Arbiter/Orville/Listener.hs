@@ -17,7 +17,8 @@ import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll)
 
 import Test.Arbiter.Orville.TestHelpers
-  ( createOrvilleTestEnv
+  ( TestOrville
+  , createOrvilleTestEnv
   , destroyOrvilleTestEnv
   , disableOrvilleListener
   , runOrvilleTest
@@ -35,7 +36,7 @@ type OrvilleListenRegistry = '[Queue "arbiter_orville_listen_test" ListenPayload
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
   beforeAll (setupOnce connStr listenSchema listenSchema True) $
-    TestKit.listenerSpec @ListenPayload @OrvilleListenRegistry
+    TestKit.listenerSpec @ListenPayload @(TestOrville OrvilleListenRegistry)
       listenSchema
       connStr
       ListenPayload
@@ -72,7 +73,7 @@ type OrvilleMultiQRegistry =
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @OrvilleMultiQRegistry
+    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @(TestOrville OrvilleMultiQRegistry)
       mqTableA
       mqTableB
       connStr

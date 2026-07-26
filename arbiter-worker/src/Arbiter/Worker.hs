@@ -60,7 +60,7 @@ import Arbiter.Core.Exceptions
   , TreeCancelException (..)
   , throwJobNotFound
   )
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -171,11 +171,11 @@ import Arbiter.Worker.WorkerState
 -- main = runWorkerPools allWorkers (\\_ -> pure ())
 -- @
 data NamedWorkerPool m
-  = forall registry payload.
-  ( Arb.RegistryAdmissionPolicies registry
+  = forall payload.
+  ( Arb.RegistryAdmissionPolicies (RegistryOf m)
   , EncodeJobResult (ResultOf m payload)
-  , QueueOperation m registry payload
-  , RegistryTables registry
+  , QueueOperation m payload
+  , RegistryTables (RegistryOf m)
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
@@ -186,17 +186,17 @@ data NamedWorkerPool m
 
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
-  :: forall m registry payload
-   . ( Arb.RegistryAdmissionPolicies registry
+  :: forall payload m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , EncodeJobResult (ResultOf m payload)
-     , QueueOperation m registry payload
-     , RegistryTables registry
+     , QueueOperation m payload
+     , RegistryTables (RegistryOf m)
      )
   => WorkerConfig m payload
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
-    { workerPoolName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+    { workerPoolName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
     , workerPoolConfig = cfg
     }
 
@@ -252,8 +252,8 @@ withPoolContext poolName lc =
 -- stripe by its capability and does not search other stripes when its own is
 -- exhausted, so multiple stripes let one pool starve a stripe while others sit idle.
 poolConfigForWorkers
-  :: forall m registry
-   . (ArbiterSchema m registry, RegistryTables registry)
+  :: forall m
+   . (RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
   -> IO PoolConfig
 poolConfigForWorkers pools = do
@@ -267,18 +267,18 @@ poolConfigForWorkers pools = do
 
 -- | Starts a worker pool with a dispatcher and N worker threads.
 runWorkerPool
-  :: forall m registry payload
-   . ( Arb.RegistryAdmissionPolicies registry
+  :: forall payload m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , EncodeJobResult (ResultOf m payload)
      , MonadUnliftIO m
-     , QueueOperation m registry payload
-     , RegistryTables registry
+     , QueueOperation m payload
+     , RegistryTables (RegistryOf m)
      )
   => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
-      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -498,9 +498,9 @@ warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (display
 
 -- | Main loop for a single worker thread.
 workerLoop
-  :: forall m registry payload
+  :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
-     , JobOperation m registry payload
+     , JobOperation m payload
      , MonadUnliftIO m
      )
   => WorkerConfig m payload
@@ -574,9 +574,9 @@ readChildResults schemaName job = do
   pure (merged, dlqFailures)
 
 processJobsWithRetry
-  :: forall m registry payload
+  :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
-     , JobOperation m registry payload
+     , JobOperation m payload
      , MonadUnliftIO m
      )
   => WorkerConfig m payload
@@ -662,8 +662,8 @@ processJobsWithRetry config jobs = do
 -- | Interpret a finished batch: warn when the handler left jobs unfinalized,
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
-  :: forall m registry payload
-   . (JobOperation m registry payload, MonadUnliftIO m)
+  :: forall payload m
+   . (JobOperation m payload, MonadUnliftIO m)
   => WorkerConfig m payload
   -> Job.ObservabilityHooks m payload
   -> UTCTime
@@ -702,7 +702,7 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (ArbiterSchema m registry, FromJSON (ResultOf m payload), MonadArbiter m)
+  :: (FromJSON (ResultOf m payload), HasArbiterSchema m, MonadArbiter m)
   => Job.JobRead payload
   -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
 childResults job = do
@@ -712,8 +712,8 @@ childResults job = do
 -- | 'childResults' with the child results 'Monoid'-merged (decode failures
 -- contribute 'mempty').
 mergedChildResults
-  :: ( ArbiterSchema m registry
-     , FromJSON (ResultOf m payload)
+  :: ( FromJSON (ResultOf m payload)
+     , HasArbiterSchema m
      , MonadArbiter m
      , Monoid (ResultOf m payload)
      )
@@ -780,8 +780,8 @@ classifyException e
 
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
-  :: forall m registry payload
-   . ( JobOperation m registry payload
+  :: forall payload m
+   . ( JobOperation m payload
      , MonadUnliftIO m
      )
   => WorkerConfig m payload
@@ -849,12 +849,12 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
 -- Each gated so only one pool runs it per interval.
 reaperLoop
-  :: forall m registry
-   . ( Arb.RegistryAdmissionPolicies registry
-     , ArbiterSchema m registry
+  :: forall m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+     , HasArbiterSchema m
      , MonadArbiter m
      , MonadUnliftIO m
-     , RegistryTables registry
+     , RegistryTables (RegistryOf m)
      )
   => LogConfig
   -> NominalDiffTime
@@ -864,10 +864,10 @@ reaperLoop
   -> m ()
 reaperLoop logCfg interval stmtTimeout = do
   let intervalSecs = ceiling interval
-      queues = registryTableNames (Proxy @registry)
+      queues = registryTableNames (Proxy @(RegistryOf m))
       pruneInterval = interval * 12
-      hasConcurrency = not (Set.null (registryConcurrencyPolicies @registry))
-      hasRateLimit = not (Set.null (registryRateLimitPolicies @registry))
+      hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
+      hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schemaName <- Arb.getSchema
   let gated :: forall a. Text -> NominalDiffTime -> m a -> m (Maybe a)
       gated = runReaperOp logCfg schemaName stmtTimeout
@@ -892,10 +892,10 @@ reaperLoop logCfg interval stmtTimeout = do
     when hasRateLimit $
       void $
         gated "prune-rate-limit-buckets" pruneInterval $
-          Arb.pruneRateLimitBuckets @m @registry interval
+          Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
-      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m @registry
-      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m @registry
+      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m
+      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m
     mPurged <- gated "purge-archives" interval $ Ops.purgeArchives schemaName queues
     traverse_
       ( \(n, failed) -> do

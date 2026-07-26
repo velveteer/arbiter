@@ -43,7 +43,7 @@ tableB = "mq_listen_b"
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr schemaName tableA True >> addQueueTable connStr schemaName tableB True) $
-    multiQueueListenerSpec @QueueAPayload @QueueBPayload @MultiQRegistry
+    multiQueueListenerSpec @QueueAPayload @QueueBPayload
       tableA
       tableB
       connStr

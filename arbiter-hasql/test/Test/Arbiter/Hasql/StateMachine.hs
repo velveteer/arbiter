@@ -40,7 +40,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource pgPool
       reset = cleanupHasqlTest connStr testSchema testTable
-  stateMachineSpec @(HasqlDb SMRegistry IO) @SMRegistry
+  stateMachineSpec @(HasqlDb SMRegistry IO)
     run
     testSchema
     testTable

@@ -109,7 +109,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   around (withPool sharedPool) $ do
-    workerSpec @WorkerTestPayload @WorkerTestRegistry
+    workerSpec @WorkerTestPayload
       SimpleTask
       FailingTask
       (\f _conn job -> f job)
@@ -645,17 +645,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Phase 1: Run workers - children succeed, reducer fails → DLQ
         withAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->
           waitUntil 10_000 $ do
-            dlqJobs <- runSimpleDb env $ HL.listDLQJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+            dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
             pure $ any (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "dlq-reducer") dlqJobs
 
         -- Verify reducer is in DLQ with snapshot
-        dlqJobs <- runSimpleDb env $ HL.listDLQJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+        dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
         let reducerDlq = filter (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "dlq-reducer") dlqJobs
         length reducerDlq `shouldBe` 1
 
         -- Phase 2: Retry from DLQ - reducer should see preserved results from snapshot
         let dlqId = DLQ.dlqPrimaryKey (head reducerDlq)
-        mRetried <- runSimpleDb env $ HL.retryFromDLQ @_ @WorkerTestRegistry @WorkerTestPayload dlqId
+        mRetried <- runSimpleDb env $ HL.retryFromDLQ @WorkerTestPayload dlqId
         case mRetried of
           Nothing -> expectationFailure "retryFromDLQ returned Nothing"
           Just retried -> payload retried `shouldBe` SimpleTask "dlq-reducer"
@@ -706,18 +706,18 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         withAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->
           waitUntil 15_000 $ do
-            dlqJobs <- runSimpleDb env $ HL.listDLQJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+            dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
             pure (length dlqJobs == 2)
 
         -- Both child-fail and reducer should be in DLQ
-        dlqJobs <- runSimpleDb env $ HL.listDLQJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+        dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
         let dlqPayloads = map (payload . DLQ.jobSnapshot) dlqJobs
         dlqPayloads `shouldContain` [SimpleTask "recover-child-fail"]
         dlqPayloads `shouldContain` [SimpleTask "recover-reducer"]
 
         -- Phase 2: Retry child-fail from DLQ → auto-retries reducer (suspended)
         let childDlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "recover-child-fail") dlqJobs
-        mRetried <- runSimpleDb env $ HL.retryFromDLQ @_ @WorkerTestRegistry @WorkerTestPayload (DLQ.dlqPrimaryKey childDlq)
+        mRetried <- runSimpleDb env $ HL.retryFromDLQ @WorkerTestPayload (DLQ.dlqPrimaryKey childDlq)
         case mRetried of
           Nothing -> expectationFailure "retryFromDLQ returned Nothing"
           Just retried -> payload retried `shouldBe` SimpleTask "recover-child-fail"
@@ -1031,7 +1031,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
           -- Handler should be interrupted well before its 30s sleep finishes.
           waitUntil 5_000 $ do
-            mJob <- runSimpleDb env $ HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload (primaryKey job)
+            mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload (primaryKey job)
             pure (isNothing mJob)
           elapsed <- (`diffUTCTime` start) <$> getCurrentTime
           elapsed `shouldSatisfy` (< 3.0)
@@ -1109,7 +1109,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable firstId
           n `shouldBe` 1
           waitUntil 5_000 $ do
-            mJob <- runSimpleDb env $ HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload firstId
+            mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload firstId
             pure (isNothing mJob)
           elapsed <- (`diffUTCTime` start) <$> getCurrentTime
           elapsed `shouldSatisfy` (< 3.0)
@@ -1151,7 +1151,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           n `shouldBe` 1
 
           waitUntil 5_000 $ do
-            mJob <- runSimpleDb env $ HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload (primaryKey job)
+            mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload (primaryKey job)
             pure (isNothing mJob)
           elapsed <- (`diffUTCTime` start) <$> getCurrentTime
           elapsed `shouldSatisfy` (< 3.0)
@@ -1220,7 +1220,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid
         n `shouldBe` 1
 
-        runSimpleDb env (HL.getJobById @_ @WorkerTestRegistry @WorkerTestPayload jid)
+        runSimpleDb env (HL.getJobById @WorkerTestPayload jid)
           >>= (`shouldSatisfy` isNothing)
 
         mNotif <- timeout 2_000_000 (getNotification lconn)

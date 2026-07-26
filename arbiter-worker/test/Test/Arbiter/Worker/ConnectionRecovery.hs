@@ -145,7 +145,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           completed `shouldBe` 2
 
           -- Verify job was eventually acked and removed from queue
-          remainingJobs <- runSimpleDb env $ HL.listJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+          remainingJobs <- runSimpleDb env $ HL.listJobs @WorkerTestPayload 10 0
           length (remainingJobs :: [JobRead WorkerTestPayload]) `shouldBe` 0
 
 -- | Kill active connections that reference our test schema.
