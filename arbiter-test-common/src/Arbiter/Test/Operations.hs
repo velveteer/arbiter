@@ -7,11 +7,12 @@ module Arbiter.Test.Operations
   ( operationsSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema)
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, ResultOf)
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types
+import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter)
@@ -39,6 +40,7 @@ import Arbiter.Test.Setup (truncateToMicros)
 operationsSpec
   :: forall payload registry env m
    . ( ArbiterSchema m registry
+     , EncodeJobResult (ResultOf m payload)
      , Eq payload
      , JobPayload payload
      , KnownSymbol (TableForPayload payload registry)
@@ -48,10 +50,12 @@ operationsSpec
      )
   => (Text -> payload)
   -- ^ Constructor for a simple test message payload
+  -> (Text -> ResultOf m payload)
+  -- ^ Constructor for the queue's declared handler result
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function to execute monad actions (e.g., runSimpleDb env or runOrvilleTest env)
   -> SpecWith env
-operationsSpec mkMessage runM = do
+operationsSpec mkMessage mkResult runM = do
   -- Test helpers
   let claimJobs env n = runM env (HL.claimNextVisibleJobs n 60) :: IO [JobRead payload]
       getJob env jobId = runM env (HL.getJobById @m @registry @payload jobId)
@@ -2728,11 +2732,11 @@ operationsSpec mkMessage runM = do
       -- Single child result upsert returns 1 row
       rowsInserted <-
         runM env $
-          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "child1-done")
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "child1-done")
       rowsInserted `shouldBe` 1
 
       -- A second child upserts independently into its own (parent, child) row
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.Number 99)
+      void $ runM env $ HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.Number 99)
 
       -- Both results are readable from the results table
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
@@ -2811,7 +2815,9 @@ operationsSpec mkMessage runM = do
               )
       let [child1, _child2, child3] = children
 
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "ok-1")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "ok-1")
 
       claimed <- claimJobs env 10
       let c3 = head $ filter (\j -> primaryKey j == primaryKey child3) claimed
@@ -2836,7 +2842,7 @@ operationsSpec mkMessage runM = do
 
       void $
         runM env $
-          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.toJSON (["hello"] :: [Text]))
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.toJSON (["hello"] :: [Text]))
 
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
       Map.size results `shouldBe` 1
@@ -2879,8 +2885,12 @@ operationsSpec mkMessage runM = do
                   :| [JT.leaf (defaultJob (mkMessage "DblDLQChild2"))]
               )
       let [child1, child2] = children
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
       claimed <- claimJobs env 10
       forM_ claimed $ \j -> void $ runM env (HL.ackJob j)
       [parentJob] <- claimJobs env 1
@@ -3001,7 +3011,7 @@ operationsSpec mkMessage runM = do
       -- Each mapper inserts its partial result
       let insertRes childId result =
             runM env $
-              HL.insertResult @_ @registry @payload
+              HL.insertResultUnsafe @_ @registry @payload
                 (primaryKey reducer)
                 childId
                 (Aeson.toJSON (result :: [Text]))
@@ -3050,7 +3060,7 @@ operationsSpec mkMessage runM = do
 
       let insertRes parentPk childPk result =
             runM env $
-              HL.insertResult @_ @registry @payload
+              HL.insertResultUnsafe @_ @registry @payload
                 parentPk
                 childPk
                 (Aeson.toJSON (result :: [Text]))
@@ -3097,6 +3107,22 @@ operationsSpec mkMessage runM = do
         `shouldMatchList` ["sales", "growth", "revenue", "forecast", "trend", "outlook"]
 
   describe "Results Table" $ do
+    it "insertResult encodes the queue's declared result type" $ \env -> do
+      Right (parent :| [child]) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "TypedResultParent"))
+              (JT.leaf (defaultJob (mkMessage "TypedResultChild")) :| [])
+
+      rowsInserted <-
+        runM env $
+          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (mkResult "typed")
+      rowsInserted `shouldBe` 1
+
+      results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
+      Map.lookup (primaryKey child) results `shouldBe` Just (Aeson.toJSON (mkResult "typed"))
+
     it "CASCADE cleanup: acking parent deletes results rows" $ \env -> do
       -- Insert a rollup tree with 2 children
       Right (parent :| children) <-
@@ -3110,8 +3136,12 @@ operationsSpec mkMessage runM = do
       let [child1, child2] = children
 
       -- Insert results for both children
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
 
       -- Verify results exist
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
@@ -3139,7 +3169,7 @@ operationsSpec mkMessage runM = do
       let [child] = children
 
       -- Insert a result
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "r")
+      void $ runM env $ HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "r")
 
       -- Verify result exists
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
@@ -3162,10 +3192,10 @@ operationsSpec mkMessage runM = do
       let [child] = children
 
       -- Insert result
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v1")
+      void $ runM env $ HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v1")
 
       -- Insert again with different value - should overwrite, not fail
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v2")
+      void $ runM env $ HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "v2")
 
       -- Verify latest value
       results <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
@@ -3186,7 +3216,9 @@ operationsSpec mkMessage runM = do
       Map.size results `shouldBe` 0
 
       -- Manually inserting works
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "manual")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "manual")
       results2 <- runM env $ HL.getResultsByParent @_ @registry @payload (primaryKey parent)
       Map.size results2 `shouldBe` 1
 
@@ -3202,8 +3234,12 @@ operationsSpec mkMessage runM = do
       let [child1, child2] = children
 
       -- Insert results for both children
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "snap-r1")
-      void $ runM env $ HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "snap-r2")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child1) (Aeson.String "snap-r1")
+      void $
+        runM env $
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child2) (Aeson.String "snap-r2")
 
       -- Ack children to wake the parent
       claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
@@ -3242,7 +3278,7 @@ operationsSpec mkMessage runM = do
       -- Insert result, ack child, claim parent
       void $
         runM env $
-          HL.insertResult @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "retry-val")
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey parent) (primaryKey child) (Aeson.String "retry-val")
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       forM_ claimed $ \j -> void $ runM env (HL.ackJob j)
       [parentJob] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -3441,7 +3477,7 @@ operationsSpec mkMessage runM = do
       -- Insert a result for child1 under mid-parent, then ack child1
       void $
         runM env $
-          HL.insertResult @_ @registry @payload (primaryKey midParent) (primaryKey child1) (Aeson.String "child1-result")
+          HL.insertResultUnsafe @_ @registry @payload (primaryKey midParent) (primaryKey child1) (Aeson.String "child1-result")
       void $ runM env (HL.ackJob child1)
 
       -- Mid-parent still suspended (one child remains)

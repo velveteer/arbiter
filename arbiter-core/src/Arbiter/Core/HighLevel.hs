@@ -99,6 +99,7 @@ module Arbiter.Core.HighLevel
 
     -- * Results Table Operations
   , insertResult
+  , insertResultUnsafe
   , getResultsByParent
   , getDLQChildErrorsByParent
   , readChildResultsRaw
@@ -158,10 +159,11 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
-import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..))
+import Arbiter.Core.HasArbiterSchema (ArbiterSchema, HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
+import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
@@ -1135,13 +1137,30 @@ resumeJob jobId = do
 -- Results Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Insert a child's result into the results table.
+-- | Insert a child's result into the results table, encoded as the queue's
+-- declared result type.
 --
 -- Each child gets its own row keyed by @(parent_id, child_id)@.
 -- The FK @ON DELETE CASCADE@ ensures cleanup when the parent is acked.
 --
--- Returns the number of rows inserted (1 on success).
+-- Returns the number of rows inserted, 0 for a result that stores nothing.
 insertResult
+  :: forall m registry payload
+   . (EncodeJobResult (ResultOf m payload), QueueOperation m registry payload)
+  => Int64
+  -- ^ Parent job ID
+  -> Int64
+  -- ^ Child job ID
+  -> ResultOf m payload
+  -- ^ Result value
+  -> m Int64
+insertResult parentJobId childId result =
+  maybe (pure 0) (insertResultUnsafe @m @registry @payload parentJobId childId) (encodeJobResult result)
+
+-- | 'insertResult' with a raw JSON value, bypassing the queue's declared result
+-- type. A value 'Arbiter.Worker.childResults' cannot decode surfaces there as a
+-- 'Left'.
+insertResultUnsafe
   :: forall m registry payload
    . (QueueOperation m registry payload)
   => Int64
@@ -1151,7 +1170,7 @@ insertResult
   -> Value
   -- ^ Encoded result value
   -> m Int64
-insertResult parentJobId childId result = do
+insertResultUnsafe parentJobId childId result = do
   schemaName <- getSchema
   let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
   Ops.insertResult schemaName tableName parentJobId childId result

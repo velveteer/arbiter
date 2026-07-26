@@ -7,7 +7,7 @@ module Test.Arbiter.Simple.Operations (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (execute_, setupOnce)
@@ -30,7 +30,7 @@ import Test.Arbiter.Simple.TestHelpers (cleanupSimpleTest, createSimplePool)
 testSchema :: Text
 testSchema = "arbiter_simple_test"
 
-type SimpleOpsTestRegistry = '[Queue "arbiter_simple_test" TestPayload]
+type SimpleOpsTestRegistry = '[QueueWithResult "arbiter_simple_test" TestPayload [Text]]
 
 testTable :: Text
 testTable = "arbiter_simple_test"
@@ -46,7 +46,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   sharedPool <- runIO (createSimplePool 5 connStr)
   around (withCleanup sharedPool) $ do
-    operationsSpec @TestPayload TestMessage runSimpleDb
+    operationsSpec @TestPayload TestMessage pure runSimpleDb
 
     describe "Transaction Participation (localConnection)" $ do
       it "commits job insertion within user transaction" $ \env -> do
