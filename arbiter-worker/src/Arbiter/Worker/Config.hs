@@ -43,12 +43,11 @@ import Arbiter.Worker.Cron (CronJob)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
--- | Configuration for a worker pool. @result@ is pinned to
--- @'ResultOf' m payload@ by this module's config constructors.
-data WorkerConfig m payload result = WorkerConfig
+-- | Configuration for a worker pool.
+data WorkerConfig m payload = WorkerConfig
   { workerCount :: Int
   -- ^ Number of concurrent worker threads.
-  , handlerMode :: HandlerMode m payload result
+  , handlerMode :: HandlerMode m payload
   -- ^ Job handler and claiming strategy. Set by this module's config constructors.
   , pollInterval :: NominalDiffTime
   -- ^ Cadence floor in seconds for the dispatcher poll.
@@ -153,16 +152,16 @@ data BatchCallbacks m payload result = BatchCallbacks
   }
 
 -- | How the worker claims and runs jobs. Set by this module's config constructors.
-data HandlerMode m payload result
+data HandlerMode m payload
   = -- | Automatic single-job mode: claim one job per group and run the handler
     -- in a worker transaction, storing its result and acking atomically.
-    SingleJobMode (JobHandler m payload result)
+    SingleJobMode (JobHandler m payload (ResultOf m payload))
   | -- | Batched callback mode: claim up to N jobs per group and hand the batch to
     -- the handler with a 'BatchCallbacks' record to finalize each job. No worker
     -- transaction. Batch size 1 is the manual single-job case.
     BatchedJobsMode
       Int
-      (NonEmpty (JobRead payload) -> BatchCallbacks m payload result -> m ())
+      (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
@@ -173,7 +172,7 @@ transactionalWorkerConfig
   => Int
   -- ^ Worker count
   -> JobHandler n payload (ResultOf n payload)
-  -> m (WorkerConfig n payload (ResultOf n payload))
+  -> m (WorkerConfig n payload)
 transactionalWorkerConfig workerCnt handler =
   mkDefaultConfig workerCnt (SingleJobMode handler)
 
@@ -188,7 +187,7 @@ defaultBatchedWorkerConfig
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload (ResultOf n payload) -> n ())
-  -> m (WorkerConfig n payload (ResultOf n payload))
+  -> m (WorkerConfig n payload)
 defaultBatchedWorkerConfig workerCnt batchSize handler =
   mkDefaultConfig workerCnt (BatchedJobsMode batchSize handler)
 
@@ -200,7 +199,7 @@ manualWorkerConfig
   => Int
   -- ^ Worker count
   -> (JobRead payload -> BatchCallbacks n payload (ResultOf n payload) -> n ())
-  -> m (WorkerConfig n payload (ResultOf n payload))
+  -> m (WorkerConfig n payload)
 manualWorkerConfig workerCnt handler =
   defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
 
@@ -208,8 +207,8 @@ manualWorkerConfig workerCnt handler =
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
   => Int
-  -> HandlerMode n payload result
-  -> m (WorkerConfig n payload result)
+  -> HandlerMode n payload
+  -> m (WorkerConfig n payload)
 mkDefaultConfig workerCnt mode = do
   heartbeatTMVar <- liftIO newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
@@ -253,17 +252,17 @@ withWorkerIdContext workerId lc =
 -- | Initiate graceful shutdown of the worker pool
 --
 -- Stops claiming new jobs. In-flight jobs will complete, then the pool exits.
-shutdownWorker :: (MonadIO m) => WorkerConfig n payload result -> m ()
+shutdownWorker :: (MonadIO m) => WorkerConfig n payload -> m ()
 shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
-getWorkerState :: (MonadIO m) => WorkerConfig n payload result -> m WorkerState
+getWorkerState :: (MonadIO m) => WorkerConfig n payload -> m WorkerState
 getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
 
 -- | Whether this pool's LISTEN channels are subscribed (or there is no listener).
-getListenerReady :: (MonadIO m) => WorkerConfig n payload result -> m Bool
+getListenerReady :: (MonadIO m) => WorkerConfig n payload -> m Bool
 getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
 
-readEffectiveState :: WorkerConfig n payload result -> STM.STM WorkerState
+readEffectiveState :: WorkerConfig n payload -> STM.STM WorkerState
 readEffectiveState config = do
   st <- STM.readTVar (workerStateVar config)
   case st of

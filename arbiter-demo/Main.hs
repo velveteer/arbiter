@@ -252,7 +252,7 @@ main = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
-mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload ())
+mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
   cfg <- transactionalWorkerConfig 5 handler
   pure
@@ -272,7 +272,7 @@ mkDemoWorker = do
             (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
       ]
 
-mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload ())
+mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload)
 mkEmailWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -292,7 +292,7 @@ mkEmailWorker = do
             (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
       ]
 
-mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload ())
+mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload)
 mkNotifWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -316,7 +316,7 @@ mkNotifWorker = do
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
-mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload [Text])
+mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
   cfg <- transactionalWorkerConfig 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}

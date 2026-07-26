@@ -45,7 +45,7 @@ type RunningJobs = TVar (Map.Map Int64 (Async.Async ()))
 -- | Decode the pause payload and, if it addresses this worker, write 'pauseVar'.
 handlePauseNotif
   :: (MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> Notification
   -> m ()
 handlePauseNotif config notif =
@@ -59,7 +59,7 @@ handlePauseNotif config notif =
 -- 'JobForceCancelled' into its handler thread.
 handleCancelNotif
   :: (MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> RunningJobs
   -> Notification
   -> m ()

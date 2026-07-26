@@ -34,6 +34,7 @@ import Arbiter.Orville
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
   ( BatchCallbacks (..)
+  , EncodeJobResult
   , WorkerConfig (..)
   , defaultBatchedWorkerConfig
   , runWorkerPool
@@ -511,7 +512,7 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
 
 runWorkerTrial
   :: (ArbiterSchema m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
-  => RunM m -> Connection -> [WorkerConfig m BenchPayload ()] -> Int -> Int -> IO SteadyResult
+  => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
     start <- getCurrentTime
@@ -581,7 +582,7 @@ runSteadyStateTrial
   -- ^ Runner for producers (separate pool)
   -> Connection
   -- ^ Stats connection for WAL/churn snapshots (used only on the timer thread)
-  -> [WorkerConfig m BenchPayload ()]
+  -> [WorkerConfig m BenchPayload]
   -> IORef Int
   -- ^ Counter that handlers increment per job processed
   -> Int
@@ -833,14 +834,15 @@ multiTrialGated n setup measure = formatGated <$> replicateM n (setup >> measure
 
 -- | One steady-state window over a gated queue: 10 producers insert, a 10-worker pool acks.
 runGatedSteadyTrial
-  :: ( MonadUnliftIO m
+  :: ( EncodeJobResult (ResultOf m payload)
+     , MonadUnliftIO m
      , QueueOperation SimpleM BenchRegistry payload
      , QueueOperation m BenchRegistry payload
      )
   => RunM m
   -> RunM SimpleM
   -> Connection
-  -> WorkerConfig m payload ()
+  -> WorkerConfig m payload
   -> IORef Int
   -> Text
   -> (Int -> JobWrite payload)

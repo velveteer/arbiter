@@ -328,7 +328,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           pure (any ((== mkSimple "dlq-arch") . payload . Archive.archivedSnapshot) arch)
 
     it "archives the row but stores no result for a Nothing result" $ \env -> do
-      cfg :: WorkerConfig m payload (ResultOf m payload) <-
+      cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Nothing :: Maybe [Text])))
       void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just dayRetention})
 
@@ -341,7 +341,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         (Archive.archivedResult =<< mine) `shouldBe` Nothing
 
     it "stores the wrapped value for a Just result" $ \env -> do
-      cfg :: WorkerConfig m payload (ResultOf m payload) <-
+      cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["kept"] :: Maybe [Text])))
       void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just dayRetention})
 
@@ -355,7 +355,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "does not archive a result when archiveFor is unset" $ \env -> do
       doneRef <- newIORef False
-      cfg :: WorkerConfig m payload (ResultOf m payload) <-
+      cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig
           1
           (mkHandler (\_job -> liftIO (writeIORef doneRef True) >> pure (Just ["unkept"] :: Maybe [Text])))
@@ -368,7 +368,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         map (payload . Archive.archivedSnapshot) arch `shouldBe` []
 
     it "stores a child's result in the tree, not on its archive row" $ \env -> do
-      cfg :: WorkerConfig m payload (ResultOf m payload) <-
+      cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["child-result"] :: Maybe [Text])))
       let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just dayRetention}
       void $ runM env $ HL.insertJobTree $ defaultJob (mkSimple "arch-root") <~~ (child :| [])
@@ -402,7 +402,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         fmap (attempts . Archive.archivedSnapshot) mine `shouldBe` Just 2
 
     it "preserves a child's parent linkage on its archived row" $ \env -> do
-      cfg :: WorkerConfig m payload (ResultOf m payload) <-
+      cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["ok"] :: Maybe [Text])))
       let child = (defaultJob (mkSimple "pl-child")) {archiveFor = Just dayRetention}
           root = (defaultJob (mkSimple "pl-root")) {archiveFor = Just dayRetention}
@@ -1357,13 +1357,13 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let allPayloads = [mkSimple "bc-root", mkSimple "bc-mid", mkSimple "bc-leaf1", mkSimple "bc-leaf2"]
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
   where
-    mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload (ResultOf m payload))
+    mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload)
     mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (Nothing :: Maybe [Text])))
     mkBatchedConfig
       :: Int
       -> Int
       -> (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
-      -> IO (WorkerConfig m payload (ResultOf m payload))
+      -> IO (WorkerConfig m payload)
     mkBatchedConfig = defaultBatchedWorkerConfig
 
 -- | Env-owned LISTEN hub test suite, instantiated for each backend. A high
@@ -1399,7 +1399,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
     around (bracket mkEnv destroyEnv) $ do
       it "wakes the dispatcher on NOTIFY under a high poll interval" $ \env -> do
         ref <- newIORef (0 :: Int)
-        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
         let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
           threadDelay 1_000_000
@@ -1409,7 +1409,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
 
       it "re-subscribes after a reconnect under a high poll interval" $ \env -> do
         ref <- newIORef (0 :: Int)
-        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
         let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
           threadDelay 1_000_000
@@ -1468,7 +1468,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
     around (bracket mkEnvPollOnly destroyEnv) $
       it "processes jobs poll-only when the listener is disabled" $ \env -> do
         ref <- newIORef (0 :: Int)
-        config :: WorkerConfig m payload () <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
+        config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
         let workerConfig = config {workerCount = 1, pollInterval = 0.2, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
           runM env $ void $ HL.insertJob (defaultJob (mkPayload "poll")) {groupKey = Just "g1"}
@@ -1567,9 +1567,9 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
       it "wakes each pool only for its own queue's jobs under a high poll interval" $ \env -> do
         refA <- newIORef (0 :: Int)
         refB <- newIORef (0 :: Int)
-        cfgA :: WorkerConfig m payloadA () <-
+        cfgA :: WorkerConfig m payloadA <-
           runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m ()))
-        cfgB :: WorkerConfig m payloadB () <-
+        cfgB :: WorkerConfig m payloadB <-
           runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m ()))
         let poolA = cfgA {workerCount = 1, pollInterval = 300, jitter = NoJitter}
             poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
