@@ -66,9 +66,8 @@ Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on 
 
 ### Payload Types
 
-Define payload types with `ToJSON` and `FromJSON` instances. Nothing else is
-required of them - a queue's [result type](#job-results) is declared in the
-registry.
+Define payload types with `ToJSON` and `FromJSON` instances. A queue's [result
+type](#job-results) is also declared in the registry.
 
 ```haskell
 data EmailPayload
@@ -88,8 +87,7 @@ data ImagePayload
 
 Map queue table names to payload types at the type level. `Queue` declares a
 queue whose handlers store no result. `QueueWithResult` adds the
-[result type](#job-results) its handlers produce, which needs `ToJSON` to be
-stored and `FromJSON` to be read back.
+[result type](#job-results) its handlers produce.
 
 ```haskell
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
@@ -106,9 +104,6 @@ type AppRegistry =
    , QueueWithResult "image_queue" ImagePayload Score
    ]
 ```
-
-`Queue name payload` is a synonym for `QueueWithResult name payload ()`, so type
-errors and haddocks print the expanded form.
 
 The registry is enforced at compile time - each payload type maps to exactly one
 table, and a duplicate table name or a duplicate payload type is a type error.
