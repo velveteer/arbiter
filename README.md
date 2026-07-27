@@ -64,10 +64,11 @@ Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on 
 
 ## Quick Start
 
-### Payload Types
+### Payload and Result Types
 
-Define payload types with `ToJSON` and `FromJSON` instances. A queue's [result
-type](#job-results) is also declared in the registry.
+Define payload types with `ToJSON` and `FromJSON` instances. A queue whose
+handlers produce a [result](#job-results) needs the same instances on the result
+type.
 
 ```haskell
 data EmailPayload
@@ -81,6 +82,13 @@ data ImagePayload
   | GenerateThumbnail Text
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
+
+data Score = Score
+  { sharpness :: Double
+  , sizeBytes :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 ```
 
 ### Type-Level Registry
@@ -91,13 +99,6 @@ queue whose handlers store no result. `QueueWithResult` adds the
 
 ```haskell
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
-
-data Score = Score
-  { sharpness :: Double
-  , sizeBytes :: Int
-  }
-  deriving stock (Eq, Show, Generic)
-  deriving anyclass (ToJSON, FromJSON)
 
 type AppRegistry =
   '[ Queue "email_queue" EmailPayload
