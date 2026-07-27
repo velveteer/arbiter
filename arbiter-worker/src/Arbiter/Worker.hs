@@ -218,7 +218,9 @@ runWorkerPools pools = do
 shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
 shutdownPools pools =
   liftIO . STM.atomically $
-    traverse_ (\(NamedWorkerPool _ cfg) -> STM.writeTVar (workerStateVar cfg) ShuttingDown) pools
+    traverse_
+      (\var -> STM.writeTVar var ShuttingDown)
+      [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
 -- | Run only the worker pools whose names appear in the enabled list. The first
 -- pool to exit winds the others down, so the group stops together.
