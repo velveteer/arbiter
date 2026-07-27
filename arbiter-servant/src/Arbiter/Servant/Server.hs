@@ -29,7 +29,7 @@ import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
-import Arbiter.Worker.Cron (validateCronScheduleUpdate)
+import Arbiter.Worker.Cron (updateCronScheduleChecked)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
@@ -974,17 +974,14 @@ updateCronScheduleHandler config name update = do
   let env = serverEnv config
       schemaName = schema env
 
-  case validateCronScheduleUpdate update of
-    Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
-    Right () -> pure ()
-
   result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
-    _ <- Ops.updateCronSchedule schemaName name update
-    Ops.getCronScheduleByName schemaName name
+    outcome <- updateCronScheduleChecked name update
+    traverse (const (Ops.getCronScheduleByName schemaName name)) outcome
 
   case result of
-    Nothing -> throwError err404 {errBody = "Cron schedule not found"}
-    Just row -> pure row
+    Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
+    Right Nothing -> throwError err404 {errBody = "Cron schedule not found"}
+    Right (Just row) -> pure row
 
 -- | Request an out-of-band run of a cron schedule. A disabled schedule is
 -- refused so a manual run never fires what the schedule itself would not, and

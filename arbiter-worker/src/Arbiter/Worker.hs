@@ -60,7 +60,6 @@ import Arbiter.Core.Exceptions
   , TreeCancelException (..)
   , throwJobNotFound
   )
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -650,7 +649,7 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @(ResultOf m payload) handler job
+            handlerResult <- runHandlerWithConnection handler job
             ackJobOrSkip job
             storeJobResult schemaName job handlerResult
           finalize job
@@ -702,7 +701,7 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (FromJSON (ResultOf m payload), HasArbiterSchema m, MonadArbiter m)
+  :: (FromJSON (ResultOf m payload), MonadArbiter m)
   => Job.JobRead payload
   -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
 childResults job = do
@@ -713,7 +712,6 @@ childResults job = do
 -- contribute 'mempty').
 mergedChildResults
   :: ( FromJSON (ResultOf m payload)
-     , HasArbiterSchema m
      , MonadArbiter m
      , Monoid (ResultOf m payload)
      )
@@ -851,7 +849,6 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
 reaperLoop
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
-     , HasArbiterSchema m
      , MonadArbiter m
      , MonadUnliftIO m
      , RegistryTables (RegistryOf m)

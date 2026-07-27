@@ -27,7 +27,6 @@ module Arbiter.Simple.SimpleDb
   , useDedicatedListener
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Listen (Listener, dedicatedListener, newDedicatedListen, newPoolListener)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
@@ -80,17 +79,14 @@ newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: 
     , MonadUnliftIO
     )
 
-instance (Monad m) => HasArbiterSchema (SimpleDb registry m) where
-  type RegistryOf (SimpleDb registry m) = registry
-
-  getSchema = asks schema
-
 instance (Monad m) => HasSimplePool (SimpleDb registry m) where
   getSimplePool = asks simplePool
   localSimplePool f = local (\env -> env {simplePool = f (simplePool env)})
 
-instance (Monad m, MonadIO m, MonadUnliftIO m) => MonadArbiter (SimpleDb registry m) where
-  type Handler (SimpleDb registry m) jobs result = Connection -> jobs -> SimpleDb registry m result
+instance (MonadUnliftIO m) => MonadArbiter (SimpleDb registry m) where
+  type RegistryOf (SimpleDb registry m) = registry
+  type Handler (SimpleDb registry m) job result = Connection -> job -> SimpleDb registry m result
+  getSchema = asks schema
   executeQuery = simpleExecuteQuery
   executeStatement = simpleExecuteStatement
   withDbTransaction = simpleWithDbTransaction

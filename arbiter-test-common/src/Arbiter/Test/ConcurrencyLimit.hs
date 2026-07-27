@@ -33,7 +33,6 @@ import Arbiter.Core.Concurrency.Spec
   , runConcurrencyFor
   )
 import Arbiter.Core.Concurrency.Stats (ConcurrencyPolicyUpdate (..))
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), HasRegistry)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -45,7 +44,7 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter (HasRegistry, getSchema, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
@@ -118,7 +117,7 @@ groupedJob gk pool suffix = defaultGroupedJob gk (CLPayload (pool <> ":" <> suff
 
 concurrencyLimitSpec
   :: forall env m
-   . (HasRegistry m CLReg, MonadArbiter m)
+   . (HasRegistry m CLReg)
   => (forall a. env -> m a -> IO a)
   -> SpecWith env
 concurrencyLimitSpec runM = do

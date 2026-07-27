@@ -19,7 +19,6 @@ module Arbiter.Test.RateLimit
   , rateLimitSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), HasRegistry)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (jobQueueTable)
@@ -36,7 +35,7 @@ import Arbiter.Core.Job.Types
   , jobRateLimitKey
   , payload
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.MonadArbiter (HasRegistry, getSchema)
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema
   ( arbiterRateLimitPoliciesTable
@@ -120,7 +119,7 @@ groupedJob gk tenant = defaultGroupedJob gk (RLPayload tenant 1)
 
 rateLimitSpec
   :: forall env m
-   . (HasRegistry m RLReg, MonadArbiter m)
+   . (HasRegistry m RLReg)
   => (forall a. env -> m a -> IO a)
   -> SpecWith env
 rateLimitSpec runM = do

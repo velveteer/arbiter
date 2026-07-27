@@ -39,6 +39,7 @@ import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
 import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
+  , ackAll
   , ackAllWith
   , ackWith
   , defaultBatchedWorkerConfig
@@ -367,7 +368,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                               (Only (primaryKey j))
                   )
                   js
-              ackAllWith cbs (map (\j -> (j, Nothing)) js)
+              ackAll cbs js
         let jobs =
               [ (defaultJob (SimpleTask "ca-keep1")) {groupKey = Just "ca"}
               , (defaultJob (SimpleTask "ca-stolen")) {groupKey = Just "ca"}

@@ -22,9 +22,8 @@ module Arbiter.Worker.Config
   , readEffectiveState
   ) where
 
-import Arbiter.Core.HasArbiterSchema (ResultOf)
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
-import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter)
+import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -95,8 +94,7 @@ data WorkerConfig m payload = WorkerConfig
   , reaperTimeout :: NominalDiffTime
   -- ^ Abort any single reaper statement that runs longer than this. Default: @300@ (5 minutes).
   , workerId :: UUID
-  -- ^ Identity for this pool. Auto-minted by 'transactionalWorkerConfig'.
-  -- Note: this is not a stable identifier by default,
+  -- ^ Identity for this pool. This is not a stable identifier by default,
   -- i.e. it will not persist across worker restarts.
   , workerHost :: Maybe Text
   -- ^ Hostname recorded in the worker registry. Default: auto-generated.
@@ -105,7 +103,7 @@ data WorkerConfig m payload = WorkerConfig
   -- git SHA, deploy id, etc.). Default: 'Nothing'.
   , workerStaleThreshold :: NominalDiffTime
   -- ^ Workers whose @last_heartbeat@ is older than this are swept from the
-  -- registry by 'reaperInterval'. Must be well above the heartbeat cadence
+  -- runtime registry by 'reaperInterval'. Must be well above the heartbeat cadence
   -- ('workerHeartbeatInterval', or 'jobHeartbeatInterval' while busy).
   -- Default: @300@ (5 minutes).
   , heartbeatSignal :: TMVar ()

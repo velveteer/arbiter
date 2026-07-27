@@ -56,8 +56,8 @@ orvilleExecuteStatement (Query sql params _) = O.withConnection $ \conn -> do
 orvilleWithDbTransaction :: (O.MonadOrville m) => m a -> m a
 orvilleWithDbTransaction = O.withTransaction
 
-orvilleRunHandlerWithConnection :: (jobs -> m result) -> jobs -> m result
-orvilleRunHandlerWithConnection handler jobs = handler jobs
+orvilleRunHandlerWithConnection :: (job -> m result) -> job -> m result
+orvilleRunHandlerWithConnection handler job = handler job
 
 someParamToSqlValue :: SomeParam -> Either Text SqlValue
 someParamToSqlValue (SomeParam (PScalar c) v) =

@@ -6,7 +6,6 @@ module Arbiter.Core
     module Arbiter.Core.Job.DLQ
   , module Arbiter.Core.Job.Types
   , module Arbiter.Core.MonadArbiter
-  , module Arbiter.Core.HasArbiterSchema
   , module Arbiter.Core.QueueRegistry
 
     -- * High-level operations
@@ -68,7 +67,6 @@ import Arbiter.Core.CronSchedule
   , effectiveTimezone
   )
 import Arbiter.Core.Exceptions
-import Arbiter.Core.HasArbiterSchema
 import Arbiter.Core.HighLevel
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ

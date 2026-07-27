@@ -18,7 +18,6 @@ import Arbiter.Core.Exceptions
   , throwRetryable
   , throwTreeCancel
   )
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
@@ -35,7 +34,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
-import Arbiter.Core.MonadArbiter (JobHandler, getListener, withDbTransaction)
+import Arbiter.Core.MonadArbiter (JobHandler, RegistryOf, ResultOf, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -96,8 +95,8 @@ workerSpec
   -- ^ Construct a simple task payload
   -> (Int -> payload)
   -- ^ Construct a failing task payload
-  -> (forall r. (JobRead payload -> m r) -> JobHandler m payload r)
-  -- ^ Adapt a job action into the backend's handler shape, result-polymorphic
+  -> ((JobRead payload -> m (ResultOf m payload)) -> JobHandler m payload (ResultOf m payload))
+  -- ^ Adapt a job action into the backend's handler shape
   -> (forall a. env -> m a -> IO a)
   -- ^ Runner function (e.g. runSimpleDb env or runOrvilleTest env)
   -> SpecWith env

@@ -8,10 +8,11 @@
 -- The registry enforces at compile-time that:
 --
 --   1. Each payload type maps to exactly one queue name (via 'TableForPayload')
---   2. All queue names are unique (via 'AllQueuesUnique')
---   3. All payload types are unique (also via 'AllQueuesUnique')
---   4. Workers can only claim jobs for payloads they're registered to handle
---   5. Each queue has one handler result type (via 'ResultFor')
+--   2. Queue names and payload types are unique. 'SpecForPayload' checks the
+--      entry it resolves, so any lookup rejects a duplicate. 'AllQueuesUnique'
+--      checks the whole registry up front, for 'RegistryTables'.
+--   3. Workers can only claim jobs for payloads they're registered to handle
+--   4. Each queue has one handler result type (via 'ResultFor')
 module Arbiter.Core.QueueRegistry
   ( -- * Registry type
     JobPayloadRegistry
@@ -70,12 +71,31 @@ type family SpecPayload (spec :: QueueSpec) :: Type where
 type family SpecResult (spec :: QueueSpec) :: Type where
   SpecResult (QueueWithResult _ _ result) = result
 
--- | Look up a payload type's registry entry. Compile-time error if not
--- registered. Takes the first match, which 'AllQueuesUnique' makes the only one.
+-- | Look up a payload type's registry entry.
 type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: QueueSpec where
-  SpecForPayload payload (QueueWithResult table payload result ': _) = QueueWithResult table payload result
+  SpecForPayload payload (QueueWithResult table payload result ': rest) =
+    OnlyMatch payload (QueueWithResult table payload result) rest
   SpecForPayload payload (_ ': rest) = SpecForPayload payload rest
   SpecForPayload payload '[] = PayloadNotRegistered payload
+
+-- | The match, unless a later entry reuses its payload type or table name.
+type family
+  OnlyMatch (payload :: Type) (spec :: QueueSpec) (rest :: JobPayloadRegistry)
+    :: QueueSpec
+  where
+  OnlyMatch _ spec '[] = spec
+  OnlyMatch payload _ (QueueWithResult _ payload _ ': _) = DuplicatePayloadSpec payload
+  OnlyMatch _ (QueueWithResult table _ _) (QueueWithResult table _ _ ': _) =
+    DuplicateTableSpec table
+  OnlyMatch payload spec (_ ': rest) = OnlyMatch payload spec rest
+
+type family DuplicatePayloadSpec (payload :: Type) :: QueueSpec where
+  DuplicatePayloadSpec payload =
+    TypeError ('Text "Duplicate payload type in registry: " ':<>: 'ShowType payload)
+
+type family DuplicateTableSpec (table :: Symbol) :: QueueSpec where
+  DuplicateTableSpec table =
+    TypeError ('Text "Duplicate table name in registry: " ':<>: 'ShowType table)
 
 type family PayloadNotRegistered (payload :: Type) :: QueueSpec where
   PayloadNotRegistered payload =
@@ -118,23 +138,11 @@ type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: 
 
 type family DuplicateTable (table :: Symbol) :: Constraint where
   DuplicateTable table =
-    TypeError
-      ( 'Text "Duplicate table name: "
-          ':<>: 'ShowType table
-          ':<>: 'Text ""
-          ':$$: 'Text "Each table can only be used once in the registry."
-          ':$$: 'Text "Hint: Multiple payload types cannot share the same table."
-      )
+    TypeError ('Text "Duplicate table name in registry: " ':<>: 'ShowType table)
 
 type family DuplicatePayload (payload :: Type) :: Constraint where
   DuplicatePayload payload =
-    TypeError
-      ( 'Text "Duplicate payload type: "
-          ':<>: 'ShowType payload
-          ':$$: 'Text "Each payload type can only be used once in the registry."
-          ':$$: 'Text "Hint: a payload's table name and result type resolve to its"
-          ':$$: 'Text "first registry entry, so a second entry would never be used."
-      )
+    TypeError ('Text "Duplicate payload type in registry: " ':<>: 'ShowType payload)
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where

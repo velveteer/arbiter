@@ -917,16 +917,21 @@ See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-si
 
 Integrates with `orville-postgresql`. Handlers do not receive a connection
 parameter - Orville manages connections and transactions internally. Requires a
-custom monad with `MonadOrville`, `HasArbiterSchema`, and `MonadArbiter`
-instances:
+custom monad with `MonadOrville` and `MonadArbiter` instances:
 
 ```haskell
 {-# LANGUAGE TypeFamilies #-}
 
-instance HasArbiterSchema AppM where
+instance MonadArbiter AppM where
   type RegistryOf AppM = AppRegistry
+  type Handler AppM job result = job -> AppM result
   getSchema = asks appSchema
+  -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
 ```
+
+`Handler` is the shape of your handlers - Orville passes no connection, so it is
+just the job. `Arb.JobHandler AppM payload result` is that shape at one queue's
+job type, and is what you write in a handler's own signature.
 
 Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
 shared listener runs on its own dedicated connection. Build a `DedicatedListen`
@@ -948,7 +953,7 @@ main = do
   -- ... build AppEnv { appListen = listen, ... } and run your workers
 
 instance MonadArbiter AppM where
-  -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
+  -- ... RegistryOf / Handler / getSchema and the query methods, as above
   getListener = asks (Just . dedicatedListener . appListen)
 ```
 

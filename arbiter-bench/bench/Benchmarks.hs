@@ -6,7 +6,6 @@ module Main (main) where
 
 import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.Exceptions (throwRetryable)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), HasRegistry, ResultOf)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
@@ -18,7 +17,7 @@ import Arbiter.Core.Job.Types
   , notVisibleUntil
   , payload
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.MonadArbiter (HasRegistry, MonadArbiter (..), ResultOf)
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
@@ -458,13 +457,10 @@ instance O.MonadOrvilleControl BenchOrville where
   liftCatch = O.liftCatchViaUnliftIO
   liftMask = O.liftMaskViaUnliftIO
 
-instance HasArbiterSchema BenchOrville where
-  type RegistryOf BenchOrville = BenchRegistry
-
-  getSchema = BenchOrville $ asks fst
-
 instance MonadArbiter BenchOrville where
-  type Handler BenchOrville jobs result = jobs -> BenchOrville result
+  type RegistryOf BenchOrville = BenchRegistry
+  type Handler BenchOrville job result = job -> BenchOrville result
+  getSchema = BenchOrville $ asks fst
   executeQuery = orvilleExecuteQuery
   executeStatement = orvilleExecuteStatement
   withDbTransaction = orvilleWithDbTransaction
@@ -511,7 +507,7 @@ orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool m
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 runWorkerTrial
-  :: (HasRegistry m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry, MonadUnliftIO m)
   => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
@@ -575,7 +571,7 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
 runSteadyStateTrial
-  :: (HasRegistry m BenchRegistry, MonadArbiter m, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry, MonadUnliftIO m)
   => RunM m
   -- ^ Runner for workers
   -> RunM SimpleM
@@ -966,7 +962,7 @@ setupQueue simpleEnv totalJobs flavor = do
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue DISABLE TRIGGER USER")
   go 0
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue ENABLE TRIGGER USER")
-  runSimpleDb simpleEnv $ void $ HL.refreshAllGroups
+  runSimpleDb simpleEnv $ void HL.refreshAllGroups
 
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")

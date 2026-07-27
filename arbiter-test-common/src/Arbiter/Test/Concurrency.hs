@@ -12,10 +12,9 @@ module Arbiter.Test.Concurrency
   , removeHolDetector
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
 import Arbiter.Core.QueueRegistry (TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, replicateM, replicateM_, void, when)
@@ -97,8 +96,7 @@ removeHolDetector conn schemaName tableName =
 -- The payload type must be registered in the registry and satisfy JobPayload constraints.
 concurrencySpec
   :: forall payload m env
-   . ( HasArbiterSchema m
-     , JobPayload payload
+   . ( JobPayload payload
      , KnownSymbol (TableForPayload payload (RegistryOf m))
      , MonadArbiter m
      )
@@ -269,8 +267,7 @@ concurrencySpec mkMessage runM = do
 -- - Real database contention
 raceConditionSpec
   :: forall payload m env
-   . ( HasArbiterSchema m
-     , JobPayload payload
+   . ( JobPayload payload
      , KnownSymbol (TableForPayload payload (RegistryOf m))
      , MonadArbiter m
      )

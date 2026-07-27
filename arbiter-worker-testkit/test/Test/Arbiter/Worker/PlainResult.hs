@@ -10,8 +10,9 @@ module Test.Arbiter.Worker.PlainResult (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
-import Arbiter.Core.Job.Types (Job (..), JobRead, dayRetention, defaultJob, isRollup, payload)
+import Arbiter.Core.Job.Types (Job (..), JobRead, dayRetention, defaultJob, isRollup, payload, primaryKey)
 import Arbiter.Core.JobTree ((<~~))
+import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Simple (SimpleDb, createSimpleEnv, destroySimpleEnv, runSimpleDb)
@@ -33,6 +34,7 @@ import Data.Foldable (toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find, partition)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -102,6 +104,23 @@ spec connStr =
           map (payload . Archive.jobSnapshot) arch
             `shouldMatchList` [NoResultTask "a", NoResultTask "b", NoResultTask "c"]
           map Archive.archivedResult arch `shouldBe` [Nothing, Nothing, Nothing]
+
+    describe "insertResult on a queue that stores nothing" $
+      it "writes no row and reports 0" $ do
+        cleanup connStr
+        withEnv $ \env -> do
+          Right (parent :| [child]) <-
+            runSimpleDb env $
+              HL.insertJobTree $
+                JT.rollup
+                  (defaultJob (NoResultTask "declining-parent"))
+                  (JT.leaf (defaultJob (NoResultTask "declining-child")) :| [])
+          rowsInserted <-
+            runSimpleDb env $
+              HL.insertResult @NoResultPayload (primaryKey parent) (primaryKey child) ()
+          rowsInserted `shouldBe` 0
+          results <- runSimpleDb env $ HL.getResultsByParent @NoResultPayload (primaryKey parent)
+          results `shouldBe` Map.empty
 
     describe "plain result type" $ do
       it "stores a non-Maybe result on the archive row" $ do

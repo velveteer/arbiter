@@ -7,7 +7,6 @@ module Arbiter.Test.Operations
   ( operationsSpec
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -15,7 +14,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf)
 import Arbiter.Core.QueueRegistry (TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
@@ -41,7 +40,6 @@ operationsSpec
   :: forall payload m env
    . ( EncodeJobResult (ResultOf m payload)
      , Eq payload
-     , HasArbiterSchema m
      , JobPayload payload
      , KnownSymbol (TableForPayload payload (RegistryOf m))
      , MonadArbiter m

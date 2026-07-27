@@ -45,7 +45,6 @@ module Arbiter.Worker.Cron
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -132,7 +131,7 @@ validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
 -- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
 -- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
 updateCronScheduleChecked
-  :: (HasArbiterSchema m, MonadArbiter m)
+  :: (MonadArbiter m)
   => Text
   -> CS.CronScheduleUpdate
   -> m (Either Text Int64)

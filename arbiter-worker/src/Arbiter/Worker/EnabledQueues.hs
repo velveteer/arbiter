@@ -10,7 +10,7 @@ module Arbiter.Worker.EnabledQueues
   ) where
 
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
+import Arbiter.Core.MonadArbiter (RegistryOf)
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)

@@ -12,7 +12,6 @@ module Test.Arbiter.Orville.TestHelpers
   , TestOrville (..)
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
@@ -63,13 +62,10 @@ instance O.MonadOrvilleControl (TestOrville registry) where
   liftCatch = O.liftCatchViaUnliftIO
   liftMask = O.liftMaskViaUnliftIO
 
-instance HasArbiterSchema (TestOrville registry) where
-  type RegistryOf (TestOrville registry) = registry
-
-  getSchema = TestOrville $ asks testSchema
-
 instance MonadArbiter (TestOrville registry) where
-  type Handler (TestOrville registry) jobs result = jobs -> TestOrville registry result
+  type RegistryOf (TestOrville registry) = registry
+  type Handler (TestOrville registry) job result = job -> TestOrville registry result
+  getSchema = TestOrville $ asks testSchema
   executeQuery = orvilleExecuteQuery
   executeStatement = orvilleExecuteStatement
   withDbTransaction = orvilleWithDbTransaction

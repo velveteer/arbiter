@@ -10,12 +10,18 @@
 -- import Hasql.Connection qualified as Hasql
 --
 -- instance MonadArbiter MyApp where
---   type Handler MyApp jobs result = Hasql.Connection -> jobs -> MyApp result
+--   type RegistryOf MyApp = MyRegistry
+--   type Handler MyApp job result = Hasql.Connection -> job -> MyApp result
+--   getSchema                = asks appSchema
 --   executeQuery             = hasqlExecuteQuery
 --   executeStatement         = hasqlExecuteStatement
 --   withDbTransaction        = hasqlWithDbTransaction
 --   runHandlerWithConnection = hasqlRunHandlerWithConnection
+--   getListener              = asks appListener
 -- @
+--
+-- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
+-- 'Handler' at that queue's job and declared result types.
 module Arbiter.Hasql.MonadArbiter
   ( -- * MonadArbiter implementation
     hasqlExecuteQuery
@@ -161,13 +167,13 @@ beginCommitOrRollback conn action = mask $ \restore -> do
 -- queries within the worker transaction.
 hasqlRunHandlerWithConnection
   :: (HasHasqlPool m, MonadIO m)
-  => (Hasql.Connection -> jobs -> m result)
-  -> jobs
+  => (Hasql.Connection -> job -> m result)
+  -> job
   -> m result
-hasqlRunHandlerWithConnection handler jobs = do
+hasqlRunHandlerWithConnection handler job = do
   pool <- getHasqlPool
   case activeConn pool of
-    Just conn -> handler conn jobs
+    Just conn -> handler conn job
     Nothing -> throwInternal "hasqlRunHandlerWithConnection: no active connection"
 
 -- ---------------------------------------------------------------------------

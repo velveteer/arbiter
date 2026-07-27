@@ -10,6 +10,7 @@ module Arbiter.Core.HighLevel
   ( -- * Constraint Aliases
     QueueOperation
   , JobOperation
+  , queueTable
   , RegistryAdmissionPolicies
 
     -- * Job Operations
@@ -159,13 +160,12 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..), ResultOf)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
@@ -175,18 +175,20 @@ import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
 type QueueOperation m payload =
-  ( HasArbiterSchema m
-  , JobPayload payload
+  ( JobPayload payload
   , KnownSymbol (TableForPayload payload (RegistryOf m))
   , MonadArbiter m
   )
 
 -- | Constraints for job operations (table name stored in job).
 type JobOperation m payload =
-  ( HasArbiterSchema m
-  , JobPayload payload
+  ( JobPayload payload
   , MonadArbiter m
   )
+
+-- | The table name @payload@'s entry in this monad's registry declares.
+queueTable :: forall payload m. (KnownSymbol (TableForPayload payload (RegistryOf m))) => Text
+queueTable = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
 
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
 -- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
@@ -197,7 +199,7 @@ insertJob
   -> m (Maybe (JobRead payload))
 insertJob job = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns only the jobs that were
@@ -210,7 +212,7 @@ insertJobsBatch
   -> m [JobRead payload]
 insertJobsBatch jobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.insertJobsBatch schemaName tableName jobs
 
 -- | Like 'insertJobsBatch' but returns only the count of inserted rows.
@@ -221,7 +223,7 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ jobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.insertJobsBatch_ schemaName tableName jobs
 
 -- | Claim visible jobs (at most one per group). May return fewer than the
@@ -237,14 +239,14 @@ claimNextVisibleJobs
   -> m [JobRead payload]
 claimNextVisibleJobs limit timeout = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.claimNextVisibleJobs schemaName tableName limit timeout
 
 -- | Add tokens to a key's bucket, capped at max, and wake any of its jobs parked
 -- mid-wait. A no-op without a policy.
 addRateLimitTokens
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => RateLimitKey
   -> Double
   -> m ()
@@ -259,7 +261,7 @@ addRateLimitTokens key amount = withDbTransaction $ do
 -- no burst.
 pruneRateLimitBuckets
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => NominalDiffTime
   -> m Int64
 pruneRateLimitBuckets idle = do
@@ -271,7 +273,7 @@ pruneRateLimitBuckets idle = do
 -- at the boundary is a fixed window.
 resetRateLimitBuckets
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Text
   -> m Int64
 resetRateLimitBuckets prefix = withDbTransaction $ do
@@ -285,7 +287,7 @@ resetRateLimitBuckets prefix = withDbTransaction $ do
 -- of currently-throttled jobs per prefix across the registry's queues.
 listRateLimitPolicies
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m [RateLimitPolicyView]
 listRateLimitPolicies = do
   schemaName <- getSchema
@@ -295,7 +297,7 @@ listRateLimitPolicies = do
 -- count. 'Nothing' when the prefix has no policy.
 getRateLimitPolicy
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Text
   -> m (Maybe RateLimitPolicyView)
 getRateLimitPolicy prefix = do
@@ -305,7 +307,7 @@ getRateLimitPolicy prefix = do
 -- | Whether a rate-limit policy exists for a prefix.
 rateLimitPolicyExists
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -> m Bool
 rateLimitPolicyExists prefix = do
@@ -315,7 +317,7 @@ rateLimitPolicyExists prefix = do
 -- | List a prefix's buckets with fill levels, paginated.
 listRateLimitBuckets
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -> Int
   -> Int
@@ -328,7 +330,7 @@ listRateLimitBuckets prefix limit offset = do
 -- rows affected (0 if absent).
 updateRateLimitPolicyOverrides
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Text
   -> RateLimitPolicyUpdate
   -> m Int64
@@ -345,7 +347,7 @@ updateRateLimitPolicyOverrides prefix upd = do
 -- in-flight aggregates.
 listConcurrencyPolicies
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => m [ConcurrencyPolicyView]
 listConcurrencyPolicies = do
   schemaName <- getSchema
@@ -355,7 +357,7 @@ listConcurrencyPolicies = do
 -- 'Nothing' when the prefix has no pool.
 getConcurrencyPolicy
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -> m (Maybe ConcurrencyPolicyView)
 getConcurrencyPolicy prefix = do
@@ -365,7 +367,7 @@ getConcurrencyPolicy prefix = do
 -- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
 listConcurrencyKeys
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -> Int
   -> Int
@@ -379,7 +381,7 @@ listConcurrencyKeys prefix limit offset = do
 -- Returns rows affected.
 updateConcurrencyPolicyOverrides
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -> ConcurrencyPolicyUpdate
   -> m Int64
@@ -390,7 +392,7 @@ updateConcurrencyPolicyOverrides prefix upd = do
 -- | Delete drained concurrency rows with no live job. The reaper runs this.
 pruneConcurrencyKeys
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 pruneConcurrencyKeys = do
   schemaName <- getSchema
@@ -399,7 +401,7 @@ pruneConcurrencyKeys = do
 -- | Recompute the concurrency counts from live jobs, repairing any trigger drift.
 reconcileConcurrencyCounts
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 reconcileConcurrencyCounts = do
   schemaName <- getSchema
@@ -409,7 +411,7 @@ reconcileConcurrencyCounts = do
 -- reaper runs this periodically.
 reconcileConcurrencyCountsIfStale
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m ()
 reconcileConcurrencyCountsIfStale = do
   schemaName <- getSchema
@@ -418,7 +420,7 @@ reconcileConcurrencyCountsIfStale = do
 -- | Reconcile then prune. The reaper runs this.
 reconcileAndPruneConcurrency
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m ()
 reconcileAndPruneConcurrency = do
   schemaName <- getSchema
@@ -436,7 +438,7 @@ mkClaimSql
   -> m Ops.ClaimSql
 mkClaimSql batchSize poolSize timeout mWorkerId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   pure $ Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize poolSize timeout mWorkerId
 
 -- | Variant of 'claimNextVisibleJobs' that stamps @claimed_by@ on every claimed
@@ -451,7 +453,7 @@ claimNextVisibleJobsAs
   -> m [JobRead payload]
 claimNextVisibleJobsAs limit timeout workerId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
 
 -- | Claims multiple jobs per group. Unlike 'claimNextVisibleJobs', this can
@@ -469,7 +471,7 @@ claimNextVisibleJobsBatched
   -> m [NonEmpty (JobRead payload)]
 claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
 
 -- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
@@ -606,7 +608,7 @@ listDLQJobs
   -> m [DLQ.DLQJob payload]
 listDLQJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listDLQJobs schemaName tableName limit offset
 
 -- | Lists completed jobs in the archive with pagination (most recent first).
@@ -620,7 +622,7 @@ listArchiveJobs
   -> m [Archive.ArchiveJob payload]
 listArchiveJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listArchiveJobs schemaName tableName limit offset
 
 -- | Fetch a single archived job by its original job id.
@@ -632,7 +634,7 @@ getArchivedJobById
   -> m (Maybe (Archive.ArchiveJob payload))
 getArchivedJobById jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getArchivedJobById schemaName tableName jobId
 
 -- | List archived jobs in a group, most recent first, with pagination.
@@ -648,7 +650,7 @@ listArchivedJobsByGroupKey
   -> m [Archive.ArchiveJob payload]
 listArchivedJobsByGroupKey groupKey limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listArchivedJobsByGroupKey schemaName tableName groupKey limit offset
 
 -- | Delete one archived job by its archive primary key. Returns rows deleted.
@@ -660,7 +662,7 @@ deleteArchiveJob
   -> m Int64
 deleteArchiveJob archiveId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.deleteArchiveJob schemaName tableName archiveId
 
 -- | Delete archived jobs by archive primary key. Returns rows deleted.
@@ -672,7 +674,7 @@ deleteArchiveJobsBatch
   -> m Int64
 deleteArchiveJobsBatch archiveIds = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
 
 -- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
@@ -685,7 +687,7 @@ reEnqueueFromArchive
   -> m (Maybe (JobRead payload))
 reEnqueueFromArchive archiveId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.reEnqueueFromArchive schemaName tableName archiveId
 
 -- | Retry a DLQ job (re-insert into main queue with attempts reset).
@@ -698,7 +700,7 @@ retryFromDLQ
   -> m (Maybe (JobRead payload))
 retryFromDLQ dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.retryFromDLQ schemaName tableName dlqId
 
 -- | Check whether a DLQ job exists by ID.
@@ -709,7 +711,7 @@ dlqJobExists
   -> m Bool
 dlqJobExists dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.dlqJobExists schemaName tableName dlqId
 
 -- | Permanently deletes a job from the dead-letter queue.
@@ -723,7 +725,7 @@ deleteDLQJob
   -> m Int64
 deleteDLQJob dlqId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.deleteDLQJob schemaName tableName dlqId
 
 -- | Move multiple jobs to the DLQ. Jobs already claimed by another worker are
@@ -751,7 +753,7 @@ deleteDLQJobsBatch
   -> m Int64
 deleteDLQJobsBatch dlqIds = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.deleteDLQJobsBatch schemaName tableName dlqIds
 
 -- ---------------------------------------------------------------------------
@@ -773,7 +775,7 @@ listJobsFiltered
   -> m [JobRead payload]
 listJobsFiltered filters limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listJobsFiltered schemaName tableName filters limit offset
 
 -- | Counts jobs with composable filters.
@@ -785,7 +787,7 @@ countJobsFiltered
   -> m Int64
 countJobsFiltered filters = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countJobsFiltered schemaName tableName filters
 
 -- | Lists DLQ jobs with composable filters.
@@ -803,7 +805,7 @@ listDLQFiltered
   -> m [DLQ.DLQJob payload]
 listDLQFiltered filters limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listDLQFiltered schemaName tableName filters limit offset
 
 -- | Counts DLQ jobs with composable filters.
@@ -815,7 +817,7 @@ countDLQFiltered
   -> m Int64
 countDLQFiltered filters = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countDLQFiltered schemaName tableName filters
 
 -- ---------------------------------------------------------------------------
@@ -835,7 +837,7 @@ listJobs
   -> m [JobRead payload]
 listJobs limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.listJobs schemaName tableName limit offset
 
 -- | Gets a single job by its ID.
@@ -849,7 +851,7 @@ getJobById
   -> m (Maybe (JobRead payload))
 getJobById jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getJobById schemaName tableName jobId
 
 -- | Whether a job with the given id exists in this payload's queue table.
@@ -861,7 +863,7 @@ jobExists
   -> m Bool
 jobExists jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.jobExists schemaName tableName jobId
 
 -- | Gets all jobs for a specific group key with pagination.
@@ -877,7 +879,7 @@ getJobsByGroup
   -> m [JobRead payload]
 getJobsByGroup groupKey limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getJobsByGroup schemaName tableName groupKey limit offset
 
 -- | Gets all jobs for a specific parent ID with pagination.
@@ -893,7 +895,7 @@ getJobsByParent
   -> m [JobRead payload]
 getJobsByParent pid limit offset = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getJobsByParent schemaName tableName pid limit offset
 
 -- | Cancels (deletes) a job by ID.
@@ -908,7 +910,7 @@ cancelJob
   -> m Int64
 cancelJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.cancelJob schemaName tableName jobId
 
 -- | Force-cancel a job and its descendants, also interrupting any handlers
@@ -921,7 +923,7 @@ forceCancelJob
   -> m Int64
 forceCancelJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.forceCancelJob schemaName tableName jobId
 
 -- | Cancels (deletes) multiple jobs by ID.
@@ -935,7 +937,7 @@ cancelJobsBatch
   -> m Int64
 cancelJobsBatch jobIds = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.cancelJobsBatch schemaName tableName jobIds
 
 -- | Promote a delayed or retrying job to be immediately visible.
@@ -950,7 +952,7 @@ promoteJob
   -> m Int64
 promoteJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.promoteJob schemaName tableName jobId
 
 -- | Gets statistics about the job queue.
@@ -960,7 +962,7 @@ getQueueStats
   => m Ops.QueueStats
 getQueueStats = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getQueueStats schemaName tableName
 
 -- ---------------------------------------------------------------------------
@@ -974,7 +976,7 @@ countJobs
   => m Int64
 countJobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countJobs schemaName tableName
 
 -- | Counts jobs matching a group key.
@@ -986,7 +988,7 @@ countJobsByGroup
   -> m Int64
 countJobsByGroup groupKey = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countJobsByGroup schemaName tableName groupKey
 
 -- | Counts jobs matching a parent ID.
@@ -998,7 +1000,7 @@ countJobsByParent
   -> m Int64
 countJobsByParent pid = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countJobsByParent schemaName tableName pid
 
 -- | Counts jobs in the dead-letter queue.
@@ -1008,7 +1010,7 @@ countDLQJobs
   => m Int64
 countDLQJobs = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countDLQJobs schemaName tableName
 
 -- | Counts children for a batch of potential parent IDs.
@@ -1021,7 +1023,7 @@ countChildrenBatch
   -> m (Map Int64 (Int64, Int64))
 countChildrenBatch ids = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countChildrenBatch schemaName tableName ids
 
 -- | Count how many children of a parent are in the DLQ.
@@ -1046,7 +1048,7 @@ countDLQChildrenBatch
   -> m (Map Int64 Int64)
 countDLQChildrenBatch ids = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.countDLQChildrenBatch schemaName tableName ids
 
 -- ---------------------------------------------------------------------------
@@ -1068,7 +1070,7 @@ pauseChildren
   -> m Int64
 pauseChildren parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.pauseChildren schemaName tableName parentJobId
 
 -- | Resume all suspended children of a parent job.
@@ -1082,7 +1084,7 @@ resumeChildren
   -> m Int64
 resumeChildren parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.resumeChildren schemaName tableName parentJobId
 
 -- | Cancel a job and all its descendants recursively.
@@ -1096,7 +1098,7 @@ cancelJobCascade
   -> m Int64
 cancelJobCascade jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.cancelJobCascade schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -1116,7 +1118,7 @@ suspendJob
   -> m Int64
 suspendJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.suspendJob schemaName tableName jobId
 
 -- | Resume a suspended job, making it claimable again.
@@ -1130,7 +1132,7 @@ resumeJob
   -> m Int64
 resumeJob jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.resumeJob schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -1172,7 +1174,7 @@ insertResultUnsafe
   -> m Int64
 insertResultUnsafe parentJobId childId result = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.insertResult schemaName tableName parentJobId childId result
 
 -- | Get all child results for a parent from the results table.
@@ -1184,7 +1186,7 @@ getResultsByParent
   -> m (Map Int64 Value)
 getResultsByParent parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getResultsByParent schemaName tableName parentJobId
 
 -- | Get DLQ child errors for a parent.
@@ -1198,7 +1200,7 @@ getDLQChildErrorsByParent
   -> m (Map Int64 Text)
 getDLQChildErrorsByParent parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
@@ -1211,7 +1213,7 @@ readChildResultsRaw
   -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
 readChildResultsRaw parentJobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.readChildResultsRaw schemaName tableName parentJobId
 
 -- | Snapshot results into @parent_state@ before DLQ move.
@@ -1223,7 +1225,7 @@ persistParentState
   -> m Int64
 persistParentState jobId state = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.persistParentState schemaName tableName jobId state
 
 -- | Read raw @parent_state@ snapshot from the DB.
@@ -1234,7 +1236,7 @@ getParentStateSnapshot
   -> m (Maybe Value)
 getParentStateSnapshot jobId = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   Ops.getParentStateSnapshot schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
@@ -1249,7 +1251,7 @@ getParentStateSnapshot jobId = do
 -- one pool runs it per interval.
 refreshAllGroups
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => m [Text]
 refreshAllGroups = do
   schemaName <- getSchema
@@ -1262,7 +1264,7 @@ refreshAllGroups = do
 -- | Register a worker pool. See 'Ops.registerWorker'.
 registerWorker
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => UUID
   -> Text
   -- ^ Queue name
@@ -1282,7 +1284,7 @@ registerWorker workerId queue host threads staleThreshold metadata = do
 -- | Bump a worker's heartbeat. See 'Ops.heartbeatWorker'.
 heartbeatWorker
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => UUID
   -> m (Maybe Bool)
 heartbeatWorker workerId = do
@@ -1292,7 +1294,7 @@ heartbeatWorker workerId = do
 -- | Set the @paused@ flag for a registered worker.
 setWorkerPaused
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => UUID
   -> Bool
   -> m Int64
@@ -1303,7 +1305,7 @@ setWorkerPaused workerId p = do
 -- | Mark a worker as gracefully draining.
 markWorkerShuttingDown
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => UUID
   -> m Int64
 markWorkerShuttingDown workerId = do
@@ -1313,7 +1315,7 @@ markWorkerShuttingDown workerId = do
 -- | Remove a worker row.
 deregisterWorker
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => UUID
   -> m Int64
 deregisterWorker workerId = do
@@ -1323,7 +1325,7 @@ deregisterWorker workerId = do
 -- | List workers, optionally scoped to a queue and a heartbeat-age threshold.
 listWorkers
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Maybe Text
   -- ^ Queue name. 'Nothing' returns workers from all queues.
   -> Maybe NominalDiffTime
@@ -1336,7 +1338,7 @@ listWorkers mQueue mLiveSecs = do
 -- | Delete worker rows older than each row's own @stale_threshold_secs@.
 sweepStaleWorkers
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => m Int64
 sweepStaleWorkers = do
   schemaName <- getSchema
@@ -1349,7 +1351,7 @@ sweepStaleWorkers = do
 -- | Insert an @arbiter_queues@ row with defaults if one doesn't already exist.
 ensureQueue
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Queue name
   -> m Int64
@@ -1361,7 +1363,7 @@ ensureQueue queue = do
 -- on the queue.
 setQueuePaused
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Queue name
   -> Bool
@@ -1373,7 +1375,7 @@ setQueuePaused queue p = do
 -- | Get the queue's row. 'Nothing' if absent.
 getQueue
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Queue name
   -> m (Maybe QueueRow)
@@ -1384,7 +1386,7 @@ getQueue queue = do
 -- | List all queues registered in this schema.
 listQueues
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => m [QueueRow]
 listQueues = do
   schemaName <- getSchema
@@ -1397,7 +1399,7 @@ listQueues = do
 -- | List cron schedules ordered by name, optionally filtered by queue.
 listCronSchedules
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Maybe Text
   -- ^ Queue filter. 'Nothing' returns schedules for all queues.
   -> m [CronScheduleRow]
@@ -1408,7 +1410,7 @@ listCronSchedules mQueue = do
 -- | Get a single cron schedule by name.
 getCronScheduleByName
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Schedule name
   -> m (Maybe CronScheduleRow)
@@ -1423,7 +1425,7 @@ getCronScheduleByName scheduleName = do
 -- rejects ones the scheduler cannot parse.
 updateCronScheduleUnchecked
   :: forall m
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Schedule name
   -> CronScheduleUpdate
@@ -1440,7 +1442,7 @@ updateCronScheduleUnchecked scheduleName upd = do
 -- the same schema. See 'Ops.runGated'.
 runGated
   :: forall m a
-   . (HasArbiterSchema m, MonadArbiter m)
+   . (MonadArbiter m)
   => Text
   -- ^ Task identifier
   -> NominalDiffTime
@@ -1463,5 +1465,5 @@ insertJobTree
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree tree = do
   schemaName <- getSchema
-  let tableName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+  let tableName = queueTable @payload @m
   JT.insertJobTree schemaName tableName tree
