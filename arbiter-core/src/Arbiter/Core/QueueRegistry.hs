@@ -9,8 +9,9 @@
 --
 --   1. Each payload type maps to exactly one queue name (via 'TableForPayload')
 --   2. Queue names and payload types are unique. 'SpecForPayload' checks the
---      entry it resolves, so any lookup rejects a duplicate. 'AllQueuesUnique'
---      checks the whole registry up front, for 'RegistryTables'.
+--      entry it resolves against the whole registry, so any lookup rejects a
+--      duplicate. 'AllQueuesUnique' checks the whole registry up front, for
+--      'RegistryTables'.
 --   3. Workers can only claim jobs for payloads they're registered to handle
 --   4. Each queue has one handler result type (via 'ResultFor')
 module Arbiter.Core.QueueRegistry
@@ -73,29 +74,43 @@ type family SpecResult (spec :: QueueSpec) :: Type where
 
 -- | Look up a payload type's registry entry.
 type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: QueueSpec where
-  SpecForPayload payload (QueueWithResult table payload result ': rest) =
-    OnlyMatch payload (QueueWithResult table payload result) rest
-  SpecForPayload payload (_ ': rest) = SpecForPayload payload rest
-  SpecForPayload payload '[] = PayloadNotRegistered payload
+  SpecForPayload payload registry = MatchIn payload '[] registry
 
--- | The match, unless a later entry reuses its payload type or table name.
+-- | Walk to the entry for @payload@, carrying the entries already passed over
+-- so its match is checked against every other entry, not just the later ones.
 type family
-  OnlyMatch (payload :: Type) (spec :: QueueSpec) (rest :: JobPayloadRegistry)
+  MatchIn (payload :: Type) (seen :: JobPayloadRegistry) (rest :: JobPayloadRegistry)
+    :: QueueSpec
+  where
+  MatchIn payload seen (QueueWithResult table payload result ': rest) =
+    OnlyMatch payload (QueueWithResult table payload result) (AppendSpecs seen rest)
+  MatchIn payload seen (spec ': rest) = MatchIn payload (spec ': seen) rest
+  MatchIn payload _ '[] = PayloadNotRegistered payload
+
+-- | Registry concatenation.
+type family
+  AppendSpecs (xs :: JobPayloadRegistry) (ys :: JobPayloadRegistry)
+    :: JobPayloadRegistry
+  where
+  AppendSpecs '[] ys = ys
+  AppendSpecs (x ': xs) ys = x ': AppendSpecs xs ys
+
+-- | The match, unless another entry reuses its payload type or table name.
+type family
+  OnlyMatch (payload :: Type) (spec :: QueueSpec) (others :: JobPayloadRegistry)
     :: QueueSpec
   where
   OnlyMatch _ spec '[] = spec
-  OnlyMatch payload _ (QueueWithResult _ payload _ ': _) = DuplicatePayloadSpec payload
+  OnlyMatch payload _ (QueueWithResult _ payload _ ': _) = TypeError (DuplicatePayloadMsg payload)
   OnlyMatch _ (QueueWithResult table _ _) (QueueWithResult table _ _ ': _) =
-    DuplicateTableSpec table
+    TypeError (DuplicateTableMsg table)
   OnlyMatch payload spec (_ ': rest) = OnlyMatch payload spec rest
 
-type family DuplicatePayloadSpec (payload :: Type) :: QueueSpec where
-  DuplicatePayloadSpec payload =
-    TypeError ('Text "Duplicate payload type in registry: " ':<>: 'ShowType payload)
+type DuplicatePayloadMsg (payload :: Type) =
+  'Text "Duplicate payload type in registry: " ':<>: 'ShowType payload
 
-type family DuplicateTableSpec (table :: Symbol) :: QueueSpec where
-  DuplicateTableSpec table =
-    TypeError ('Text "Duplicate table name in registry: " ':<>: 'ShowType table)
+type DuplicateTableMsg (table :: Symbol) =
+  'Text "Duplicate table name in registry: " ':<>: 'ShowType table
 
 type family PayloadNotRegistered (payload :: Type) :: QueueSpec where
   PayloadNotRegistered payload =
@@ -127,22 +142,14 @@ type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
 -- | Check that a table name doesn't appear in the rest of the registry.
 type family NotInTables (table :: Symbol) (registry :: JobPayloadRegistry) :: Constraint where
   NotInTables _ '[] = ()
-  NotInTables table (QueueWithResult table _ _ ': _) = DuplicateTable table
+  NotInTables table (QueueWithResult table _ _ ': _) = TypeError (DuplicateTableMsg table)
   NotInTables table (_ ': rest) = NotInTables table rest
 
 -- | Check that a payload type doesn't appear in the rest of the registry.
 type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: Constraint where
   NotInPayloads _ '[] = ()
-  NotInPayloads payload (QueueWithResult _ payload _ ': _) = DuplicatePayload payload
+  NotInPayloads payload (QueueWithResult _ payload _ ': _) = TypeError (DuplicatePayloadMsg payload)
   NotInPayloads payload (_ ': rest) = NotInPayloads payload rest
-
-type family DuplicateTable (table :: Symbol) :: Constraint where
-  DuplicateTable table =
-    TypeError ('Text "Duplicate table name in registry: " ':<>: 'ShowType table)
-
-type family DuplicatePayload (payload :: Type) :: Constraint where
-  DuplicatePayload payload =
-    TypeError ('Text "Duplicate payload type in registry: " ':<>: 'ShowType payload)
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where

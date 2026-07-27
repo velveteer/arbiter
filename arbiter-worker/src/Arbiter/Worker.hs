@@ -71,7 +71,7 @@ import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..), defaultPoolConfig)
-import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Exception (SomeException, displayException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
@@ -79,14 +79,15 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, Value, toJSON)
-import Data.Foldable (fold, foldMap', for_, toList, traverse_)
+import Data.Either (partitionEithers)
+import Data.Foldable (fold, foldMap', toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -94,7 +95,6 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
-import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
@@ -196,7 +196,7 @@ namedWorkerPool
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
-    { workerPoolName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+    { workerPoolName = Arb.queueTable @payload @m
     , workerPoolConfig = cfg
     }
 
@@ -220,7 +220,8 @@ shutdownPools pools =
   liftIO . STM.atomically $
     traverse_ (\(NamedWorkerPool _ cfg) -> STM.writeTVar (workerStateVar cfg) ShuttingDown) pools
 
--- | Run only the worker pools whose names appear in the enabled list.
+-- | Run only the worker pools whose names appear in the enabled list. The first
+-- pool to exit winds the others down, so the group stops together.
 runSelectedWorkerPools
   :: forall m
    . (MonadUnliftIO m)
@@ -232,7 +233,10 @@ runSelectedWorkerPools enabled pools =
     [] -> pure ()
     selected -> evalContT $ do
       asyncs <- for selected withPoolAsync
-      lift $ traverse_ Async.waitCatch asyncs
+      lift $ do
+        void $ waitAnyCatch asyncs
+        shutdownPools selected
+        traverse_ Async.waitCatch asyncs
   where
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
@@ -278,7 +282,7 @@ runWorkerPool
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
-      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
+      queueName = Arb.queueTable @payload @m
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -615,7 +619,7 @@ processJobsWithRetry config jobs = do
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, mVal) -> when (isAcked ackedSet j) $ storeEncodedResult schemaName j mVal
+          storeEncodedResults schemaName (filter (isAcked ackedSet . fst) pairs)
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -750,6 +754,28 @@ storeEncodedResult schemaName job mVal =
       | Ops.archivesOnAck job ->
           void $ Ops.updateArchiveResult schemaName (Job.queueName job) (Job.primaryKey job) val
     _ -> pure ()
+
+-- | 'storeEncodedResult' over a batch from one queue: one statement for the
+-- child results, one for the archived roots.
+storeEncodedResults
+  :: (MonadArbiter m)
+  => Text
+  -> [(Job.JobRead payload, Maybe Value)]
+  -> m ()
+storeEncodedResults _ [] = pure ()
+storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
+  let (childRows, rootRows) = partitionEithers (mapMaybe resultRow pairs)
+      queue = Job.queueName firstJob
+  void $ Ops.insertResultsBatch schemaName queue childRows
+  void $ Ops.updateArchiveResultsBatch schemaName queue rootRows
+  where
+    resultRow (job, mVal) = do
+      val <- mVal
+      case Job.parentId job of
+        Just pid -> Just (Left (pid, Job.primaryKey job, val))
+        Nothing
+          | Ops.archivesOnAck job -> Just (Right (Job.primaryKey job, val))
+          | otherwise -> Nothing
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.

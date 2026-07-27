@@ -5,6 +5,7 @@
 module Arbiter.Core.Sql.Archive
   ( archiveAckCte
   , updateArchiveResultSQL
+  , updateArchiveResultsBatchSQL
   , purgeArchiveSQL
   , archivePurgeBatch
   , listArchiveFilteredSQL
@@ -55,6 +56,19 @@ updateArchiveResultSQL :: Text -> Text -> Value -> Int64 -> Query ()
 updateArchiveResultSQL schema tableName result jobId =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|UPDATE ${archiveTbl} SET result = #{result :: CJsonb} WHERE job_id = #{jobId :: CInt8}|]
+
+-- | 'updateArchiveResultSQL' for several jobs in one statement.
+updateArchiveResultsBatchSQL :: Text -> Text -> [Int64] -> [Value] -> Query ()
+updateArchiveResultsBatchSQL schema tableName jobIds results =
+  let archiveTbl = jobQueueArchiveTable schema tableName
+   in [sql|
+        UPDATE ${archiveTbl} a SET result = src.result
+        FROM (
+          SELECT unnest(#{jobIds :: [CInt8]}::bigint[]) AS job_id,
+                 unnest(#{results :: [CJsonb]}::jsonb[]) AS result
+        ) src
+        WHERE a.job_id = src.job_id
+      |]
 
 -- | Per-queue cap on archived jobs purged in one reaper pass.
 archivePurgeBatch :: Int
