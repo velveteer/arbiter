@@ -25,7 +25,7 @@ import Arbiter.Worker
   , namedWorkerPool
   , poolConfigForWorkers
   , runWorkerPools
-  , signalShutdown
+  , shutdownPools
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
@@ -216,10 +216,9 @@ main = do
         , namedWorkerPool notifWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
-      installSignals st = do
-        let handler = Signals.Catch $ signalShutdown st
-        void $ Signals.installHandler Signals.sigTERM handler Nothing
-        void $ Signals.installHandler Signals.sigINT handler Nothing
+      handler = Signals.Catch $ shutdownPools workers
+  void $ Signals.installHandler Signals.sigTERM handler Nothing
+  void $ Signals.installHandler Signals.sigINT handler Nothing
 
   -- Self-restart watchdog: after RESET_INTERVAL_MINUTES, raise SIGTERM so the
   -- process exits via the handler above and the container's restart policy
@@ -243,7 +242,7 @@ main = do
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
   race_
-    (runSimpleDb workerEnv $ runWorkerPools workers installSignals)
+    (runSimpleDb workerEnv $ runWorkerPools workers)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------

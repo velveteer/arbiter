@@ -11,6 +11,7 @@ module Arbiter.Worker
     -- * Multi-Queue Workers
   , NamedWorkerPool (..)
   , namedWorkerPool
+  , shutdownPools
   , runWorkerPools
   , runSelectedWorkerPools
   , getEnabledQueues
@@ -74,7 +75,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Exception (SomeException, displayException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, Value, toJSON)
@@ -167,7 +168,7 @@ import Arbiter.Worker.WorkerState
 --   , namedWorkerPool imageConfig      -- "image_jobs"
 --   ]
 --
--- main = runWorkerPools allWorkers (\\_ -> pure ())
+-- main = runWorkerPools allWorkers
 -- @
 data NamedWorkerPool m
   = forall payload.
@@ -199,30 +200,34 @@ namedWorkerPool cfg =
     , workerPoolConfig = cfg
     }
 
--- | Run worker pools with shared shutdown state. Filters to queues listed
--- in @ARBITER_ENABLED_QUEUES@ (all if unset). The setup action receives the
--- shared 'TVar' for installing signal handlers.
+-- | Run worker pools, each on its own 'workerStateVar'. Filters to queues
+-- listed in @ARBITER_ENABLED_QUEUES@ (all if unset). Stop them with
+-- 'shutdownPools', or one at a time with
+-- 'Arbiter.Worker.Config.shutdownWorker'.
 runWorkerPools
   :: forall m
    . (MonadUnliftIO m, RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
-  -> (TVar WorkerState -> IO ())
   -> m ()
-runWorkerPools pools setup = do
-  sharedState <- liftIO newWorkerState
-  liftIO $ setup sharedState
+runWorkerPools pools = do
   enabled <- liftIO $ enabledQueuesForMonad @m
-  runSelectedWorkerPools sharedState enabled pools
+  runSelectedWorkerPools enabled pools
+
+-- | Signal graceful shutdown to every pool in one transaction, so none of them
+-- claims another job after any of them has stopped.
+shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
+shutdownPools pools =
+  liftIO . STM.atomically $
+    traverse_ (\(NamedWorkerPool _ cfg) -> STM.writeTVar (workerStateVar cfg) ShuttingDown) pools
 
 -- | Run only the worker pools whose names appear in the enabled list.
 runSelectedWorkerPools
   :: forall m
    . (MonadUnliftIO m)
-  => TVar WorkerState
-  -> [Text]
+  => [Text]
   -> [NamedWorkerPool m]
   -> m ()
-runSelectedWorkerPools sharedState enabled pools =
+runSelectedWorkerPools enabled pools =
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
     [] -> pure ()
     selected -> evalContT $ do
@@ -231,11 +236,7 @@ runSelectedWorkerPools sharedState enabled pools =
   where
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
-      let cfg' =
-            cfg
-              { workerStateVar = sharedState
-              , logConfig = withPoolContext name (logConfig cfg)
-              }
+      let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
        in ContT $ Async.withAsync (runWorkerPool cfg')
 
 -- | Inject the pool name into log context. User-supplied pairs come after

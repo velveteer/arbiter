@@ -701,16 +701,17 @@ emailConfig <- Worker.transactionalWorkerConfig 3 processEmail
 imageConfig <- Worker.transactionalWorkerConfig 2 processImage
 
 let workers = [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]
+    shutdown = Signals.Catch $ Worker.shutdownPools workers
+void $ Signals.installHandler Signals.sigTERM shutdown Nothing
+void $ Signals.installHandler Signals.sigINT shutdown Nothing
+
 poolCfg <- Worker.poolConfigForWorkers workers
 env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
-
-ArbS.runSimpleDb env $ Worker.runWorkerPools workers $ \state -> do
-  let shutdown = Signals.Catch $ Worker.signalShutdown state
-  void $ Signals.installHandler Signals.sigTERM shutdown Nothing
-  void $ Signals.installHandler Signals.sigINT shutdown Nothing
+ArbS.runSimpleDb env $ Worker.runWorkerPools workers
 ```
 
-The dispatcher stops claiming, in-flight jobs drain within `gracefulShutdownTimeout`, and the process exits.
+The dispatcher stops claiming, in-flight jobs drain within
+`gracefulShutdownTimeout`, and the process exits.
 
 ### Backoff Strategies
 
@@ -936,7 +937,10 @@ job type, and is what you write in a handler's own signature.
 Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
 shared listener runs on its own dedicated connection. Build a `DedicatedListen`
 (from `Arbiter.Core.Listen`) with the same connection string as your Orville
-pool, keep it in your reader environment, and return it from `getListener`:
+pool, keep it in your reader environment, and return it from `getListener`.
+
+`createOrvilleConnectionOptions` takes an arbiter `PoolConfig`, so
+`poolConfigForWorkers` sizes your Orville pool for the workers that will use it:
 
 ```haskell
 import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)
@@ -949,8 +953,16 @@ data AppEnv = AppEnv
 
 main :: IO ()
 main = do
+  poolCfg <- Worker.poolConfigForWorkers workers
+  orvillePool <- O.createConnectionPool (createOrvilleConnectionOptions connStr poolCfg)
   listen <- newDedicatedListen connStr
-  -- ... build AppEnv { appListen = listen, ... } and run your workers
+  let env =
+        AppEnv
+          { appSchema = "arbiter"
+          , appOrville = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
+          , appListen = listen
+          }
+  runAppM env $ Worker.runWorkerPools workers
 
 instance MonadArbiter AppM where
   -- ... RegistryOf / Handler / getSchema and the query methods, as above

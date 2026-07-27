@@ -60,7 +60,7 @@ spec connStr =
         poolCfg <- poolConfigForWorkers pools
         poolSize poolCfg `shouldBe` 7 -- 2 * 3 + 1
         env <- createSimpleEnvWithConfig (Proxy @SizingTestRegistry) connStr testSchema poolCfg
-        withAsync (runSimpleDb env $ runWorkerPools pools (\_ -> pure ())) $ \_ -> do
+        withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema
           forM_ [1 :: Int .. 6] $ \i ->
             runSimpleDb producer $
