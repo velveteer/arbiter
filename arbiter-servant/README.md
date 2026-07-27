@@ -18,19 +18,32 @@ dependencies:
 
 ```haskell
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-import Arbiter.Servant
-import Data.Proxy (Proxy(..))
+import Arbiter.Servant (Queue, initArbiterServer, runArbiterAPI)
+import Data.Aeson (FromJSON, ToJSON)
+import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+import GHC.Generics (Generic)
 
 -- Define your job types
-data EmailJob = SendEmail { to :: Text, subject :: Text, body :: Text }
-  deriving (Generic, ToJSON, FromJSON)
+data EmailJob = SendEmail {to :: Text, subject :: Text, body :: Text}
+  deriving stock (Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
-type MyRegistry = '[ '("email_jobs", EmailJob) ]
+type MyRegistry = '[Queue "email_jobs" EmailJob]
 
 main :: IO ()
 main = do
+  -- connStr is your libpq connection string, "public" the schema
   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
   runArbiterAPI 8080 config
 ```
+
+A queue that stores a handler result uses `QueueWithResult "email_jobs" EmailJob
+Report` in place of `Queue`, importing `QueueSpec (..)` for the constructor. See
+the [main README](../README.md) for the worker side and the full feature set.

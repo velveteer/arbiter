@@ -43,12 +43,12 @@ library
     Arbiter.Core.CronSchedule
     Arbiter.Core.Exceptions
     Arbiter.Core.Gates
-    Arbiter.Core.HasArbiterSchema
     Arbiter.Core.HighLevel
     Arbiter.Core.Job.Archive
     Arbiter.Core.Job.DLQ
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Types
+    Arbiter.Core.JobResult
     Arbiter.Core.JobTree
     Arbiter.Core.Json
     Arbiter.Core.Listen

@@ -13,6 +13,7 @@ import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.JobTree qualified as JT
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
@@ -24,7 +25,7 @@ import Arbiter.Worker
   , namedWorkerPool
   , poolConfigForWorkers
   , runWorkerPools
-  , signalShutdown
+  , shutdownPools
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
@@ -86,10 +87,10 @@ data PipelinePayload
 
 -- | Demo registry with multiple queues
 type DemoRegistry =
-  '[ '("demo_queue", DemoPayload)
-   , '("email_queue", EmailPayload)
-   , '("notifications", NotificationPayload)
-   , '("pipeline", PipelinePayload)
+  '[ Queue "demo_queue" DemoPayload
+   , Queue "email_queue" EmailPayload
+   , Queue "notifications" NotificationPayload
+   , QueueWithResult "pipeline" PipelinePayload [Text]
    ]
 
 -- | Email recipient tiers, each rate-limited separately.
@@ -215,10 +216,9 @@ main = do
         , namedWorkerPool notifWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
-      installSignals st = do
-        let handler = Signals.Catch $ signalShutdown st
-        void $ Signals.installHandler Signals.sigTERM handler Nothing
-        void $ Signals.installHandler Signals.sigINT handler Nothing
+      handler = Signals.Catch $ shutdownPools workers
+  void $ Signals.installHandler Signals.sigTERM handler Nothing
+  void $ Signals.installHandler Signals.sigINT handler Nothing
 
   -- Self-restart watchdog: after RESET_INTERVAL_MINUTES, raise SIGTERM so the
   -- process exits via the handler above and the container's restart policy
@@ -242,7 +242,7 @@ main = do
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
   race_
-    (runSimpleDb workerEnv $ runWorkerPools (Proxy @DemoRegistry) workers installSignals)
+    (runSimpleDb workerEnv $ runWorkerPools workers)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ main = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
-mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload ())
+mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
   cfg <- transactionalWorkerConfig 5 handler
   pure
@@ -271,7 +271,7 @@ mkDemoWorker = do
             (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
       ]
 
-mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload ())
+mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload)
 mkEmailWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -291,7 +291,7 @@ mkEmailWorker = do
             (\_ _ -> defaultJob (SendEmail "scheduled-digest"))
       ]
 
-mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload ())
+mkNotifWorker :: IO (WorkerConfig DemoM NotificationPayload)
 mkNotifWorker = do
   cfg <- transactionalWorkerConfig 1 handler
   pure
@@ -315,7 +315,7 @@ mkNotifWorker = do
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
 
-mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload [Text])
+mkPipelineWorker :: IO (WorkerConfig DemoM PipelinePayload)
 mkPipelineWorker = do
   cfg <- transactionalWorkerConfig 3 handler
   pure cfg {pollInterval = 2, livenessFile = Nothing}

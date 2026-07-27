@@ -1,8 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
--- 'enabledQueuesForMonad' carries a fundep-only 'HasArbiterSchema' constraint
--- that pins registry from the monad. GHC flags it redundant, a false positive.
-{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | Resolving which queues a worker process should run from
 -- @ARBITER_ENABLED_QUEUES@.
@@ -13,7 +10,7 @@ module Arbiter.Worker.EnabledQueues
   ) where
 
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema)
+import Arbiter.Core.MonadArbiter (RegistryOf)
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -70,9 +67,9 @@ getEnabledQueues envVar registry = do
             _ -> throwInternal $ "Unknown queue names: " <> T.intercalate ", " invalid
 
 -- | 'getEnabledQueues' for @ARBITER_ENABLED_QUEUES@, resolving the registry from
--- the monad through the 'HasArbiterSchema' fundep instead of a passed 'Proxy'.
+-- the monad through 'RegistryOf' instead of a passed 'Proxy'.
 enabledQueuesForMonad
-  :: forall m registry
-   . (HasArbiterSchema m registry, RegistryTables registry)
+  :: forall m
+   . (RegistryTables (RegistryOf m))
   => IO [Text]
-enabledQueuesForMonad = getEnabledQueues enabledQueuesEnvVar (Proxy @registry)
+enabledQueuesForMonad = getEnabledQueues enabledQueuesEnvVar (Proxy @(RegistryOf m))

@@ -8,6 +8,7 @@ module Test.Arbiter.Worker.SharedListener (spec) where
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple
   ( SimpleDb
   , createSimpleEnv
@@ -37,7 +38,7 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker.TestKit (listenerSpec)
 
-type ListenTestRegistry = '[ '("arbiter_worker_listen_test", WorkerTestPayload)]
+type ListenTestRegistry = '[Queue "arbiter_worker_listen_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_listen_test"
@@ -51,7 +52,7 @@ cleanup connStr = do
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr testSchema testSchema True) $ do
-    listenerSpec @WorkerTestPayload @ListenTestRegistry
+    listenerSpec @WorkerTestPayload
       testSchema
       connStr
       SimpleTask

@@ -11,6 +11,7 @@ module Test.Arbiter.Worker.ConnectionRecovery (spec) where
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnvWithPool, inTransaction, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
@@ -33,7 +34,7 @@ import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
-type WorkerTestRegistry = '[ '("arbiter_worker_recovery_test", WorkerTestPayload)]
+type WorkerTestRegistry = '[Queue "arbiter_worker_recovery_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_recovery_test"
@@ -144,7 +145,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           completed `shouldBe` 2
 
           -- Verify job was eventually acked and removed from queue
-          remainingJobs <- runSimpleDb env $ HL.listJobs @_ @WorkerTestRegistry @WorkerTestPayload 10 0
+          remainingJobs <- runSimpleDb env $ HL.listJobs @WorkerTestPayload 10 0
           length (remainingJobs :: [JobRead WorkerTestPayload]) `shouldBe` 0
 
 -- | Kill active connections that reference our test schema.

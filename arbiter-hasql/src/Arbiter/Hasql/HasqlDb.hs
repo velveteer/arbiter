@@ -35,7 +35,6 @@ module Arbiter.Hasql.HasqlDb
   , HasqlConnectionError (..)
   ) where
 
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Listen (Listener, dedicatedListener, newDedicatedListen, newPoolListener)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
@@ -95,15 +94,14 @@ newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb {unHasqlDb :: Rea
     , MonadUnliftIO
     )
 
-instance (Monad m) => HasArbiterSchema (HasqlDb registry m) registry where
-  getSchema = asks schema
-
 instance (Monad m) => HasHasqlPool (HasqlDb registry m) where
   getHasqlPool = asks hasqlPool
   localHasqlPool f = local (\env -> env {hasqlPool = f (hasqlPool env)})
 
-instance (Monad m, MonadIO m, MonadUnliftIO m) => MonadArbiter (HasqlDb registry m) where
-  type Handler (HasqlDb registry m) jobs result = Hasql.Connection -> jobs -> HasqlDb registry m result
+instance (MonadUnliftIO m) => MonadArbiter (HasqlDb registry m) where
+  type RegistryOf (HasqlDb registry m) = registry
+  type Handler (HasqlDb registry m) job result = Hasql.Connection -> job -> HasqlDb registry m result
+  getSchema = asks schema
   executeQuery = hasqlExecuteQuery
   executeQueryPrepared = hasqlExecuteQueryPrepared
   executeStatement = hasqlExecuteStatement

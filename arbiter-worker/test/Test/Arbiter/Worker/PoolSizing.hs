@@ -9,6 +9,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (defaultJob)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.PoolConfig (poolSize)
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple
   ( SimpleDb
   , createSimpleEnv
@@ -34,7 +35,7 @@ import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
 
-type SizingTestRegistry = '[ '("arbiter_worker_sizing_test", WorkerTestPayload)]
+type SizingTestRegistry = '[Queue "arbiter_worker_sizing_test" WorkerTestPayload]
 
 testSchema :: Text
 testSchema = "arbiter_worker_sizing_test"
@@ -59,7 +60,7 @@ spec connStr =
         poolCfg <- poolConfigForWorkers pools
         poolSize poolCfg `shouldBe` 7 -- 2 * 3 + 1
         env <- createSimpleEnvWithConfig (Proxy @SizingTestRegistry) connStr testSchema poolCfg
-        withAsync (runSimpleDb env $ runWorkerPools (Proxy @SizingTestRegistry) pools (\_ -> pure ())) $ \_ -> do
+        withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema
           forM_ [1 :: Int .. 6] $ \i ->
             runSimpleDb producer $

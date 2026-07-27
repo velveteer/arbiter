@@ -11,6 +11,7 @@ module Arbiter.Core.Operations
   , insertJobsBatch
   , insertJobsBatch_
   , insertResult
+  , insertResultsBatch
   , getResultsByParent
   , getDLQChildErrorsByParent
   , persistParentState
@@ -69,6 +70,7 @@ module Arbiter.Core.Operations
   , deleteArchiveJobsBatch
   , reEnqueueFromArchive
   , updateArchiveResult
+  , updateArchiveResultsBatch
 
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
@@ -593,6 +595,15 @@ insertResult
 insertResult schemaName tableName parentJobId childId result =
   MA.executeStatement
     (Tmpl.insertResultSQL schemaName tableName parentJobId childId result)
+
+-- | 'insertResult' for several @(parent id, child id, result)@ rows in one statement.
+insertResultsBatch
+  :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Int64, Value)] -> m Int64
+insertResultsBatch _ _ [] = pure 0
+insertResultsBatch schemaName tableName rows =
+  let (parentIds, childIds, results) = unzip3 rows
+   in MA.executeStatement
+        (Tmpl.insertResultsBatchSQL schemaName tableName parentIds childIds results)
 
 -- | Get all child results for a parent from the results table.
 --
@@ -1403,6 +1414,14 @@ updateArchiveResult schemaName tableName jobId result =
   MA.executeStatement
     (Tmpl.updateArchiveResultSQL schemaName tableName result jobId)
 
+-- | 'updateArchiveResult' for several @(job id, result)@ pairs in one statement.
+updateArchiveResultsBatch
+  :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Value)] -> m Int64
+updateArchiveResultsBatch _ _ [] = pure 0
+updateArchiveResultsBatch schemaName tableName pairs =
+  MA.executeStatement
+    (uncurry (Tmpl.updateArchiveResultsBatchSQL schemaName tableName) (unzip pairs))
+
 -- | List archived jobs in a group, most recent first.
 listArchivedJobsByGroupKey
   :: forall m payload
@@ -1431,12 +1450,12 @@ decodeArchiveRow
   => (Int64, UTCTime, JobRead Value, Maybe Value)
   -> m (Archive.ArchiveJob payload)
 decodeArchiveRow (aId, aCompletedAt, rawJob, aResult) = do
-  jobSnapshot <- decodePayload rawJob
+  snapshot <- decodePayload rawJob
   pure $
     Archive.ArchiveJob
       { Archive.archivePrimaryKey = aId
       , Archive.completedAt = aCompletedAt
-      , Archive.jobSnapshot = jobSnapshot
+      , Archive.jobSnapshot = snapshot
       , Archive.archivedResult = aResult
       }
 

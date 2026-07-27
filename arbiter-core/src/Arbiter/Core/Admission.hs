@@ -1,6 +1,8 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Shared machinery for per-job admission policies (rate limits and concurrency
 -- pools). Both kinds pick a policy and a @prefix:suffix@ key per job via a
@@ -40,7 +42,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload)
 import Arbiter.Core.Selector (Selector, field, usePolicy)
 
 -- Keys -----------------------------------------------------------------------
@@ -139,11 +141,12 @@ instance RegistryPolicies '[] p where
   registryTablePolicies = []
 
 instance
-  (CollectFor payload p, KnownSymbol name, RegistryPolicies rest p)
-  => RegistryPolicies ('(name, payload) ': rest) p
+  (CollectFor (SpecPayload spec) p, KnownSymbol (SpecName spec), RegistryPolicies rest p)
+  => RegistryPolicies (spec ': rest) p
   where
   registryTablePolicies =
-    (T.pack (symbolVal (Proxy @name)), collectFor @payload @p) : registryTablePolicies @rest @p
+    (T.pack (symbolVal (Proxy @(SpecName spec))), collectFor @(SpecPayload spec) @p)
+      : registryTablePolicies @rest @p
 
 -- | Every policy of kind @p@ declared across a registry's payloads. The migration
 -- seeds these.

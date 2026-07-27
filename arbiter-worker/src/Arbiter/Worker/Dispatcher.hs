@@ -26,11 +26,11 @@ import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 -- | Wake on NOTIFY, poll timer, or worker-finished, then claim up to capacity.
 -- @notifVar@ is filled from the shared hub in "Arbiter.Core.Listen".
 runDispatcher
-  :: forall m registry payload result
+  :: forall payload m
    . ( MonadUnliftIO m
-     , QueueOperation m registry payload
+     , QueueOperation m payload
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> Int
   -> STM.TBQueue (NonEmpty (JobRead payload))
   -> STM.TVar Int
@@ -43,7 +43,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
     let batchSize = case handlerMode config of
           SingleJobMode _ -> 1
           BatchedJobsMode n _ -> n
-     in Arb.mkClaimSql @m @registry @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
+     in Arb.mkClaimSql @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
   let
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do

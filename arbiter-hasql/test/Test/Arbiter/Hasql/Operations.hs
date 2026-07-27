@@ -7,6 +7,7 @@ module Test.Arbiter.Hasql.Operations (spec) where
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
 import Arbiter.Core.MonadArbiter (withDbTransaction)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (setupOnce)
@@ -27,7 +28,7 @@ import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 testSchema :: Text
 testSchema = "arbiter_hasql_ops_test"
 
-type HasqlOpsTestRegistry = '[ '("arbiter_hasql_ops_test", TestPayload)]
+type HasqlOpsTestRegistry = '[QueueWithResult "arbiter_hasql_ops_test" TestPayload [Text]]
 
 testTable :: Text
 testTable = "arbiter_hasql_ops_test"
@@ -37,7 +38,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   sharedPool <- runIO (createHasqlPool 5 connStr)
   mkEnv <- runIO (createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema)
   around (\action -> cleanupHasqlTest connStr testSchema testTable >> action mkEnv) $ do
-    operationsSpec @TestPayload TestMessage runHasqlDb
+    operationsSpec @TestPayload TestMessage pure runHasqlDb
 
     describe "Transaction Participation (inTransaction)" $ do
       it "commits job insertion within user transaction" $ \env -> do

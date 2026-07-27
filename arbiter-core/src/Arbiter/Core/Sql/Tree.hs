@@ -18,6 +18,7 @@ module Arbiter.Core.Sql.Tree
   , jobExistsSQL
   , getParentIdSQL
   , insertResultSQL
+  , insertResultsBatchSQL
   , getResultsByParentSQL
   , getDLQChildErrorsByParentSQL
   , persistParentStateSQL
@@ -306,6 +307,20 @@ insertResultSQL schema tableName parentId childId result =
    in [sql|
         INSERT INTO ${resultsTbl} (parent_id, child_id, result)
         VALUES (#{parentId :: CInt8}, #{childId :: CInt8}, #{result :: CJsonb})
+        ON CONFLICT (parent_id, child_id) DO UPDATE SET result = EXCLUDED.result
+      |]
+
+-- | 'insertResultSQL' for several children in one statement.
+insertResultsBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Value] -> Query ()
+insertResultsBatchSQL schema tableName parentIds childIds results =
+  let resultsTbl = jobQueueResultsTable schema tableName
+   in [sql|
+        INSERT INTO ${resultsTbl} (parent_id, child_id, result)
+        SELECT parent_id, child_id, result FROM (
+          SELECT unnest(#{parentIds :: [CInt8]}::bigint[]) AS parent_id,
+                 unnest(#{childIds :: [CInt8]}::bigint[]) AS child_id,
+                 unnest(#{results :: [CJsonb]}::jsonb[]) AS result
+        ) src
         ON CONFLICT (parent_id, child_id) DO UPDATE SET result = EXCLUDED.result
       |]
 

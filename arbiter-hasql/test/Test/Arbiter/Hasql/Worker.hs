@@ -4,6 +4,7 @@
 
 module Test.Arbiter.Hasql.Worker (spec, listenerSpec, multiQueueSpec) where
 
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Test.Setup (addQueueTable, setupOnce)
 import Arbiter.Worker.TestKit (workerSpec)
 import Arbiter.Worker.TestKit qualified as TestKit
@@ -32,7 +33,7 @@ data HasqlWorkerTestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type HasqlWorkerTestRegistry = '[ '("arbiter_hasql_worker_test", HasqlWorkerTestPayload)]
+type HasqlWorkerTestRegistry = '[QueueWithResult "arbiter_hasql_worker_test" HasqlWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_hasql_worker_test"
@@ -44,17 +45,21 @@ spec connStr =
       let runM pool act = do
             env <- createHasqlEnvWithPool (Proxy @HasqlWorkerTestRegistry) pool workerTestSchemaName
             runHasqlDb env act
-      workerSpec @HasqlWorkerTestPayload @HasqlWorkerTestRegistry SimpleTask FailingTask (\f _conn job -> f job) runM
+      workerSpec @HasqlWorkerTestPayload
+        SimpleTask
+        FailingTask
+        (\f _conn job -> f job)
+        runM
 
 listenSchema :: Text
 listenSchema = "arbiter_hasql_listen_test"
 
-type HasqlListenRegistry = '[ '("arbiter_hasql_listen_test", HasqlWorkerTestPayload)]
+type HasqlListenRegistry = '[Queue "arbiter_hasql_listen_test" HasqlWorkerTestPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
   beforeAll (setupOnce connStr listenSchema listenSchema True) $
-    TestKit.listenerSpec @HasqlWorkerTestPayload @HasqlListenRegistry
+    TestKit.listenerSpec @HasqlWorkerTestPayload
       listenSchema
       connStr
       SimpleTask
@@ -84,14 +89,14 @@ newtype MqBPayload = MqBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type HasqlMultiQRegistry =
-  '[ '("mqh_listen_a", MqAPayload)
-   , '("mqh_listen_b", MqBPayload)
+  '[ Queue "mqh_listen_a" MqAPayload
+   , Queue "mqh_listen_b" MqBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @HasqlMultiQRegistry
+    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload
       mqTableA
       mqTableB
       connStr

@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Entry point for running a worker pool that fetches and executes jobs.
@@ -10,6 +11,7 @@ module Arbiter.Worker
     -- * Multi-Queue Workers
   , NamedWorkerPool (..)
   , namedWorkerPool
+  , shutdownPools
   , runWorkerPools
   , runSelectedWorkerPools
   , getEnabledQueues
@@ -18,7 +20,7 @@ module Arbiter.Worker
   , poolConfigForWorkers
 
     -- * Job Result
-  , JobResult (..)
+  , module Arbiter.Core.JobResult
 
     -- * Rollup Child Results
   , childResults
@@ -42,6 +44,8 @@ module Arbiter.Worker
   , initCronSchedules
   , overlapPolicyToText
   , overlapPolicyFromText
+  , validateCronScheduleUpdate
+  , updateCronScheduleChecked
   ) where
 
 import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
@@ -57,34 +61,33 @@ import Arbiter.Core.Exceptions
   , TreeCancelException (..)
   , throwJobNotFound
   )
-import Arbiter.Core.HasArbiterSchema (HasArbiterSchema (..))
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types qualified as Job
+import Arbiter.Core.JobResult
 import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..), defaultPoolConfig)
-import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
+import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Exception (SomeException, displayException, fromException, toException)
 import Control.Monad (forever, replicateM, unless, void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (FromJSON, ToJSON, Value, toJSON)
-import Data.Aeson qualified as Aeson
-import Data.Bifunctor (second)
-import Data.Foldable (fold, foldMap', for_, toList, traverse_)
+import Data.Aeson (FromJSON, Value, toJSON)
+import Data.Either (partitionEithers)
+import Data.Foldable (fold, foldMap', toList, traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -92,7 +95,6 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
-import GHC.TypeLits (symbolVal)
 import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
@@ -137,9 +139,11 @@ import Arbiter.Worker.Cron
   , overlapPolicyFromText
   , overlapPolicyToText
   , runCronScheduler
+  , updateCronScheduleChecked
+  , validateCronScheduleUpdate
   )
 import Arbiter.Worker.Dispatcher
-import Arbiter.Worker.EnabledQueues (enabledQueuesEnvVar, enabledQueuesForMonad, getEnabledQueues)
+import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad, getEnabledQueues)
 import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal
@@ -153,35 +157,6 @@ import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.WorkerState
 
 -- ---------------------------------------------------------------------------
--- Job Result
--- ---------------------------------------------------------------------------
-
--- | Handler result types. @()@ is fire-and-forget. any @(ToJSON a, FromJSON a)@
--- from a job with a parent is stored in the results table and decoded when read
--- by a rollup finalizer. A root job's result is stored on its archive row, if archived.
-class JobResult a where
-  encodeJobResult :: a -> Maybe Value
-  decodeJobResult :: Value -> Either Text a
-
-instance JobResult () where
-  encodeJobResult _ = Nothing
-  decodeJobResult _ = Right ()
-
-decodeJobResultAeson :: (FromJSON a) => Value -> Either Text a
-decodeJobResultAeson v = case Aeson.fromJSON v of
-  Aeson.Success a -> Right a
-  Aeson.Error err -> Left (T.pack err)
-
-instance {-# OVERLAPPABLE #-} (FromJSON a, ToJSON a) => JobResult a where
-  encodeJobResult = Just . toJSON
-  decodeJobResult = decodeJobResultAeson
-
--- | A @Maybe@ result is optional: @Nothing@ stores nothing, @Just x@ stores @x@.
-instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
-  encodeJobResult = fmap toJSON
-  decodeJobResult = decodeJobResultAeson
-
--- ---------------------------------------------------------------------------
 -- Multi-Queue Workers
 -- ---------------------------------------------------------------------------
 
@@ -193,73 +168,80 @@ instance {-# OVERLAPPING #-} (FromJSON a, ToJSON a) => JobResult (Maybe a) where
 --   , namedWorkerPool imageConfig      -- "image_jobs"
 --   ]
 --
--- main = runWorkerPools (Proxy \@MyRegistry) allWorkers (\\_ -> pure ())
+-- main = runWorkerPools allWorkers
 -- @
 data NamedWorkerPool m
-  = forall registry payload result.
-  ( Arb.RegistryAdmissionPolicies registry
-  , JobResult result
-  , QueueOperation m registry payload
-  , RegistryTables registry
+  = forall payload.
+  ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+  , EncodeJobResult (ResultOf m payload)
+  , QueueOperation m payload
+  , RegistryTables (RegistryOf m)
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
   -- ^ Queue name from the type-level registry
-  , workerPoolConfig :: WorkerConfig m payload result
+  , workerPoolConfig :: WorkerConfig m payload
   -- ^ The worker configuration
   }
 
 -- | Create a named worker pool, deriving the name from the type-level registry.
 namedWorkerPool
-  :: forall m registry payload result
-   . ( Arb.RegistryAdmissionPolicies registry
-     , JobResult result
-     , QueueOperation m registry payload
-     , RegistryTables registry
+  :: forall payload m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+     , EncodeJobResult (ResultOf m payload)
+     , QueueOperation m payload
+     , RegistryTables (RegistryOf m)
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> NamedWorkerPool m
 namedWorkerPool cfg =
   NamedWorkerPool
-    { workerPoolName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+    { workerPoolName = Arb.queueTable @payload @m
     , workerPoolConfig = cfg
     }
 
--- | Run worker pools with shared shutdown state. Filters to queues listed
--- in @ARBITER_ENABLED_QUEUES@ (all if unset). The setup action receives the
--- shared 'TVar' for installing signal handlers.
+-- | Run worker pools, each on its own 'workerStateVar'. Filters to queues
+-- listed in @ARBITER_ENABLED_QUEUES@ (all if unset). Stop them with
+-- 'shutdownPools', or one at a time with
+-- 'Arbiter.Worker.Config.shutdownWorker'.
 runWorkerPools
-  :: forall m registry
-   . (MonadUnliftIO m, RegistryTables registry)
-  => Proxy registry
-  -> [NamedWorkerPool m]
-  -> (TVar WorkerState -> IO ())
+  :: forall m
+   . (MonadUnliftIO m, RegistryTables (RegistryOf m))
+  => [NamedWorkerPool m]
   -> m ()
-runWorkerPools registry pools setup = do
-  sharedState <- liftIO newWorkerState
-  liftIO $ setup sharedState
-  enabled <- liftIO $ getEnabledQueues enabledQueuesEnvVar registry
-  runSelectedWorkerPools sharedState enabled pools
+runWorkerPools pools = do
+  enabled <- liftIO $ enabledQueuesForMonad @m
+  runSelectedWorkerPools enabled pools
 
--- | Run only the worker pools whose names appear in the enabled list.
+-- | Signal graceful shutdown to every pool in one transaction, so none of them
+-- claims another job after any of them has stopped.
+shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
+shutdownPools pools =
+  liftIO . STM.atomically $
+    traverse_ (\(NamedWorkerPool _ cfg) -> STM.writeTVar (workerStateVar cfg) ShuttingDown) pools
+
+-- | Run only the worker pools whose names appear in the enabled list. The first
+-- pool to exit winds the others down, so the group stops together.
 runSelectedWorkerPools
-  :: (MonadUnliftIO m)
-  => TVar WorkerState
-  -> [Text]
+  :: forall m
+   . (MonadUnliftIO m)
+  => [Text]
   -> [NamedWorkerPool m]
   -> m ()
-runSelectedWorkerPools sharedState enabled pools =
+runSelectedWorkerPools enabled pools =
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
     [] -> pure ()
     selected -> evalContT $ do
-      asyncs <- for selected $ \(NamedWorkerPool name cfg) ->
-        let cfg' =
-              cfg
-                { workerStateVar = sharedState
-                , logConfig = withPoolContext name (logConfig cfg)
-                }
-         in ContT $ \k -> Async.withAsync (runWorkerPool cfg') k
-      lift $ traverse_ Async.waitCatch asyncs
+      asyncs <- for selected withPoolAsync
+      lift $ do
+        void $ waitAnyCatch asyncs
+        shutdownPools selected
+        traverse_ Async.waitCatch asyncs
+  where
+    withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
+    withPoolAsync (NamedWorkerPool name cfg) =
+      let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
+       in ContT $ Async.withAsync (runWorkerPool cfg')
 
 -- | Inject the pool name into log context. User-supplied pairs come after
 -- so they win on key collision.
@@ -274,8 +256,8 @@ withPoolContext poolName lc =
 -- stripe by its capability and does not search other stripes when its own is
 -- exhausted, so multiple stripes let one pool starve a stripe while others sit idle.
 poolConfigForWorkers
-  :: forall m registry
-   . (HasArbiterSchema m registry, RegistryTables registry)
+  :: forall m
+   . (RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
   -> IO PoolConfig
 poolConfigForWorkers pools = do
@@ -289,18 +271,18 @@ poolConfigForWorkers pools = do
 
 -- | Starts a worker pool with a dispatcher and N worker threads.
 runWorkerPool
-  :: forall m registry payload result
-   . ( Arb.RegistryAdmissionPolicies registry
-     , JobResult result
+  :: forall payload m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+     , EncodeJobResult (ResultOf m payload)
      , MonadUnliftIO m
-     , QueueOperation m registry payload
-     , RegistryTables registry
+     , QueueOperation m payload
+     , RegistryTables (RegistryOf m)
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
   let workerCap = workerCount config
-      queueName = T.pack $ symbolVal (Proxy @(TableForPayload payload registry))
+      queueName = Arb.queueTable @payload @m
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -374,14 +356,14 @@ runWorkerPool config = do
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool and never gates startup.
-publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload result -> STM Bool -> m ()
+publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload -> STM Bool -> m ()
 publishListenerReady config ready =
   atomically $ do
     ready >>= checkSTM
     writeTVar (listenerReadyVar config) True
 
 -- | Remove the liveness file when the pool exits, after the drain.
-withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload result -> ContT r m ()
+withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload -> ContT r m ()
 withLivenessFile config = case livenessFile config of
   Nothing -> pure ()
   Just path -> ContT $ \k ->
@@ -392,7 +374,7 @@ withLivenessFile config = case livenessFile config of
 
 -- | Re-insert the worker's registry row from the config + schema/queue.
 -- Returns the effective paused state so the caller can seed 'pauseVar'.
-registerSelf :: (MonadArbiter m) => WorkerConfig n payload result -> SchemaName -> Text -> m (Maybe Bool)
+registerSelf :: (MonadArbiter m) => WorkerConfig n payload -> SchemaName -> Text -> m (Maybe Bool)
 registerSelf config schemaName queueName =
   Ops.registerWorker
     schemaName
@@ -407,7 +389,7 @@ registerSelf config schemaName queueName =
 -- writes are best-effort and logged on failure.
 shutdownPool
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> SchemaName
   -> TBQueue a
   -> TVar Int
@@ -469,7 +451,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
 -- the row.
 heartbeatLoop
   :: (MonadArbiter m, MonadUnliftIO m)
-  => WorkerConfig n payload result
+  => WorkerConfig n payload
   -> SchemaName
   -> Text
   -- ^ Queue name (used when the row needs re-registering).
@@ -520,12 +502,12 @@ warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (display
 
 -- | Main loop for a single worker thread.
 workerLoop
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
-     , JobResult result
+  :: forall payload m
+   . ( EncodeJobResult (ResultOf m payload)
+     , JobOperation m payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
@@ -584,7 +566,7 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
 -- Decode failures appear as @Left decodeError@ - the child succeeded but
 -- its result JSON doesn't match the expected type.
 readChildResults
-  :: (JobResult a, MonadArbiter m)
+  :: (FromJSON a, MonadArbiter m)
   => Text
   -> Job.JobRead payload
   -> m (Map.Map Int64 (Either Text a), Map.Map Int64 T.Text)
@@ -596,12 +578,12 @@ readChildResults schemaName job = do
   pure (merged, dlqFailures)
 
 processJobsWithRetry
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
-     , JobResult result
+  :: forall payload m
+   . ( EncodeJobResult (ResultOf m payload)
+     , JobOperation m payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> NonEmpty (Job.JobRead payload)
   -> m ()
 processJobsWithRetry config jobs = do
@@ -627,20 +609,17 @@ processJobsWithRetry config jobs = do
         withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
-      ackOne j = do
-        withDbTransaction $ ackJobOrSkip j
-        finalize j
-      ackOneWith j r = do
+      ackOneStoring j mVal = do
         withDbTransaction $ do
           ackJobOrSkip j
-          storeJobResult schemaName j r
+          storeEncodedResult schemaName j mVal
         finalize j
-      ackBatch pairs = do
+      ackBatchStoring pairs = do
         let js = map fst pairs
             isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          for_ pairs $ \(j, mr) -> when (isAcked ackedSet j) $ traverse_ (storeJobResult schemaName j) mr
+          storeEncodedResults schemaName (filter (isAcked ackedSet . fst) pairs)
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
         unless (null reclaimed) $
@@ -651,10 +630,10 @@ processJobsWithRetry config jobs = do
         traverse_ finalize done
       callbacks =
         BatchCallbacks
-          { ack = ackOne
-          , ackWith = ackOneWith
-          , ackAll = \js -> ackBatch (map (\j -> (j, Nothing)) js)
-          , ackAllWith = \pairs -> ackBatch (map (second Just) pairs)
+          { ack = \job -> ackOneStoring job Nothing
+          , ackWith = \job r -> ackOneStoring job (encodeJobResult r)
+          , ackAll = \js -> ackBatchStoring (map (\j -> (j, Nothing)) js)
+          , ackAllWith = \prs -> ackBatchStoring (map (\(j, r) -> (j, encodeJobResult r)) prs)
           , failRetry = failAs (Retryable . JobRetryableException)
           , failPermanent = failAs (Permanent . JobPermanentException)
           , cancelBranch = failAs (BranchCancel . BranchCancelException)
@@ -675,7 +654,7 @@ processJobsWithRetry config jobs = do
         SingleJobMode handler -> do
           let (job :| _) = jobs
           withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection @_ @_ @result handler job
+            handlerResult <- runHandlerWithConnection handler job
             ackJobOrSkip job
             storeJobResult schemaName job handlerResult
           finalize job
@@ -687,9 +666,9 @@ processJobsWithRetry config jobs = do
 -- | Interpret a finished batch: warn when the handler left jobs unfinalized,
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
-  :: forall m registry payload result
-   . (JobOperation m registry payload, MonadUnliftIO m)
-  => WorkerConfig m payload result
+  :: forall payload m
+   . (JobOperation m payload, MonadUnliftIO m)
+  => WorkerConfig m payload
   -> Job.ObservabilityHooks m payload
   -> UTCTime
   -> UTCTime
@@ -727,9 +706,9 @@ reportBatchOutcome config hooks startTime endTime jobs handled = \case
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
 -- Both are empty for a job with no children.
 childResults
-  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m)
+  :: (FromJSON (ResultOf m payload), MonadArbiter m)
   => Job.JobRead payload
-  -> m (Map.Map Int64 (Either Text result), Map.Map Int64 T.Text)
+  -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
 childResults job = do
   schemaName <- getSchema
   readChildResults schemaName job
@@ -737,9 +716,12 @@ childResults job = do
 -- | 'childResults' with the child results 'Monoid'-merged (decode failures
 -- contribute 'mempty').
 mergedChildResults
-  :: (HasArbiterSchema m registry, JobResult result, MonadArbiter m, Monoid result)
+  :: ( FromJSON (ResultOf m payload)
+     , MonadArbiter m
+     , Monoid (ResultOf m payload)
+     )
   => Job.JobRead payload
-  -> m (result, Map.Map Int64 T.Text)
+  -> m (ResultOf m payload, Map.Map Int64 T.Text)
 mergedChildResults job = do
   (results, dlqFailures) <- childResults job
   pure (mergeChildResults results, dlqFailures)
@@ -750,19 +732,50 @@ mergeChildResults = foldMap' fold
 
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult
-  :: (JobResult result, MonadArbiter m)
+  :: (EncodeJobResult result, MonadArbiter m)
   => Text
   -> Job.JobRead payload
   -> result
   -> m ()
-storeJobResult schemaName job result =
-  case (Job.parentId job, encodeJobResult result) of
+storeJobResult schemaName job = storeEncodedResult schemaName job . encodeJobResult
+
+-- | 'storeJobResult' on an already-encoded result. 'Nothing' stores nothing.
+storeEncodedResult
+  :: (MonadArbiter m)
+  => Text
+  -> Job.JobRead payload
+  -> Maybe Value
+  -> m ()
+storeEncodedResult schemaName job mVal =
+  case (Job.parentId job, mVal) of
     (Just pid, Just val) ->
       void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
     (Nothing, Just val)
       | Ops.archivesOnAck job ->
           void $ Ops.updateArchiveResult schemaName (Job.queueName job) (Job.primaryKey job) val
     _ -> pure ()
+
+-- | 'storeEncodedResult' over a batch from one queue: one statement for the
+-- child results, one for the archived roots.
+storeEncodedResults
+  :: (MonadArbiter m)
+  => Text
+  -> [(Job.JobRead payload, Maybe Value)]
+  -> m ()
+storeEncodedResults _ [] = pure ()
+storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
+  let (childRows, rootRows) = partitionEithers (mapMaybe resultRow pairs)
+      queue = Job.queueName firstJob
+  void $ Ops.insertResultsBatch schemaName queue childRows
+  void $ Ops.updateArchiveResultsBatch schemaName queue rootRows
+  where
+    resultRow (job, mVal) = do
+      val <- mVal
+      case Job.parentId job of
+        Just pid -> Just (Left (pid, Job.primaryKey job, val))
+        Nothing
+          | Ops.archivesOnAck job -> Just (Right (Job.primaryKey job, val))
+          | otherwise -> Nothing
 
 -- | Check if an exception indicates the job is gone (stolen or not found).
 -- These jobs should not be retried or moved to DLQ.
@@ -792,11 +805,11 @@ classifyException e
 
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
-  :: forall m registry payload result
-   . ( JobOperation m registry payload
+  :: forall payload m
+   . ( JobOperation m payload
      , MonadUnliftIO m
      )
-  => WorkerConfig m payload result
+  => WorkerConfig m payload
   -> Job.ObservabilityHooks m payload
   -> SomeException
   -> Int32
@@ -861,12 +874,11 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
 -- Each gated so only one pool runs it per interval.
 reaperLoop
-  :: forall m registry
-   . ( Arb.RegistryAdmissionPolicies registry
-     , HasArbiterSchema m registry
+  :: forall m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , MonadArbiter m
      , MonadUnliftIO m
-     , RegistryTables registry
+     , RegistryTables (RegistryOf m)
      )
   => LogConfig
   -> NominalDiffTime
@@ -876,10 +888,10 @@ reaperLoop
   -> m ()
 reaperLoop logCfg interval stmtTimeout = do
   let intervalSecs = ceiling interval
-      queues = registryTableNames (Proxy @registry)
+      queues = registryTableNames (Proxy @(RegistryOf m))
       pruneInterval = interval * 12
-      hasConcurrency = not (Set.null (registryConcurrencyPolicies @registry))
-      hasRateLimit = not (Set.null (registryRateLimitPolicies @registry))
+      hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
+      hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schemaName <- Arb.getSchema
   let gated :: forall a. Text -> NominalDiffTime -> m a -> m (Maybe a)
       gated = runReaperOp logCfg schemaName stmtTimeout
@@ -904,10 +916,10 @@ reaperLoop logCfg interval stmtTimeout = do
     when hasRateLimit $
       void $
         gated "prune-rate-limit-buckets" pruneInterval $
-          Arb.pruneRateLimitBuckets @m @registry interval
+          Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
-      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m @registry
-      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m @registry
+      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m
+      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m
     mPurged <- gated "purge-archives" interval $ Ops.purgeArchives schemaName queues
     traverse_
       ( \(n, failed) -> do

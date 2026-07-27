@@ -5,6 +5,7 @@
 -- | Multi-queue shared-listener tests on the postgresql-simple backend.
 module Test.Arbiter.Worker.MultiQueueListener (spec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (createSimpleEnv, destroySimpleEnv, runSimpleDb)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Data.Aeson (FromJSON, ToJSON)
@@ -26,8 +27,8 @@ newtype QueueBPayload = QueueBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type MultiQRegistry =
-  '[ '("mq_listen_a", QueueAPayload)
-   , '("mq_listen_b", QueueBPayload)
+  '[ Queue "mq_listen_a" QueueAPayload
+   , Queue "mq_listen_b" QueueBPayload
    ]
 
 schemaName :: Text
@@ -42,7 +43,7 @@ tableB = "mq_listen_b"
 spec :: ByteString -> Spec
 spec connStr =
   beforeAll (setupOnce connStr schemaName tableA True >> addQueueTable connStr schemaName tableB True) $
-    multiQueueListenerSpec @QueueAPayload @QueueBPayload @MultiQRegistry
+    multiQueueListenerSpec @QueueAPayload @QueueBPayload
       tableA
       tableB
       connStr

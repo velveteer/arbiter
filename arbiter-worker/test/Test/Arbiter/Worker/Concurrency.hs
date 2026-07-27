@@ -17,6 +17,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
@@ -51,7 +52,7 @@ data WorkerConcurrencyTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Local test registry
-type WorkerConcurrencyTestRegistry = '[ '("arbiter_worker_concurrency_test", WorkerConcurrencyTestPayload)]
+type WorkerConcurrencyTestRegistry = '[Queue "arbiter_worker_concurrency_test" WorkerConcurrencyTestPayload]
 
 -- Table name for tests
 testTable :: T.Text

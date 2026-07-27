@@ -127,11 +127,11 @@ simpleWithConnection action = do
 
 simpleRunHandlerWithConnection
   :: (HasSimplePool m, MonadUnliftIO m)
-  => (Connection -> jobs -> m result)
-  -> jobs
+  => (Connection -> job -> m result)
+  -> job
   -> m result
-simpleRunHandlerWithConnection handler jobs =
-  withConn $ \conn -> handler conn jobs
+simpleRunHandlerWithConnection handler job =
+  withConn $ \conn -> handler conn job
 
 withConn
   :: (HasSimplePool m, MonadUnliftIO m)

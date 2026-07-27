@@ -6,6 +6,7 @@ module Test.Arbiter.Orville.Operations (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Control.Exception (SomeException, catch, throwIO)
@@ -20,14 +21,14 @@ import Test.Arbiter.Orville.TestHelpers (cleanupOrvilleTest, runOrvilleTest, set
 testSchema :: Text
 testSchema = "arbiter_orville_ops_test"
 
-type OrvilleOpsTestRegistry = '[ '("arbiter_orville_ops_test", TestPayload)]
+type OrvilleOpsTestRegistry = '[QueueWithResult "arbiter_orville_ops_test" TestPayload [Text]]
 
 testTable :: Text
 testTable = "arbiter_orville_ops_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  operationsSpec @TestPayload @OrvilleOpsTestRegistry TestMessage (runOrvilleTest @OrvilleOpsTestRegistry)
+  operationsSpec @TestPayload TestMessage pure (runOrvilleTest @OrvilleOpsTestRegistry)
 
   describe "Transaction Participation" $ do
     it "commits job insertion within user transaction" $ \env -> do

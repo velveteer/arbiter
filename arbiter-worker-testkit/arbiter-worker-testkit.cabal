@@ -53,6 +53,7 @@ test-suite arbiter-worker-testkit-tests
   other-modules:
     Test.Arbiter.Worker
     Test.Arbiter.Worker.MultiQueueListener
+    Test.Arbiter.Worker.PlainResult
     Test.Arbiter.Worker.SharedListener
 
   build-depends:

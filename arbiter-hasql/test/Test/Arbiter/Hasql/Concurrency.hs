@@ -3,6 +3,7 @@
 
 module Test.Arbiter.Hasql.Concurrency (spec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Concurrency
   ( concurrencySpec
   , raceConditionSpec
@@ -20,7 +21,7 @@ import Test.Arbiter.Hasql.TestHelpers (cleanupHasqlTest, createHasqlPool)
 testSchema :: Text
 testSchema = "arbiter_hasql_concurrency_test"
 
-type HasqlConcurrencyTestRegistry = '[ '("arbiter_hasql_concurrency_test", TestPayload)]
+type HasqlConcurrencyTestRegistry = '[Queue "arbiter_hasql_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_hasql_concurrency_test"
@@ -30,9 +31,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False >> create
   let run pool act = do
         env <- createHasqlEnvWithPool (Proxy @HasqlConcurrencyTestRegistry) pool testSchema
         runHasqlDb env act
-  concurrencySpec @TestPayload @HasqlConcurrencyTestRegistry
+  concurrencySpec @TestPayload
     TestMessage
     run
-  raceConditionSpec @TestPayload @HasqlConcurrencyTestRegistry
+  raceConditionSpec @TestPayload
     TestMessage
     run

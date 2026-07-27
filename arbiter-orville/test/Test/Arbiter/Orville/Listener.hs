@@ -6,6 +6,7 @@
 -- and multiple queues sharing one env's dedicated LISTEN connection.
 module Test.Arbiter.Orville.Listener (listenerSpec, multiQueueSpec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Arbiter.Worker.TestKit qualified as TestKit
 import Data.Aeson (FromJSON, ToJSON)
@@ -16,7 +17,8 @@ import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll)
 
 import Test.Arbiter.Orville.TestHelpers
-  ( createOrvilleTestEnv
+  ( TestOrville
+  , createOrvilleTestEnv
   , destroyOrvilleTestEnv
   , disableOrvilleListener
   , runOrvilleTest
@@ -29,12 +31,12 @@ newtype ListenPayload = ListenPayload Text
 listenSchema :: Text
 listenSchema = "arbiter_orville_listen_test"
 
-type OrvilleListenRegistry = '[ '("arbiter_orville_listen_test", ListenPayload)]
+type OrvilleListenRegistry = '[Queue "arbiter_orville_listen_test" ListenPayload]
 
 listenerSpec :: ByteString -> Spec
 listenerSpec connStr =
   beforeAll (setupOnce connStr listenSchema listenSchema True) $
-    TestKit.listenerSpec @ListenPayload @OrvilleListenRegistry
+    TestKit.listenerSpec @ListenPayload @(TestOrville OrvilleListenRegistry)
       listenSchema
       connStr
       ListenPayload
@@ -64,14 +66,14 @@ newtype MqBPayload = MqBPayload Text
   deriving anyclass (FromJSON, ToJSON)
 
 type OrvilleMultiQRegistry =
-  '[ '("mqo_listen_a", MqAPayload)
-   , '("mqo_listen_b", MqBPayload)
+  '[ Queue "mqo_listen_a" MqAPayload
+   , Queue "mqo_listen_b" MqBPayload
    ]
 
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @OrvilleMultiQRegistry
+    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @(TestOrville OrvilleMultiQRegistry)
       mqTableA
       mqTableB
       connStr

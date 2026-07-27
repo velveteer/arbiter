@@ -44,8 +44,8 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 --
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
-  :: forall registry m payload a
-   . ( JobOperation m registry payload
+  :: forall payload m a
+   . ( JobOperation m payload
      , MonadUnliftIO m
      )
   => ObservabilityHooks m payload

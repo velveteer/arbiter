@@ -11,6 +11,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
+import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
@@ -55,14 +56,15 @@ data OrvilleWorkerTestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
-type OrvilleWorkerTestRegistry = '[ '("arbiter_orville_worker_test", OrvilleWorkerTestPayload)]
+type OrvilleWorkerTestRegistry =
+  '[QueueWithResult "arbiter_orville_worker_test" OrvilleWorkerTestPayload (Maybe [Text])]
 
 testTable :: Text
 testTable = "arbiter_orville_worker_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  workerSpec @OrvilleWorkerTestPayload @OrvilleWorkerTestRegistry SimpleTask FailingTask id runOrvilleTest
+  workerSpec @OrvilleWorkerTestPayload SimpleTask FailingTask id runOrvilleTest
 
   describe "Transactional Atomicity" $ do
     it "rolls back user operations when handler fails" $ \env -> do
@@ -71,7 +73,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
         executeSql $ "CREATE TABLE IF NOT EXISTS " <> workerTestSchemaName <> ".test_operations (job_id INT, operation TEXT)"
         executeSql $ "TRUNCATE " <> workerTestSchemaName <> ".test_operations"
 
-      let handler :: JobRead OrvilleWorkerTestPayload -> TestOrville OrvilleWorkerTestRegistry ()
+      let handler :: JobRead OrvilleWorkerTestPayload -> TestOrville OrvilleWorkerTestRegistry (Maybe [Text])
           handler job = do
             -- User performs their own database operation using the connection
             let insertSql =
@@ -108,11 +110,11 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
           do
             -- Wait for job to be processed and moved to DLQ
             liftIO $ waitUntil 10_000 $ do
-              dlqJobs <- runOrvilleTest env $ HL.listDLQJobs @_ @_ @OrvilleWorkerTestPayload 10 0
+              dlqJobs <- runOrvilleTest env $ HL.listDLQJobs @OrvilleWorkerTestPayload 10 0
               pure (length dlqJobs == 1)
 
             -- Verify the job is in the DLQ with the correct payload
-            dlqJobs <- HL.listDLQJobs @_ @_ @OrvilleWorkerTestPayload 10 0
+            dlqJobs <- HL.listDLQJobs @OrvilleWorkerTestPayload 10 0
             liftIO $ length dlqJobs `shouldBe` 1
             liftIO $ (payload $ DLQ.jobSnapshot (head dlqJobs)) `shouldBe` SimpleTask "WillFail"
 
@@ -142,7 +144,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
           )
         O.executeVoid O.OtherQuery (RawSql.fromText $ "TRUNCATE " <> workerTestSchemaName <> ".test_operations")
 
-      let handler :: JobRead OrvilleWorkerTestPayload -> TestOrville OrvilleWorkerTestRegistry ()
+      let handler :: JobRead OrvilleWorkerTestPayload -> TestOrville OrvilleWorkerTestRegistry (Maybe [Text])
           handler job = do
             -- User performs their own database operation using the connection
             let insertSql =
@@ -153,6 +155,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
                       <> T.pack (show (primaryKey job))
                       <> ", 'processed')"
             O.executeVoid O.InsertQuery insertSql
+            pure mempty
 
       -- Insert a job
       let job =
@@ -175,7 +178,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
         $ \_ -> do
           -- Wait for job to be processed
           liftIO $ waitUntil 10_000 $ do
-            jobs <- runOrvilleTest env $ HL.listJobs @_ @OrvilleWorkerTestRegistry @OrvilleWorkerTestPayload 10 0
+            jobs <- runOrvilleTest env $ HL.listJobs @OrvilleWorkerTestPayload 10 0
             pure (null jobs)
 
           -- Verify the job is NOT in the queue anymore

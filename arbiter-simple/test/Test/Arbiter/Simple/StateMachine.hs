@@ -8,6 +8,7 @@
 -- | Simple backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Simple.StateMachine (spec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (setupOnce)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
@@ -28,7 +29,7 @@ testSchema = "arbiter_simple_sm_test"
 testTable :: Text
 testTable = "arbiter_simple_sm_test"
 
-type SMRegistry = '[ '("arbiter_simple_sm_test", SMPayload)]
+type SMRegistry = '[Queue "arbiter_simple_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
@@ -39,7 +40,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource (fromJust (connectionPool (simplePool env)))
       reset = cleanupSimpleTest env testSchema testTable
-  stateMachineSpec @(SimpleDb SMRegistry IO) @SMRegistry
+  stateMachineSpec @(SimpleDb SMRegistry IO)
     run
     testSchema
     testTable

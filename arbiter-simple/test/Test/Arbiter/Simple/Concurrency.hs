@@ -5,6 +5,7 @@ module Test.Arbiter.Simple.Concurrency (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Concurrency
   ( concurrencySpec
   , countHolViolations
@@ -33,7 +34,7 @@ import Test.Arbiter.Simple.TestHelpers (cleanupSimpleTest, createSimplePool)
 testSchema :: Text
 testSchema = "arbiter_simple_concurrency_test"
 
-type SimpleConcurrencyTestRegistry = '[ '("arbiter_simple_concurrency_test", TestPayload)]
+type SimpleConcurrencyTestRegistry = '[Queue "arbiter_simple_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_simple_concurrency_test"

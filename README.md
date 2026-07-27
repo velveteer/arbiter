@@ -66,7 +66,8 @@ Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on 
 
 ### Payload Types
 
-Define payload types with `ToJSON` and `FromJSON` instances.
+Define payload types with `ToJSON` and `FromJSON` instances. A queue's [result
+type](#job-results) is also declared in the registry.
 
 ```haskell
 data EmailPayload
@@ -84,16 +85,28 @@ data ImagePayload
 
 ### Type-Level Registry
 
-Map queue table names to payload types at the type level.
+Map queue table names to payload types at the type level. `Queue` declares a
+queue whose handlers store no result. `QueueWithResult` adds the
+[result type](#job-results) its handlers produce.
 
 ```haskell
+import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
+
+data Score = Score
+  { sharpness :: Double
+  , sizeBytes :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
 type AppRegistry =
-  '[ '("email_queue", EmailPayload)
-   , '("image_queue", ImagePayload)
+  '[ Queue "email_queue" EmailPayload
+   , QueueWithResult "image_queue" ImagePayload Score
    ]
 ```
 
-The registry is enforced at compile time - each payload type maps to exactly one table, and duplicate table names are a type error.
+The registry is enforced at compile time - each payload type maps to exactly one
+table, and a duplicate table name or a duplicate payload type is a type error.
 
 ### Migrations
 
@@ -244,9 +257,12 @@ job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-1
 
 ### Job Results
 
-A handler can return a value - its **result**. Return `()` for fire-and-forget
-work, or any `ToJSON`/`FromJSON` value otherwise. Returning a result does not
-store it on its own - whether it is kept, and where, depends on the job:
+A handler can produce a value - its **result** - by returning it under
+`transactionalWorkerConfig`, or by passing it to `ackWith`/`ackAllWith` under a
+manual or batched config.
+
+Producing a result does not store it on its own - whether it is kept, and
+where, depends on the job:
 
 - **A job with a parent** (a node in a [tree](#job-trees-fan-outfan-in)) - the
   result is kept for the parent to collect with `Worker.childResults`/`Worker.mergedChildResults`,
@@ -255,36 +271,27 @@ store it on its own - whether it is kept, and where, depends on the job:
   [archive](#archiving-completed-jobs) entry, if the job is archived. Without
   archiving there is nowhere to keep it, so it is dropped.
 
-The mapping between a result value and stored JSON is the `JobResult` typeclass:
+A result is stored with its `ToJSON` and read back with its `FromJSON`, so your
+own records and sum types work as results directly.
+
+To decide per run whether there is anything worth keeping, make the queue's
+result type a `Maybe`. `Nothing` stores nothing at all - no archive entry
+result, and no row for a rollup parent to collect.
 
 ```haskell
-class JobResult a where
-  encodeJobResult :: a -> Maybe Value        -- Nothing means store nothing
-  decodeJobResult :: Value -> Either Text a  -- read a stored result back
-```
-
-Any `ToJSON`/`FromJSON` type gets an instance for free (`Maybe a` skips on
-`Nothing` - everything else is always recorded), so your own records and sum
-types work as results directly.
-
-```haskell
-import Arbiter.Worker (JobResult (..))
-import Data.Aeson (FromJSON, ToJSON, toJSON)
-import Data.Aeson qualified as Aeson
-import Data.Text qualified as T
-import GHC.Generics (Generic)
-
-data SyncReport = SyncReport { rowsChanged :: Int, notes :: [Text] }
-  deriving stock (Generic)
+data SyncReport = SyncReport
+  { rowsChanged :: Int
+  , notes :: [Text]
+  }
+  deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
-instance JobResult SyncReport where
-  encodeJobResult r
-    | rowsChanged r == 0 = Nothing
-    | otherwise          = Just (toJSON r)
-  decodeJobResult v = case Aeson.fromJSON v of
-    Aeson.Success r -> Right r
-    Aeson.Error err -> Left (T.pack err)
+type SyncRegistry = '[ QueueWithResult "sync_queue" SyncPayload (Maybe SyncReport) ]
+
+syncHandler :: Arb.JobHandler (ArbS.SimpleDb SyncRegistry IO) SyncPayload (Maybe SyncReport)
+syncHandler _conn job = do
+  report <- runSync (Arb.payload job)
+  pure $ if rowsChanged report == 0 then Nothing else Just report
 ```
 
 ### Job Trees (Fan-out/Fan-in)
@@ -301,6 +308,9 @@ data PipelinePayload
   | Aggregate
   deriving stock (Generic)
   deriving anyclass (ToJSON, FromJSON)
+
+-- One entry for the whole tree: children and parents share the queue.
+type PipelineRegistry = '[ QueueWithResult "pipeline_queue" PipelinePayload [Text] ]
 
 myTree = Arb.defaultJob Aggregate <~~
   [ Arb.defaultJob (ProcessChunk "chunk-1")
@@ -330,7 +340,7 @@ children's results plus a map of any DLQ'd immediate children. Intermediate
 results are cleaned up automatically when the parent is acked.
 
 ```haskell
-handler :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) PipelinePayload [Text]
+handler :: Arb.JobHandler (ArbS.SimpleDb PipelineRegistry IO) PipelinePayload [Text]
 handler _conn job =
   case Arb.payload job of
     ProcessChunk name -> pure ["processed: " <> name]
@@ -342,6 +352,7 @@ handler _conn job =
     Aggregate -> do
       (childResults, _) <- Worker.mergedChildResults job
       sendToS3 childResults
+      pure childResults
 
 config <- Worker.transactionalWorkerConfig 4 handler
 ```
@@ -361,6 +372,9 @@ Use a job tree to replace a staging table. Each child job carries its chunk of r
 data MigrationJob
   = MigrateChunk [Int64]
   | MigrationComplete
+
+type MigrationRegistry =
+  '[ QueueWithResult "migration_queue" MigrationJob (Sum Int) ]
 
 rowIds <- findRowsToMigrate  -- SELECT id FROM orders WHERE needs_migration
 let chunks = chunksOf 1000 rowIds  -- from the split package
@@ -615,13 +629,13 @@ config <- Worker.defaultBatchedWorkerConfig 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload ()
+  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
   -> ArbS.SimpleDb AppRegistry IO ()
 batchHandler jobs cbs = do
-  let urls = map (getUrl . Arb.payload) (toList jobs)
-  liftIO $ bulkProcess urls
+  -- bulkProcess :: [Arb.JobRead ImagePayload] -> IO [(Arb.JobRead ImagePayload, Score)]
+  scored <- liftIO $ bulkProcess (toList jobs)
   -- Bulk-ack the whole batch in one transaction.
-  Worker.ackAll cbs (toList jobs)
+  Worker.ackAllWith cbs scored
 ```
 
 Opting out of the worker transaction does not mean giving up atomicity where
@@ -630,9 +644,11 @@ your own `withDbTransaction` commits the ack together with your writes:
 
 ```haskell
 batchHandler jobs cbs =
-  for_ jobs $ \job -> Arb.withDbTransaction $ do
-    recordCharge (Arb.payload job)
-    Worker.ack cbs job
+  for_ jobs $ \job -> do
+    score <- liftIO $ scoreImage (Arb.payload job)
+    Arb.withDbTransaction $ do
+      recordCharge (Arb.payload job)
+      Worker.ackWith cbs job score
 ```
 
 So you pay for a transaction only around the work that needs one, rather than
@@ -642,29 +658,14 @@ happen exactly once in the transaction next to the ack, not in the hook.
 
 Each job is finalized on its own via the
 [`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
-record - `ack`/`ackAll` (per-job or bulk ack), `failRetry`/`failPermanent`,
+record - `ack`/`ackAll` or `ackWith`/`ackAllWith` (per-job or bulk ack), `failRetry`/`failPermanent`,
 `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure,
 cancel, or nack affects only that job - completed jobs stay done, an untouched
 job is reprocessed, and hooks fire per job.
 
-To attach a [result](#job-results) per job - for a rollup parent to collect, or
-to keep on an archived job's entry - use `defaultBatchedResultWorkerConfig` and
-ack with `ackWith`/`ackAllWith`:
-
-```haskell
--- defaultBatchedResultWorkerConfig <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedResultWorkerConfig 10 5 scoreHandler
-
-scoreHandler
-  :: NonEmpty (Arb.JobRead ImagePayload)
-  -> Worker.BatchCallbacks (ArbS.SimpleDb AppRegistry IO) ImagePayload Score
-  -> ArbS.SimpleDb AppRegistry IO ()
-scoreHandler jobs cbs =
-  for_ jobs $ \job -> do
-    score <- liftIO $ scoreImage (Arb.payload job)
-    -- The score lands with the ack, for the rollup parent to collect.
-    Worker.ackWith cbs job score
-```
+`ackWith`/`ackAllWith` carry the queue's [result](#job-results) - kept for a
+rollup parent to collect, or on an archived job's entry. `ack`/`ackAll` finalize
+a job without storing anything, on any queue.
 
 ### Observability Hooks
 
@@ -695,16 +696,17 @@ emailConfig <- Worker.transactionalWorkerConfig 3 processEmail
 imageConfig <- Worker.transactionalWorkerConfig 2 processImage
 
 let workers = [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]
+    shutdown = Signals.Catch $ Worker.shutdownPools workers
+void $ Signals.installHandler Signals.sigTERM shutdown Nothing
+void $ Signals.installHandler Signals.sigINT shutdown Nothing
+
 poolCfg <- Worker.poolConfigForWorkers workers
 env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
-
-ArbS.runSimpleDb env $ Worker.runWorkerPools (Proxy @AppRegistry) workers $ \state -> do
-  let shutdown = Signals.Catch $ Worker.signalShutdown state
-  void $ Signals.installHandler Signals.sigTERM shutdown Nothing
-  void $ Signals.installHandler Signals.sigINT shutdown Nothing
+ArbS.runSimpleDb env $ Worker.runWorkerPools workers
 ```
 
-The dispatcher stops claiming, in-flight jobs drain within `gracefulShutdownTimeout`, and the process exits.
+The dispatcher stops claiming, in-flight jobs drain within
+`gracefulShutdownTimeout`, and the process exits.
 
 ### Backoff Strategies
 
@@ -911,13 +913,29 @@ See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-si
 
 Integrates with `orville-postgresql`. Handlers do not receive a connection
 parameter - Orville manages connections and transactions internally. Requires a
-custom monad with `MonadOrville`, `HasArbiterSchema`, and `MonadArbiter`
-instances.
+custom monad with `MonadOrville` and `MonadArbiter` instances:
+
+```haskell
+{-# LANGUAGE TypeFamilies #-}
+
+instance MonadArbiter AppM where
+  type RegistryOf AppM = AppRegistry
+  type Handler AppM job result = job -> AppM result
+  getSchema = asks appSchema
+  -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
+```
+
+`Handler` is the shape of your handlers - Orville passes no connection, so it is
+just the job. `Arb.JobHandler AppM payload result` is that shape at one queue's
+job type, and is what you write in a handler's own signature.
 
 Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
 shared listener runs on its own dedicated connection. Build a `DedicatedListen`
 (from `Arbiter.Core.Listen`) with the same connection string as your Orville
-pool, keep it in your reader environment, and return it from `getListener`:
+pool, keep it in your reader environment, and return it from `getListener`.
+
+`createOrvilleConnectionOptions` takes an arbiter `PoolConfig`, so
+`poolConfigForWorkers` sizes your Orville pool for the workers that will use it:
 
 ```haskell
 import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)
@@ -930,11 +948,19 @@ data AppEnv = AppEnv
 
 main :: IO ()
 main = do
+  poolCfg <- Worker.poolConfigForWorkers workers
+  orvillePool <- O.createConnectionPool (createOrvilleConnectionOptions connStr poolCfg)
   listen <- newDedicatedListen connStr
-  -- ... build AppEnv { appListen = listen, ... } and run your workers
+  let env =
+        AppEnv
+          { appSchema = "arbiter"
+          , appOrville = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
+          , appListen = listen
+          }
+  runAppM env $ Worker.runWorkerPools workers
 
 instance MonadArbiter AppM where
-  -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
+  -- ... RegistryOf / Handler / getSchema and the query methods, as above
   getListener = asks (Just . dedicatedListener . appListen)
 ```
 

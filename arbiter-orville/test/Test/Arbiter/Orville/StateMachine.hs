@@ -8,6 +8,7 @@
 -- | Orville backend wrapper for the shared state-machine property suite.
 module Test.Arbiter.Orville.StateMachine (spec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Setup (createSharedPool)
 import Arbiter.Test.StateMachine (SMPayload, stateMachineSpec)
 import Data.ByteString (ByteString)
@@ -29,7 +30,7 @@ testSchema = "arbiter_orville_sm_test"
 testTable :: Text
 testTable = "arbiter_orville_sm_test"
 
-type SMRegistry = '[ '("arbiter_orville_sm_test", SMPayload)]
+type SMRegistry = '[Queue "arbiter_orville_sm_test" SMPayload]
 
 spec :: ByteString -> Spec
 spec connStr = do
@@ -40,7 +41,7 @@ spec connStr = do
       withConn :: forall a. (PG.Connection -> IO a) -> IO a
       withConn = withResource pgPool
       reset = cleanupOrvilleTest env
-  stateMachineSpec @(TestOrville SMRegistry) @SMRegistry
+  stateMachineSpec @(TestOrville SMRegistry)
     run
     testSchema
     testTable

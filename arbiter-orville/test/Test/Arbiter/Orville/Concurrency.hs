@@ -3,6 +3,7 @@
 
 module Test.Arbiter.Orville.Concurrency (spec) where
 
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Concurrency
   ( concurrencySpec
   , raceConditionSpec
@@ -21,16 +22,16 @@ import Test.Arbiter.Orville.TestHelpers
 testSchema :: Text
 testSchema = "arbiter_orville_concurrency_test"
 
-type OrvilleConcurrencyTestRegistry = '[ '("arbiter_orville_concurrency_test", TestPayload)]
+type OrvilleConcurrencyTestRegistry = '[Queue "arbiter_orville_concurrency_test" TestPayload]
 
 testTable :: Text
 testTable = "arbiter_orville_concurrency_test"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 10) $ beforeWith (\env -> cleanupOrvilleTest env >> pure env) $ do
-  concurrencySpec @TestPayload @OrvilleConcurrencyTestRegistry
+  concurrencySpec @TestPayload
     TestMessage
     (runOrvilleTest @OrvilleConcurrencyTestRegistry)
-  raceConditionSpec @TestPayload @OrvilleConcurrencyTestRegistry
+  raceConditionSpec @TestPayload
     TestMessage
     (runOrvilleTest @OrvilleConcurrencyTestRegistry)

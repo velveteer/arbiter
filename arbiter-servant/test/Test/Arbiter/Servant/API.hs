@@ -13,6 +13,7 @@ import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
@@ -73,7 +74,7 @@ data ServantTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Test registry
-type ServantTestRegistry = '[ '("arbiter_servant_test", ServantTestPayload)]
+type ServantTestRegistry = '[Queue "arbiter_servant_test" ServantTestPayload]
 
 -- Table name for tests
 testTable :: Text
@@ -731,7 +732,7 @@ spec connStr = do
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
         -- Cancel parent (cascade) - removes the suspended parent
-        _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @_ @ServantTestRegistry @ServantTestPayload (primaryKey parent)
+        _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @ServantTestPayload (primaryKey parent)
         -- Get DLQ job ID
         dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
         pure $ dlqPrimaryKey (head dlqs)
