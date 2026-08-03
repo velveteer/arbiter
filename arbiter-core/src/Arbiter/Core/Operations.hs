@@ -182,7 +182,7 @@ import Data.List (groupBy, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Monoid (Ap (..), Sum (..))
 import Data.Proxy (Proxy (..))
 import Data.Sequence ((|>))
@@ -478,20 +478,25 @@ reconcileConcurrencyCounts schemaName tableNames = withDbTransaction $ do
   rows <- MA.executeQuery (Tmpl.reconcileConcurrencyCountsSQL schemaName tableNames held)
   pure (fromMaybe 0 (listToMaybe rows))
 
--- | Rebuild the counts only if a crash truncated the UNLOGGED table.
-reconcileConcurrencyCountsIfStale :: (MonadArbiter m) => SchemaName -> [TableName] -> m ()
-reconcileConcurrencyCountsIfStale _ [] = pure ()
+-- | Rebuild the counts only if a crash truncated the UNLOGGED table. Returns the
+-- rows it recounted.
+reconcileConcurrencyCountsIfStale :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
+reconcileConcurrencyCountsIfStale _ [] = pure 0
 reconcileConcurrencyCountsIfStale schemaName tableNames = do
   stale <- MA.executeQuery (Tmpl.concurrencyCountsStaleSQL schemaName tableNames)
-  when (or stale) (void (reconcileConcurrencyCounts schemaName tableNames))
+  if or stale then reconcileConcurrencyCounts schemaName tableNames else pure 0
 
--- | Reconcile then prune, skipped entirely when no concurrency key exists.
-reconcileAndPruneConcurrency :: (MonadArbiter m) => SchemaName -> [TableName] -> m ()
+-- | Reconcile then prune, skipped entirely when no concurrency key exists. Returns
+-- the rows recounted and pruned.
+reconcileAndPruneConcurrency :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileAndPruneConcurrency schemaName tableNames = do
   hasKeys <- MA.executeQuery (Tmpl.concurrencyHasAnyKeySQL schemaName)
-  when (or hasKeys) $ do
-    void $ reconcileConcurrencyCounts schemaName tableNames
-    void $ pruneConcurrencyKeys schemaName tableNames
+  if not (or hasKeys)
+    then pure 0
+    else
+      (+)
+        <$> reconcileConcurrencyCounts schemaName tableNames
+        <*> pruneConcurrencyKeys schemaName tableNames
 
 -- | Inserts a job into the queue.
 --
@@ -2106,27 +2111,21 @@ refreshGroupsForQueue
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
-  -> m ()
+  -> m Int64
 refreshGroupsForQueue schemaName tableName = withDbTransaction $ do
   keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName)
-  void $ MA.executeStatement (Tmpl.refreshGroupsSQL schemaName tableName keys)
+  MA.executeStatement (Tmpl.refreshGroupsSQL schemaName tableName keys)
 
 -- | Schema-wide groups-table refresh. Refreshes each given queue in its own
 -- savepoint, so one queue's failure is isolated and the rest still commit.
--- Wrap in 'runGated' so only one pool runs it per interval. Returns the queue
--- names that failed.
+-- Wrap in 'runGated' so only one pool runs it per interval. Returns the rows
+-- rewritten and the queue names that failed.
 refreshAllGroups
   :: (MonadArbiter m, MonadUnliftIO m)
   => SchemaName
   -> [TableName]
-  -> m [Text]
-refreshAllGroups schemaName queues = do
-  outcomes <- traverse refreshOne queues
-  pure (catMaybes outcomes)
-  where
-    refreshOne queue = do
-      result <- tryAny (refreshGroupsForQueue schemaName queue)
-      pure (either (const (Just queue)) (const Nothing) result)
+  -> m (Int64, [Text])
+refreshAllGroups = sweepQueues refreshGroupsForQueue
 
 -- | Run a per-queue sweep over every queue, returning the total and the names
 -- of queues whose sweep threw.

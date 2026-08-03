@@ -465,7 +465,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
         , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
         , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v7" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v8" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
         , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName

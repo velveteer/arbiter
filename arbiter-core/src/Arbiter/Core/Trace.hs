@@ -38,7 +38,6 @@ module Arbiter.Core.Trace
     -- * Span enrichment
   , addSpanAttributes
   , markSpanError
-  , clearSpanError
   , recordJobFailure
   , recordJobCancelled
   , Attribute
@@ -177,10 +176,6 @@ addSpanAttributes attributes = onActiveSpan (\sp -> addAttributes sp (HM.fromLis
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()
 markSpanError msg = onActiveSpan (\sp -> setStatus sp (Error msg))
-
--- | Clear an error status the active span picked up.
-clearSpanError :: (MonadIO m) => m ()
-clearSpanError = onActiveSpan (\sp -> setStatus sp Ok)
 
 -- | Record one job's failure as an event on the active span, a no-op when none is active.
 -- A batch span also covers the jobs that succeeded, so this leaves its status alone.

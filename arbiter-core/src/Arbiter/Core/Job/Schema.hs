@@ -559,8 +559,10 @@ groupsInsertFunction funcName groupsTbl dd =
       GROUP BY group_key
       ORDER BY group_key
       ON CONFLICT (group_key) DO UPDATE SET
-        min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
-        min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
+        min_priority = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_priority
+          ELSE LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority) END,
+        min_id = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_id
+          ELSE LEAST(${groupsTbl}.min_id, EXCLUDED.min_id) END,
         job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
         ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
         next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due),
@@ -603,12 +605,17 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
       FOR UPDATE;
 
       UPDATE ${groupsTbl} g
-      SET job_count = g.job_count - sub.removed_count,
-          min_priority = COALESCE(sub.new_min_priority, g.min_priority),
-          min_id = COALESCE(sub.new_min_id, g.min_id),
-          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
-          next_due = sub.new_next_due,
+      SET job_count = GREATEST(0, g.job_count - sub.removed_count),
+          min_priority = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
+            ELSE COALESCE(sub.new_min_priority, g.min_priority) END,
+          min_id = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
+            ELSE COALESCE(sub.new_min_id, g.min_id) END,
+          ready_count = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
+            ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
+          next_due = CASE WHEN g.job_count - sub.removed_count <= 0 THEN NULL
+            ELSE sub.new_next_due END,
           in_flight_until = CASE
+            WHEN g.job_count - sub.removed_count <= 0 THEN NULL
             WHEN sub.had_inflight THEN sub.surviving_ift
             ELSE g.in_flight_until
           END
@@ -630,10 +637,6 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
         GROUP BY d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight
       ) sub
       WHERE g.group_key = sub.group_key;
-
-      DELETE FROM ${groupsTbl}
-      WHERE job_count <= 0
-        AND group_key IN (SELECT group_key FROM old_table WHERE group_key IS NOT NULL);
 
       RETURN NULL;
     END;
@@ -695,12 +698,17 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
 
       -- Step 2: group_key change (dedup replace) - remove from old group
       UPDATE ${groupsTbl} g
-      SET job_count = g.job_count - sub.cnt,
-          min_priority = COALESCE(sub.new_min_priority, g.min_priority),
-          min_id = COALESCE(sub.new_min_id, g.min_id),
-          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
-          next_due = sub.new_next_due,
+      SET job_count = GREATEST(0, g.job_count - sub.cnt),
+          min_priority = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+            ELSE COALESCE(sub.new_min_priority, g.min_priority) END,
+          min_id = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+            ELSE COALESCE(sub.new_min_id, g.min_id) END,
+          ready_count = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+            ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
+          next_due = CASE WHEN g.job_count - sub.cnt <= 0 THEN NULL
+            ELSE sub.new_next_due END,
           in_flight_until = CASE
+            WHEN g.job_count - sub.cnt <= 0 THEN NULL
             WHEN sub.had_inflight THEN sub.surviving_ift
             ELSE g.in_flight_until
           END
@@ -724,15 +732,6 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ) sub
       WHERE g.group_key = sub.group_key;
 
-      DELETE FROM ${groupsTbl}
-      WHERE job_count <= 0
-        AND group_key IN (
-          SELECT o.group_key FROM old_table o
-          JOIN new_table n ON o.id = n.id
-          WHERE o.group_key IS NOT NULL
-            AND o.group_key IS DISTINCT FROM n.group_key
-        );
-
       -- Step 3: group_key change - add to new group
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
       SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
@@ -745,8 +744,10 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       GROUP BY n.group_key
       ORDER BY n.group_key
       ON CONFLICT (group_key) DO UPDATE SET
-        min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
-        min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
+        min_priority = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_priority
+          ELSE LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority) END,
+        min_id = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_id
+          ELSE LEAST(${groupsTbl}.min_id, EXCLUDED.min_id) END,
         job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
         ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
         next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due);

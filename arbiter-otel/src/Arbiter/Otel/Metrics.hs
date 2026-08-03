@@ -133,12 +133,14 @@ rateLimitKind, concurrencyKind :: Text
 rateLimitKind = "rate_limit"
 concurrencyKind = "concurrency"
 
--- | Send a config's logs to @dest@. 'Nothing' leaves the destination alone, and a
--- config that discards its logs keeps discarding them.
+-- | Send a config's logs to @dest@ as well as its own. 'Nothing' leaves the
+-- destination alone. A config that discards its own logs still exports them.
 otelLogs :: Maybe LogDestination -> LogConfig -> LogConfig
-otelLogs dest cfg = case logDestination cfg of
-  LogDiscard -> cfg
-  existing -> maybe cfg (\d -> cfg {logDestination = LogTee existing d}) dest
+otelLogs dest cfg = maybe cfg (\d -> cfg {logDestination = teed d}) dest
+  where
+    teed d = case logDestination cfg of
+      LogDiscard -> d
+      existing -> LogTee existing d
 
 -- | Route Arbiter's logs to @provider@ as OTel log records.
 loggerDestination :: Log.LoggerProvider -> LogDestination

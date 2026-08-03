@@ -5,7 +5,6 @@
 module Arbiter.Otel.Telemetry
   ( Telemetry (..)
   , GaugeClaim (..)
-  , GaugeSlot
   , withTelemetry
   , withTelemetryIf
   , withTelemetryFromEnv
@@ -77,6 +76,8 @@ import OpenTelemetry.Trace
   , shutdownTracerProvider
   )
 import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
+import System.Mem.StableName (StableName, makeStableName)
 import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (link, withAsync)
 
@@ -94,9 +95,6 @@ data Telemetry = Telemetry
   -- ^ The Prometheus scrape app. 'Nothing' when this handle serves no scrape endpoint.
   , logDestination :: Maybe LogDestination
   -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
-  , gaugeSlot :: GaugeSlot
-  -- ^ Held by the running 'Arbiter.Otel.withGauges' on this handle, so a concurrent
-  -- call cannot register a duplicate set of instruments.
   , telemetrySummary :: Text
   -- ^ What this handle exports and where, for the caller to log at startup.
   }
@@ -227,12 +225,11 @@ withTelemetryIf False action = action =<< inertTelemetry
 inertTelemetry :: IO Telemetry
 inertTelemetry = baseTelemetry noopMeterProvider
 
--- | An exporting-nothing handle over @mp@, holding its own gauge slot. The installers
--- record-update the fields they actually set.
+-- | An exporting-nothing handle over @mp@. The installers record-update the fields
+-- they actually set.
 baseTelemetry :: MeterProvider -> IO Telemetry
 baseTelemetry mp = do
   ms <- newArbiterMeters mp
-  slot <- newGaugeSlot
   pure
     Telemetry
       { enabled = False
@@ -241,7 +238,6 @@ baseTelemetry mp = do
       , provider = mp
       , metricsApp = Nothing
       , logDestination = Nothing
-      , gaugeSlot = slot
       , telemetrySummary = "telemetry off, no exporter configured"
       }
 
@@ -295,11 +291,10 @@ withMetricsEndpoint tel baseLog port action = maybe (unserved >> action) serve (
   where
     -- An explicit request that binds nothing would otherwise look like a scrape target
     -- that is up but empty.
-    unserved =
-      tryLog
-        (telemetryLogConfig tel baseLog)
-        Warning
-        "No metrics to scrape, binding no endpoint: metrics are off or exported over OTLP only"
+    unserved = tryLog (telemetryLogConfig tel baseLog) Warning ("Binding no metrics endpoint: " <> reason)
+    reason
+      | not (metricsEnabled tel) = "metrics are off"
+      | otherwise = "this handle serves no scrape endpoint of its own, the caller's reader does"
 
     -- Linked, so a port it cannot bind fails the process.
     serve app =
@@ -310,38 +305,42 @@ withMetricsEndpoint tel baseLog port action = maybe (unserved >> action) serve (
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 
--- | A handle's single gauge registration.
-newtype GaugeSlot = GaugeSlot (MVar SlotState)
+-- | One meter provider's gauge registration, and whether a caller holds it. The cells
+-- outlive the claim: the SDK cannot unregister an observable callback.
+data GaugeSlot = GaugeSlot
+  { slotCells :: GaugeCells
+  , slotHeld :: Bool
+  }
 
--- | The cells outlive the claim: the SDK cannot unregister an observable callback.
-data SlotState
-  = Vacant (Maybe GaugeCells)
-  | Held GaugeCells
-
-newGaugeSlot :: IO GaugeSlot
-newGaugeSlot = GaugeSlot <$> newMVar (Vacant Nothing)
+-- | Gauge registrations by the meter provider they were made against, rather than by
+-- handle: two handles over one provider would otherwise each register the instruments,
+-- and every observation would be counted twice.
+gaugeSlots :: MVar [(StableName MeterProvider, GaugeSlot)]
+gaugeSlots = unsafePerformIO (newMVar [])
+{-# NOINLINE gaugeSlots #-}
 
 -- | A held gauge slot.
 data GaugeClaim = GaugeClaim
   { claimCells :: GaugeCells
   , claimRegistered :: Bool
-  -- ^ True when this handle's instruments already exist and only need their cells reset.
+  -- ^ True when this provider's instruments already exist and only need their cells reset.
   , releaseGaugeSlot :: IO ()
   }
 
--- | Take this handle's single gauge registration. 'Nothing' once another caller holds it.
+-- | Take the gauge registration for this handle's meter provider. 'Nothing' once
+-- another caller holds it.
 claimGaugeSlot :: Telemetry -> IO (Maybe GaugeClaim)
-claimGaugeSlot tel = modifyMVar slot $ \case
-  Held cells -> pure (Held cells, Nothing)
-  Vacant existing -> do
-    cells <- maybe newGaugeCells pure existing
-    pure (Held cells, Just (GaugeClaim cells (isJust existing) release))
+claimGaugeSlot tel = do
+  key <- makeStableName (provider tel)
+  modifyMVar gaugeSlots $ \slots -> case lookup key slots of
+    Just held | slotHeld held -> pure (slots, Nothing)
+    prior -> do
+      cells <- maybe newGaugeCells (pure . slotCells) prior
+      let claim = GaugeClaim cells (isJust prior) (release key)
+      pure (setSlot key (GaugeSlot cells True) slots, Just claim)
   where
-    GaugeSlot slot = gaugeSlot tel
-    release = modifyMVar_ slot (pure . vacate)
-    vacate = \case
-      Held cells -> Vacant (Just cells)
-      vacant -> vacant
+    setSlot key slot = ((key, slot) :) . filter ((/= key) . fst)
+    release key = modifyMVar_ gaugeSlots (pure . map (\(k, v) -> (k, if k == key then v {slotHeld = False} else v)))
 
 -- | The resource the SDK detects for traces, so pushed metrics carry the same @service.name@.
 detectedResources :: IO MaterializedResources
@@ -354,8 +353,7 @@ detectedResources = do
     maybe base (\n -> mergeResources (mkResource ["service.name" .= n]) base) svcName
 
 -- | Build 'Telemetry' over providers the caller installed itself, which the meters and
--- the log destination bind to here (no scrape app). 'Nothing' exports no logs. One
--- handle registers one set of gauges, so give the same providers one handle.
+-- the log destination bind to here (no scrape app). 'Nothing' exports no logs.
 withExternalTelemetry :: MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
 withExternalTelemetry mp mlp action = do
   tracing <- isJust <$> resolveTracer

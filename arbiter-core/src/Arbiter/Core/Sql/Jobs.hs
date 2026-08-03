@@ -33,6 +33,8 @@ module Arbiter.Core.Sql.Jobs
   , jobColsExceptError
   , jobColsExceptId
   , dlqCarriedCols
+  , requeuedCols
+  , enqueuedAgainCols
   , jobColumns
   , insertJobSQL
   , insertJobReplaceSQL
@@ -335,7 +337,7 @@ allDLQColumns = codecColumns (dlqRowCodec "")
 -- | All job columns except @id@ and @last_error@, comma-separated.
 -- Used for DLQ INSERT operations where @id@ becomes @job_id@ and @last_error@ is overridden.
 jobColsExceptError :: Text
-jobColsExceptError = T.intercalate ", " $ filter (/= "last_error") (drop 1 allJobColumns)
+jobColsExceptError = aliasedCols Nothing (filter (/= "last_error") (drop 1 allJobColumns))
 
 -- | All job read columns except @id@, comma-separated. Used for the archive
 -- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
@@ -345,11 +347,44 @@ jobColsExceptId = T.intercalate ", " (drop 1 allJobColumns)
 
 -- | Job columns carried through a DLQ round-trip: the read columns plus write-only rate_limit_cost.
 dlqCarriedCols :: Text
-dlqCarriedCols = jobColsExceptError <> ", rate_limit_cost"
+dlqCarriedCols = aliasedCols Nothing dlqCarriedColumns
+
+dlqCarriedColumns :: [Text]
+dlqCarriedColumns = filter (/= "last_error") (drop 1 allJobColumns) <> ["rate_limit_cost"]
+
+-- | Job columns a DLQ retry carries back to the main table, optionally aliased. The
+-- rest are re-armed by the retry itself: a fresh attempt count, a recomputed suspended
+-- flag, no claim, no dedup key, and no timestamps of the failed run.
+requeuedCols :: Maybe Text -> Text
+requeuedCols mAlias = aliasedCols mAlias requeuedColumns
+
+-- | 'requeuedCols' for an archive re-enqueue, which starts a standalone job and so
+-- leaves the parent link behind too.
+enqueuedAgainCols :: Maybe Text -> Text
+enqueuedAgainCols mAlias = aliasedCols mAlias (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
+
+requeuedColumns :: [Text]
+requeuedColumns = filter (`notElem` reArmed) dlqCarriedColumns
+  where
+    reArmed =
+      [ "inserted_at"
+      , "updated_at"
+      , "attempts"
+      , "last_attempted_at"
+      , "not_visible_until"
+      , "dedup_key"
+      , "dedup_strategy"
+      , "suspended"
+      , "claimed_by"
+      ]
 
 -- | Standard job column list (for SELECT and RETURNING)
 jobColumns :: Maybe Text -> Text
-jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
+jobColumns mAlias = aliasedCols mAlias allJobColumns
+
+-- | Comma-separated column list, each name qualified by @alias@ when given.
+aliasedCols :: Maybe Text -> [Text] -> Text
+aliasedCols mAlias = T.intercalate ", " . map withAlias
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
 

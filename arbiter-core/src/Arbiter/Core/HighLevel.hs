@@ -412,7 +412,7 @@ reconcileConcurrencyCounts = do
 reconcileConcurrencyCountsIfStale
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
-  => m ()
+  => m Int64
 reconcileConcurrencyCountsIfStale = do
   schemaName <- getSchema
   Ops.reconcileConcurrencyCountsIfStale schemaName (registryTableNames (Proxy @(RegistryOf m)))
@@ -421,7 +421,7 @@ reconcileConcurrencyCountsIfStale = do
 reconcileAndPruneConcurrency
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
-  => m ()
+  => m Int64
 reconcileAndPruneConcurrency = do
   schemaName <- getSchema
   Ops.reconcileAndPruneConcurrency schemaName (registryTableNames (Proxy @(RegistryOf m)))
@@ -1245,14 +1245,15 @@ getParentStateSnapshot jobId = do
 
 -- | Schema-wide groups-table refresh. Iterates all registered queues and
 -- corrects drift in @job_count@, @min_priority@, @min_id@, and
--- @in_flight_until@ for each. Returns the queue names that failed.
+-- @in_flight_until@ for each. Returns the rows rewritten and the queue names
+-- that failed.
 --
 -- Intended for the reaper loop, which wraps it in 'Ops.runGated' so only
 -- one pool runs it per interval.
 refreshAllGroups
   :: forall m
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
-  => m [Text]
+  => m (Int64, [Text])
 refreshAllGroups = do
   schemaName <- getSchema
   Ops.refreshAllGroups schemaName (registryTableNames (Proxy @(RegistryOf m)))

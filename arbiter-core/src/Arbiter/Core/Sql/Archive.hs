@@ -26,7 +26,7 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead)
-import Arbiter.Core.Sql.Jobs (jobColsExceptId, jobColumns)
+import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, jobColsExceptId, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
@@ -134,11 +134,12 @@ reEnqueueFromArchiveSQL schema tableName archiveId =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
+      carried = enqueuedAgainCols Nothing
    in rows
         (jobRowCodec tableName)
         [sql|
-          INSERT INTO ${tbl} (payload, group_key, priority, max_attempts, archive_for, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, traceparent, tracestate)
-          SELECT payload, group_key, priority, max_attempts, archive_for, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, traceparent, tracestate
+          INSERT INTO ${tbl} (${carried})
+          SELECT ${carried}
           FROM ${archiveTbl}
           WHERE id = #{archiveId :: CInt8}
           RETURNING ${columns}

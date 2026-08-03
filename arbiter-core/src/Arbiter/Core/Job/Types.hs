@@ -29,6 +29,7 @@ module Arbiter.Core.Job.Types
     -- * Observability
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
+  , andThen
   , ClaimTime
   , CurrentTime
   , StartTime
@@ -45,8 +46,8 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO)
-import UnliftIO.Exception (finally)
+import Control.Exception qualified as E
+import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
@@ -372,15 +373,20 @@ defaultObservabilityHooks =
 instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
   a <> b =
     ObservabilityHooks
-      { onJobClaimed = \j t -> onJobClaimed a j t `finally` onJobClaimed b j t
-      , onJobSuccess = \j s e -> onJobSuccess a j s e `finally` onJobSuccess b j s e
-      , onJobFailure = \j msg s e -> onJobFailure a j msg s e `finally` onJobFailure b j msg s e
-      , onJobRetry = \j d -> onJobRetry a j d `finally` onJobRetry b j d
-      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j `finally` onJobFailedAndMovedToDLQ b msg j
-      , onJobCancelled = \j msg -> onJobCancelled a j msg `finally` onJobCancelled b j msg
-      , onJobUnavailable = \j msg -> onJobUnavailable a j msg `finally` onJobUnavailable b j msg
-      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s `finally` onJobHeartbeat b j c s
+      { onJobClaimed = \j t -> onJobClaimed a j t `andThen` onJobClaimed b j t
+      , onJobSuccess = \j s e -> onJobSuccess a j s e `andThen` onJobSuccess b j s e
+      , onJobFailure = \j msg s e -> onJobFailure a j msg s e `andThen` onJobFailure b j msg s e
+      , onJobRetry = \j d -> onJobRetry a j d `andThen` onJobRetry b j d
+      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j `andThen` onJobFailedAndMovedToDLQ b msg j
+      , onJobCancelled = \j msg -> onJobCancelled a j msg `andThen` onJobCancelled b j msg
+      , onJobUnavailable = \j msg -> onJobUnavailable a j msg `andThen` onJobUnavailable b j msg
+      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s `andThen` onJobHeartbeat b j c s
       }
 
 instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
   mempty = defaultObservabilityHooks
+
+-- | @finally@ leaving the second action interruptible, unlike UnliftIO's, so a hook
+-- blocked on IO still answers a shutdown.
+andThen :: (MonadUnliftIO m) => m () -> m () -> m ()
+andThen first second = withRunInIO $ \run -> run first `E.finally` run second

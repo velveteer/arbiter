@@ -13,14 +13,16 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 
 -- | One row of database-wide health, counters cumulative. Skips the reading backend.
+-- Every connection reading comes from @pg_stat_activity@, so the states partition the
+-- backend count at one visibility scope.
 pgDbHealthSQL :: Query ()
 pgDbHealthSQL =
   [sql|
     SELECT
       d.blks_hit::float8, d.blks_read::float8,
       d.xact_commit::float8, d.xact_rollback::float8, d.deadlocks::float8,
-      greatest(d.numbackends - 1, 0)::int8 AS numbackends,
-      a.active::int8, a.idle::int8, a.idle_in_txn::int8, a.idle_in_txn_aborted::int8, a.blocked::int8,
+      a.numbackends::int8,
+      a.active::int8, a.idle::int8, a.idle_in_txn::int8, a.idle_in_txn_aborted::int8, a.blocked::int8, a.other::int8,
       a.oldest_txn_age::float8, a.oldest_query_age::float8,
       age(pd.datfrozenxid)::int8 AS xid_age
     FROM pg_stat_database d
@@ -32,6 +34,8 @@ pgDbHealthSQL =
         count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_txn,
         count(*) FILTER (WHERE state = 'idle in transaction (aborted)') AS idle_in_txn_aborted,
         count(*) FILTER (WHERE state = 'active' AND wait_event_type = 'Lock') AS blocked,
+        count(*) FILTER (WHERE state IS NULL OR state NOT IN ('active', 'idle', 'idle in transaction', 'idle in transaction (aborted)')) AS other,
+        count(*) AS numbackends,
         COALESCE(EXTRACT(EPOCH FROM max(clock_timestamp() - xact_start)), 0) AS oldest_txn_age,
         COALESCE(EXTRACT(EPOCH FROM max(clock_timestamp() - query_start) FILTER (WHERE state = 'active')), 0) AS oldest_query_age
       FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()

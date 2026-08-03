@@ -44,6 +44,7 @@ module Arbiter.Otel
   , attrs
   ) where
 
+import Arbiter.Core.Job.Types (andThen)
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
 import Arbiter.Core.QueueRegistry (RegistryTables, registryTableNames)
 import Arbiter.Core.Threads (labelArbiterThread)
@@ -55,7 +56,7 @@ import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, finally, withRunInIO)
+import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
@@ -79,22 +80,17 @@ import Arbiter.Otel.Telemetry
   )
 
 -- | Give a pool consumer spans, lifecycle metrics, and the telemetry log destination.
--- The queue name labels its metrics. Apply it once per pool.
-instrumentPool
-  :: (MonadUnliftIO m)
-  => Telemetry
-  -> Text
-  -> WorkerConfig m payload
-  -> WorkerConfig m payload
-instrumentPool tel queue cfg
-  | not (enabled tel) = cfg
-  | otherwise = instrumentConfig (meters tel <$ guard (metricsEnabled tel)) (logDestination tel) queue cfg
+-- The pool's registry queue name labels its metrics, which is what the gauges are
+-- labelled by. Apply it once per pool.
+instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
+instrumentPool tel pool@(NamedWorkerPool queue cfg)
+  | not (enabled tel) = pool
+  | otherwise =
+      NamedWorkerPool queue (instrumentConfig (meters tel <$ guard (metricsEnabled tel)) (logDestination tel) queue cfg)
 
--- | 'instrumentPool' over a pool list, each under the queue name it carries.
+-- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]
-instrumentPools tel = map instrument
-  where
-    instrument (NamedWorkerPool name cfg) = NamedWorkerPool name (instrumentPool tel name cfg)
+instrumentPools = map . instrumentPool
 
 -- | Run the registry's depth and health gauges alongside @action@. Nothing is scanned
 -- when the handle has metrics off, and one handle registers one set of gauges.
@@ -125,7 +121,7 @@ instrumentConfig ms dest queue cfg =
   withHooks metricHooks $
     cfg
       { logConfig = otelLogs dest (logConfig cfg)
-      , onMaintenance = \op n -> traverse_ (\ms' -> otelMaintenance ms' op n) ms `finally` onMaintenance cfg op n
+      , onMaintenance = \op n -> traverse_ (\ms' -> otelMaintenance ms' op n) ms `andThen` onMaintenance cfg op n
       }
   where
     metricHooks hooks = maybe hooks (\ms' -> otelHooks ms' queue <> hooks) ms

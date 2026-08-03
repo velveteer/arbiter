@@ -22,7 +22,7 @@ import Data.Text qualified as T
 import Arbiter.Core.Codec (jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, defaultMaxAttempts)
-import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns)
+import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
@@ -99,6 +99,8 @@ retryFromDLQSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
+      carried = requeuedCols Nothing
+      carriedFrom = requeuedCols (Just "d")
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -141,17 +143,11 @@ retryFromDLQSQL schema tableName dlqId =
         ),
         -- Walk down from root to collect all DLQ tree members
         tree AS (
-          SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
-                 d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for,
-                 d.traceparent, d.tracestate
+          SELECT d.id AS dlq_id, d.job_id, ${carriedFrom}
           FROM ${dlqTbl} d
           WHERE d.job_id = (SELECT job_id FROM root_job_id)
           UNION ALL
-          SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
-                 d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for,
-                 d.traceparent, d.tracestate
+          SELECT d.id AS dlq_id, d.job_id, ${carriedFrom}
           FROM ${dlqTbl} d
           JOIN tree t ON d.parent_id = t.job_id
         ),
@@ -160,24 +156,20 @@ retryFromDLQSQL schema tableName dlqId =
           DELETE FROM ${dlqTbl}
           WHERE id IN (SELECT dlq_id FROM tree)
             AND (SELECT val FROM can_retry)
-          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for, traceparent, tracestate
+          RETURNING job_id, ${carried}
         ),
         -- Re-insert into main queue with computed suspended state:
         -- rollup finalizers are suspended if they have children (in this
         -- retry batch OR already in the main queue).
         inserted AS (
-          INSERT INTO ${tbl} (id, payload, group_key, attempts, priority, max_attempts,
-                              parent_id, parent_state, archive_for, suspended, rate_limit_key, rate_limit_prefix,
-                              rate_limit_cost, concurrency_key, concurrency_prefix, traceparent, tracestate)
-          SELECT d.job_id, d.payload, d.group_key, 0, d.priority, d.max_attempts,
-                 d.parent_id, d.parent_state, d.archive_for,
+          INSERT INTO ${tbl} (id, attempts, suspended, ${carried})
+          SELECT d.job_id, 0,
                  CASE WHEN d.parent_state IS NOT NULL
                    THEN EXISTS (SELECT 1 FROM deleted c WHERE c.parent_id = d.job_id)
                      OR EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = d.job_id)
                    ELSE FALSE
                  END,
-                 d.rate_limit_key, d.rate_limit_prefix, d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix,
-                 d.traceparent, d.tracestate
+                 ${carriedFrom}
           FROM deleted d
           RETURNING *
         ),

@@ -32,6 +32,7 @@ data PgDbHealth = PgDbHealth
   , connIdleInTxn :: Int64
   , connIdleInTxnAborted :: Int64
   , connBlocked :: Int64
+  , connOther :: Int64
   , oldestTxnAge :: Double
   , oldestQueryAge :: Double
   , xidAge :: Int64
@@ -66,6 +67,7 @@ pgDbHealthCodec =
     <*> col "idle_in_txn" CInt8
     <*> col "idle_in_txn_aborted" CInt8
     <*> col "blocked" CInt8
+    <*> col "other" CInt8
     <*> col "oldest_txn_age" CFloat8
     <*> col "oldest_query_age" CFloat8
     <*> col "xid_age" CInt8
@@ -82,8 +84,8 @@ pgTableHealthCodec =
     <*> col "idx_scan" CFloat8
 
 -- | Database-wide health and per-table churn for the given queues' tables and the schema's
--- shared arbiter tables. Connection and age readings cover only arbiter's own role, absent
--- @pg_read_all_stats@.
+-- shared arbiter tables. Backends owned by another role report their state as unknown,
+-- absent @pg_read_all_stats@.
 getPgHealth :: (MonadArbiter m) => SchemaName -> [TableName] -> m (Maybe PgDbHealth, [PgTableHealth])
 getPgHealth schemaName queueTables = do
   dbRows <- executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)

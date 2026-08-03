@@ -13,7 +13,7 @@ module Arbiter.Worker.Logger.Internal
   ) where
 
 import Arbiter.Core.Job.Types qualified as Job
-import Control.Exception (displayException)
+import Control.Exception (displayException, finally)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Logger qualified as ML
@@ -24,7 +24,7 @@ import Data.Aeson.Types (Pair)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, finally, tryAny)
+import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
 

@@ -137,7 +137,7 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
   resetGaugeCells registered cells
   gateRef <- newIORef Nothing
   meter <- arbiterMeter (Tel.provider tel)
-  -- Instruments a handle already registered are reused: the SDK cannot unregister
+  -- Instruments the provider already registered are reused: the SDK cannot unregister
   -- an observable callback.
   let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res)]
       callback emit = withCached (\res -> emit res . reading)
@@ -254,7 +254,9 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
           (traverse_ (atomically . writeTVar (cache cells) . Just . stamp started now))
           refreshed
         elapsed <- subtract started <$> getMonotonicTime
-        threadDelay (max minimumPause (micros refreshInterval - round (elapsed * 1_000_000)))
+        -- The gate reopens gateInterval after the publish, so a scan slower than the
+        -- slack would otherwise lose the gate on the very next tick.
+        threadDelay (max minimumPause (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000))))
   pure (refreshLoop, atomically (writeTVar (cache cells) Nothing) >> Tel.releaseGaugeSlot claim)
   where
     cells = Tel.claimCells claim
@@ -273,10 +275,12 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
     resolveGate gateRef =
       readIORef gateRef
         >>= maybe (runDb (gaugeGate queueTables) >>= \gate -> gate <$ writeIORef gateRef (Just gate)) pure
-    -- A scan that outlives the freshness window is abandoned, not left running.
+    -- A scan that outlives the freshness window is abandoned, so long as a cached
+    -- reading stands in for it. With nothing exported yet it runs to completion.
     bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
-    bounded act =
-      tryAny (timeout (micros staleAfter) act)
+    bounded act = do
+      cached <- readTVarIO (cache cells)
+      tryAny (maybe (Just <$> act) (const (timeout (micros staleAfter) act)) cached)
         >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
     abandoned = "Gauge scan outlived the freshness window, abandoned"
     -- Only an unreadable payload falls back, and only with nothing fresh of its own.
@@ -328,6 +332,7 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
       , ("idle_in_transaction", Health.connIdleInTxn h)
       , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted h)
       , ("blocked", Health.connBlocked h)
+      , ("other", Health.connOther h)
       ]
     admissionAttrs kind prefix = attrs [("kind", kind), ("policy", prefix)]
     policyAttrs prefix = attrs [("policy", prefix)]

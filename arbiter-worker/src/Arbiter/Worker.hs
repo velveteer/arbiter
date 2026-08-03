@@ -81,7 +81,6 @@ import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Core.Trace
   ( ConsumeSpan
-  , clearSpanError
   , consumeSpanFor
   , markSpanError
   , recordJobCancelled
@@ -645,7 +644,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
       nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        void . withDbTransaction $ handleJobFailure (withJobLog config j) hooks exc (jobMaxAtts j) startTime endT j
+        withDbTransaction $ handleJobFailure (withJobLog config j) hooks exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
       ackOneStoring j mVal = do
@@ -822,7 +821,8 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
   unowned <- liftIO (readIORef (unownedRef handoff))
   let splitNamed ids = let idSet = Set.fromList ids in partition (\j -> Set.member (Job.primaryKey j) idSet) unhandled
       reportUnavailable ids reason = do
-        let (jobsGone, siblings) = splitNamed ids
+        -- No named job speaks for the whole batch, and nacking would refund the attempt.
+        let (jobsGone, siblings) = if null ids then (unhandled, []) else splitNamed ids
         traverse_ (\job -> fireUnavailable (jobLog job) hooks job reason >> markJobHandled handoff job) jobsGone
         unless (null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
@@ -847,17 +847,15 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
       | otherwise ->
           -- Fail the jobs the handler did not finalize, in a separate transaction.
           withDbTransaction $ do
-            traverse_
-              (\job -> failJob hooks exc job >>= \terminal -> when terminal (markJobHandled handoff job))
-              unhandled
+            traverse_ (\job -> failJob exc job >> markJobHandled handoff job) unhandled
             -- A tree or branch cancel acts on the tree, not on this worker's claim.
-            when (cancelsTree exc) $ traverse_ (void . failJob Job.defaultObservabilityHooks exc) unownedOf
+            when (cancelsTree exc) $ traverse_ (void . cancelJobFor exc) unownedOf
   where
     batchLog = withJobContext (logConfig config) jobs
     jobLog job = withJobContextOne (logConfig config) job
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
-    failJob hs exc job =
-      handleJobFailure (withJobLog config job) hs exc (jobMaxAtts job) startTime endTime job
+    failJob exc job =
+      handleJobFailure (withJobLog config job) hooks exc (jobMaxAtts job) startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -995,8 +993,7 @@ fireFailure config hooks job errorMsg startTime endTime = do
   unless (batchedPool config) (markSpanError errorMsg)
   runHook (logConfig config) "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
 
--- | Report a cancelled job. A deliberate cancel is not a span failure, so it clears an
--- error status the failure classification already set.
+-- | Report a cancelled job.
 fireCancelled
   :: (JobOperation m payload, MonadUnliftIO m)
   => WorkerConfig m payload
@@ -1006,11 +1003,22 @@ fireCancelled
   -> m ()
 fireCancelled config hooks job errorMsg = do
   recordJobCancelled job errorMsg
-  unless (batchedPool config) clearSpanError
   runHook (logConfig config) "onJobCancelled" $ Job.onJobCancelled hooks job errorMsg
 
--- | Handle failure for a single job (retry or move to DLQ). True once the job reached
--- a terminal outcome, a retry having none yet.
+-- | Delete what a tree or branch cancel names, returning the rows deleted.
+cancelJobFor
+  :: (JobOperation m payload)
+  => SomeException
+  -> Job.JobRead payload
+  -> m Int64
+cancelJobFor e job = do
+  schemaName <- getSchema
+  case snd (classifyException e) of
+    BranchCancelFailure ->
+      Ops.cancelJobCascade schemaName (Job.queueName job) (fromMaybe (Job.primaryKey job) (Job.parentId job))
+    _ -> Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
+
+-- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
   :: forall payload m
    . ( JobOperation m payload
@@ -1023,26 +1031,16 @@ handleJobFailure
   -> UTCTime
   -> UTCTime
   -> Job.JobRead payload
-  -> m Bool
+  -> m ()
 handleJobFailure config hooks e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
-      unavailable reason = True <$ fireUnavailable cfg hooks job reason
-      reportCancelled deleted
-        | deleted > 0 = True <$ fireCancelled config hooks job errorMsg
-        | otherwise = do
-            tryLog cfg Warning "Job not available for cancelling"
-            unavailable "no longer available to cancel"
+      unavailable = fireUnavailable cfg hooks job
+      reportCancelled deleted = when (deleted > 0) (fireCancelled config hooks job errorMsg)
   schemaName <- getSchema
   case failureKind of
-    TreeCancelFailure ->
-      -- TreeCancel: delete the entire tree from root down (including this job)
-      reportCancelled =<< Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
-    BranchCancelFailure ->
-      -- BranchCancel: cascade-delete the parent + all siblings (including this job).
-      -- If no parent, just delete this job.
-      reportCancelled
-        =<< Ops.cancelJobCascade schemaName (Job.queueName job) (fromMaybe (Job.primaryKey job) (Job.parentId job))
+    TreeCancelFailure -> reportCancelled =<< cancelJobFor e job
+    BranchCancelFailure -> reportCancelled =<< cancelJobFor e job
     _
       | failureKind == PermanentFailure || Job.attempts job >= maxAtts -> do
           -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
@@ -1064,7 +1062,6 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               -- Successfully moved to DLQ
               fireFailure config hooks job errorMsg startTime endTime
               runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
-              pure True
       | otherwise -> do
           -- Retry with configured backoff strategy and jitter
           let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
@@ -1079,7 +1076,6 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
               -- Successfully updated for retry
               fireFailure config hooks job errorMsg startTime endTime
               runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
-              pure False
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, moves
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
@@ -1115,8 +1111,10 @@ reaperLoop logCfg report interval stmtTimeout = do
         mr <- gated op every work
         mr <$ traverse_ (reaped op . rowsOf) mr
   forever $ do
-    mFailed <- gated RefreshGroups interval $ Ops.refreshAllGroups schemaName queues
-    traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
+    mRefreshed <- gatedRows RefreshGroups interval fst $ Ops.refreshAllGroups schemaName queues
+    traverse_
+      (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue) . snd)
+      mRefreshed
     void $ gatedRows SweepStaleWorkers interval id $ Ops.sweepStaleWorkers schemaName
     mSwept <- gatedRows SweepExhaustedJobs interval fst $ Ops.sweepExhaustedJobs schemaName queues
     traverse_
@@ -1137,8 +1135,8 @@ reaperLoop logCfg report interval stmtTimeout = do
         gatedRows PruneRateLimitBuckets pruneInterval id $
           Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
-      void $ gated ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
-      void $ gated ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m
+      void $ gatedRows ReconcileConcurrencyStale interval id $ Arb.reconcileConcurrencyCountsIfStale @m
+      void $ gatedRows ReconcilePruneConcurrency pruneInterval id $ Arb.reconcileAndPruneConcurrency @m
     mPurged <- gatedRows PurgeArchives interval fst $ Ops.purgeArchives schemaName queues
     traverse_
       ( \(n, failed) -> do
