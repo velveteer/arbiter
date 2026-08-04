@@ -2114,7 +2114,7 @@ refreshGroupsForQueue
   -> m Int64
 refreshGroupsForQueue schemaName tableName = withDbTransaction $ do
   keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName)
-  MA.executeStatement (Tmpl.refreshGroupsSQL schemaName tableName keys)
+  sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName keys)
 
 -- | Schema-wide groups-table refresh. Refreshes each given queue in its own
 -- savepoint, so one queue's failure is isolated and the rest still commit.

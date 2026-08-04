@@ -7,6 +7,7 @@ module Arbiter.Core.Sql.Groups
   , refreshGroupsSQL
   ) where
 
+import Data.Int (Int64)
 import Data.Text (Text)
 
 import Arbiter.Core.Job.Schema (inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
@@ -20,10 +21,11 @@ lockGroupsSQL schema tableName =
   let groupsTbl = jobQueueGroupsTable schema tableName
    in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
 
--- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
--- A separate statement, so its snapshot post-dates the lock and cannot clobber a
--- concurrent claim's @in_flight_until@. The INSERT only repairs missing rows.
-refreshGroupsSQL :: Text -> Text -> [Text] -> Query ()
+-- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
+-- returning the rows it rewrote. A separate statement, so its snapshot post-dates
+-- the lock and cannot clobber a concurrent claim's @in_flight_until@. The INSERT
+-- only repairs missing rows.
+refreshGroupsSQL :: Text -> Text -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -48,6 +50,7 @@ refreshGroupsSQL schema tableName keys =
           DELETE FROM ${groupsTbl} g
           WHERE g.group_key IN (SELECT group_key FROM params)
             AND NOT EXISTS (SELECT 1 FROM current c WHERE c.group_key = g.group_key)
+          RETURNING 1
         ),
         updated AS (
           UPDATE ${groupsTbl} g
@@ -64,16 +67,21 @@ refreshGroupsSQL schema tableName keys =
                  OR g.ready_count <> c.ready_count
                  OR g.next_due IS DISTINCT FROM c.next_due
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
+          RETURNING 1
+        ),
+        inserted AS (
+          INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
+          SELECT group_key,
+                 MIN(priority), MIN(id), COUNT(*),
+                 COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
+                 MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended),
+                 MAX(not_visible_until) FILTER (WHERE ${ifBucket})
+          FROM ${tbl}
+          WHERE group_key IS NOT NULL
+            AND group_key NOT IN (SELECT group_key FROM ${groupsTbl})
+          GROUP BY group_key
+          ON CONFLICT (group_key) DO NOTHING
+          RETURNING 1
         )
-        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
-        SELECT group_key,
-               MIN(priority), MIN(id), COUNT(*),
-               COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
-               MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended),
-               MAX(not_visible_until) FILTER (WHERE ${ifBucket})
-        FROM ${tbl}
-        WHERE group_key IS NOT NULL
-          AND group_key NOT IN (SELECT group_key FROM ${groupsTbl})
-        GROUP BY group_key
-        ON CONFLICT (group_key) DO NOTHING
+        SELECT (SELECT count(*) FROM deleted) + (SELECT count(*) FROM updated) + (SELECT count(*) FROM inserted) AS @{rewritten :: CInt8}
       |]

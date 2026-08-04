@@ -38,6 +38,7 @@ module Arbiter.Core.Job.Types
   , BackoffDelay
   ) where
 
+import Control.Exception qualified as E
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Int (Int32, Int64)
@@ -46,7 +47,6 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import Control.Exception qualified as E
 import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
@@ -387,6 +387,12 @@ instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
   mempty = defaultObservabilityHooks
 
 -- | @finally@ leaving the second action interruptible, unlike UnliftIO's, so a hook
--- blocked on IO still answers a shutdown.
+-- blocked on IO still answers a shutdown. The first action's exception wins.
 andThen :: (MonadUnliftIO m) => m () -> m () -> m ()
-andThen first second = withRunInIO $ \run -> run first `E.finally` run second
+andThen first second = withRunInIO $ \run ->
+  E.mask $ \restore ->
+    tried (restore (run first))
+      >>= either (\e -> tried (restore (run second)) >> E.throwIO e) (const (restore (run second)))
+
+tried :: IO () -> IO (Either E.SomeException ())
+tried = E.try

@@ -120,7 +120,7 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
       tryLog
         (Tel.telemetryLogConfig tel baseLog)
         Warning
-        "Gauges are already running for this telemetry handle, skipping"
+        "Gauges are already running for this meter provider, skipping"
 
 registerGauges
   :: (MonadArbiter m)

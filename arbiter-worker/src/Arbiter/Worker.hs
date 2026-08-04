@@ -821,8 +821,9 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
   unowned <- liftIO (readIORef (unownedRef handoff))
   let splitNamed ids = let idSet = Set.fromList ids in partition (\j -> Set.member (Job.primaryKey j) idSet) unhandled
       reportUnavailable ids reason = do
-        -- No named job speaks for the whole batch, and nacking would refund the attempt.
-        let (jobsGone, siblings) = if null ids then (unhandled, []) else splitNamed ids
+        -- An exception naming no job speaks for none of them, so the whole
+        -- remainder is released and reports when it runs.
+        let (jobsGone, siblings) = splitNamed ids
         traverse_ (\job -> fireUnavailable (jobLog job) hooks job reason >> markJobHandled handoff job) jobsGone
         unless (null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
@@ -1036,7 +1037,11 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
       unavailable = fireUnavailable cfg hooks job
-      reportCancelled deleted = when (deleted > 0) (fireCancelled config hooks job errorMsg)
+      reportCancelled deleted
+        | deleted > 0 = fireCancelled config hooks job errorMsg
+        | otherwise = do
+            tryLog cfg Warning "Job not available for cancelling"
+            unavailable "no longer available to cancel"
   schemaName <- getSchema
   case failureKind of
     TreeCancelFailure -> reportCancelled =<< cancelJobFor e job

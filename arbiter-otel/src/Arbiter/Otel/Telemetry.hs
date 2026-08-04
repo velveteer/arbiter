@@ -331,7 +331,8 @@ data GaugeClaim = GaugeClaim
 -- another caller holds it.
 claimGaugeSlot :: Telemetry -> IO (Maybe GaugeClaim)
 claimGaugeSlot tel = do
-  key <- makeStableName (provider tel)
+  -- Forced, so the name is the provider's and not a fresh selector thunk's.
+  key <- makeStableName $! provider tel
   modifyMVar gaugeSlots $ \slots -> case lookup key slots of
     Just held | slotHeld held -> pure (slots, Nothing)
     prior -> do
