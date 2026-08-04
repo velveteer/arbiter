@@ -223,7 +223,7 @@ instrumentPools Plain configs = do
 instrumentPools Instrumented configs = do
   (tp, tel) <- benchTelemetry
   setGlobalTracerProvider tp
-  pure (map (Otel.instrumentConfig (Just (Otel.meters tel)) (Otel.logDestination tel) "bench_queue") configs)
+  pure (map (Otel.instrumentConfig (Otel.meters tel) (Otel.logDestination tel) "bench_queue") configs)
 
 -- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
 -- flaky (fail once into backoff), a fifth are scheduled into the near future,

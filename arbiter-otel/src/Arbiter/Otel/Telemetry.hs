@@ -40,22 +40,17 @@ import OpenTelemetry.Metric
   , stopPeriodicMetricReader
   )
 import OpenTelemetry.Metric.Core (MeterProvider, getGlobalMeterProvider, noopMeterProvider, setGlobalMeterProvider)
-import OpenTelemetry.Resource
-  ( MaterializedResources
-  , getMaterializedResourcesAttributes
-  , materializeResources
-  , mergeResources
-  , mkResource
-  , (.=)
-  )
-import OpenTelemetry.Resource.Detect (detectBuiltInResources, detectResourceAttributes)
+import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
+import OpenTelemetry.Processor.Span (SpanProcessor)
+import OpenTelemetry.Propagator (setGlobalTextMapPropagator)
 import OpenTelemetry.Trace
-  ( getGlobalTracerProvider
-  , initializeGlobalTracerProvider
+  ( TracerProviderOptions (..)
+  , createTracerProvider
+  , getGlobalTracerProvider
+  , getTracerProviderInitializationOptions
   , setGlobalTracerProvider
   , shutdownTracerProvider
   )
-import System.Environment (lookupEnv)
 import UnliftIO (liftIO, tryAny)
 
 import Arbiter.Otel.Metrics (ArbiterMeters, loggerDestination, newArbiterMeters, otelLogs)
@@ -75,12 +70,13 @@ data Telemetry = Telemetry
 -- 'withTelemetryFromEnv' is the gated form.
 withTelemetry :: (Telemetry -> IO a) -> IO a
 withTelemetry action = do
-  resources <- detectedResources
+  (processors, traceOpts) <- getTracerProviderInitializationOptions
+  let resources = tracerProviderOptionsResources traceOpts
   previousMeters <- getGlobalMeterProvider
   evalContT $ do
     (mp, env) <- ContT (withMeterProvider resources previousMeters)
     metricsNote <- ContT (withReader env)
-    tracesNote <- ContT withTraces
+    tracesNote <- ContT (withTraces processors traceOpts)
     logsNote <- ContT withLogs
     liftIO $ do
       ms <- traverse (const (newArbiterMeters mp)) (guard (isNothing metricsNote))
@@ -92,9 +88,14 @@ withTelemetry action = do
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
   where
-    withTraces =
-      withGlobalProvider "traces" getGlobalTracerProvider setGlobalTracerProvider initializeGlobalTracerProvider $
+    withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Maybe Text -> IO a) -> IO a
+    withTraces processors opts =
+      withGlobalProvider "traces" getGlobalTracerProvider setGlobalTracerProvider initialize $
         \tp -> void (shutdownTracerProvider tp Nothing)
+      where
+        initialize = do
+          setGlobalTextMapPropagator (tracerProviderOptionsPropagators opts)
+          createTracerProvider processors opts
     withMeterProvider resources previous inner =
       bracket
         (createMeterProvider resources defaultSdkMeterProviderOptions)
@@ -166,16 +167,6 @@ withTelemetryFromEnv action = do
 -- | Send a log config's output to this handle's destination as well as its own.
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
-
--- | The resource the SDK detects for traces, so pushed metrics carry the same @service.name@.
-detectedResources :: IO MaterializedResources
-detectedResources = do
-  builtIn <- detectBuiltInResources
-  fromEnv <- mkResource . map Just <$> detectResourceAttributes
-  svcName <- fmap T.pack <$> lookupEnv "OTEL_SERVICE_NAME"
-  let base = mergeResources fromEnv builtIn
-  pure . materializeResources $
-    maybe base (\n -> mergeResources (mkResource ["service.name" .= n]) base) svcName
 
 -- | Build 'Telemetry' over providers the caller installed itself, which the meters and
 -- the log destination bind to here. 'Nothing' exports no logs.
