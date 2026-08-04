@@ -231,9 +231,8 @@ capturingContext = (\ctx -> maybe id (const (withContext ctx)) (lookupSpan ctx))
 withContext :: (MonadUnliftIO m) => Context -> m a -> m a
 withContext ctx action = bracket (attachContext ctx) detachContext (const action)
 
--- | Run an action with the job's stored trace context as the ambient parent. A job whose
--- run is delayed, retried, or one of a large fan-out belongs in its own linked trace, not
--- in the producer's.
+-- | Run an action with the job's stored trace context as the ambient parent, where the
+-- consumer spans link to it instead.
 withJobParent :: (MonadUnliftIO m) => JobRead payload -> m a -> m a
 withJobParent job action = maybe action attached (spanContextForJob job)
   where

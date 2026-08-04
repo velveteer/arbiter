@@ -1,7 +1,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Postgres health snapshots: @pg_stat_*@ reads that never touch arbiter's own tables.
+-- | Postgres health snapshots from the stats and catalog views. Arbiter's own tables are
+-- named but never scanned.
 module Arbiter.Core.Health
   ( PgDbHealth (..)
   , PgTableHealth (..)

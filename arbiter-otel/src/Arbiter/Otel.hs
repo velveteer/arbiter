@@ -91,7 +91,7 @@ instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [Nam
 instrumentPools = map . instrumentPool
 
 -- | Run the registry's depth and health gauges alongside @action@. Nothing is scanned
--- when the handle has metrics off, and one meter provider registers one set of gauges.
+-- when the handle has metrics off.
 withGauges
   :: forall m b
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))

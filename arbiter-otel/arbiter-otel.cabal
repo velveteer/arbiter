@@ -43,19 +43,19 @@ library
     Arbiter.Otel.Telemetry
 
   build-depends:
-    , aeson                                 >=2.0  && <2.3
-    , arbiter-core                          <0.2
-    , arbiter-worker                        <0.2
-    , base                                  >=4.14 && <5
-    , hs-opentelemetry-api                  >=1.0  && <1.1
-    , hs-opentelemetry-sdk                  >=1.0  && <1.1
-    , scientific                            >=0.3  && <0.4
-    , stm                                   >=2.5  && <2.6
-    , text                                  >=1.2  && <2.2
-    , time                                  >=1.9  && <1.16
-    , transformers                          >=0.5  && <0.7
-    , unliftio                              >=0.2  && <0.3
-    , unordered-containers                  >=0.2  && <0.3
+    , aeson                 >=2.0  && <2.3
+    , arbiter-core          <0.2
+    , arbiter-worker        <0.2
+    , base                  >=4.14 && <5
+    , hs-opentelemetry-api  >=1.0  && <1.1
+    , hs-opentelemetry-sdk  >=1.0  && <1.1
+    , scientific            >=0.3  && <0.4
+    , stm                   >=2.5  && <2.6
+    , text                  >=1.2  && <2.2
+    , time                  >=1.9  && <1.16
+    , transformers          >=0.5  && <0.7
+    , unliftio              >=0.2  && <0.3
+    , unordered-containers  >=0.2  && <0.3
 
 test-suite arbiter-otel-tests
   import:         shared-properties

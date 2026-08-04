@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Postgres health SQL: reads over the in-memory @pg_stat_*@ views. The caller
+-- | Postgres health SQL: reads over the stats and catalog views. The caller
 -- attaches the row decoder.
 module Arbiter.Core.Sql.Health
   ( pgDbHealthSQL

@@ -170,6 +170,7 @@ module Arbiter.Core.Operations
   ) where
 
 import Control.Monad (foldM, void, when)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither)
 import Data.Bifunctor (first)
@@ -230,7 +231,7 @@ import Arbiter.Core.Job.Types
   , jobStatusFromText
   , jobStatusToText
   )
-import Arbiter.Core.MonadArbiter (MonadArbiter, getTraceContext, withDbTransaction)
+import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.RateLimit.Spec
@@ -260,7 +261,7 @@ import Arbiter.Core.Sql.RateLimit qualified as Tmpl
 import Arbiter.Core.Sql.Stats qualified as Tmpl
 import Arbiter.Core.Sql.Tree qualified as Tmpl
 import Arbiter.Core.Sql.Workers qualified as Tmpl
-import Arbiter.Core.Trace (stampTraceContext)
+import Arbiter.Core.Trace (currentTraceContext, stampTraceContext)
 import Arbiter.Core.Worker (WorkerRow)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
@@ -347,7 +348,7 @@ insertJobUnsafe
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
 insertJobUnsafe schemaName tableName job0 = do
-  job <- flip stampTraceContext job0 <$> getTraceContext
+  job <- flip stampTraceContext job0 <$> liftIO currentTraceContext
   let codec = jobCodec tableName
       valuesFrag = insertFrag codec (job, admissionColumns (payload job))
       query = case dedupKey job of
@@ -568,7 +569,7 @@ insertJobsBatch
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
 insertJobsBatch schemaName tableName jobs0 = do
-  ctx <- getTraceContext
+  ctx <- liftIO currentTraceContext
   let jobs = map (stampTraceContext ctx) jobs0
       codec = jobCodec tableName
       batchSrc = batchFrag codec [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
@@ -586,7 +587,7 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
 insertJobsBatch_ schemaName tableName jobs0 = do
-  ctx <- getTraceContext
+  ctx <- liftIO currentTraceContext
   let jobs = map (stampTraceContext ctx) jobs0
       batchSrc = batchFrag (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
   withDbTransaction (MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc))

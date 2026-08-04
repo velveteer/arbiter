@@ -66,8 +66,8 @@ gaugeGate :: (MonadArbiter m) => [TableName] -> m Text
 gaugeGate = gateNameFor "refresh-gauges"
 
 -- | Register the gauges and return the refresh loop for the caller to run, over the
--- given queues and the caller's own database env. A handle registers one set of
--- gauges, and none at all with its metrics off: otherwise the loop does nothing.
+-- given queues and the caller's own database env. A handle with its metrics off
+-- registers nothing and its loop does nothing.
 startGauges
   :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
@@ -81,8 +81,8 @@ startGauges tel baseLog runDb schema queueTables refreshInterval = do
   (loop, retire) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
   pure (loop `finally` retire)
 
--- | 'startGauges' with the registration bracketed, so the slot is handed back however
--- @use@ ends, including before the loop was ever run.
+-- | 'startGauges' with the reading bracketed, so the instruments stop exporting however
+-- @use@ ends.
 withGaugeLoop
   :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
@@ -97,7 +97,7 @@ withGaugeLoop
 withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
   bracket (prepareGauges tel baseLog runDb schema queueTables refreshInterval) snd (use . fst)
 
--- | The refresh loop and the action retiring the set it registered.
+-- | The refresh loop and the action blanking the reading its instruments export.
 prepareGauges
   :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
@@ -109,7 +109,6 @@ prepareGauges
   -> IO (IO (), IO ())
 prepareGauges tel baseLog runDb schema queueTables refreshInterval
   | isNothing (Tel.meters tel) = pure (pure (), pure ())
-  -- Floored, a non-positive interval otherwise leaving the loop no pause at all.
   | otherwise = do
       cells <- newGaugeCells =<< getMonotonicTime
       arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells

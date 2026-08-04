@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
--- | The state the gauge instruments read, reusable by a later registration.
+-- | The state the gauge instruments read, one set per registration.
 module Arbiter.Otel.Gauges.Cells
   ( Snapshot (..)
   , Cached (..)
