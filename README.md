@@ -850,23 +850,15 @@ Global endpoints under `/api/v1/`:
 
 ## OpenTelemetry
 
-Spans and W3C trace-context propagation are built in: an enqueue stamps the ambient
-span onto the job, and a worker runs each claim inside a `process <queue>` consumer span
-linked back to it. Nothing is exported until an SDK is installed, so this costs an
-untraced deployment nothing.
-
-`arbiter-otel` installs that SDK and adds metrics, gauges and OTel log records. All three
-signals leave over OTLP, so point them at a collector and export from there to whatever
-you run.
+Spans and W3C trace-context propagation are built in, needing no setup. `arbiter-otel`
+adds metrics, gauges and OTel log records over OTLP:
 
 ```haskell
 import Arbiter.Otel qualified as Otel
-import Arbiter.Simple (createSimpleEnv, runSimpleDb)
-import Data.Text (unpack)
 
 main :: IO ()
 main = Otel.withTelemetryFromEnv $ \tel -> do
-  putStrLn (unpack (Otel.telemetrySummary tel))
+  putStrLn (unpack (Otel.telemetrySummary tel))   -- telemetry on, service.name=orders
   env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
   let pools = Otel.instrumentPools tel [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
 
@@ -874,39 +866,24 @@ main = Otel.withTelemetryFromEnv $ \tel -> do
     Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
 ```
 
-`telemetrySummary` is one line naming the service and any exporter that failed to start,
-which does not take the process down:
+Exporters, endpoints and intervals come from the standard `OTEL_*` variables, including
+`OTEL_SDK_DISABLED=true`. Call `withGauges` once per process, not per pool. Logs are
+emitted alongside your configured destination, carrying the job's trace, id, queue, and
+attempt.
 
-```
-telemetry on, service.name=orders
-```
-
-Exporters, endpoints and intervals are the SDK's own `OTEL_*` variables, resolved by the
-SDK rather than reinterpreted here: the spec's defaults apply, `OTEL_SDK_DISABLED=true`
-installs nothing, and a handle that installs nothing is inert, so the wiring above is the
-same either way. `withTelemetryIf`, `withTelemetry` and `withExternalTelemetry` take the
-same handle from your own config, unconditionally, or from providers you installed
-yourself.
+`withTelemetryFromEnv` installs the SDK; if your program installs its own, use
+`withExternalTelemetry` instead. See `Arbiter.Otel` for the other variants.
 
 ### Traces
 
-Every enqueue carries the ambient span, and every claim opens a consumer span linked
-back to it - across process boundaries, and across jobs when a handler enqueues
-children. No wiring, and `instrumentPools` is not needed for any of it.
+Every enqueue stamps the ambient span and every claim opens a `process <queue>` consumer
+span linked back to it, across processes and across jobs a handler enqueues. Override
+`getTraceContext` to decide for yourself what an enqueue stamps. An enqueue over the REST
+API joins the request's trace, given server spans from `newOpenTelemetryWaiMiddleware`
+(`hs-opentelemetry-instrumentation-wai`).
 
-The span helpers live in `Arbiter.Core.Trace`:
-
-| Call | Use |
-| --- | --- |
-| `addSpanAttributes` | Annotate the job's own span from a handler |
-| `withSpan` | A child span inside a handler |
-| `withPublishSpan` | A producer span around an enqueue outside a handler |
-| `withJobParent` | Run under the job's stored context rather than linking to it, for a queue you know is processed promptly |
-
-A handler that overrides `getTraceContext` decides for itself what an enqueue stamps.
-
-An enqueue over the REST API joins the request's trace on its own, given server spans from
-`newOpenTelemetryWaiMiddleware` (`hs-opentelemetry-instrumentation-wai`).
+`Arbiter.Core.Trace` has the helpers for annotating a job's span, opening child spans,
+and wrapping an enqueue made outside a handler.
 
 ### Metrics
 
@@ -918,20 +895,14 @@ An enqueue over the REST API joins the request's trace on its own, given server 
 | Reaper | Rows each op touched |
 | Postgres | Connections, dead tuples, transaction age, cache hits |
 
-- `withGauges` scans the queues your registry declares. Call it once for the process, not per pool: a second call registers the instruments twice.
-- Postgres health covers arbiter's own role unless you grant it `pg_read_all_stats`.
-- One replica scans per interval and the rest export its reading, so the scan cost does not grow with the fleet. An age gauge tells a fresh scan from one that stopped.
-- Aggregate queue depth and Postgres health across replicas with `max`, since they are that one shared reading; sum the per-process counters and latencies. The bundled dashboard does both.
-
-### Logs
-
-OTel log records carrying the job's trace, id, queue, and attempt, sent alongside your
-configured destination rather than instead of it.
+Grant `pg_read_all_stats` for Postgres health beyond arbiter's own role. One replica
+scans per interval and the rest export its reading, so aggregate queue depth and Postgres
+health across replicas with `max`, and the per-process counters and latencies with `sum`.
 
 ### Local stack
 
 Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm) with the arbiter
-dashboard provisioned, at http://localhost:3000/dash:
+dashboard provisioned at http://localhost:3000/dash:
 
 ```
 docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
@@ -940,11 +911,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
   cabal run arbiter-demo
 ```
 
-`arbiter-demo/run-local.sh` runs the demo from this repository against that stack, at
-http://localhost:8000 with the dashboard at http://localhost:8000/dash.
-
-The [live demo](https://demo.arbiterq.dev/) runs the same stack, with its dashboard at
-[/dash](https://demo.arbiterq.dev/dash) as an anonymous viewer.
+`arbiter-demo/run-local.sh` runs this repository's demo against that stack at
+http://localhost:8000, dashboard at /dash. The [live demo](https://demo.arbiterq.dev/)
+runs the same stack.
 
 ## Backend Integration
 

@@ -334,10 +334,14 @@ allJobColumns = codecColumns (jobRowCodec "")
 allDLQColumns :: [Text]
 allDLQColumns = codecColumns (dlqRowCodec "")
 
+-- | All job columns except @id@ and @last_error@.
+jobColsExceptErrorColumns :: [Text]
+jobColsExceptErrorColumns = filter (/= "last_error") (drop 1 allJobColumns)
+
 -- | All job columns except @id@ and @last_error@, comma-separated.
 -- Used for DLQ INSERT operations where @id@ becomes @job_id@ and @last_error@ is overridden.
 jobColsExceptError :: Text
-jobColsExceptError = aliasedCols Nothing (filter (/= "last_error") (drop 1 allJobColumns))
+jobColsExceptError = aliasedCols Nothing jobColsExceptErrorColumns
 
 -- | All job read columns except @id@, comma-separated. Used for the archive
 -- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
@@ -350,7 +354,7 @@ dlqCarriedCols :: Text
 dlqCarriedCols = aliasedCols Nothing dlqCarriedColumns
 
 dlqCarriedColumns :: [Text]
-dlqCarriedColumns = filter (/= "last_error") (drop 1 allJobColumns) <> ["rate_limit_cost"]
+dlqCarriedColumns = jobColsExceptErrorColumns <> ["rate_limit_cost"]
 
 -- | Job columns a DLQ retry carries back to the main table, optionally aliased. The
 -- rest are re-armed by the retry itself: a fresh attempt count, a recomputed suspended

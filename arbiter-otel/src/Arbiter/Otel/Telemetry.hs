@@ -58,7 +58,7 @@ import OpenTelemetry.Trace
 import System.Environment (lookupEnv)
 import UnliftIO (liftIO, tryAny)
 
-import Arbiter.Otel.Metrics (ArbiterMeters, loggerDestination, newArbiterMeters, otelLogDestination, otelLogs)
+import Arbiter.Otel.Metrics (ArbiterMeters, loggerDestination, newArbiterMeters, otelLogs)
 
 data Telemetry = Telemetry
   { meters :: Maybe ArbiterMeters
@@ -84,10 +84,12 @@ withTelemetry action = do
     logsNote <- ContT withLogs
     liftIO $ do
       ms <- traverse (const (newArbiterMeters mp)) (guard (isNothing metricsNote))
+      -- The provider is installed by now, so the logger binds once rather than per record.
+      dest <- loggerDestination <$> getGlobalLoggerProvider
       action
         (baseTelemetry mp)
           { meters = ms
-          , logDestination = Just otelLogDestination
+          , logDestination = Just dest
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
   where

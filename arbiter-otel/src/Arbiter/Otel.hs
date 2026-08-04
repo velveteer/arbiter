@@ -114,7 +114,9 @@ instrumentConfig ms dest queue cfg =
   withHooks metricHooks $
     cfg
       { logConfig = otelLogs dest (logConfig cfg)
-      , onMaintenance = \op n -> traverse_ (\ms' -> otelMaintenance ms' op n) ms `andThen` onMaintenance cfg op n
+      , onMaintenance = \op n -> traverse_ (\ms' -> otelMaintenance ms' op n) ms `andThen` baseMaintenance op n
       }
   where
+    -- Projected out so the instrumented config does not retain the uninstrumented one.
+    baseMaintenance = onMaintenance cfg
     metricHooks hooks = maybe hooks (\ms' -> otelHooks ms' queue <> hooks) ms

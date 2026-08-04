@@ -525,7 +525,11 @@ tryWarnWith logCfg label fallback act =
 
 -- | The pool's config with its log context narrowed to one job.
 withJobLog :: WorkerConfig m payload -> Job.JobRead payload -> WorkerConfig m payload
-withJobLog config job = config {logConfig = withJobContextOne (logConfig config) job}
+withJobLog config job = config {logConfig = jobLog config job}
+
+-- | The pool's log context narrowed to one job.
+jobLog :: WorkerConfig m payload -> Job.JobRead payload -> LogConfig
+jobLog config = withJobContextOne (logConfig config)
 
 warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
 warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
@@ -557,10 +561,9 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
     pure batch
 
   let jobIds = map Job.primaryKey (toList jobBatch)
-      jobLog job = withJobContextOne (logConfig config) job
       batchLog = withJobContext (logConfig config) jobBatch
       claimHook now job =
-        runHook (jobLog job) "onJobClaimed" $
+        runHook (jobLog config job) "onJobClaimed" $
           Job.onJobClaimed (observabilityHooks config) job now
 
   flip
@@ -629,11 +632,10 @@ processJobsWithRetry config consumeSpan handoff jobs = do
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
   let (firstJob :| _) = jobs
-      jobLog j = withJobContextOne (logConfig config) j
       markHandled = markJobHandled handoff
       fireSuccess j = do
         endT <- liftIO getCurrentTime
-        runHook (jobLog j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
+        runHook (jobLog config j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
       -- Rethrown with base throwIO, UnliftIO's wrapping it as synchronous. The flag
       -- is set last, so an interrupted finalizer leaves the rest to 'workerLoop'.
       onForceCancel exc@(JobForceCancelled cancelledIds) = do
@@ -676,7 +678,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         traverse_ finalize done
       reportReclaimed cancelled j
         | Set.member (Job.primaryKey j) cancelled = fireForceCancelled (withJobLog config j) j
-        | otherwise = fireUnavailable (jobLog j) hooks j "no longer claimed by this worker"
+        | otherwise = fireUnavailable (jobLog config j) hooks j "no longer claimed by this worker"
       markUnowned j = markJobUnowned handoff j >> markHandled j
       callbacks =
         BatchCallbacks
@@ -824,7 +826,7 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
         -- An exception naming no job speaks for none of them, so the remainder keeps
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
-        traverse_ (\job -> fireUnavailable (jobLog job) hooks job reason >> markJobHandled handoff job) jobsGone
+        traverse_ (\job -> fireUnavailable (jobLog config job) hooks job reason >> markJobHandled handoff job) jobsGone
         unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
@@ -854,7 +856,6 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
           traverse_ (markJobHandled handoff) unhandled
   where
     batchLog = withJobContext (logConfig config) jobs
-    jobLog job = withJobContextOne (logConfig config) job
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
     failJob exc job =
       handleJobFailure (withJobLog config job) hooks exc (jobMaxAtts job) startTime endTime job
@@ -1113,26 +1114,37 @@ reaperLoop logCfg report interval stmtTimeout = do
       gatedRows op every rowsOf work = do
         mr <- gated op every work
         mr <$ traverse_ (reaped op . rowsOf) mr
+      -- A per-queue sweep: warn for each queue it could not do, then report the total.
+      sweep
+        :: MaintenanceOp
+        -> NominalDiffTime
+        -> Text
+        -> (Int64 -> m ())
+        -> m (Int64, [Text])
+        -> m ()
+      sweep op every failMsg done work =
+        gatedRows op every fst work
+          >>= traverse_
+            ( \(n, failed) -> do
+                traverse_ (\queue -> tryLog logCfg Warning $ failMsg <> queue) failed
+                when (n > 0) $ done n
+            )
   forever $ do
-    mRefreshed <- gatedRows RefreshGroups interval fst $ Ops.refreshAllGroups schemaName queues
-    traverse_
-      (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue) . snd)
-      mRefreshed
+    sweep RefreshGroups interval "Groups refresh failed for queue: " (const (pure ())) $
+      Ops.refreshAllGroups schemaName queues
     void $ gatedRows SweepStaleWorkers interval id $ Ops.sweepStaleWorkers schemaName
-    mSwept <- gatedRows SweepExhaustedJobs interval fst $ Ops.sweepExhaustedJobs schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Exhausted-job sweep failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ"
-      )
-      mSwept
-    mCancelled <- gatedRows SweepCancelledJobs interval fst $ Ops.sweepCancelledJobs schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Cancelled-job sweep failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)"
-      )
-      mCancelled
+    sweep
+      SweepExhaustedJobs
+      interval
+      "Exhausted-job sweep failed for queue: "
+      (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
+      $ Ops.sweepExhaustedJobs schemaName queues
+    sweep
+      SweepCancelledJobs
+      interval
+      "Cancelled-job sweep failed for queue: "
+      (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
+      $ Ops.sweepCancelledJobs schemaName queues
     when hasRateLimit $
       void $
         gatedRows PruneRateLimitBuckets pruneInterval id $
@@ -1140,13 +1152,12 @@ reaperLoop logCfg report interval stmtTimeout = do
     when hasConcurrency $ do
       void $ gatedRows ReconcileConcurrencyStale interval id $ Arb.reconcileConcurrencyCountsIfStale @m
       void $ gatedRows ReconcilePruneConcurrency pruneInterval id $ Arb.reconcileAndPruneConcurrency @m
-    mPurged <- gatedRows PurgeArchives interval fst $ Ops.purgeArchives schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Archive purge failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)"
-      )
-      mPurged
+    sweep
+      PurgeArchives
+      interval
+      "Archive purge failed for queue: "
+      (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
+      $ Ops.purgeArchives schemaName queues
     threadDelay (intervalSecs * 1_000_000)
 
 -- | Run one gated reaper op, logging and swallowing failures so the loop survives.
