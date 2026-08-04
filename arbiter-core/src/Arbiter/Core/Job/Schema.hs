@@ -82,6 +82,7 @@ module Arbiter.Core.Job.Schema
   , createMaintenanceTriggersSQL
   , statementTriggerSQL
   , inFlightPredicate
+  , groupAggregates
   ) where
 
 import Data.Text (Text)
@@ -547,6 +548,7 @@ groupsMergeSet groupsTbl =
 groupsInsertFunction :: Text -> Text -> Text -> Text
 groupsInsertFunction funcName groupsTbl dd =
   let mergeSet = groupsMergeSet groupsTbl
+      aggs = groupAggregates "" Nothing
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
@@ -562,12 +564,7 @@ groupsInsertFunction funcName groupsTbl dd =
       FOR UPDATE;
 
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
-      SELECT group_key,
-        MIN(priority),
-        MIN(id),
-        COUNT(*),
-        COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
-        MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended)
+      SELECT group_key, ${aggs}
       FROM new_table
       WHERE group_key IS NOT NULL
       GROUP BY group_key
@@ -581,6 +578,28 @@ groupsInsertFunction funcName groupsTbl dd =
     END;
     ${dd} LANGUAGE plpgsql;
   |]
+
+-- | The group summary aggregates over job rows grouped by @group_key@. @col@ prefixes
+-- each column, and @mInFlight@ adds the in-flight bucket only the reaper's recompute
+-- carries.
+groupAggregates :: Text -> Maybe Text -> Text
+groupAggregates col mInFlight =
+  T.intercalate ", " $
+    [ "MIN(" <> col <> "priority) AS min_priority"
+    , "MIN(" <> col <> "id) AS min_id"
+    , "COUNT(*) AS job_count"
+    , "COUNT(*) FILTER (WHERE " <> col <> "not_visible_until IS NULL AND NOT " <> col <> "suspended) AS ready_count"
+    , "MIN("
+        <> col
+        <> "not_visible_until) FILTER (WHERE "
+        <> col
+        <> "not_visible_until IS NOT NULL AND NOT "
+        <> col
+        <> "suspended) AS next_due"
+    ]
+      <> foldMap
+        (\bucket -> ["MAX(" <> col <> "not_visible_until) FILTER (WHERE " <> bucket <> ") AS in_flight_until"])
+        mInFlight
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text
@@ -671,6 +690,7 @@ groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
 groupsUpdateFunction funcName groupsTbl tbl dd =
   let ifSurv = inFlightPredicate "t."
       ifOld = inFlightPredicate "o."
+      aggsN = groupAggregates "n." Nothing
       mergeSet = groupsMergeSet groupsTbl
       removeUpdate =
         groupsRemoveUpdate
@@ -745,9 +765,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
 
         -- Step 3: group_key change - add to new group
         INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
-        SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
-          COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended),
-          MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended)
+        SELECT n.group_key, ${aggsN}
         FROM new_table n
         JOIN old_table o ON o.id = n.id
         WHERE n.group_key IS NOT NULL

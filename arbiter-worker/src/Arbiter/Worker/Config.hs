@@ -9,6 +9,7 @@ module Arbiter.Worker.Config
   , manualWorkerConfig
   , defaultBatchedWorkerConfig
   , withHooks
+  , withMaintenance
   , HandlerMode (..)
   , handlerBatchSize
   , MaintenanceOp (..)
@@ -26,7 +27,7 @@ module Arbiter.Worker.Config
   , readEffectiveState
   ) where
 
-import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, defaultObservabilityHooks)
+import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
@@ -39,6 +40,7 @@ import Data.UUID (UUID, toString)
 import Data.UUID.V4 qualified as UUID
 import Network.HostName (getHostName)
 import System.Directory (getTemporaryDirectory)
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.STM (TMVar, TVar, newEmptyTMVarIO, newTVarIO)
 import UnliftIO.STM qualified as STM
 
@@ -245,6 +247,15 @@ withHooks
   -> WorkerConfig m payload
   -> WorkerConfig m payload
 withHooks f cfg = cfg {observabilityHooks = f (observabilityHooks cfg)}
+
+-- | Run @report@ before the pool's own maintenance callback, both regardless of failure.
+withMaintenance
+  :: (MonadUnliftIO m)
+  => (MaintenanceOp -> Int64 -> m ())
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+withMaintenance report cfg =
+  cfg {onMaintenance = \op n -> report op n `andThen` onMaintenance cfg op n}
 
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig

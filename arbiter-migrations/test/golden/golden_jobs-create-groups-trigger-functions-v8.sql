@@ -12,12 +12,7 @@ BEGIN
   FOR UPDATE;
 
   INSERT INTO "arbiter"."golden_jobs_groups" (group_key, min_priority, min_id, job_count, ready_count, next_due)
-  SELECT group_key,
-    MIN(priority),
-    MIN(id),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
-    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended)
+  SELECT group_key, MIN(priority) AS min_priority, MIN(id) AS min_id, COUNT(*) AS job_count, COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count, MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due
   FROM new_table
   WHERE group_key IS NOT NULL
   GROUP BY group_key
@@ -178,9 +173,7 @@ BEGIN
 
     -- Step 3: group_key change - add to new group
     INSERT INTO "arbiter"."golden_jobs_groups" (group_key, min_priority, min_id, job_count, ready_count, next_due)
-    SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
-      COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended),
-      MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended)
+    SELECT n.group_key, MIN(n.priority) AS min_priority, MIN(n.id) AS min_id, COUNT(*) AS job_count, COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended) AS ready_count, MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended) AS next_due
     FROM new_table n
     JOIN old_table o ON o.id = n.id
     WHERE n.group_key IS NOT NULL

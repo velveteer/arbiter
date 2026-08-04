@@ -9,9 +9,8 @@ module Arbiter.Core.Sql.Groups
 
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 
-import Arbiter.Core.Job.Schema (inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Schema (groupAggregates, inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 
@@ -34,8 +33,7 @@ refreshGroupsSQL :: Text -> Text -> Int -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName limit keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      ifBucket = inFlightPredicate ""
-      aggs = groupAggregates ifBucket
+      aggs = groupAggregates "" (Just (inFlightPredicate ""))
       lim = fromIntegral limit :: Int64
    in [sql|
         WITH params AS (
@@ -87,16 +85,3 @@ refreshGroupsSQL schema tableName limit keys =
         )
         SELECT (SELECT count(*) FROM deleted) + (SELECT count(*) FROM updated) + (SELECT count(*) FROM inserted) AS @{rewritten :: CInt8}
       |]
-
--- | The aliased group summary aggregates, over a job table grouped by @group_key@.
-groupAggregates :: Text -> Text
-groupAggregates ifBucket =
-  T.intercalate
-    ", "
-    [ "MIN(priority) AS min_priority"
-    , "MIN(id) AS min_id"
-    , "COUNT(*) AS job_count"
-    , "COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count"
-    , "MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due"
-    , "MAX(not_visible_until) FILTER (WHERE " <> ifBucket <> ") AS in_flight_until"
-    ]

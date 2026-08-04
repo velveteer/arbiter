@@ -137,28 +137,24 @@ registerInstruments meter cells = do
                 defaultAdvisoryParameters
                 (withCached emit)
 
-  reg "arbiter.queue.depth" "{job}" "Jobs in a queue by status" $ \res snap ->
-    traverse_
-      ( \o ->
-          traverse_
-            (\(st, n) -> observe res (fromIntegral n) (attrs [("queue", overviewQueue o), ("status", st)]))
-            (statusCounts (overviewStats o))
-      )
-      (queues snap)
-  reg "arbiter.queue.oldest_ready_age" "s" "Age of the oldest claimable job (0 = none ready)" $ \res snap ->
-    traverse_
-      (\o -> observe res (fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o))) (attrs [("queue", overviewQueue o)]))
-      (queues snap)
+  reg "arbiter.queue.depth" "{job}" "Jobs in a queue by status" $
+    observed $
+      over queues $ \o ->
+        [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
+        | (st, n) <- statusCounts (overviewStats o)
+        ]
+  reg "arbiter.queue.oldest_ready_age" "s" "Age of the oldest claimable job (0 = none ready)" $
+    observed $
+      over queues $ \o ->
+        [([("queue", overviewQueue o)], fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o)))]
   -- The states partition the live workers, so a queue's fleet is their sum.
-  reg "arbiter.workers" "{worker}" "Registered workers by state" $ \res snap ->
-    traverse_
-      ( \o -> do
-          let paused = overviewWorkersPaused o
-              running = max 0 (overviewWorkersLive o - paused)
-          observe res (fromIntegral running) (attrs [("queue", overviewQueue o), ("state", "running")])
-          observe res (fromIntegral paused) (attrs [("queue", overviewQueue o), ("state", "paused")])
-      )
-      (queues snap)
+  reg "arbiter.workers" "{worker}" "Registered workers by state" $
+    observed $
+      over queues $ \o ->
+        let paused = overviewWorkersPaused o
+         in [ ([("queue", overviewQueue o), ("state", "running")], fromIntegral (max 0 (overviewWorkersLive o - paused)))
+            , ([("queue", overviewQueue o), ("state", "paused")], fromIntegral paused)
+            ]
 
   -- Keyed by policy prefix, never by admission key: a per-tenant suffix would be unbounded.
   reg "arbiter.admission.keys" "{key}" "Live admission keys, by policy" $ \res snap -> do
@@ -248,15 +244,15 @@ registerInstruments meter cells = do
     -- Every series is a list of rows picked out of the snapshot, each row labelled
     -- and valued. Counters hand that list over, gauges observe it.
     over pick label snap = concatMap label (pick snap)
-    observing pick label res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . over pick label
+    observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
     dbOf = toList . db
-    perTable field = observing tables (\t -> [([("table", Health.table t)], field t)])
-    perDb field = observing dbOf (\h -> [([], field h)])
-    perDbBy label pairs = observing dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
     perTableTotals label pairs =
       over tables (\t -> [([("table", Health.table t), (label, k)], v) | (k, v) <- pairs t])
     perDbTotals label pairs = over dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
     dbTotal field = over dbOf (\h -> [([], field h)])
+    perTable field = observed (over tables (\t -> [([("table", Health.table t)], field t)]))
+    perDb = observed . dbTotal
+    perDbBy label = observed . perDbTotals label
 
 -- | The loop that scans and publishes the reading every instrument reads from.
 gaugeRefreshLoop

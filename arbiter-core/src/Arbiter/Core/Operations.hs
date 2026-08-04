@@ -170,7 +170,7 @@ module Arbiter.Core.Operations
   ) where
 
 import Control.Monad (foldM, void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither)
 import Data.Bifunctor (first)
@@ -333,6 +333,10 @@ admissionColumns p =
         , acConcurrencyPrefix = ckPrefix <$> ccKey
         }
 
+-- | The stamp every insert path puts on its jobs, carrying the ambient trace context.
+traceStamp :: (MonadIO m) => m (JobWrite payload -> JobWrite payload)
+traceStamp = stampTraceContext <$> liftIO currentTraceContext
+
 -- | Insert a job without validating that the parent exists.
 --
 -- This is an internal fast path for callers that already guarantee the parent
@@ -348,8 +352,9 @@ insertJobUnsafe
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
 insertJobUnsafe schemaName tableName job0 = do
-  job <- flip stampTraceContext job0 <$> liftIO currentTraceContext
-  let codec = jobCodec tableName
+  stamp <- traceStamp
+  let job = stamp job0
+      codec = jobCodec tableName
       valuesFrag = insertFrag codec (job, admissionColumns (payload job))
       query = case dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
@@ -569,8 +574,8 @@ insertJobsBatch
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
 insertJobsBatch schemaName tableName jobs0 = do
-  ctx <- liftIO currentTraceContext
-  let jobs = map (stampTraceContext ctx) jobs0
+  stamp <- traceStamp
+  let jobs = map stamp jobs0
       codec = jobCodec tableName
       batchSrc = batchFrag codec [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
 
@@ -587,8 +592,8 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
 insertJobsBatch_ schemaName tableName jobs0 = do
-  ctx <- liftIO currentTraceContext
-  let jobs = map (stampTraceContext ctx) jobs0
+  stamp <- traceStamp
+  let jobs = map stamp jobs0
       batchSrc = batchFrag (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
   withDbTransaction (MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc))
 

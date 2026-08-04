@@ -45,14 +45,13 @@ module Arbiter.Otel
   , attrs
   ) where
 
-import Arbiter.Core.Job.Types (andThen)
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
 import Arbiter.Core.QueueRegistry (RegistryTables, registryTableNames)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
-import Arbiter.Worker.Config (WorkerConfig (..), withHooks)
-import Arbiter.Worker.Logger (LogConfig, LogDestination, defaultLogConfig)
+import Arbiter.Worker.Config (WorkerConfig (..), withHooks, withMaintenance)
+import Arbiter.Worker.Logger (LogConfig, defaultLogConfig)
 import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -84,7 +83,7 @@ import Arbiter.Otel.Telemetry
 -- labelled by. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
 instrumentPool tel (NamedWorkerPool queue cfg) =
-  NamedWorkerPool queue (instrumentConfig (meters tel) (logDestination tel) queue cfg)
+  NamedWorkerPool queue (instrumentConfig tel queue cfg)
 
 -- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]
@@ -115,7 +114,9 @@ runWorkerPools
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
   -> m ()
-runWorkerPools pools = withTelemetryHere (\tel -> defaultPoolRun tel pools Worker.runWorkerPools)
+runWorkerPools pools =
+  withTelemetryHere $ \tel ->
+    poolRun tel defaultLogConfig defaultGaugeRefresh pools Worker.runWorkerPools
 
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
@@ -125,7 +126,8 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools =
-  withTelemetryHere (\tel -> defaultPoolRun tel pools (Worker.runSelectedWorkerPools enabled))
+  withTelemetryHere $ \tel ->
+    poolRun tel defaultLogConfig defaultGaugeRefresh pools (Worker.runSelectedWorkerPools enabled)
 
 -- | 'runWorkerPools' over a handle the caller installed itself, with the gauge loop's
 -- base log config and refresh interval.
@@ -139,7 +141,7 @@ runWorkerPoolsWith
   -> [NamedWorkerPool m]
   -> m ()
 runWorkerPoolsWith tel baseLog refreshInterval pools =
-  withGauges tel baseLog refreshInterval (Worker.runWorkerPools (instrumentPools tel pools))
+  poolRun tel baseLog refreshInterval pools Worker.runWorkerPools
 
 -- | 'runSelectedWorkerPools' over a handle the caller installed itself.
 runSelectedWorkerPoolsWith
@@ -152,41 +154,38 @@ runSelectedWorkerPoolsWith
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPoolsWith tel baseLog refreshInterval enabled pools =
-  withGauges tel baseLog refreshInterval $
-    Worker.runSelectedWorkerPools enabled (instrumentPools tel pools)
+  poolRun tel baseLog refreshInterval pools (Worker.runSelectedWorkerPools enabled)
 
 -- | Install the SDK around an action in the database monad.
 withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a
 withTelemetryHere use = withRunInIO $ \runDb -> withTelemetryFromEnv (runDb . use)
 
--- | Instrumented pools and gauges on the defaults, for the handle-less entry points.
-defaultPoolRun
+-- | Run @run@ over the instrumented pools with the gauges alongside.
+poolRun
   :: (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => Telemetry
+  -> LogConfig
+  -> NominalDiffTime
   -> [NamedWorkerPool m]
   -> ([NamedWorkerPool m] -> m ())
   -> m ()
-defaultPoolRun tel pools run =
-  withGauges tel defaultLogConfig defaultGaugeRefresh (run (instrumentPools tel pools))
+poolRun tel baseLog refreshInterval pools run =
+  withGauges tel baseLog refreshInterval (run (instrumentPools tel pools))
 
 -- | Gauge refresh interval the handle-less entry points use.
 defaultGaugeRefresh :: NominalDiffTime
 defaultGaugeRefresh = 15
 
--- | 'instrumentPool' against meters and a log destination the caller resolved itself.
+-- | 'instrumentPool' over a bare config, labelled by @queue@.
 instrumentConfig
   :: (MonadUnliftIO m)
-  => Maybe ArbiterMeters
-  -> Maybe LogDestination
+  => Telemetry
   -> Text
   -> WorkerConfig m payload
   -> WorkerConfig m payload
-instrumentConfig ms dest queue cfg =
+instrumentConfig tel queue cfg =
   withHooks metricHooks $
-    cfg
-      { logConfig = otelLogs dest (logConfig cfg)
-      , onMaintenance = \op n -> traverse_ (\ms' -> otelMaintenance ms' op n) ms `andThen` baseMaintenance op n
-      }
+    withMaintenance (\op n -> traverse_ (\ms -> otelMaintenance ms op n) (meters tel)) $
+      cfg {logConfig = otelLogs (logDestination tel) (logConfig cfg)}
   where
-    baseMaintenance = onMaintenance cfg
-    metricHooks hooks = maybe hooks (\ms' -> otelHooks ms' queue <> hooks) ms
+    metricHooks hooks = maybe hooks (\ms -> otelHooks ms queue <> hooks) (meters tel)

@@ -702,7 +702,6 @@ processJobsWithRetry config consumeSpan handoff jobs = do
     result <-
       tryAny
         $ withJobsHeartbeat
-          tracer
           hooks
           (jobHeartbeatInterval config)
           (visibilityTimeout config)
@@ -1042,44 +1041,42 @@ handleJobFailure config e maxAtts startTime endTime job = do
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
       cancel = void (cancelJobFor failureKind job) >> fireCancelled config job errorMsg
   schemaName <- getSchema
-  case failureKind of
-    TreeCancelFailure -> cancel
-    BranchCancelFailure -> cancel
-    _
-      | failureKind == PermanentFailure || Job.attempts job >= maxAtts -> do
-          -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-          -- Merges old snapshot so repeated DLQ round-trips don't lose data.
-          when (Job.isRollup job) $ do
-            (results, failures, mSnapshot, _dlqFailures) <-
-              Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
-            let merged = Ops.mergeRawChildResults results failures mSnapshot
-            unless (Map.null merged) $
-              void $
-                Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
-          -- Permanent failure or max attempts reached - move to DLQ
-          rowsAffected <- Arb.moveToDLQ errorMsg job
-          if rowsAffected == 0
-            then do
-              tryLog cfg Warning "Job not available for moving to DLQ"
-              unavailable "no longer available for the dead-letter queue"
-            else do
-              -- Successfully moved to DLQ
-              fireFailure config job errorMsg startTime endTime
-              runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
-      | otherwise -> do
-          -- Retry with configured backoff strategy and jitter
-          let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
-          backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
-          rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
-          if rowsAffected == 0
-            then do
-              tryLog cfg Warning $
-                "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
-              unavailable "no longer available for retry"
-            else do
-              -- Successfully updated for retry
-              fireFailure config job errorMsg startTime endTime
-              runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
+  let deadLetter = do
+        -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
+        -- Merges old snapshot so repeated DLQ round-trips don't lose data.
+        when (Job.isRollup job) $ do
+          (results, failures, mSnapshot, _dlqFailures) <-
+            Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
+          let merged = Ops.mergeRawChildResults results failures mSnapshot
+          unless (Map.null merged) $
+            void $
+              Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
+        rowsAffected <- Arb.moveToDLQ errorMsg job
+        if rowsAffected == 0
+          then do
+            tryLog cfg Warning "Job not available for moving to DLQ"
+            unavailable "no longer available for the dead-letter queue"
+          else do
+            fireFailure config job errorMsg startTime endTime
+            runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
+      retryLater = do
+        let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
+        backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
+        rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
+        if rowsAffected == 0
+          then do
+            tryLog cfg Warning $
+              "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
+            unavailable "no longer available for retry"
+          else do
+            fireFailure config job errorMsg startTime endTime
+            runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
+  if cancelsTree failureKind
+    then cancel
+    else
+      if failureKind == PermanentFailure || Job.attempts job >= maxAtts
+        then deadLetter
+        else retryLater
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, moves
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
@@ -1114,6 +1111,8 @@ reaperLoop logCfg report interval stmtTimeout = do
       gatedRows op every rowsOf work = do
         mr <- gated op every work
         mr <$ traverse_ (reaped op . rowsOf) mr
+      gatedCount :: MaintenanceOp -> NominalDiffTime -> m Int64 -> m ()
+      gatedCount op every = void . gatedRows op every id
       sweep
         :: MaintenanceOp
         -> NominalDiffTime
@@ -1131,7 +1130,7 @@ reaperLoop logCfg report interval stmtTimeout = do
   forever $ do
     sweep RefreshGroups interval "Groups refresh failed for queue: " (const (pure ())) $
       Ops.refreshAllGroups schemaName queues
-    void $ gatedRows SweepStaleWorkers interval id $ Ops.sweepStaleWorkers schemaName
+    gatedCount SweepStaleWorkers interval $ Ops.sweepStaleWorkers schemaName
     sweep
       SweepExhaustedJobs
       interval
@@ -1145,12 +1144,11 @@ reaperLoop logCfg report interval stmtTimeout = do
       (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
       $ Ops.sweepCancelledJobs schemaName queues
     when hasRateLimit $
-      void $
-        gatedRows PruneRateLimitBuckets pruneInterval id $
-          Arb.pruneRateLimitBuckets @m interval
+      gatedCount PruneRateLimitBuckets pruneInterval $
+        Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
-      void $ gatedRows ReconcileConcurrencyStale interval id $ Arb.reconcileConcurrencyCountsIfStale @m
-      void $ gatedRows ReconcilePruneConcurrency pruneInterval id $ Arb.reconcileAndPruneConcurrency @m
+      gatedCount ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
+      gatedCount ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m
     sweep
       PurgeArchives
       interval

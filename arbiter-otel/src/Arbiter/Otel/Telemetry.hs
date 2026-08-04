@@ -14,7 +14,7 @@ module Arbiter.Otel.Telemetry
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (bracket, displayException)
-import Control.Monad (guard, void)
+import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
@@ -79,8 +79,8 @@ withTelemetry action = do
     tracesNote <- ContT (withTraces processors traceOpts)
     logsNote <- ContT withLogs
     liftIO $ do
-      ms <- traverse (const (newArbiterMeters mp)) (guard (isNothing metricsNote))
-      dest <- traverse (const (loggerDestination <$> getGlobalLoggerProvider)) (guard (isNothing logsNote))
+      ms <- ifStarted metricsNote (newArbiterMeters mp)
+      dest <- ifStarted logsNote (loggerDestination <$> getGlobalLoggerProvider)
       action
         (baseTelemetry mp)
           { meters = ms
@@ -88,6 +88,9 @@ withTelemetry action = do
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
   where
+    -- Bind a signal's handle only when nothing went wrong starting it.
+    ifStarted :: Maybe Text -> IO b -> IO (Maybe b)
+    ifStarted note act = if isNothing note then Just <$> act else pure Nothing
     withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Maybe Text -> IO a) -> IO a
     withTraces processors opts =
       withGlobalProvider "traces" getGlobalTracerProvider setGlobalTracerProvider initialize $

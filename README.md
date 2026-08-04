@@ -882,9 +882,8 @@ The `With` variants also take the gauge loop's base log config and refresh inter
 ### Traces
 
 Every enqueue stamps the ambient span and every claim opens a `process <queue>` consumer
-span linked back to it, across processes and across jobs a handler enqueues. Override
-`getTraceContext` to decide for yourself what an enqueue stamps. An enqueue over the REST
-API joins the request's trace, given server spans from `newOpenTelemetryWaiMiddleware`
+span linked back to it, across processes and across jobs a handler enqueues. An enqueue
+over the REST API joins the request's trace, given server spans from `newOpenTelemetryWaiMiddleware`
 (`hs-opentelemetry-instrumentation-wai`).
 
 `Arbiter.Core.Trace` has the helpers for annotating a job's span, opening child spans,
