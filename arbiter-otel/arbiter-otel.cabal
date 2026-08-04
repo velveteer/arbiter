@@ -14,8 +14,6 @@ maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
-data-dir:        deploy
-data-files:      observability/grafana/dashboards/arbiter.json
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -30,6 +28,7 @@ common shared-properties
     -Wall -Wcompat -Widentities -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
     -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
     -Wderiving-defaults -Wmissing-deriving-strategies
     -Wmissing-signatures
 

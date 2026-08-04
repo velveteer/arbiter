@@ -386,13 +386,6 @@ instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
 instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
   mempty = defaultObservabilityHooks
 
--- | @finally@ leaving the second action interruptible, unlike UnliftIO's, so a hook
--- blocked on IO still answers a shutdown. The first action's exception wins.
+-- | base's @finally@, so the second action stays interruptible unlike UnliftIO's.
 andThen :: (MonadUnliftIO m) => m () -> m () -> m ()
-andThen first second = withRunInIO $ \run ->
-  E.mask $ \restore ->
-    tried (restore (run first))
-      >>= either (\e -> tried (restore (run second)) >> E.throwIO e) (const (restore (run second)))
-
-tried :: IO () -> IO (Either E.SomeException ())
-tried = E.try
+andThen first second = withRunInIO $ \run -> run first `E.finally` run second

@@ -107,6 +107,7 @@ withTelemetry action = do
   (wantMetrics, push) <- metricsExporter
   traces <- tracesExporter
   logs <- logsExporter
+  metricsNamed <- exporterSelection "OTEL_METRICS_EXPORTER"
   previousMeters <- getGlobalMeterProvider
   evalContT $ do
     (mp, mEnv) <- ContT (withMeterProvider wantMetrics resources previousMeters)
@@ -125,7 +126,7 @@ withTelemetry action = do
           , telemetrySummary =
               summarize
                 (signalLabel tracesSignal traces)
-                (metricsMode wantMetrics (exporting metricsSignal))
+                (metricsMode wantMetrics (exporting metricsSignal) metricsNamed)
                 (signalLabel logsSignal logs)
                 (serviceName resources)
                 [note | ExporterFailed note <- [tracesSignal, metricsSignal, logsSignal]]
@@ -211,10 +212,10 @@ summarize traces metrics logs service notes =
 serviceName :: MaterializedResources -> Maybe Text
 serviceName res = lookupAttributeByKey (getMaterializedResourcesAttributes res) ("service.name" :: AttributeKey Text)
 
--- | A scrape endpoint this handle can serve, an OTLP push, or both.
-metricsMode :: Bool -> Bool -> Text
-metricsMode False _ = "off"
-metricsMode True push = if push then "scrape+otlp" else "scrape"
+-- | A scrape endpoint this handle can serve, a push under the named exporter, or both.
+metricsMode :: Bool -> Bool -> Maybe Text -> Text
+metricsMode False _ _ = "off"
+metricsMode True push named = if push then "scrape+" <> fromMaybe "otlp" named else "scrape"
 
 -- | 'withTelemetry' when the flag is set, an inert handle when it is not.
 withTelemetryIf :: Bool -> (Telemetry -> IO a) -> IO a
@@ -408,7 +409,10 @@ logsExporter =
 otlpDefault :: String -> IO (Maybe Text)
 otlpDefault signalEndpointVar = (\ok -> "otlp" <$ guard ok) <$> otlpConfigured signalEndpointVar
 
--- | Whether an endpoint was configured for a signal, by its own variable or the shared one.
+-- | Whether an endpoint was configured for a signal, by its own variable or the shared
+-- one. An empty value counts as unset.
 otlpConfigured :: String -> IO Bool
 otlpConfigured signalEndpointVar =
-  any isJust <$> traverse lookupEnv ["OTEL_EXPORTER_OTLP_ENDPOINT", signalEndpointVar]
+  any configured <$> traverse lookupEnv ["OTEL_EXPORTER_OTLP_ENDPOINT", signalEndpointVar]
+  where
+    configured = maybe False (not . T.null . T.strip . T.pack)

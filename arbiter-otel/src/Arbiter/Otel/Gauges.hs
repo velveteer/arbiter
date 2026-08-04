@@ -256,16 +256,13 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
         elapsed <- subtract started <$> getMonotonicTime
         -- The gate reopens gateInterval after the publish, so a scan slower than the
         -- slack would otherwise lose the gate on the very next tick.
-        threadDelay (max minimumPause (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000))))
+        threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
   pure (refreshLoop, atomically (writeTVar (cache cells) Nothing) >> Tel.releaseGaugeSlot claim)
   where
     cells = Tel.claimCells claim
     fresh = not (Tel.claimRegistered claim)
     micros :: NominalDiffTime -> Int
     micros t = round (realToFrac t * 1_000_000 :: Double)
-    -- A scan slower than the interval would otherwise re-run with no pause at all,
-    -- pegging a connection on the database the gauges are there to observe.
-    minimumPause = micros (0.1 * refreshInterval)
     logCfg = Tel.telemetryLogConfig tel baseLog
     refresh gateRef =
       tryAny (resolveGate gateRef)
@@ -275,12 +272,12 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
     resolveGate gateRef =
       readIORef gateRef
         >>= maybe (runDb (gaugeGate queueTables) >>= \gate -> gate <$ writeIORef gateRef (Just gate)) pure
-    -- A scan that outlives the freshness window is abandoned, so long as a cached
-    -- reading stands in for it. With nothing exported yet it runs to completion.
+    -- A scan that outlives the freshness window is abandoned, so long as a fresh
+    -- reading stands in for it.
     bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
     bounded act = do
-      cached <- readTVarIO (cache cells)
-      tryAny (maybe (Just <$> act) (const (timeout (micros staleAfter) act)) cached)
+      stale <- readingStale
+      tryAny (if stale then Just <$> act else timeout (micros staleAfter) act)
         >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
     abandoned = "Gauge scan outlived the freshness window, abandoned"
     -- Only an unreadable payload falls back, and only with nothing fresh of its own.

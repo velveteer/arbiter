@@ -821,11 +821,11 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
   unowned <- liftIO (readIORef (unownedRef handoff))
   let splitNamed ids = let idSet = Set.fromList ids in partition (\j -> Set.member (Job.primaryKey j) idSet) unhandled
       reportUnavailable ids reason = do
-        -- An exception naming no job speaks for none of them, so the whole
-        -- remainder is released and reports when it runs.
+        -- An exception naming no job speaks for none of them, so the remainder keeps
+        -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
         traverse_ (\job -> fireUnavailable (jobLog job) hooks job reason >> markJobHandled handoff job) jobsGone
-        unless (null siblings) $
+        unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
       unownedOf = filter (\j -> Set.member (Job.primaryKey j) unowned) (toList jobs)
@@ -845,12 +845,13 @@ reportBatchOutcome config hooks startTime endTime jobs handoff outcome = do
           -- left unfinalized, so the nacked reprocess does not record a failure.
           withDbTransaction $ traverse_ (void . Arb.nackJob) unhandled
           tryLog batchLog Info "Job(s) nacked, will be reprocessed"
-      | otherwise ->
+      | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
           withDbTransaction $ do
-            traverse_ (\job -> failJob exc job >> markJobHandled handoff job) unhandled
+            traverse_ (failJob exc) unhandled
             -- A tree or branch cancel acts on the tree, not on this worker's claim.
             when (cancelsTree exc) $ traverse_ (void . cancelJobFor exc) unownedOf
+          traverse_ (markJobHandled handoff) unhandled
   where
     batchLog = withJobContext (logConfig config) jobs
     jobLog job = withJobContextOne (logConfig config) job
@@ -1037,15 +1038,12 @@ handleJobFailure config hooks e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
       unavailable = fireUnavailable cfg hooks job
-      reportCancelled deleted
-        | deleted > 0 = fireCancelled config hooks job errorMsg
-        | otherwise = do
-            tryLog cfg Warning "Job not available for cancelling"
-            unavailable "no longer available to cancel"
+      -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
+      cancel = void (cancelJobFor e job) >> fireCancelled config hooks job errorMsg
   schemaName <- getSchema
   case failureKind of
-    TreeCancelFailure -> reportCancelled =<< cancelJobFor e job
-    BranchCancelFailure -> reportCancelled =<< cancelJobFor e job
+    TreeCancelFailure -> cancel
+    BranchCancelFailure -> cancel
     _
       | failureKind == PermanentFailure || Job.attempts job >= maxAtts -> do
           -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
