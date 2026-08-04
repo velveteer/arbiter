@@ -117,12 +117,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(arbiter_jobs_processed[1m]))",
+          "expr": "sum by (outcome) (rate(arbiter_jobs_processed_total[1m]))",
           "legendFormat": "{{outcome}}"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(arbiter_jobs_retries[1m]))",
+          "expr": "sum(rate(arbiter_jobs_retries_total[1m]))",
           "legendFormat": "retry (rescheduled)"
         }
       ]
@@ -303,7 +303,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind, policy) (rate(arbiter_admission_admitted[1m]))",
+          "expr": "sum by (kind, policy) (rate(arbiter_admission_admitted_total[1m]))",
           "legendFormat": "{{kind}} {{policy}}"
         }
       ]
@@ -330,7 +330,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (op) (rate(arbiter_maintenance_rows[1m]))",
+          "expr": "sum by (op) (rate(arbiter_maintenance_rows_total[1m]))",
           "legendFormat": "{{op}}"
         }
       ]
@@ -360,7 +360,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(rate(arbiter_pg_blocks{source=\"hit\"}[5m])) / sum(max by (source) (rate(arbiter_pg_blocks[5m])))"
+          "expr": "max(rate(arbiter_pg_blocks_total{source=\"hit\"}[5m])) / sum(max by (source) (rate(arbiter_pg_blocks_total[5m])))"
         }
       ]
     },
@@ -478,7 +478,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (queue) (rate(arbiter_jobs_claimed[1m]))",
+          "expr": "sum by (queue) (rate(arbiter_jobs_claimed_total[1m]))",
           "legendFormat": "{{queue}}"
         }
       ]
@@ -567,7 +567,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (table, path) (rate(arbiter_pg_table_scans[5m]))",
+          "expr": "max by (table, path) (rate(arbiter_pg_table_scans_total[5m]))",
           "legendFormat": "{{table}} / {{path}}"
         }
       ]
@@ -595,7 +595,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (outcome) (rate(arbiter_pg_transactions[5m]))",
+          "expr": "max by (outcome) (rate(arbiter_pg_transactions_total[5m]))",
           "legendFormat": "{{outcome}}"
         }
       ]
@@ -761,7 +761,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(rate(arbiter_pg_deadlocks[5m]))"
+          "expr": "max(rate(arbiter_pg_deadlocks_total[5m]))"
         }
       ]
     },

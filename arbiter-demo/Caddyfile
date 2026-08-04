@@ -2,12 +2,13 @@
 # $DEMO_DOMAIN pointing at this host and ports 80/443 reachable. To receive
 # ACME renewal notices, add a global block with an `email you@host` directive.
 
-{$DEMO_DOMAIN} {
+{$DEMO_DOMAIN:localhost} {
 	encode zstd gzip
 
-	# Grafana runs with serve_from_sub_path, so it keeps the prefix.
-	handle /grafana* {
-		reverse_proxy grafana:3000
+	# Grafana runs with serve_from_sub_path under /dash, its home dashboard set
+	# to arbiter's, so the prefix reaches the dashboard directly.
+	handle /dash* {
+		reverse_proxy lgtm:3000
 	}
 
 	# flush_interval -1 disables response buffering so the admin UI's SSE

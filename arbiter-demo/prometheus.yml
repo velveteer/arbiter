@@ -1,7 +1,0 @@
-global:
-  scrape_interval: 10s
-
-scrape_configs:
-  - job_name: arbiter
-    static_configs:
-      - targets: ["otel-collector:8889"]

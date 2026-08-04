@@ -1,65 +1,22 @@
-# Grafana + Prometheus + Tempo + Loki, for viewing what an arbiter process exports.
+# Grafana's all-in-one LGTM stack, for viewing what an arbiter process exports.
 #
 #   docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 #   OTEL_SERVICE_NAME=arbiter-demo \
 #   cabal run arbiter-demo
 #
-# Every signal goes to that one endpoint. The collector fans them out to Tempo,
-# Loki, and a scrape endpoint Prometheus reads.
-#
 # Grafana is then at http://localhost:3000 with the arbiter dashboard provisioned.
 services:
-  prometheus:
-    image: prom/prometheus:latest
-    command: ["--config.file=/etc/prometheus/prometheus.yml"]
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports:
-      - "9090:9090"
-
-  tempo:
-    image: grafana/tempo:2.6.1
-    command: ["-config.file=/etc/tempo.yaml"]
-    volumes:
-      - ./tempo.yaml:/etc/tempo.yaml:ro
-    ports:
-      - "3200:3200"     # Tempo query API (Grafana datasource)
-
-  loki:
-    image: grafana/loki:3.3.2
-    command: ["-config.file=/etc/loki.yaml"]
-    volumes:
-      - ./loki.yaml:/etc/loki.yaml:ro
-    ports:
-      - "3100:3100"     # Loki query API (Grafana datasource)
-
-  # One OTLP endpoint for the process to point at, split by signal on arrival.
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.115.1
-    command: ["--config=/etc/collector.yaml"]
-    volumes:
-      - ./collector.yaml:/etc/collector.yaml:ro
-    ports:
-      - "4318:4318"     # OTLP HTTP
-      - "4317:4317"     # OTLP gRPC
-      - "8889:8889"     # Prometheus scrape of the OTLP-pushed metrics
-    depends_on:
-      - tempo
-      - loki
-
-  grafana:
-    image: grafana/grafana:latest
+  lgtm:
+    image: grafana/otel-lgtm:latest
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter:ro
+      - ./grafana/provisioning/dashboards/provider.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter.yaml:ro
     ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
-      - tempo
-      - loki
+      - "3000:3000"     # Grafana
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP

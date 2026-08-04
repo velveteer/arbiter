@@ -1,8 +1,0 @@
-global:
-  scrape_interval: 10s
-
-scrape_configs:
-  # Metrics arbiter pushed to the collector over OTLP, re-exposed on :8889.
-  - job_name: arbiter
-    static_configs:
-      - targets: ["otel-collector:8889"]
