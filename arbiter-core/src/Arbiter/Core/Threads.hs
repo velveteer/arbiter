@@ -20,4 +20,4 @@ labelArbiterThread role mQueue = liftIO $ do
   tid <- myThreadId
   labelThread tid (T.unpack (T.intercalate ":" ("arbiter" : slug role : toList mQueue)))
   where
-    slug = T.map (\c -> if c == ' ' then '-' else c) . T.toLower
+    slug = T.replace " " "-" . T.toLower

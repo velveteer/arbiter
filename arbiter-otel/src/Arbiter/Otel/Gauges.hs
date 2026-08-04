@@ -219,9 +219,8 @@ registerInstruments meter cells = do
     "Seconds since the exported readings were scanned"
     [ \res -> do
         now <- getMonotonicTime
-        from <- readTVarIO (registeredAt cells)
         cached <- readTVarIO (cache cells)
-        observe res (now - maybe from takenAt cached) (attrs [])
+        observe res (now - maybe (registeredAt cells) takenAt cached) (attrs [])
     ]
   where
     admissionAttrs kind prefix = attrs [("kind", kind), ("policy", prefix)]
@@ -279,7 +278,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
       (warn "Gauge refresh failed, keeping the last reading")
       (traverse_ (atomically . writeTVar (cache cells) . Just . stamp started now))
       refreshed
-    elapsed <- subtract started <$> getMonotonicTime
+    let elapsed = now - started
     -- The gate reopens gateInterval after the publish, so a scan slower than the
     -- slack would otherwise lose the gate on the very next tick.
     threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))

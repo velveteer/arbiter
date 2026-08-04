@@ -9,6 +9,7 @@ module Arbiter.Core.Sql.Groups
 
 import Data.Int (Int64)
 import Data.Text (Text)
+import Data.Text qualified as T
 
 import Arbiter.Core.Job.Schema (inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.QQ (sql)
@@ -34,19 +35,14 @@ refreshGroupsSQL schema tableName limit keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       ifBucket = inFlightPredicate ""
+      aggs = groupAggregates ifBucket
       lim = fromIntegral limit :: Int64
    in [sql|
         WITH params AS (
           SELECT unnest(#{keys :: [CText]}::text[]) AS group_key
         ),
         current AS (
-          SELECT group_key,
-                 MIN(priority) AS min_priority,
-                 MIN(id) AS min_id,
-                 COUNT(*) AS job_count,
-                 COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count,
-                 MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due,
-                 MAX(not_visible_until) FILTER (WHERE ${ifBucket}) AS in_flight_until
+          SELECT group_key, ${aggs}
           FROM ${tbl}
           WHERE group_key IN (SELECT group_key FROM params)
           GROUP BY group_key
@@ -75,7 +71,7 @@ refreshGroupsSQL schema tableName limit keys =
           RETURNING 1
         ),
         missing AS (
-          SELECT group_key
+          SELECT group_key, ${aggs}
           FROM ${tbl} j
           WHERE group_key IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
@@ -84,16 +80,23 @@ refreshGroupsSQL schema tableName limit keys =
         ),
         inserted AS (
           INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
-          SELECT group_key,
-                 MIN(priority), MIN(id), COUNT(*),
-                 COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
-                 MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended),
-                 MAX(not_visible_until) FILTER (WHERE ${ifBucket})
-          FROM ${tbl}
-          WHERE group_key IN (SELECT group_key FROM missing)
-          GROUP BY group_key
+          SELECT group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until
+          FROM missing
           ON CONFLICT (group_key) DO NOTHING
           RETURNING 1
         )
         SELECT (SELECT count(*) FROM deleted) + (SELECT count(*) FROM updated) + (SELECT count(*) FROM inserted) AS @{rewritten :: CInt8}
       |]
+
+-- | The aliased group summary aggregates, over a job table grouped by @group_key@.
+groupAggregates :: Text -> Text
+groupAggregates ifBucket =
+  T.intercalate
+    ", "
+    [ "MIN(priority) AS min_priority"
+    , "MIN(id) AS min_id"
+    , "COUNT(*) AS job_count"
+    , "COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count"
+    , "MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due"
+    , "MAX(not_visible_until) FILTER (WHERE " <> ifBucket <> ") AS in_flight_until"
+    ]

@@ -52,12 +52,12 @@ data Baseline = Baseline
 data GaugeCells = GaugeCells
   { cache :: TVar (Maybe Cached)
   , counterBaselines :: IORef (HashMap SeriesKey Baseline)
-  , registeredAt :: TVar Double
+  , registeredAt :: Double
   }
 
 -- | Cells for a registration starting at @now@.
 newGaugeCells :: Double -> IO GaugeCells
-newGaugeCells now = GaugeCells <$> newTVarIO Nothing <*> newIORef HM.empty <*> newTVarIO now
+newGaugeCells now = GaugeCells <$> newTVarIO Nothing <*> newIORef HM.empty <*> pure now
 
 -- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
 -- reading or one already counted, the whole total for a counter that was reset,

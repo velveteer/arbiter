@@ -141,27 +141,28 @@ BEGIN
   ) THEN
     -- Step 2: group_key change (dedup replace) - remove from old group
     UPDATE "arbiter"."golden_jobs_groups" g
-    SET job_count = GREATEST(0, g.job_count - sub.cnt),
-        min_priority = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+    SET job_count = GREATEST(0, g.job_count - sub.removed_count),
+        min_priority = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
           ELSE COALESCE(sub.new_min_priority, g.min_priority) END,
-        min_id = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+        min_id = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
           ELSE COALESCE(sub.new_min_id, g.min_id) END,
-        ready_count = CASE WHEN g.job_count - sub.cnt <= 0 THEN 0
+        ready_count = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
           ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
-        next_due = CASE WHEN g.job_count - sub.cnt <= 0 THEN NULL
+        next_due = CASE WHEN g.job_count - sub.removed_count <= 0 THEN NULL
           ELSE sub.new_next_due END,
         in_flight_until = CASE
-          WHEN g.job_count - sub.cnt <= 0 THEN NULL
+          WHEN g.job_count - sub.removed_count <= 0 THEN NULL
           WHEN sub.had_inflight THEN sub.surviving_ift
           ELSE g.in_flight_until
         END
     FROM (
-      SELECT d.group_key, d.cnt, d.removed_ready_count, d.had_inflight,
-        MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id,
+      SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
+        MIN(t.priority) AS new_min_priority,
+        MIN(t.id) AS new_min_id,
         MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
         MAX(t.not_visible_until) FILTER (WHERE t.not_visible_until > NOW() AND NOT t.suspended AND (t.attempts > 0 OR t.throttled_until > NOW())) AS surviving_ift
       FROM (
-        SELECT o.group_key, COUNT(*) AS cnt,
+        SELECT o.group_key, COUNT(*) AS removed_count,
           COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
           bool_or(o.not_visible_until > NOW() AND NOT o.suspended AND (o.attempts > 0 OR o.throttled_until > NOW())) AS had_inflight
         FROM old_table o
@@ -171,7 +172,7 @@ BEGIN
         GROUP BY o.group_key
       ) d
       LEFT JOIN "arbiter"."golden_jobs" t ON t.group_key = d.group_key
-      GROUP BY d.group_key, d.cnt, d.removed_ready_count, d.had_inflight
+      GROUP BY d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight
     ) sub
     WHERE g.group_key = sub.group_key;
 
