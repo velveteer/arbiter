@@ -14,12 +14,15 @@ import Arbiter.Core.Job.Schema (inFlightPredicate, jobQueueGroupsTable, jobQueue
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 
--- | @FOR UPDATE SKIP LOCKED@ over the groups rows, returning the locked keys for
--- the reaper to recompute. Claim-locked groups are skipped.
-lockGroupsSQL :: Text -> Text -> Query Text
-lockGroupsSQL schema tableName =
+-- | @FOR UPDATE SKIP LOCKED@ over at most @limit@ groups rows, returning the locked
+-- keys for the reaper to recompute. Claim-locked groups are skipped. Bounded so a
+-- table grown wide on short-lived keys is drained over several passes rather than in
+-- one recompute that outlives the reaper's timeout.
+lockGroupsSQL :: Text -> Text -> Int -> Query Text
+lockGroupsSQL schema tableName limit =
   let groupsTbl = jobQueueGroupsTable schema tableName
-   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} FOR UPDATE SKIP LOCKED|]
+      lim = fromIntegral limit :: Int64
+   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} LIMIT #{lim :: CInt8} FOR UPDATE SKIP LOCKED|]
 
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
 -- returning the rows it rewrote. A separate statement, so its snapshot post-dates

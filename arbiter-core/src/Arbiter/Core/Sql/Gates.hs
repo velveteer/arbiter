@@ -7,6 +7,7 @@ module Arbiter.Core.Sql.Gates
   , checkGateSQL
   , tryClaimGateSQL
   , gateClaimedAtSQL
+  , releaseGateSQL
   , gateNameDigestSQL
   , bumpGateSQL
   , setGateMetadataSQL
@@ -58,9 +59,27 @@ tryClaimGateSQL schemaName task intervalSecs =
 gateNameDigestSQL :: Text -> Query Text
 gateNameDigestSQL name = [sql|SELECT md5(#{name :: CText}) AS @{digest :: CText}|]
 
--- | The claiming transaction's timestamp, which is the value its 'bumpGateSQL' writes.
-gateClaimedAtSQL :: Query UTCTime
-gateClaimedAtSQL = [sql|SELECT NOW() AS @{claimed_at :: CTimestamptz}|]
+-- | The claiming transaction's timestamp, which is the value its 'bumpGateSQL' writes,
+-- and the watermark that bump replaces. Read under the claim's own row lock.
+gateClaimedAtSQL :: SchemaName -> Text -> Query (UTCTime, UTCTime)
+gateClaimedAtSQL schemaName task =
+  let tbl = arbiterGatesTable schemaName
+   in [sql|
+        SELECT NOW() AS @{claimed_at :: CTimestamptz},
+               last_run_at AS @{previous_run_at :: CTimestamptz}
+        FROM ${tbl}
+        WHERE task_name = #{task :: CText}
+      |]
+
+-- | Put a claim's watermark back, for a winner whose work never published. Scoped to
+-- the value that claim wrote, so a later run's bump stands.
+releaseGateSQL :: SchemaName -> Text -> UTCTime -> UTCTime -> Query ()
+releaseGateSQL schemaName task claimedAt previous =
+  let tbl = arbiterGatesTable schemaName
+   in [sql|
+        UPDATE ${tbl} SET last_run_at = #{previous :: CTimestamptz}
+        WHERE task_name = #{task :: CText} AND last_run_at = #{claimedAt :: CTimestamptz}
+      |]
 
 -- | Bump last_run_at to NOW(), inside the claim transaction so it commits with the task's work.
 bumpGateSQL :: SchemaName -> Text -> Query ()

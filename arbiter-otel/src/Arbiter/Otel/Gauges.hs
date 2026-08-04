@@ -45,6 +45,7 @@ import OpenTelemetry.Metric.Core
   , observe
   )
 import System.Timeout (timeout)
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception (bracket, finally, tryAny)
 
 import Arbiter.Otel.Gauges.Cells
@@ -68,7 +69,7 @@ gaugeGate = gateNameFor "refresh-gauges"
 -- given queues and the caller's own database env. A handle registers one set of
 -- gauges, and none at all with its metrics off: otherwise the loop does nothing.
 startGauges
-  :: (MonadArbiter m)
+  :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -83,7 +84,7 @@ startGauges tel baseLog runDb schema queueTables refreshInterval = do
 -- | 'startGauges' with the registration bracketed, so the slot is handed back however
 -- @use@ ends, including before the loop was ever run.
 withGaugeLoop
-  :: (MonadArbiter m)
+  :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -98,7 +99,7 @@ withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
 
 -- | The refresh loop and the action retiring the set it registered.
 prepareGauges
-  :: (MonadArbiter m)
+  :: (MonadArbiter m, MonadUnliftIO m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -261,7 +262,7 @@ registerInstruments meter cells = do
 
 -- | The loop that scans and publishes the reading every instrument reads from.
 gaugeRefreshLoop
-  :: (MonadArbiter m)
+  :: (MonadArbiter m, MonadUnliftIO m)
   => LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName

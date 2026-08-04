@@ -193,7 +193,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, tryAny)
+import UnliftIO (MonadUnliftIO, onException, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
@@ -2101,7 +2101,7 @@ resumeJob schemaName tableName jobId =
   MA.executeStatement
     (Tmpl.resumeJobSQL schemaName tableName jobId)
 
--- | Full recompute of the groups table from the main queue.
+-- | Recompute of the groups table from the main queue, over a bounded batch of rows.
 --
 -- Locks the groups rows currently free (FOR UPDATE SKIP LOCKED) to avoid
 -- fighting with live job claims, then rewrites the table. The caller is
@@ -2113,8 +2113,14 @@ refreshGroupsForQueue
   -> TableName
   -> m Int64
 refreshGroupsForQueue schemaName tableName = withDbTransaction $ do
-  keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName)
+  keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName groupsRefreshBatch)
   sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName keys)
+
+-- | Groups rows one refresh pass recomputes. Above any live group count, and far
+-- enough under a pass that outlives the reaper's timeout, which would leave the
+-- table growing with nothing ever reclaimed.
+groupsRefreshBatch :: Int
+groupsRefreshBatch = 20000
 
 -- | Schema-wide groups-table refresh. Refreshes each given queue in its own
 -- savepoint, so one queue's failure is isolated and the rest still commit.
@@ -2637,9 +2643,10 @@ data Shared a
 -- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
 -- after the gate transaction commits, so a slow scan holds neither the gate row
 -- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
--- restarts from the publish.
+-- restarts from the publish. Work that throws puts the watermark back, so a winner
+-- that keeps failing does not keep every other caller from running.
 runGatedShared
-  :: (FromJSON a, MonadArbiter m, ToJSON a)
+  :: (FromJSON a, MonadArbiter m, MonadUnliftIO m, ToJSON a)
   => SchemaName
   -> Text
   -> NominalDiffTime
@@ -2652,11 +2659,12 @@ runGatedShared schemaName task interval maxAge work =
   runGated schemaName task interval claimedAt
     >>= maybe (readGateMetadata schemaName task maxAge) (fmap (Just . Ran) . publish)
   where
-    claimedAt = listToMaybe <$> MA.executeQuery Tmpl.gateClaimedAtSQL
-    publish at = do
-      a <- work
-      traverse_ (\t -> MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) t task)) at
+    claimedAt = listToMaybe <$> MA.executeQuery (Tmpl.gateClaimedAtSQL schemaName task)
+    publish claim = do
+      a <- work `onException` traverse_ reopen claim
+      traverse_ (\(t, _) -> MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) t task)) claim
       pure a
+    reopen (at, previous) = MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)
 
 -- | What a task published on its gate row within @maxAge@. Throws on a payload that does not decode.
 readGateMetadata :: (FromJSON a, MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> m (Maybe (Shared a))

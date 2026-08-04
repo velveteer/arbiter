@@ -873,10 +873,9 @@ carrying the job's trace, id, queue, and attempt.
 
 | Need | Use |
 |------|-----|
-| The handle, for `telemetrySummary` or other instrumentation | `withTelemetryFromEnv`, then `runWorkerPoolsWith` |
+| The telemetry handle, for `telemetrySummary` or other instrumentation | `withTelemetryFromEnv`, then `runWorkerPoolsWith` |
 | Your program installs its own SDK | `withExternalTelemetry`, then `runWorkerPoolsWith` |
 | Driving the pools some other way | `instrumentPools` + `withGauges` |
-| An explicit queue list | `runSelectedWorkerPools` / `runSelectedWorkerPoolsWith` |
 
 The `With` variants also take the gauge loop's base log config and refresh interval.
 
