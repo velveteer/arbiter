@@ -11,9 +11,7 @@
 --   putStrLn (unpack (Otel.telemetrySummary tel))
 --   env <- createHasqlEnv ...
 --   let pools = Otel.instrumentPools tel [namedWorkerPool emailCfg]
---   Otel.withMetricsEndpoint tel defaultLogConfig 9464
---     $ runHasqlDb env
---     $ Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
+--   runHasqlDb env $ Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
 -- @
 module Arbiter.Otel
   ( -- * Setup
@@ -22,7 +20,6 @@ module Arbiter.Otel
   , withTelemetryIf
   , withTelemetryFromEnv
   , withExternalTelemetry
-  , withMetricsEndpoint
 
     -- * Instrumenting a pool
   , instrumentPool
@@ -73,7 +70,6 @@ import Arbiter.Otel.Metrics
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
   , withExternalTelemetry
-  , withMetricsEndpoint
   , withTelemetry
   , withTelemetryFromEnv
   , withTelemetryIf
@@ -86,7 +82,7 @@ instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWo
 instrumentPool tel pool@(NamedWorkerPool queue cfg)
   | not (enabled tel) = pool
   | otherwise =
-      NamedWorkerPool queue (instrumentConfig (meters tel <$ guard (metricsEnabled tel)) (logDestination tel) queue cfg)
+      NamedWorkerPool queue (instrumentConfig (Just (meters tel)) (logDestination tel) queue cfg)
 
 -- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]

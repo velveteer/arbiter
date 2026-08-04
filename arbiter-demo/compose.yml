@@ -35,9 +35,7 @@ services:
       # Self-restart cadence: the watchdog raises SIGTERM after this many
       # minutes, the process exits, and restart:always reseeds a clean demo.
       RESET_INTERVAL_MINUTES: "20"
-      # Traces and logs to the collector, metrics scraped from 9464.
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
-      OTEL_METRICS_EXPORTER: prometheus
       OTEL_SERVICE_NAME: arbiter-demo
     labels:
       com.centurylinklabs.watchtower.enable: "true"

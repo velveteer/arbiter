@@ -2,18 +2,7 @@ global:
   scrape_interval: 10s
 
 scrape_configs:
+  # Metrics arbiter pushed to the collector over OTLP, re-exposed on :8889.
   - job_name: arbiter
     static_configs:
-      # The arbiter process's /metrics, reached from inside the compose network when
-      # the demo runs on the host. Point it at a service name when arbiter is itself a
-      # compose service, and list every replica: each is its own series, which the
-      # dashboard maxes for queue gauges and sums for per-process counters.
-      - targets: ["host.docker.internal:9464"]
-
-  # Metrics an arbiter process pushed to the collector over OTLP. A process that
-  # serves /metrics also pushes when an OTLP endpoint is set, so both jobs would
-  # collect the same series and every sum would double. Enable this one only in
-  # place of the job above, when arbiter serves no scrape endpoint of its own.
-  # - job_name: arbiter-otlp
-  #   static_configs:
-  #     - targets: ["otel-collector:8889"]
+      - targets: ["otel-collector:8889"]

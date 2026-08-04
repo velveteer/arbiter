@@ -33,12 +33,10 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
-import Data.ByteString.Builder (toLazyByteString)
-import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Char (isAsciiLower)
+import Data.String (fromString)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (isInfixOf)
 import Data.Maybe (listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -48,11 +46,23 @@ import Data.Text.IO qualified as TIO
 import Data.Time (getCurrentTime)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.Generics (Generic)
-import Network.Wai (Application, defaultRequest, responseToStream)
-import Network.Wai.Internal (ResponseReceived (..))
+import OpenTelemetry.Attributes (Attributes, lookupAttributeByKey)
+import OpenTelemetry.Attributes.Key (AttributeKey)
 import OpenTelemetry.Context (empty, insertSpan)
 import OpenTelemetry.Context.ThreadLocal (attachContext, detachContext)
+import OpenTelemetry.Exporter.Metric
+  ( MetricExport (..)
+  , ResourceMetricsExport (..)
+  , ScopeMetricsExport (..)
+  , exponentialHistogramDataPointAttributes
+  , gaugeDataPointAttributes
+  , histogramDataPointAttributes
+  , sumDataPointAttributes
+  )
+import OpenTelemetry.Metric (SdkMeterEnv, createMeterProvider, defaultSdkMeterProviderOptions)
+import OpenTelemetry.MeterProvider (collectResourceMetrics)
 import OpenTelemetry.Processor.Span (SpanProcessor (..))
+import OpenTelemetry.Resource (materializeResources, mkResource)
 import OpenTelemetry.Propagator.W3CTraceContext (decodeSpanContext)
 import OpenTelemetry.Trace.Core
   ( Event (..)
@@ -71,7 +81,6 @@ import OpenTelemetry.Trace.Core
   , wrapSpanContext
   )
 import OpenTelemetry.Util (appendOnlyBoundedCollectionValues)
-import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 import UnliftIO.Async (withAsync)
 import UnliftIO.Concurrent (threadDelay)
@@ -130,26 +139,6 @@ recordingTracerProvider = do
 -- shell had. The variables under test are the same ones an operator sets, so an
 -- ambient @OTEL_METRICS_EXPORTER=none@ would otherwise decide the assertions and an
 -- ambient endpoint would have the suite push to a real collector.
-withPinnedOtelEnv :: IO a -> IO a
-withPinnedOtelEnv = bracket save restore . const
-  where
-    pinned =
-      [ ("OTEL_METRICS_EXPORTER", Just "prometheus")
-      , ("OTEL_TRACES_EXPORTER", Just "none")
-      , ("OTEL_LOGS_EXPORTER", Just "none")
-      , ("OTEL_SDK_DISABLED", Just "false")
-      , ("OTEL_EXPORTER_OTLP_ENDPOINT", Nothing)
-      , ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", Nothing)
-      , ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", Nothing)
-      , ("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", Nothing)
-      ]
-    save = do
-      previous <- traverse (\(k, _) -> (,) k <$> lookupEnv k) pinned
-      traverse_ (uncurry apply) pinned
-      pure previous
-    restore = traverse_ (uncurry apply)
-    apply k = maybe (unsetEnv k) (setEnv k)
-
 -- | Paths are package-relative, which is where cabal runs a test suite from.
 dashboardPath :: FilePath
 dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
@@ -172,15 +161,25 @@ declaredMetrics = map (T.replace "." "_" . T.takeWhile nameChar . T.drop 1 . snd
   where
     nameChar c = isAsciiLower c || c == '_' || c == '.'
 
--- | Read a WAI application's whole response body.
-scrape :: Application -> IO String
-scrape app = do
-  ref <- newIORef mempty
-  void . app defaultRequest $ \res -> do
-    let (_, _, withBody) = responseToStream res
-    withBody $ \streamingBody -> streamingBody (\b -> modifyIORef' ref (<> b)) (pure ())
-    pure ResponseReceived
-  BL8.unpack . toLazyByteString <$> readIORef ref
+-- | Every point a collection produced, as its metric name and attributes.
+collected :: SdkMeterEnv -> IO [(Text, Attributes)]
+collected env = concatMap resourcePoints <$> collectResourceMetrics env
+  where
+    resourcePoints = foldMap scopePoints . resourceMetricsScopes
+    scopePoints = foldMap metricPoints . scopeMetricsExports
+    metricPoints = \case
+      MetricExportSum {mesName, mesSumPoints} -> withName mesName sumDataPointAttributes mesSumPoints
+      MetricExportGauge {megName, megGaugePoints} -> withName megName gaugeDataPointAttributes megGaugePoints
+      MetricExportHistogram {mehName, mehPoints} -> withName mehName histogramDataPointAttributes mehPoints
+      MetricExportExponentialHistogram {meehName, meehPoints} ->
+        withName meehName exponentialHistogramDataPointAttributes meehPoints
+    withName name pointAttrs = foldMap (\p -> [(name, pointAttrs p)])
+
+-- | Whether a metric was recorded carrying every one of @kvs@ on one point.
+recordedWith :: Text -> [(Text, Text)] -> [(Text, Attributes)] -> Bool
+recordedWith name kvs = any (\(n, as) -> n == name && all (carries as) kvs)
+  where
+    carries as (k, v) = lookupAttributeByKey as (fromString (T.unpack k) :: AttributeKey Text) == Just v
 
 main :: IO ()
 main = hspec spec
@@ -221,33 +220,33 @@ spec = do
       fmap (fmap traceparent) retried `shouldBe` Just (Just (traceparent stored))
 
   describe "telemetry" $
-    it "exports job metrics and queue-depth gauges on the scrape endpoint" $
-      withPinnedOtelEnv $
-        Otel.withTelemetry $ \tel -> do
-          job <- enqueue plainEnv (Greeting "measured")
-          now <- getCurrentTime
-          let hooks = Otel.otelHooks (Otel.meters tel) queue
-          onJobClaimed hooks job now
-          onJobSuccess hooks job now now
-          onJobFailedAndMovedToDLQ hooks "boom" job
-          onJobCancelled hooks job "cancelled"
-          onJobUnavailable hooks job "no longer available"
-          Otel.otelMaintenance (Otel.meters tel) SweepExhaustedJobs 3
+    it "records job metrics and queue-depth gauges" $ do
+      (mp, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+      Otel.withExternalTelemetry mp Nothing $ \tel -> do
+        job <- enqueue plainEnv (Greeting "measured")
+        now <- getCurrentTime
+        let hooks = Otel.otelHooks (Otel.meters tel) queue
+        onJobClaimed hooks job now
+        onJobSuccess hooks job now now
+        onJobFailedAndMovedToDLQ hooks "boom" job
+        onJobCancelled hooks job "cancelled"
+        onJobUnavailable hooks job "no longer available"
+        Otel.otelMaintenance (Otel.meters tel) SweepExhaustedJobs 3
 
-          loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
-          withAsync loop $ \_ -> do
-            threadDelay 3_000_000
-            text <- maybe (expectationFailure "no scrape app" >> error "unreachable") scrape (Otel.metricsApp tel)
-            text `shouldSatisfy` isInfixOf "arbiter_jobs_processed"
-            text `shouldSatisfy` isInfixOf "outcome=\"success\""
-            text `shouldSatisfy` isInfixOf "outcome=\"dlq\""
-            text `shouldSatisfy` isInfixOf "outcome=\"cancelled\""
-            text `shouldSatisfy` isInfixOf "outcome=\"unavailable\""
-            text `shouldSatisfy` isInfixOf "arbiter_maintenance_rows"
-            text `shouldSatisfy` isInfixOf "op=\"sweep-exhausted-jobs\""
-            text `shouldSatisfy` isInfixOf "arbiter_queue_depth"
-            text `shouldSatisfy` isInfixOf ("queue=\"" <> T.unpack queue <> "\"")
-            text `shouldSatisfy` isInfixOf "arbiter_pg_backends"
+        loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
+        withAsync loop $ \_ -> do
+          threadDelay 3_000_000
+          points <- collected env
+          traverse_
+            (\(name, kvs) -> points `shouldSatisfy` recordedWith name kvs)
+            [ ("arbiter.jobs.processed", [("outcome", "success")])
+            , ("arbiter.jobs.processed", [("outcome", "dlq")])
+            , ("arbiter.jobs.processed", [("outcome", "cancelled")])
+            , ("arbiter.jobs.processed", [("outcome", "unavailable")])
+            , ("arbiter.maintenance.rows", [("op", "sweep-exhausted-jobs")])
+            , ("arbiter.queue.depth", [("queue", queue)])
+            , ("arbiter.pg.backends", [])
+            ]
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
   describe "provisioned dashboard" $ do

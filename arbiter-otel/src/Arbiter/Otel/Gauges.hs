@@ -52,6 +52,7 @@ import Arbiter.Otel.Gauges.Cells
   , GaugeCells (..)
   , SeriesKey
   , Snapshot (..)
+  , newGaugeCells
   , resetGaugeCells
   , riseSince
   )
@@ -106,21 +107,9 @@ prepareGauges
   -> NominalDiffTime
   -> IO (IO (), IO ())
 prepareGauges tel baseLog runDb schema queueTables refreshInterval
-  | not (Tel.metricsEnabled tel) = idle
-  | otherwise =
-      Tel.claimGaugeSlot tel
-        >>= maybe
-          (duplicate >> idle)
-          (\claim -> register claim `onException` Tel.releaseGaugeSlot claim)
-  where
-    -- Floored, a non-positive interval otherwise leaving the loop no pause at all.
-    register = registerGauges tel baseLog runDb schema queueTables (max 1 refreshInterval)
-    idle = pure (pure (), pure ())
-    duplicate =
-      tryLog
-        (Tel.telemetryLogConfig tel baseLog)
-        Warning
-        "Gauges are already running for this meter provider, skipping"
+  | not (Tel.enabled tel) = pure (pure (), pure ())
+  -- Floored, a non-positive interval otherwise leaving the loop no pause at all.
+  | otherwise = newGaugeCells >>= registerGauges tel baseLog runDb schema queueTables (max 1 refreshInterval)
 
 registerGauges
   :: (MonadArbiter m)
@@ -130,26 +119,23 @@ registerGauges
   -> SchemaName
   -> [TableName]
   -> NominalDiffTime
-  -> Tel.GaugeClaim
+  -> GaugeCells
   -> IO (IO (), IO ())
-registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
+registerGauges tel baseLog runDb schema queueTables refreshInterval cells = do
   registered <- getMonotonicTime
   resetGaugeCells registered cells
   gateRef <- newIORef Nothing
   meter <- arbiterMeter (Tel.provider tel)
-  -- Instruments the provider already registered are reused: the SDK cannot unregister
-  -- an observable callback.
   let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res)]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
       shared desc = desc <> " (shared reading, do not sum across replicas)"
       regGauge name unit desc cbs =
-        when fresh . void $
-          meterCreateObservableGaugeDouble meter name (Just unit) (Just desc) defaultAdvisoryParameters cbs
+        void $ meterCreateObservableGaugeDouble meter name (Just unit) (Just desc) defaultAdvisoryParameters cbs
       reg name unit desc emit = regGauge name unit (shared desc) (callback emit)
       regCounter name unit desc series =
         let emit res c = traverse_ (observeRise (counterBaselines cells) name res (takenAt c)) (series (reading c))
-         in when fresh . void $
+         in void $
               meterCreateObservableCounterDouble
                 meter
                 name
@@ -257,10 +243,8 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval claim = do
         -- The gate reopens gateInterval after the publish, so a scan slower than the
         -- slack would otherwise lose the gate on the very next tick.
         threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
-  pure (refreshLoop, atomically (writeTVar (cache cells) Nothing) >> Tel.releaseGaugeSlot claim)
+  pure (refreshLoop, atomically (writeTVar (cache cells) Nothing))
   where
-    cells = Tel.claimCells claim
-    fresh = not (Tel.claimRegistered claim)
     micros :: NominalDiffTime -> Int
     micros t = round (realToFrac t * 1_000_000 :: Double)
     logCfg = Tel.telemetryLogConfig tel baseLog

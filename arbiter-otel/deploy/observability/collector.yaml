@@ -21,8 +21,7 @@ exporters:
     endpoint: http://loki:3100/otlp
   prometheus:
     endpoint: 0.0.0.0:8889
-    # Keep the metric names the direct scrape serves, so one dashboard query works
-    # whether a process pushes to this collector or is scraped on its own port.
+    # Keep the instrument names arbiter registers, which the dashboard queries.
     add_metric_suffixes: false
 
 service:

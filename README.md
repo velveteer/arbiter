@@ -855,7 +855,9 @@ span onto the job, and a worker runs each claim inside a `process <queue>` consu
 linked back to it. Nothing is exported until an SDK is installed, so this costs an
 untraced deployment nothing.
 
-`arbiter-otel` installs that SDK, and adds metrics, gauges and OTel log records.
+`arbiter-otel` installs that SDK, and adds metrics, gauges and OTel log records. All three
+signals leave over OTLP: point them at a collector, and export from there to whatever you
+run.
 
 ```haskell
 import Arbiter.Otel qualified as Otel
@@ -868,44 +870,41 @@ main = Otel.withTelemetryFromEnv $ \tel -> do
   env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
   let pools = Otel.instrumentPools tel [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
 
-  Otel.withMetricsEndpoint tel defaultLogConfig 9464 $
-    runSimpleDb env $
-      Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
+  runSimpleDb env $
+    Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
 ```
 
-That prints what the handle turned on, so an empty dashboard is explained at startup:
+That prints one line at startup, naming the service and anything that failed to start:
 
 ```
-traces=otlp, metrics=scrape+otlp, logs=off, service.name=orders
+telemetry on, service.name=orders
 ```
 
-A signal whose exporter fails to start is logged, reported `off`, and does not take the process down.
+A signal whose exporter fails to start is logged there and does not take the process down.
 
 ### Entry points
 
 | Function | Installs the SDK |
 | --- | --- |
-| `withTelemetryFromEnv` | Once a signal names an exporter or endpoint, never under `OTEL_SDK_DISABLED` |
+| `withTelemetryFromEnv` | Unless `OTEL_SDK_DISABLED` |
 | `withTelemetryIf cond` | When your own config says so |
 | `withTelemetry` | Always |
 | `withExternalTelemetry mp mlp` | Never - binds to the meter provider you hand it, and to the logger provider when you pass one |
 
-An unconfigured handle is inert - no SDK, no gauge scan, no scrape port - so the wiring above is the same either way.
+A disabled handle is inert - no SDK, no exporters, no gauge scan - so the wiring above is the same either way.
 
 ### Environment
+
+Exporters, endpoints and intervals are the SDK's own `OTEL_*` variables, resolved by the
+SDK rather than reinterpreted here, so the spec's defaults apply - including an OTLP
+exporter pointing at `localhost:4318` when you name none.
 
 | Variable | Effect |
 | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | One collector for all three signals. Per-signal variables override it |
 | `OTEL_SERVICE_NAME` | Reported on every signal |
-| `OTEL_METRICS_EXPORTER=prometheus` | Scrape endpoint only, no push - for a traces-only backend |
-| `OTEL_METRICS_EXPORTER=none` | Metrics off: no scrape endpoint, no health scan. Traces and logs untouched |
-| `OTEL_LOGS_EXPORTER=none` | Logs stay on your own destination only |
+| `OTEL_METRICS_EXPORTER=none`, `OTEL_TRACES_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none` | That signal exports nothing |
 | `OTEL_SDK_DISABLED=true` | Nothing installed |
-
-A signal with no exporter named and no endpoint set is off, rather than exported to a
-collector on localhost. Name its exporter (`OTEL_TRACES_EXPORTER=otlp`) or set an
-endpoint to turn it on. What each signal ended up doing is in the startup summary.
 
 ### Traces
 
@@ -934,7 +933,7 @@ A handler that overrides `getTraceContext` decides for itself what an enqueue st
 | Reaper | Rows each op touched |
 | Postgres | Connections, dead tuples, transaction age, cache hits |
 
-- `withGauges` scans the queues your registry declares. One handle runs one set of gauges, so wrap the whole process, not each pool.
+- `withGauges` scans the queues your registry declares. Call it once for the process, not per pool: a second call registers the instruments twice.
 - Postgres health covers arbiter's own role unless you grant it `pg_read_all_stats`.
 - One replica scans per interval and the rest export its reading, so the scan cost does not grow with the fleet. An age gauge tells a fresh scan from one that stopped.
 
@@ -947,7 +946,9 @@ Aggregating across replicas:
 
 The bundled dashboard does both.
 
-Pushing through a collector: its `prometheus` exporter needs `add_metric_suffixes: false`, or metrics arrive as `arbiter_jobs_processed_total` and panels built on the direct scrape go blank. `arbiter-otel/deploy/observability/collector.yaml` sets it.
+Reaching Prometheus through a collector: its `prometheus` exporter needs
+`add_metric_suffixes: false`, or metrics arrive as `arbiter_jobs_processed_total` and the
+dashboard's panels stay blank. `arbiter-otel/deploy/observability/collector.yaml` sets it.
 
 ### Logs
 
@@ -955,10 +956,7 @@ OTel log records carrying the job's trace, id, queue, and attempt, sent alongsid
 
 ### HTTP
 
-- `withMetricsEndpoint tel defaultLogConfig 9464` serves the scrape endpoint on its own port.
-- Or mount `Otel.metricsApp` elsewhere: it answers at its mount root and at `/metrics`, 404s anything else.
-- Server spans come from `newOpenTelemetryWaiMiddleware` (`hs-opentelemetry-instrumentation-wai`).
-
+Server spans come from `newOpenTelemetryWaiMiddleware` (`hs-opentelemetry-instrumentation-wai`).
 An enqueue over the REST API joins the request's trace on its own, the server span being
 ambient when the handler runs.
 
@@ -969,11 +967,12 @@ Grafana + Prometheus + Tempo + Loki with an arbiter dashboard provisioned, under
 ```
 docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  OTEL_METRICS_EXPORTER=prometheus OTEL_SERVICE_NAME=arbiter-demo \
+  OTEL_SERVICE_NAME=arbiter-demo \
   cabal run arbiter-demo
 ```
 
-Tempo takes the traces, Loki the logs, and Prometheus scrapes the metrics.
+The collector fans the three signals out to Tempo, Loki, and a scrape endpoint Prometheus
+reads.
 
 The [live demo](https://demo.arbiterq.dev/) runs the same stack from the same configs, with
 its dashboard at [/grafana](https://demo.arbiterq.dev/grafana) as an anonymous viewer.

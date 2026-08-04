@@ -2,13 +2,11 @@
 #
 #   docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-#   OTEL_METRICS_EXPORTER=prometheus \
 #   OTEL_SERVICE_NAME=arbiter-demo \
 #   cabal run arbiter-demo
 #
-# The collector takes traces and logs off that one endpoint and fans them out to
-# Tempo and Loki. Prometheus scrapes the metrics, which are pull-based: from the
-# process itself above, or from the collector when the process pushes them.
+# Every signal goes to that one endpoint. The collector fans them out to Tempo,
+# Loki, and a scrape endpoint Prometheus reads.
 #
 # Grafana is then at http://localhost:3000 with the arbiter dashboard provisioned.
 services:
@@ -19,8 +17,6 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   tempo:
     image: grafana/tempo:2.6.1
@@ -47,7 +43,7 @@ services:
     ports:
       - "4318:4318"     # OTLP HTTP
       - "4317:4317"     # OTLP gRPC
-      - "8889:8889"     # Prometheus scrape of OTLP-pushed metrics
+      - "8889:8889"     # Prometheus scrape of the OTLP-pushed metrics
     depends_on:
       - tempo
       - loki

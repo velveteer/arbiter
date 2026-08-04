@@ -257,14 +257,9 @@ runDemo tel = do
           (runSimpleDb workerEnv $ runWorkerPools workers)
           (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
-  when (isJust (Otel.metricsApp tel)) $ putStrLn $ "Metrics: http://localhost:" <> show metricsPort <> "/metrics"
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
-  Otel.withMetricsEndpoint tel defaultLogConfig metricsPort $
-    runSimpleDb producerEnv $
-      Otel.withGauges tel defaultLogConfig 15 (liftIO serve)
-  where
-    metricsPort :: Int
-    metricsPort = 9464
+  runSimpleDb producerEnv $
+    Otel.withGauges tel defaultLogConfig 15 (liftIO serve)
 
 -- ---------------------------------------------------------------------------
 -- Worker configs
