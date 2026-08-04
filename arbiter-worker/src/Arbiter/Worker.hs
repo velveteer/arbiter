@@ -702,6 +702,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
     result <-
       tryAny
         $ withJobsHeartbeat
+          tracer
           hooks
           (jobHeartbeatInterval config)
           (visibilityTimeout config)
@@ -1114,7 +1115,6 @@ reaperLoop logCfg report interval stmtTimeout = do
       gatedRows op every rowsOf work = do
         mr <- gated op every work
         mr <$ traverse_ (reaped op . rowsOf) mr
-      -- A per-queue sweep: warn for each queue it could not do, then report the total.
       sweep
         :: MaintenanceOp
         -> NominalDiffTime

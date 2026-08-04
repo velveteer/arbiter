@@ -8,7 +8,7 @@ import Arbiter.Core.Exceptions (JobForceCancelled (..), throwJobStolenIds)
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
-import Arbiter.Core.Trace (capturingContext)
+import Arbiter.Core.Trace (Tracer, capturingContext)
 import Control.Exception (throwIO)
 import Control.Monad (forever, unless, void)
 import Control.Monad.IO.Class (liftIO)
@@ -48,7 +48,9 @@ withJobsHeartbeat
    . ( JobOperation m payload
      , MonadUnliftIO m
      )
-  => ObservabilityHooks m payload
+  => Maybe Tracer
+  -- ^ The batch's tracer.
+  -> ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
   -> NominalDiffTime
   -- ^ Heartbeat interval
@@ -65,9 +67,9 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal action = do
+withJobsHeartbeat tracer hooks intervalSecs timeoutSecs startTime jobs logCfg signal action = do
   -- 'race' forks both sides, so the handler needs the job span reattached too.
-  inherited <- capturingContext
+  inherited <- maybe (pure id) (const capturingContext) tracer
   either id id <$> race (inherited (absurd <$> heartbeatThread)) (inherited action)
   where
     heartbeatThread =

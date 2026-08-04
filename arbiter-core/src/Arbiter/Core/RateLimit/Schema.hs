@@ -10,6 +10,7 @@ module Arbiter.Core.RateLimit.Schema
 
     -- * Table name helpers
   , arbiterRateLimitPoliciesTable
+  , arbiterRateLimitPoliciesTableName
   , arbiterRateLimitsTable
   , arbiterRateLimitsTableName
 
@@ -58,7 +59,10 @@ toPolicyRow (Policy prefix mx rf iv) =
 -- | Qualified name of the app-global policies table.
 arbiterRateLimitPoliciesTable :: SchemaName -> Text
 arbiterRateLimitPoliciesTable schemaName =
-  quoteIdentifier schemaName <> ".arbiter_rate_limit_policies"
+  quoteIdentifier schemaName <> "." <> arbiterRateLimitPoliciesTableName
+
+arbiterRateLimitPoliciesTableName :: Text
+arbiterRateLimitPoliciesTableName = "arbiter_rate_limit_policies"
 
 -- | Bare (unqualified) name of the bucket table, for catalog lookups by relname.
 arbiterRateLimitsTableName :: Text

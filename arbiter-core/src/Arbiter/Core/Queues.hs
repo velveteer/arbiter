@@ -6,6 +6,7 @@
 module Arbiter.Core.Queues
   ( QueueRow (..)
   , arbiterQueuesTable
+  , arbiterQueuesTableName
   , createQueuesTableSQL
   ) where
 
@@ -31,7 +32,10 @@ data QueueRow = QueueRow
 
 -- | Qualified table name for the arbiter_queues table.
 arbiterQueuesTable :: SchemaName -> Text
-arbiterQueuesTable schemaName = quoteIdentifier schemaName <> ".arbiter_queues"
+arbiterQueuesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterQueuesTableName
+
+arbiterQueuesTableName :: Text
+arbiterQueuesTableName = "arbiter_queues"
 
 -- | DDL for the @arbiter_queues@ table.
 createQueuesTableSQL :: SchemaName -> Text

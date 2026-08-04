@@ -54,5 +54,5 @@ pgTableHealthSQL schemaName tableNames =
       seq_scan::float8, COALESCE(idx_scan, 0)::float8 AS idx_scan
     FROM pg_stat_user_tables
     WHERE schemaname = #{schemaName :: CText}
-      AND (relname = ANY(#{tableNames :: [CText]}) OR relname LIKE 'arbiter\_%')
+      AND relname = ANY(#{tableNames :: [CText]})
   |]

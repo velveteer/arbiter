@@ -6,6 +6,7 @@
 -- elapsed, so at most one worker pool runs the task per interval.
 module Arbiter.Core.Gates
   ( arbiterGatesTable
+  , arbiterGatesTableName
   , createGatesTableSQL
   , addGateMetadataColumnSQL
   ) where
@@ -18,7 +19,10 @@ import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | Qualified name of the gates table.
 arbiterGatesTable :: SchemaName -> Text
-arbiterGatesTable schemaName = quoteIdentifier schemaName <> ".arbiter_gates"
+arbiterGatesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterGatesTableName
+
+arbiterGatesTableName :: Text
+arbiterGatesTableName = "arbiter_gates"
 
 -- | DDL for the @arbiter_gates@ table.
 createGatesTableSQL :: SchemaName -> Text

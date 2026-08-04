@@ -15,10 +15,16 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Codec (Col (..), RowCodec, col)
+import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTableName, arbiterConcurrencyTableName)
+import Arbiter.Core.CronSchedule (cronSchedulesTableName)
+import Arbiter.Core.Gates (arbiterGatesTableName)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, queueTableNames)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.Queues (arbiterQueuesTableName)
+import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTableName, arbiterRateLimitsTableName)
 import Arbiter.Core.Sql.Health qualified as Sql
 import Arbiter.Core.Sql.Query (rows)
+import Arbiter.Core.Worker (arbiterWorkersTableName)
 
 data PgDbHealth = PgDbHealth
   { blksHit :: Double
@@ -89,7 +95,20 @@ pgTableHealthCodec =
 getPgHealth :: (MonadArbiter m) => SchemaName -> [TableName] -> m (Maybe PgDbHealth, [PgTableHealth])
 getPgHealth schemaName queueTables = do
   dbRows <- executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)
-  tableRows <- executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName queueTables'))
+  tableRows <- executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName scanned))
   pure (listToMaybe dbRows, tableRows)
   where
-    queueTables' = concatMap queueTableNames queueTables
+    scanned = concatMap queueTableNames queueTables <> sharedTableNames
+
+-- | The schema's tables that are not owned by any one queue.
+sharedTableNames :: [TableName]
+sharedTableNames =
+  [ arbiterGatesTableName
+  , arbiterWorkersTableName
+  , arbiterQueuesTableName
+  , arbiterConcurrencyTableName
+  , arbiterConcurrencyPoliciesTableName
+  , arbiterRateLimitsTableName
+  , arbiterRateLimitPoliciesTableName
+  , cronSchedulesTableName
+  ]
