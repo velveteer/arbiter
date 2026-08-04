@@ -26,7 +26,6 @@ import Arbiter.Worker
   , mergedChildResults
   , namedWorkerPool
   , poolConfigForWorkers
-  , runWorkerPools
   , shutdownPools
   , transactionalWorkerConfig
   )
@@ -219,13 +218,11 @@ runDemo tel = do
 
   -- Build worker pool list
   let workers =
-        Otel.instrumentPools
-          tel
-          [ namedWorkerPool demoWorkerCfg
-          , namedWorkerPool emailWorkerCfg
-          , namedWorkerPool notifWorkerCfg
-          , namedWorkerPool pipelineWorkerCfg
-          ]
+        [ namedWorkerPool demoWorkerCfg
+        , namedWorkerPool emailWorkerCfg
+        , namedWorkerPool notifWorkerCfg
+        , namedWorkerPool pipelineWorkerCfg
+        ]
   let handler = Signals.Catch $ shutdownPools workers
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
@@ -252,14 +249,10 @@ runDemo tel = do
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
 
-  let serve =
-        race_
-          (runSimpleDb workerEnv $ runWorkerPools workers)
-          (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
-
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
-  runSimpleDb producerEnv $
-    Otel.withGauges tel defaultLogConfig 15 (liftIO serve)
+  race_
+    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig 15 workers)
+    (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------
 -- Worker configs

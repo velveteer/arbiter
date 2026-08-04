@@ -857,22 +857,28 @@ adds metrics, gauges and OTel log records over OTLP:
 import Arbiter.Otel qualified as Otel
 
 main :: IO ()
-main = Otel.withTelemetryFromEnv $ \tel -> do
-  putStrLn (unpack (Otel.telemetrySummary tel))   -- telemetry on, service.name=orders
+main = do
   env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-  let pools = Otel.instrumentPools tel [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
 
   runSimpleDb env $
-    Otel.withGauges tel defaultLogConfig 15 (runWorkerPools pools)
+    Otel.runWorkerPools [namedWorkerPool emailCfg, namedWorkerPool imageCfg]
 ```
 
-Exporters, endpoints and intervals come from the standard `OTEL_*` variables, including
-`OTEL_SDK_DISABLED=true`. Call `withGauges` once per process, not per pool. Logs are
-emitted alongside your configured destination, carrying the job's trace, id, queue, and
-attempt.
+`Otel.runWorkerPools` swaps in for `runWorkerPools`, same arguments: it installs the SDK,
+instruments the pools and runs the gauges. Call it once per process, not per pool.
 
-`withTelemetryFromEnv` installs the SDK; if your program installs its own, use
-`withExternalTelemetry` instead. See `Arbiter.Otel` for the other variants.
+Exporters, endpoints and intervals come from the standard `OTEL_*` variables, including
+`OTEL_SDK_DISABLED=true`. Logs are emitted alongside your configured destination,
+carrying the job's trace, id, queue, and attempt.
+
+| Need | Use |
+|------|-----|
+| The handle, for `telemetrySummary` or other instrumentation | `withTelemetryFromEnv`, then `runWorkerPoolsWith` |
+| Your program installs its own SDK | `withExternalTelemetry`, then `runWorkerPoolsWith` |
+| Driving the pools some other way | `instrumentPools` + `withGauges` |
+| An explicit queue list | `runSelectedWorkerPools` / `runSelectedWorkerPoolsWith` |
+
+The `With` variants also take the gauge loop's base log config and refresh interval.
 
 ### Traces
 
