@@ -80,11 +80,11 @@ withTelemetry action = do
     logsNote <- ContT withLogs
     liftIO $ do
       ms <- traverse (const (newArbiterMeters mp)) (guard (isNothing metricsNote))
-      dest <- loggerDestination <$> getGlobalLoggerProvider
+      dest <- traverse (const (loggerDestination <$> getGlobalLoggerProvider)) (guard (isNothing logsNote))
       action
         (baseTelemetry mp)
           { meters = ms
-          , logDestination = Just dest
+          , logDestination = dest
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
   where
@@ -120,7 +120,7 @@ withGlobalProvider
   :: Text -> IO p -> (p -> IO ()) -> IO p -> (p -> IO ()) -> (Maybe Text -> IO a) -> IO a
 withGlobalProvider signal getGlobal setGlobal initialize shutdown inner = do
   previous <- getGlobal
-  bracketSignal signal initialize (\p -> setGlobal previous >> shutdown p) inner
+  bracketSignal signal (initialize >>= \p -> p <$ setGlobal p) (\p -> setGlobal previous >> shutdown p) inner
 
 -- | Set a signal up and run @inner@ under it, or under the failure that left it off.
 bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Maybe Text -> IO a) -> IO a
