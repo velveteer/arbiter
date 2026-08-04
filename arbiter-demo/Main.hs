@@ -39,7 +39,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 qualified as BS
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)

@@ -135,10 +135,6 @@ recordingTracerProvider = do
           }
   (,) ref <$> createTracerProvider [processor] emptyTracerProviderOptions
 
--- | Pin the SDK's environment for the duration of the action, restoring whatever the
--- shell had. The variables under test are the same ones an operator sets, so an
--- ambient @OTEL_METRICS_EXPORTER=none@ would otherwise decide the assertions and an
--- ambient endpoint would have the suite push to a real collector.
 -- | Paths are package-relative, which is where cabal runs a test suite from.
 dashboardPath :: FilePath
 dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
@@ -225,13 +221,14 @@ spec = do
       Otel.withExternalTelemetry mp Nothing $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
-        let hooks = Otel.otelHooks (Otel.meters tel) queue
+        ms <- maybe (expectationFailure "expected metrics on" >> error "unreachable") pure (Otel.meters tel)
+        let hooks = Otel.otelHooks ms queue
         onJobClaimed hooks job now
         onJobSuccess hooks job now now
         onJobFailedAndMovedToDLQ hooks "boom" job
         onJobCancelled hooks job "cancelled"
         onJobUnavailable hooks job "no longer available"
-        Otel.otelMaintenance (Otel.meters tel) SweepExhaustedJobs 3
+        Otel.otelMaintenance ms SweepExhaustedJobs 3
 
         loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
         withAsync loop $ \_ -> do
@@ -280,7 +277,7 @@ spec = do
       hotName hot `shouldBe` "process " <> queue
       spanKind sp `shouldBe` Consumer
       hotStatus hot `shouldBe` Error "boom"
-      map eventName (values (hotEvents hot)) `shouldBe` ["job.failed"]
+      map eventName (values (hotEvents hot)) `shouldBe` ["exception"]
       -- Linked to the enqueue's trace, and running under a trace of its own.
       map (traceId . frozenLinkContext) (values (hotLinks hot))
         `shouldBe` map traceId (toList (spanContextOf =<< traceparent job))

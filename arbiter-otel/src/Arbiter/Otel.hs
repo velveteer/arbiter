@@ -48,7 +48,6 @@ import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker.Config (WorkerConfig (..), withHooks)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
-import Control.Monad (guard)
 import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -79,10 +78,8 @@ import Arbiter.Otel.Telemetry
 -- The pool's registry queue name labels its metrics, which is what the gauges are
 -- labelled by. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
-instrumentPool tel pool@(NamedWorkerPool queue cfg)
-  | not (enabled tel) = pool
-  | otherwise =
-      NamedWorkerPool queue (instrumentConfig (Just (meters tel)) (logDestination tel) queue cfg)
+instrumentPool tel (NamedWorkerPool queue cfg) =
+  NamedWorkerPool queue (instrumentConfig (meters tel) (logDestination tel) queue cfg)
 
 -- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]

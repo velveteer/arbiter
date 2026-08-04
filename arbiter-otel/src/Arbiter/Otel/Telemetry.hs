@@ -14,10 +14,10 @@ module Arbiter.Otel.Telemetry
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (bracket, displayException)
-import Control.Monad (void)
+import Control.Monad (guard, void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import OpenTelemetry.Attributes (lookupAttributeByKey)
@@ -61,9 +61,8 @@ import UnliftIO (liftIO, tryAny)
 import Arbiter.Otel.Metrics (ArbiterMeters, loggerDestination, newArbiterMeters, otelLogDestination, otelLogs)
 
 data Telemetry = Telemetry
-  { enabled :: Bool
-  -- ^ False for the inert handle: no SDK installed, no gauge scan.
-  , meters :: ArbiterMeters
+  { meters :: Maybe ArbiterMeters
+  -- ^ 'Nothing' when nothing is exporting metrics: no job instruments, no gauge scan.
   , provider :: MeterProvider
   , logDestination :: Maybe LogDestination
   -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
@@ -84,10 +83,10 @@ withTelemetry action = do
     tracesNote <- ContT withTraces
     logsNote <- ContT withLogs
     liftIO $ do
-      base <- baseTelemetry mp
+      ms <- traverse (const (newArbiterMeters mp)) (guard (isNothing metricsNote))
       action
-        base
-          { enabled = True
+        (baseTelemetry mp)
+          { meters = ms
           , logDestination = Just otelLogDestination
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
@@ -140,25 +139,22 @@ serviceName res = lookupAttributeByKey (getMaterializedResourcesAttributes res) 
 -- | 'withTelemetry' when the flag is set, an inert handle when it is not.
 withTelemetryIf :: Bool -> (Telemetry -> IO a) -> IO a
 withTelemetryIf True action = withTelemetry action
-withTelemetryIf False action = action =<< inertTelemetry
+withTelemetryIf False action = action inertTelemetry
 
 -- | A handle over the API's no-op providers, installing nothing.
-inertTelemetry :: IO Telemetry
+inertTelemetry :: Telemetry
 inertTelemetry = baseTelemetry noopMeterProvider
 
 -- | An exporting-nothing handle over @mp@. The installers record-update the fields
 -- they actually set.
-baseTelemetry :: MeterProvider -> IO Telemetry
-baseTelemetry mp = do
-  ms <- newArbiterMeters mp
-  pure
-    Telemetry
-      { enabled = False
-      , meters = ms
-      , provider = mp
-      , logDestination = Nothing
-      , telemetrySummary = "telemetry off"
-      }
+baseTelemetry :: MeterProvider -> Telemetry
+baseTelemetry mp =
+  Telemetry
+    { meters = Nothing
+    , provider = mp
+    , logDestination = Nothing
+    , telemetrySummary = "telemetry off"
+    }
 
 -- | 'withTelemetryIf' on @OTEL_SDK_DISABLED@, the spec's own switch.
 withTelemetryFromEnv :: (Telemetry -> IO a) -> IO a
@@ -185,10 +181,10 @@ detectedResources = do
 withExternalTelemetry :: MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
 withExternalTelemetry mp mlp action = do
   tracing <- isJust <$> resolveTracer
-  base <- baseTelemetry mp
+  ms <- newArbiterMeters mp
   action
-    base
-      { enabled = True
+    (baseTelemetry mp)
+      { meters = Just ms
       , logDestination = loggerDestination <$> mlp
       , telemetrySummary =
           "telemetry on, caller's providers" <> if tracing then mempty else ", no global tracer provider installed"

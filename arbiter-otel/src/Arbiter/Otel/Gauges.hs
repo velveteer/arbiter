@@ -28,11 +28,11 @@ import Arbiter.Worker (LogConfig, LogLevel (..), tryLog, warnEx)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically, readTVarIO, writeTVar)
 import Control.Exception (SomeException, fromException)
-import Control.Monad (forever, void, when)
+import Control.Monad (forever, void)
 import Data.Foldable (toList, traverse_)
 import Data.HashMap.Strict (HashMap)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.Clock (getMonotonicTime)
@@ -44,7 +44,7 @@ import OpenTelemetry.Metric.Core
   , observe
   )
 import System.Timeout (timeout)
-import UnliftIO.Exception (bracket, finally, onException, tryAny)
+import UnliftIO.Exception (bracket, finally, tryAny)
 
 import Arbiter.Otel.Gauges.Cells
   ( Baseline
@@ -107,7 +107,7 @@ prepareGauges
   -> NominalDiffTime
   -> IO (IO (), IO ())
 prepareGauges tel baseLog runDb schema queueTables refreshInterval
-  | not (Tel.enabled tel) = pure (pure (), pure ())
+  | isNothing (Tel.meters tel) = pure (pure (), pure ())
   -- Floored, a non-positive interval otherwise leaving the loop no pause at all.
   | otherwise = newGaugeCells >>= registerGauges tel baseLog runDb schema queueTables (max 1 refreshInterval)
 
