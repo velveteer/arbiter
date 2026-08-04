@@ -2115,7 +2115,7 @@ refreshGroupsForQueue
   -> m Int64
 refreshGroupsForQueue schemaName tableName = withDbTransaction $ do
   keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName groupsRefreshBatch)
-  sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName keys)
+  sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName groupsRefreshBatch keys)
 
 -- | Groups rows one refresh pass recomputes. Above any live group count, and far
 -- enough under a pass that outlives the reaper's timeout, which would leave the
@@ -2644,8 +2644,8 @@ data Shared a
 -- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
 -- after the gate transaction commits, so a slow scan holds neither the gate row
 -- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
--- restarts from the publish. Work that throws puts the watermark back, so a winner
--- that keeps failing does not keep every other caller from running.
+-- restarts from the publish. A run or publish that throws puts the watermark back, so a
+-- winner that keeps failing does not keep every other caller from running.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, MonadUnliftIO m, ToJSON a)
   => SchemaName
@@ -2661,8 +2661,8 @@ runGatedShared schemaName task interval maxAge work =
     >>= maybe (readGateMetadata schemaName task maxAge) (fmap (Just . Ran) . publish)
   where
     claimedAt = listToMaybe <$> MA.executeQuery (Tmpl.gateClaimedAtSQL schemaName task)
-    publish claim = do
-      a <- work `onException` traverse_ reopen claim
+    publish claim = flip onException (traverse_ reopen claim) $ do
+      a <- work
       traverse_ (\(t, _) -> MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) t task)) claim
       pure a
     reopen (at, previous) = MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)

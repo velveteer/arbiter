@@ -17,7 +17,8 @@ import Arbiter.Core.Sql.Query (Query)
 -- | @FOR UPDATE SKIP LOCKED@ over at most @limit@ groups rows, returning the locked
 -- keys for the reaper to recompute. Claim-locked groups are skipped. Bounded so a
 -- table grown wide on short-lived keys is drained over several passes rather than in
--- one recompute that outlives the reaper's timeout.
+-- one recompute that outlives the reaper's timeout. Unordered, so a pass covers rows
+-- past the bound only as the ones ahead of them are reclaimed.
 lockGroupsSQL :: Text -> Text -> Int -> Query Text
 lockGroupsSQL schema tableName limit =
   let groupsTbl = jobQueueGroupsTable schema tableName
@@ -27,12 +28,13 @@ lockGroupsSQL schema tableName limit =
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
 -- returning the rows it rewrote. A separate statement, so its snapshot post-dates
 -- the lock and cannot clobber a concurrent claim's @in_flight_until@. The INSERT
--- only repairs missing rows.
-refreshGroupsSQL :: Text -> Text -> [Text] -> Query Int64
-refreshGroupsSQL schema tableName keys =
+-- only repairs missing rows, at most @limit@ of them.
+refreshGroupsSQL :: Text -> Text -> Int -> [Text] -> Query Int64
+refreshGroupsSQL schema tableName limit keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       ifBucket = inFlightPredicate ""
+      lim = fromIntegral limit :: Int64
    in [sql|
         WITH params AS (
           SELECT unnest(#{keys :: [CText]}::text[]) AS group_key
@@ -72,6 +74,14 @@ refreshGroupsSQL schema tableName keys =
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
           RETURNING 1
         ),
+        missing AS (
+          SELECT group_key
+          FROM ${tbl} j
+          WHERE group_key IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
+          GROUP BY group_key
+          LIMIT #{lim :: CInt8}
+        ),
         inserted AS (
           INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
           SELECT group_key,
@@ -80,8 +90,7 @@ refreshGroupsSQL schema tableName keys =
                  MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended),
                  MAX(not_visible_until) FILTER (WHERE ${ifBucket})
           FROM ${tbl}
-          WHERE group_key IS NOT NULL
-            AND group_key NOT IN (SELECT group_key FROM ${groupsTbl})
+          WHERE group_key IN (SELECT group_key FROM missing)
           GROUP BY group_key
           ON CONFLICT (group_key) DO NOTHING
           RETURNING 1
