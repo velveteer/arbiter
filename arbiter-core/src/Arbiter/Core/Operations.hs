@@ -176,7 +176,7 @@ import Data.Aeson.Types (parseEither)
 import Data.Bifunctor (first)
 import Data.Bitraversable (bitraverse)
 import Data.Either (partitionEithers)
-import Data.Foldable (for_, toList, traverse_)
+import Data.Foldable (for_, toList)
 import Data.Int (Int32, Int64)
 import Data.IntMap qualified as IntMap
 import Data.List (groupBy, sort, sortOn)
@@ -2662,22 +2662,17 @@ runGatedShared
   -> m a
   -> m (Maybe (Shared a))
 runGatedShared schemaName task interval maxAge work =
-  runGated schemaName task interval claimedAt
-    >>= maybe (readGateMetadata schemaName task maxAge) (fmap (Just . Ran) . publish)
+  MA.executeQuery claimOrRead >>= maybe (pure Nothing) shared . listToMaybe
   where
-    claimedAt = listToMaybe <$> MA.executeQuery (Tmpl.gateClaimedAtSQL schemaName task)
-    publish claim = flip onException (traverse_ reopen claim) $ do
+    claimOrRead =
+      Tmpl.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
+    shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
+      (Just at, Just previous) -> Just . Ran <$> publish at previous
+      _ -> traverse (\(v, age) -> Published age <$> decode v) ((,) <$> mPayload <*> mAge)
+    publish at previous = flip onException (reopen at previous) $ do
       a <- work
-      traverse_ (\(t, _) -> MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) t task)) claim
-      pure a
-    reopen (at, previous) = MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)
-
--- | What a task published on its gate row within @maxAge@. Throws on a payload that does not decode.
-readGateMetadata :: (FromJSON a, MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> m (Maybe (Shared a))
-readGateMetadata schemaName task maxAge = do
-  rows <- MA.executeQuery (Tmpl.gateMetadataSQL schemaName task (realToFrac maxAge))
-  traverse (\(v, age) -> Published age <$> decode v) (listToMaybe rows)
-  where
+      a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task)
+    reopen at previous = MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)
     decode = either (\e -> throwParsing (task <> " gate payload: " <> T.pack e)) pure . parseEither parseJSON
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures

@@ -6,12 +6,11 @@ module Arbiter.Core.Sql.Gates
   ( ensureGateRowSQL
   , checkGateSQL
   , tryClaimGateSQL
-  , gateClaimedAtSQL
+  , claimOrReadGateSQL
   , releaseGateSQL
   , gateNameDigestSQL
   , bumpGateSQL
   , setGateMetadataSQL
-  , gateMetadataSQL
   ) where
 
 import Data.Aeson (Value)
@@ -59,16 +58,44 @@ tryClaimGateSQL schemaName task intervalSecs =
 gateNameDigestSQL :: Text -> Query Text
 gateNameDigestSQL name = [sql|SELECT md5(#{name :: CText}) AS @{digest :: CText}|]
 
--- | The claiming transaction's timestamp, which is the value its 'bumpGateSQL' writes,
--- and the watermark that bump replaces. Read under the claim's own row lock.
-gateClaimedAtSQL :: SchemaName -> Text -> Query (UTCTime, UTCTime)
-gateClaimedAtSQL schemaName task =
+-- | Claim the gate, or read what the last winner published. NULL timestamps mean lost.
+claimOrReadGateSQL
+  :: SchemaName -> Text -> Double -> Double -> Query (Maybe UTCTime, Maybe UTCTime, Maybe Value, Maybe Double)
+claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
   let tbl = arbiterGatesTable schemaName
    in [sql|
-        SELECT NOW() AS @{claimed_at :: CTimestamptz},
-               last_run_at AS @{previous_run_at :: CTimestamptz}
-        FROM ${tbl}
-        WHERE task_name = #{task :: CText}
+        WITH seeded AS (
+          INSERT INTO ${tbl} (task_name, last_run_at)
+          SELECT #{task :: CText}, NOW()
+          WHERE NOT EXISTS (SELECT 1 FROM ${tbl} WHERE task_name = #{task :: CText})
+          ON CONFLICT (task_name) DO NOTHING
+          RETURNING NOW() AS claimed_at, '1970-01-01'::timestamptz AS previous_run_at
+        ),
+        claimed AS (
+          UPDATE ${tbl} g SET last_run_at = NOW()
+          FROM ${tbl} old
+          WHERE g.task_name = #{task :: CText}
+            AND old.task_name = g.task_name
+            AND g.last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
+          RETURNING NOW() AS claimed_at, old.last_run_at AS previous_run_at
+        ),
+        claim AS (
+          SELECT claimed_at, previous_run_at FROM seeded
+          UNION ALL
+          SELECT claimed_at, previous_run_at FROM claimed
+        ),
+        published AS (
+          SELECT metadata -> 'payload' AS payload,
+                 EXTRACT(EPOCH FROM NOW() - (metadata ->> 'at')::timestamptz)::float8 AS age_seconds
+          FROM ${tbl}
+          WHERE task_name = #{task :: CText}
+            AND metadata -> 'payload' IS NOT NULL
+            AND (metadata ->> 'at')::timestamptz > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
+        )
+        SELECT (SELECT claimed_at FROM claim) AS @{claimed_at :: Maybe CTimestamptz},
+               (SELECT previous_run_at FROM claim) AS @{previous_run_at :: Maybe CTimestamptz},
+               (SELECT payload FROM published) AS @{payload :: Maybe CJsonb},
+               (SELECT age_seconds FROM published) AS @{age_seconds :: Maybe CFloat8}
       |]
 
 -- | Put a claim's watermark back, for a winner whose work never published. Scoped to
@@ -97,17 +124,4 @@ setGateMetadataSQL schemaName metadata claimedAt task =
         SET last_run_at = NOW(),
             metadata = jsonb_build_object('at', to_jsonb(#{claimedAt :: CTimestamptz}::timestamptz), 'payload', #{metadata :: CJsonb}::jsonb)
         WHERE task_name = #{task :: CText}
-      |]
-
--- | What the task published, with its age in seconds, if it is still fresh.
-gateMetadataSQL :: SchemaName -> Text -> Double -> Query (Value, Double)
-gateMetadataSQL schemaName task maxAgeSecs =
-  let tbl = arbiterGatesTable schemaName
-   in [sql|
-        SELECT metadata -> 'payload' AS @{metadata :: CJsonb},
-               EXTRACT(EPOCH FROM NOW() - (metadata ->> 'at')::timestamptz)::float8 AS @{age_seconds :: CFloat8}
-        FROM ${tbl}
-        WHERE task_name = #{task :: CText}
-          AND metadata -> 'payload' IS NOT NULL
-          AND (metadata ->> 'at')::timestamptz > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
       |]
