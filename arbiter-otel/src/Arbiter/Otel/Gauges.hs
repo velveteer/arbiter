@@ -37,7 +37,8 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.Clock (getMonotonicTime)
 import OpenTelemetry.Metric.Core
-  ( ObservableResult
+  ( Meter
+  , ObservableResult
   , defaultAdvisoryParameters
   , meterCreateObservableCounterDouble
   , meterCreateObservableGaugeDouble
@@ -53,7 +54,6 @@ import Arbiter.Otel.Gauges.Cells
   , SeriesKey
   , Snapshot (..)
   , newGaugeCells
-  , resetGaugeCells
   , riseSince
   )
 import Arbiter.Otel.Metrics (arbiterMeter, attrs, concurrencyKind, rateLimitKind)
@@ -109,23 +109,16 @@ prepareGauges
 prepareGauges tel baseLog runDb schema queueTables refreshInterval
   | isNothing (Tel.meters tel) = pure (pure (), pure ())
   -- Floored, a non-positive interval otherwise leaving the loop no pause at all.
-  | otherwise = newGaugeCells >>= registerGauges tel baseLog runDb schema queueTables (max 1 refreshInterval)
+  | otherwise = do
+      cells <- newGaugeCells =<< getMonotonicTime
+      arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
+      loop <-
+        gaugeRefreshLoop (Tel.telemetryLogConfig tel baseLog) runDb schema queueTables (max 1 refreshInterval) cells
+      pure (loop, atomically (writeTVar (cache cells) Nothing))
 
-registerGauges
-  :: (MonadArbiter m)
-  => Tel.Telemetry
-  -> LogConfig
-  -> (forall a. m a -> IO a)
-  -> SchemaName
-  -> [TableName]
-  -> NominalDiffTime
-  -> GaugeCells
-  -> IO (IO (), IO ())
-registerGauges tel baseLog runDb schema queueTables refreshInterval cells = do
-  registered <- getMonotonicTime
-  resetGaugeCells registered cells
-  gateRef <- newIORef Nothing
-  meter <- arbiterMeter (Tel.provider tel)
+-- | Register the observable instruments, each reading whatever the loop last cached.
+registerInstruments :: Meter -> GaugeCells -> IO ()
+registerInstruments meter cells = do
   let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res)]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
@@ -194,11 +187,11 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval cells = do
       )
       (rateLimits snap)
 
-  reg "arbiter.pg.table.dead_tuples" "{tuple}" "Dead tuples pending vacuum" $ perTable Health.deadTup fromIntegral
-  reg "arbiter.pg.table.live_tuples" "{tuple}" "Estimated live tuples" $ perTable Health.liveTup fromIntegral
+  reg "arbiter.pg.table.dead_tuples" "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
+  reg "arbiter.pg.table.live_tuples" "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
   reg "arbiter.pg.table.autovacuum_age" "s" "Seconds since last (auto)vacuum (-1 = never)" $
-    perTable Health.autovacuumAge id
-  reg "arbiter.pg.table.size_bytes" "By" "Total relation size" $ perTable Health.totalBytes fromIntegral
+    perTable Health.autovacuumAge
+  reg "arbiter.pg.table.size_bytes" "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
   reg "arbiter.pg.connections" "{connection}" "Backends by state" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)
   reg "arbiter.pg.oldest_transaction_age" "s" "Age of the oldest open transaction" $
@@ -230,24 +223,69 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval cells = do
         cached <- readTVarIO (cache cells)
         observe res (now - maybe from takenAt cached) (attrs [])
     ]
+  where
+    admissionAttrs kind prefix = attrs [("kind", kind), ("policy", prefix)]
+    policyAttrs prefix = attrs [("policy", prefix)]
+    tokenAttrs prefix stat = attrs [("policy", prefix), ("stat", stat)]
+    effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
+    effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
+    statusCounts s =
+      [ (jobStatusToText Ready, readyJobs s)
+      , (jobStatusToText InFlight, inFlightJobs s)
+      , (jobStatusToText Scheduled, scheduledJobs s)
+      , (jobStatusToText Backoff, backoffJobs s)
+      , (jobStatusToText Throttled, throttledJobs s)
+      , (jobStatusToText Suspended, suspendedJobs s)
+      , (jobStatusToText Cancelled, cancelledJobs s)
+      ]
+    connCounts h =
+      [ ("active", Health.connActive h)
+      , ("idle", Health.connIdle h)
+      , ("idle_in_transaction", Health.connIdleInTxn h)
+      , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted h)
+      , ("blocked", Health.connBlocked h)
+      , ("other", Health.connOther h)
+      ]
+    -- Every series is a list of rows picked out of the snapshot, each row labelled
+    -- and valued. Counters hand that list over, gauges observe it.
+    over pick label snap = concatMap label (pick snap)
+    observing pick label res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . over pick label
+    dbOf = toList . db
+    perTable field = observing tables (\t -> [([("table", Health.table t)], field t)])
+    perDb field = observing dbOf (\h -> [([], field h)])
+    perDbBy label pairs = observing dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
+    perTableTotals label pairs =
+      over tables (\t -> [([("table", Health.table t), (label, k)], v) | (k, v) <- pairs t])
+    perDbTotals label pairs = over dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
+    dbTotal field = over dbOf (\h -> [([], field h)])
 
-  let refreshLoop = forever $ do
-        started <- getMonotonicTime
-        refreshed <- refresh gateRef
-        now <- getMonotonicTime
-        either
-          (warn "Gauge refresh failed, keeping the last reading")
-          (traverse_ (atomically . writeTVar (cache cells) . Just . stamp started now))
-          refreshed
-        elapsed <- subtract started <$> getMonotonicTime
-        -- The gate reopens gateInterval after the publish, so a scan slower than the
-        -- slack would otherwise lose the gate on the very next tick.
-        threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
-  pure (refreshLoop, atomically (writeTVar (cache cells) Nothing))
+-- | The loop that scans and publishes the reading every instrument reads from.
+gaugeRefreshLoop
+  :: (MonadArbiter m)
+  => LogConfig
+  -> (forall a. m a -> IO a)
+  -> SchemaName
+  -> [TableName]
+  -> NominalDiffTime
+  -> GaugeCells
+  -> IO (IO ())
+gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
+  gateRef <- newIORef Nothing
+  pure $ forever $ do
+    started <- getMonotonicTime
+    refreshed <- refresh gateRef
+    now <- getMonotonicTime
+    either
+      (warn "Gauge refresh failed, keeping the last reading")
+      (traverse_ (atomically . writeTVar (cache cells) . Just . stamp started now))
+      refreshed
+    elapsed <- subtract started <$> getMonotonicTime
+    -- The gate reopens gateInterval after the publish, so a scan slower than the
+    -- slack would otherwise lose the gate on the very next tick.
+    threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
   where
     micros :: NominalDiffTime -> Int
     micros t = round (realToFrac t * 1_000_000 :: Double)
-    logCfg = Tel.telemetryLogConfig tel baseLog
     refresh gateRef =
       tryAny (resolveGate gateRef)
         >>= either (pure . Left) (\gate -> bounded (gatedScan gate) >>= either localScan (pure . Right))
@@ -298,36 +336,6 @@ registerGauges tel baseLog runDb schema queueTables refreshInterval cells = do
           , rateLimits = rlPolicies
           }
     warn = warnEx logCfg
-    statusCounts s =
-      [ (jobStatusToText Ready, readyJobs s)
-      , (jobStatusToText InFlight, inFlightJobs s)
-      , (jobStatusToText Scheduled, scheduledJobs s)
-      , (jobStatusToText Backoff, backoffJobs s)
-      , (jobStatusToText Throttled, throttledJobs s)
-      , (jobStatusToText Suspended, suspendedJobs s)
-      , (jobStatusToText Cancelled, cancelledJobs s)
-      ]
-    connCounts h =
-      [ ("active", Health.connActive h)
-      , ("idle", Health.connIdle h)
-      , ("idle_in_transaction", Health.connIdleInTxn h)
-      , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted h)
-      , ("blocked", Health.connBlocked h)
-      , ("other", Health.connOther h)
-      ]
-    admissionAttrs kind prefix = attrs [("kind", kind), ("policy", prefix)]
-    policyAttrs prefix = attrs [("policy", prefix)]
-    tokenAttrs prefix stat = attrs [("policy", prefix), ("stat", stat)]
-    effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
-    effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
-    perTable field conv res snap = traverse_ (\t -> observe res (conv (field t)) (attrs [("table", Health.table t)])) (tables snap)
-    perDb field res snap = traverse_ (\h -> observe res (field h) (attrs [])) (db snap)
-    perDbBy label pairs res snap =
-      traverse_ (\h -> traverse_ (\(k, v) -> observe res v (attrs [(label, k)])) (pairs h)) (db snap)
-    perTableTotals label pairs snap =
-      [([("table", Health.table t), (label, k)], v) | t <- tables snap, (k, v) <- pairs t]
-    perDbTotals label pairs snap = [([(label, k)], v) | h <- toList (db snap), (k, v) <- pairs h]
-    dbTotal field snap = [([], field h) | h <- toList (db snap)]
 
 -- | Export an absolute total as its rise since the scan it was last counted from.
 observeRise

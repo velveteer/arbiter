@@ -40,9 +40,9 @@ import OpenTelemetry.Metric
   , stopPeriodicMetricReader
   )
 import OpenTelemetry.Metric.Core (MeterProvider, getGlobalMeterProvider, noopMeterProvider, setGlobalMeterProvider)
-import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
 import OpenTelemetry.Processor.Span (SpanProcessor)
 import OpenTelemetry.Propagator (setGlobalTextMapPropagator)
+import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
 import OpenTelemetry.Trace
   ( TracerProviderOptions (..)
   , createTracerProvider

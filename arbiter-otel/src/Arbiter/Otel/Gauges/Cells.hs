@@ -8,7 +8,6 @@ module Arbiter.Otel.Gauges.Cells
   , Baseline
   , SeriesKey
   , newGaugeCells
-  , resetGaugeCells
   , riseSince
   ) where
 
@@ -16,11 +15,11 @@ import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.Operations (QueueOverview (..))
 import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
-import Control.Concurrent.STM (TVar, atomically, newTVarIO, writeTVar)
+import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
-import Data.IORef (IORef, newIORef, writeIORef)
+import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -56,16 +55,9 @@ data GaugeCells = GaugeCells
   , registeredAt :: TVar Double
   }
 
-newGaugeCells :: IO GaugeCells
-newGaugeCells = GaugeCells <$> newTVarIO Nothing <*> newIORef HM.empty <*> newTVarIO 0
-
--- | Reset the cells for a registration starting at @now@.
-resetGaugeCells :: Double -> GaugeCells -> IO ()
-resetGaugeCells now cells = do
-  writeIORef (counterBaselines cells) HM.empty
-  atomically $ do
-    writeTVar (cache cells) Nothing
-    writeTVar (registeredAt cells) now
+-- | Cells for a registration starting at @now@.
+newGaugeCells :: Double -> IO GaugeCells
+newGaugeCells now = GaugeCells <$> newTVarIO Nothing <*> newIORef HM.empty <*> newTVarIO now
 
 -- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
 -- reading or one already counted, the whole total for a counter that was reset,
