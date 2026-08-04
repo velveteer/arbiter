@@ -34,11 +34,11 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Char (isAsciiLower)
-import Data.String (fromString)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Maybe (listToMaybe)
 import Data.Proxy (Proxy (..))
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -59,11 +59,11 @@ import OpenTelemetry.Exporter.Metric
   , histogramDataPointAttributes
   , sumDataPointAttributes
   )
-import OpenTelemetry.Metric (SdkMeterEnv, createMeterProvider, defaultSdkMeterProviderOptions)
 import OpenTelemetry.MeterProvider (collectResourceMetrics)
+import OpenTelemetry.Metric (SdkMeterEnv, createMeterProvider, defaultSdkMeterProviderOptions)
 import OpenTelemetry.Processor.Span (SpanProcessor (..))
-import OpenTelemetry.Resource (materializeResources, mkResource)
 import OpenTelemetry.Propagator.W3CTraceContext (decodeSpanContext)
+import OpenTelemetry.Resource (materializeResources, mkResource)
 import OpenTelemetry.Trace.Core
   ( Event (..)
   , FlushResult (..)

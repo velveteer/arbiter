@@ -931,7 +931,7 @@ configured destination rather than instead of it.
 ### Local stack
 
 Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm) with the arbiter
-dashboard provisioned, at http://localhost:3000:
+dashboard provisioned, at http://localhost:3000/dash:
 
 ```
 docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
@@ -939,6 +939,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
   OTEL_SERVICE_NAME=arbiter-demo \
   cabal run arbiter-demo
 ```
+
+`arbiter-demo/run-local.sh` runs the demo from this repository against that stack, at
+http://localhost:8000 with the dashboard at http://localhost:8000/dash.
 
 The [live demo](https://demo.arbiterq.dev/) runs the same stack, with its dashboard at
 [/dash](https://demo.arbiterq.dev/dash) as an anonymous viewer.

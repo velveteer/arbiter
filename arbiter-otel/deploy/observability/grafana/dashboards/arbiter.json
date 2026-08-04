@@ -90,7 +90,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (queue) (arbiter_queue_oldest_ready_age)",
+          "expr": "max by (queue) (arbiter_queue_oldest_ready_age_seconds)",
           "legendFormat": "{{queue}}"
         }
       ]
@@ -149,7 +149,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, queue) (rate(arbiter_job_handler_duration_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, queue) (rate(arbiter_job_handler_duration_seconds_bucket[5m])))",
           "legendFormat": "{{queue}}"
         }
       ]
@@ -386,7 +386,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_oldest_transaction_age)"
+          "expr": "max(arbiter_pg_oldest_transaction_age_seconds)"
         }
       ]
     },
@@ -451,7 +451,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_gauges_age)"
+          "expr": "max(arbiter_gauges_age_seconds)"
         }
       ]
     },
@@ -679,7 +679,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_autovacuum_age)",
+          "expr": "max by (table) (arbiter_pg_table_autovacuum_age_seconds)",
           "legendFormat": "{{table}}"
         }
       ]
@@ -707,7 +707,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_oldest_query_age)"
+          "expr": "max(arbiter_pg_oldest_query_age_seconds)"
         }
       ]
     },

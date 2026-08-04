@@ -1,0 +1,43 @@
+# The deployment's stack, minus the published demo image and TLS: the demo runs
+# from this working tree instead, started by run-local.sh.
+#
+#   arbiter-demo/run-local.sh
+name: arbiter-demo-local
+
+services:
+  db:
+    image: postgres:17.4
+    environment:
+      POSTGRES_PASSWORD: master
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-U", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "${DB_PORT:-5433}:5432"
+
+  lgtm:
+    extends:
+      file: compose.yml
+      service: lgtm
+    environment:
+      GF_SERVER_ROOT_URL: "http://localhost:${PROXY_PORT:-8000}/dash"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "4318:4318"
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - lgtm
+    environment:
+      # Plain HTTP, so there is no local CA to trust, and the demo on the host.
+      DEMO_DOMAIN: ":80"
+      DEMO_UPSTREAM: "host.docker.internal:${PORT:-8080}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PROXY_PORT:-8000}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro

@@ -1,6 +1,9 @@
 # Caddy fronts the demo with automatic Let's Encrypt TLS. Requires DNS for
 # $DEMO_DOMAIN pointing at this host and ports 80/443 reachable. To receive
 # ACME renewal notices, add a global block with an `email you@host` directive.
+#
+# The upstreams are the compose service names. run-local.sh overrides them to
+# serve the same routes over a demo running on the host.
 
 {$DEMO_DOMAIN:localhost} {
 	encode zstd gzip
@@ -8,13 +11,13 @@
 	# Grafana runs with serve_from_sub_path under /dash, its home dashboard set
 	# to arbiter's, so the prefix reaches the dashboard directly.
 	handle /dash* {
-		reverse_proxy lgtm:3000
+		reverse_proxy {$DASH_UPSTREAM:lgtm:3000}
 	}
 
 	# flush_interval -1 disables response buffering so the admin UI's SSE
 	# stream (/api/v1/events/stream) reaches the browser live.
 	handle {
-		reverse_proxy demo:8080 {
+		reverse_proxy {$DEMO_UPSTREAM:demo:8080} {
 			flush_interval -1
 		}
 	}
