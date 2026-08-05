@@ -21,14 +21,11 @@ module Arbiter.Test.Setup
 import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Concurrency.Schema qualified as CC
 import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..))
-import Arbiter.Core.Gates qualified as Gates
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.MonadArbiter (MonadArbiter, Params)
 import Arbiter.Core.MonadArbiter qualified as MA
-import Arbiter.Core.Queues qualified as Q
-import Arbiter.Core.RateLimit.Schema qualified as RL
+import Arbiter.Core.SchemaTables (sharedArbiterTables)
 import Arbiter.Core.SqlLiterals (textLiteral)
-import Arbiter.Core.Worker qualified as W
 import Arbiter.Migrations
   ( MigrationConfig (..)
   , allTableAdmission
@@ -106,27 +103,10 @@ cleanupData schemaName tableName conn = do
   -- the opposite order from this TRUNCATE, so bound the wait and retry on a
   -- deadlock or lock timeout instead of failing the test.
   execute_ conn "SET lock_timeout = '5s'"
-  let truncateSql =
+  let truncated = Schema.queueTableNames tableName <> sharedArbiterTables
+      truncateSql =
         "TRUNCATE "
-          <> Schema.jobQueueTable schemaName tableName
-          <> ", "
-          <> Schema.jobQueueDLQTable schemaName tableName
-          <> ", "
-          <> Schema.jobQueueArchiveTable schemaName tableName
-          <> ", "
-          <> Schema.jobQueueGroupsTable schemaName tableName
-          <> ", "
-          <> W.arbiterWorkersTable schemaName
-          <> ", "
-          <> Q.arbiterQueuesTable schemaName
-          <> ", "
-          <> Gates.arbiterGatesTable schemaName
-          <> ", "
-          <> RL.arbiterRateLimitsTable schemaName
-          <> ", "
-          <> CC.arbiterConcurrencyTable schemaName
-          <> ", "
-          <> CC.arbiterConcurrencyPoliciesTable schemaName
+          <> T.intercalate ", " (map (Schema.jobQueueTable schemaName) truncated)
           <> " CASCADE"
       go n = do
         r <- try (execute_ conn truncateSql) :: IO (Either SqlError ())

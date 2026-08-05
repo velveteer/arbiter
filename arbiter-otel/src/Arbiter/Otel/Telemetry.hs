@@ -53,7 +53,8 @@ import OpenTelemetry.Trace
   )
 import UnliftIO (liftIO, tryAny)
 
-import Arbiter.Otel.Metrics (ArbiterMeters, loggerDestination, newArbiterMeters, otelLogs)
+import Arbiter.Otel.Logs (loggerDestination, otelLogs)
+import Arbiter.Otel.Metrics (ArbiterMeters, newArbiterMeters)
 
 data Telemetry = Telemetry
   { meters :: Maybe ArbiterMeters

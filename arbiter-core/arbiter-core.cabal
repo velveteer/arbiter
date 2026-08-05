@@ -61,6 +61,7 @@ library
     Arbiter.Core.RateLimit.Schema
     Arbiter.Core.RateLimit.Spec
     Arbiter.Core.RateLimit.Stats
+    Arbiter.Core.SchemaTables
     Arbiter.Core.Selector
     Arbiter.Core.Sql.Archive
     Arbiter.Core.Sql.Claim

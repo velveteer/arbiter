@@ -39,6 +39,7 @@ library
     Arbiter.Otel
     Arbiter.Otel.Gauges
     Arbiter.Otel.Gauges.Cells
+    Arbiter.Otel.Logs
     Arbiter.Otel.Metrics
     Arbiter.Otel.Telemetry
 

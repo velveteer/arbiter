@@ -66,14 +66,13 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
+import Arbiter.Otel.Logs (loggerDestination, otelLogs)
 import Arbiter.Otel.Metrics
   ( ArbiterMeters
   , arbiterMeter
   , attrs
-  , loggerDestination
   , newArbiterMeters
   , otelHooks
-  , otelLogs
   , otelMaintenance
   )
 import Arbiter.Otel.Telemetry
