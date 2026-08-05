@@ -24,6 +24,7 @@ import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..))
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.MonadArbiter (MonadArbiter, Params)
 import Arbiter.Core.MonadArbiter qualified as MA
+import Arbiter.Core.RateLimit.Schema qualified as RL
 import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Migrations
@@ -103,7 +104,8 @@ cleanupData schemaName tableName conn = do
   -- the opposite order from this TRUNCATE, so bound the wait and retry on a
   -- deadlock or lock timeout instead of failing the test.
   execute_ conn "SET lock_timeout = '5s'"
-  let truncated = allSchemaTables [tableName]
+  -- Rate-limit policies are seeded once per suite, not per test.
+  let truncated = filter (/= RL.arbiterRateLimitPoliciesTableName) (allSchemaTables [tableName])
       truncateSql =
         "TRUNCATE "
           <> T.intercalate ", " (map (Schema.jobQueueTable schemaName) truncated)

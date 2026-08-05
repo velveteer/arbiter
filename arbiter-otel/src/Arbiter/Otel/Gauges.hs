@@ -57,6 +57,7 @@ import Arbiter.Otel.Gauges.Cells
   , newGaugeCells
   , riseSince
   )
+import Arbiter.Otel.MetricNames qualified as Name
 import Arbiter.Otel.Metrics (arbiterMeter, attrs, concurrencyKind, rateLimitKind)
 import Arbiter.Otel.Telemetry qualified as Tel
 
@@ -137,18 +138,18 @@ registerInstruments meter cells = do
                 defaultAdvisoryParameters
                 (withCached emit)
 
-  reg "arbiter.queue.depth" "{job}" "Jobs in a queue by status" $
+  reg Name.queueDepth "{job}" "Jobs in a queue by status" $
     observed $
       over queues $ \o ->
         [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
         | (st, n) <- statusCounts (overviewStats o)
         ]
-  reg "arbiter.queue.oldest_ready_age" "s" "Age of the oldest claimable job (0 = none ready)" $
+  reg Name.queueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
     observed $
       over queues $ \o ->
         [([("queue", overviewQueue o)], fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o)))]
   -- The states partition the live workers, so a queue's fleet is their sum.
-  reg "arbiter.workers" "{worker}" "Registered workers by state" $
+  reg Name.workers "{worker}" "Registered workers by state" $
     observed $
       over queues $ \o ->
         let paused = overviewWorkersPaused o
@@ -157,15 +158,15 @@ registerInstruments meter cells = do
             ]
 
   -- Keyed by policy prefix, never by admission key: a per-tenant suffix would be unbounded.
-  reg "arbiter.admission.keys" "{key}" "Live admission keys, by policy" $
+  reg Name.admissionKeys "{key}" "Live admission keys, by policy" $
     bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
-  reg "arbiter.admission.limit" "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
+  reg Name.admissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
     bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
-  reg "arbiter.admission.in_flight" "{job}" "Jobs holding a concurrency slot, by policy" $
+  reg Name.admissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
     perPolicy concurrency Conc.prefix (fromIntegral . Conc.totalInFlight)
-  reg "arbiter.admission.busiest_key" "{job}" "In-flight count of the fullest key, by policy" $
+  reg Name.admissionBusiestKey "{job}" "In-flight count of the fullest key, by policy" $
     perPolicy concurrency Conc.prefix (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
-  reg "arbiter.admission.tokens" "{token}" "Rate-limit tokens left across a policy's buckets" $
+  reg Name.admissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
     observed $
       over rateLimits $ \p ->
         [ ([("policy", RL.prefix p), ("stat", stat)], t)
@@ -173,34 +174,34 @@ registerInstruments meter cells = do
         , t <- toList mt
         ]
 
-  reg "arbiter.pg.table.dead_tuples" "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
-  reg "arbiter.pg.table.live_tuples" "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
-  reg "arbiter.pg.table.autovacuum_age" "s" "Seconds since last (auto)vacuum (-1 = never)" $
+  reg Name.pgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
+  reg Name.pgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
+  reg Name.pgTableAutovacuumAge "s" "Seconds since last (auto)vacuum (-1 = never)" $
     perTable Health.autovacuumAge
-  reg "arbiter.pg.table.size_bytes" "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
-  reg "arbiter.pg.connections" "{connection}" "Backends by state" $
+  reg Name.pgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
+  reg Name.pgConnections "{connection}" "Backends by state" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)
-  reg "arbiter.pg.oldest_transaction_age" "s" "Age of the oldest open transaction" $
+  reg Name.pgOldestTransactionAge "s" "Age of the oldest open transaction" $
     perDb Health.oldestTxnAge
-  reg "arbiter.pg.oldest_query_age" "s" "Age of the oldest running query" $ perDb Health.oldestQueryAge
-  reg "arbiter.pg.xid_age" "{transaction}" "Transaction-id age (wraparound headroom)" $
+  reg Name.pgOldestQueryAge "s" "Age of the oldest running query" $ perDb Health.oldestQueryAge
+  reg Name.pgXidAge "{transaction}" "Transaction-id age (wraparound headroom)" $
     perDb (fromIntegral . Health.xidAge)
-  reg "arbiter.pg.backends" "{backend}" "Backends currently connected" $
+  reg Name.pgBackends "{backend}" "Backends currently connected" $
     perDb (fromIntegral . Health.numBackends)
 
-  regCounter "arbiter.pg.table.scans" "{scan}" "Table scans, by the access path they took" $
+  regCounter Name.pgTableScans "{scan}" "Table scans, by the access path they took" $
     perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
-  regCounter "arbiter.pg.blocks" "{block}" "Shared-buffer reads, by whether they hit the cache" $
+  regCounter Name.pgBlocks "{block}" "Shared-buffer reads, by whether they hit the cache" $
     perDbTotals "source" (\h -> [("hit", Health.blksHit h), ("disk", Health.blksRead h)])
-  regCounter "arbiter.pg.transactions" "{transaction}" "Transactions by outcome" $
+  regCounter Name.pgTransactions "{transaction}" "Transactions by outcome" $
     perDbTotals "outcome" (\h -> [("commit", Health.xactCommit h), ("rollback", Health.xactRollback h)])
-  regCounter "arbiter.pg.deadlocks" "{deadlock}" "Deadlocks detected" $ dbTotal Health.deadlocks
+  regCounter Name.pgDeadlocks "{deadlock}" "Deadlocks detected" $ dbTotal Health.deadlocks
 
   -- How far behind the exported readings have fallen, from registration until the
   -- first. A stopped loop leaves the other gauges holding their last reading, which
   -- only this tells apart from a fresh one.
   regGauge
-    "arbiter.gauges.age"
+    Name.gaugesAge
     "s"
     "Seconds since the exported readings were scanned"
     [ \res -> do

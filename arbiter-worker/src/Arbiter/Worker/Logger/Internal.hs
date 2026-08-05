@@ -53,8 +53,12 @@ withJobContextList config = maybe config (withJobContext config) . nonEmpty
 
 -- | Building job context is wasted work when logs are discarded.
 loggingActive :: LogConfig -> Bool
-loggingActive config = case logDestination config of
+loggingActive = destinationActive . logDestination
+
+destinationActive :: LogDestination -> Bool
+destinationActive = \case
   LogDiscard -> False
+  LogTee first second -> destinationActive first || destinationActive second
   _ -> True
 
 -- | Build structured context for a batch of jobs.

@@ -37,6 +37,8 @@ import OpenTelemetry.Metric.Core
   , meterCreateHistogram
   )
 
+import Arbiter.Otel.MetricNames qualified as Name
+
 data ArbiterMeters = ArbiterMeters
   { claimed :: Counter Int64
   , processed :: Counter Int64
@@ -55,14 +57,14 @@ newArbiterMeters mp = do
   meter <- arbiterMeter mp
   let counter name desc = meterCreateCounterInt64 meter name Nothing (Just desc) defaultAdvisoryParameters
   ArbiterMeters
-    <$> counter "arbiter.jobs.claimed" "Jobs claimed by workers"
-    <*> counter "arbiter.jobs.processed" "Jobs processed, by terminal outcome"
-    <*> counter "arbiter.jobs.retries" "Failed jobs scheduled for another attempt"
-    <*> counter "arbiter.admission.admitted" "Claimed jobs that passed an admission policy, by kind and policy"
-    <*> counter "arbiter.maintenance.rows" "Rows a reaper op touched, by op"
+    <$> counter Name.jobsClaimed "Jobs claimed by workers"
+    <*> counter Name.jobsProcessed "Jobs processed, by terminal outcome"
+    <*> counter Name.jobsRetries "Failed jobs scheduled for another attempt"
+    <*> counter Name.admissionAdmitted "Claimed jobs that passed an admission policy, by kind and policy"
+    <*> counter Name.maintenanceRows "Rows a reaper op touched, by op"
     <*> meterCreateHistogram
       meter
-      "arbiter.job.handler.duration"
+      Name.handlerDuration
       (Just "s")
       (Just "Seconds a job spent in the handler (a batched pool records its batch's span for each job)")
       durationBuckets

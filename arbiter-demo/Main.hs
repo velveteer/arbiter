@@ -250,8 +250,9 @@ runDemo tel = do
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
 
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
+  gaugeRefresh <- Otel.defaultGaugeRefresh
   race_
-    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig Otel.defaultGaugeRefresh workers)
+    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig gaugeRefresh workers)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ module Arbiter.Otel
   , otelLogs
   , loggerDestination
   , attrs
+  , arbiterMetricNames
   ) where
 
 import Arbiter.Core.HighLevel qualified as Arb
@@ -62,11 +63,13 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.TypeLits (KnownSymbol)
-import UnliftIO (MonadUnliftIO, withRunInIO)
+import OpenTelemetry.Metric (PeriodicMetricReaderOptions (..), periodicMetricReaderOptionsFromEnv)
+import UnliftIO (MonadUnliftIO, liftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
 import Arbiter.Otel.Logs (loggerDestination, otelLogs)
+import Arbiter.Otel.MetricNames (arbiterMetricNames)
 import Arbiter.Otel.Metrics
   ( ArbiterMeters
   , arbiterMeter
@@ -121,8 +124,9 @@ runWorkerPools
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools =
-  withTelemetryHere $ \tel ->
-    poolRun tel defaultLogConfig defaultGaugeRefresh pools Worker.runWorkerPools
+  withTelemetryHere $ \tel -> do
+    refresh <- liftIO defaultGaugeRefresh
+    poolRun tel defaultLogConfig refresh pools Worker.runWorkerPools
 
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
@@ -132,8 +136,9 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools =
-  withTelemetryHere $ \tel ->
-    poolRun tel defaultLogConfig defaultGaugeRefresh pools (Worker.runSelectedWorkerPools enabled)
+  withTelemetryHere $ \tel -> do
+    refresh <- liftIO defaultGaugeRefresh
+    poolRun tel defaultLogConfig refresh pools (Worker.runSelectedWorkerPools enabled)
 
 -- | 'runWorkerPools' over a handle the caller installed itself, with the gauge loop's
 -- base log config and refresh interval.
@@ -178,9 +183,11 @@ poolRun
 poolRun tel baseLog refreshInterval pools run =
   withGauges tel baseLog refreshInterval (run (instrumentPools tel pools))
 
--- | Gauge refresh interval the handle-less entry points use.
-defaultGaugeRefresh :: NominalDiffTime
-defaultGaugeRefresh = 15
+-- | Gauge refresh interval the handle-less entry points use: the SDK's metric export interval.
+defaultGaugeRefresh :: IO NominalDiffTime
+defaultGaugeRefresh = seconds . periodicIntervalMicros <$> periodicMetricReaderOptionsFromEnv
+  where
+    seconds us = fromIntegral us / 1_000_000
 
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig

@@ -903,6 +903,9 @@ Grant `pg_read_all_stats` for Postgres health beyond arbiter's own role. One rep
 scans per interval and the rest export its reading, so aggregate queue depth and Postgres
 health across replicas with `max`, and the per-process counters and latencies with `sum`.
 
+Queue and Postgres gauges are scanned once per `OTEL_METRIC_EXPORT_INTERVAL` (default 60s).
+The `With` variants take the interval instead.
+
 ### Local stack
 
 Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm) with the arbiter

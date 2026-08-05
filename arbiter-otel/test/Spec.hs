@@ -139,9 +139,6 @@ recordingTracerProvider = do
 dashboardPath :: FilePath
 dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
 
-metricSources :: [FilePath]
-metricSources = ["src/Arbiter/Otel/Metrics.hs", "src/Arbiter/Otel/Gauges.hs"]
-
 -- | Every @arbiter_*@ family the dashboard names, Prometheus having flattened the dots.
 -- Read from the whole file rather than the queries alone: a metric named in a panel
 -- description should be just as real as one in a query.
@@ -150,12 +147,9 @@ dashboardMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
   where
     nameChar c = isAsciiLower c || c == '_'
 
--- | Every instrument name the source registers, as Prometheus renders it. Quoted, so
--- a haddock mention of a metric does not count as declaring one.
-declaredMetrics :: Text -> [Text]
-declaredMetrics = map (T.replace "." "_" . T.takeWhile nameChar . T.drop 1 . snd) . T.breakOnAll "\"arbiter."
-  where
-    nameChar c = isAsciiLower c || c == '_' || c == '.'
+-- | Every instrument the library registers, as Prometheus renders it.
+declaredMetrics :: [Text]
+declaredMetrics = map (T.replace "." "_") Otel.arbiterMetricNames
 
 -- | Every point a collection produced, as its metric name and attributes.
 collected :: SdkMeterEnv -> IO [(Text, Attributes)]
@@ -247,14 +241,13 @@ spec = do
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
   describe "provisioned dashboard" $ do
-    declared <- runIO (foldMap declaredMetrics <$> traverse TIO.readFile metricSources)
     referenced <- runIO (dashboardMetrics <$> TIO.readFile dashboardPath)
 
     it "queries only metrics the library registers" $
-      filter (\r -> not (any (`T.isPrefixOf` r) declared)) referenced `shouldBe` []
+      filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
 
     it "has a panel for every metric the library registers" $
-      filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declared `shouldBe` []
+      filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
 
   describe "consumer spans" $ do
     (recorded, provider) <- runIO recordingTracerProvider
