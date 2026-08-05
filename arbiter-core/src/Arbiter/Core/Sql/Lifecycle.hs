@@ -195,6 +195,7 @@ nackJobSQL schema tableName jobId att =
         SET attempts = GREATEST(attempts - 1, 0),
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4} AND NOT suspended
+          AND claimed_by IS NOT NULL
       |]
 
 -- | Promote a delayed or retrying job to be immediately visible.

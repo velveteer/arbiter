@@ -28,7 +28,7 @@ lockGroupsSQL schema tableName limit =
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
 -- returning the rows it rewrote. A separate statement, so its snapshot post-dates
 -- the lock and cannot clobber a concurrent claim's @in_flight_until@. The INSERT
--- only repairs missing rows, at most @limit@ of them.
+-- only repairs missing rows, at most @limit@ keys per pass.
 refreshGroupsSQL :: Text -> Text -> Int -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName limit keys =
   let tbl = jobQueueTable schema tableName

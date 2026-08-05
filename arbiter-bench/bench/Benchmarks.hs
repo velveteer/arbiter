@@ -44,6 +44,7 @@ import Arbiter.Worker
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race_)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Exception (finally)
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -77,6 +78,7 @@ import OpenTelemetry.Trace.Core
   , TracerProvider
   , createTracerProvider
   , emptyTracerProviderOptions
+  , getGlobalTracerProvider
   , setGlobalTracerProvider
   )
 import Orville.PostgreSQL qualified as O
@@ -210,20 +212,26 @@ benchTelemetryVar :: MVar (Maybe (TracerProvider, Otel.Telemetry))
 benchTelemetryVar = unsafePerformIO (newMVar Nothing)
 {-# NOINLINE benchTelemetryVar #-}
 
--- | Instrument a trial's pools, or hand them back untouched. Each trial installs the
--- global tracer provider it measures.
-instrumentPools
+-- | Run @use@ over a trial's pools under the global tracer provider that trial
+-- measures, restoring the previous provider afterwards.
+withInstrumentedPools
   :: (MonadUnliftIO m, QueueOperation m BenchPayload)
   => Instrumentation
   -> [WorkerConfig m BenchPayload]
-  -> IO [WorkerConfig m BenchPayload]
-instrumentPools Plain configs = do
-  setGlobalTracerProvider =<< createTracerProvider [] emptyTracerProviderOptions
-  pure configs
-instrumentPools Instrumented configs = do
-  (tp, tel) <- benchTelemetry
-  setGlobalTracerProvider tp
-  pure (map (Otel.instrumentConfig tel) configs)
+  -> ([WorkerConfig m BenchPayload] -> IO a)
+  -> IO a
+withInstrumentedPools otel configs use = do
+  previous <- getGlobalTracerProvider
+  instrumented `finally` setGlobalTracerProvider previous
+  where
+    instrumented = case otel of
+      Plain -> do
+        setGlobalTracerProvider =<< createTracerProvider [] emptyTracerProviderOptions
+        use configs
+      Instrumented -> do
+        (tp, tel) <- benchTelemetry
+        setGlobalTracerProvider tp
+        use (map (Otel.instrumentConfig tel) configs)
 
 -- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
 -- flaky (fail once into backoff), a fifth are scheduled into the near future,
@@ -724,18 +732,18 @@ steadyStateTrial runM producerRunM statsConn mkSingle durationUs numPools worker
     BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
       acked <- flakyBatch cb jobs
       liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
-  instrumented <- instrumentPools otel configs
-  runSteadyStateTrial
-    runM
-    producerRunM
-    statsConn
-    instrumented
-    processedCounter
-    producerBatchSize
-    10
-    50_000
-    flavor
-    durationUs
+  withInstrumentedPools otel configs $ \instrumented ->
+    runSteadyStateTrial
+      runM
+      producerRunM
+      statsConn
+      instrumented
+      processedCounter
+      producerBatchSize
+      10
+      50_000
+      flavor
+      durationUs
 
 -- | Count one processed job against a steady-state trial's counter.
 countProcessed :: (MonadIO n) => IORef Int -> n ()

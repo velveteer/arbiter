@@ -125,31 +125,39 @@ registerInstruments meter cells = do
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
       shared desc = desc <> " (shared reading, do not sum across replicas)"
       regGauge name unit desc cbs =
-        void $ meterCreateObservableGaugeDouble meter name (Just unit) (Just desc) defaultAdvisoryParameters cbs
+        void $
+          meterCreateObservableGaugeDouble
+            meter
+            (Name.metricName name)
+            (Just unit)
+            (Just desc)
+            defaultAdvisoryParameters
+            cbs
       reg name unit desc emit = regGauge name unit (shared desc) (callback emit)
       regCounter name unit desc series =
-        let emit res c = traverse_ (observeRise (counterBaselines cells) name res (takenAt c)) (series (reading c))
+        let emit res c =
+              traverse_ (observeRise (counterBaselines cells) (Name.metricName name) res (takenAt c)) (series (reading c))
          in void $
               meterCreateObservableCounterDouble
                 meter
-                name
+                (Name.metricName name)
                 (Just unit)
                 (Just (shared desc))
                 defaultAdvisoryParameters
                 (withCached emit)
 
-  reg Name.queueDepth "{job}" "Jobs in a queue by status" $
+  reg Name.QueueDepth "{job}" "Jobs in a queue by status" $
     observed $
       over queues $ \o ->
         [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
         | (st, n) <- statusCounts (overviewStats o)
         ]
-  reg Name.queueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
+  reg Name.QueueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
     observed $
       over queues $ \o ->
         [([("queue", overviewQueue o)], fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o)))]
   -- The states partition the live workers, so a queue's fleet is their sum.
-  reg Name.workers "{worker}" "Registered workers by state" $
+  reg Name.Workers "{worker}" "Registered workers by state" $
     observed $
       over queues $ \o ->
         let paused = overviewWorkersPaused o
@@ -158,15 +166,15 @@ registerInstruments meter cells = do
             ]
 
   -- Keyed by policy prefix, never by admission key: a per-tenant suffix would be unbounded.
-  reg Name.admissionKeys "{key}" "Live admission keys, by policy" $
+  reg Name.AdmissionKeys "{key}" "Live admission keys, by policy" $
     bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
-  reg Name.admissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
+  reg Name.AdmissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
     bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
-  reg Name.admissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
+  reg Name.AdmissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
     perPolicy concurrency Conc.prefix (fromIntegral . Conc.totalInFlight)
-  reg Name.admissionBusiestKey "{job}" "In-flight count of the fullest key, by policy" $
+  reg Name.AdmissionBusiestKey "{job}" "In-flight count of the fullest key, by policy" $
     perPolicy concurrency Conc.prefix (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
-  reg Name.admissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
+  reg Name.AdmissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
     observed $
       over rateLimits $ \p ->
         [ ([("policy", RL.prefix p), ("stat", stat)], t)
@@ -174,34 +182,34 @@ registerInstruments meter cells = do
         , t <- toList mt
         ]
 
-  reg Name.pgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
-  reg Name.pgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
-  reg Name.pgTableAutovacuumAge "s" "Seconds since last (auto)vacuum (-1 = never)" $
+  reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
+  reg Name.PgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
+  reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum (-1 = never)" $
     perTable Health.autovacuumAge
-  reg Name.pgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
-  reg Name.pgConnections "{connection}" "Backends by state" $
+  reg Name.PgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
+  reg Name.PgConnections "{connection}" "Backends by state" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)
-  reg Name.pgOldestTransactionAge "s" "Age of the oldest open transaction" $
+  reg Name.PgOldestTransactionAge "s" "Age of the oldest open transaction" $
     perDb Health.oldestTxnAge
-  reg Name.pgOldestQueryAge "s" "Age of the oldest running query" $ perDb Health.oldestQueryAge
-  reg Name.pgXidAge "{transaction}" "Transaction-id age (wraparound headroom)" $
+  reg Name.PgOldestQueryAge "s" "Age of the oldest running query" $ perDb Health.oldestQueryAge
+  reg Name.PgXidAge "{transaction}" "Transaction-id age (wraparound headroom)" $
     perDb (fromIntegral . Health.xidAge)
-  reg Name.pgBackends "{backend}" "Backends currently connected" $
+  reg Name.PgBackends "{backend}" "Backends currently connected" $
     perDb (fromIntegral . Health.numBackends)
 
-  regCounter Name.pgTableScans "{scan}" "Table scans, by the access path they took" $
+  regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
     perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
-  regCounter Name.pgBlocks "{block}" "Shared-buffer reads, by whether they hit the cache" $
+  regCounter Name.PgBlocks "{block}" "Shared-buffer reads, by whether they hit the cache" $
     perDbTotals "source" (\h -> [("hit", Health.blksHit h), ("disk", Health.blksRead h)])
-  regCounter Name.pgTransactions "{transaction}" "Transactions by outcome" $
+  regCounter Name.PgTransactions "{transaction}" "Transactions by outcome" $
     perDbTotals "outcome" (\h -> [("commit", Health.xactCommit h), ("rollback", Health.xactRollback h)])
-  regCounter Name.pgDeadlocks "{deadlock}" "Deadlocks detected" $ dbTotal Health.deadlocks
+  regCounter Name.PgDeadlocks "{deadlock}" "Deadlocks detected" $ dbTotal Health.deadlocks
 
   -- How far behind the exported readings have fallen, from registration until the
   -- first. A stopped loop leaves the other gauges holding their last reading, which
   -- only this tells apart from a fresh one.
   regGauge
-    Name.gaugesAge
+    Name.GaugesAge
     "s"
     "Seconds since the exported readings were scanned"
     [ \res -> do

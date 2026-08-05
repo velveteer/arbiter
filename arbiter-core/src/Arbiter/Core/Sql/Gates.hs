@@ -124,4 +124,5 @@ setGateMetadataSQL schemaName metadata claimedAt task =
         SET last_run_at = NOW(),
             metadata = jsonb_build_object('at', to_jsonb(#{claimedAt :: CTimestamptz}::timestamptz), 'payload', #{metadata :: CJsonb}::jsonb)
         WHERE task_name = #{task :: CText}
+          AND (metadata ->> 'at' IS NULL OR (metadata ->> 'at')::timestamptz < #{claimedAt :: CTimestamptz})
       |]

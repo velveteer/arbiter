@@ -2118,7 +2118,7 @@ groupsRefreshBatch :: Int
 groupsRefreshBatch = 20000
 
 -- | Schema-wide groups-table refresh. Refreshes each given queue in its own
--- savepoint, so one queue's failure is isolated and the rest still commit.
+-- transaction, so one queue's failure is isolated and the rest still commit.
 -- Wrap in 'runGated' so only one pool runs it per interval. Returns the rows
 -- rewritten and the queue names that failed.
 refreshAllGroups

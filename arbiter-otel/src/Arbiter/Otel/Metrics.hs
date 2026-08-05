@@ -55,16 +55,17 @@ arbiterMeter mp = getMeter mp "arbiter"
 newArbiterMeters :: MeterProvider -> IO ArbiterMeters
 newArbiterMeters mp = do
   meter <- arbiterMeter mp
-  let counter name desc = meterCreateCounterInt64 meter name Nothing (Just desc) defaultAdvisoryParameters
+  let counter name desc =
+        meterCreateCounterInt64 meter (Name.metricName name) Nothing (Just desc) defaultAdvisoryParameters
   ArbiterMeters
-    <$> counter Name.jobsClaimed "Jobs claimed by workers"
-    <*> counter Name.jobsProcessed "Jobs processed, by terminal outcome"
-    <*> counter Name.jobsRetries "Failed jobs scheduled for another attempt"
-    <*> counter Name.admissionAdmitted "Claimed jobs that passed an admission policy, by kind and policy"
-    <*> counter Name.maintenanceRows "Rows a reaper op touched, by op"
+    <$> counter Name.JobsClaimed "Jobs claimed by workers"
+    <*> counter Name.JobsProcessed "Jobs processed, by terminal outcome"
+    <*> counter Name.JobsRetries "Failed jobs scheduled for another attempt"
+    <*> counter Name.AdmissionAdmitted "Claimed jobs that passed an admission policy, by kind and policy"
+    <*> counter Name.MaintenanceRows "Rows a reaper op touched, by op"
     <*> meterCreateHistogram
       meter
-      Name.handlerDuration
+      (Name.metricName Name.HandlerDuration)
       (Just "s")
       (Just "Seconds a job spent in the handler (a batched pool records its batch's span for each job)")
       durationBuckets

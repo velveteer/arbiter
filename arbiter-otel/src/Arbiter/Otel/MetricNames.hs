@@ -2,116 +2,79 @@
 
 -- | The names of the instruments arbiter registers.
 module Arbiter.Otel.MetricNames
-  ( arbiterMetricNames
-
-    -- * Worker lifecycle
-  , jobsClaimed
-  , jobsProcessed
-  , jobsRetries
-  , admissionAdmitted
-  , maintenanceRows
-  , handlerDuration
-
-    -- * Queue depth
-  , queueDepth
-  , queueOldestReadyAge
-  , workers
-
-    -- * Admission
-  , admissionKeys
-  , admissionLimit
-  , admissionInFlight
-  , admissionBusiestKey
-  , admissionTokens
-
-    -- * Postgres health
-  , pgTableDeadTuples
-  , pgTableLiveTuples
-  , pgTableAutovacuumAge
-  , pgTableSizeBytes
-  , pgTableScans
-  , pgConnections
-  , pgBackends
-  , pgOldestTransactionAge
-  , pgOldestQueryAge
-  , pgXidAge
-  , pgBlocks
-  , pgTransactions
-  , pgDeadlocks
-  , gaugesAge
+  ( MetricName (..)
+  , metricName
+  , arbiterMetricNames
   ) where
 
 import Data.Text (Text)
 
 -- | Every instrument the library registers.
+data MetricName
+  = -- Worker lifecycle
+    JobsClaimed
+  | JobsProcessed
+  | JobsRetries
+  | AdmissionAdmitted
+  | MaintenanceRows
+  | HandlerDuration
+  | -- Queue depth
+    QueueDepth
+  | QueueOldestReadyAge
+  | Workers
+  | -- Admission
+    AdmissionKeys
+  | AdmissionLimit
+  | AdmissionInFlight
+  | AdmissionBusiestKey
+  | AdmissionTokens
+  | -- Postgres health
+    PgTableDeadTuples
+  | PgTableLiveTuples
+  | PgTableAutovacuumAge
+  | PgTableSizeBytes
+  | PgTableScans
+  | PgConnections
+  | PgBackends
+  | PgOldestTransactionAge
+  | PgOldestQueryAge
+  | PgXidAge
+  | PgBlocks
+  | PgTransactions
+  | PgDeadlocks
+  | GaugesAge
+  deriving stock (Bounded, Enum, Eq, Show)
+
+metricName :: MetricName -> Text
+metricName = \case
+  JobsClaimed -> "arbiter.jobs.claimed"
+  JobsProcessed -> "arbiter.jobs.processed"
+  JobsRetries -> "arbiter.jobs.retries"
+  AdmissionAdmitted -> "arbiter.admission.admitted"
+  MaintenanceRows -> "arbiter.maintenance.rows"
+  HandlerDuration -> "arbiter.job.handler.duration"
+  QueueDepth -> "arbiter.queue.depth"
+  QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
+  Workers -> "arbiter.workers"
+  AdmissionKeys -> "arbiter.admission.keys"
+  AdmissionLimit -> "arbiter.admission.limit"
+  AdmissionInFlight -> "arbiter.admission.in_flight"
+  AdmissionBusiestKey -> "arbiter.admission.busiest_key"
+  AdmissionTokens -> "arbiter.admission.tokens"
+  PgTableDeadTuples -> "arbiter.pg.table.dead_tuples"
+  PgTableLiveTuples -> "arbiter.pg.table.live_tuples"
+  PgTableAutovacuumAge -> "arbiter.pg.table.autovacuum_age"
+  PgTableSizeBytes -> "arbiter.pg.table.size_bytes"
+  PgTableScans -> "arbiter.pg.table.scans"
+  PgConnections -> "arbiter.pg.connections"
+  PgBackends -> "arbiter.pg.backends"
+  PgOldestTransactionAge -> "arbiter.pg.oldest_transaction_age"
+  PgOldestQueryAge -> "arbiter.pg.oldest_query_age"
+  PgXidAge -> "arbiter.pg.xid_age"
+  PgBlocks -> "arbiter.pg.blocks"
+  PgTransactions -> "arbiter.pg.transactions"
+  PgDeadlocks -> "arbiter.pg.deadlocks"
+  GaugesAge -> "arbiter.gauges.age"
+
 arbiterMetricNames :: [Text]
-arbiterMetricNames =
-  [ jobsClaimed
-  , jobsProcessed
-  , jobsRetries
-  , admissionAdmitted
-  , maintenanceRows
-  , handlerDuration
-  , queueDepth
-  , queueOldestReadyAge
-  , workers
-  , admissionKeys
-  , admissionLimit
-  , admissionInFlight
-  , admissionBusiestKey
-  , admissionTokens
-  , pgTableDeadTuples
-  , pgTableLiveTuples
-  , pgTableAutovacuumAge
-  , pgTableSizeBytes
-  , pgTableScans
-  , pgConnections
-  , pgBackends
-  , pgOldestTransactionAge
-  , pgOldestQueryAge
-  , pgXidAge
-  , pgBlocks
-  , pgTransactions
-  , pgDeadlocks
-  , gaugesAge
-  ]
-
-jobsClaimed, jobsProcessed, jobsRetries, admissionAdmitted, maintenanceRows, handlerDuration :: Text
-jobsClaimed = "arbiter.jobs.claimed"
-jobsProcessed = "arbiter.jobs.processed"
-jobsRetries = "arbiter.jobs.retries"
-admissionAdmitted = "arbiter.admission.admitted"
-maintenanceRows = "arbiter.maintenance.rows"
-handlerDuration = "arbiter.job.handler.duration"
-
-queueDepth, queueOldestReadyAge, workers :: Text
-queueDepth = "arbiter.queue.depth"
-queueOldestReadyAge = "arbiter.queue.oldest_ready_age"
-workers = "arbiter.workers"
-
-admissionKeys, admissionLimit, admissionInFlight, admissionBusiestKey, admissionTokens :: Text
-admissionKeys = "arbiter.admission.keys"
-admissionLimit = "arbiter.admission.limit"
-admissionInFlight = "arbiter.admission.in_flight"
-admissionBusiestKey = "arbiter.admission.busiest_key"
-admissionTokens = "arbiter.admission.tokens"
-
-pgTableDeadTuples, pgTableLiveTuples, pgTableAutovacuumAge, pgTableSizeBytes, pgTableScans :: Text
-pgTableDeadTuples = "arbiter.pg.table.dead_tuples"
-pgTableLiveTuples = "arbiter.pg.table.live_tuples"
-pgTableAutovacuumAge = "arbiter.pg.table.autovacuum_age"
-pgTableSizeBytes = "arbiter.pg.table.size_bytes"
-pgTableScans = "arbiter.pg.table.scans"
-
-pgConnections, pgBackends, pgOldestTransactionAge, pgOldestQueryAge, pgXidAge :: Text
-pgConnections = "arbiter.pg.connections"
-pgBackends = "arbiter.pg.backends"
-pgOldestTransactionAge = "arbiter.pg.oldest_transaction_age"
-pgOldestQueryAge = "arbiter.pg.oldest_query_age"
-pgXidAge = "arbiter.pg.xid_age"
-
-pgBlocks, pgTransactions, pgDeadlocks, gaugesAge :: Text
-pgBlocks = "arbiter.pg.blocks"
-pgTransactions = "arbiter.pg.transactions"
-pgDeadlocks = "arbiter.pg.deadlocks"
-gaugesAge = "arbiter.gauges.age"
+arbiterMetricNames = map metricName [minBound .. maxBound]

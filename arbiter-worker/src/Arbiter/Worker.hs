@@ -662,7 +662,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         let (done, reclaimed) = partition (isAcked acked) js
             reclaimedLog = withJobContextList (logConfig config) reclaimed
         unless (null reclaimed) $ do
-          tryLog reclaimedLog Info "Jobs no longer claimed here during bulk completion, skipped"
+          tryLog reclaimedLog Info "Jobs no longer claimed by this worker during bulk completion, skipped"
           -- A force-cancel voids the claim the same way a reclaim does.
           cancelled <-
             deleteCancelledOrWarn
@@ -672,11 +672,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
               (map Job.primaryKey reclaimed)
           traverse_ (\j -> reportReclaimed cancelled j >> markUnowned j) reclaimed
         traverse_ finalize done
-      reportReclaimed cancelled j
-        | Set.member (Job.primaryKey j) cancelled = fireForceCancelled cfgJ j
-        | otherwise = fireUnavailable cfgJ j "no longer claimed by this worker"
-        where
-          cfgJ = withJobLog config j
+      reportReclaimed cancelled = reportGoneJob config cancelled "no longer claimed by this worker"
       markUnowned j = markJobUnowned handoff j >> markHandled j
       callbacks =
         BatchCallbacks
@@ -817,12 +813,23 @@ reportBatchOutcome
 reportBatchOutcome config startTime endTime jobs handoff outcome = do
   unhandled <- pendingJobs handoff jobs
   unowned <- liftIO (readIORef (unownedRef handoff))
+  schemaName <- Arb.getSchema
   let splitNamed ids = let idSet = Set.fromList ids in partition (\j -> Set.member (Job.primaryKey j) idSet) unhandled
       reportUnavailable ids reason = do
         -- An exception naming no job speaks for none of them, so the remainder keeps
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
-        traverse_ (\job -> fireUnavailable (withJobLog config job) job reason >> markJobHandled handoff job) jobsGone
+        -- A force-cancel voids the claim the same way a reclaim does.
+        cancelled <-
+          if null jobsGone
+            then pure mempty
+            else
+              deleteCancelledOrWarn
+                batchLog
+                schemaName
+                (Job.queueName firstJob)
+                (map Job.primaryKey jobsGone)
+        traverse_ (\job -> reportGoneJob config cancelled reason job >> markJobHandled handoff job) jobsGone
         unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
@@ -836,7 +843,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
           tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
           reportUnavailable stolen "reclaimed by another worker"
       | Just (JobNotFoundException _ gone) <- fromException exc -> do
-          tryLog batchLog Info "Job(s) no longer available, skipping retry"
+          tryLog batchLog Info "Job(s) no longer claimed by this worker, skipping retry"
           reportUnavailable gone "no longer available"
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
@@ -852,6 +859,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
             when (cancelsTree kind) $ traverse_ (void . cancelJobFor kind) unownedOf
           traverse_ (markJobHandled handoff) unhandled
   where
+    (firstJob :| _) = jobs
     batchLog = withJobContext (logConfig config) jobs
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
     failJob exc job =
@@ -952,6 +960,21 @@ classifyException e
 -- | Whether a failure deletes a job tree rather than acting on the job's own claim.
 cancelsTree :: FailureKind -> Bool
 cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
+
+-- | Report a job the ack no longer owns, as cancelled when a force-cancel deleted it.
+reportGoneJob
+  :: (JobOperation m payload, MonadUnliftIO m)
+  => WorkerConfig m payload
+  -> Set.Set Int64
+  -- ^ Ids a force-cancel accounted for.
+  -> Text
+  -> Job.JobRead payload
+  -> m ()
+reportGoneJob config cancelled reason job
+  | Set.member (Job.primaryKey job) cancelled = fireForceCancelled cfgJ job
+  | otherwise = fireUnavailable cfgJ job reason
+  where
+    cfgJ = withJobLog config job
 
 -- | Report a claimed job the worker can no longer act on.
 fireUnavailable
