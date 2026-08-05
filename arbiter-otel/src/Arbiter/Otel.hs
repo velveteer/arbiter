@@ -32,7 +32,6 @@ module Arbiter.Otel
   , runSelectedWorkerPools
   , runWorkerPoolsWith
   , runSelectedWorkerPoolsWith
-  , defaultGaugeRefresh
 
     -- * Gauges
   , withGauges
@@ -63,8 +62,7 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.TypeLits (KnownSymbol)
-import OpenTelemetry.Metric (PeriodicMetricReaderOptions (..), periodicMetricReaderOptionsFromEnv)
-import UnliftIO (MonadUnliftIO, liftIO, withRunInIO)
+import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
@@ -124,9 +122,7 @@ runWorkerPools
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools =
-  withTelemetryHere $ \tel -> do
-    refresh <- liftIO defaultGaugeRefresh
-    poolRun tel defaultLogConfig refresh pools Worker.runWorkerPools
+  withTelemetryHere $ \tel -> runWorkerPoolsWith tel defaultLogConfig (gaugeRefresh tel) pools
 
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
@@ -136,9 +132,7 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools =
-  withTelemetryHere $ \tel -> do
-    refresh <- liftIO defaultGaugeRefresh
-    poolRun tel defaultLogConfig refresh pools (Worker.runSelectedWorkerPools enabled)
+  withTelemetryHere $ \tel -> runSelectedWorkerPoolsWith tel defaultLogConfig (gaugeRefresh tel) enabled pools
 
 -- | 'runWorkerPools' over a handle the caller installed itself, with the gauge loop's
 -- base log config and refresh interval.
@@ -152,7 +146,7 @@ runWorkerPoolsWith
   -> [NamedWorkerPool m]
   -> m ()
 runWorkerPoolsWith tel baseLog refreshInterval pools =
-  poolRun tel baseLog refreshInterval pools Worker.runWorkerPools
+  withGauges tel baseLog refreshInterval (Worker.runWorkerPools (instrumentPools tel pools))
 
 -- | 'runSelectedWorkerPools' over a handle the caller installed itself.
 runSelectedWorkerPoolsWith
@@ -165,29 +159,11 @@ runSelectedWorkerPoolsWith
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPoolsWith tel baseLog refreshInterval enabled pools =
-  poolRun tel baseLog refreshInterval pools (Worker.runSelectedWorkerPools enabled)
+  withGauges tel baseLog refreshInterval (Worker.runSelectedWorkerPools enabled (instrumentPools tel pools))
 
 -- | Install the SDK around an action in the database monad.
 withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a
 withTelemetryHere use = withRunInIO $ \runDb -> withTelemetryFromEnv (runDb . use)
-
--- | Run @run@ over the instrumented pools with the gauges alongside.
-poolRun
-  :: (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
-  => Telemetry
-  -> LogConfig
-  -> NominalDiffTime
-  -> [NamedWorkerPool m]
-  -> ([NamedWorkerPool m] -> m ())
-  -> m ()
-poolRun tel baseLog refreshInterval pools run =
-  withGauges tel baseLog refreshInterval (run (instrumentPools tel pools))
-
--- | Gauge refresh interval the handle-less entry points use: the SDK's metric export interval.
-defaultGaugeRefresh :: IO NominalDiffTime
-defaultGaugeRefresh = seconds . periodicIntervalMicros <$> periodicMetricReaderOptionsFromEnv
-  where
-    seconds us = fromIntegral us / 1_000_000
 
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig

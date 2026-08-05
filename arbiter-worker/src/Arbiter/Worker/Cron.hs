@@ -81,8 +81,7 @@ import GHC.Generics (Generic)
 import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
 import UnliftIO (MonadUnliftIO, TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny, writeTVar)
 
-import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | How overlapping cron ticks are deduplicated.

@@ -26,8 +26,7 @@ import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
 import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
 
-import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Run an action in a retry loop, surviving transient failures.

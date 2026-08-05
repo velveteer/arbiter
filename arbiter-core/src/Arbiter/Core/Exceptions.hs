@@ -34,7 +34,6 @@ module Arbiter.Core.Exceptions
   , throwNack
   , throwParsing
   , throwInternal
-  , throwJobNotFound
   , throwJobNotFoundIds
   , throwJobStolen
   , throwJobStolenIds
@@ -167,11 +166,7 @@ throwParsing msg = UE.throwIO (ParsingException msg)
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
-throwJobNotFound :: (MonadIO m) => Text -> m a
-throwJobNotFound msg = throwJobNotFoundIds msg []
-
--- | 'throwJobNotFound' naming the jobs that went away, so the worker can tell them
--- from the rest of the batch.
+-- | Names the jobs that went away, so the worker can tell them from the rest of the batch.
 throwJobNotFoundIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobNotFoundIds msg ids = UE.throwIO (JobNotFoundException msg ids)
 

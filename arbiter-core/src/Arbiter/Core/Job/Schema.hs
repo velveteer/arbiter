@@ -62,6 +62,7 @@ module Arbiter.Core.Job.Schema
   , eventStreamingDLQTriggerName
 
     -- * Table Name Helpers
+  , qualifiedTable
   , jobQueueTable
   , jobQueueDLQTable
   , jobQueueArchiveTable
@@ -162,17 +163,21 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
 
+-- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
+qualifiedTable :: SchemaName -> TableName -> Text
+qualifiedTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
+
 -- | Qualified table name: @jobQueueTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs"@
 jobQueueTable :: SchemaName -> TableName -> Text
-jobQueueTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
+jobQueueTable = qualifiedTable
 
 -- | Qualified DLQ table name: @jobQueueDLQTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_dlq"@
 jobQueueDLQTable :: SchemaName -> TableName -> Text
-jobQueueDLQTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_dlq")
+jobQueueDLQTable schemaName tableName = qualifiedTable schemaName (tableName <> dlqSuffix)
 
 -- | Qualified archive table name: @jobQueueArchiveTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_archive"@
 jobQueueArchiveTable :: SchemaName -> TableName -> Text
-jobQueueArchiveTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_archive")
+jobQueueArchiveTable schemaName tableName = qualifiedTable schemaName (tableName <> archiveSuffix)
 
 -- | Backfill NULL @max_attempts@ to the default and set the column default.
 -- Left nullable for rolling-deploy safety (old code may still insert NULL).
@@ -187,16 +192,22 @@ setMaxAttemptsDefaultSQL schemaName tableName =
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
 jobQueueResultsTable :: Text -> Text -> Text
-jobQueueResultsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_results")
+jobQueueResultsTable schemaName tableName = qualifiedTable schemaName (tableName <> resultsSuffix)
 
 -- | Qualified groups table name: @jobQueueGroupsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_groups"@
 jobQueueGroupsTable :: Text -> Text -> Text
-jobQueueGroupsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_groups")
+jobQueueGroupsTable schemaName tableName = qualifiedTable schemaName (tableName <> groupsSuffix)
+
+dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix :: Text
+dlqSuffix = "_dlq"
+archiveSuffix = "_archive"
+resultsSuffix = "_results"
+groupsSuffix = "_groups"
 
 -- | A queue's own table and its companions, unqualified and unquoted, for callers that
 -- match on @pg_catalog@ relnames.
 queueTableNames :: TableName -> [TableName]
-queueTableNames tableName = tableName : map (tableName <>) ["_dlq", "_archive", "_results", "_groups"]
+queueTableNames tableName = tableName : map (tableName <>) [dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix]
 
 -- | SQL to create the schema for Arbiter tables
 createSchemaSQL :: SchemaName -> Text

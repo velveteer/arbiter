@@ -134,7 +134,7 @@ reEnqueueFromArchiveSQL schema tableName archiveId =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
-      carried = enqueuedAgainCols Nothing
+      carried = enqueuedAgainCols
    in rows
         (jobRowCodec tableName)
         [sql|

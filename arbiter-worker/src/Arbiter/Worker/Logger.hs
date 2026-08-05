@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Logging for the Arbiter worker.
 --
 -- Arbiter handles its own structured JSON logging internally. Users can:
@@ -18,15 +20,27 @@ module Arbiter.Worker.Logger
     -- * Log Levels
   , LogLevel (..)
 
+    -- * Emitting
+  , tryLog
+  , warnEx
+
     -- * Re-exports for structured context
   , Pair
   , (.=)
   ) where
 
+import Control.Exception (displayException, finally)
+import Control.Monad (void, when)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Logger qualified as ML
 import Control.Monad.Logger.Aeson ((.=))
+import Control.Monad.Logger.Aeson qualified as MLA
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
 import Data.Text (Text)
+import Data.Text qualified as T
 import System.Log.FastLogger (LoggerSet)
+import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 
 -- | Log severity levels.
 data LogLevel
@@ -87,3 +101,36 @@ defaultLogConfig =
 -- | Silent log configuration: discards all logs.
 silentLogConfig :: LogConfig
 silentLogConfig = defaultLogConfig {logDestination = LogDiscard}
+
+-- | Log a message, swallowing any exceptions from the logging infrastructure.
+tryLog :: (MonadUnliftIO m) => LogConfig -> LogLevel -> Text -> m ()
+tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
+
+-- | 'tryLog' an exception at 'Warning' under @label@.
+warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
+warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
+
+-- | Log a message using the given config.
+logMessage :: LogConfig -> LogLevel -> Text -> IO ()
+logMessage config level msg = when (level >= minLogLevel config) $ do
+  extraCtx <- additionalContext config
+  runWithDestination (logDestination config) extraCtx level msg
+
+-- | Run the logger with the appropriate destination and context.
+runWithDestination :: LogDestination -> [Pair] -> LogLevel -> Text -> IO ()
+runWithDestination dest ctx level msg = case dest of
+  LogStdout -> MLA.runStdoutLoggingT $ MLA.withThreadContext ctx $ logAt level msg
+  LogStderr -> MLA.runStderrLoggingT $ MLA.withThreadContext ctx $ logAt level msg
+  LogFastLogger loggerSet -> MLA.runFastLoggingT loggerSet $ MLA.withThreadContext ctx $ logAt level msg
+  LogCallback cb -> do
+    threadCtx <- KM.toList <$> MLA.myThreadContext
+    cb level msg (threadCtx <> ctx)
+  LogTee base extra ->
+    runWithDestination base ctx level msg `finally` runWithDestination extra ctx level msg
+  LogDiscard -> pure ()
+  where
+    logAt :: (ML.MonadLogger m) => LogLevel -> Text -> m ()
+    logAt Debug = ML.logDebugN
+    logAt Info = ML.logInfoN
+    logAt Warning = ML.logWarnN
+    logAt Error = ML.logErrorN

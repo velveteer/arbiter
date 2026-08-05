@@ -20,6 +20,7 @@ import Data.Foldable (traverse_)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (NominalDiffTime)
 import OpenTelemetry.Attributes (lookupAttributeByKey)
 import OpenTelemetry.Attributes.Key (AttributeKey)
 import OpenTelemetry.Environment (lookupBooleanEnv)
@@ -31,7 +32,9 @@ import OpenTelemetry.Log
   , shutdownLoggerProvider
   )
 import OpenTelemetry.Metric
-  ( createMeterProvider
+  ( PeriodicMetricReaderOptions (..)
+  , createMeterProvider
+  , defaultPeriodicMetricReaderOptions
   , defaultSdkMeterProviderOptions
   , forkPeriodicMetricReader
   , periodicMetricReaderOptionsFromEnv
@@ -62,6 +65,8 @@ data Telemetry = Telemetry
   , provider :: MeterProvider
   , logDestination :: Maybe LogDestination
   -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
+  , gaugeRefresh :: NominalDiffTime
+  -- ^ The metric export interval this handle resolved.
   , telemetrySummary :: Text
   -- ^ What this handle exports and where, for the caller to log at startup.
   }
@@ -74,9 +79,10 @@ withTelemetry action = do
   (processors, traceOpts) <- getTracerProviderInitializationOptions
   let resources = tracerProviderOptionsResources traceOpts
   previousMeters <- getGlobalMeterProvider
+  readerOpts <- periodicMetricReaderOptionsFromEnv
   evalContT $ do
     (mp, env) <- ContT (withMeterProvider resources previousMeters)
-    metricsNote <- ContT (withReader env)
+    metricsNote <- ContT (withReader readerOpts env)
     tracesNote <- ContT (withTraces processors traceOpts)
     logsNote <- ContT withLogs
     liftIO $ do
@@ -86,6 +92,7 @@ withTelemetry action = do
         (baseTelemetry mp)
           { meters = ms
           , logDestination = dest
+          , gaugeRefresh = refreshFor readerOpts
           , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
           }
   where
@@ -105,10 +112,10 @@ withTelemetry action = do
         (createMeterProvider resources defaultSdkMeterProviderOptions)
         (\(m, _) -> setGlobalMeterProvider previous >> void (shutdownMeterProvider m Nothing))
         (\(m, env) -> setGlobalMeterProvider m >> inner (m, env))
-    withReader env =
+    withReader readerOpts env =
       bracketSignal
         "metrics"
-        (resolveMetricExporter >>= \e -> periodicMetricReaderOptionsFromEnv >>= forkPeriodicMetricReader env e)
+        (resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts)
         stopPeriodicMetricReader
     withLogs =
       withGlobalProvider
@@ -159,8 +166,13 @@ baseTelemetry mp =
     { meters = Nothing
     , provider = mp
     , logDestination = Nothing
+    , gaugeRefresh = refreshFor defaultPeriodicMetricReaderOptions
     , telemetrySummary = "telemetry off"
     }
+
+-- | A metric reader's export interval.
+refreshFor :: PeriodicMetricReaderOptions -> NominalDiffTime
+refreshFor opts = fromIntegral (periodicIntervalMicros opts) / 1_000_000
 
 -- | 'withTelemetryIf' on @OTEL_SDK_DISABLED@, the spec's own switch.
 withTelemetryFromEnv :: (Telemetry -> IO a) -> IO a
@@ -178,10 +190,12 @@ withExternalTelemetry :: MeterProvider -> Maybe LoggerProvider -> (Telemetry -> 
 withExternalTelemetry mp mlp action = do
   tracing <- isJust <$> resolveTracer
   ms <- newArbiterMeters mp
+  readerOpts <- periodicMetricReaderOptionsFromEnv
   action
     (baseTelemetry mp)
       { meters = Just ms
       , logDestination = loggerDestination <$> mlp
+      , gaugeRefresh = refreshFor readerOpts
       , telemetrySummary =
           "telemetry on, caller's providers" <> if tracing then mempty else ", no global tracer provider installed"
       }

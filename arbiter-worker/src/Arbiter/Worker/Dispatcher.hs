@@ -19,8 +19,7 @@ import UnliftIO.Exception qualified as Ex
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), handlerBatchSize, readEffectiveState)
-import Arbiter.Worker.Logger (LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.Logger (LogLevel (..), tryLog)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 
 -- | Wake on NOTIFY, poll timer, or worker-finished, then claim up to capacity.

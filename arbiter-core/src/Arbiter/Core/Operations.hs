@@ -336,6 +336,17 @@ admissionColumns p =
 traceStamp :: (MonadIO m) => m (JobWrite payload -> JobWrite payload)
 traceStamp = stampTraceContext <$> liftIO currentTraceContext
 
+-- | The row an insert writes: the stamped job and its admission columns.
+insertRow :: (JobPayload payload, MonadIO m) => JobWrite payload -> m (JobWrite payload, AdmissionColumns)
+insertRow job = (\stamp -> admissionRow (stamp job)) <$> traceStamp
+
+-- | 'insertRow' over a batch, sharing one stamp.
+insertRows :: (JobPayload payload, MonadIO m) => [JobWrite payload] -> m [(JobWrite payload, AdmissionColumns)]
+insertRows jobs = (\stamp -> map (admissionRow . stamp) jobs) <$> traceStamp
+
+admissionRow :: (JobPayload payload) => JobWrite payload -> (JobWrite payload, AdmissionColumns)
+admissionRow job = (job, admissionColumns (payload job))
+
 -- | Insert a job without validating that the parent exists.
 --
 -- This is an internal fast path for callers that already guarantee the parent
@@ -350,11 +361,9 @@ insertJobUnsafe
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafe schemaName tableName job0 = do
-  stamp <- traceStamp
-  let job = stamp job0
-      codec = jobCodec tableName
-      valuesFrag = insertFrag codec (job, admissionColumns (payload job))
+insertJobUnsafe schemaName tableName job = do
+  row <- insertRow job
+  let valuesFrag = insertFrag (jobCodec tableName) row
       query = case dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
         _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
@@ -572,12 +581,8 @@ insertJobsBatch
   -- ^ Jobs to insert
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
-insertJobsBatch schemaName tableName jobs0 = do
-  stamp <- traceStamp
-  let jobs = map stamp jobs0
-      codec = jobCodec tableName
-      batchSrc = batchFrag codec [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
-
+insertJobsBatch schemaName tableName jobs = do
+  batchSrc <- batchFrag (jobCodec tableName) <$> insertRows (dedupBatch jobs)
   withDbTransaction $ do
     rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
     traverse decodePayload rawJobs
@@ -590,10 +595,8 @@ insertJobsBatch_
   -> [JobWrite payload]
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
-insertJobsBatch_ schemaName tableName jobs0 = do
-  stamp <- traceStamp
-  let jobs = map stamp jobs0
-      batchSrc = batchFrag (jobCodec tableName) [(j, admissionColumns (payload j)) | j <- dedupBatch jobs]
+insertJobsBatch_ schemaName tableName jobs = do
+  batchSrc <- batchFrag (jobCodec tableName) <$> insertRows (dedupBatch jobs)
   withDbTransaction (MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc))
 
 -- | Insert a child's result into the results table.

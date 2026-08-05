@@ -53,8 +53,10 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.Lazy (toStrict)
+import Data.Text.Lazy.Builder (toLazyText)
+import Data.Text.Lazy.Builder.Int (decimal)
 import GHC.Stack (HasCallStack)
 import OpenTelemetry.Attributes (Attribute, toAttribute)
 import OpenTelemetry.Attributes.Map (AttributeMap)
@@ -297,7 +299,7 @@ messagingAttrs queue op =
 
 -- | Textual per the messaging semantic conventions, not the raw key.
 messageId :: JobRead payload -> Attribute
-messageId = toAttribute . T.pack . show . primaryKey
+messageId = toAttribute . toStrict . toLazyText . decimal . primaryKey
 
 jobAttrs :: JobRead payload -> AttributeMap
 jobAttrs job =

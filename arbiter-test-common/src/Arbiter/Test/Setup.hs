@@ -108,7 +108,7 @@ cleanupData schemaName tableName conn = do
   let truncated = filter (/= RL.arbiterRateLimitPoliciesTableName) (allSchemaTables [tableName])
       truncateSql =
         "TRUNCATE "
-          <> T.intercalate ", " (map (Schema.jobQueueTable schemaName) truncated)
+          <> T.intercalate ", " (map (Schema.qualifiedTable schemaName) truncated)
           <> " CASCADE"
       go n = do
         r <- try (execute_ conn truncateSql) :: IO (Either SqlError ())

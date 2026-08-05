@@ -30,7 +30,6 @@ module Arbiter.Core.Sql.Jobs
   , countDLQFilteredSQL
   , allJobColumns
   , allDLQColumns
-  , jobColsExceptError
   , jobColsExceptId
   , dlqCarriedCols
   , requeuedCols
@@ -338,11 +337,6 @@ allDLQColumns = codecColumns (dlqRowCodec "")
 jobColsExceptErrorColumns :: [Text]
 jobColsExceptErrorColumns = filter (/= "last_error") (drop 1 allJobColumns)
 
--- | All job columns except @id@ and @last_error@, comma-separated.
--- Used for DLQ INSERT operations where @id@ becomes @job_id@ and @last_error@ is overridden.
-jobColsExceptError :: Text
-jobColsExceptError = aliasedCols Nothing jobColsExceptErrorColumns
-
 -- | All job read columns except @id@, comma-separated. Used for the archive
 -- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
 -- other read column is copied verbatim.
@@ -364,8 +358,8 @@ requeuedCols mAlias = aliasedCols mAlias requeuedColumns
 
 -- | 'requeuedCols' for an archive re-enqueue, which starts a standalone job and so
 -- leaves the parent link behind too.
-enqueuedAgainCols :: Maybe Text -> Text
-enqueuedAgainCols mAlias = aliasedCols mAlias (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
+enqueuedAgainCols :: Text
+enqueuedAgainCols = aliasedCols Nothing (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
 
 requeuedColumns :: [Text]
 requeuedColumns = filter (`notElem` reArmed) dlqCarriedColumns
