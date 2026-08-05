@@ -177,9 +177,8 @@ registerInstruments meter cells = do
   reg Name.AdmissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
     observed $
       over rateLimits $ \p ->
-        [ ([("policy", RL.prefix p), ("stat", stat)], t)
+        [ ([("policy", RL.prefix p), ("stat", stat)], fromMaybe 0 mt)
         | (stat, mt) <- [("min", RL.minTokens p), ("avg", RL.avgTokens p)]
-        , t <- toList mt
         ]
 
   reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)

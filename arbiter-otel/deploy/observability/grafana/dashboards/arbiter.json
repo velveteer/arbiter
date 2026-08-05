@@ -770,6 +770,14 @@
         "x": 0,
         "y": 84
       },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Start time",
+            "desc": true
+          }
+        ]
+      },
       "targets": [
         {
           "refId": "A",
@@ -778,7 +786,7 @@
             "uid": "${DS_TEMPO}"
           },
           "queryType": "traceql",
-          "query": "{ resource.service.name =~ \".+\" }",
+          "query": "{ resource.service.name =~ \".+\" } with (most_recent=true)",
           "limit": 20,
           "tableType": "traces"
         }
