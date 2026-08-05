@@ -157,31 +157,21 @@ registerInstruments meter cells = do
             ]
 
   -- Keyed by policy prefix, never by admission key: a per-tenant suffix would be unbounded.
-  reg "arbiter.admission.keys" "{key}" "Live admission keys, by policy" $ \res snap -> do
-    traverse_
-      (\p -> observe res (fromIntegral (Conc.keyCount p)) (admissionAttrs concurrencyKind (Conc.prefix p)))
-      (concurrency snap)
-    traverse_
-      (\p -> observe res (fromIntegral (RL.bucketCount p)) (admissionAttrs rateLimitKind (RL.prefix p)))
-      (rateLimits snap)
-  reg "arbiter.admission.limit" "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $ \res snap -> do
-    traverse_
-      (\p -> observe res (fromIntegral (effectiveLimit p)) (admissionAttrs concurrencyKind (Conc.prefix p)))
-      (concurrency snap)
-    traverse_ (\p -> observe res (effectiveMaxTokens p) (admissionAttrs rateLimitKind (RL.prefix p))) (rateLimits snap)
-  reg "arbiter.admission.in_flight" "{job}" "Jobs holding a concurrency slot, by policy" $ \res snap ->
-    traverse_ (\p -> observe res (fromIntegral (Conc.totalInFlight p)) (policyAttrs (Conc.prefix p))) (concurrency snap)
-  reg "arbiter.admission.busiest_key" "{job}" "In-flight count of the fullest key, by policy" $ \res snap ->
-    traverse_
-      (\p -> observe res (fromIntegral (fromMaybe 0 (Conc.maxInFlight p))) (policyAttrs (Conc.prefix p)))
-      (concurrency snap)
-  reg "arbiter.admission.tokens" "{token}" "Rate-limit tokens left across a policy's buckets" $ \res snap ->
-    traverse_
-      ( \p -> do
-          traverse_ (\t -> observe res t (tokenAttrs (RL.prefix p) "min")) (RL.minTokens p)
-          traverse_ (\t -> observe res t (tokenAttrs (RL.prefix p) "avg")) (RL.avgTokens p)
-      )
-      (rateLimits snap)
+  reg "arbiter.admission.keys" "{key}" "Live admission keys, by policy" $
+    bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
+  reg "arbiter.admission.limit" "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
+    bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
+  reg "arbiter.admission.in_flight" "{job}" "Jobs holding a concurrency slot, by policy" $
+    perPolicy concurrency Conc.prefix (fromIntegral . Conc.totalInFlight)
+  reg "arbiter.admission.busiest_key" "{job}" "In-flight count of the fullest key, by policy" $
+    perPolicy concurrency Conc.prefix (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
+  reg "arbiter.admission.tokens" "{token}" "Rate-limit tokens left across a policy's buckets" $
+    observed $
+      over rateLimits $ \p ->
+        [ ([("policy", RL.prefix p), ("stat", stat)], t)
+        | (stat, mt) <- [("min", RL.minTokens p), ("avg", RL.avgTokens p)]
+        , t <- toList mt
+        ]
 
   reg "arbiter.pg.table.dead_tuples" "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
   reg "arbiter.pg.table.live_tuples" "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
@@ -219,9 +209,6 @@ registerInstruments meter cells = do
         observe res (now - maybe (registeredAt cells) takenAt cached) (attrs [])
     ]
   where
-    admissionAttrs kind prefix = attrs [("kind", kind), ("policy", prefix)]
-    policyAttrs prefix = attrs [("policy", prefix)]
-    tokenAttrs prefix stat = attrs [("policy", prefix), ("stat", stat)]
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
     effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
     statusCounts s =
@@ -245,6 +232,10 @@ registerInstruments meter cells = do
     -- and valued. Counters hand that list over, gauges observe it.
     over pick label snap = concatMap label (pick snap)
     observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
+    perPolicy pick prefix field = observed (over pick (\p -> [([("policy", prefix p)], field p)]))
+    bothKinds concField rateField = observed $ \snap ->
+      [([("kind", concurrencyKind), ("policy", Conc.prefix p)], concField p) | p <- concurrency snap]
+        <> [([("kind", rateLimitKind), ("policy", RL.prefix p)], rateField p) | p <- rateLimits snap]
     dbOf = toList . db
     perTableTotals label pairs =
       over tables (\t -> [([("table", Health.table t), (label, k)], v) | (k, v) <- pairs t])

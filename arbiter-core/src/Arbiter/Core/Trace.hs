@@ -112,7 +112,6 @@ untraced = (Nothing, Nothing)
 -- The halves belong to one trace, so a caller's @tracestate@ never pairs with an
 -- ambient @traceparent@.
 stampTraceContext :: TraceContext -> JobWrite payload -> JobWrite payload
-stampTraceContext (Nothing, Nothing) job = job
 stampTraceContext (tp, ts) job
   | isJust (traceparent job) || isJust (tracestate job) = job
   | otherwise = job {traceparent = tp, tracestate = ts}
@@ -134,8 +133,11 @@ currentTraceContext = maybe (pure untraced) encoded =<< getActiveSpan
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)
 resolveTracer = do
   tp <- getGlobalTracerProvider
-  let tracer = makeTracer tp "arbiter" tracerOptions {tracerExceptionHandlerOptions = [routineControlFlow]}
+  let tracer = makeTracer tp "arbiter" arbiterTracerOptions
   pure (if tracerIsEnabled tracer then Just tracer else Nothing)
+
+arbiterTracerOptions :: TracerOptions
+arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineControlFlow]}
 
 -- | Arbiter's control-flow exceptions (nack, reclaimed, cancelled) are recorded on the
 -- span rather than failing it, and a cancelled worker is not recorded at all.

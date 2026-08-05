@@ -673,8 +673,10 @@ processJobsWithRetry config consumeSpan handoff jobs = do
           traverse_ (\j -> reportReclaimed cancelled j >> markUnowned j) reclaimed
         traverse_ finalize done
       reportReclaimed cancelled j
-        | Set.member (Job.primaryKey j) cancelled = fireForceCancelled (withJobLog config j) j
-        | otherwise = fireUnavailable (withJobLog config j) j "no longer claimed by this worker"
+        | Set.member (Job.primaryKey j) cancelled = fireForceCancelled cfgJ j
+        | otherwise = fireUnavailable cfgJ j "no longer claimed by this worker"
+        where
+          cfgJ = withJobLog config j
       markUnowned j = markJobUnowned handoff j >> markHandled j
       callbacks =
         BatchCallbacks

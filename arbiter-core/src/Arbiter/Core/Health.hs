@@ -16,9 +16,9 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 
 import Arbiter.Core.Codec (Col (..), RowCodec, col)
-import Arbiter.Core.Job.Schema (SchemaName, TableName, queueTableNames)
+import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
-import Arbiter.Core.SchemaTables (sharedArbiterTables)
+import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.Sql.Health qualified as Sql
 import Arbiter.Core.Sql.Query (rows)
 
@@ -94,4 +94,4 @@ getPgHealth schemaName queueTables = do
   tableRows <- executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName scanned))
   pure (listToMaybe dbRows, tableRows)
   where
-    scanned = concatMap queueTableNames queueTables <> sharedArbiterTables
+    scanned = allSchemaTables queueTables

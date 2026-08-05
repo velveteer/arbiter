@@ -231,11 +231,7 @@ jobColumns =
 -- | Add the W3C trace-context columns to a queue's three job tables.
 addTraceContextColumnSQL :: Text -> Text -> Text
 addTraceContextColumnSQL schemaName tableName =
-  T.unlines
-    [ alter table
-    | table <-
-        [jobQueueTable schemaName tableName, jobQueueDLQTable schemaName tableName, jobQueueArchiveTable schemaName tableName]
-    ]
+  T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
   where
     alter table = "ALTER TABLE " <> table <> " " <> T.intercalate ", " (map addColumn ["traceparent", "tracestate"]) <> ";"
     addColumn column = "ADD COLUMN IF NOT EXISTS " <> column <> " TEXT"
@@ -583,20 +579,7 @@ groupsInsertFunction funcName groupsTbl dd =
 -- each column.
 groupAggregates :: Text -> Text
 groupAggregates col =
-  T.intercalate
-    ", "
-    [ "MIN(" <> col <> "priority) AS min_priority"
-    , "MIN(" <> col <> "id) AS min_id"
-    , "COUNT(*) AS job_count"
-    , "COUNT(*) FILTER (WHERE " <> col <> "not_visible_until IS NULL AND NOT " <> col <> "suspended) AS ready_count"
-    , "MIN("
-        <> col
-        <> "not_visible_until) FILTER (WHERE "
-        <> col
-        <> "not_visible_until IS NOT NULL AND NOT "
-        <> col
-        <> "suspended) AS next_due"
-    ]
+  [text|MIN(${col}priority) AS min_priority, MIN(${col}id) AS min_id, COUNT(*) AS job_count, COUNT(*) FILTER (WHERE ${col}not_visible_until IS NULL AND NOT ${col}suspended) AS ready_count, MIN(${col}not_visible_until) FILTER (WHERE ${col}not_visible_until IS NOT NULL AND NOT ${col}suspended) AS next_due|]
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text

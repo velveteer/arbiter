@@ -538,9 +538,9 @@ benchConfigs
   -> m (WorkerConfig m BenchPayload)
   -> IO [WorkerConfig m BenchPayload]
 benchConfigs runM numPools mkConfig =
-  replicateM numPools $ do
-    c <- runM mkConfig
-    pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  replicateM numPools (tune <$> runM mkConfig)
+  where
+    tune c = c {pollInterval = 0.1, logConfig = silentLogConfig}
 
 simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
 simpleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
@@ -740,56 +740,6 @@ steadyStateTrial runM producerRunM statsConn mkSingle durationUs numPools worker
 -- | Count one processed job against a steady-state trial's counter.
 countProcessed :: (MonadIO n) => IORef Int -> n ()
 countProcessed counter = liftIO $ atomicModifyIORef' counter (\n -> (n + 1, ()))
-
-simpleSteadyStateTrial
-  :: RunM SimpleM
-  -> RunM SimpleM
-  -> Connection
-  -> Int
-  -> Int
-  -> Int
-  -> Int
-  -> BenchMode
-  -> QueueFlavor
-  -> Instrumentation
-  -> IO SteadyResult
-simpleSteadyStateTrial runM producerRunM statsConn =
-  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
-    transactionalWorkerConfig workers $ \(_conn :: Connection) job ->
-      flakyGate (countProcessed counter) job
-
-hasqlSteadyStateTrial
-  :: RunM HasqlM
-  -> RunM SimpleM
-  -> Connection
-  -> Int
-  -> Int
-  -> Int
-  -> Int
-  -> BenchMode
-  -> QueueFlavor
-  -> Instrumentation
-  -> IO SteadyResult
-hasqlSteadyStateTrial runM producerRunM statsConn =
-  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
-    transactionalWorkerConfig workers $ \(_conn :: Hasql.Connection) job ->
-      flakyGate (countProcessed counter) job
-
-orvilleSteadyStateTrial
-  :: RunM OrvilleM
-  -> RunM SimpleM
-  -> Connection
-  -> Int
-  -> Int
-  -> Int
-  -> Int
-  -> BenchMode
-  -> QueueFlavor
-  -> Instrumentation
-  -> IO SteadyResult
-orvilleSteadyStateTrial runM producerRunM statsConn =
-  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
-    transactionalWorkerConfig workers $ \job -> flakyGate (countProcessed counter) job
 
 -- Setup
 
@@ -1137,11 +1087,19 @@ main = do
       , bgroup "Worker Throughput (orville)" $
           orvilleWorkerBenches statsConn simpleEnv orvilleRun
       , bgroup "Steady-State Throughput (simple)" $
-          steadyStateBenches (simpleSteadyStateTrial simpleRun producerRun statsConn)
+          steadyStateBenches $
+            steadyStateTrial simpleRun producerRun statsConn $ \workers counter ->
+              transactionalWorkerConfig workers $ \(_conn :: Connection) job ->
+                flakyGate (countProcessed counter) job
       , bgroup "Steady-State Throughput (hasql)" $
-          steadyStateBenches (hasqlSteadyStateTrial hasqlPreparedRun producerRun statsConn)
+          steadyStateBenches $
+            steadyStateTrial hasqlPreparedRun producerRun statsConn $ \workers counter ->
+              transactionalWorkerConfig workers $ \(_conn :: Hasql.Connection) job ->
+                flakyGate (countProcessed counter) job
       , bgroup "Steady-State Throughput (orville)" $
-          steadyStateBenches (orvilleSteadyStateTrial orvilleRun producerRun statsConn)
+          steadyStateBenches $
+            steadyStateTrial orvilleRun producerRun statsConn $ \workers counter ->
+              transactionalWorkerConfig workers $ \job -> flakyGate (countProcessed counter) job
       , bgroup "Gating Overhead (hasql)" $
           gatingBenches settleGated (hasqlGatedSteadyTrial hasqlPreparedRun producerRun statsConn)
       ]

@@ -117,4 +117,3 @@ attrs kvs = unsafeAttributesFromListIgnoringLimits [(k, toAttribute v) | (k, v) 
 rateLimitKind, concurrencyKind :: Text
 rateLimitKind = "rate_limit"
 concurrencyKind = "concurrency"
-
