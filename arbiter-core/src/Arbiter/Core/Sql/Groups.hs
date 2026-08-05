@@ -33,7 +33,7 @@ refreshGroupsSQL :: Text -> Text -> Int -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName limit keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      aggs = groupAggregates "" (Just (inFlightPredicate ""))
+      aggs = groupAggregates "" <> ", MAX(not_visible_until) FILTER (WHERE " <> inFlightPredicate "" <> ") AS in_flight_until"
       lim = fromIntegral limit :: Int64
    in [sql|
         WITH params AS (

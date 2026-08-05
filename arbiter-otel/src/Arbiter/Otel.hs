@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | OpenTelemetry for arbiter: traces, metrics and logs.
 --
@@ -43,12 +45,13 @@ module Arbiter.Otel
   , otelHooks
   , otelMaintenance
   , otelLogs
-  , otelLogDestination
+  , loggerDestination
   , attrs
   ) where
 
+import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
-import Arbiter.Core.QueueRegistry (RegistryTables, registryTableNames)
+import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryTableNames)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
@@ -58,6 +61,7 @@ import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
+import GHC.TypeLits (KnownSymbol)
 import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
@@ -66,9 +70,9 @@ import Arbiter.Otel.Metrics
   ( ArbiterMeters
   , arbiterMeter
   , attrs
+  , loggerDestination
   , newArbiterMeters
   , otelHooks
-  , otelLogDestination
   , otelLogs
   , otelMaintenance
   )
@@ -86,7 +90,7 @@ import Arbiter.Otel.Telemetry
 -- labelled by. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
 instrumentPool tel (NamedWorkerPool queue cfg) =
-  NamedWorkerPool queue (instrumentConfig tel queue cfg)
+  NamedWorkerPool queue (labelledConfig tel queue cfg)
 
 -- | 'instrumentPool' over a pool list.
 instrumentPools :: (MonadUnliftIO m) => Telemetry -> [NamedWorkerPool m] -> [NamedWorkerPool m]
@@ -179,14 +183,22 @@ poolRun tel baseLog refreshInterval pools run =
 defaultGaugeRefresh :: NominalDiffTime
 defaultGaugeRefresh = 15
 
--- | 'instrumentPool' over a bare config, labelled by @queue@.
+-- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig
+  :: forall m payload
+   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+  => Telemetry
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+instrumentConfig tel = labelledConfig tel (Arb.queueTable @payload @m)
+
+labelledConfig
   :: (MonadUnliftIO m)
   => Telemetry
   -> Text
   -> WorkerConfig m payload
   -> WorkerConfig m payload
-instrumentConfig tel queue cfg =
+labelledConfig tel queue cfg =
   withHooks metricHooks $
     withMaintenance (\op n -> traverse_ (\ms -> otelMaintenance ms op n) (meters tel)) $
       cfg {logConfig = telemetryLogConfig tel (logConfig cfg)}

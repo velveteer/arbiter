@@ -213,7 +213,7 @@ benchTelemetryVar = unsafePerformIO (newMVar Nothing)
 -- | Instrument a trial's pools, or hand them back untouched. Each trial installs the
 -- global tracer provider it measures.
 instrumentPools
-  :: (MonadUnliftIO m)
+  :: (MonadUnliftIO m, QueueOperation m BenchPayload)
   => Instrumentation
   -> [WorkerConfig m BenchPayload]
   -> IO [WorkerConfig m BenchPayload]
@@ -223,7 +223,7 @@ instrumentPools Plain configs = do
 instrumentPools Instrumented configs = do
   (tp, tel) <- benchTelemetry
   setGlobalTracerProvider tp
-  pure (map (Otel.instrumentConfig tel "bench_queue") configs)
+  pure (map (Otel.instrumentConfig tel) configs)
 
 -- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
 -- flaky (fail once into backoff), a fifth are scheduled into the near future,
@@ -531,41 +531,41 @@ instance MonadArbiter BenchOrville where
 
 type OrvilleM = BenchOrville
 
+-- | @numPools@ copies of a backend's config, tuned for benching.
+benchConfigs
+  :: RunM m
+  -> Int
+  -> m (WorkerConfig m BenchPayload)
+  -> IO [WorkerConfig m BenchPayload]
+benchConfigs runM numPools mkConfig =
+  replicateM numPools $ do
+    c <- runM mkConfig
+    pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+
 simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
 simpleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <-
-        runM $ transactionalWorkerConfig workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  configs <- benchConfigs runM numPools $ case modeConfig of
+    BenchSingleJobMode ->
+      transactionalWorkerConfig workersPerPool (\(_conn :: Connection) job -> flakyGate (pure ()) job)
+    BenchBatchedJobsMode batchSize ->
+      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 hasqlWorkerTrial :: RunM HasqlM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
 hasqlWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <-
-        runM $
-          transactionalWorkerConfig workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <-
-        runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  configs <- benchConfigs runM numPools $ case modeConfig of
+    BenchSingleJobMode ->
+      transactionalWorkerConfig workersPerPool (\(_conn :: Hasql.Connection) job -> flakyGate (pure ()) job)
+    BenchBatchedJobsMode batchSize ->
+      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 orvilleWorkerTrial :: RunM OrvilleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
 orvilleWorkerTrial runM statsConn totalJobs durationUs numPools workersPerPool modeConfig = do
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig workersPerPool (\job -> flakyGate (pure ()) job)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  configs <- benchConfigs runM numPools $ case modeConfig of
+    BenchSingleJobMode -> transactionalWorkerConfig workersPerPool (\job -> flakyGate (pure ()) job)
+    BenchBatchedJobsMode batchSize ->
+      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 runWorkerTrial
@@ -697,30 +697,33 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
       durationUs
   pure (mkSteadyResult throughput processed snap0 snap1 trg)
 
-simpleSteadyStateTrial
-  :: RunM SimpleM
+-- | A steady-state trial for one backend. @mkSingle@ builds that backend's single-job
+-- config, counting each job it processes.
+steadyStateTrial
+  :: (HasRegistry m BenchRegistry, MonadUnliftIO m, QueueOperation m BenchPayload)
+  => RunM m
   -> RunM SimpleM
   -> Connection
+  -> (Int -> IORef Int -> m (WorkerConfig m BenchPayload))
   -> Int
+  -- ^ Trial duration (microseconds)
   -> Int
+  -- ^ Pools
   -> Int
+  -- ^ Workers per pool
   -> Int
+  -- ^ Producer batch size
   -> BenchMode
   -> QueueFlavor
   -> Instrumentation
   -> IO SteadyResult
-simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
+steadyStateTrial runM producerRunM statsConn mkSingle durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
   processedCounter <- newIORef (0 :: Int)
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig workersPerPool $ \(_conn :: Connection) job ->
-        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
-        acked <- flakyBatch cb jobs
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
+  configs <- benchConfigs runM numPools $ case modeConfig of
+    BenchSingleJobMode -> mkSingle workersPerPool processedCounter
+    BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
+      acked <- flakyBatch cb jobs
+      liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
   instrumented <- instrumentPools otel configs
   runSteadyStateTrial
     runM
@@ -733,6 +736,27 @@ simpleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPe
     50_000
     flavor
     durationUs
+
+-- | Count one processed job against a steady-state trial's counter.
+countProcessed :: (MonadIO n) => IORef Int -> n ()
+countProcessed counter = liftIO $ atomicModifyIORef' counter (\n -> (n + 1, ()))
+
+simpleSteadyStateTrial
+  :: RunM SimpleM
+  -> RunM SimpleM
+  -> Connection
+  -> Int
+  -> Int
+  -> Int
+  -> Int
+  -> BenchMode
+  -> QueueFlavor
+  -> Instrumentation
+  -> IO SteadyResult
+simpleSteadyStateTrial runM producerRunM statsConn =
+  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
+    transactionalWorkerConfig workers $ \(_conn :: Connection) job ->
+      flakyGate (countProcessed counter) job
 
 hasqlSteadyStateTrial
   :: RunM HasqlM
@@ -746,30 +770,10 @@ hasqlSteadyStateTrial
   -> QueueFlavor
   -> Instrumentation
   -> IO SteadyResult
-hasqlSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
-  processedCounter <- newIORef (0 :: Int)
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig workersPerPool $ \(_conn :: Hasql.Connection) job ->
-        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
-        acked <- flakyBatch cb jobs
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-  instrumented <- instrumentPools otel configs
-  runSteadyStateTrial
-    runM
-    producerRunM
-    statsConn
-    instrumented
-    processedCounter
-    producerBatchSize
-    10
-    50_000
-    flavor
-    durationUs
+hasqlSteadyStateTrial runM producerRunM statsConn =
+  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
+    transactionalWorkerConfig workers $ \(_conn :: Hasql.Connection) job ->
+      flakyGate (countProcessed counter) job
 
 orvilleSteadyStateTrial
   :: RunM OrvilleM
@@ -783,30 +787,9 @@ orvilleSteadyStateTrial
   -> QueueFlavor
   -> Instrumentation
   -> IO SteadyResult
-orvilleSteadyStateTrial runM producerRunM statsConn durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
-  processedCounter <- newIORef (0 :: Int)
-  configs <- replicateM numPools $ case modeConfig of
-    BenchSingleJobMode -> do
-      c <- runM $ transactionalWorkerConfig workersPerPool $ \job ->
-        flakyGate (liftIO $ atomicModifyIORef' processedCounter (\n -> (n + 1, ()))) job
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-    BenchBatchedJobsMode batchSize -> do
-      c <- runM $ defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
-        acked <- flakyBatch cb jobs
-        liftIO $ atomicModifyIORef' processedCounter (\n -> (n + acked, ()))
-      pure c {pollInterval = 0.1, logConfig = silentLogConfig}
-  instrumented <- instrumentPools otel configs
-  runSteadyStateTrial
-    runM
-    producerRunM
-    statsConn
-    instrumented
-    processedCounter
-    producerBatchSize
-    10
-    50_000
-    flavor
-    durationUs
+orvilleSteadyStateTrial runM producerRunM statsConn =
+  steadyStateTrial runM producerRunM statsConn $ \workers counter ->
+    transactionalWorkerConfig workers $ \job -> flakyGate (countProcessed counter) job
 
 -- Setup
 

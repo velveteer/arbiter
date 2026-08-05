@@ -112,6 +112,7 @@ untraced = (Nothing, Nothing)
 -- The halves belong to one trace, so a caller's @tracestate@ never pairs with an
 -- ambient @traceparent@.
 stampTraceContext :: TraceContext -> JobWrite payload -> JobWrite payload
+stampTraceContext (Nothing, Nothing) job = job
 stampTraceContext (tp, ts) job
   | isJust (traceparent job) || isJust (tracestate job) = job
   | otherwise = job {traceparent = tp, tracestate = ts}

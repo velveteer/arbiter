@@ -232,13 +232,13 @@ jobColumns =
 addTraceContextColumnSQL :: Text -> Text -> Text
 addTraceContextColumnSQL schemaName tableName =
   T.unlines
-    [ alter table column
+    [ alter table
     | table <-
         [jobQueueTable schemaName tableName, jobQueueDLQTable schemaName tableName, jobQueueArchiveTable schemaName tableName]
-    , column <- ["traceparent", "tracestate"]
     ]
   where
-    alter table column = "ALTER TABLE " <> table <> " ADD COLUMN IF NOT EXISTS " <> column <> " TEXT;"
+    alter table = "ALTER TABLE " <> table <> " " <> T.intercalate ", " (map addColumn ["traceparent", "tracestate"]) <> ";"
+    addColumn column = "ADD COLUMN IF NOT EXISTS " <> column <> " TEXT"
 
 -- | Job column definitions for DLQ table (with job_id instead of id)
 jobColumnsForDLQ :: Text
@@ -548,7 +548,7 @@ groupsMergeSet groupsTbl =
 groupsInsertFunction :: Text -> Text -> Text -> Text
 groupsInsertFunction funcName groupsTbl dd =
   let mergeSet = groupsMergeSet groupsTbl
-      aggs = groupAggregates "" Nothing
+      aggs = groupAggregates ""
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
@@ -580,11 +580,11 @@ groupsInsertFunction funcName groupsTbl dd =
   |]
 
 -- | The group summary aggregates over job rows grouped by @group_key@. @col@ prefixes
--- each column, and @mInFlight@ adds the in-flight bucket only the reaper's recompute
--- carries.
-groupAggregates :: Text -> Maybe Text -> Text
-groupAggregates col mInFlight =
-  T.intercalate ", " $
+-- each column.
+groupAggregates :: Text -> Text
+groupAggregates col =
+  T.intercalate
+    ", "
     [ "MIN(" <> col <> "priority) AS min_priority"
     , "MIN(" <> col <> "id) AS min_id"
     , "COUNT(*) AS job_count"
@@ -597,9 +597,6 @@ groupAggregates col mInFlight =
         <> col
         <> "suspended) AS next_due"
     ]
-      <> foldMap
-        (\bucket -> ["MAX(" <> col <> "not_visible_until) FILTER (WHERE " <> bucket <> ") AS in_flight_until"])
-        mInFlight
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text
@@ -690,7 +687,7 @@ groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
 groupsUpdateFunction funcName groupsTbl tbl dd =
   let ifSurv = inFlightPredicate "t."
       ifOld = inFlightPredicate "o."
-      aggsN = groupAggregates "n." Nothing
+      aggsN = groupAggregates "n."
       mergeSet = groupsMergeSet groupsTbl
       removeUpdate =
         groupsRemoveUpdate

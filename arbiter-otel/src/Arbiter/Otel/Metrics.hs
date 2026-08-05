@@ -15,7 +15,6 @@ module Arbiter.Otel.Metrics
 
     -- * Logs
   , loggerDestination
-  , otelLogDestination
   , otelLogs
   ) where
 
@@ -145,15 +144,6 @@ otelLogs dest cfg = maybe cfg (\d -> cfg {logDestination = teed d}) dest
 -- | Route Arbiter's logs to @provider@ as OTel log records.
 loggerDestination :: Log.LoggerProvider -> LogDestination
 loggerDestination provider = LogCallback (otelLogCallback (Log.makeLogger provider "arbiter"))
-
--- | Route Arbiter's logs to the global logger provider as OTel log records. The provider
--- is read per record, so one installed after this destination still receives them.
-otelLogDestination :: LogDestination
-otelLogDestination = LogCallback emit
-  where
-    emit level msg context = do
-      provider <- Log.getGlobalLoggerProvider
-      otelLogCallback (Log.makeLogger provider "arbiter") level msg context
 
 -- | One Arbiter log line as an OTel log record, with its structured context as attributes.
 otelLogCallback :: Log.Logger -> LogLevel -> Text -> [Pair] -> IO ()

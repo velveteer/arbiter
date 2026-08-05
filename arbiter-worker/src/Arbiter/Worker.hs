@@ -660,15 +660,13 @@ processJobsWithRetry config consumeSpan handoff jobs = do
           storeEncodedResults schemaName (filter (isAcked ackedSet . fst) pairs)
           pure ackedSet
         let (done, reclaimed) = partition (isAcked acked) js
+            reclaimedLog = withJobContextList (logConfig config) reclaimed
         unless (null reclaimed) $ do
-          tryLog
-            (withJobContextList (logConfig config) reclaimed)
-            Info
-            "Jobs no longer claimed here during bulk completion, skipped"
+          tryLog reclaimedLog Info "Jobs no longer claimed here during bulk completion, skipped"
           -- A force-cancel voids the claim the same way a reclaim does.
           cancelled <-
             deleteCancelledOrWarn
-              (withJobContextList (logConfig config) reclaimed)
+              reclaimedLog
               schemaName
               (Job.queueName firstJob)
               (map Job.primaryKey reclaimed)
@@ -759,7 +757,7 @@ deleteCancelledOrWarn
   -> m (Set.Set Int64)
 deleteCancelledOrWarn logCfg schemaName queue jobIds =
   tryWarnWith logCfg "Deleting force-cancelled jobs failed" mempty $
-    Set.fromList <$> Ops.deleteCancelledJobsReturning schemaName queue jobIds
+    Set.fromList <$> Ops.deleteCancelledJobs schemaName queue jobIds
 
 -- | What a force-cancel finalizer needs from the handler's scope, whichever side of
 -- the job span runs it.
@@ -1096,29 +1094,28 @@ reaperLoop logCfg report interval stmtTimeout = do
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schemaName <- Arb.getSchema
-  let gated :: forall a. MaintenanceOp -> NominalDiffTime -> m a -> m (Maybe a)
-      gated = runReaperOp logCfg schemaName stmtTimeout . maintenanceOpName
-      -- Reports the rows the op touched, for the ops whose result counts any.
-      gatedRows :: forall a. MaintenanceOp -> NominalDiffTime -> (a -> Int64) -> m a -> m (Maybe a)
-      gatedRows op every rowsOf work = do
-        mr <- gated op every work
-        mr <$ traverse_ (reaped op . rowsOf) mr
-      gatedCount :: MaintenanceOp -> NominalDiffTime -> m Int64 -> m ()
-      gatedCount op every = void . gatedRows op every id
-      sweep
-        :: MaintenanceOp
-        -> NominalDiffTime
-        -> Text
-        -> (Int64 -> m ())
-        -> m (Int64, [Text])
-        -> m ()
-      sweep op every failMsg done work =
-        gatedRows op every fst work
-          >>= traverse_
-            ( \(n, failed) -> do
-                traverse_ (\queue -> tryLog logCfg Warning $ failMsg <> queue) failed
-                when (n > 0) $ done n
-            )
+  let
+    -- Reports the rows the op touched, for the ops whose result counts any.
+    gatedRows :: forall a. MaintenanceOp -> NominalDiffTime -> (a -> Int64) -> m a -> m (Maybe a)
+    gatedRows op every rowsOf work = do
+      mr <- runReaperOp logCfg schemaName stmtTimeout (maintenanceOpName op) every work
+      mr <$ traverse_ (reaped op . rowsOf) mr
+    gatedCount :: MaintenanceOp -> NominalDiffTime -> m Int64 -> m ()
+    gatedCount op every = void . gatedRows op every id
+    sweep
+      :: MaintenanceOp
+      -> NominalDiffTime
+      -> Text
+      -> (Int64 -> m ())
+      -> m (Int64, [Text])
+      -> m ()
+    sweep op every failMsg done work =
+      gatedRows op every fst work
+        >>= traverse_
+          ( \(n, failed) -> do
+              traverse_ (\queue -> tryLog logCfg Warning $ failMsg <> queue) failed
+              when (n > 0) $ done n
+          )
   forever $ do
     sweep RefreshGroups interval "Groups refresh failed for queue: " (const (pure ())) $
       Ops.refreshAllGroups schemaName queues

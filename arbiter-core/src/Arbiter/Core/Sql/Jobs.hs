@@ -347,7 +347,7 @@ jobColsExceptError = aliasedCols Nothing jobColsExceptErrorColumns
 -- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
 -- other read column is copied verbatim.
 jobColsExceptId :: Text
-jobColsExceptId = T.intercalate ", " (drop 1 allJobColumns)
+jobColsExceptId = aliasedCols Nothing (drop 1 allJobColumns)
 
 -- | Job columns carried through a DLQ round-trip: the read columns plus write-only rate_limit_cost.
 dlqCarriedCols :: Text

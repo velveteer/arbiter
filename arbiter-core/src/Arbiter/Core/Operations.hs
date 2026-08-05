@@ -58,7 +58,6 @@ module Arbiter.Core.Operations
   , deleteDLQJob
   , deleteDLQJobsBatch
   , deleteCancelledJobs
-  , deleteCancelledJobsReturning
 
     -- * Completed-Job Archive
   , listArchiveJobs
@@ -1558,15 +1557,15 @@ deleteDLQJob schemaName tableName dlqId = withDbTransaction $ do
     _ -> pure 1
 
 -- | Delete jobs by id via the given query builder, then resume any parents left
--- childless. The query must return each deleted row's parent_id alongside whatever
--- the caller wants back. Returns that per-row payload for the rows deleted.
+-- childless. The query must return each deleted row's id and parent_id. Returns
+-- the ids deleted.
 deleteJobsResumingParents
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
-  -> ([Int64] -> Q.Query (a, Maybe Int64))
+  -> ([Int64] -> Q.Query (Int64, Maybe Int64))
   -> [Int64]
-  -> m [a]
+  -> m [Int64]
 deleteJobsResumingParents _ _ _ [] = pure []
 deleteJobsResumingParents schemaName tableName mkSql jobIds = withDbTransaction $ do
   rows <- MA.executeQuery (mkSql jobIds)
@@ -1590,24 +1589,14 @@ deleteDLQJobsBatch schemaName tableName dlqIds =
     <$> deleteJobsResumingParents schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
 
 -- | Delete force-cancel-flagged jobs by id and resume any parents left
--- childless. Returns the number of rows actually deleted.
+-- childless. Returns the ids it deleted.
 deleteCancelledJobs
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
   -> [Int64]
-  -> m Int
-deleteCancelledJobs schemaName tableName jobIds =
-  length <$> deleteCancelledJobsReturning schemaName tableName jobIds
-
--- | 'deleteCancelledJobs' reporting the ids it deleted.
-deleteCancelledJobsReturning
-  :: (MonadArbiter m)
-  => SchemaName
-  -> TableName
-  -> [Int64]
   -> m [Int64]
-deleteCancelledJobsReturning schemaName tableName =
+deleteCancelledJobs schemaName tableName =
   deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName)
 
 -- * Admin Operations
@@ -2202,7 +2191,7 @@ sweepCancelledForQueue
   -> m Int64
 sweepCancelledForQueue schemaName tableName = do
   ids <- MA.executeQuery (Tmpl.selectCancelledReapableJobsSQL schemaName tableName cancelledSweepBatch)
-  fromIntegral <$> deleteCancelledJobs schemaName tableName ids
+  fromIntegral . length <$> deleteCancelledJobs schemaName tableName ids
 
 -- | Per-queue cap on flagged jobs reaped in one pass.
 cancelledSweepBatch :: Int
