@@ -213,12 +213,12 @@ data ConsumeSpan = ConsumeSpan
   , consumeAttrs :: AttributeMap
   }
 
--- | The consumer-span shape for a queue, with @extra@ attributes on every span.
-consumeSpanFor :: TableName -> [(Text, Attribute)] -> ConsumeSpan
-consumeSpanFor queue extra =
+-- | The consumer-span shape for a queue.
+consumeSpanFor :: TableName -> ConsumeSpan
+consumeSpanFor queue =
   ConsumeSpan
     { consumeName = "process " <> queue
-    , consumeAttrs = HM.fromList extra <> messagingAttrs queue "process"
+    , consumeAttrs = messagingAttrs queue "process"
     }
 
 -- | Run a job handler inside a @process \<queue\>@ consumer span linked to its producer.

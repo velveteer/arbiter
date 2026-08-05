@@ -51,15 +51,6 @@
         "x": 0,
         "y": 0
       },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "stacking": {
-              "mode": "normal"
-            }
-          }
-        }
-      },
       "targets": [
         {
           "refId": "A",

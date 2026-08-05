@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
 -- 'JobException' is the user-facing decision sum. A handler throws one of
@@ -37,6 +39,7 @@ module Arbiter.Core.Exceptions
   , throwJobNotFoundIds
   , throwJobStolen
   , throwJobStolenIds
+  , namedJobIds
   ) where
 
 import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException)
@@ -126,7 +129,7 @@ data JobNotFoundException = JobNotFoundException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobNotFoundException where
-  displayException (JobNotFoundException msg _) = T.unpack msg
+  displayException (JobNotFoundException msg ids) = T.unpack (msg <> namedJobIds ids)
 
 -- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
 -- combinator propagates this signal so the worker can stop duplicate work.
@@ -135,7 +138,7 @@ data JobStolenException = JobStolenException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobStolenException where
-  displayException (JobStolenException msg _) = T.unpack msg
+  displayException (JobStolenException msg ids) = T.unpack (msg <> namedJobIds ids)
 
 -- | Async exception for user-initiated force-cancel, naming the jobs it cancels.
 data JobForceCancelled = JobForceCancelled [Int64]
@@ -176,4 +179,9 @@ throwJobStolen msg = UE.throwIO (JobStolenException msg [])
 -- | 'throwJobStolen' naming the reclaimed jobs, so the worker can tell them from
 -- the rest of the batch.
 throwJobStolenIds :: (MonadIO m) => [Int64] -> m a
-throwJobStolenIds ids = UE.throwIO (JobStolenException (T.intercalate (T.pack ", ") (map (T.pack . show) ids)) ids)
+throwJobStolenIds = UE.throwIO . JobStolenException "reclaimed by another worker"
+
+-- | The ids a signal names, appended to its message. Empty when it names none.
+namedJobIds :: [Int64] -> Text
+namedJobIds [] = ""
+namedJobIds ids = ": " <> T.intercalate ", " (map (T.pack . show) ids)

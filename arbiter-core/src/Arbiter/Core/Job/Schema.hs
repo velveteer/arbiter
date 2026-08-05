@@ -604,6 +604,15 @@ inFlightPredicate col =
     <> col
     <> "throttled_until > NOW())"
 
+-- | Ordering and visibility recomputed from the rows a group has left, aliased @t@.
+survivingAggregates :: Text
+survivingAggregates =
+  [text|
+    MIN(t.priority) AS new_min_priority,
+    MIN(t.id) AS new_min_id,
+    MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+  |]
+
 -- | Decrement a group summary for removed rows, resetting an emptied group in place.
 -- @removedRows@ aggregates them as @group_key@, @removed_count@, @removed_ready_count@
 -- and @had_inflight@.
@@ -628,9 +637,7 @@ groupsRemoveUpdate groupsTbl tbl removedRows =
         END
     FROM (
       SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
-        MIN(t.priority) AS new_min_priority,
-        MIN(t.id) AS new_min_id,
-        MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
+        ${survivingAggregates},
         MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
       FROM (
         ${removedRows}
@@ -781,9 +788,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           s.new_ift, s.delta
         FROM (
           SELECT d.group_key,
-            MIN(t.priority) AS new_min_priority,
-            MIN(t.id) AS new_min_id,
-            MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+            ${survivingAggregates}
           FROM (
             SELECT DISTINCT n.group_key
             FROM new_table n

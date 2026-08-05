@@ -256,7 +256,7 @@ spec = do
       setGlobalTracerProvider provider
       job <- withAttachedSpan sampleTraceparent $ enqueue plainEnv (Greeting "spanned")
       tracer <- resolveTracer
-      inherited <- runSimpleDb plainEnv . withConsumeSpan tracer (consumeSpanFor queue []) job $ do
+      inherited <- runSimpleDb plainEnv . withConsumeSpan tracer (consumeSpanFor queue) job $ do
         reattach <- capturingContext
         recordJobFailure job "boom"
         markSpanError "boom"

@@ -60,6 +60,7 @@ import Arbiter.Core.Exceptions
   , JobStolenException (..)
   , ParsingException (..)
   , TreeCancelException (..)
+  , namedJobIds
   , throwJobNotFoundIds
   )
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
@@ -298,7 +299,7 @@ runWorkerPool config = do
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
       -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.
-      consumeSpan = consumeSpanFor queueName []
+      consumeSpan = consumeSpanFor queueName
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -648,12 +649,11 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         finalize j
       ackBatchStoring pairs = do
         let js = map fst pairs
-            isAcked acked j = Job.primaryKey j `Set.member` acked
         acked <- withDbTransaction $ do
           ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          storeEncodedResults schemaName (filter (isAcked ackedSet . fst) pairs)
+          storeEncodedResults schemaName (filter (hasIdIn ackedSet . fst) pairs)
           pure ackedSet
-        let (done, reclaimed) = partition (isAcked acked) js
+        let (done, reclaimed) = partition (hasIdIn acked) js
             reclaimedLog = withJobContextList (logConfig config) reclaimed
         unless (null reclaimed) $ do
           tryLog reclaimedLog Info "Jobs no longer claimed by this worker during bulk completion, skipped"
@@ -723,7 +723,7 @@ finalizeForceCancelled config jobs cancelledIds handoff = do
   deleted <- deleteCancelledOrWarn batchLog schemaName (Job.queueName firstJob) jobIds
   pending <- pendingJobs handoff jobs
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
-  let (gone, siblings) = partition (\j -> Set.member (Job.primaryKey j) cancelled) pending
+  let (gone, siblings) = partition (hasIdIn cancelled) pending
   reportGoneJobs config (markJobHandled handoff) cancelled "force-cancelled" gone
   traverse_
     ( \j ->
@@ -767,7 +767,7 @@ newCancelHandoff =
 pendingJobs :: (MonadIO m) => CancelHandoff -> NonEmpty (Job.JobRead payload) -> m [Job.JobRead payload]
 pendingJobs handoff jobs = do
   handled <- liftIO (readIORef (handledRef handoff))
-  pure (filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs))
+  pure (filter (not . hasIdIn handled) (toList jobs))
 
 markJobHandled :: (MonadIO m) => CancelHandoff -> Job.JobRead payload -> m ()
 markJobHandled = insertJob . handledRef
@@ -777,6 +777,10 @@ markJobUnowned = insertJob . unownedRef
 
 insertJob :: (MonadIO m) => IORef (Set.Set Int64) -> Job.JobRead payload -> m ()
 insertJob ref job = liftIO $ atomicModifyIORef' ref $ \s -> (Set.insert (Job.primaryKey job) s, ())
+
+-- | Whether a set of job ids names this job.
+hasIdIn :: Set.Set Int64 -> Job.JobRead payload -> Bool
+hasIdIn ids job = Set.member (Job.primaryKey job) ids
 
 -- | Add to the jobs a force-cancel accounted for, returning every id recorded so far.
 recordCancelled :: (MonadIO m) => CancelHandoff -> Set.Set Int64 -> m (Set.Set Int64)
@@ -804,39 +808,32 @@ reportBatchOutcome
   -> m ()
 reportBatchOutcome config startTime endTime jobs handoff outcome = do
   unhandled <- pendingJobs handoff jobs
-  let splitNamed ids = let idSet = Set.fromList ids in partition (\j -> Set.member (Job.primaryKey j) idSet) unhandled
+  let splitNamed ids = partition (hasIdIn (Set.fromList ids)) unhandled
       reportUnavailable ids reason = do
         -- An exception naming no job speaks for none of them, so the remainder keeps
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
+        schemaName <- Arb.getSchema
         -- A force-cancel voids the claim the same way a reclaim does.
         cancelled <-
-          if null jobsGone
-            then pure mempty
-            else do
-              schemaName <- Arb.getSchema
-              deleteCancelledOrWarn
-                batchLog
-                schemaName
-                (Job.queueName firstJob)
-                (map Job.primaryKey jobsGone)
+          deleteCancelledOrWarn batchLog schemaName (Job.queueName firstJob) (map Job.primaryKey jobsGone)
         reportGoneJobs config (markJobHandled handoff) cancelled reason jobsGone
         unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
       unownedOf = do
         unowned <- liftIO (readIORef (unownedRef handoff))
-        pure (filter (\j -> Set.member (Job.primaryKey j) unowned) (toList jobs))
+        pure (filter (hasIdIn unowned) (toList jobs))
   case outcome of
     Right () ->
       unless (null unhandled) $
         tryLog (withJobContextList (logConfig config) unhandled) Warning "Handler left jobs unfinalized, will reprocess"
     Left exc
-      | Just (JobStolenException ids stolen) <- fromException exc -> do
-          tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
+      | Just (JobStolenException _ stolen) <- fromException exc -> do
+          tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry" <> namedJobIds stolen
           reportUnavailable stolen "reclaimed by another worker"
       | Just (JobNotFoundException _ gone) <- fromException exc -> do
-          tryLog batchLog Info "Job(s) no longer claimed by this worker, skipping retry"
+          tryLog batchLog Info $ "Job(s) no longer claimed by this worker, skipping retry" <> namedJobIds gone
           reportUnavailable gone "no longer available"
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
@@ -954,7 +951,8 @@ classifyException e
 cancelsTree :: FailureKind -> Bool
 cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
 
--- | 'reportGoneJob' over a list, marking each reported job with @mark@.
+-- | Report the jobs the ack no longer owns, as cancelled where a force-cancel deleted
+-- them, marking each with @mark@.
 reportGoneJobs
   :: (JobOperation m payload, MonadUnliftIO m)
   => WorkerConfig m payload
@@ -964,24 +962,14 @@ reportGoneJobs
   -> Text
   -> [Job.JobRead payload]
   -> m ()
-reportGoneJobs config mark cancelled reason =
-  traverse_ (\j -> reportGoneJob config cancelled reason j >> mark j)
-
--- | Report a job the ack no longer owns, as cancelled when a force-cancel deleted it.
-reportGoneJob
-  :: (JobOperation m payload, MonadUnliftIO m)
-  => WorkerConfig m payload
-  -> Set.Set Int64
-  -- ^ Ids a force-cancel accounted for.
-  -> Text
-  -> Job.JobRead payload
-  -> m ()
-reportGoneJob config cancelled reason job
-  | Set.member (Job.primaryKey job) cancelled = fireForceCancelled logCfg hooks job
-  | otherwise = fireUnavailable logCfg hooks job reason
+reportGoneJobs config mark cancelled reason = traverse_ (\j -> report j >> mark j)
   where
-    logCfg = jobLog config job
     hooks = observabilityHooks config
+    report job
+      | hasIdIn cancelled job = fireCancelled logCfg hooks job "force-cancelled"
+      | otherwise = fireUnavailable logCfg hooks job reason
+      where
+        logCfg = jobLog config job
 
 -- | Report a claimed job the worker can no longer act on.
 fireUnavailable
@@ -993,15 +981,6 @@ fireUnavailable
   -> m ()
 fireUnavailable logCfg hooks job reason =
   runHook logCfg "onJobUnavailable" $ Job.onJobUnavailable hooks job reason
-
--- | Report a job a force-cancel took out from under its handler.
-fireForceCancelled
-  :: (Job.JobPayload payload, MonadUnliftIO m)
-  => LogConfig
-  -> Job.ObservabilityHooks m payload
-  -> Job.JobRead payload
-  -> m ()
-fireForceCancelled logCfg hooks job = fireCancelled logCfg hooks job "force-cancelled"
 
 -- | Whether this pool's consumer spans cover a batch rather than a single job.
 batchedPool :: WorkerConfig m payload -> Bool
