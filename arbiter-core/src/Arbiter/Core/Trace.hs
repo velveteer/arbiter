@@ -27,7 +27,6 @@ module Arbiter.Core.Trace
   , withJobParent
   , capturingContext
   , getActiveSpan
-  , spanLinkForJob
 
     -- * Custom spans
   , withSpan
@@ -56,7 +55,7 @@ import Data.Maybe (isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import GHC.Stack (HasCallStack, withFrozenCallStack)
+import GHC.Stack (HasCallStack)
 import OpenTelemetry.Attributes (Attribute, toAttribute)
 import OpenTelemetry.Attributes.Map (AttributeMap)
 import OpenTelemetry.Context (Context, insertSpan, lookupSpan)
@@ -153,16 +152,18 @@ routineControlFlow e
 -- | Run an action inside a named span, unwrapped when no tracer was resolved. The code
 -- attributes point at this call site.
 withSpan :: (HasCallStack, MonadUnliftIO m) => Maybe Tracer -> Text -> SpanArguments -> m a -> m a
-withSpan mTracer name args action =
-  maybe action withTracer mTracer
-  where
-    withTracer tracer =
-      inSpan'' tracer name (addAttributesToSpanArguments callerAttributes args) (const action)
+withSpan mTracer name args =
+  spanning mTracer name (addAttributesToSpanArguments callerAttributes args)
+
+-- | 'withSpan' without the caller's code attributes, for arbiter's own spans.
+spanning :: (MonadUnliftIO m) => Maybe Tracer -> Text -> SpanArguments -> m a -> m a
+spanning mTracer name args action =
+  maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
 -- | Run an action inside a @publish \<queue\>@ producer span.
-withPublishSpan :: (HasCallStack, MonadUnliftIO m) => Maybe Tracer -> TableName -> m a -> m a
-withPublishSpan mTracer queue action =
-  withFrozenCallStack (withSpan mTracer ("publish " <> queue) (producerArgs queue) action)
+withPublishSpan :: (MonadUnliftIO m) => Maybe Tracer -> TableName -> m a -> m a
+withPublishSpan mTracer queue =
+  spanning mTracer ("publish " <> queue) (producerArgs queue)
 
 -- | Act on the currently active span, a no-op when none is active.
 onActiveSpan :: (MonadIO m) => (Span -> m ()) -> m ()
@@ -217,9 +218,9 @@ consumeSpanFor queue extra =
 
 -- | Run a job handler inside a @process \<queue\>@ consumer span linked to its producer.
 withConsumeSpan
-  :: (HasCallStack, MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> JobRead payload -> m a -> m a
-withConsumeSpan mTracer cs job action =
-  withFrozenCallStack (withSpan mTracer (consumeName cs) (consumerArgs cs job) action)
+  :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> JobRead payload -> m a -> m a
+withConsumeSpan mTracer cs job =
+  spanning mTracer (consumeName cs) (consumerArgs cs job)
 
 -- | Capture the caller's context for an action running on a thread forked from it.
 -- A context carrying no span propagates nothing, so an untraced deployment is left
@@ -240,9 +241,9 @@ withJobParent job action = maybe action attached (spanContextForJob job)
 
 -- | As 'withConsumeSpan', for a batch, linking every job to the one consumer span.
 withConsumeSpanBatch
-  :: (HasCallStack, MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
-withConsumeSpanBatch mTracer cs jobs action =
-  withFrozenCallStack (withSpan mTracer (consumeName cs) (batchConsumerArgs cs jobs) action)
+  :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
+withConsumeSpanBatch mTracer cs jobs =
+  spanning mTracer (consumeName cs) (batchConsumerArgs cs jobs)
 
 -- | A span link reconstructed from a job's stored W3C trace context.
 spanLinkForJob :: JobRead payload -> Maybe NewLink

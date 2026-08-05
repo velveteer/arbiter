@@ -302,7 +302,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
       | Just (ParsingException _) <- fromException e = do
           warn "Shared gauge payload unreadable, scanning locally" e
           stale <- readingStale
-          if stale then bounded (runDb (Just . Ran <$> scan)) else pure (Right Nothing)
+          if stale then tryAny (Just . Ran <$> runDb scan) else pure (Right Nothing)
       | otherwise = pure (Left e)
     readingStale = do
       now <- getMonotonicTime

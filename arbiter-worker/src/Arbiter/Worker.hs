@@ -166,6 +166,7 @@ import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal
   ( runHook
   , tryLog
+  , warnEx
   , withJobContext
   , withJobContextList
   , withJobContextOne
@@ -530,9 +531,6 @@ withJobLog config job = config {logConfig = jobLog config job}
 -- | The pool's log context narrowed to one job.
 jobLog :: WorkerConfig m payload -> Job.JobRead payload -> LogConfig
 jobLog config = withJobContextOne (logConfig config)
-
-warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
-warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
 
 -- | Main loop for a single worker thread.
 workerLoop
@@ -1040,6 +1038,10 @@ handleJobFailure config e maxAtts startTime endTime job = do
       unavailable = fireUnavailable config job
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
       cancel = void (cancelJobFor failureKind job) >> fireCancelled config job errorMsg
+      -- Nothing written means the job went elsewhere, so the failure is not ours to report.
+      wrote reason after rowsAffected
+        | rowsAffected == 0 = tryLog cfg Warning ("Job " <> reason) >> unavailable reason
+        | otherwise = fireFailure config job errorMsg startTime endTime >> after
   schemaName <- getSchema
   let deadLetter = do
         -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
@@ -1051,32 +1053,22 @@ handleJobFailure config e maxAtts startTime endTime job = do
           unless (Map.null merged) $
             void $
               Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
-        rowsAffected <- Arb.moveToDLQ errorMsg job
-        if rowsAffected == 0
-          then do
-            tryLog cfg Warning "Job not available for moving to DLQ"
-            unavailable "no longer available for the dead-letter queue"
-          else do
-            fireFailure config job errorMsg startTime endTime
-            runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
+        Arb.moveToDLQ errorMsg job
+          >>= wrote
+            "no longer available for the dead-letter queue"
+            (runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job)
       retryLater = do
         let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
         backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
-        rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
-        if rowsAffected == 0
-          then do
-            tryLog cfg Warning $
-              "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
-            unavailable "no longer available for retry"
-          else do
-            fireFailure config job errorMsg startTime endTime
-            runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
-  if cancelsTree failureKind
-    then cancel
-    else
-      if failureKind == PermanentFailure || Job.attempts job >= maxAtts
-        then deadLetter
-        else retryLater
+        Arb.updateJobForRetry backoffSecs errorMsg job
+          >>= wrote
+            "no longer available for retry"
+            (runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs)
+      dispatch
+        | cancelsTree failureKind = cancel
+        | failureKind == PermanentFailure || Job.attempts job >= maxAtts = deadLetter
+        | otherwise = retryLater
+  dispatch
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, moves
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).

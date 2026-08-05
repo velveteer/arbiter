@@ -18,6 +18,7 @@ module Arbiter.Otel
   , withTelemetryIf
   , withTelemetryFromEnv
   , withExternalTelemetry
+  , telemetryLogConfig
 
     -- * Instrumenting a pool
   , instrumentPool
@@ -29,6 +30,7 @@ module Arbiter.Otel
   , runSelectedWorkerPools
   , runWorkerPoolsWith
   , runSelectedWorkerPoolsWith
+  , defaultGaugeRefresh
 
     -- * Gauges
   , withGauges
@@ -72,6 +74,7 @@ import Arbiter.Otel.Metrics
   )
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
+  , telemetryLogConfig
   , withExternalTelemetry
   , withTelemetry
   , withTelemetryFromEnv
@@ -186,6 +189,6 @@ instrumentConfig
 instrumentConfig tel queue cfg =
   withHooks metricHooks $
     withMaintenance (\op n -> traverse_ (\ms -> otelMaintenance ms op n) (meters tel)) $
-      cfg {logConfig = otelLogs (logDestination tel) (logConfig cfg)}
+      cfg {logConfig = telemetryLogConfig tel (logConfig cfg)}
   where
     metricHooks hooks = maybe hooks (\ms -> otelHooks ms queue <> hooks) (meters tel)

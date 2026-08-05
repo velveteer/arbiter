@@ -6,6 +6,7 @@
 module Arbiter.Worker.Logger.Internal
   ( logMessage
   , tryLog
+  , warnEx
   , withJobContext
   , withJobContextOne
   , withJobContextList
@@ -24,7 +25,7 @@ import Data.Aeson.Types (Pair)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, tryAny)
+import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
 
@@ -90,6 +91,10 @@ runWithDestination dest ctx level msg = case dest of
 -- | Log a message, swallowing any exceptions from the logging infrastructure.
 tryLog :: (MonadUnliftIO m) => LogConfig -> LogLevel -> Text -> m ()
 tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
+
+-- | 'tryLog' an exception at 'Warning' under @label@.
+warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
+warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
 
 -- | Run an observability hook, catching and logging any exceptions.
 runHook
