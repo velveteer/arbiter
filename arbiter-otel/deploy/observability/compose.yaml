@@ -21,6 +21,7 @@ services:
     volumes:
       - ./grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter:ro
       - ./grafana/provisioning/dashboards/provider.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter.yaml:ro
+      - ./grafana/provisioning/alerting/arbiter.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/arbiter.yaml:ro
     ports:
       - "3000:3000"     # Grafana
       - "4317:4317"     # OTLP gRPC

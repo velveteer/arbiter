@@ -62,7 +62,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Oldest ready job age (backlog latency)",
+      "title": "Oldest job age (waiting vs running)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -82,7 +82,12 @@
         {
           "refId": "A",
           "expr": "max by (queue) (arbiter_queue_oldest_ready_age_seconds)",
-          "legendFormat": "{{queue}}"
+          "legendFormat": "{{queue}} / waiting"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (queue) (arbiter_queue_oldest_in_flight_age_seconds)",
+          "legendFormat": "{{queue}} / running"
         }
       ]
     },

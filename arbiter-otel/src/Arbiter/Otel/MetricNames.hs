@@ -21,6 +21,7 @@ data MetricName
   | -- Queue depth
     QueueDepth
   | QueueOldestReadyAge
+  | QueueOldestInFlightAge
   | Workers
   | -- Admission
     AdmissionKeys
@@ -55,6 +56,7 @@ metricName = \case
   HandlerDuration -> "arbiter.job.handler.duration"
   QueueDepth -> "arbiter.queue.depth"
   QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
+  QueueOldestInFlightAge -> "arbiter.queue.oldest_in_flight_age"
   Workers -> "arbiter.workers"
   AdmissionKeys -> "arbiter.admission.keys"
   AdmissionLimit -> "arbiter.admission.limit"

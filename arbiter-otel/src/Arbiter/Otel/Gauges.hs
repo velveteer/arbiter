@@ -156,6 +156,10 @@ registerInstruments meter cells = do
     observed $
       over queues $ \o ->
         [([("queue", overviewQueue o)], fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o)))]
+  reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased (0 = none in flight)" $
+    observed $
+      over queues $ \o ->
+        [([("queue", overviewQueue o)], fromMaybe 0 (oldestInFlightAgeSeconds (overviewStats o)))]
   -- The states partition the live workers, so a queue's fleet is their sum.
   reg Name.Workers "{worker}" "Registered workers by state" $
     observed $

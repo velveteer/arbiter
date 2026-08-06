@@ -1783,6 +1783,10 @@ data QueueStats = QueueStats
   -- ^ Age in seconds of the oldest @ready@ job (Nothing if none are ready).
   -- Scheduled/backoff/leased jobs are excluded so a far-future delayed job
   -- does not inflate the queue's apparent backlog latency.
+  , oldestInFlightAgeSeconds :: Maybe Double
+  -- ^ Seconds since the oldest in-flight job was claimed (Nothing if none are
+  -- leased). Measures work still running, which a handler-duration sample
+  -- taken on return cannot: a hung handler never returns one.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -1801,6 +1805,7 @@ statsRowCodec =
     <*> col "suspended_jobs" CInt8
     <*> col "cancelled_jobs" CInt8
     <*> ncol "oldest_ready_age_seconds" CFloat8
+    <*> ncol "oldest_in_flight_age_seconds" CFloat8
 
 -- | Get statistics about the job queue
 getQueueStats
@@ -1818,7 +1823,7 @@ getQueueStats schemaName tableName = do
   -- only guards against an unexpected truncation.
   pure $ case rows of
     (s : _) -> s
-    [] -> QueueStats 0 0 0 0 0 0 0 0 Nothing
+    [] -> QueueStats 0 0 0 0 0 0 0 0 Nothing Nothing
 
 -- | A landing-overview row: a queue's stats plus its pause state.
 data QueueOverview = QueueOverview

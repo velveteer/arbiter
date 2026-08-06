@@ -837,7 +837,7 @@ spec connStr = do
     let overview =
           Ops.QueueOverview
             { Ops.overviewQueue = "greetings"
-            , Ops.overviewStats = Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5)
+            , Ops.overviewStats = Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5) (Just 4.5)
             , Ops.overviewQueuePaused = True
             , Ops.overviewWorkersLive = 4
             , Ops.overviewWorkersPaused = 1
@@ -860,6 +860,7 @@ spec connStr = do
               , "suspendedJobs": 1
               , "cancelledJobs": 0
               , "oldestReadyAgeSeconds": 12.5
+              , "oldestInFlightAgeSeconds": 4.5
               }
           }
         |]

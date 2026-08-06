@@ -1,0 +1,264 @@
+# Sample alert rules over the metrics arbiter-otel exports. Thresholds are starting
+# points, not recommendations: tune them to the queue's own latency budget.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: arbiter
+    folder: Arbiter
+    interval: 1m
+    rules:
+      - uid: arbiter-backlog-age
+        title: Queue backlog is not draining
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.queue }}: the oldest ready job has waited over 5m."
+          description: Ready work is not being claimed. Check for a paused queue, an exhausted admission policy, or workers that are up but not claiming.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max by (queue) (arbiter_queue_oldest_ready_age_seconds)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [300]
+
+      - uid: arbiter-long-running-job
+        title: A job has been running too long
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.queue }}: a job has held its lease for over 10m."
+          description: Measured from the claim, so a handler that never returns keeps climbing. A handler-duration alert cannot see this one, since no duration is recorded until the handler returns. Set the threshold above the queue's slowest legitimate job.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max by (queue) (arbiter_queue_oldest_in_flight_age_seconds)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [600]
+
+      - uid: arbiter-no-workers
+        title: Ready work with no workers
+        condition: threshold
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.queue }}: jobs are ready but no worker is registered."
+          description: Every worker for this queue has stopped or lost its registration.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: (max by (queue) (arbiter_queue_depth{status="ready"}) > 0) and on (queue) (sum by (queue) (arbiter_workers) == 0)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+
+      - uid: arbiter-gauges-stale
+        title: Gauge readings are stale
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Exported gauges are older than three export intervals.
+          description: The gauge scan is timing out or its shared gate is held. Every other gauge-based alert here is reading stale values while this fires. Raise the threshold to 3x OTEL_METRIC_EXPORT_INTERVAL if that is not the 60s default.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max(arbiter_gauges_age_seconds)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [180]
+
+      - uid: arbiter-retry-rate
+        title: Handlers are failing
+        condition: threshold
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Over 10% of processed jobs are being retried.
+          description: Handler failures are outpacing successes. Check the DLQ and the traces for the failing queue.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: sum(rate(arbiter_jobs_retries_total[5m])) / sum(rate(arbiter_jobs_processed_total[5m]))
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.1]
+
+      - uid: arbiter-pg-xid-age
+        title: Transaction ID age is climbing
+        condition: threshold
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: The database is over 1.5B transactions from wraparound.
+          description: Autovacuum is not keeping up. Postgres refuses writes at 2B.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max(arbiter_pg_xid_age)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [1500000000]
+
+      - uid: arbiter-autovacuum-age
+        title: Queue table has not been autovacuumed
+        condition: threshold
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.table }}: no autovacuum in over 24h."
+          description: A high-churn queue table that autovacuum has not reached accumulates dead tuples and slows the claim query.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max by (table) (arbiter_pg_table_autovacuum_age_seconds)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [86400]
+
+      - uid: arbiter-pg-deadlocks
+        title: Deadlocks in the database
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Postgres is reporting deadlocks.
+          description: Arbiter's own statements take their locks in a fixed order, so deadlocks usually come from application transactions that touch the queue tables alongside their own.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max(rate(arbiter_pg_deadlocks_total[5m]))
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
