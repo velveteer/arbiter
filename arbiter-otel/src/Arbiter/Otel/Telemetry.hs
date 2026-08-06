@@ -13,7 +13,7 @@ module Arbiter.Otel.Telemetry
 
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
-import Control.Exception (bracket, displayException)
+import Control.Exception (SomeException, bracket, displayException)
 import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
@@ -49,6 +49,7 @@ import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAt
 import OpenTelemetry.Trace
   ( TracerProviderOptions (..)
   , createTracerProvider
+  , emptyTracerProviderOptions
   , getGlobalTracerProvider
   , getTracerProviderInitializationOptions
   , setGlobalTracerProvider
@@ -76,8 +77,10 @@ data Telemetry = Telemetry
 -- 'withTelemetryFromEnv' is the gated form.
 withTelemetry :: (Telemetry -> IO a) -> IO a
 withTelemetry action = do
-  (processors, traceOpts) <- getTracerProviderInitializationOptions
-  let resources = tracerProviderOptionsResources traceOpts
+  detected <- tryAny getTracerProviderInitializationOptions
+  let (processors, traceOpts) = either (const ([], emptyTracerProviderOptions)) id detected
+      detectNote = either (Just . signalFailed "traces") (const Nothing) detected
+      resources = tracerProviderOptionsResources traceOpts
   previousMeters <- getGlobalMeterProvider
   readerOpts <- periodicMetricReaderOptionsFromEnv
   evalContT $ do
@@ -93,7 +96,7 @@ withTelemetry action = do
           { meters = ms
           , logDestination = dest
           , gaugeRefresh = refreshFor readerOpts
-          , telemetrySummary = summarize (serviceName resources) (catMaybes [tracesNote, metricsNote, logsNote])
+          , telemetrySummary = summarize (serviceName resources) (catMaybes [detectNote, tracesNote, metricsNote, logsNote])
           }
   where
     -- Bind a signal's handle only when nothing went wrong starting it.
@@ -136,9 +139,11 @@ withGlobalProvider signal getGlobal setGlobal initialize shutdown inner = do
 -- | Set a signal up and run @inner@ under it, or under the failure that left it off.
 bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Maybe Text -> IO a) -> IO a
 bracketSignal signal acquire release inner =
-  bracket (tryAny acquire) (traverse_ release) (inner . either (Just . failed) (const Nothing))
-  where
-    failed e = signal <> " exporter did not start: " <> T.pack (displayException e)
+  bracket (tryAny acquire) (traverse_ release) (inner . either (Just . signalFailed signal) (const Nothing))
+
+-- | The note a signal that could not start leaves in the summary.
+signalFailed :: Text -> SomeException -> Text
+signalFailed signal e = signal <> " exporter did not start: " <> T.pack (displayException e)
 
 -- | One line for the caller to log at startup, with whatever could not be started.
 summarize :: Maybe Text -> [Text] -> Text
@@ -185,15 +190,15 @@ telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 
 -- | Build 'Telemetry' over providers the caller installed itself, which the meters and
--- the log destination bind to here. 'Nothing' exports no logs.
-withExternalTelemetry :: MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
-withExternalTelemetry mp mlp action = do
+-- the log destination bind to here. A 'Nothing' provider leaves that signal off.
+withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
+withExternalTelemetry mmp mlp action = do
   tracing <- isJust <$> resolveTracer
-  ms <- newArbiterMeters mp
+  ms <- traverse newArbiterMeters mmp
   readerOpts <- periodicMetricReaderOptionsFromEnv
   action
-    (baseTelemetry mp)
-      { meters = Just ms
+    (baseTelemetry (fromMaybe noopMeterProvider mmp))
+      { meters = ms
       , logDestination = loggerDestination <$> mlp
       , gaugeRefresh = refreshFor readerOpts
       , telemetrySummary =

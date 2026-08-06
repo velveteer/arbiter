@@ -1045,15 +1045,19 @@ handleJobFailure config e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = logConfig config
       hooks = observabilityHooks config
-      unavailable = fireUnavailable cfg hooks job
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
       cancel = void (cancelJobFor failureKind job) >> fireCancelled cfg hooks job errorMsg
+  schemaName <- getSchema
+  let gone reason = do
+        cancelled <- deleteCancelledOrWarn cfg schemaName (Job.queueName job) [Job.primaryKey job]
+        if hasIdIn cancelled job
+          then tryLog cfg Info "Job force-cancelled" >> fireCancelled cfg hooks job "force-cancelled"
+          else tryLog cfg Warning ("Job " <> reason) >> fireUnavailable cfg hooks job reason
       -- Nothing written means the job went elsewhere, so the failure is not ours to report.
       wrote reason after rowsAffected
-        | rowsAffected == 0 = tryLog cfg Warning ("Job " <> reason) >> unavailable reason
+        | rowsAffected == 0 = gone reason
         | otherwise = fireFailure config job errorMsg startTime endTime >> after
-  schemaName <- getSchema
-  let deadLetter = do
+      deadLetter = do
         -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
         -- Merges old snapshot so repeated DLQ round-trips don't lose data.
         when (Job.isRollup job) $ do

@@ -212,7 +212,7 @@ spec = do
   describe "telemetry" $
     it "records job metrics and queue-depth gauges" $ do
       (mp, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-      Otel.withExternalTelemetry mp Nothing $ \tel -> do
+      Otel.withExternalTelemetry (Just mp) Nothing $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
         ms <- maybe (expectationFailure "expected metrics on" >> error "unreachable") pure (Otel.meters tel)

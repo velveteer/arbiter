@@ -68,13 +68,18 @@ refreshGroupsSQL schema tableName limit keys =
                  OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
           RETURNING 1
         ),
+        missing_keys AS (
+          SELECT DISTINCT j.group_key
+          FROM ${tbl} j
+          WHERE j.group_key IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
+          LIMIT #{lim :: CInt8}
+        ),
         missing AS (
           SELECT group_key, ${aggs}
-          FROM ${tbl} j
-          WHERE group_key IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
+          FROM ${tbl}
+          WHERE group_key IN (SELECT group_key FROM missing_keys)
           GROUP BY group_key
-          LIMIT #{lim :: CInt8}
         ),
         inserted AS (
           INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)

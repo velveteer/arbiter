@@ -198,7 +198,7 @@ benchTelemetry = modifyMVar benchTelemetryVar $ \case
     (mp, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
     setGlobalMeterProvider mp
     -- The handle holds nothing bracketed, so it outlives the call.
-    tel <- Otel.withExternalTelemetry mp Nothing pure
+    tel <- Otel.withExternalTelemetry (Just mp) Nothing pure
     pure (Just (tp, tel), (tp, tel))
   where
     discardSpans =
