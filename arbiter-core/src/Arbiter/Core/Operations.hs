@@ -338,11 +338,18 @@ traceStamp = stampTraceContext <$> liftIO currentTraceContext
 
 -- | The row an insert writes: the stamped job and its admission columns.
 insertRow :: (JobPayload payload, MonadIO m) => JobWrite payload -> m (JobWrite payload, AdmissionColumns)
-insertRow job = (\stamp -> (stamp job, admissionColumns (payload job))) <$> traceStamp
+insertRow job = flip stampedRow job <$> traceStamp
 
 -- | 'insertRow' over a batch, sharing one stamp.
 insertRows :: (JobPayload payload, MonadIO m) => [JobWrite payload] -> m [(JobWrite payload, AdmissionColumns)]
-insertRows jobs = (\stamp -> [(stamp j, admissionColumns (payload j)) | j <- jobs]) <$> traceStamp
+insertRows jobs = (\stamp -> map (stampedRow stamp) jobs) <$> traceStamp
+
+stampedRow
+  :: (JobPayload payload)
+  => (JobWrite payload -> JobWrite payload)
+  -> JobWrite payload
+  -> (JobWrite payload, AdmissionColumns)
+stampedRow stamp job = (stamp job, admissionColumns (payload job))
 
 -- | Insert a job without validating that the parent exists.
 --

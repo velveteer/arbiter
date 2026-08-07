@@ -26,6 +26,10 @@ module Arbiter.Core.Job.Types
   , DedupKey (..)
   , dedupParts
 
+    -- * Trace context
+  , TraceContext (..)
+  , toTraceContext
+
     -- * Observability
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
@@ -93,9 +97,8 @@ data Job payload key q insertedAt adm = Job
   -- rollup finalizer, and overwrites it with the final results map before
   -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
   -- results table. 'isRollup' is derived from whether this is non-null.
-  , traceparent :: Maybe Text
+  , traceContext :: Maybe TraceContext
   -- ^ W3C trace context captured at enqueue.
-  , tracestate :: Maybe Text
   , suspended :: Bool
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
@@ -194,8 +197,7 @@ defaultJob p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
-    , traceparent = Nothing
-    , tracestate = Nothing
+    , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
     , archiveFor = Nothing
@@ -225,8 +227,7 @@ defaultGroupedJob gk p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
-    , traceparent = Nothing
-    , tracestate = Nothing
+    , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
     , archiveFor = Nothing
@@ -249,6 +250,17 @@ type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
 
 -- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
+-- | A job's W3C trace context.
+data TraceContext = TraceContext
+  { traceparent :: Text
+  , tracestate :: Maybe Text
+  }
+  deriving stock (Eq, Generic, Show)
+
+-- | A trace context from its two stored halves.
+toTraceContext :: Maybe Text -> Maybe Text -> Maybe TraceContext
+toTraceContext tp ts = flip TraceContext ts <$> tp
+
 data DedupKey
   = -- | Skip if a job with this key exists (@DO NOTHING@).
     IgnoreDuplicate Text

@@ -60,7 +60,6 @@ import Arbiter.Worker.Logger (LogConfig, defaultLogConfig)
 import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import Data.Time (NominalDiffTime)
 import GHC.TypeLits (KnownSymbol)
 import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
@@ -103,14 +102,12 @@ withGauges
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
-  -> NominalDiffTime
-  -- ^ How often to refresh the readings.
   -> m b
   -> m b
-withGauges tel baseLog refreshInterval action = do
+withGauges tel baseLog action = do
   schema <- getSchema
   withRunInIO $ \runDb ->
-    withGaugeLoop tel baseLog runDb schema (registryTableNames (Proxy @(RegistryOf m))) refreshInterval $
+    withGaugeLoop tel baseLog runDb schema (registryTableNames (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
       \loop -> withAsync (labelArbiterThread "gauges" Nothing >> loop) (const (runDb action))
 
 -- | 'Arbiter.Worker.runWorkerPools' with the SDK installed from the environment, the
@@ -122,7 +119,7 @@ runWorkerPools
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools =
-  withTelemetryHere $ \tel -> runWorkerPoolsWith tel defaultLogConfig (gaugeRefresh tel) pools
+  withTelemetryHere $ \tel -> runWorkerPoolsWith tel defaultLogConfig pools
 
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
@@ -132,21 +129,19 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools =
-  withTelemetryHere $ \tel -> runSelectedWorkerPoolsWith tel defaultLogConfig (gaugeRefresh tel) enabled pools
+  withTelemetryHere $ \tel -> runSelectedWorkerPoolsWith tel defaultLogConfig enabled pools
 
 -- | 'runWorkerPools' over a handle the caller installed itself, with the gauge loop's
--- base log config and refresh interval.
+-- base log config.
 runWorkerPoolsWith
   :: forall m
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
-  -> NominalDiffTime
-  -- ^ How often to refresh the gauge readings.
   -> [NamedWorkerPool m]
   -> m ()
-runWorkerPoolsWith tel baseLog refreshInterval pools =
-  withGauges tel baseLog refreshInterval (Worker.runWorkerPools (instrumentPools tel pools))
+runWorkerPoolsWith tel baseLog pools =
+  withGauges tel baseLog (Worker.runWorkerPools (instrumentPools tel pools))
 
 -- | 'runSelectedWorkerPools' over a handle the caller installed itself.
 runSelectedWorkerPoolsWith
@@ -154,12 +149,11 @@ runSelectedWorkerPoolsWith
    . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
-  -> NominalDiffTime
   -> [Text]
   -> [NamedWorkerPool m]
   -> m ()
-runSelectedWorkerPoolsWith tel baseLog refreshInterval enabled pools =
-  withGauges tel baseLog refreshInterval (Worker.runSelectedWorkerPools enabled (instrumentPools tel pools))
+runSelectedWorkerPoolsWith tel baseLog enabled pools =
+  withGauges tel baseLog (Worker.runSelectedWorkerPools enabled (instrumentPools tel pools))
 
 -- | Install the SDK around an action in the database monad.
 withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a

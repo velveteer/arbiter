@@ -153,13 +153,9 @@ registerInstruments meter cells = do
         | (st, n) <- statusCounts (overviewStats o)
         ]
   reg Name.QueueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
-    observed $
-      over queues $ \o ->
-        [([("queue", overviewQueue o)], fromMaybe 0 (oldestReadyAgeSeconds (overviewStats o)))]
+    perQueue oldestReadyAgeSeconds
   reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased (0 = none in flight)" $
-    observed $
-      over queues $ \o ->
-        [([("queue", overviewQueue o)], fromMaybe 0 (oldestInFlightAgeSeconds (overviewStats o)))]
+    perQueue oldestInFlightAgeSeconds
   -- The states partition the live workers, so a queue's fleet is their sum.
   reg Name.Workers "{worker}" "Registered workers by state" $
     observed $
@@ -254,6 +250,8 @@ registerInstruments meter cells = do
     perDbTotals label pairs = over dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
     dbTotal field = over dbOf (\h -> [([], field h)])
     perTable field = observed (over tables (\t -> [([("table", Health.table t)], field t)]))
+    perQueue field =
+      observed (over queues (\o -> [([("queue", overviewQueue o)], fromMaybe 0 (field (overviewStats o)))]))
     perDb = observed . dbTotal
     perDbBy label = observed . perDbTotals label
 

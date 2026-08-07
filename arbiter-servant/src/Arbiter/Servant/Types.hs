@@ -26,7 +26,16 @@ import Arbiter.Core.Concurrency.Stats
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
+import Arbiter.Core.Job.Types
+  ( Job (..)
+  , JobRead
+  , JobStatus
+  , JobWrite
+  , isRollup
+  , toTraceContext
+  , traceparent
+  , tracestate
+  )
 import Arbiter.Core.Job.Types qualified as Arb
 import Arbiter.Core.Operations (QueueOverview (..), QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
@@ -80,8 +89,8 @@ apiJobPairs job =
   , "parentId" .= parentId job
   , "parentState" .= parentState job
   , "isRollup" .= isRollup job
-  , "traceparent" .= traceparent job
-  , "tracestate" .= tracestate job
+  , "traceparent" .= (traceparent <$> traceContext job)
+  , "tracestate" .= (tracestate =<< traceContext job)
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
   , "archiveFor" .= archiveFor job
@@ -114,8 +123,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .: "maxAttempts"
         <*> v .:? "parentId"
         <*> v .:? "parentState"
-        <*> v .:? "traceparent"
-        <*> v .:? "tracestate"
+        <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
         <*> v .:? "archiveFor"
@@ -159,8 +167,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> v .:? "maxAttempts"
         <*> pure Nothing -- parentId: managed internally
         <*> pure Nothing -- parentState: managed internally
-        <*> pure Nothing -- traceparent: stamped at enqueue
-        <*> pure Nothing -- tracestate: stamped at enqueue
+        <*> pure Nothing -- traceContext: stamped at enqueue
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
         -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.

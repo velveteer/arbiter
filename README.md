@@ -926,7 +926,7 @@ main = do
 
   Otel.withExternalTelemetry (Just mp) Nothing $ \tel ->
     runSimpleDb env $
-      Otel.runWorkerPoolsWith tel defaultLogConfig (Otel.gaugeRefresh tel) [namedWorkerPool emailCfg]
+      Otel.runWorkerPoolsWith tel defaultLogConfig [namedWorkerPool emailCfg]
 ```
 
 `withExternalTelemetry` covers metrics and logs. Install the tracer provider yourself,

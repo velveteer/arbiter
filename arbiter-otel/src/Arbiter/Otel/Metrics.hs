@@ -18,10 +18,11 @@ import Arbiter.Core.Job.Types (AdmissionKeys (..), Job (..), ObservabilityHooks 
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Fixed (Fixed (MkFixed))
 import Data.Foldable (traverse_)
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Time.Clock (diffUTCTime)
+import Data.Time.Clock (diffUTCTime, nominalDiffTimeToSeconds)
 import OpenTelemetry.Attributes (Attributes, toAttribute, unsafeAttributesFromListIgnoringLimits)
 import OpenTelemetry.Metric.Core
   ( AdvisoryParameters (..)
@@ -95,7 +96,8 @@ otelHooks ms queue =
     }
   where
     -- A clock stepped backwards must not subtract from the histogram's sum.
-    secs start end = max 0 (realToFrac (diffUTCTime end start))
+    secs start end = case nominalDiffTimeToSeconds (diffUTCTime end start) of
+      MkFixed ps -> max 0 (fromInteger ps / 1e12)
     outcome o = attrs [("queue", queue), ("outcome", o)]
     queueAttr = attrs [("queue", queue)]
     -- The policy prefix, never the key: a per-tenant suffix would be unbounded.

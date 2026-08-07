@@ -9,7 +9,7 @@ module Main (main) where
 import Arbiter.Concurrency (HasConcurrency)
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ (DLQJob (dlqPrimaryKey))
-import Arbiter.Core.Job.Types (Job (..), ObservabilityHooks (..), defaultJob)
+import Arbiter.Core.Job.Types (Job (..), ObservabilityHooks (..), TraceContext (..), defaultJob)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
@@ -186,23 +186,23 @@ spec = do
   describe "trace context" $ do
     it "stamps the ambient span onto an enqueued job" $ do
       stored <- withAttachedSpan sampleTraceparent $ enqueue plainEnv (Greeting "traced")
-      fmap (T.isInfixOf sampleTraceId) (traceparent stored) `shouldBe` Just True
+      fmap (T.isInfixOf sampleTraceId . traceparent) (traceContext stored) `shouldBe` Just True
 
     it "leaves the columns null when no span is active" $ do
       stored <- enqueue plainEnv (Greeting "no-span")
-      traceparent stored `shouldBe` Nothing
+      traceContext stored `shouldBe` Nothing
 
     it "does not overwrite a trace context the caller set" $ do
-      let job = (defaultJob (Greeting "preset")) {traceparent = Just "caller-set"}
+      let job = (defaultJob (Greeting "preset")) {traceContext = Just (TraceContext "caller-set" Nothing)}
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
-      traceparent stored `shouldBe` Just "caller-set"
+      fmap traceparent (traceContext stored) `shouldBe` Just "caller-set"
 
     it "survives the queue-to-archive copy" $ do
       let job = (defaultJob (Greeting "archived")) {archiveFor = Just 3600}
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
       void $ runSimpleDb plainEnv (Ops.ackJob schema queue stored)
       archived <- runSimpleDb plainEnv (Ops.getArchivedJobById @_ @Greeting schema queue (primaryKey stored))
-      fmap (traceparent . jobSnapshot) archived `shouldBe` Just (traceparent stored)
+      fmap (traceContext . jobSnapshot) archived `shouldBe` Just (traceContext stored)
 
     it "survives the DLQ round trip" $ do
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv (defaultJob (Greeting "dlq'd"))
@@ -210,7 +210,7 @@ spec = do
         void $ Ops.moveToDLQ schema queue "boom" stored
         listToMaybe <$> Ops.listDLQJobs @_ @Greeting schema queue 1 0
       retried <- traverse (runSimpleDb plainEnv . Ops.retryFromDLQ @_ @Greeting schema queue . dlqPrimaryKey) entry
-      fmap (fmap traceparent) retried `shouldBe` Just (Just (traceparent stored))
+      fmap (fmap traceContext) retried `shouldBe` Just (Just (traceContext stored))
 
   describe "telemetry" $
     it "records job metrics and queue-depth gauges" $ do
@@ -269,7 +269,7 @@ spec = do
         reattach <- capturingContext
         recordJobFailure job "boom"
         markSpanError "boom"
-        reattach (liftIO (fst <$> currentTraceContext))
+        reattach (liftIO (fmap traceparent <$> currentTraceContext))
 
       spans <- readIORef recorded
       sp <- case spans of
@@ -282,7 +282,7 @@ spec = do
       map eventName (values (hotEvents hot)) `shouldBe` ["exception"]
       -- Linked to the enqueue's trace, and running under a trace of its own.
       map (traceId . frozenLinkContext) (values (hotLinks hot))
-        `shouldBe` map traceId (toList (spanContextOf =<< traceparent job))
+        `shouldBe` map traceId (toList (spanContextOf . traceparent =<< traceContext job))
       (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext sp))
   where
     values = toList . appendOnlyBoundedCollectionValues

@@ -657,14 +657,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
             reclaimedLog = withJobContextList (logConfig config) reclaimed
         unless (null reclaimed) $ do
           tryLog reclaimedLog Info "Jobs no longer claimed by this worker during bulk completion, skipped"
-          -- A force-cancel voids the claim the same way a reclaim does.
-          cancelled <-
-            deleteCancelledOrWarn
-              reclaimedLog
-              schemaName
-              (Job.queueName firstJob)
-              (map Job.primaryKey reclaimed)
-          reportGoneJobs config markUnowned cancelled "no longer claimed by this worker" reclaimed
+          settleGoneJobs config reclaimedLog markUnowned "no longer claimed by this worker" reclaimed
         traverse_ finalize done
       markUnowned j = markJobUnowned handoff j >> markHandled j
       callbacks =
@@ -743,6 +736,22 @@ finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
     jobIds = map Job.primaryKey (toList jobs)
     batchLog = withJobContext (logConfig config) jobs
 
+-- | Delete whichever of @jobs@ a force-cancel flagged, then report them all.
+settleGoneJobs
+  :: (JobOperation m payload, MonadUnliftIO m)
+  => WorkerConfig m payload
+  -> LogConfig
+  -> (Job.JobRead payload -> m ())
+  -> Text
+  -> [Job.JobRead payload]
+  -> m ()
+settleGoneJobs config logCfg mark reason = \case
+  [] -> pure ()
+  jobs@(j : _) -> do
+    schemaName <- getSchema
+    cancelled <- deleteCancelledOrWarn logCfg schemaName (Job.queueName j) (map Job.primaryKey jobs)
+    reportGoneJobs config mark cancelled reason jobs
+
 -- | Delete whichever of @jobIds@ a force-cancel flagged, returning the ids it deleted.
 deleteCancelledOrWarn
   :: (MonadArbiter m, MonadUnliftIO m)
@@ -820,11 +829,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
         -- An exception naming no job speaks for none of them, so the remainder keeps
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
-        schemaName <- Arb.getSchema
-        -- A force-cancel voids the claim the same way a reclaim does.
-        cancelled <-
-          deleteCancelledOrWarn batchLog schemaName (Job.queueName firstJob) (map Job.primaryKey jobsGone)
-        reportGoneJobs config (markJobHandled handoff) cancelled reason jobsGone
+        settleGoneJobs config batchLog (markJobHandled handoff) reason jobsGone
         unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
@@ -856,7 +861,6 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
             when (cancelsTree kind) $ unownedOf >>= traverse_ (void . cancelJobFor kind)
           traverse_ (markJobHandled handoff) unhandled
   where
-    (firstJob :| _) = jobs
     batchLog = withJobContext (logConfig config) jobs
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
     failJob exc job =
@@ -1128,31 +1132,30 @@ reaperLoop logCfg report interval stmtTimeout = do
     sweep
       :: MaintenanceOp
       -> NominalDiffTime
-      -> Text
       -> (Int64 -> m ())
       -> m (Int64, [Text])
       -> m ()
-    sweep op every failMsg done work =
+    sweep op every done work =
       gatedRows op every fst work
         >>= traverse_
           ( \(n, failed) -> do
-              traverse_ (\queue -> tryLog logCfg Warning $ failMsg <> queue) failed
+              traverse_
+                (\queue -> tryLog logCfg Warning $ maintenanceOpName op <> " failed for queue: " <> queue)
+                failed
               when (n > 0) $ done n
           )
   forever $ do
-    sweep RefreshGroups interval "Groups refresh failed for queue: " (const (pure ())) $
+    sweep RefreshGroups interval (const (pure ())) $
       Ops.refreshAllGroups schemaName queues
     gatedCount SweepStaleWorkers interval $ Ops.sweepStaleWorkers schemaName
     sweep
       SweepExhaustedJobs
       interval
-      "Exhausted-job sweep failed for queue: "
       (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
       $ Ops.sweepExhaustedJobs schemaName queues
     sweep
       SweepCancelledJobs
       interval
-      "Cancelled-job sweep failed for queue: "
       (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
       $ Ops.sweepCancelledJobs schemaName queues
     when hasRateLimit $
@@ -1164,7 +1167,6 @@ reaperLoop logCfg report interval stmtTimeout = do
     sweep
       PurgeArchives
       interval
-      "Archive purge failed for queue: "
       (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
       $ Ops.purgeArchives schemaName queues
     threadDelay (intervalSecs * 1_000_000)

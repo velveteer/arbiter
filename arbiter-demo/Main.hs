@@ -251,7 +251,7 @@ runDemo tel = do
 
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
   race_
-    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig (Otel.gaugeRefresh tel) workers)
+    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig workers)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------

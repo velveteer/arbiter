@@ -7,8 +7,7 @@
 -- an untraced deployment pays for none of this.
 module Arbiter.Core.Trace
   ( -- * Job trace context
-    TraceContext
-  , untraced
+    TraceContext (..)
   , stampTraceContext
 
     -- * Tracer
@@ -43,6 +42,7 @@ module Arbiter.Core.Trace
   , toAttribute
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (fromException)
 import Control.Monad (guard)
 import Control.Monad.IO.Class (MonadIO)
@@ -101,34 +101,24 @@ import Arbiter.Core.Exceptions
   , JobStolenException (..)
   )
 import Arbiter.Core.Job.Schema (TableName)
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite)
+import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
 
--- | A job's @traceparent@ and @tracestate@.
-type TraceContext = (Maybe Text, Maybe Text)
+-- | Fill a job's trace context, leaving a job that carries one of its own alone.
+stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
+stampTraceContext ctx job = job {traceContext = traceContext job <|> ctx}
 
-untraced :: TraceContext
-untraced = (Nothing, Nothing)
-
--- | Fill a job's trace context, leaving a job that already carries either half alone.
--- The halves belong to one trace, so a caller's @tracestate@ never pairs with an
--- ambient @traceparent@.
-stampTraceContext :: TraceContext -> JobWrite payload -> JobWrite payload
-stampTraceContext (tp, ts) job
-  | isJust (traceparent job) || isJust (tracestate job) = job
-  | otherwise = job {traceparent = tp, tracestate = ts}
-
--- | The ambient span's trace context, or untraced when no span is active. Read from
+-- | The ambient span's trace context, or 'Nothing' when no span is active. Read from
 -- thread-local context, so it answers for the thread that enqueues.
-currentTraceContext :: IO TraceContext
-currentTraceContext = maybe (pure untraced) encoded =<< getActiveSpan
+currentTraceContext :: IO (Maybe TraceContext)
+currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
   where
     encoded sp = do
       valid <- isValid <$> getSpanContext sp
       if not valid
-        then pure untraced
+        then pure Nothing
         else do
           (tp, ts) <- encodeSpanContext sp
-          pure (Just (decodeUtf8 tp), decodeUtf8 ts <$ guard (not (BS.null ts)))
+          pure (Just (TraceContext (decodeUtf8 tp) (decodeUtf8 ts <$ guard (not (BS.null ts)))))
 
 -- | Resolve the arbiter tracer once, or 'Nothing' when nothing is collecting.
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)
@@ -252,8 +242,8 @@ spanLinkForJob job =
 
 spanContextForJob :: JobRead payload -> Maybe SpanContext
 spanContextForJob job = do
-  tp <- traceparent job
-  decodeSpanContext (Just (encodeUtf8 tp)) (encodeUtf8 <$> tracestate job)
+  ctx <- traceContext job
+  decodeSpanContext (Just (encodeUtf8 (traceparent ctx))) (encodeUtf8 <$> tracestate ctx)
 
 producerArgs :: TableName -> SpanArguments
 producerArgs queue =
