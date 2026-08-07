@@ -106,12 +106,16 @@ sampleTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 sampleTraceId :: Text
 sampleTraceId = "4bf92f3577b34da6a3ce929d0e0e4736"
 
+-- | Unwrap, failing the example when there is nothing to unwrap.
+orFail :: String -> Maybe a -> IO a
+orFail msg = maybe (expectationFailure msg >> error "unreachable") pure
+
 -- | Run an action with a frozen span attached to this thread, as an enclosing @inSpan@
 -- would leave it.
 withAttachedSpan :: ByteString -> IO a -> IO a
-withAttachedSpan traceparent action = case decodeSpanContext (Just traceparent) Nothing of
-  Nothing -> expectationFailure "sample traceparent did not decode" >> error "unreachable"
-  Just sc -> bracket (attachContext (insertSpan (wrapSpanContext sc) empty)) detachContext (const action)
+withAttachedSpan traceparent action = do
+  sc <- orFail "sample traceparent did not decode" (decodeSpanContext (Just traceparent) Nothing)
+  bracket (attachContext (insertSpan (wrapSpanContext sc) empty)) detachContext (const action)
 
 -- | Drop and re-migrate the test schema.
 freshSchema :: ByteString -> IO ()
@@ -153,6 +157,11 @@ referencedMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
 -- | Every instrument the library registers, as Prometheus renders it.
 declaredMetrics :: [Text]
 declaredMetrics = map (T.replace "." "_") Otel.arbiterMetricNames
+
+-- | No metric a provisioned file names is one the library never registers.
+queriesOnlyDeclared :: [Text] -> Expectation
+queriesOnlyDeclared referenced =
+  filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
 
 -- | Every point a collection produced, as its metric name and attributes.
 collected :: SdkMeterEnv -> IO [(Text, Attributes)]
@@ -218,7 +227,7 @@ spec = do
       Otel.withExternalTelemetry (Just mp) Nothing $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
-        ms <- maybe (expectationFailure "expected metrics on" >> error "unreachable") pure (Otel.meters tel)
+        ms <- orFail "expected metrics on" (Otel.meters tel)
         let hooks = Otel.otelHooks ms queue
         onJobClaimed hooks job now
         onJobSuccess hooks job now now
@@ -246,8 +255,7 @@ spec = do
   describe "provisioned dashboard" $ do
     referenced <- runIO (referencedMetrics <$> TIO.readFile dashboardPath)
 
-    it "queries only metrics the library registers" $
-      filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
+    it "queries only metrics the library registers" $ queriesOnlyDeclared referenced
 
     it "has a panel for every metric the library registers" $
       filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
@@ -255,8 +263,7 @@ spec = do
   describe "provisioned alerts" $ do
     referenced <- runIO (referencedMetrics <$> TIO.readFile alertingPath)
 
-    it "query only metrics the library registers" $
-      filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
+    it "query only metrics the library registers" $ queriesOnlyDeclared referenced
 
   describe "consumer spans" $ do
     (recorded, provider) <- runIO recordingTracerProvider
@@ -272,9 +279,9 @@ spec = do
         reattach (liftIO (fmap traceparent <$> currentTraceContext))
 
       spans <- readIORef recorded
-      sp <- case spans of
-        [one] -> pure one
-        _ -> expectationFailure "expected exactly one consumer span" >> error "unreachable"
+      sp <- orFail "expected exactly one consumer span" $ case spans of
+        [one] -> Just one
+        _ -> Nothing
       hot <- readIORef (spanHot sp)
       hotName hot `shouldBe` "process " <> queue
       spanKind sp `shouldBe` Consumer
@@ -290,4 +297,4 @@ spec = do
     enqueue env p = insertRaw env (defaultJob p)
     insertRaw env job = do
       inserted <- runSimpleDb env (Ops.insertJob schema queue job)
-      maybe (expectationFailure "insert returned no row" >> error "unreachable") pure inserted
+      orFail "insert returned no row" inserted

@@ -89,6 +89,7 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
                  EXTRACT(EPOCH FROM NOW() - (metadata ->> 'at')::timestamptz)::float8 AS age_seconds
           FROM ${tbl}
           WHERE task_name = #{task :: CText}
+            AND NOT EXISTS (SELECT 1 FROM claim)
             AND metadata -> 'payload' IS NOT NULL
             AND (metadata ->> 'at')::timestamptz > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
         )

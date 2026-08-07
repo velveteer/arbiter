@@ -249,7 +249,6 @@ type JobPayload payload =
 type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
 
--- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 -- | A job's W3C trace context.
 data TraceContext = TraceContext
   { traceparent :: Text
@@ -261,6 +260,7 @@ data TraceContext = TraceContext
 toTraceContext :: Maybe Text -> Maybe Text -> Maybe TraceContext
 toTraceContext tp ts = flip TraceContext ts <$> tp
 
+-- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 data DedupKey
   = -- | Skip if a job with this key exists (@DO NOTHING@).
     IgnoreDuplicate Text

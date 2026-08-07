@@ -16,7 +16,6 @@ import Data.Foldable (toList)
 import Data.HashMap.Strict qualified as HM
 import Data.Scientific (toBoundedInteger, toRealFloat)
 import Data.Text (Text)
-import Data.Text qualified as T
 import OpenTelemetry.Log.Core qualified as Log
 
 -- | Send a config's logs to @dest@ as well as its own. 'Nothing' leaves the
@@ -40,12 +39,19 @@ otelLogCallback logger level msg context =
       { Log.timestamp = Nothing
       , Log.observedTimestamp = Nothing
       , Log.context = Nothing
-      , Log.severityText = Just (T.pack (show level))
+      , Log.severityText = Just (severityLabel level)
       , Log.severityNumber = Just (severityOf level)
       , Log.body = Log.TextValue msg
       , Log.attributes = HM.fromList (map logAttribute context)
       , Log.eventName = Nothing
       }
+
+severityLabel :: LogLevel -> Text
+severityLabel = \case
+  Debug -> "Debug"
+  Info -> "Info"
+  Warning -> "Warning"
+  Error -> "Error"
 
 severityOf :: LogLevel -> Log.SeverityNumber
 severityOf = \case
