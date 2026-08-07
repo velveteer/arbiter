@@ -12,7 +12,7 @@ module Arbiter.Worker.TestKit
 
 import Arbiter.Core.Exceptions
   ( throwBranchCancel
-  , throwJobStolen
+  , throwJobGone
   , throwNack
   , throwPermanent
   , throwRetryable
@@ -1158,12 +1158,12 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
 
-    it "a thrown JobStolenException skips retry and leaves the job to reprocess" $ \env -> do
+    it "a thrown JobGoneException skips retry and leaves the job to reprocess" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
             n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
             if n == 1
-              then throwJobStolen "stolen mid-batch"
+              then throwJobGone "stolen mid-batch"
               else traverse_ (ack cbs) (toList jobs)
       let jobs = [(defaultJob (mkSimple "stolen-job")) {groupKey = Just "st"}]
       runM env $ traverse_ HL.insertJob jobs

@@ -8,7 +8,7 @@
 -- 'throwNack') to reprocess the job without recording a failure.
 --
 -- The engine-internal exceptions ('ParsingException', 'InternalException',
--- 'JobNotFoundException', 'JobStolenException') are thrown directly as
+-- 'JobGoneException') are thrown directly as
 -- their own types, not wrapped in any sum. They are handled by the worker's
 -- retry combinators and classifier, and are not part of the surface API
 -- that user handlers throw.
@@ -24,8 +24,7 @@ module Arbiter.Core.Exceptions
     -- * Engine-internal signals
   , ParsingException (..)
   , InternalException (..)
-  , JobNotFoundException (..)
-  , JobStolenException (..)
+  , JobGoneException (..)
   , JobForceCancelled (..)
 
     -- * Helpers
@@ -36,9 +35,8 @@ module Arbiter.Core.Exceptions
   , throwNack
   , throwParsing
   , throwInternal
-  , throwJobNotFoundIds
-  , throwJobStolen
-  , throwJobStolenIds
+  , throwJobGone
+  , throwJobGoneIds
   , namedJobIds
   ) where
 
@@ -122,23 +120,15 @@ newtype InternalException = InternalException Text
 instance Exception InternalException where
   displayException (InternalException msg) = T.unpack msg
 
--- | Job was deleted or reclaimed between claim and ack. The worker recognizes
--- this signal and skips retry/DLQ.
--- The ids are the jobs actually gone, empty when the thrower did not name them.
-data JobNotFoundException = JobNotFoundException Text [Int64]
+-- | Job was deleted or reclaimed between claim and ack. The worker recognizes this
+-- signal and skips retry/DLQ. The message is the reason reported to
+-- 'Arbiter.Core.Job.Types.onJobUnavailable'. The ids are the jobs actually gone,
+-- empty when the thrower did not name them.
+data JobGoneException = JobGoneException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
-instance Exception JobNotFoundException where
-  displayException (JobNotFoundException msg ids) = T.unpack (msg <> namedJobIds ids)
-
--- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
--- combinator propagates this signal so the worker can stop duplicate work.
--- The ids are the jobs actually reclaimed, empty when the thrower did not name them.
-data JobStolenException = JobStolenException Text [Int64]
-  deriving stock (Eq, Generic, Show)
-
-instance Exception JobStolenException where
-  displayException (JobStolenException msg ids) = T.unpack (msg <> namedJobIds ids)
+instance Exception JobGoneException where
+  displayException (JobGoneException msg ids) = T.unpack (msg <> namedJobIds ids)
 
 -- | Async exception for user-initiated force-cancel, naming the jobs it cancels
 -- and any the same check found reclaimed by another worker.
@@ -171,16 +161,12 @@ throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
 -- | Names the jobs that went away, so the worker can tell them from the rest of the batch.
-throwJobNotFoundIds :: (MonadIO m) => Text -> [Int64] -> m a
-throwJobNotFoundIds msg ids = UE.throwIO (JobNotFoundException msg ids)
+throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
+throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 
-throwJobStolen :: (MonadIO m) => Text -> m a
-throwJobStolen msg = UE.throwIO (JobStolenException msg [])
-
--- | 'throwJobStolen' naming the reclaimed jobs, so the worker can tell them from
--- the rest of the batch.
-throwJobStolenIds :: (MonadIO m) => [Int64] -> m a
-throwJobStolenIds = UE.throwIO . JobStolenException "reclaimed by another worker"
+-- | 'throwJobGoneIds' naming none, for a thrower that speaks for the whole batch.
+throwJobGone :: (MonadIO m) => Text -> m a
+throwJobGone msg = throwJobGoneIds msg []
 
 -- | The ids a signal names, appended to its message. Empty when it names none.
 namedJobIds :: [Int64] -> Text

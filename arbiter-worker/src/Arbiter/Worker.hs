@@ -53,15 +53,14 @@ import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
   , JobForceCancelled (..)
+  , JobGoneException (..)
   , JobNackException (..)
-  , JobNotFoundException (..)
   , JobPermanentException (..)
   , JobRetryableException (..)
-  , JobStolenException (..)
   , ParsingException (..)
   , TreeCancelException (..)
   , namedJobIds
-  , throwJobNotFoundIds
+  , throwJobGoneIds
   )
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
@@ -621,7 +620,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
       ackJobOrSkip job = do
         rowsAffected <- Arb.ackJob job
         when (rowsAffected == 0) $
-          throwJobNotFoundIds "reclaimed by another worker during processing" [Job.primaryKey job]
+          throwJobGoneIds "reclaimed by another worker during processing" [Job.primaryKey job]
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
   let (firstJob :| _) = jobs
@@ -841,12 +840,9 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
       unless (null unhandled) $
         tryLog (withJobContextList (logConfig config) unhandled) Warning "Handler left jobs unfinalized, will reprocess"
     Left exc
-      | Just (JobStolenException _ stolen) <- fromException exc -> do
-          tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry" <> namedJobIds stolen
-          reportUnavailable stolen "reclaimed by another worker"
-      | Just (JobNotFoundException _ gone) <- fromException exc -> do
-          tryLog batchLog Info $ "Job(s) no longer claimed by this worker, skipping retry" <> namedJobIds gone
-          reportUnavailable gone "no longer available"
+      | Just (JobGoneException reason gone) <- fromException exc -> do
+          tryLog batchLog Info $ "Job(s) " <> reason <> ", skipping retry" <> namedJobIds gone
+          reportUnavailable gone reason
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
           -- left unfinalized, so the nacked reprocess does not record a failure.
@@ -943,7 +939,7 @@ storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
 
 -- | Classify a handler exception into an error message and failure disposition.
 --
--- Note: 'JobNotFoundException' and 'JobStolenException' are intercepted by
+-- Note: 'JobGoneException' is intercepted by
 -- 'reportBatchOutcome' before reaching 'handleJobFailure', so they never
 -- arrive here.
 data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure

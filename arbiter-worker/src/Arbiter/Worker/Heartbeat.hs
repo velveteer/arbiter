@@ -4,7 +4,7 @@ module Arbiter.Worker.Heartbeat
   ( withJobsHeartbeat
   ) where
 
-import Arbiter.Core.Exceptions (JobForceCancelled (..), throwJobStolenIds)
+import Arbiter.Core.Exceptions (JobForceCancelled (..), throwJobGoneIds)
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
@@ -83,7 +83,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       unless (null cancelledJobs) $
         liftIO (throwIO (JobForceCancelled cancelledJobs stolenJobs))
       unless (null stolenJobs) $
-        throwJobStolenIds stolenJobs
+        throwJobGoneIds "reclaimed by another worker" stolenJobs
       let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
           activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) (toList jobs)
       currentTime <- liftIO getCurrentTime

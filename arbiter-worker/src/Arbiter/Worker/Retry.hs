@@ -8,11 +8,7 @@ module Arbiter.Worker.Retry
   , spawnRetried
   ) where
 
-import Arbiter.Core.Exceptions
-  ( JobException
-  , JobNotFoundException
-  , JobStolenException
-  )
+import Arbiter.Core.Exceptions (JobException, JobGoneException)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Exception (displayException)
 import Control.Monad (forever)
@@ -71,7 +67,7 @@ retryOnException stateVar logCfg label action = loop
 -- | Like 'retryOnException' but never returns on its own, even if the worker
 -- is shutting down. Job signals propagate so they reach the worker layer
 -- where they have semantic meaning ('JobException' user decisions,
--- 'JobStolenException' and 'JobNotFoundException' reclaim signals).
+-- 'JobGoneException' reclaim signals).
 -- Everything else (including transient DB errors) is retried.
 retryOnExceptionForever
   :: (MonadUnliftIO m)
@@ -97,8 +93,7 @@ retryOnExceptionForever logCfg label delay action = forever $ do
 isJobSignal :: SomeException -> Bool
 isJobSignal e =
   isJust (fromException e :: Maybe JobException)
-    || isJust (fromException e :: Maybe JobStolenException)
-    || isJust (fromException e :: Maybe JobNotFoundException)
+    || isJust (fromException e :: Maybe JobGoneException)
 
 -- | Spawn a thread under 'withAsync', wrapped in 'retryOnException' so
 -- transient failures restart the action instead of killing the thread.

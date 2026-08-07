@@ -50,7 +50,7 @@ import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HM
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (isJust, mapMaybe, maybeToList)
+import Data.Maybe (mapMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.Lazy (toStrict)
@@ -97,8 +97,7 @@ import UnliftIO.Async (AsyncCancelled (..))
 import Arbiter.Core.Exceptions
   ( JobForceCancelled (..)
   , JobNackException (..)
-  , JobNotFoundException (..)
-  , JobStolenException (..)
+  , JobGoneException (..)
   )
 import Arbiter.Core.Job.Schema (TableName)
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
@@ -135,8 +134,7 @@ arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineCo
 routineControlFlow :: ExceptionHandler
 routineControlFlow e
   | Just JobNackException <- fromException e = recorded
-  | Just (JobNotFoundException _ _) <- fromException e = recorded
-  | Just (JobStolenException _ _) <- fromException e = recorded
+  | Just (JobGoneException _ _) <- fromException e = recorded
   | Just (JobForceCancelled _ _) <- fromException e = recorded
   | Just AsyncCancelled <- fromException e = Just (ExceptionResponse IgnoredException mempty)
   | otherwise = Nothing
