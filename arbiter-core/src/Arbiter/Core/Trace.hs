@@ -47,7 +47,6 @@ import Control.Exception (fromException)
 import Control.Monad (guard)
 import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString qualified as BS
-import Data.Foldable (traverse_)
 import Data.HashMap.Strict qualified as HM
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
@@ -69,7 +68,6 @@ import OpenTelemetry.Trace.Core
   , ExceptionResponse (..)
   , NewEvent (..)
   , NewLink (..)
-  , Span
   , SpanArguments (..)
   , SpanContext
   , SpanKind (..)
@@ -90,6 +88,7 @@ import OpenTelemetry.Trace.Core
   , setStatus
   , tracerIsEnabled
   , tracerOptions
+  , withActiveSpan
   , wrapSpanContext
   )
 import UnliftIO (MonadUnliftIO, bracket)
@@ -170,18 +169,14 @@ withPublishSpan :: (MonadUnliftIO m) => Maybe Tracer -> TableName -> m a -> m a
 withPublishSpan mTracer queue =
   spanning mTracer ("publish " <> queue) (producerArgs queue)
 
--- | Act on the currently active span, a no-op when none is active.
-onActiveSpan :: (MonadIO m) => (Span -> m ()) -> m ()
-onActiveSpan act = traverse_ act =<< getActiveSpan
-
 -- | Add attributes to the currently active span.
 addSpanAttributes :: (MonadIO m) => [(Text, Attribute)] -> m ()
 addSpanAttributes [] = pure ()
-addSpanAttributes attributes = onActiveSpan (\sp -> addAttributes sp (HM.fromList attributes))
+addSpanAttributes attributes = withActiveSpan (\sp -> addAttributes sp (HM.fromList attributes))
 
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()
-markSpanError msg = onActiveSpan (\sp -> setStatus sp (Error msg))
+markSpanError msg = withActiveSpan (\sp -> setStatus sp (Error msg))
 
 -- | Record one job's failure as an event on the active span, a no-op when none is active.
 -- A batch span also covers the jobs that succeeded, so this leaves its status alone.
@@ -193,7 +188,7 @@ recordJobCancelled :: (MonadIO m) => JobRead payload -> Text -> m ()
 recordJobCancelled = jobEvent "job.cancelled" "arbiter.job.cancel_reason"
 
 jobEvent :: (MonadIO m) => Text -> Text -> JobRead payload -> Text -> m ()
-jobEvent name reasonKey job msg = onActiveSpan (\sp -> addEvent sp event)
+jobEvent name reasonKey job msg = withActiveSpan (\sp -> addEvent sp event)
   where
     event =
       NewEvent

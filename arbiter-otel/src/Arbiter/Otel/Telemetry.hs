@@ -23,7 +23,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import OpenTelemetry.Attributes (lookupAttributeByKey)
 import OpenTelemetry.Attributes.Key (AttributeKey)
-import OpenTelemetry.Environment (lookupBooleanEnv)
+import OpenTelemetry.Environment (MetricsExporterSelection (..), lookupBooleanEnv, lookupMetricsExporterSelection)
 import OpenTelemetry.Log
   ( LoggerProvider
   , getGlobalLoggerProvider
@@ -115,11 +115,16 @@ withTelemetry action = do
         (createMeterProvider resources defaultSdkMeterProviderOptions)
         (\(m, _) -> setGlobalMeterProvider previous >> void (shutdownMeterProvider m Nothing))
         (\(m, env) -> setGlobalMeterProvider m >> inner (m, env))
-    withReader readerOpts env =
-      bracketSignal
-        "metrics"
-        (resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts)
-        stopPeriodicMetricReader
+    withReader readerOpts env inner = do
+      selection <- lookupMetricsExporterSelection
+      if exportsNothing selection
+        then inner (Just "metrics off, OTEL_METRICS_EXPORTER=none")
+        else
+          bracketSignal
+            "metrics"
+            (resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts)
+            stopPeriodicMetricReader
+            inner
     withLogs =
       withGlobalProvider
         "logs"
@@ -140,6 +145,10 @@ withGlobalProvider signal getGlobal setGlobal initialize shutdown inner = do
 bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Maybe Text -> IO a) -> IO a
 bracketSignal signal acquire release inner =
   bracket (tryAny acquire) (traverse_ release) (inner . either (Just . signalFailed signal) (const Nothing))
+
+-- | Whether @OTEL_METRICS_EXPORTER@ selects no exporter at all.
+exportsNothing :: Maybe MetricsExporterSelection -> Bool
+exportsNothing = (== Just MetricsExporterNone)
 
 -- | The note a signal that could not start leaves in the summary.
 signalFailed :: Text -> SomeException -> Text

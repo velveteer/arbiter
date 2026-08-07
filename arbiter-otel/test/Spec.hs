@@ -139,11 +139,14 @@ recordingTracerProvider = do
 dashboardPath :: FilePath
 dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
 
--- | Every @arbiter_*@ family the dashboard names, Prometheus having flattened the dots.
--- Read from the whole file rather than the queries alone: a metric named in a panel
--- description should be just as real as one in a query.
-dashboardMetrics :: Text -> [Text]
-dashboardMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
+alertingPath :: FilePath
+alertingPath = "deploy/observability/grafana/provisioning/alerting/arbiter.yaml"
+
+-- | Every @arbiter_*@ family a provisioned file names, Prometheus having flattened the
+-- dots. Read from the whole file rather than the queries alone: a metric named in a
+-- panel description should be just as real as one in a query.
+referencedMetrics :: Text -> [Text]
+referencedMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
   where
     nameChar c = isAsciiLower c || c == '_'
 
@@ -241,13 +244,19 @@ spec = do
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
   describe "provisioned dashboard" $ do
-    referenced <- runIO (dashboardMetrics <$> TIO.readFile dashboardPath)
+    referenced <- runIO (referencedMetrics <$> TIO.readFile dashboardPath)
 
     it "queries only metrics the library registers" $
       filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
 
     it "has a panel for every metric the library registers" $
       filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
+
+  describe "provisioned alerts" $ do
+    referenced <- runIO (referencedMetrics <$> TIO.readFile alertingPath)
+
+    it "query only metrics the library registers" $
+      filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
 
   describe "consumer spans" $ do
     (recorded, provider) <- runIO recordingTracerProvider

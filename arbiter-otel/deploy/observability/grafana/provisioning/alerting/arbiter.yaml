@@ -80,7 +80,7 @@ groups:
         annotations:
           summary: "{{ $labels.queue }}: jobs are ready but no worker is registered."
           description: Every worker for this queue has stopped or lost its registration.
-        noDataState: OK
+        noDataState: Alerting
         execErrState: Error
         data:
           - refId: query
@@ -112,7 +112,7 @@ groups:
         annotations:
           summary: Exported gauges are older than three export intervals.
           description: The gauge scan is timing out or its shared gate is held. Every other gauge-based alert here is reading stale values while this fires. Raise the threshold to 3x OTEL_METRIC_EXPORT_INTERVAL if that is not the 60s default.
-        noDataState: OK
+        noDataState: Alerting
         execErrState: Error
         data:
           - refId: query
@@ -142,8 +142,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Over 10% of processed jobs are being retried.
-          description: Handler failures are outpacing successes. Check the DLQ and the traces for the failing queue.
+          summary: Over 10% of job attempts are ending in a retry.
+          description: Handler failures are outpacing successes. The denominator is every attempt that ended, retried or terminal. Check the DLQ and the traces for the failing queue.
         noDataState: OK
         execErrState: Error
         data:
@@ -155,7 +155,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: sum(rate(arbiter_jobs_retries_total[5m])) / sum(rate(arbiter_jobs_processed_total[5m]))
+              expr: sum(rate(arbiter_jobs_retries_total[5m])) / clamp_min(sum(rate(arbiter_jobs_retries_total[5m])) + sum(rate(arbiter_jobs_processed_total[5m])), 0.001)
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -230,6 +230,38 @@ groups:
                 - evaluator:
                     type: gt
                     params: [86400]
+
+      - uid: arbiter-dead-tuples
+        title: Queue table is bloating with dead tuples
+        condition: threshold
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.table }}: over 20% of the table is dead tuples."
+          description: Vacuum is not keeping up with the churn on this table, and the dead rows slow the claim query. A table autovacuum has never reached reports an age of -1, so age alone does not surface it.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: (max by (table) (arbiter_pg_table_dead_tuples) / clamp_min(max by (table) (arbiter_pg_table_dead_tuples + arbiter_pg_table_live_tuples), 1)) and (max by (table) (arbiter_pg_table_dead_tuples) > 100000)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.2]
 
       - uid: arbiter-pg-deadlocks
         title: Deadlocks in the database

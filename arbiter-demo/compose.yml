@@ -62,6 +62,7 @@ services:
     volumes:
       - ../arbiter-otel/deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter:ro
       - ../arbiter-otel/deploy/observability/grafana/provisioning/dashboards/provider.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter.yaml:ro
+      - ../arbiter-otel/deploy/observability/grafana/provisioning/alerting/arbiter.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/arbiter.yaml:ro
     restart: always
 
   caddy:
