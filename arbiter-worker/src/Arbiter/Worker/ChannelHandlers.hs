@@ -66,7 +66,7 @@ handleCancelNotif config runningJobs notif =
   where
     -- Fork so throwTo can't block the listener on the target unwinding.
     fireCancel jid a =
-      liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) (JobForceCancelled [jid])
+      liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) (JobForceCancelled [jid] [])
 
 -- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
 -- The cron-run channel is per-schema, so pools that do not own the named

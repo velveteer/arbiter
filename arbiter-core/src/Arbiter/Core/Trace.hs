@@ -148,7 +148,7 @@ routineControlFlow e
   | Just JobNackException <- fromException e = recorded
   | Just (JobNotFoundException _ _) <- fromException e = recorded
   | Just (JobStolenException _ _) <- fromException e = recorded
-  | Just (JobForceCancelled _) <- fromException e = recorded
+  | Just (JobForceCancelled _ _) <- fromException e = recorded
   | Just AsyncCancelled <- fromException e = Just (ExceptionResponse IgnoredException mempty)
   | otherwise = Nothing
   where

@@ -140,8 +140,9 @@ data JobStolenException = JobStolenException Text [Int64]
 instance Exception JobStolenException where
   displayException (JobStolenException msg ids) = T.unpack (msg <> namedJobIds ids)
 
--- | Async exception for user-initiated force-cancel, naming the jobs it cancels.
-data JobForceCancelled = JobForceCancelled [Int64]
+-- | Async exception for user-initiated force-cancel, naming the jobs it cancels
+-- and any the same check found reclaimed by another worker.
+data JobForceCancelled = JobForceCancelled [Int64] [Int64]
   deriving stock (Show)
 
 instance Exception JobForceCancelled where

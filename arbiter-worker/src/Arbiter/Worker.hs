@@ -578,10 +578,10 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
         Left e
           -- Finalized inside the job span, so the trace carries the cancel. One
           -- delivered before that catch, or interrupting it, arrives here undone.
-          | Just (JobForceCancelled cancelledIds) <- fromException e -> do
+          | Just (JobForceCancelled cancelledIds reclaimedIds) <- fromException e -> do
               finalized <- cancelFinalized handoff
               unless finalized $
-                finalizeForceCancelled config jobBatch cancelledIds handoff
+                finalizeForceCancelled config jobBatch cancelledIds reclaimedIds handoff
           | Just Async.AsyncCancelled <- fromException e -> throwIO e
           | otherwise -> do
               tryLog batchLog Error $ "Worker exception: " <> T.pack (displayException e)
@@ -631,8 +631,8 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         runHook (jobLog config j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
       -- Rethrown with base throwIO, UnliftIO's wrapping it as synchronous. The flag
       -- is set last, so an interrupted finalizer leaves the rest to 'workerLoop'.
-      onForceCancel exc@(JobForceCancelled cancelledIds) = do
-        finalizeForceCancelled config jobs cancelledIds handoff
+      onForceCancel exc@(JobForceCancelled cancelledIds reclaimedIds) = do
+        finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff
         markCancelFinalized handoff
         liftIO $ E.throwIO exc
       finalize j = fireSuccess j >> markHandled j
@@ -715,16 +715,23 @@ finalizeForceCancelled
   -> NonEmpty (Job.JobRead payload)
   -> [Int64]
   -- ^ The jobs the cancel named.
+  -> [Int64]
+  -- ^ Jobs the same signal found reclaimed, which report rather than take a nack.
   -> CancelHandoff
   -> m ()
-finalizeForceCancelled config jobs cancelledIds handoff = do
+finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
   tryLog batchLog Info "Job(s) force-cancelled"
   schemaName <- getSchema
   deleted <- deleteCancelledOrWarn batchLog schemaName (Job.queueName firstJob) jobIds
   pending <- pendingJobs handoff jobs
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
-  let (gone, siblings) = partition (hasIdIn cancelled) pending
+  let (gone, interrupted) = partition (hasIdIn cancelled) pending
+      (reclaimed, siblings) = partition (hasIdIn (Set.fromList reclaimedIds)) interrupted
+      reclaimedLog = withJobContextList (logConfig config) reclaimed
   reportGoneJobs config (markJobHandled handoff) cancelled "force-cancelled" gone
+  unless (null reclaimed) $ do
+    tryLog reclaimedLog Info "Job(s) reclaimed by another worker, skipping retry"
+    reportGoneJobs config (markJobHandled handoff) mempty "reclaimed by another worker" reclaimed
   traverse_
     ( \j ->
         tryWarn batchLog "Releasing a force-cancel batch sibling failed" $

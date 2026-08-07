@@ -79,9 +79,9 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       results <- Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
       atomically $ void $ STM.tryPutTMVar signal ()
       let cancelledJobs = [jobId | Arb.JobCancelled jobId <- results]
+          stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
       unless (null cancelledJobs) $
-        liftIO (throwIO (JobForceCancelled cancelledJobs))
-      let stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
+        liftIO (throwIO (JobForceCancelled cancelledJobs stolenJobs))
       unless (null stolenJobs) $
         throwJobStolenIds stolenJobs
       let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
