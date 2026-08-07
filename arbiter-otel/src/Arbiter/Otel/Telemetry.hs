@@ -44,7 +44,7 @@ import OpenTelemetry.Metric
   )
 import OpenTelemetry.Metric.Core (MeterProvider, getGlobalMeterProvider, noopMeterProvider, setGlobalMeterProvider)
 import OpenTelemetry.Processor.Span (SpanProcessor)
-import OpenTelemetry.Propagator (setGlobalTextMapPropagator)
+import OpenTelemetry.Propagator (getGlobalTextMapPropagator, setGlobalTextMapPropagator)
 import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
 import OpenTelemetry.Trace
   ( TracerProviderOptions (..)
@@ -103,9 +103,15 @@ withTelemetry action = do
     ifStarted :: Maybe Text -> IO b -> IO (Maybe b)
     ifStarted note act = if isNothing note then Just <$> act else pure Nothing
     withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Maybe Text -> IO a) -> IO a
-    withTraces processors opts =
-      withGlobalProvider "traces" getGlobalTracerProvider setGlobalTracerProvider initialize $
-        \tp -> void (shutdownTracerProvider tp Nothing)
+    withTraces processors opts inner =
+      bracket getGlobalTextMapPropagator setGlobalTextMapPropagator $ \_ ->
+        withGlobalProvider
+          "traces"
+          getGlobalTracerProvider
+          setGlobalTracerProvider
+          initialize
+          (\tp -> void (shutdownTracerProvider tp Nothing))
+          inner
       where
         initialize = do
           setGlobalTextMapPropagator (tracerProviderOptionsPropagators opts)
@@ -117,14 +123,9 @@ withTelemetry action = do
         (\(m, env) -> setGlobalMeterProvider m >> inner (m, env))
     withReader readerOpts env inner = do
       selection <- lookupMetricsExporterSelection
-      if exportsNothing selection
-        then inner (Just "metrics off, OTEL_METRICS_EXPORTER=none")
-        else
-          bracketSignal
-            "metrics"
-            (resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts)
-            stopPeriodicMetricReader
-            inner
+      maybe (bracketSignal "metrics" forkReader stopPeriodicMetricReader inner) (inner . Just) (metricsOffNote selection)
+      where
+        forkReader = resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts
     withLogs =
       withGlobalProvider
         "logs"
@@ -146,9 +147,12 @@ bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Maybe Text -> IO a) -> IO a
 bracketSignal signal acquire release inner =
   bracket (tryAny acquire) (traverse_ release) (inner . either (Just . signalFailed signal) (const Nothing))
 
--- | Whether @OTEL_METRICS_EXPORTER@ selects no exporter at all.
-exportsNothing :: Maybe MetricsExporterSelection -> Bool
-exportsNothing = (== Just MetricsExporterNone)
+-- | Why a selection leaves metrics off, for the selections that do.
+metricsOffNote :: Maybe MetricsExporterSelection -> Maybe Text
+metricsOffNote = \case
+  Just MetricsExporterNone -> Just "metrics off, OTEL_METRICS_EXPORTER=none"
+  Just MetricsExporterPrometheus -> Just "metrics off, no Prometheus endpoint is served, point OTEL_EXPORTER_OTLP_ENDPOINT at a collector"
+  _ -> Nothing
 
 -- | The note a signal that could not start leaves in the summary.
 signalFailed :: Text -> SomeException -> Text
