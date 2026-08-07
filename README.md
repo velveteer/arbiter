@@ -906,6 +906,32 @@ health across replicas with `max`, and the per-process counters and latencies wi
 Queue and Postgres gauges are scanned once per `OTEL_METRIC_EXPORT_INTERVAL` (default 60s).
 The `With` variants take the interval instead.
 
+### Prometheus
+
+Metrics are pushed over OTLP. To be scraped instead, own the meter provider and serve the
+collection with `hs-opentelemetry-exporter-prometheus`:
+
+```haskell
+import Data.Vector qualified as V
+import OpenTelemetry.Exporter.Prometheus.WAI (startPrometheusServerAsync)
+import OpenTelemetry.MeterProvider (collectResourceMetrics)
+import OpenTelemetry.Metric (createMeterProvider, defaultSdkMeterProviderOptions)
+import OpenTelemetry.Resource (materializeResources, mkResource)
+
+main :: IO ()
+main = do
+  env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
+  (mp, sdk) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+  _ <- startPrometheusServerAsync (V.fromList <$> collectResourceMetrics sdk)
+
+  Otel.withExternalTelemetry (Just mp) Nothing $ \tel ->
+    runSimpleDb env $
+      Otel.runWorkerPoolsWith tel defaultLogConfig (Otel.gaugeRefresh tel) [namedWorkerPool emailCfg]
+```
+
+`withExternalTelemetry` covers metrics and logs. Install the tracer provider yourself,
+spans find it.
+
 ### Local stack
 
 Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm) with the arbiter
@@ -921,6 +947,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 `arbiter-demo/run-local.sh` runs this repository's demo against that stack at
 http://localhost:8000, dashboard at /dash. The [live demo](https://demo.arbiterq.dev/)
 runs the same stack.
+
+The dashboard and alert rules assume metrics arriving over OTLP through a collector.
 
 ## Backend Integration
 
