@@ -171,9 +171,9 @@ registerInstruments meter cells = do
   reg Name.AdmissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
     bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
   reg Name.AdmissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
-    perPolicy concurrency Conc.prefix (fromIntegral . Conc.totalInFlight)
+    perConcurrency (fromIntegral . Conc.totalInFlight)
   reg Name.AdmissionBusiestKey "{job}" "In-flight count of the fullest key, by policy" $
-    perPolicy concurrency Conc.prefix (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
+    perConcurrency (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
   reg Name.AdmissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
     observed $
       over rateLimits $ \p ->
@@ -240,7 +240,7 @@ registerInstruments meter cells = do
     -- and valued. Counters hand that list over, gauges observe it.
     over pick label snap = concatMap label (pick snap)
     observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
-    perPolicy pick prefix field = observed (over pick (\p -> [([("policy", prefix p)], field p)]))
+    perConcurrency field = observed (over concurrency (\p -> [([("policy", Conc.prefix p)], field p)]))
     bothKinds concField rateField = observed $ \snap ->
       [([("kind", concurrencyKind), ("policy", Conc.prefix p)], concField p) | p <- concurrency snap]
         <> [([("kind", rateLimitKind), ("policy", RL.prefix p)], rateField p) | p <- rateLimits snap]

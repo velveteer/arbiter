@@ -164,7 +164,6 @@ throwInternal msg = UE.throwIO (InternalException msg)
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 
--- | 'throwJobGoneIds' naming none, for a thrower that speaks for the whole batch.
 throwJobGone :: (MonadIO m) => Text -> m a
 throwJobGone msg = throwJobGoneIds msg []
 

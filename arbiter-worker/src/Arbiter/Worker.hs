@@ -76,14 +76,14 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Core.Trace
-  ( ConsumeSpan
+  ( ConsumeShape (..)
+  , ConsumeSpan
   , consumeSpanFor
   , markSpanError
   , recordJobCancelled
   , recordJobFailure
   , resolveTracer
   , withConsumeSpan
-  , withConsumeSpanBatch
   )
 import Control.Exception (SomeException, displayException, fromException, toException)
 import Control.Exception qualified as E
@@ -92,6 +92,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Aeson (FromJSON, Value, toJSON)
+import Data.Bool (bool)
 import Data.Either (partitionEithers)
 import Data.Foldable (fold, foldMap', toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -298,7 +299,7 @@ runWorkerPool config = do
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
       -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.
-      consumeSpan = consumeSpanFor queueName
+      consumeSpan = consumeSpanFor queueName (poolSpanShape config)
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -672,12 +673,9 @@ processJobsWithRetry config consumeSpan handoff jobs = do
           , nack = nackOne
           }
   tracer <- resolveTracer
-  let inJobSpan
-        | batchedPool config = withConsumeSpanBatch tracer consumeSpan jobs
-        | otherwise = withConsumeSpan tracer consumeSpan firstJob
   -- The span covers the outcome report and the force-cancel finalizer too, so every
   -- terminal hook fires while it is open.
-  inJobSpan $ flip catchSyncOrAsync onForceCancel $ do
+  withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
     result <-
       tryAny
         $ withJobsHeartbeat
@@ -989,9 +987,9 @@ fireUnavailable
 fireUnavailable logCfg hooks job reason =
   runHook logCfg "onJobUnavailable" $ Job.onJobUnavailable hooks job reason
 
--- | Whether this pool's consumer spans cover a batch rather than a single job.
-batchedPool :: WorkerConfig m payload -> Bool
-batchedPool = (> 1) . handlerBatchSize
+-- | What this pool's consumer spans cover.
+poolSpanShape :: WorkerConfig m payload -> ConsumeShape
+poolSpanShape = bool PerJob PerBatch . (> 1) . handlerBatchSize
 
 -- | Report a failed job to its hooks and to the consumer span it ran under. A batch
 -- span also covers the jobs that succeeded, so only a single-job span takes the error
@@ -1006,7 +1004,7 @@ fireFailure
   -> m ()
 fireFailure config job errorMsg startTime endTime = do
   recordJobFailure job errorMsg
-  unless (batchedPool config) (markSpanError errorMsg)
+  when (poolSpanShape config == PerJob) (markSpanError errorMsg)
   runHook (logConfig config) "onJobFailure" $
     Job.onJobFailure (observabilityHooks config) job errorMsg startTime endTime
 

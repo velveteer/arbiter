@@ -14,7 +14,8 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 import Arbiter.Core.Trace
-  ( capturingContext
+  ( ConsumeShape (..)
+  , capturingContext
   , consumeSpanFor
   , currentTraceContext
   , markSpanError
@@ -36,6 +37,7 @@ import Data.ByteString (ByteString)
 import Data.Char (isAsciiLower)
 import Data.Foldable (toList, traverse_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -272,7 +274,7 @@ spec = do
       setGlobalTracerProvider provider
       job <- withAttachedSpan sampleTraceparent $ enqueue plainEnv (Greeting "spanned")
       tracer <- resolveTracer
-      inherited <- runSimpleDb plainEnv . withConsumeSpan tracer (consumeSpanFor queue) job $ do
+      inherited <- runSimpleDb plainEnv . withConsumeSpan tracer (consumeSpanFor queue PerJob) (job :| []) $ do
         reattach <- capturingContext
         recordJobFailure job "boom"
         markSpanError "boom"

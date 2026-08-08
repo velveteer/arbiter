@@ -20,9 +20,9 @@ module Arbiter.Core.Trace
 
     -- * Consumer
   , ConsumeSpan
+  , ConsumeShape (..)
   , consumeSpanFor
   , withConsumeSpan
-  , withConsumeSpanBatch
   , withJobParent
   , capturingContext
   , getActiveSpan
@@ -48,7 +48,7 @@ import Control.Monad (guard)
 import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HM
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (mapMaybe, maybeToList)
 import Data.Text (Text)
@@ -96,8 +96,8 @@ import UnliftIO.Async (AsyncCancelled (..))
 
 import Arbiter.Core.Exceptions
   ( JobForceCancelled (..)
-  , JobNackException (..)
   , JobGoneException (..)
+  , JobNackException (..)
   )
 import Arbiter.Core.Job.Schema (TableName)
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
@@ -194,21 +194,32 @@ jobEvent name reasonKey job msg = withActiveSpan (\sp -> addEvent sp event)
 data ConsumeSpan = ConsumeSpan
   { consumeName :: Text
   , consumeAttrs :: AttributeMap
+  , consumeShape :: ConsumeShape
   }
 
+-- | What one consumer span covers.
+data ConsumeShape = PerJob | PerBatch
+  deriving stock (Eq, Show)
+
 -- | The consumer-span shape for a queue.
-consumeSpanFor :: TableName -> ConsumeSpan
-consumeSpanFor queue =
+consumeSpanFor :: TableName -> ConsumeShape -> ConsumeSpan
+consumeSpanFor queue shape =
   ConsumeSpan
     { consumeName = "process " <> queue
     , consumeAttrs = messagingAttrs queue "process"
+    , consumeShape = shape
     }
 
 -- | Run a job handler inside a @process \<queue\>@ consumer span linked to its producer.
 withConsumeSpan
-  :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> JobRead payload -> m a -> m a
-withConsumeSpan mTracer cs job =
-  spanning mTracer (consumeName cs) (consumerArgs cs job)
+  :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
+withConsumeSpan mTracer cs jobs =
+  spanning mTracer (consumeName cs) args
+  where
+    (firstJob :| _) = jobs
+    args = case consumeShape cs of
+      PerBatch -> batchConsumerArgs cs jobs
+      PerJob -> consumerArgs cs firstJob
 
 -- | Capture the caller's context for an action running on a thread forked from it.
 -- A context carrying no span propagates nothing, so an untraced deployment is left
@@ -226,12 +237,6 @@ withJobParent :: (MonadUnliftIO m) => JobRead payload -> m a -> m a
 withJobParent job action = maybe action attached (spanContextForJob job)
   where
     attached sc = flip withContext action . insertSpan (wrapSpanContext sc) =<< getContext
-
--- | As 'withConsumeSpan', for a batch, linking every job to the one consumer span.
-withConsumeSpanBatch
-  :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
-withConsumeSpanBatch mTracer cs jobs =
-  spanning mTracer (consumeName cs) (batchConsumerArgs cs jobs)
 
 -- | A span link reconstructed from a job's stored W3C trace context.
 spanLinkForJob :: JobRead payload -> Maybe NewLink

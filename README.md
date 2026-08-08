@@ -685,6 +685,9 @@ config <- Worker.transactionalWorkerConfig 5 handler
 let instrumented = config { Worker.observabilityHooks = myHooks }
 ```
 
+Reaper activity reports through `onMaintenance` on `WorkerConfig`, not through the hooks
+record.
+
 ### Graceful Shutdown
 
 Install signal handlers through the setup callback, which receives the shared
@@ -877,7 +880,7 @@ carrying the job's trace, id, queue, and attempt.
 | Your program installs its own SDK | `withExternalTelemetry`, then `runWorkerPoolsWith` |
 | Driving the pools some other way | `instrumentPools` + `withGauges` |
 
-The `With` variants also take the gauge loop's base log config and refresh interval.
+The `With` variants also take the gauge loop's base log config.
 
 ### Traces
 
@@ -904,7 +907,6 @@ scans per interval and the rest export its reading, so aggregate queue depth and
 health across replicas with `max`, and the per-process counters and latencies with `sum`.
 
 Queue and Postgres gauges are scanned once per `OTEL_METRIC_EXPORT_INTERVAL` (default 60s).
-The `With` variants take the interval instead.
 
 ### Prometheus
 
