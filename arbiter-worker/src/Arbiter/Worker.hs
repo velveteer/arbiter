@@ -520,10 +520,6 @@ tryWarnWith :: (MonadUnliftIO m) => LogConfig -> Text -> a -> m a -> m a
 tryWarnWith logCfg label fallback act =
   tryAny act >>= either (\e -> fallback <$ warnEx logCfg label e) pure
 
--- | The pool's config with its log context narrowed to one job.
-withJobLog :: WorkerConfig m payload -> Job.JobRead payload -> WorkerConfig m payload
-withJobLog config job = config {logConfig = jobLog config job}
-
 -- | The pool's log context narrowed to one job.
 jobLog :: WorkerConfig m payload -> Job.JobRead payload -> LogConfig
 jobLog config = withJobContextOne (logConfig config)
@@ -640,7 +636,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
       nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        withDbTransaction $ handleJobFailure (withJobLog config j) exc (jobMaxAtts j) startTime endT j
+        withDbTransaction $ handleJobFailure config exc (jobMaxAtts j) startTime endT j
         markHandled j
       failAs mkExc j msg = failWith j (toException (mkExc msg))
       ackOneStoring j mVal = do
@@ -832,8 +828,9 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
         let (jobsGone, siblings) = splitNamed ids
         settleGoneJobs config batchLog (markJobHandled handoff) reason jobsGone
         unless (null ids || null siblings) $
-          tryWarn batchLog "Releasing an interrupted batch sibling failed" $
+          tryWarn batchLog "Releasing an interrupted batch sibling failed" $ do
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
+            traverse_ (markJobHandled handoff) siblings
       unownedOf = do
         unowned <- liftIO (readIORef (unownedRef handoff))
         pure (filter (hasIdIn unowned) (toList jobs))
@@ -862,7 +859,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
     batchLog = withJobContext (logConfig config) jobs
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
     failJob exc job =
-      handleJobFailure (withJobLog config job) exc (jobMaxAtts job) startTime endTime job
+      handleJobFailure config exc (jobMaxAtts job) startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -939,14 +936,11 @@ storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
           | Ops.archivesOnAck job -> Just (Right (Job.primaryKey job, val))
           | otherwise -> Nothing
 
--- | Classify a handler exception into an error message and failure disposition.
---
--- Note: 'JobGoneException' is intercepted by
--- 'reportBatchOutcome' before reaching 'handleJobFailure', so they never
--- arrive here.
 data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure
   deriving stock (Eq)
 
+-- | Classify a handler exception into an error message and failure disposition.
+-- 'reportBatchOutcome' intercepts 'JobGoneException' first, so it never arrives here.
 classifyException :: SomeException -> (T.Text, FailureKind)
 classifyException e
   | Just (Retryable (JobRetryableException msg)) <- fromException e = (msg, RetryFailure)
@@ -960,8 +954,8 @@ classifyException e
 cancelsTree :: FailureKind -> Bool
 cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
 
--- | Report the jobs the ack no longer owns, as cancelled where a force-cancel deleted
--- them, marking each with @mark@.
+-- | Report jobs this worker can no longer act on, as cancelled where a force-cancel
+-- deleted them, marking each with @mark@.
 reportGoneJobs
   :: (JobOperation m payload, MonadUnliftIO m)
   => WorkerConfig m payload
@@ -1009,7 +1003,7 @@ fireFailure
 fireFailure config job errorMsg startTime endTime = do
   recordJobFailure job errorMsg
   when (poolSpanShape config == PerJob) (markSpanError errorMsg)
-  runHook (logConfig config) "onJobFailure" $
+  runHook (jobLog config job) "onJobFailure" $
     Job.onJobFailure (observabilityHooks config) job errorMsg startTime endTime
 
 -- | Report a cancelled job.
@@ -1052,7 +1046,7 @@ handleJobFailure
   -> m ()
 handleJobFailure config e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
-      cfg = logConfig config
+      cfg = jobLog config job
       hooks = observabilityHooks config
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
       cancel = void (cancelJobFor failureKind job) >> fireCancelled cfg hooks job errorMsg
@@ -1060,8 +1054,9 @@ handleJobFailure config e maxAtts startTime endTime job = do
   let gone reason = do
         cancelled <- deleteCancelledOrWarn cfg schemaName (Job.queueName job) [Job.primaryKey job]
         if hasIdIn cancelled job
-          then tryLog cfg Info "Job force-cancelled" >> fireCancelled cfg hooks job "force-cancelled"
-          else tryLog cfg Warning ("Job " <> reason) >> fireUnavailable cfg hooks job reason
+          then tryLog cfg Info "Job force-cancelled"
+          else tryLog cfg Warning ("Job " <> reason)
+        reportGoneJobs config (const (pure ())) cancelled reason [job]
       -- Nothing written means the job went elsewhere, so the failure is not ours to report.
       wrote reason after rowsAffected
         | rowsAffected == 0 = gone reason

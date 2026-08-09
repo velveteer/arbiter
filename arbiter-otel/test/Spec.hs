@@ -288,7 +288,7 @@ spec = do
       hotName hot `shouldBe` "process " <> queue
       spanKind sp `shouldBe` Consumer
       hotStatus hot `shouldBe` Error "boom"
-      map eventName (values (hotEvents hot)) `shouldBe` ["exception"]
+      map eventName (values (hotEvents hot)) `shouldBe` ["job.failed"]
       -- Linked to the enqueue's trace, and running under a trace of its own.
       map (traceId . frozenLinkContext) (values (hotLinks hot))
         `shouldBe` map traceId (toList (spanContextOf . traceparent =<< traceContext job))

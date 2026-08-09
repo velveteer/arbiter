@@ -169,7 +169,7 @@ markSpanError msg = withActiveSpan (\sp -> setStatus sp (Error msg))
 -- | Record one job's failure as an event on the active span, a no-op when none is active.
 -- A batch span also covers the jobs that succeeded, so this leaves its status alone.
 recordJobFailure :: (MonadIO m) => JobRead payload -> Text -> m ()
-recordJobFailure = jobEvent "exception" "exception.message"
+recordJobFailure = jobEvent "job.failed" "arbiter.job.failure_reason"
 
 -- | Record one job's cancellation as an event on the active span.
 recordJobCancelled :: (MonadIO m) => JobRead payload -> Text -> m ()
