@@ -880,7 +880,8 @@ carrying the job's trace, id, queue, and attempt.
 | Your program installs its own SDK | `withExternalTelemetry`, then `runWorkerPoolsWith` |
 | Driving the pools some other way | `instrumentPools` + `withGauges` |
 
-The `With` variants also take the gauge loop's base log config.
+The `With` variants also take the gauge loop's base log config. `withExternalTelemetry`
+covers metrics and logs, and spans find whatever tracer provider you install.
 
 ### Traces
 
@@ -910,29 +911,8 @@ Queue and Postgres gauges are scanned once per `OTEL_METRIC_EXPORT_INTERVAL` (de
 
 ### Prometheus
 
-Metrics are pushed over OTLP. To be scraped instead, own the meter provider and serve the
-collection with `hs-opentelemetry-exporter-prometheus`:
-
-```haskell
-import Data.Vector qualified as V
-import OpenTelemetry.Exporter.Prometheus.WAI (startPrometheusServerAsync)
-import OpenTelemetry.MeterProvider (collectResourceMetrics)
-import OpenTelemetry.Metric (createMeterProvider, defaultSdkMeterProviderOptions)
-import OpenTelemetry.Resource (materializeResources, mkResource)
-
-main :: IO ()
-main = do
-  env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-  (mp, sdk) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-  _ <- startPrometheusServerAsync (V.fromList <$> collectResourceMetrics sdk)
-
-  Otel.withExternalTelemetry (Just mp) Nothing $ \tel ->
-    runSimpleDb env $
-      Otel.runWorkerPoolsWith tel defaultLogConfig [namedWorkerPool emailCfg]
-```
-
-`withExternalTelemetry` covers metrics and logs. Install the tracer provider yourself,
-spans find it.
+Metrics are pushed over OTLP, so scrape a collector rather than the process.
+`OTEL_METRICS_EXPORTER=prometheus` is unsupported and leaves metrics off.
 
 ### Local stack
 
