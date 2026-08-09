@@ -261,8 +261,10 @@ runDemo tel = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
-simulateWork :: (Int, Int) -> IO ()
-simulateWork range = randomRIO range >>= threadDelay
+simulateWork :: Double -> IO ()
+simulateWork mean = do
+  u <- randomRIO (1.0e-6, 1.0)
+  threadDelay (round (mean * negate (log u) * 1e6))
 
 mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
@@ -274,7 +276,7 @@ mkDemoWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ simulateWork (2_000_000, 8_000_000)
+    handler _conn _job = liftIO $ simulateWork 2
     demoCrons =
       [ either error id $
           cronJob
@@ -294,7 +296,7 @@ mkEmailWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ simulateWork (2_000_000, 8_000_000)
+    handler _conn _job = liftIO $ simulateWork 2
     emailCrons =
       [ either error id $
           cronJob
@@ -314,7 +316,7 @@ mkNotifWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ simulateWork (5_000, 150_000)
+    handler _conn _job = liftIO $ simulateWork 0.05
     notifCrons =
       [ either error id $
           cronJob
@@ -335,7 +337,7 @@ mkPipelineWorker = do
   where
     handler _conn job = case payload job of
       ProcessChunk chunkName -> do
-        liftIO $ simulateWork (500_000, 3_000_000)
+        liftIO $ simulateWork 1
         pure (chunkFindings chunkName)
       AggregateResults _ -> fst <$> mergedChildResults job
 
