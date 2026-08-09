@@ -291,7 +291,6 @@ runWorkerPool
   :: forall payload m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , EncodeJobResult (ResultOf m payload)
-     , MonadUnliftIO m
      , QueueOperation m payload
      , RegistryTables (RegistryOf m)
      )
@@ -407,7 +406,7 @@ registerSelf config schemaName queueName =
 -- | Mark shutting-down, drain, then deregister. All DB
 -- writes are best-effort and logged on failure.
 shutdownPool
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
   -> TBQueue a
@@ -469,7 +468,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
 -- @paused@ flag into local state, and re-registers if the sweeper deleted
 -- the row.
 heartbeatLoop
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
   -> Text
@@ -530,7 +529,6 @@ workerLoop
   :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m payload
-     , MonadUnliftIO m
      )
   => WorkerConfig m payload
   -> ConsumeSpan
@@ -604,7 +602,6 @@ processJobsWithRetry
   :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m payload
-     , MonadUnliftIO m
      )
   => WorkerConfig m payload
   -> ConsumeSpan
@@ -698,7 +695,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
 -- | Delete the jobs a force-cancel flagged, report them, and hand back the attempt
 -- the claim consumed for the batch siblings it interrupted.
 finalizeForceCancelled
-  :: (JobOperation m payload, MonadUnliftIO m)
+  :: (JobOperation m payload)
   => WorkerConfig m payload
   -> NonEmpty (Job.JobRead payload)
   -> [Int64]
@@ -710,8 +707,9 @@ finalizeForceCancelled
 finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
   tryLog batchLog Info "Job(s) force-cancelled"
   schemaName <- getSchema
-  deleted <- deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) jobIds
   pending <- pendingJobs handoff jobs
+  deleted <-
+    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey pending)
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
   let (gone, interrupted) = partition (hasIdIn cancelled) pending
       (reclaimed, siblings) = partition (hasIdIn (Set.fromList reclaimedIds)) interrupted
@@ -728,12 +726,11 @@ finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
     siblings
   where
     (firstJob :| _) = jobs
-    jobIds = map Job.primaryKey (toList jobs)
     batchLog = withJobContext (logConfig config) jobs
 
 -- | Delete whichever of @jobs@ a force-cancel flagged, then report them all.
 settleGoneJobs
-  :: (JobOperation m payload, MonadUnliftIO m)
+  :: (JobOperation m payload)
   => WorkerConfig m payload
   -> LogConfig
   -> (Job.JobRead payload -> m ())
@@ -750,7 +747,7 @@ settleGoneJobs config logCfg mark reason = \case
 -- | Delete whichever of @jobIds@ a force-cancel flagged against this worker's lease,
 -- or against none, returning the ids it deleted. One held elsewhere is that worker's.
 deleteCancelledOrWarn
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => LogConfig
   -> UUID
   -> SchemaName
@@ -814,7 +811,7 @@ markCancelFinalized = liftIO . flip writeIORef True . finalizedRef
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
   :: forall payload m
-   . (JobOperation m payload, MonadUnliftIO m)
+   . (JobOperation m payload)
   => WorkerConfig m payload
   -> UTCTime
   -> UTCTime
@@ -836,7 +833,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
             traverse_ (markJobHandled handoff) siblings
       unownedOf = do
         unowned <- liftIO (readIORef (unownedRef handoff))
-        pure (filter (hasIdIn unowned) (toList jobs))
+        pure (sortOn (Down . Job.primaryKey) (filter (hasIdIn unowned) (toList jobs)))
   case outcome of
     Right () ->
       unless (null unhandled) $
@@ -960,7 +957,7 @@ cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
 -- | Report jobs this worker can no longer act on, as cancelled where a force-cancel
 -- deleted them, marking each with @mark@.
 reportGoneJobs
-  :: (JobOperation m payload, MonadUnliftIO m)
+  :: (JobOperation m payload)
   => WorkerConfig m payload
   -> (Job.JobRead payload -> m ())
   -> Set.Set Int64
@@ -996,7 +993,7 @@ poolSpanShape = bool PerJob PerBatch . (> 1) . handlerBatchSize
 -- span also covers the jobs that succeeded, so only a single-job span takes the error
 -- status.
 fireFailure
-  :: (JobOperation m payload, MonadUnliftIO m)
+  :: (JobOperation m payload)
   => WorkerConfig m payload
   -> Job.JobRead payload
   -> Text
@@ -1037,9 +1034,7 @@ cancelJobFor kind job = do
 -- | Handle failure for a single job (retry or move to DLQ).
 handleJobFailure
   :: forall payload m
-   . ( JobOperation m payload
-     , MonadUnliftIO m
-     )
+   . (JobOperation m payload)
   => WorkerConfig m payload
   -> SomeException
   -> Int32
@@ -1098,7 +1093,6 @@ reaperLoop
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , MonadArbiter m
-     , MonadUnliftIO m
      , RegistryTables (RegistryOf m)
      )
   => LogConfig
@@ -1171,7 +1165,7 @@ reaperLoop logCfg report interval stmtTimeout = do
 -- statement_timeout bounds each statement (aborting a stuck one at the DB), while a
 -- legitimately long multi-statement op still runs to completion.
 runReaperOp
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => LogConfig
   -> SchemaName
   -> NominalDiffTime

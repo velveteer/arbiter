@@ -25,21 +25,12 @@ module Arbiter.Core.Trace
   , withConsumeSpan
   , withJobParent
   , capturingContext
-  , getActiveSpan
-
-    -- * Custom spans
-  , withSpan
-  , SpanArguments (..)
-  , SpanKind (..)
-  , defaultSpanArguments
 
     -- * Span enrichment
-  , addSpanAttributes
+    -- $enrichment
   , markSpanError
   , recordJobFailure
   , recordJobCancelled
-  , Attribute
-  , toAttribute
   ) where
 
 import Control.Applicative ((<|>))
@@ -56,7 +47,6 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.Lazy (toStrict)
 import Data.Text.Lazy.Builder (toLazyText)
 import Data.Text.Lazy.Builder.Int (decimal)
-import GHC.Stack (HasCallStack)
 import OpenTelemetry.Attributes (Attribute, toAttribute)
 import OpenTelemetry.Attributes.Map (AttributeMap)
 import OpenTelemetry.Context (Context, insertSpan, lookupSpan)
@@ -74,10 +64,7 @@ import OpenTelemetry.Trace.Core
   , SpanStatus (..)
   , Tracer
   , TracerOptions (..)
-  , addAttributes
-  , addAttributesToSpanArguments
   , addEvent
-  , callerAttributes
   , defaultSpanArguments
   , getActiveSpan
   , getGlobalTracerProvider
@@ -101,6 +88,9 @@ import Arbiter.Core.Exceptions
   )
 import Arbiter.Core.Job.Schema (TableName)
 import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
+
+-- $enrichment
+-- Reach for @hs-opentelemetry-api@ directly for custom spans and attributes.
 
 -- | Fill a job's trace context, leaving a job that carries one of its own alone.
 stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
@@ -141,26 +131,15 @@ routineControlFlow e
   where
     recorded = Just (ExceptionResponse RecordedException mempty)
 
--- | Run an action inside a named span, unwrapped when no tracer was resolved. The code
--- attributes point at this call site.
-withSpan :: (HasCallStack, MonadUnliftIO m) => Maybe Tracer -> Text -> SpanArguments -> m a -> m a
-withSpan mTracer name args =
-  spanning mTracer name (addAttributesToSpanArguments callerAttributes args)
-
--- | 'withSpan' without the caller's code attributes, for arbiter's own spans.
+-- | Run an action inside a named span, unwrapped when no tracer was resolved.
 spanning :: (MonadUnliftIO m) => Maybe Tracer -> Text -> SpanArguments -> m a -> m a
 spanning mTracer name args action =
   maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
--- | Run an action inside a @publish \<queue\>@ producer span.
-withPublishSpan :: (MonadUnliftIO m) => Maybe Tracer -> TableName -> m a -> m a
-withPublishSpan mTracer queue =
-  spanning mTracer ("publish " <> queue) (producerArgs queue)
-
--- | Add attributes to the currently active span.
-addSpanAttributes :: (MonadIO m) => [(Text, Attribute)] -> m ()
-addSpanAttributes [] = pure ()
-addSpanAttributes attributes = withActiveSpan (\sp -> addAttributes sp (HM.fromList attributes))
+-- | Run an action inside a @publish \<queue\>@ producer span over @n@ jobs.
+withPublishSpan :: (MonadUnliftIO m) => Maybe Tracer -> TableName -> Int -> m a -> m a
+withPublishSpan mTracer queue n =
+  spanning mTracer ("publish " <> queue) (producerArgs queue n)
 
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()
@@ -248,9 +227,11 @@ spanContextForJob job = do
   ctx <- traceContext job
   decodeSpanContext (Just (encodeUtf8 (traceparent ctx))) (encodeUtf8 <$> tracestate ctx)
 
-producerArgs :: TableName -> SpanArguments
-producerArgs queue =
-  defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish"}
+producerArgs :: TableName -> Int -> SpanArguments
+producerArgs queue n =
+  defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish" <> batchAttr}
+  where
+    batchAttr = HM.fromList [("messaging.batch.message_count", toAttribute n) | n > 1]
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =

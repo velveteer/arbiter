@@ -45,15 +45,16 @@ import OpenTelemetry.Metric.Core
   , observe
   )
 import System.Timeout (timeout)
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception (bracket, finally, tryAny)
 
 import Arbiter.Otel.Gauges.Cells
   ( Baseline
   , Cached (..)
+  , Export (..)
   , GaugeCells (..)
   , SeriesKey
   , Snapshot (..)
+  , live
   , newGaugeCells
   , riseSince
   )
@@ -70,7 +71,7 @@ gaugeGate = gateNameFor "refresh-gauges"
 -- given queues and the caller's own database env. A handle with its metrics off
 -- registers nothing and its loop does nothing.
 startGauges
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -85,7 +86,7 @@ startGauges tel baseLog runDb schema queueTables refreshInterval = do
 -- | 'startGauges' with the reading bracketed, so the instruments stop exporting however
 -- @use@ ends.
 withGaugeLoop
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -100,7 +101,7 @@ withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
 
 -- | The refresh loop and the action blanking the reading its instruments export.
 prepareGauges
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
@@ -115,12 +116,12 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
       arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
       loop <-
         gaugeRefreshLoop (Tel.telemetryLogConfig tel baseLog) runDb schema queueTables (max 1 refreshInterval) cells
-      pure (loop, atomically (writeTVar (cache cells) Nothing))
+      pure (loop, atomically (writeTVar (cache cells) Retired))
 
 -- | Register the observable instruments, each reading whatever the loop last cached.
 registerInstruments :: Meter -> GaugeCells -> IO ()
 registerInstruments meter cells = do
-  let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res)]
+  let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
       shared desc = desc <> " (shared reading, do not sum across replicas)"
@@ -213,8 +214,10 @@ registerInstruments meter cells = do
     "Seconds since the exported readings were scanned"
     [ \res -> do
         now <- getMonotonicTime
-        cached <- readTVarIO (cache cells)
-        observe res (now - maybe (registeredAt cells) takenAt cached) (attrs [])
+        readTVarIO (cache cells) >>= \case
+          Retired -> pure ()
+          Pending -> observe res (now - registeredAt cells) (attrs [])
+          Live c -> observe res (now - takenAt c) (attrs [])
     ]
   where
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
@@ -257,7 +260,7 @@ registerInstruments meter cells = do
 
 -- | The loop that scans and publishes the reading every instrument reads from.
 gaugeRefreshLoop
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
@@ -273,7 +276,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
     now <- getMonotonicTime
     either
       (warn "Gauge refresh failed, keeping the last reading")
-      (traverse_ (atomically . writeTVar (cache cells) . Just . stamp started now))
+      (traverse_ (atomically . writeTVar (cache cells) . Live . stamp started now))
       refreshed
     let elapsed = now - started
     -- The gate reopens gateInterval after the publish, so a scan slower than the
@@ -307,7 +310,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
       | otherwise = pure (Left e)
     readingStale = do
       now <- getMonotonicTime
-      cached <- readTVarIO (cache cells)
+      cached <- live <$> readTVarIO (cache cells)
       pure (maybe True (\c -> now - takenAt c > realToFrac staleAfter) cached)
     stamp started now = \case
       Ran snap -> Cached started snap

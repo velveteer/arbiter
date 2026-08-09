@@ -143,11 +143,11 @@ retryFromDLQSQL schema tableName dlqId =
         ),
         -- Walk down from root to collect all DLQ tree members
         tree AS (
-          SELECT d.id AS dlq_id, d.job_id, ${carriedFrom}
+          SELECT d.id AS dlq_id, d.job_id
           FROM ${dlqTbl} d
           WHERE d.job_id = (SELECT job_id FROM root_job_id)
           UNION ALL
-          SELECT d.id AS dlq_id, d.job_id, ${carriedFrom}
+          SELECT d.id AS dlq_id, d.job_id
           FROM ${dlqTbl} d
           JOIN tree t ON d.parent_id = t.job_id
         ),

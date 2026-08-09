@@ -1046,7 +1046,7 @@ data Refresh (v :: Type -> Type) = Refresh
 -- the DLQ. Both are backstops, so neither may break an invariant.
 runReaper
   :: forall sm
-   . (MonadArbiter sm, MonadUnliftIO sm, RegistryTables (RegistryOf sm))
+   . (MonadArbiter sm, RegistryTables (RegistryOf sm))
   => Text
   -> Text
   -> sm ()

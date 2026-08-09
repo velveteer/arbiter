@@ -14,7 +14,6 @@ import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
 import UnliftIO.STM qualified as STM
 
@@ -26,9 +25,7 @@ import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 -- @notifVar@ is filled from the shared hub in "Arbiter.Core.Listen".
 runDispatcher
   :: forall payload m
-   . ( MonadUnliftIO m
-     , QueueOperation m payload
-     )
+   . (QueueOperation m payload)
   => WorkerConfig m payload
   -> Int
   -> STM.TBQueue (NonEmpty (JobRead payload))

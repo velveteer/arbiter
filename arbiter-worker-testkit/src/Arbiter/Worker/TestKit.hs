@@ -71,7 +71,7 @@ import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Types (Identifier (..))
 import Test.Hspec
-import UnliftIO (MonadUnliftIO, atomically, bracket)
+import UnliftIO (atomically, bracket)
 import UnliftIO.Async (withAsync)
 
 -- | Build a worker-pool test suite for the given 'MonadArbiter' runner.
@@ -84,7 +84,6 @@ import UnliftIO.Async (withAsync)
 workerSpec
   :: forall payload m env
    . ( Eq payload
-     , MonadUnliftIO m
      , QueueOperation m payload
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)
@@ -1369,8 +1368,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 -- in time, so completion proves the listener fired.
 listenerSpec
   :: forall payload m env
-   . ( MonadUnliftIO m
-     , QueueOperation m payload
+   . ( QueueOperation m payload
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)
      , ResultOf m payload ~ ()
@@ -1532,8 +1530,7 @@ killListener connStr schema =
 -- @tableA@ queue and @payloadB@ to @tableB@.
 multiQueueListenerSpec
   :: forall payloadA payloadB m env
-   . ( MonadUnliftIO m
-     , QueueOperation m payloadA
+   . ( QueueOperation m payloadA
      , QueueOperation m payloadB
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)

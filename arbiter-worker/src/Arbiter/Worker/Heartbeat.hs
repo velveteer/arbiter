@@ -16,7 +16,6 @@ import Data.Foldable (toList, traverse_)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async (race)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.STM (TMVar, atomically)
@@ -45,9 +44,7 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
   :: forall payload m a
-   . ( JobOperation m payload
-     , MonadUnliftIO m
-     )
+   . (JobOperation m payload)
   => ObservabilityHooks m payload
   -- ^ Observability hooks (for heartbeat hook)
   -> NominalDiffTime

@@ -56,7 +56,7 @@ import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
 import Arbiter.Worker.Config (WorkerConfig (..), withHooks, withMaintenance)
-import Arbiter.Worker.Logger (LogConfig, defaultLogConfig)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..), defaultLogConfig, tryLog)
 import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -99,7 +99,7 @@ instrumentPools = map . instrumentPool
 -- when the handle has metrics off.
 withGauges
   :: forall m b
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
   -> m b
@@ -115,7 +115,7 @@ withGauges tel baseLog action = do
 -- 'runWorkerPoolsWith' when something else needs it.
 runWorkerPools
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools =
@@ -124,7 +124,7 @@ runWorkerPools pools =
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => [Text]
   -> [NamedWorkerPool m]
   -> m ()
@@ -135,7 +135,7 @@ runSelectedWorkerPools enabled pools =
 -- base log config.
 runWorkerPoolsWith
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
   -> [NamedWorkerPool m]
@@ -146,7 +146,7 @@ runWorkerPoolsWith tel baseLog pools =
 -- | 'runSelectedWorkerPools' over a handle the caller installed itself.
 runSelectedWorkerPoolsWith
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => Telemetry
   -> LogConfig
   -> [Text]
@@ -155,9 +155,11 @@ runSelectedWorkerPoolsWith
 runSelectedWorkerPoolsWith tel baseLog enabled pools =
   withGauges tel baseLog (Worker.runSelectedWorkerPools enabled (instrumentPools tel pools))
 
--- | Install the SDK around an action in the database monad.
+-- | Install the SDK around an action in the database monad, logging how it started.
 withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a
-withTelemetryHere use = withRunInIO $ \runDb -> withTelemetryFromEnv (runDb . use)
+withTelemetryHere use = withRunInIO $ \runDb ->
+  withTelemetryFromEnv $ \tel ->
+    runDb (tryLog defaultLogConfig Info (telemetrySummary tel) >> use tel)
 
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig

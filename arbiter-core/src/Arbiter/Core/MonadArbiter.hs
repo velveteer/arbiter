@@ -11,10 +11,10 @@ module Arbiter.Core.MonadArbiter
   , Query (..)
   ) where
 
-import Control.Monad.IO.Class (MonadIO)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
+import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Codec (ParamType (..), Params, SomeParam (..))
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -29,7 +29,7 @@ import Arbiter.Core.Sql.Query (Query (..))
 -- The instance also names the monad's schema and queue registry, which is how
 -- the high-level API resolves table names and result types from payload types
 -- at compile time.
-class (MonadIO m) => MonadArbiter m where
+class (MonadUnliftIO m) => MonadArbiter m where
   -- | This monad's registry. The default reports an instance that omits it,
   -- which would otherwise surface as an irreducible 'RegistryOf' application.
   type RegistryOf m :: JobPayloadRegistry

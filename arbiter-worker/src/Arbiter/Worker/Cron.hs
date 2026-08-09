@@ -79,7 +79,7 @@ import Data.Time.Zones (TZ, utcToLocalTimeTZ)
 import Data.Time.Zones.All (fromTZName, tzByLabel)
 import GHC.Generics (Generic)
 import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
-import UnliftIO (MonadUnliftIO, TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny, writeTVar)
+import UnliftIO (TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny, writeTVar)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
@@ -275,7 +275,7 @@ initCronSchedules schemaName queueName jobs logCfg = do
 -- | Scheduler entry point. Exits cleanly when the worker state becomes
 -- 'ShuttingDown' so graceful shutdown stops creating new jobs.
 runCronScheduler
-  :: (MonadUnliftIO m, QueueOperation m payload)
+  :: (QueueOperation m payload)
   => TVar WorkerState
   -> TVar Bool
   -- ^ Set by the run-now listener when a schedule this pool owns is requested.
@@ -316,7 +316,7 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
 -- | Scheduler catch-up step. Each cron runs in its own transaction.
 -- Backfill schedules hold a per-(schema, queue, name) advisory lock.
 processCronCatchUp
-  :: (MonadUnliftIO m, QueueOperation m payload)
+  :: (QueueOperation m payload)
   => LogConfig
   -> Text
   -> Text
@@ -442,7 +442,7 @@ resolveAndParse cj mRow =
 -- either fails the other rolls back, so a successful fire is always paired
 -- with a watermark advance to that tick.
 tryInsertCronJob
-  :: (MonadUnliftIO m, QueueOperation m payload)
+  :: (QueueOperation m payload)
   => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m Bool
 tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
   result <- tryAny . withDbTransaction $ do
@@ -470,7 +470,7 @@ data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
 -- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
   :: forall payload m
-   . (MonadUnliftIO m, QueueOperation m payload)
+   . (QueueOperation m payload)
   => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)

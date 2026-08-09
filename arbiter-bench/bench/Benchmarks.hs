@@ -215,7 +215,7 @@ benchTelemetryVar = unsafePerformIO (newMVar Nothing)
 -- | Run @use@ over a trial's pools under the global tracer provider that trial
 -- measures, restoring the previous provider afterwards.
 withInstrumentedPools
-  :: (MonadUnliftIO m, QueueOperation m BenchPayload)
+  :: (QueueOperation m BenchPayload)
   => Instrumentation
   -> [WorkerConfig m BenchPayload]
   -> ([WorkerConfig m BenchPayload] -> IO a)
@@ -553,7 +553,7 @@ benchTune c = c {pollInterval = 0.1, logConfig = silentLogConfig}
 
 -- | A worker trial for one backend. @mkSingle@ builds that backend's single-job config.
 workerTrial
-  :: (HasRegistry m BenchRegistry, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry)
   => RunM m
   -> Connection
   -> (Int -> m (WorkerConfig m BenchPayload))
@@ -586,7 +586,7 @@ orvilleWorkerTrial runM statsConn =
     transactionalWorkerConfig workersPerPool (\job -> flakyGate (pure ()) job)
 
 runWorkerTrial
-  :: (HasRegistry m BenchRegistry, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry)
   => RunM m -> Connection -> [WorkerConfig m BenchPayload] -> Int -> Int -> IO SteadyResult
 runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
@@ -650,7 +650,7 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
 -- Workers increment a counter per job, decoupling throughput from queue
 -- depth at trial boundaries.
 runSteadyStateTrial
-  :: (HasRegistry m BenchRegistry, MonadUnliftIO m)
+  :: (HasRegistry m BenchRegistry)
   => RunM m
   -- ^ Runner for workers
   -> RunM SimpleM
@@ -717,7 +717,7 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
 -- | A steady-state trial for one backend. @mkSingle@ builds that backend's single-job
 -- config, counting each job it processes.
 steadyStateTrial
-  :: (HasRegistry m BenchRegistry, MonadUnliftIO m, QueueOperation m BenchPayload)
+  :: (HasRegistry m BenchRegistry, QueueOperation m BenchPayload)
   => RunM m
   -> RunM SimpleM
   -> Connection
@@ -910,7 +910,6 @@ multiTrialGated n setup measure = formatGated <$> replicateM n (setup >> measure
 -- | One steady-state window over a gated queue: 10 producers insert, a 10-worker pool acks.
 runGatedSteadyTrial
   :: ( EncodeJobResult (ResultOf m payload)
-     , MonadUnliftIO m
      , QueueOperation SimpleM payload
      , QueueOperation m payload
      , RegistryAdmissionPolicies (RegistryOf m)

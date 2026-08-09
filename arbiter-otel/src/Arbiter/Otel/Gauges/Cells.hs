@@ -4,6 +4,8 @@
 module Arbiter.Otel.Gauges.Cells
   ( Snapshot (..)
   , Cached (..)
+  , Export (..)
+  , live
   , GaugeCells (..)
   , Baseline
   , SeriesKey
@@ -39,6 +41,15 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
+-- | What the instruments export.
+data Export = Pending | Live Cached | Retired
+
+-- | The scan behind an export, if it has one.
+live :: Export -> Maybe Cached
+live = \case
+  Live c -> Just c
+  _ -> Nothing
+
 -- | One counter series: its instrument and attributes.
 type SeriesKey = (Text, [(Text, Text)])
 
@@ -50,14 +61,14 @@ data Baseline = Baseline
 
 -- | What the registered callbacks read.
 data GaugeCells = GaugeCells
-  { cache :: TVar (Maybe Cached)
+  { cache :: TVar Export
   , counterBaselines :: IORef (HashMap SeriesKey Baseline)
   , registeredAt :: Double
   }
 
 -- | Cells for a registration starting at @now@.
 newGaugeCells :: Double -> IO GaugeCells
-newGaugeCells now = GaugeCells <$> newTVarIO Nothing <*> newIORef HM.empty <*> pure now
+newGaugeCells now = GaugeCells <$> newTVarIO Pending <*> newIORef HM.empty <*> pure now
 
 -- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
 -- reading or one already counted, the whole total for a counter that was reset,

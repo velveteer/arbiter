@@ -8,8 +8,12 @@ module Arbiter.Core.Operations
   ( -- * Job Insertion
     insertJob
   , insertJobUnsafe
+  , insertJobUnsafeStamped
   , insertJobsBatch
+  , insertJobsBatchStamped
   , insertJobsBatch_
+  , TraceStamp
+  , traceStamp
   , insertResult
   , insertResultsBatch
   , getResultsByParent
@@ -332,21 +336,20 @@ admissionColumns p =
         , acConcurrencyPrefix = ckPrefix <$> ccKey
         }
 
--- | The stamp every insert path puts on its jobs, carrying the ambient trace context.
-traceStamp :: (MonadIO m) => m (JobWrite payload -> JobWrite payload)
+-- | What an insert path puts on its jobs, carrying the ambient trace context.
+type TraceStamp payload = JobWrite payload -> JobWrite payload
+
+-- | The stamp for the context in scope. One read covers every job inserted under it.
+traceStamp :: (MonadIO m) => m (TraceStamp payload)
 traceStamp = stampTraceContext <$> liftIO currentTraceContext
 
--- | The row an insert writes: the stamped job and its admission columns.
-insertRow :: (JobPayload payload, MonadIO m) => JobWrite payload -> m (JobWrite payload, AdmissionColumns)
-insertRow job = flip stampedRow job <$> traceStamp
-
--- | 'insertRow' over a batch, sharing one stamp.
+-- | The rows an insert writes: the stamped jobs and their admission columns.
 insertRows :: (JobPayload payload, MonadIO m) => [JobWrite payload] -> m [(JobWrite payload, AdmissionColumns)]
 insertRows jobs = (\stamp -> map (stampedRow stamp) jobs) <$> traceStamp
 
 stampedRow
   :: (JobPayload payload)
-  => (JobWrite payload -> JobWrite payload)
+  => TraceStamp payload
   -> JobWrite payload
   -> (JobWrite payload, AdmissionColumns)
 stampedRow stamp job = (stamp job, admissionColumns (payload job))
@@ -365,9 +368,20 @@ insertJobUnsafe
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafe schemaName tableName job = do
-  row <- insertRow job
-  let valuesFrag = insertFrag (jobCodec tableName) row
+insertJobUnsafe schemaName tableName job =
+  traceStamp >>= \stamp -> insertJobUnsafeStamped schemaName tableName stamp job
+
+-- | 'insertJobUnsafe' over a stamp the caller shares across its inserts.
+insertJobUnsafeStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> JobWrite payload
+  -> m (Maybe (JobRead payload))
+insertJobUnsafeStamped schemaName tableName stamp job = do
+  let valuesFrag = insertFrag (jobCodec tableName) (stampedRow stamp job)
       query = case dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
         _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
@@ -585,8 +599,21 @@ insertJobsBatch
   -- ^ Jobs to insert
   -> m [JobRead payload]
 insertJobsBatch _ _ [] = pure []
-insertJobsBatch schemaName tableName jobs = do
-  batchSrc <- batchFrag (jobCodec tableName) <$> insertRows (dedupBatch jobs)
+insertJobsBatch schemaName tableName jobs =
+  traceStamp >>= \stamp -> insertJobsBatchStamped schemaName tableName stamp jobs
+
+-- | 'insertJobsBatch' over a stamp the caller shares across its inserts.
+insertJobsBatchStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> [JobWrite payload]
+  -> m [JobRead payload]
+insertJobsBatchStamped _ _ _ [] = pure []
+insertJobsBatchStamped schemaName tableName stamp jobs = do
+  let batchSrc = batchFrag (jobCodec tableName) (map (stampedRow stamp) (dedupBatch jobs))
   withDbTransaction $ do
     rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
     traverse decodePayload rawJobs
@@ -1493,7 +1520,7 @@ decodeArchiveRow (aId, aCompletedAt, rawJob, aResult) = do
 -- Returns the total rows purged and the queues whose purge errored. Designed to
 -- run once per reaper tick, so steady-state each call deletes only a small slice.
 purgeArchives
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => SchemaName -> [TableName] -> m (Int64, [Text])
 purgeArchives =
   sweepQueues $ \schemaName queue ->
@@ -2135,7 +2162,7 @@ groupsRefreshBatch = 20000
 -- Wrap in 'runGated' so only one pool runs it per interval. Returns the rows
 -- rewritten and the queue names that failed.
 refreshAllGroups
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
   -> m (Int64, [Text])
@@ -2158,7 +2185,7 @@ sweepQueues sweepOne schemaName queues = do
 -- | Sweep exhausted jobs across all queues. Returns the total moved and the
 -- names of queues whose sweep failed.
 sweepExhaustedJobs
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
   -> m (Int64, [Text])
@@ -2188,7 +2215,7 @@ exhaustedSweepBatch = 1000
 -- left for the worker's own cancel handler. Returns the total deleted and the
 -- names of queues whose sweep failed.
 sweepCancelledJobs
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => SchemaName
   -> [TableName]
   -> m (Int64, [Text])
@@ -2654,7 +2681,7 @@ data Shared a
 -- restarts from the publish. A run or publish that throws puts the watermark back, so a
 -- winner that keeps failing does not keep every other caller from running.
 runGatedShared
-  :: (FromJSON a, MonadArbiter m, MonadUnliftIO m, ToJSON a)
+  :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName
   -> Text
   -> NominalDiffTime

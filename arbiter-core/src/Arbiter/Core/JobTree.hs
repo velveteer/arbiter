@@ -55,7 +55,6 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as UE
 
 import Arbiter.Core.Job.Types
@@ -66,6 +65,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
+import Arbiter.Core.Trace (resolveTracer, withPublishSpan)
 
 -- | Internal exception used to abort a tree insertion transaction.
 -- Not exported - caught and converted to @Left@ by 'insertJobTree'.
@@ -140,7 +140,7 @@ parent <~~ children = Finalizer (parent {parentState = Just emptyState}) (fmap L
 -- partial trees are committed.
 insertJobTree
   :: forall m payload
-   . (JobPayload payload, MonadArbiter m, MonadUnliftIO m)
+   . (JobPayload payload, MonadArbiter m)
   => Text
   -- ^ PostgreSQL schema name
   -> Text
@@ -148,7 +148,10 @@ insertJobTree
   -> JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree schemaName tableName tree = do
-  result <- UE.try $ withDbTransaction $ go Nothing (rootSuspended tree) tree
+  tracer <- resolveTracer
+  result <- withPublishSpan tracer tableName (treeSize tree) $ UE.try $ do
+    stamp <- Ops.traceStamp
+    withDbTransaction $ go stamp Nothing (rootSuspended tree) tree
   pure $ case result of
     Left (TreeInsertFailed msg) -> Left msg
     Right jobs -> Right jobs
@@ -158,22 +161,27 @@ insertJobTree schemaName tableName tree = do
     rootSuspended (Finalizer _ _) = True
     rootSuspended _ = False
 
+    treeSize :: JobTree payload -> Int
+    treeSize (Leaf _) = 1
+    treeSize (Finalizer _ children) = 1 + sum (fmap treeSize children)
+
     go
-      :: Maybe Int64
+      :: Ops.TraceStamp payload
+      -> Maybe Int64
       -- \^ Parent primary key (Nothing for root)
       -> Bool
       -- \^ Whether this node should be inserted suspended
       -> JobTree payload
       -> m (NonEmpty (JobRead payload))
-    go mParentId susp (Leaf jobW) = do
+    go stamp mParentId susp (Leaf jobW) = do
       let jobW' = jobW {parentId = mParentId, suspended = susp}
-      mInserted <- Ops.insertJobUnsafe schemaName tableName jobW'
+      mInserted <- Ops.insertJobUnsafeStamped schemaName tableName stamp jobW'
       case mInserted of
         Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: job insert failed (dedup conflict or invalid parent)"
         Just inserted -> pure (inserted :| [])
-    go mParentId susp (Finalizer jobW children) = do
+    go stamp mParentId susp (Finalizer jobW children) = do
       let jobW' = jobW {parentId = mParentId, suspended = susp}
-      mInserted <- Ops.insertJobUnsafe schemaName tableName jobW'
+      mInserted <- Ops.insertJobUnsafeStamped schemaName tableName stamp jobW'
       case mInserted of
         Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict or invalid parent)"
         Just inserted -> do
@@ -183,11 +191,11 @@ insertJobTree schemaName tableName tree = do
                   [case c of Leaf j -> Left j; t -> Right t | c <- NE.toList children]
 
           -- Recursively insert sub-finalizers first (preserves pre-order)
-          subTreeJobs <- mapM (\child -> go (Just parentPK) True child) subTrees
+          subTreeJobs <- mapM (\child -> go stamp (Just parentPK) True child) subTrees
 
           -- Batch-insert all leaf children in one roundtrip
           let leafWrites = [j {parentId = Just parentPK, suspended = False} | j <- leaves]
-          leafJobs <- Ops.insertJobsBatch schemaName tableName leafWrites
+          leafJobs <- Ops.insertJobsBatchStamped schemaName tableName stamp leafWrites
           when (length leafJobs /= length leaves) $
             UE.throwIO $
               TreeInsertFailed "insertJobTree: leaf batch insert had dedup conflicts"

@@ -32,7 +32,6 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Data.UUID.Types qualified as UUID
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
-import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Test.Setup (truncateToMicros)
 
@@ -44,7 +43,6 @@ operationsSpec
      , JobPayload payload
      , KnownSymbol (TableForPayload payload (RegistryOf m))
      , MonadArbiter m
-     , MonadUnliftIO m
      , Show payload
      )
   => (Text -> payload)

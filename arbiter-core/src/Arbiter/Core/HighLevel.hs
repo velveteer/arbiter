@@ -171,6 +171,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate, RateLimitPolicyView)
+import Arbiter.Core.Trace (resolveTracer, withPublishSpan)
 import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
@@ -190,6 +191,16 @@ type JobOperation m payload =
 queueTable :: forall payload m. (KnownSymbol (TableForPayload payload (RegistryOf m))) => Text
 queueTable = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
 
+publishSpan
+  :: forall payload m a
+   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+  => Int
+  -> m a
+  -> m a
+publishSpan n action = do
+  tracer <- resolveTracer
+  withPublishSpan tracer (queueTable @payload @m) n action
+
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
 -- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
 insertJob
@@ -197,7 +208,7 @@ insertJob
    . (QueueOperation m payload)
   => JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob job = do
+insertJob job = publishSpan @payload 1 $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJob schemaName tableName job
@@ -210,7 +221,8 @@ insertJobsBatch
    . (QueueOperation m payload)
   => [JobWrite payload]
   -> m [JobRead payload]
-insertJobsBatch jobs = do
+insertJobsBatch [] = pure []
+insertJobsBatch jobs = publishSpan @payload (length jobs) $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch schemaName tableName jobs
@@ -221,7 +233,8 @@ insertJobsBatch_
    . (QueueOperation m payload)
   => [JobWrite payload]
   -> m Int64
-insertJobsBatch_ jobs = do
+insertJobsBatch_ [] = pure 0
+insertJobsBatch_ jobs = publishSpan @payload (length jobs) $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch_ schemaName tableName jobs
@@ -1252,7 +1265,7 @@ getParentStateSnapshot jobId = do
 -- one pool runs it per interval.
 refreshAllGroups
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m (Int64, [Text])
 refreshAllGroups = do
   schemaName <- getSchema
@@ -1461,7 +1474,7 @@ runGated task interval work = do
 -- or @Left@ if the root has a dedup conflict. Rolls back on any failure.
 insertJobTree
   :: forall payload m
-   . (MonadUnliftIO m, QueueOperation m payload)
+   . (QueueOperation m payload)
   => JT.JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree tree = do
