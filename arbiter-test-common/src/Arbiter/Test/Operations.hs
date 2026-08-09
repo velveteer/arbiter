@@ -14,7 +14,8 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf, getSchema)
+import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
@@ -67,6 +68,10 @@ operationsSpec mkMessage mkResult runM = do
         j <- getJob env jobId
         j `shouldBe` Nothing
       dlqAll env = runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      deleteCancelledAs env owner jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          Ops.deleteCancelledJobs schemaName (HL.queueTable @payload @m) (Just owner) jobIds
 
   describe "claimNextVisibleJobs" $ do
     it "claims jobs in priority order" $ \env -> do
@@ -253,6 +258,24 @@ operationsSpec mkMessage mkResult runM = do
 
       -- The flagged row survives, left for the cancel path to reap.
       getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
+
+    it "leaves a force-cancel-flagged job for the worker holding its lease" $ \env -> do
+      -- Deleting it elsewhere takes the flag away before its holder can read it.
+      let owner = UUID.nil
+          other = UUID.fromWords 1 1 1 1
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-lease-owner")))
+      let jobId = primaryKey inserted
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 owner) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+
+      flagged <- runM env (HL.forceCancelJob @payload jobId)
+      flagged `shouldBe` 1
+
+      deleteCancelledAs env other [jobId] >>= (`shouldBe` [])
+      getJob env jobId >>= (`shouldSatisfy` isJust)
+
+      deleteCancelledAs env owner [jobId] >>= (`shouldBe` [jobId])
+      assertGone env jobId
 
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do

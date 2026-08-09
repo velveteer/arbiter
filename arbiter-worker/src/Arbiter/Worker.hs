@@ -110,6 +110,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
+import Data.UUID (UUID)
 import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
@@ -709,7 +710,7 @@ finalizeForceCancelled
 finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
   tryLog batchLog Info "Job(s) force-cancelled"
   schemaName <- getSchema
-  deleted <- deleteCancelledOrWarn batchLog schemaName (Job.queueName firstJob) jobIds
+  deleted <- deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) jobIds
   pending <- pendingJobs handoff jobs
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
   let (gone, interrupted) = partition (hasIdIn cancelled) pending
@@ -743,21 +744,23 @@ settleGoneJobs config logCfg mark reason = \case
   [] -> pure ()
   jobs@(j : _) -> do
     schemaName <- getSchema
-    cancelled <- deleteCancelledOrWarn logCfg schemaName (Job.queueName j) (map Job.primaryKey jobs)
+    cancelled <- deleteCancelledOrWarn logCfg (workerId config) schemaName (Job.queueName j) (map Job.primaryKey jobs)
     reportGoneJobs config mark cancelled reason jobs
 
--- | Delete whichever of @jobIds@ a force-cancel flagged, returning the ids it deleted.
+-- | Delete whichever of @jobIds@ a force-cancel flagged against this worker's lease,
+-- or against none, returning the ids it deleted. One held elsewhere is that worker's.
 deleteCancelledOrWarn
   :: (MonadArbiter m, MonadUnliftIO m)
   => LogConfig
+  -> UUID
   -> SchemaName
   -> Text
   -- ^ Queue the jobs belong to.
   -> [Int64]
   -> m (Set.Set Int64)
-deleteCancelledOrWarn logCfg schemaName queue jobIds =
+deleteCancelledOrWarn logCfg owner schemaName queue jobIds =
   tryWarnWith logCfg "Deleting force-cancelled jobs failed" mempty $
-    Set.fromList <$> Ops.deleteCancelledJobs schemaName queue jobIds
+    Set.fromList <$> Ops.deleteCancelledJobs schemaName queue (Just owner) jobIds
 
 -- | What a force-cancel finalizer needs from the handler's scope, whichever side of
 -- the job span runs it.
@@ -1052,7 +1055,7 @@ handleJobFailure config e maxAtts startTime endTime job = do
       cancel = void (cancelJobFor failureKind job) >> fireCancelled cfg hooks job errorMsg
   schemaName <- getSchema
   let gone reason = do
-        cancelled <- deleteCancelledOrWarn cfg schemaName (Job.queueName job) [Job.primaryKey job]
+        cancelled <- deleteCancelledOrWarn cfg (workerId config) schemaName (Job.queueName job) [Job.primaryKey job]
         if hasIdIn cancelled job
           then tryLog cfg Info "Job force-cancelled"
           else tryLog cfg Warning ("Job " <> reason)

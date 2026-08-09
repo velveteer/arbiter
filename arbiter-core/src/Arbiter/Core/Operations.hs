@@ -1595,16 +1595,17 @@ deleteDLQJobsBatch schemaName tableName dlqIds =
   fromIntegral . length
     <$> deleteJobsResumingParents schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
 
--- | Delete force-cancel-flagged jobs by id and resume any parents left
--- childless. Returns the ids it deleted.
+-- | Delete force-cancel-flagged jobs @owner@ holds or no live lease holds, resuming
+-- any parents left childless. Returns the ids it deleted.
 deleteCancelledJobs
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
+  -> Maybe UUID
   -> [Int64]
   -> m [Int64]
-deleteCancelledJobs schemaName tableName =
-  deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName)
+deleteCancelledJobs schemaName tableName owner =
+  deleteJobsResumingParents schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName owner)
 
 -- * Admin Operations
 
@@ -2195,7 +2196,7 @@ sweepCancelledJobs = sweepQueues sweepCancelledForQueue
 
 -- | Delete one queue's lease-lapsed flagged jobs, resuming any parents left
 -- childless. 'deleteCancelledJobs' runs in its own transaction and re-checks
--- the flag, so a concurrent worker cancel handler is harmless.
+-- the lease under the row lock, so a job reclaimed since the select is left alone.
 sweepCancelledForQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -2203,7 +2204,7 @@ sweepCancelledForQueue
   -> m Int64
 sweepCancelledForQueue schemaName tableName = do
   ids <- MA.executeQuery (Tmpl.selectCancelledReapableJobsSQL schemaName tableName cancelledSweepBatch)
-  fromIntegral . length <$> deleteCancelledJobs schemaName tableName ids
+  fromIntegral . length <$> deleteCancelledJobs schemaName tableName Nothing ids
 
 -- | Per-queue cap on flagged jobs reaped in one pass.
 cancelledSweepBatch :: Int

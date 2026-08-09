@@ -30,6 +30,7 @@ import Data.Aeson (Value)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.UUID.Types (UUID)
 
 import Arbiter.Core.Job.Schema
   ( SchemaName
@@ -164,11 +165,11 @@ forceCancelJobSQL schema tableName jobId =
         WHERE (SELECT count(*) FROM notif) >= 0
       |]
 
--- | Delete force-cancel-flagged jobs by id, locking descending to match ack and force-cancel, returning each one's parent id.
-deleteCancelledJobsSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
-deleteCancelledJobsSQL schema tableName jobIds =
+-- | Delete force-cancel-flagged jobs @owner@ holds or no live lease holds, locking descending to match ack and force-cancel, returning each one's parent id.
+deleteCancelledJobsSQL :: SchemaName -> TableName -> Maybe UUID -> [Int64] -> Query (Int64, Maybe Int64)
+deleteCancelledJobsSQL schema tableName owner jobIds =
   let tbl = jobQueueTable schema tableName
-   in [sql|WITH locked AS (SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND cancel_requested_at IS NOT NULL ORDER BY id DESC FOR UPDATE) DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
+   in [sql|WITH locked AS (SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) AND cancel_requested_at IS NOT NULL AND (claimed_by = #{owner :: Maybe CUuid} OR not_visible_until IS NULL OR not_visible_until <= NOW()) ORDER BY id DESC FOR UPDATE) DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
 
 -- | Flagged jobs whose lease has lapsed, so the claiming worker is no longer
 -- heartbeating and the reaper should delete them and resume their parents.
