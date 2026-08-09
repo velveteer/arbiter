@@ -51,7 +51,8 @@ import Arbiter.Worker.Config
 import Arbiter.Worker.Logger (silentLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, try)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -105,6 +106,12 @@ testSchema = "arbiter_worker_test"
 
 testTable :: Text
 testTable = "arbiter_worker_test"
+
+-- | Take a job's row lock on a connection of the test's own.
+lockJobRow :: PG.Connection -> Int64 -> IO (Either SomeException [Only Int64])
+lockJobRow conn jobId = try (PG.query conn lockSql (Only jobId))
+  where
+    lockSql = fromString . T.unpack $ "SELECT id FROM " <> testSchema <> "." <> testTable <> " WHERE id = ? FOR UPDATE"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
@@ -1235,19 +1242,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let pid = primaryKey parent
         Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-child")) {parentId = Just pid}
         let cid = primaryKey child
-            lockSql =
-              fromString . T.unpack $
-                "SELECT id FROM " <> testSchema <> "." <> testTable <> " WHERE id = ? FOR UPDATE"
-            lockRow conn i = try (PG.query conn lockSql (Only i) :: IO [Only Int64]) :: IO (Either SomeException [Only Int64])
 
         connA <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connA "BEGIN"
-        void $ lockRow connA cid
+        void $ lockJobRow connA cid
 
         (efc, epA) <-
           withAsync (try (runSimpleDb env $ Ops.forceCancelJob testSchema testTable pid) :: IO (Either SomeException Int64)) $ \fc -> do
             threadDelay 300_000
-            epA <- lockRow connA pid
+            epA <- lockJobRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
             efc <- Async.wait fc
             pure (efc, epA)
@@ -1255,6 +1258,43 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         efc `shouldSatisfy` isRight
         epA `shouldSatisfy` isRight
+
+      it "settles a failed batch children-first, so a tree lock cannot deadlock it" $ \env -> do
+        startedRef <- newIORef False
+        goVar <- newEmptyMVar
+        let batchHandler _jobs _cbs = liftIO $ do
+              writeIORef startedRef True
+              takeMVar goVar
+              throwIO (userError "dlb-boom")
+        let jobs =
+              [ (defaultJob (SimpleTask "dlb-1")) {groupKey = Just "dlb", maxAttempts = Just 1}
+              , (defaultJob (SimpleTask "dlb-2")) {groupKey = Just "dlb", maxAttempts = Just 1}
+              ]
+        inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
+        let ids = map primaryKey inserted
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 batchHandler
+
+        withAsync
+          (runSimpleDb env $ runWorkerPool config {pollInterval = 0.05, jobHeartbeatInterval = 30, visibilityTimeout = 60})
+          $ \_ -> do
+            waitUntil 5_000 $ readIORef startedRef
+
+            connA <- PG.connectPostgreSQL connStr
+            void $ PG.execute_ connA "BEGIN"
+            -- Hold the batch's higher id, the row a force-cancel over the tree takes first.
+            void $ lockJobRow connA (maximum ids)
+            putMVar goVar ()
+            threadDelay 300_000
+            -- The failure transaction must not already hold the lower id.
+            eLo <- lockJobRow connA (minimum ids)
+            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+            PG.close connA
+
+            eLo `shouldSatisfy` isRight
+            waitUntil 10_000 $ do
+              dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+              pure (length dlqJobs == 2)
 
     describe "Sweeper" $ do
       it "deletes a stale unpaused worker row" $ \env -> do

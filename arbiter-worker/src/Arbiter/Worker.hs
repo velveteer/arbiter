@@ -97,11 +97,12 @@ import Data.Either (partitionEithers)
 import Data.Foldable (fold, foldMap', toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int32, Int64)
-import Data.List (partition)
+import Data.List (partition, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Ord (Down (..))
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -777,10 +778,13 @@ newCancelHandoff =
 
 -- | The batch's jobs still awaiting an outcome, which keeps the force-cancel finalizer
 -- and the outcome report from both reporting the same job.
+--
+-- Children-first, so the per-job locks a settle takes follow the same order as ack
+-- and force-cancel.
 pendingJobs :: (MonadIO m) => CancelHandoff -> NonEmpty (Job.JobRead payload) -> m [Job.JobRead payload]
 pendingJobs handoff jobs = do
   handled <- liftIO (readIORef (handledRef handoff))
-  pure (filter (not . hasIdIn handled) (toList jobs))
+  pure (sortOn (Down . Job.primaryKey) (filter (not . hasIdIn handled) (toList jobs)))
 
 markJobHandled :: (MonadIO m) => CancelHandoff -> Job.JobRead payload -> m ()
 markJobHandled = insertJob . handledRef
