@@ -80,7 +80,7 @@ groups:
         annotations:
           summary: "{{ $labels.queue }}: jobs are ready but no worker is registered."
           description: Every worker for this queue has stopped or lost its registration.
-        noDataState: Alerting
+        noDataState: OK
         execErrState: Error
         data:
           - refId: query
