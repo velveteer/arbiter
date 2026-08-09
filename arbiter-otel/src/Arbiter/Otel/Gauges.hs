@@ -156,12 +156,12 @@ registerInstruments meter cells = do
     perQueue oldestReadyAgeSeconds
   reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased (0 = none in flight)" $
     perQueue oldestInFlightAgeSeconds
-  -- The states partition the live workers, so a queue's fleet is their sum.
+  -- Active and paused partition the pools with a fresh heartbeat, so a queue's fleet is their sum.
   reg Name.Workers "{worker}" "Registered workers by state" $
     observed $
       over queues $ \o ->
         let paused = overviewWorkersPaused o
-         in [ ([("queue", overviewQueue o), ("state", "running")], fromIntegral (max 0 (overviewWorkersLive o - paused)))
+         in [ ([("queue", overviewQueue o), ("state", "active")], fromIntegral (max 0 (overviewWorkersLive o - paused)))
             , ([("queue", overviewQueue o), ("state", "paused")], fromIntegral paused)
             ]
 

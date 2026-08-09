@@ -57,6 +57,7 @@ import OpenTelemetry.Instrumentation.Wai (newOpenTelemetryWaiMiddleware)
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
+import System.Random (randomRIO)
 
 -- ---------------------------------------------------------------------------
 -- Payload types
@@ -260,6 +261,9 @@ runDemo tel = do
 
 type DemoM = SimpleDb DemoRegistry IO
 
+simulateWork :: (Int, Int) -> IO ()
+simulateWork range = randomRIO range >>= threadDelay
+
 mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
   cfg <- transactionalWorkerConfig 5 handler
@@ -270,7 +274,7 @@ mkDemoWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
+    handler _conn _job = liftIO $ simulateWork (2_000_000, 8_000_000)
     demoCrons =
       [ either error id $
           cronJob
@@ -290,7 +294,7 @@ mkEmailWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
+    handler _conn _job = liftIO $ simulateWork (2_000_000, 8_000_000)
     emailCrons =
       [ either error id $
           cronJob
@@ -310,7 +314,7 @@ mkNotifWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = pure ()
+    handler _conn _job = liftIO $ simulateWork (5_000, 150_000)
     notifCrons =
       [ either error id $
           cronJob
@@ -331,7 +335,7 @@ mkPipelineWorker = do
   where
     handler _conn job = case payload job of
       ProcessChunk chunkName -> do
-        liftIO $ threadDelay 1_500_000 -- simulate 1.5s of work
+        liftIO $ simulateWork (500_000, 3_000_000)
         pure (chunkFindings chunkName)
       AggregateResults _ -> fst <$> mergedChildResults job
 
