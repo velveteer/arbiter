@@ -101,7 +101,7 @@ import Data.List (partition, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
@@ -634,8 +634,9 @@ processJobsWithRetry config consumeSpan handoff jobs = do
       nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        withDbTransaction $ handleJobFailure config exc (jobMaxAtts j) startTime endT j
+        gone <- withDbTransaction $ handleJobFailure config exc (jobMaxAtts j) startTime endT j
         markHandled j
+        settleUnwritten config (map (j,) (toList gone))
       failAs mkExc j msg = failWith j (toException (mkExc msg))
       ackOneStoring j mVal = do
         withDbTransaction $ do
@@ -652,7 +653,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
             reclaimedLog = withJobContextList (logConfig config) reclaimed
         unless (null reclaimed) $ do
           tryLog reclaimedLog Info "Jobs no longer claimed by this worker during bulk completion, skipped"
-          settleGoneJobs config reclaimedLog markUnowned "no longer claimed by this worker" reclaimed
+          void $ settleGoneJobs config markUnowned "no longer claimed by this worker" reclaimed
         traverse_ finalize done
       markUnowned j = markJobUnowned handoff j >> markHandled j
       callbacks =
@@ -728,21 +729,36 @@ finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
     (firstJob :| _) = jobs
     batchLog = withJobContext (logConfig config) jobs
 
--- | Delete whichever of @jobs@ a force-cancel flagged, then report them all.
+-- | Settle the jobs a failure could not be written for, each under its own reason.
+settleUnwritten
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> [(Job.JobRead payload, Text)]
+  -> m ()
+settleUnwritten config = traverse_ settle . Map.toList . Map.fromListWith (<>) . map (\(j, r) -> (r, [j]))
+  where
+    ctx = withJobContextList (logConfig config)
+    settle (reason, js) = do
+      cancelled <- settleGoneJobs config (const (pure ())) reason js
+      let (forced, unavailable) = partition (hasIdIn cancelled) js
+      unless (null forced) $ tryLog (ctx forced) Info "Job(s) force-cancelled"
+      unless (null unavailable) $ tryLog (ctx unavailable) Warning ("Job(s) " <> reason)
+
+-- | Delete whichever of @jobs@ a force-cancel flagged, report them all, return those ids.
 settleGoneJobs
   :: (JobOperation m payload)
   => WorkerConfig m payload
-  -> LogConfig
   -> (Job.JobRead payload -> m ())
   -> Text
   -> [Job.JobRead payload]
-  -> m ()
-settleGoneJobs config logCfg mark reason = \case
-  [] -> pure ()
+  -> m (Set.Set Int64)
+settleGoneJobs config mark reason = \case
+  [] -> pure mempty
   jobs@(j : _) -> do
     schemaName <- getSchema
+    let logCfg = withJobContextList (logConfig config) jobs
     cancelled <- deleteCancelledOrWarn logCfg (workerId config) schemaName (Job.queueName j) (map Job.primaryKey jobs)
-    reportGoneJobs config mark cancelled reason jobs
+    cancelled <$ reportGoneJobs config mark cancelled reason jobs
 
 -- | Delete whichever of @jobIds@ a force-cancel flagged against this worker's lease,
 -- or against none, returning the ids it deleted. One held elsewhere is that worker's.
@@ -826,7 +842,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
         -- An exception naming no job speaks for none of them, so the remainder keeps
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
-        settleGoneJobs config batchLog (markJobHandled handoff) reason jobsGone
+        void $ settleGoneJobs config (markJobHandled handoff) reason jobsGone
         unless (null ids || null siblings) $
           tryWarn batchLog "Releasing an interrupted batch sibling failed" $ do
             withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
@@ -846,15 +862,18 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
           -- Hand back the attempt the claim consumed for every job the handler
           -- left unfinalized, so the nacked reprocess does not record a failure.
           withDbTransaction $ traverse_ (void . Arb.nackJob) unhandled
+          traverse_ (markJobHandled handoff) unhandled
           tryLog batchLog Info "Job(s) nacked, will be reprocessed"
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
           let kind = snd (classifyException exc)
-          withDbTransaction $ do
-            traverse_ (failJob exc) unhandled
+          gone <- withDbTransaction $ do
+            reasons <- traverse (\j -> fmap (j,) <$> failJob exc j) unhandled
             -- A tree or branch cancel acts on the tree, not on this worker's claim.
             when (cancelsTree kind) $ unownedOf >>= traverse_ (void . cancelJobFor kind)
+            pure (catMaybes reasons)
           traverse_ (markJobHandled handoff) unhandled
+          settleUnwritten config gone
   where
     batchLog = withJobContext (logConfig config) jobs
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
@@ -1031,7 +1050,8 @@ cancelJobFor kind job = do
       Ops.cancelJobCascade schemaName (Job.queueName job) (fromMaybe (Job.primaryKey job) (Job.parentId job))
     _ -> Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
 
--- | Handle failure for a single job (retry or move to DLQ).
+-- | Handle failure for a single job (retry or move to DLQ), returning why the write
+-- found no row.
 handleJobFailure
   :: forall payload m
    . (JobOperation m payload)
@@ -1041,7 +1061,7 @@ handleJobFailure
   -> UTCTime
   -> UTCTime
   -> Job.JobRead payload
-  -> m ()
+  -> m (Maybe Text)
 handleJobFailure config e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = jobLog config job
@@ -1049,41 +1069,36 @@ handleJobFailure config e maxAtts startTime endTime job = do
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
       cancel = void (cancelJobFor failureKind job) >> fireCancelled cfg hooks job errorMsg
   schemaName <- getSchema
-  let gone reason = do
-        cancelled <- deleteCancelledOrWarn cfg (workerId config) schemaName (Job.queueName job) [Job.primaryKey job]
-        if hasIdIn cancelled job
-          then tryLog cfg Info "Job force-cancelled"
-          else tryLog cfg Warning ("Job " <> reason)
-        reportGoneJobs config (const (pure ())) cancelled reason [job]
-      -- Nothing written means the job went elsewhere, so the failure is not ours to report.
-      wrote reason after rowsAffected
-        | rowsAffected == 0 = gone reason
-        | otherwise = fireFailure config job errorMsg startTime endTime >> after
-      deadLetter = do
-        -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-        -- Merges old snapshot so repeated DLQ round-trips don't lose data.
-        when (Job.isRollup job) $ do
-          (results, failures, mSnapshot, _dlqFailures) <-
-            Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
-          let merged = Ops.mergeRawChildResults results failures mSnapshot
-          unless (Map.null merged) $
-            void $
-              Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
-        Arb.moveToDLQ errorMsg job
-          >>= wrote
-            "no longer available for the dead-letter queue"
-            (runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job)
-      retryLater = do
-        let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
-        backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
-        Arb.updateJobForRetry backoffSecs errorMsg job
-          >>= wrote
-            "no longer available for retry"
-            (runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs)
-      dispatch
-        | cancelsTree failureKind = cancel
-        | failureKind == PermanentFailure || Job.attempts job >= maxAtts = deadLetter
-        | otherwise = retryLater
+  let
+    -- Nothing written means the job went elsewhere, so the failure is not ours to report.
+    wrote reason after rowsAffected
+      | rowsAffected == 0 = pure (Just reason)
+      | otherwise = Nothing <$ (fireFailure config job errorMsg startTime endTime >> after)
+    deadLetter = do
+      -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
+      -- Merges old snapshot so repeated DLQ round-trips don't lose data.
+      when (Job.isRollup job) $ do
+        (results, failures, mSnapshot, _dlqFailures) <-
+          Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
+        let merged = Ops.mergeRawChildResults results failures mSnapshot
+        unless (Map.null merged) $
+          void $
+            Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
+      Arb.moveToDLQ errorMsg job
+        >>= wrote
+          "no longer available for the dead-letter queue"
+          (runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job)
+    retryLater = do
+      let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
+      backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
+      Arb.updateJobForRetry backoffSecs errorMsg job
+        >>= wrote
+          "no longer available for retry"
+          (runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs)
+    dispatch
+      | cancelsTree failureKind = Nothing <$ cancel
+      | failureKind == PermanentFailure || Job.attempts job >= maxAtts = deadLetter
+      | otherwise = retryLater
   dispatch
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, moves

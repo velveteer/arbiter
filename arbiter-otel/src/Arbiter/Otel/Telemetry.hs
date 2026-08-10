@@ -16,6 +16,7 @@ import Arbiter.Worker.Logger (LogConfig, LogDestination)
 import Control.Exception (SomeException, bracket, displayException)
 import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
+import Data.Bifunctor (first)
 import Data.Foldable (traverse_)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Text (Text)
@@ -47,7 +48,8 @@ import OpenTelemetry.Processor.Span (SpanProcessor)
 import OpenTelemetry.Propagator (getGlobalTextMapPropagator, setGlobalTextMapPropagator)
 import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
 import OpenTelemetry.Trace
-  ( TracerProviderOptions (..)
+  ( TracerProvider
+  , TracerProviderOptions (..)
   , createTracerProvider
   , emptyTracerProviderOptions
   , getGlobalTracerProvider
@@ -85,24 +87,27 @@ withTelemetry action = do
   readerOpts <- periodicMetricReaderOptionsFromEnv
   evalContT $ do
     (mp, env) <- ContT (withMeterProvider resources previousMeters)
-    metricsNote <- ContT (withReader readerOpts env)
-    tracesNote <- ContT (withTraces processors traceOpts)
-    logsNote <- ContT withLogs
+    reader <- ContT (withReader readerOpts env)
+    traces <- ContT (withTraces processors traceOpts)
+    logs <- ContT withLogs
     liftIO $ do
-      ms <- ifStarted metricsNote (newArbiterMeters mp)
-      dest <- ifStarted logsNote (loggerDestination <$> getGlobalLoggerProvider)
+      ms <- ifStarted (noteOf reader) (newArbiterMeters mp)
       action
         (baseTelemetry mp)
           { meters = ms
-          , logDestination = dest
+          , logDestination = either (const Nothing) (Just . loggerDestination) logs
           , gaugeRefresh = refreshFor readerOpts
-          , telemetrySummary = summarize (serviceName resources) (catMaybes [detectNote, tracesNote, metricsNote, logsNote])
+          , telemetrySummary =
+              summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf reader, noteOf logs])
           }
   where
+    -- Why a signal is off, for the ones that are.
+    noteOf :: Either Text r -> Maybe Text
+    noteOf = either Just (const Nothing)
     -- Bind a signal's handle only when nothing went wrong starting it.
     ifStarted :: Maybe Text -> IO b -> IO (Maybe b)
     ifStarted note act = if isNothing note then Just <$> act else pure Nothing
-    withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Maybe Text -> IO a) -> IO a
+    withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Either Text TracerProvider -> IO a) -> IO a
     withTraces processors opts inner =
       bracket getGlobalTextMapPropagator setGlobalTextMapPropagator $ \_ ->
         withGlobalProvider
@@ -123,7 +128,7 @@ withTelemetry action = do
         (\(m, env) -> setGlobalMeterProvider m >> inner (m, env))
     withReader readerOpts env inner = do
       selection <- lookupMetricsExporterSelection
-      maybe (bracketSignal "metrics" forkReader stopPeriodicMetricReader inner) (inner . Just) (metricsOffNote selection)
+      maybe (bracketSignal "metrics" forkReader stopPeriodicMetricReader inner) (inner . Left) (metricsOffNote selection)
       where
         forkReader = resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts
     withLogs =
@@ -137,15 +142,15 @@ withTelemetry action = do
 -- | Install a signal's SDK provider as the global one for the duration, restoring the
 -- previous provider and shutting the new one down afterwards.
 withGlobalProvider
-  :: Text -> IO p -> (p -> IO ()) -> IO p -> (p -> IO ()) -> (Maybe Text -> IO a) -> IO a
+  :: Text -> IO p -> (p -> IO ()) -> IO p -> (p -> IO ()) -> (Either Text p -> IO a) -> IO a
 withGlobalProvider signal getGlobal setGlobal initialize shutdown inner = do
   previous <- getGlobal
   bracketSignal signal (initialize >>= \p -> p <$ setGlobal p) (\p -> setGlobal previous >> shutdown p) inner
 
--- | Set a signal up and run @inner@ under it, or under the failure that left it off.
-bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Maybe Text -> IO a) -> IO a
+-- | Set a signal up and run @inner@ over it, or over the failure that left it off.
+bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Either Text r -> IO a) -> IO a
 bracketSignal signal acquire release inner =
-  bracket (tryAny acquire) (traverse_ release) (inner . either (Just . signalFailed signal) (const Nothing))
+  bracket (tryAny acquire) (traverse_ release) (inner . first (signalFailed signal))
 
 -- | Why a selection leaves metrics off, for the selections that do.
 metricsOffNote :: Maybe MetricsExporterSelection -> Maybe Text

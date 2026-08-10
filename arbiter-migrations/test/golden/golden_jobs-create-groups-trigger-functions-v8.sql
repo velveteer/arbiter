@@ -45,17 +45,18 @@ BEGIN
   FOR UPDATE;
 
   UPDATE "arbiter"."golden_jobs_groups" g
-  SET job_count = GREATEST(0, g.job_count - sub.removed_count),
-      min_priority = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
-        ELSE COALESCE(sub.new_min_priority, g.min_priority) END,
-      min_id = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
-        ELSE COALESCE(sub.new_min_id, g.min_id) END,
-      ready_count = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
+  SET job_count = CASE WHEN sub.new_min_id IS NULL THEN 0
+        ELSE GREATEST(0, g.job_count - sub.removed_count) END,
+      min_priority = CASE WHEN sub.new_min_id IS NULL THEN 0
+        ELSE sub.new_min_priority END,
+      min_id = CASE WHEN sub.new_min_id IS NULL THEN 0
+        ELSE sub.new_min_id END,
+      ready_count = CASE WHEN sub.new_min_id IS NULL THEN 0
         ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
-      next_due = CASE WHEN g.job_count - sub.removed_count <= 0 THEN NULL
+      next_due = CASE WHEN sub.new_min_id IS NULL THEN NULL
         ELSE sub.new_next_due END,
       in_flight_until = CASE
-        WHEN g.job_count - sub.removed_count <= 0 THEN NULL
+        WHEN sub.new_min_id IS NULL THEN NULL
         WHEN sub.had_inflight THEN sub.surviving_ift
         ELSE g.in_flight_until
       END
@@ -136,17 +137,18 @@ BEGIN
   ) THEN
     -- Step 2: group_key change (dedup replace) - remove from old group
     UPDATE "arbiter"."golden_jobs_groups" g
-    SET job_count = GREATEST(0, g.job_count - sub.removed_count),
-        min_priority = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
-          ELSE COALESCE(sub.new_min_priority, g.min_priority) END,
-        min_id = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
-          ELSE COALESCE(sub.new_min_id, g.min_id) END,
-        ready_count = CASE WHEN g.job_count - sub.removed_count <= 0 THEN 0
+    SET job_count = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE GREATEST(0, g.job_count - sub.removed_count) END,
+        min_priority = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE sub.new_min_priority END,
+        min_id = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE sub.new_min_id END,
+        ready_count = CASE WHEN sub.new_min_id IS NULL THEN 0
           ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
-        next_due = CASE WHEN g.job_count - sub.removed_count <= 0 THEN NULL
+        next_due = CASE WHEN sub.new_min_id IS NULL THEN NULL
           ELSE sub.new_next_due END,
         in_flight_until = CASE
-          WHEN g.job_count - sub.removed_count <= 0 THEN NULL
+          WHEN sub.new_min_id IS NULL THEN NULL
           WHEN sub.had_inflight THEN sub.surviving_ift
           ELSE g.in_flight_until
         END
