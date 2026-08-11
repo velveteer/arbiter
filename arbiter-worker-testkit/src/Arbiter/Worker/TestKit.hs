@@ -1157,6 +1157,42 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
 
+    it "a nacked job leaves its batch siblings running past the next heartbeat" $ \env -> do
+      successRef <- newIORef ([] :: [payload])
+      callsRef <- newIORef (0 :: Int)
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              }
+      let isNacked j = payload j == mkSimple "hb-nacked"
+          batchHandler jobs cbs = do
+            liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
+            traverse_ (nack cbs) (filter isNacked (toList jobs))
+            -- Outlast a heartbeat tick, which the nack's given-back attempt reads as a steal.
+            liftIO $ threadDelay 1_500_000
+            traverse_ (ack cbs) (filter (not . isNacked) (toList jobs))
+      let jobs =
+            [ (defaultJob (mkSimple "hb-nacked")) {groupKey = Just "hb"}
+            , (defaultJob (mkSimple "hb-kept1")) {groupKey = Just "hb"}
+            , (defaultJob (mkSimple "hb-kept2")) {groupKey = Just "hb"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+      let batchedConfig =
+            config
+              { pollInterval = 0.05
+              , visibilityTimeout = 10
+              , jobHeartbeatInterval = 0.5
+              , observabilityHooks = hooks
+              }
+
+      withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
+        waitUntil 15_000 $ (>= 2) . length <$> readIORef successRef
+        successes <- readIORef successRef
+        successes `shouldMatchList` [mkSimple "hb-kept1", mkSimple "hb-kept2"]
+        -- One call finished the batch. A second means the heartbeat killed the first.
+        readIORef callsRef `shouldReturn` 1
+
     it "a thrown JobGoneException skips retry and leaves the job to reprocess" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do

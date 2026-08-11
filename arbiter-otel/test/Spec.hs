@@ -27,6 +27,7 @@ import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigr
 import Arbiter.RateLimit (HasRateLimit)
 import Arbiter.Simple (createSimpleEnv, runSimpleDb)
 import Arbiter.Test.Config (getTestConnectionString)
+import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (execute_)
 import Arbiter.Worker (MaintenanceOp (..), defaultLogConfig)
 import Control.Exception (bracket)
@@ -85,7 +86,6 @@ import OpenTelemetry.Trace.Core
 import OpenTelemetry.Util (appendOnlyBoundedCollectionValues)
 import Test.Hspec
 import UnliftIO.Async (withAsync)
-import UnliftIO.Concurrent (threadDelay)
 
 import Arbiter.Otel qualified as Otel
 
@@ -240,7 +240,7 @@ spec = do
 
         loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
         withAsync loop $ \_ -> do
-          threadDelay 3_000_000
+          waitUntil 30_000 $ recordedWith "arbiter.queue.depth" [("queue", queue)] <$> collected env
           points <- collected env
           traverse_
             (\(name, kvs) -> points `shouldSatisfy` recordedWith name kvs)

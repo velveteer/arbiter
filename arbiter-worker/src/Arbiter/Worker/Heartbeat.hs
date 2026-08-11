@@ -12,7 +12,7 @@ import Arbiter.Core.Trace (capturingContext)
 import Control.Exception (throwIO)
 import Control.Monad (forever, unless, void)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
@@ -41,6 +41,10 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 -- together), so a reclaim means the whole batch's lease has lapsed. The heartbeat
 -- throws to abort the action and stop wasting work on jobs it no longer owns.
 --
+-- Only the jobs still awaiting an outcome are beaten. One the handler already
+-- finalized has left this worker's lease, and its row no longer answers to the
+-- attempts the claim recorded.
+--
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat
   :: forall payload m a
@@ -55,6 +59,8 @@ withJobsHeartbeat
   -- ^ Start time (for calculating elapsed time in heartbeat hook)
   -> NonEmpty (JobRead payload)
   -- ^ The job(s) being processed
+  -> m [JobRead payload]
+  -- ^ Read each tick for the job(s) still awaiting an outcome.
   -> LogConfig
   -- ^ Log configuration
   -> TMVar ()
@@ -62,7 +68,7 @@ withJobsHeartbeat
   -> m a
   -- ^ Action to run with heartbeat protection
   -> m a
-withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal action = do
+withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs pending logCfg signal action = do
   -- 'race' forks both sides, so the handler needs the job span reattached too.
   inherited <- capturingContext
   either id id <$> race (inherited (absurd <$> heartbeatThread)) (inherited action)
@@ -73,7 +79,8 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
 
     tick = do
       threadDelay (ceiling (intervalSecs * 1_000_000))
-      results <- Arb.setVisibilityTimeoutBatch timeoutSecs (toList jobs)
+      live <- pending
+      results <- Arb.setVisibilityTimeoutBatch timeoutSecs live
       atomically $ void $ STM.tryPutTMVar signal ()
       let cancelledJobs = [jobId | Arb.JobCancelled jobId <- results]
           stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
@@ -82,7 +89,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs logCfg signal ac
       unless (null stolenJobs) $
         throwJobGoneIds "reclaimed by another worker" stolenJobs
       let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
-          activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) (toList jobs)
+          activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) live
       currentTime <- liftIO getCurrentTime
       traverse_
         ( \job ->

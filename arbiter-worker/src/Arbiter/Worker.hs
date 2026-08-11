@@ -634,7 +634,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
       nackOne j = Arb.nackJob j >> markHandled j
       failWith j exc = do
         endT <- liftIO getCurrentTime
-        gone <- withDbTransaction $ handleJobFailure config exc (jobMaxAtts j) startTime endT j
+        gone <- withDbTransaction $ handleJobFailure config (batchSpanShape jobs) exc (jobMaxAtts j) startTime endT j
         markHandled j
         settleUnwritten config (map (j,) (toList gone))
       failAs mkExc j msg = failWith j (toException (mkExc msg))
@@ -680,6 +680,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
           (visibilityTimeout config)
           startTime
           jobs
+          (pendingJobs handoff jobs)
           (logConfig config)
           (heartbeatSignal config)
         $ case handlerMode config of
@@ -843,10 +844,13 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
         -- its attempt and reports when it runs.
         let (jobsGone, siblings) = splitNamed ids
         void $ settleGoneJobs config (markJobHandled handoff) reason jobsGone
-        unless (null ids || null siblings) $
-          tryWarn batchLog "Releasing an interrupted batch sibling failed" $ do
-            withDbTransaction (traverse_ (void . Arb.nackJob) siblings)
-            traverse_ (markJobHandled handoff) siblings
+        unless (null ids) $
+          traverse_
+            ( \j ->
+                tryWarn batchLog "Releasing an interrupted batch sibling failed" $
+                  Arb.nackJob j >> markJobHandled handoff j
+            )
+            siblings
       unownedOf = do
         unowned <- liftIO (readIORef (unownedRef handoff))
         pure (sortOn (Down . Job.primaryKey) (filter (hasIdIn unowned) (toList jobs)))
@@ -878,7 +882,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
     batchLog = withJobContext (logConfig config) jobs
     jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
     failJob exc job =
-      handleJobFailure config exc (jobMaxAtts job) startTime endTime job
+      handleJobFailure config (batchSpanShape jobs) exc (jobMaxAtts job) startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -1008,20 +1012,27 @@ fireUnavailable logCfg hooks job reason =
 poolSpanShape :: WorkerConfig m payload -> ConsumeShape
 poolSpanShape = bool PerJob PerBatch . (> 1) . handlerBatchSize
 
--- | Report a failed job to its hooks and to the consumer span it ran under. A batch
--- span also covers the jobs that succeeded, so only a single-job span takes the error
--- status.
+-- | What the consumer span over this batch covers, which a pool claiming fewer jobs
+-- than it asked for narrows to the one job in hand.
+batchSpanShape :: NonEmpty (Job.JobRead payload) -> ConsumeShape
+batchSpanShape = bool PerJob PerBatch . (> 1) . length
+
+-- | Report a failed job to its hooks and to the consumer span it ran under. A span
+-- covering more than this job also covers the ones that succeeded, so only a
+-- single-job span takes the error status.
 fireFailure
   :: (JobOperation m payload)
   => WorkerConfig m payload
+  -> ConsumeShape
+  -- ^ What the span this job ran under covers.
   -> Job.JobRead payload
   -> Text
   -> UTCTime
   -> UTCTime
   -> m ()
-fireFailure config job errorMsg startTime endTime = do
+fireFailure config shape job errorMsg startTime endTime = do
   recordJobFailure job errorMsg
-  when (poolSpanShape config == PerJob) (markSpanError errorMsg)
+  when (shape == PerJob) (markSpanError errorMsg)
   runHook (jobLog config job) "onJobFailure" $
     Job.onJobFailure (observabilityHooks config) job errorMsg startTime endTime
 
@@ -1056,13 +1067,15 @@ handleJobFailure
   :: forall payload m
    . (JobOperation m payload)
   => WorkerConfig m payload
+  -> ConsumeShape
+  -- ^ What the span this job ran under covers.
   -> SomeException
   -> Int32
   -> UTCTime
   -> UTCTime
   -> Job.JobRead payload
   -> m (Maybe Text)
-handleJobFailure config e maxAtts startTime endTime job = do
+handleJobFailure config shape e maxAtts startTime endTime job = do
   let (errorMsg, failureKind) = classifyException e
       cfg = jobLog config job
       hooks = observabilityHooks config
@@ -1073,7 +1086,7 @@ handleJobFailure config e maxAtts startTime endTime job = do
     -- Nothing written means the job went elsewhere, so the failure is not ours to report.
     wrote reason after rowsAffected
       | rowsAffected == 0 = pure (Just reason)
-      | otherwise = Nothing <$ (fireFailure config job errorMsg startTime endTime >> after)
+      | otherwise = Nothing <$ (fireFailure config shape job errorMsg startTime endTime >> after)
     deadLetter = do
       -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
       -- Merges old snapshot so repeated DLQ round-trips don't lose data.
@@ -1119,7 +1132,7 @@ reaperLoop
   -- ^ Abort any single statement that exceeds this.
   -> m ()
 reaperLoop logCfg report interval stmtTimeout = do
-  let reaped op n = when (n > 0) $ runHook logCfg "onMaintenance" $ report op n
+  let reaped op n = runHook logCfg "onMaintenance" $ report op n
       intervalSecs = ceiling interval
       queues = registryTableNames (Proxy @(RegistryOf m))
       pruneInterval = interval * 12
