@@ -106,15 +106,21 @@ descendantsCte tbl jobId =
     )
   |]
 
--- | Cancel a job and all its descendants recursively.
+-- | Cancel a job and all its descendants recursively, locking descending to match
+-- ack and force-cancel.
 cancelJobCascadeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobCascadeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
       cte = descendantsCte tbl jobId
    in [sql|
         ${cte},
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
         deleted AS (
-          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id
         )
         SELECT count(*) AS @{count :: CInt8} FROM deleted
@@ -187,7 +193,8 @@ selectCancelledReapableJobsSQL schema tableName limit =
       |]
 
 -- | Cancel an entire job tree by walking up from any node to the root,
--- then cascade-deleting everything from the root down.
+-- then cascade-deleting everything from the root down, locking descending to
+-- match ack and force-cancel.
 cancelJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -206,8 +213,13 @@ cancelJobTreeSQL schema tableName jobId =
           UNION ALL
           SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         ),
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
         deleted AS (
-          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id
         )
         SELECT count(*) AS @{count :: CInt8} FROM deleted

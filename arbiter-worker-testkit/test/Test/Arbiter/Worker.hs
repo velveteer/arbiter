@@ -45,6 +45,7 @@ import Arbiter.Worker.Config
   , defaultBatchedWorkerConfig
   , getListenerReady
   , getWorkerState
+  , nack
   , shutdownWorker
   , transactionalWorkerConfig
   )
@@ -1295,6 +1296,72 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             waitUntil 10_000 $ do
               dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
               pure (length dlqJobs == 2)
+
+      it "deletes a flagged job the handler finalized after the cancel" $ \env -> do
+        -- The cancel bumps attempts, so the handler's nack matches no row while still
+        -- counting the job as finalized. The finalizer must delete it all the same.
+        startedRef <- newIORef False
+        nackedRef <- newIORef False
+        goVar <- newEmptyMVar
+        let jobs =
+              [ (defaultJob (SimpleTask "fcf-1")) {groupKey = Just "fcf"}
+              , (defaultJob (SimpleTask "fcf-2")) {groupKey = Just "fcf"}
+              ]
+        inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
+        let firstId = primaryKey (head inserted)
+            secondId = primaryKey (inserted !! 1)
+            batchHandler batch cbs = do
+              liftIO $ writeIORef startedRef True
+              liftIO $ takeMVar goVar
+              traverse_ (\j -> when (primaryKey j == firstId) (nack cbs j)) batch
+              liftIO $ writeIORef nackedRef True
+              liftIO $ threadDelay 30_000_000
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 batchHandler
+        let config = baseConfig {pollInterval = 0.1, jobHeartbeatInterval = 0.3, visibilityTimeout = 60}
+
+        -- Poll-only, so the flag lands without interrupting the handler mid-nack.
+        withAsync (runSimpleDb (disableListener env) $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ readIORef startedRef
+
+          runSimpleDb env (Ops.forceCancelJob testSchema testTable firstId) `shouldReturn` 1
+          putMVar goVar ()
+          waitUntil 5_000 $ readIORef nackedRef
+
+          -- Cancelling the sibling is what the heartbeat notices, since the nacked job
+          -- is no longer polled.
+          runSimpleDb env (Ops.forceCancelJob testSchema testTable secondId) `shouldReturn` 1
+
+          waitUntil 10_000 $ do
+            rows <- traverse (runSimpleDb env . HL.getJobById @WorkerTestPayload) [firstId, secondId]
+            pure (all isNothing rows)
+
+          dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          dlqJobs `shouldBe` []
+
+      it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
+        Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-parent"))
+        let pid = primaryKey parent
+        Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-child")) {parentId = Just pid}
+        let cid = primaryKey child
+
+        connA <- PG.connectPostgreSQL connStr
+        void $ PG.execute_ connA "BEGIN"
+        -- Hold the child, the row a tree cancel takes first.
+        void $ lockJobRow connA cid
+
+        (etc, epA) <-
+          withAsync (try (runSimpleDb env $ Ops.cancelJobTree testSchema testTable cid) :: IO (Either SomeException Int64)) $ \tc -> do
+            threadDelay 300_000
+            epA <- lockJobRow connA pid
+            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+            etc <- Async.wait tc
+            pure (etc, epA)
+        PG.close connA
+
+        etc `shouldSatisfy` isRight
+        epA `shouldSatisfy` isRight
 
     describe "Sweeper" $ do
       it "deletes a stale unpaused worker row" $ \env -> do

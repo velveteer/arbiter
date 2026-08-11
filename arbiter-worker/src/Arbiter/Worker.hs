@@ -710,10 +710,12 @@ finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
   tryLog batchLog Info "Job(s) force-cancelled"
   schemaName <- getSchema
   pending <- pendingJobs handoff jobs
+  -- A cancel voids the claim, so the batch's already-finalized jobs are flagged too.
   deleted <-
-    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey pending)
+    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey (toList jobs))
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
-  let (gone, interrupted) = partition (hasIdIn cancelled) pending
+  let settling = byIdDesc (hasIdIn (deleted <> Set.fromList (map Job.primaryKey pending))) jobs
+      (gone, interrupted) = partition (hasIdIn cancelled) settling
       (reclaimed, siblings) = partition (hasIdIn (Set.fromList reclaimedIds)) interrupted
       reclaimedLog = withJobContextList (logConfig config) reclaimed
   reportGoneJobs config (markJobHandled handoff) cancelled "force-cancelled" gone
@@ -789,15 +791,17 @@ newCancelHandoff :: (MonadIO m) => m CancelHandoff
 newCancelHandoff =
   liftIO (CancelHandoff <$> newIORef Set.empty <*> newIORef Set.empty <*> newIORef Set.empty <*> newIORef False)
 
+-- | The batch's jobs a predicate selects, children-first, so the per-job locks a
+-- settle takes follow the same order as ack and force-cancel.
+byIdDesc :: (Job.JobRead payload -> Bool) -> NonEmpty (Job.JobRead payload) -> [Job.JobRead payload]
+byIdDesc p = sortOn (Down . Job.primaryKey) . filter p . toList
+
 -- | The batch's jobs still awaiting an outcome, which keeps the force-cancel finalizer
 -- and the outcome report from both reporting the same job.
---
--- Children-first, so the per-job locks a settle takes follow the same order as ack
--- and force-cancel.
 pendingJobs :: (MonadIO m) => CancelHandoff -> NonEmpty (Job.JobRead payload) -> m [Job.JobRead payload]
 pendingJobs handoff jobs = do
   handled <- liftIO (readIORef (handledRef handoff))
-  pure (sortOn (Down . Job.primaryKey) (filter (not . hasIdIn handled) (toList jobs)))
+  pure (byIdDesc (not . hasIdIn handled) jobs)
 
 markJobHandled :: (MonadIO m) => CancelHandoff -> Job.JobRead payload -> m ()
 markJobHandled = insertJob . handledRef
@@ -853,7 +857,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
             siblings
       unownedOf = do
         unowned <- liftIO (readIORef (unownedRef handoff))
-        pure (sortOn (Down . Job.primaryKey) (filter (hasIdIn unowned) (toList jobs)))
+        pure (byIdDesc (hasIdIn unowned) jobs)
   case outcome of
     Right () ->
       unless (null unhandled) $

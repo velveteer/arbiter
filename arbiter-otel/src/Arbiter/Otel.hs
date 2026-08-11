@@ -159,7 +159,7 @@ runSelectedWorkerPoolsWith tel baseLog enabled pools =
 withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a
 withTelemetryHere use = withRunInIO $ \runDb ->
   withTelemetryFromEnv $ \tel ->
-    runDb (tryLog defaultLogConfig Info (telemetrySummary tel) >> use tel)
+    runDb (tryLog (telemetryLogConfig tel defaultLogConfig) Info (telemetrySummary tel) >> use tel)
 
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig
