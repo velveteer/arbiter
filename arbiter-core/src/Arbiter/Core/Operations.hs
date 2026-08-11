@@ -279,6 +279,7 @@ visibilityUpdateCodec =
     <*> col "was_heartbeated" CBool
     <*> ncol "current_db_attempts" CInt4
     <*> col "cancel_requested" CBool
+    <*> ncol "claimed_by" CUuid
 
 parentCountCodec :: RowCodec (Int64, (Int64, Int64))
 parentCountCodec =
@@ -985,6 +986,8 @@ data VisibilityUpdateInfo = VisibilityUpdateInfo
   -- and an acked job (row is missing, so this is 'Nothing').
   , vuiCancelRequested :: Bool
   -- ^ 'True' if a force-cancel has flagged this job.
+  , vuiClaimedBy :: Maybe UUID
+  -- ^ Who holds the row's claim now.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -2701,7 +2704,7 @@ runGatedShared schemaName task interval maxAge work =
     publish at previous = flip onException (reopen at previous) $ do
       a <- work
       a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task)
-    reopen at previous = MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)
+    reopen at previous = void (tryAny (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)))
     decode = either (\e -> throwParsing (task <> " gate payload: " <> T.pack e)) pure . parseEither parseJSON
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures

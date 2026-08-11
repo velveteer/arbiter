@@ -588,11 +588,12 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   let tableName = firstJob.queueName
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
+      stillHeld jobId holder = maybe False (\j -> j.claimedBy == holder) (Map.lookup jobId jobMap)
       toResult info = case info of
-        Ops.VisibilityUpdateInfo jobId _ _ True -> JobCancelled jobId
-        Ops.VisibilityUpdateInfo jobId True _ False -> VisibilityExtended jobId
-        Ops.VisibilityUpdateInfo jobId False Nothing False -> JobGone jobId
-        Ops.VisibilityUpdateInfo jobId False (Just actual) False ->
+        Ops.VisibilityUpdateInfo jobId _ _ True holder | stillHeld jobId holder -> JobCancelled jobId
+        Ops.VisibilityUpdateInfo jobId True _ _ _ -> VisibilityExtended jobId
+        Ops.VisibilityUpdateInfo jobId False Nothing _ _ -> JobGone jobId
+        Ops.VisibilityUpdateInfo jobId False (Just actual) _ _ ->
           let jobAttempts = maybe 0 attempts (Map.lookup jobId jobMap)
            in JobReclaimed jobId jobAttempts actual
   pure $ map toResult infos

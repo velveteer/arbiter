@@ -157,7 +157,8 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
           ij.id,
           (u.id IS NOT NULL) as was_heartbeated,
           j.attempts as current_db_attempts,
-          (j.cancel_requested_at IS NOT NULL) as cancel_requested
+          (j.cancel_requested_at IS NOT NULL) as cancel_requested,
+          j.claimed_by as claimed_by
         FROM input_jobs ij
         LEFT JOIN updated u ON ij.id = u.id
         LEFT JOIN ${tbl} j ON j.id = ij.id

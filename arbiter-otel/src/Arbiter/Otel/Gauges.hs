@@ -83,8 +83,8 @@ startGauges tel baseLog runDb schema queueTables refreshInterval = do
   (loop, retire) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
   pure (loop `finally` retire)
 
--- | 'startGauges' with the reading bracketed, so the instruments stop exporting however
--- @use@ ends.
+-- | 'startGauges' with the reading bracketed, so the instruments stop observing however
+-- @use@ ends. Each series' last point stands until the meter provider shuts down.
 withGaugeLoop
   :: (MonadArbiter m)
   => Tel.Telemetry
@@ -99,7 +99,7 @@ withGaugeLoop
 withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
   bracket (prepareGauges tel baseLog runDb schema queueTables refreshInterval) snd (use . fst)
 
--- | The refresh loop and the action blanking the reading its instruments export.
+-- | The refresh loop and the action retiring the reading its instruments observe.
 prepareGauges
   :: (MonadArbiter m)
   => Tel.Telemetry

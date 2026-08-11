@@ -46,7 +46,16 @@ import OpenTelemetry.Metric
 import OpenTelemetry.Metric.Core (MeterProvider, getGlobalMeterProvider, noopMeterProvider, setGlobalMeterProvider)
 import OpenTelemetry.Processor.Span (SpanProcessor)
 import OpenTelemetry.Propagator (getGlobalTextMapPropagator, setGlobalTextMapPropagator)
-import OpenTelemetry.Resource (MaterializedResources, getMaterializedResourcesAttributes)
+import OpenTelemetry.Resource
+  ( MaterializedResources
+  , emptyMaterializedResources
+  , getMaterializedResourcesAttributes
+  , materializeResources
+  , mergeResources
+  , mkResource
+  , (.=)
+  )
+import OpenTelemetry.Resource.Detect (detectBuiltInResources, detectResourceAttributes)
 import OpenTelemetry.Trace
   ( TracerProvider
   , TracerProviderOptions (..)
@@ -57,6 +66,7 @@ import OpenTelemetry.Trace
   , setGlobalTracerProvider
   , shutdownTracerProvider
   )
+import System.Environment (lookupEnv)
 import UnliftIO (liftIO, tryAny)
 
 import Arbiter.Otel.Logs (loggerDestination, otelLogs)
@@ -82,7 +92,7 @@ withTelemetry action = do
   detected <- tryAny getTracerProviderInitializationOptions
   let (processors, traceOpts) = either (const ([], emptyTracerProviderOptions)) id detected
       detectNote = either (Just . signalFailed "traces") (const Nothing) detected
-      resources = tracerProviderOptionsResources traceOpts
+  resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
   previousMeters <- getGlobalMeterProvider
   readerOpts <- periodicMetricReaderOptionsFromEnv
   evalContT $ do
@@ -158,6 +168,16 @@ metricsOffNote = \case
   Just MetricsExporterNone -> Just "metrics off, OTEL_METRICS_EXPORTER=none"
   Just MetricsExporterPrometheus -> Just "metrics off, no Prometheus endpoint is served, point OTEL_EXPORTER_OTLP_ENDPOINT at a collector"
   _ -> Nothing
+
+-- | The resource every signal exports under, detected the way "OpenTelemetry.Trace" does.
+detectResources :: IO MaterializedResources
+detectResources = either (const emptyMaterializedResources) id <$> tryAny detect
+  where
+    detect = do
+      builtIn <- detectBuiltInResources
+      fromEnv <- mkResource . map Just <$> detectResourceAttributes
+      service <- fmap (mkResource . foldMap (\n -> ["service.name" .= T.pack n])) (lookupEnv "OTEL_SERVICE_NAME")
+      pure (materializeResources (mergeResources service (mergeResources fromEnv builtIn)))
 
 -- | The note a signal that could not start leaves in the summary.
 signalFailed :: Text -> SomeException -> Text
