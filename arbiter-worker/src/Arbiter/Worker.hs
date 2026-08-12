@@ -710,12 +710,12 @@ finalizeForceCancelled config jobs cancelledIds reclaimedIds handoff = do
   tryLog batchLog Info "Job(s) force-cancelled"
   schemaName <- getSchema
   pending <- pendingJobs handoff jobs
-  -- A cancel voids the claim, so the batch's already-finalized jobs are flagged too.
+  -- A nack keeps the claim, so the cancel can name a job the handler already finalized.
+  let settling = byIdDesc (hasIdIn (Set.fromList (cancelledIds <> map Job.primaryKey pending))) jobs
   deleted <-
-    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey (toList jobs))
+    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey settling)
   cancelled <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
-  let settling = byIdDesc (hasIdIn (deleted <> Set.fromList (map Job.primaryKey pending))) jobs
-      (gone, interrupted) = partition (hasIdIn cancelled) settling
+  let (gone, interrupted) = partition (hasIdIn cancelled) settling
       (reclaimed, siblings) = partition (hasIdIn (Set.fromList reclaimedIds)) interrupted
       reclaimedLog = withJobContextList (logConfig config) reclaimed
   reportGoneJobs config (markJobHandled handoff) cancelled "force-cancelled" gone
