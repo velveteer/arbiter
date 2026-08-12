@@ -35,7 +35,7 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 --
 --   * Job successfully heartbeated - continue normally
 --   * Job already completed (acked\/canceled by handler) - ignore, not an error
---   * Job stolen by another worker (attempts changed) - throw to abort
+--   * Job stolen by another worker (claim token changed) - throw to abort
 --
 -- Every job in a batch shares one visibility deadline (each tick extends them
 -- together), so a reclaim means the whole batch's lease has lapsed. The heartbeat
@@ -43,7 +43,7 @@ import Arbiter.Worker.Retry (retryOnExceptionForever)
 --
 -- Only the jobs still awaiting an outcome are beaten. One the handler already
 -- finalized has left this worker's lease, and its row no longer answers to the
--- attempts the claim recorded.
+-- claim token the claim recorded.
 --
 -- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
 withJobsHeartbeat

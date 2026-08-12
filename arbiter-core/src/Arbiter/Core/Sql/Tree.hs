@@ -6,6 +6,7 @@ module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
   , descendantsCte
+  , lockJobTreeSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
   , deleteCancelledJobsSQL
@@ -106,6 +107,21 @@ descendantsCte tbl jobId =
     )
   |]
 
+-- | Lock a job and all its descendants descending, to match ack and force-cancel.
+lockJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
+lockJobTreeSQL schema tableName jobId =
+  let tbl = jobQueueTable schema tableName
+      cte = descendantsCte tbl jobId
+   in [sql|
+        ${cte},
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+          ORDER BY id DESC
+          FOR UPDATE
+        )
+        SELECT count(*) AS @{count :: CInt8} FROM locked
+      |]
+
 -- | Cancel a job and all its descendants recursively, locking descending to match
 -- ack and force-cancel.
 cancelJobCascadeSQL :: Text -> Text -> Int64 -> Query Int64
@@ -126,7 +142,7 @@ cancelJobCascadeSQL schema tableName jobId =
         SELECT count(*) AS @{count :: CInt8} FROM deleted
       |]
 
--- | Force-cancel a job subtree: flag still-live claimed jobs (bumping attempts to void their claim), delete the rest, and NOTIFY every claimed job affected.
+-- | Force-cancel a job subtree: flag still-live claimed jobs (bumping the claim token to void their claim), delete the rest, and NOTIFY every claimed job affected.
 forceCancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 forceCancelJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -142,7 +158,7 @@ forceCancelJobSQL schema tableName jobId =
           FOR UPDATE
         ),
         cancelled AS (
-          UPDATE ${tbl} t SET cancel_requested_at = NOW(), attempts = t.attempts + 1
+          UPDATE ${tbl} t SET cancel_requested_at = NOW(), claim_seq = t.claim_seq + 1
           FROM locked l
           WHERE t.id = l.id
             AND l.claimed_by IS NOT NULL

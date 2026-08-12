@@ -351,8 +351,8 @@ dlqCarriedColumns :: [Text]
 dlqCarriedColumns = jobColsExceptErrorColumns <> ["rate_limit_cost"]
 
 -- | Job columns a DLQ retry carries back to the main table, optionally aliased. The
--- rest are re-armed by the retry itself: a fresh attempt count, a recomputed suspended
--- flag, no claim, no dedup key, and no timestamps of the failed run.
+-- rest are re-armed by the retry itself: a fresh attempt count, a bumped claim token,
+-- a recomputed suspended flag, no claim, no dedup key, and no timestamps of the failed run.
 requeuedCols :: Maybe Text -> Text
 requeuedCols mAlias = aliasedCols mAlias requeuedColumns
 
@@ -368,6 +368,7 @@ requeuedColumns = filter (`notElem` reArmed) dlqCarriedColumns
       [ "inserted_at"
       , "updated_at"
       , "attempts"
+      , "claim_seq"
       , "last_attempted_at"
       , "not_visible_until"
       , "dedup_key"
@@ -388,13 +389,14 @@ aliasedCols mAlias = T.intercalate ", " . map withAlias
 
 -- | @DO UPDATE SET@ body for a replace-dedup upsert. Copies each writable column
 -- from the excluded row, then re-arms the replaced job for a fresh run.
-dedupUpdateSet :: Text
-dedupUpdateSet = T.intercalate ", " (copied <> rearm)
+dedupUpdateSet :: Text -> Text
+dedupUpdateSet tbl = T.intercalate ", " (copied <> rearm)
   where
-    -- dedup_key is the conflict key. attempts and last_error are re-armed below.
+    -- dedup_key is the conflict key. attempts, claim_seq and last_error are re-armed below.
     copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "last_error"]) writeColumnNames)
     rearm =
       [ "attempts = 0"
+      , "claim_seq = " <> tbl <> ".claim_seq + 1"
       , "last_error = NULL"
       , "updated_at = NOW()"
       , "throttled_until = NULL"
@@ -441,12 +443,13 @@ insertJobReplaceSQL schema tableName valuesFrag =
       dlqTbl = jobQueueDLQTable schema tableName
       columns = jobColumns Nothing
       guard = replaceableGuard tbl dlqTbl
+      dedupSet = dedupUpdateSet tbl
    in rows
         (jobRowCodec tableName)
         [sql|
           INSERT INTO ${tbl} ${valuesFrag}
           ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-            ${dedupUpdateSet}
+            ${dedupSet}
           WHERE ${guard}
           RETURNING ${columns}
         |]
@@ -470,12 +473,13 @@ insertJobsBatchBase schema tableName batchSrc returning =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       guard = replaceableGuard tbl dlqTbl
+      dedupSet = dedupUpdateSet tbl
    in [sql|
         INSERT INTO ${tbl} ${batchSrc}
         WHERE (src.parent_id IS NULL
             OR EXISTS (SELECT 1 FROM ${tbl} p WHERE p.id = src.parent_id))
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          ${dedupUpdateSet}
+          ${dedupSet}
         WHERE EXCLUDED.dedup_strategy = 'replace'
           AND ${guard}
         ${returning}

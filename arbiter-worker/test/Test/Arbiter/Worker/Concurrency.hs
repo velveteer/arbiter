@@ -90,11 +90,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         pure (primaryKey job)
 
       -- Handler completes successfully, but another worker has reclaimed the job
-      -- so the ack will fail (attempts mismatch). The worker should detect this
+      -- so the ack will fail (claim token mismatch). The worker should detect this
       -- as a "job gone" situation and skip retry/DLQ entirely.
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
           jobHandler _conn _job = do
-            -- Simulate another worker claiming the job (increment attempts in DB)
+            -- Simulate another worker claiming the job (a claim bumps both counters)
             liftIO $ simulateAnotherWorkerClaim connStr jobId
             liftIO $ atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
             pure ()
@@ -265,6 +265,6 @@ simulateAnotherWorkerClaim connStr jobId = do
   void $
     PG.execute
       conn
-      "UPDATE arbiter_worker_concurrency_test.arbiter_worker_concurrency_test SET attempts = attempts + 1 WHERE id = ?"
+      "UPDATE arbiter_worker_concurrency_test.arbiter_worker_concurrency_test SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
       (PG.Only jobId)
   PG.close conn

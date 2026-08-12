@@ -17,6 +17,7 @@ import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf, getSchema)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.Sql.DLQ qualified as Tmpl
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
@@ -55,6 +56,7 @@ operationsSpec
 operationsSpec mkMessage mkResult runM = do
   -- Test helpers
   let claimJobs env n = runM env (HL.claimNextVisibleJobs n 60) :: IO [JobRead payload]
+      claimJobsAs env n worker = runM env (HL.claimNextVisibleJobsAs n 60 worker) :: IO [JobRead payload]
       getJob env jobId = runM env (HL.getJobById @payload jobId)
       assertSuspended env jobId = do
         Just j <- getJob env jobId
@@ -274,6 +276,20 @@ operationsSpec mkMessage mkResult runM = do
 
       deleteCancelledAs env owner [jobId] >>= (`shouldBe` [jobId])
       assertGone env jobId
+
+  describe "nackJob" $ do
+    it "refunds one attempt however often the same claim nacks" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-repeat")))
+      firstClaim <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 (head firstClaim))
+      held <- claimJobsAs env 1 UUID.nil
+      map attempts held `shouldBe` [2]
+
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+
+      Just reread <- getJob env (primaryKey inserted)
+      attempts reread `shouldBe` 1
 
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
@@ -1005,6 +1021,44 @@ operationsSpec mkMessage mkResult runM = do
       -- Should be removed from DLQ
       dlqJobs2 <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
       length dlqJobs2 `shouldBe` 0
+
+    it "retryFromDLQ advances the claim token, so the pre-DLQ claim cannot ack it" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-retry-token")))
+      claimed <- claimJobs env 1
+      claimSeq (head claimed) `shouldBe` 1
+      void $ runM env (HL.moveToDLQ "Failed" (head claimed))
+
+      dlqJobs <- dlqAll env
+      Just retried <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
+      claimSeq retried `shouldBe` 2
+
+      runM env (HL.ackJob (head claimed)) `shouldReturn` 0
+      getJob env (primaryKey retried) >>= (`shouldSatisfy` isJust)
+
+    it "an exhausted-sweep move refuses a job whose nack restored the attempt" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "sweep-nack")) {maxAttempts = Just 1})
+      claimed <- claimJobsAs env 1 UUID.nil
+      map attempts claimed `shouldBe` [1]
+      runM env (HL.nackJob (head claimed)) `shouldReturn` 1
+
+      -- Make the job visible, so only the attempt budget can refuse the move.
+      runM env (HL.promoteJob @payload (primaryKey inserted)) `shouldReturn` 1
+
+      -- The sweep's snapshot, taken while the job was still out of attempts.
+      moved <- runM env $ do
+        schemaName <- getSchema
+        Ops.moveToDLQFields
+          Tmpl.MoveIfExhausted
+          schemaName
+          (HL.queueTable @payload @m)
+          "max attempts exceeded (reaper sweep)"
+          (primaryKey inserted)
+          (claimSeq (head claimed))
+          Nothing
+          False
+      moved `shouldBe` 0
+      dlqAll env >>= (`shouldBe` [])
+      getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
 
     it "retryFromDLQ returns Nothing for non-existent DLQ job" $ \env -> do
       -- Fabricate a DLQ job with a bogus ID

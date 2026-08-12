@@ -34,6 +34,8 @@ module Arbiter.Core.Job.Types
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
   , andThen
+  , JobId
+  , ClaimSeq
   , ClaimTime
   , CurrentTime
   , StartTime
@@ -105,6 +107,10 @@ data Job payload key q insertedAt adm = Job
   -- or operator-paused jobs.
   , claimedBy :: Maybe UUID
   -- ^ Worker pool UUID that last claimed this job.
+  , claimSeq :: Int64
+  -- ^ Identifies the claim this row was read under. Every claim bumps it and
+  -- nothing decrements it, so a finalize matching on it cannot hit a later claim
+  -- the way an @attempts@ match can. @0@ in 'JobWrite', which never sets it.
   , archiveFor :: Maybe Int32
   -- ^ Retention in seconds for this job's completed-job archive entry.
   -- @Just n@ archives the job on ack and keeps the entry for @n@ seconds.
@@ -200,6 +206,7 @@ defaultJob p =
     , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , claimSeq = 0
     , archiveFor = Nothing
     , admission = ()
     }
@@ -230,6 +237,7 @@ defaultGroupedJob gk p =
     , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , claimSeq = 0
     , archiveFor = Nothing
     , admission = ()
     }
@@ -288,6 +296,8 @@ dedupParts Nothing = (Nothing, Nothing)
 dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
 dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
 
+type JobId = Int64
+type ClaimSeq = Int64
 type ClaimTime = UTCTime
 type CurrentTime = UTCTime
 type StartTime = UTCTime

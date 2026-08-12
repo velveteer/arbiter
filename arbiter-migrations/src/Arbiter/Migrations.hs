@@ -58,6 +58,7 @@ import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , addClaimSeqColumnSQL
   , addTraceContextColumnSQL
   , createArchiveCompletedAtIndexSQL
   , createArchiveExpiresAtIndexSQL
@@ -483,6 +484,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
         , -- After the archive table exists, since it alters that too.
           script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
+        , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

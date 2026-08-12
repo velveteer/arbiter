@@ -53,6 +53,7 @@ module Arbiter.Core.Operations
   , updateJobForRetry
   , nackJob
   , moveToDLQ
+  , moveToDLQFields
   , moveToDLQBatch
   , retryFromDLQ
   , dlqJobExists
@@ -223,8 +224,10 @@ import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
   ( AdmissionColumns (..)
+  , ClaimSeq
   , DedupKey (IgnoreDuplicate, ReplaceDuplicate)
   , Job (..)
+  , JobId
   , JobPayload
   , JobRead
   , JobStatus
@@ -277,7 +280,7 @@ visibilityUpdateCodec =
   VisibilityUpdateInfo
     <$> col "id" CInt8
     <*> col "was_heartbeated" CBool
-    <*> ncol "current_db_attempts" CInt4
+    <*> ncol "current_db_claim_seq" CInt8
     <*> col "cancel_requested" CBool
     <*> ncol "claimed_by" CUuid
 
@@ -917,8 +920,8 @@ ackJobInner schemaName tableName job = do
       MA.executeQuery
         (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
   let jid = primaryKey job
-      jatt = attempts job
-  countOr0 (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid jatt)
+      cseq = claimSeq job
+  countOr0 (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid cseq)
 
 -- | Wake a suspended parent if all children are done.
 tryResumeParent :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m ()
@@ -955,7 +958,7 @@ ackJobsBatch schemaName tableName jobs = withDbTransaction $ do
       MA.executeQuery
         (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
   MA.executeQuery
-    (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName (map primaryKey jobs) (map attempts jobs))
+    (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName (map primaryKey jobs) (map claimSeq jobs))
 
 -- | Set the visibility timeout for a job
 setVisibilityTimeout
@@ -972,18 +975,16 @@ setVisibilityTimeout
   -- ^ Returns the number of rows updated (0 if job was reclaimed by another worker)
 setVisibilityTimeout schemaName tableName timeout job =
   MA.executeStatement
-    (Tmpl.setVisibilityTimeoutSQL schemaName tableName (realToFrac timeout) (primaryKey job) (attempts job))
+    (Tmpl.setVisibilityTimeoutSQL schemaName tableName (realToFrac timeout) (primaryKey job) (claimSeq job))
 
 -- | Detailed information about the result of a visibility update operation for a single job.
 data VisibilityUpdateInfo = VisibilityUpdateInfo
-  { vuiJobId :: Int64
+  { vuiJobId :: JobId
   -- ^ The ID of the job that was targeted.
   , vuiWasUpdated :: Bool
   -- ^ 'True' if the job's visibility timeout was successfully extended.
-  , vuiCurrentDbAttempts :: Maybe Int32
-  -- ^ The current attempt count of the job in the database.
-  -- This is used to distinguish between a stolen job (attempts changed)
-  -- and an acked job (row is missing, so this is 'Nothing').
+  , vuiCurrentDbClaimSeq :: Maybe ClaimSeq
+  -- ^ The row's claim token now. 'Nothing' when the row is gone.
   , vuiCancelRequested :: Bool
   -- ^ 'True' if a force-cancel has flagged this job.
   , vuiClaimedBy :: Maybe UUID
@@ -1010,7 +1011,7 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
   let valuesFrag =
         Q.sepBy
           ","
-          [[QQ.sql|(#{jid :: CInt8}, #{jatt :: CInt4})|] | job <- jobs, let jid = primaryKey job, let jatt = attempts job]
+          [[QQ.sql|(#{jid :: CInt8}, #{cseq :: CInt8})|] | job <- jobs, let jid = primaryKey job, let cseq = claimSeq job]
 
   MA.executeQuery $
     Q.rows visibilityUpdateCodec $
@@ -1034,7 +1035,7 @@ updateJobForRetry
   -> m Int64
 updateJobForRetry schemaName tableName backoff errorMsg job =
   MA.executeStatement
-    (Tmpl.updateJobForRetrySQL schemaName tableName (ceiling backoff) errorMsg (primaryKey job) (attempts job))
+    (Tmpl.updateJobForRetrySQL schemaName tableName (ceiling backoff) errorMsg (primaryKey job) (claimSeq job))
 
 -- | Soft-nack a job: decrement the attempt the claim consumed so the reprocess
 -- does not count against the retry budget, without recording a failure.
@@ -1052,7 +1053,7 @@ nackJob
   -> m Int64
 nackJob schemaName tableName job =
   MA.executeStatement
-    (Tmpl.nackJobSQL schemaName tableName (primaryKey job) (attempts job))
+    (Tmpl.nackJobSQL schemaName tableName (primaryKey job) (claimSeq job) (attempts job))
 
 -- | Move a job to the DLQ. Cascades descendants for rollup parents.
 -- Wakes the parent if this was a child job.
@@ -1070,31 +1071,33 @@ moveToDLQ
   -> JobRead payload
   -> m Int64
 moveToDLQ schemaName tableName errorMsg job =
-  moveToDLQFields schemaName tableName errorMsg (primaryKey job) (attempts job) (parentId job) (isRollup job)
+  moveToDLQFields Tmpl.MoveNow schemaName tableName errorMsg (primaryKey job) (claimSeq job) (parentId job) (isRollup job)
 
 -- | 'moveToDLQ' driven by scalar fields, so callers without a typed 'JobRead'
 -- (the reaper sweep) can reuse the tree-aware move.
 moveToDLQFields
   :: (MonadArbiter m)
-  => SchemaName
+  => Tmpl.DLQMove
+  -> SchemaName
   -> TableName
   -> Text
   -- ^ Error message (the final error that caused the DLQ move)
   -> Int64
   -- ^ Job id
-  -> Int32
-  -- ^ Attempts (for the optimistic move check)
+  -> Int64
+  -- ^ Claim token (for the optimistic move check)
   -> Maybe Int64
   -- ^ Parent id, if a child
   -> Bool
   -- ^ Whether the job is a rollup finalizer
   -> m Int64
-moveToDLQFields schemaName tableName errorMsg jobId atts mParentId rollup = withDbTransaction $ do
-  when rollup $ do
-    snapshotDescendantRollups schemaName tableName jobId
-    void $ cascadeChildrenToDLQ schemaName tableName jobId "Parent moved to DLQ"
-  rows <- countOr0 (Tmpl.moveToDLQSQL schemaName tableName jobId atts errorMsg)
-  when (rows > 0) $
+moveToDLQFields move schemaName tableName errorMsg jobId cseq mParentId rollup = withDbTransaction $ do
+  when rollup $ void $ countOr0 (Tmpl.lockJobTreeSQL schemaName tableName jobId)
+  rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
+  when (rows > 0) $ do
+    when rollup $ do
+      snapshotDescendantRollups schemaName tableName jobId
+      void $ cascadeChildrenToDLQ schemaName tableName jobId "Parent moved to DLQ"
     for_ mParentId $ \pid ->
       tryResumeParent schemaName tableName pid
   pure rows
@@ -1144,7 +1147,7 @@ snapshotDescendantRollups schemaName tableName parentJobId = do
 -- | Moves multiple jobs from the main queue to the dead-letter queue.
 --
 -- Each job is moved with its own error message. Jobs that have already been
--- claimed by another worker (attempts mismatch) are silently skipped.
+-- reclaimed by another worker (a different claim token) are silently skipped.
 --
 -- Returns the total number of jobs moved to DLQ.
 moveToDLQBatch
@@ -1159,18 +1162,20 @@ moveToDLQBatch
   -> m Int64
 moveToDLQBatch _ _ [] = pure 0
 moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
-  for_ jobsWithErrors $ \(job, _) ->
+  let ids = map (primaryKey . fst) jobsWithErrors
+      cseqs = map (claimSeq . fst) jobsWithErrors
+      msgs = map snd jobsWithErrors
+      rollupIds = Set.toDescList . Set.fromList $ map (primaryKey . fst) (filter (isRollup . fst) jobsWithErrors)
+  for_ rollupIds $ \jid -> void $ countOr0 (Tmpl.lockJobTreeSQL schemaName tableName jid)
+  moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
+  let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
+  for_ movedJobs $ \(job, _) ->
     when (isRollup job) $ do
       snapshotDescendantRollups schemaName tableName (primaryKey job)
       void $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
-  let ids = map (primaryKey . fst) jobsWithErrors
-      atts = map (attempts . fst) jobsWithErrors
-      msgs = map snd jobsWithErrors
-  rows <- countOr0 (Tmpl.moveToDLQBatchSQL schemaName tableName ids atts msgs)
-  when (rows > 0) $ do
-    let parentIds = Set.toAscList . Set.fromList $ mapMaybe (parentId . fst) jobsWithErrors
-    for_ parentIds $ tryResumeParent schemaName tableName
-  pure rows
+  let parentIds = Set.toAscList . Set.fromList $ mapMaybe (parentId . fst) movedJobs
+  for_ parentIds $ tryResumeParent schemaName tableName
+  pure (fromIntegral (Set.size moved))
 
 -- * Dead Letter Queue Operations
 
@@ -2205,8 +2210,11 @@ sweepExhaustedForQueue schemaName tableName = do
   exhausted <- MA.executeQuery (Tmpl.selectExhaustedJobsSQL schemaName tableName exhaustedSweepBatch)
   getSum <$> getAp (foldMap moveOne exhausted)
   where
-    moveOne (jobId, atts, mParentId, rollup) =
-      Ap $ Sum <$> moveToDLQFields schemaName tableName "max attempts exceeded (reaper sweep)" jobId atts mParentId rollup
+    moveOne (jobId, cseq, mParentId, rollup) =
+      Ap $
+        Sum
+          <$> moveToDLQFields Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup
+    sweepError = "max attempts exceeded (reaper sweep)"
 
 -- | Per-queue cap on jobs swept to the DLQ in one reaper pass, so a large
 -- backlog drains over several intervals instead of one unbounded fetch.

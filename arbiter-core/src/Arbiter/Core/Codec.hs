@@ -269,6 +269,7 @@ jobCodecWith idColumn queueName =
     <*> traceCodec
     <*> lmap (suspended . fst) (rw "suspended" CBool)
     <*> ro (ncol "claimed_by" CUuid)
+    <*> ro (col "claim_seq" CInt8)
     <*> lmap (archiveFor . fst) (rwN "archive_for" CInt4)
     <*> lmap snd admissionCodec
 

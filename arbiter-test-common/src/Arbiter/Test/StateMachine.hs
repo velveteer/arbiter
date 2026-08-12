@@ -300,9 +300,8 @@ driftViolations schema table withConn = withConn $ \conn -> do
 -- churn (unlike the eventually-settled summary oracle):
 --
 --   * serialization: more than one in-flight (leased\/backoff) job per group
---   * attempt bound: a live uncancelled job past its limit. The claim guard caps
---     @attempts@ at @max_attempts@, and force-cancel's void-bump is not an execution
---     (like the reaper's exhausted-to-DLQ sweep, cancelled rows are excluded)
+--   * attempt bound: a live job past its limit. The claim guard caps @attempts@
+--     at @max_attempts@
 --   * dedup uniqueness: two live jobs sharing a @dedup_key@
 --   * rate-limit integrity: a bucket's tokens stay within [0, max]. Negative means
 --     the gate over-spent, above max means a refill\/top-up\/seed skipped the cap.
@@ -398,7 +397,6 @@ exactViolations schema table withConn = withConn $ \conn -> do
         <> " WHERE attempts > COALESCE(max_attempts, "
         <> dma
         <> ")"
-        <> " AND cancel_requested_at IS NULL"
     dupSql =
       "SELECT dedup_key FROM "
         <> tbl

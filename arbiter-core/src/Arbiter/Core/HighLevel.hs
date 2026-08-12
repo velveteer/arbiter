@@ -162,7 +162,7 @@ import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpda
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
+import Arbiter.Core.Job.Types (ClaimSeq, Job (..), JobId, JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
@@ -561,15 +561,15 @@ setVisibilityTimeout timeout job = do
 
 -- | Result of setting visibility timeout for a single job in a batch.
 data SetVisibilityResult
-  = -- | Visibility timeout was successfully extended. Contains job ID.
-    VisibilityExtended Int64
-  | -- | Job no longer exists (was deleted/acked). Contains job ID.
-    JobGone Int64
-  | -- | Job was reclaimed by another worker (attempts count changed).
-    -- Contains: job ID, expected attempts, actual attempts.
-    JobReclaimed Int64 Int32 Int32
-  | -- | Job was force-cancel-flagged. Contains job ID.
-    JobCancelled Int64
+  = -- | Visibility timeout was successfully extended.
+    VisibilityExtended JobId
+  | -- | Job no longer exists (was deleted/acked).
+    JobGone JobId
+  | -- | Job was reclaimed by another worker: this claim's token, then the row's
+    -- token now.
+    JobReclaimed JobId ClaimSeq ClaimSeq
+  | -- | Job was force-cancel-flagged.
+    JobCancelled JobId
   deriving stock (Eq, Show)
 
 -- | Extends visibility timeout for multiple jobs. All jobs must be from
@@ -594,8 +594,8 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
         Ops.VisibilityUpdateInfo jobId True _ _ _ -> VisibilityExtended jobId
         Ops.VisibilityUpdateInfo jobId False Nothing _ _ -> JobGone jobId
         Ops.VisibilityUpdateInfo jobId False (Just actual) _ _ ->
-          let jobAttempts = maybe 0 attempts (Map.lookup jobId jobMap)
-           in JobReclaimed jobId jobAttempts actual
+          let expected = maybe 0 claimSeq (Map.lookup jobId jobMap)
+           in JobReclaimed jobId expected actual
   pure $ map toResult infos
 
 -- | Move a job to the DLQ. Returns 0 if already claimed by another worker.

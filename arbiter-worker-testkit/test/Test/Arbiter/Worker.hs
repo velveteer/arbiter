@@ -360,7 +360,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 }
         let batchHandler jobs cbs = do
               let js = toList jobs
-              -- Simulate a reclaim of "ca-stolen": bump its attempts so the bulk ack won't match it.
+              -- Simulate a reclaim of "ca-stolen": a claim bumps both counters, so the bulk ack won't match it.
               liftIO $
                 traverse_
                   ( \j ->
@@ -371,7 +371,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                             execute
                               conn
                               ( fromString . T.unpack $
-                                  "UPDATE " <> Schema.jobQueueTable testSchema testTable <> " SET attempts = attempts + 1 WHERE id = ?"
+                                  "UPDATE "
+                                    <> Schema.jobQueueTable testSchema testTable
+                                    <> " SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
                               )
                               (Only (primaryKey j))
                   )
@@ -1180,7 +1182,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   <> "."
                   <> testTable
                   <> " SET claimed_by = '00000000-0000-0000-0000-000000000abc'::uuid"
-                  <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1 WHERE id = ?"
+                  <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
 
         connB <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connB "BEGIN"
@@ -1328,6 +1330,42 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
           dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
           dlqJobs `shouldBe` []
+
+      it "refuses a stale worker's ack after a reclaim and nack restored attempts" $ \env -> do
+        -- A nack gives back the attempt the claim consumed, so attempts alone repeats
+        -- values across claims. The claim token must not, or the first worker's ack
+        -- matches the second worker's claim.
+        w1 <- UUID.nextRandom
+        w2 <- UUID.nextRandom
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "aba"))
+        let jid = primaryKey job
+            pool = fromJust (connectionPool (simplePool env))
+            expire =
+              fromString . T.unpack $
+                "UPDATE " <> testSchema <> "." <> testTable <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
+
+        [stale] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w1) :: IO [JobRead WorkerTestPayload]
+        primaryKey stale `shouldBe` jid
+        void $ withResource pool $ \c -> PG.execute c expire (Only jid)
+
+        [held] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w2) :: IO [JobRead WorkerTestPayload]
+        primaryKey held `shouldBe` jid
+        runSimpleDb env (HL.nackJob held) `shouldReturn` 1
+
+        -- The nack put attempts back to what w1 recorded, so an attempts-keyed
+        -- predicate would match here.
+        reread <- runSimpleDb env $ HL.getJobById @WorkerTestPayload jid
+        fmap attempts reread `shouldBe` Just (attempts stale)
+
+        -- w1 is stale: every finalize it can still issue must match no row.
+        runSimpleDb env (HL.setVisibilityTimeoutBatch 60 [stale])
+          `shouldReturn` [HL.JobReclaimed jid (claimSeq stale) (claimSeq held)]
+        runSimpleDb env (HL.nackJob stale) `shouldReturn` 0
+        runSimpleDb env (HL.ackJob stale) `shouldReturn` 0
+        runSimpleDb env (HL.getJobById @WorkerTestPayload jid) >>= (`shouldSatisfy` isJust)
+
+        -- w2 still owns it and can finish.
+        runSimpleDb env (HL.ackJob held) `shouldReturn` 1
 
       it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
         Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-parent"))

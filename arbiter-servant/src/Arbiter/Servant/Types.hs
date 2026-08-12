@@ -93,6 +93,7 @@ apiJobPairs job =
   , "tracestate" .= (tracestate =<< traceContext job)
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
+  , "claimSeq" .= Arb.claimSeq job
   , "archiveFor" .= archiveFor job
   , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
   , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
@@ -126,6 +127,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
+        <*> v .: "claimSeq"
         <*> v .:? "archiveFor"
         <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
     pure $ ApiJob job
@@ -170,6 +172,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> pure Nothing -- traceContext: stamped at enqueue
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
+        <*> pure 0 -- claimSeq: stamped by the claim
         -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.
         <*> v .:! "archiveFor" .!= Nothing
         <*> pure () -- admission: server attaches from the payload's selectors
