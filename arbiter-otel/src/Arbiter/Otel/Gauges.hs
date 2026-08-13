@@ -8,7 +8,6 @@ module Arbiter.Otel.Gauges
   ) where
 
 import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (..))
-import Arbiter.Core.Exceptions (ParsingException (..))
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types (JobStatus (..), jobStatusToText)
@@ -26,8 +25,8 @@ import Arbiter.Core.Operations
 import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
 import Arbiter.Worker (LogConfig, LogLevel (..), tryLog, warnEx)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.STM (atomically, readTVarIO, writeTVar)
-import Control.Exception (SomeException, fromException)
+import Control.Concurrent.STM (atomically, modifyTVar', readTVarIO, writeTVar)
+import Control.Exception (SomeException)
 import Control.Monad (forever, void)
 import Data.Foldable (toList, traverse_)
 import Data.HashMap.Strict (HashMap)
@@ -56,6 +55,7 @@ import Arbiter.Otel.Gauges.Cells
   , Snapshot (..)
   , live
   , newGaugeCells
+  , retire
   , riseSince
   )
 import Arbiter.Otel.MetricNames qualified as Name
@@ -80,8 +80,8 @@ startGauges
   -> NominalDiffTime
   -> IO (IO ())
 startGauges tel baseLog runDb schema queueTables refreshInterval = do
-  (loop, retire) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
-  pure (loop `finally` retire)
+  (loop, stop) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
+  pure (loop `finally` stop)
 
 -- | 'startGauges' with the reading bracketed, so the instruments stop observing however
 -- @use@ ends. Each series' last point stands until the meter provider shuts down.
@@ -116,7 +116,7 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
       arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
       loop <-
         gaugeRefreshLoop (Tel.telemetryLogConfig tel baseLog) runDb schema queueTables (max 1 refreshInterval) cells
-      pure (loop, atomically (writeTVar (cache cells) Retired))
+      pure (loop, atomically (modifyTVar' (cache cells) retire))
 
 -- | Register the observable instruments, each reading whatever the loop last cached.
 registerInstruments :: Meter -> GaugeCells -> IO ()
@@ -215,9 +215,9 @@ registerInstruments meter cells = do
     [ \res -> do
         now <- getMonotonicTime
         readTVarIO (cache cells) >>= \case
-          Retired -> pure ()
           Pending -> observe res (now - registeredAt cells) (attrs [])
           Live c -> observe res (now - takenAt c) (attrs [])
+          Retired mAt -> observe res (now - fromMaybe (registeredAt cells) mAt) (attrs [])
     ]
   where
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
@@ -276,7 +276,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
     now <- getMonotonicTime
     either
       (warn "Gauge refresh failed, keeping the last reading")
-      (traverse_ (atomically . writeTVar (cache cells) . Live . stamp started now))
+      (traverse_ (atomically . writeTVar (cache cells) . Live) . (>>= stamp started now))
       refreshed
     let elapsed = now - started
     -- The gate reopens gateInterval after the publish, so a scan slower than the
@@ -285,9 +285,11 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
   where
     micros :: NominalDiffTime -> Int
     micros t = round (realToFrac t * 1_000_000 :: Double)
-    refresh gateRef =
-      tryAny (resolveGate gateRef)
-        >>= either (pure . Left) (\gate -> bounded (gatedScan gate) >>= either localScan (pure . Right))
+    refresh gateRef = tryAny (resolveGate gateRef) >>= either (pure . Left) sharedScan
+    sharedScan gate =
+      bounded (gatedScan gate) >>= \case
+        Right (Just (Unreadable why)) -> localScan why
+        r -> pure r
     gatedScan gate = runDb (runGatedShared schema gate gateInterval staleAfter scan)
     -- Fixed for the registration, and a query of its own when it is long.
     resolveGate gateRef =
@@ -302,19 +304,18 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
         >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
     abandoned = "Gauge scan outlived the freshness window, abandoned"
     -- Only an unreadable payload falls back, and only with nothing fresh of its own.
-    localScan e
-      | Just (ParsingException _) <- fromException e = do
-          warn "Shared gauge payload unreadable, scanning locally" e
-          stale <- readingStale
-          if stale then tryAny (Just . Ran <$> runDb scan) else pure (Right Nothing)
-      | otherwise = pure (Left e)
+    localScan why = do
+      tryLog logCfg Warning ("Shared gauge payload unreadable, scanning locally: " <> why)
+      stale <- readingStale
+      if stale then tryAny (Just . Ran <$> runDb scan) else pure (Right Nothing)
     readingStale = do
       now <- getMonotonicTime
       cached <- live <$> readTVarIO (cache cells)
       pure (maybe True (\c -> now - takenAt c > realToFrac staleAfter) cached)
     stamp started now = \case
-      Ran snap -> Cached started snap
-      Published age snap -> Cached (now - age) snap
+      Ran snap -> Just (Cached started snap)
+      Published age snap -> Just (Cached (now - age) snap)
+      Unreadable _ -> Nothing
     -- Under the loop's period, so a replica can win the gate on consecutive ticks.
     gateInterval = 0.9 * refreshInterval
     -- Covers a slow scan plus one missed refresh.

@@ -173,7 +173,7 @@ module Arbiter.Core.Operations
   , mergeRawChildResults
   ) where
 
-import Control.Monad (foldM, void, when)
+import Control.Monad (foldM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither)
@@ -198,7 +198,8 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, onException, timeout, tryAny)
+import UnliftIO (MonadUnliftIO, onException, tryAny)
+import UnliftIO.Timeout qualified as UIO
 
 import Arbiter.Core.Codec
   ( Col (..)
@@ -279,9 +280,11 @@ visibilityUpdateCodec :: RowCodec VisibilityUpdateInfo
 visibilityUpdateCodec =
   VisibilityUpdateInfo
     <$> col "id" CInt8
+    <*> col "was_heartbeated" CBool
     <*> ncol "current_db_claim_seq" CInt8
     <*> col "cancel_requested" CBool
     <*> col "suspended" CBool
+    <*> ncol "claimed_by" CUuid
 
 parentCountCodec :: RowCodec (Int64, (Int64, Int64))
 parentCountCodec =
@@ -980,12 +983,16 @@ setVisibilityTimeout schemaName tableName timeout job =
 data VisibilityUpdateInfo = VisibilityUpdateInfo
   { vuiJobId :: JobId
   -- ^ The ID of the job that was targeted.
+  , vuiWasHeartbeated :: Bool
+  -- ^ Whether the update actually extended this row.
   , vuiCurrentDbClaimSeq :: Maybe ClaimSeq
   -- ^ The row's claim token now. 'Nothing' when the row is gone.
   , vuiCancelRequested :: Bool
   -- ^ 'True' if a force-cancel has flagged this job.
   , vuiSuspended :: Bool
   -- ^ 'True' if the row is a finalizer waiting on its children.
+  , vuiClaimedBy :: Maybe UUID
+  -- ^ Who holds the row's claim now.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -1008,7 +1015,12 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
   let valuesFrag =
         Q.sepBy
           ","
-          [[QQ.sql|(#{jid :: CInt8}, #{cseq :: CInt8})|] | job <- jobs, let jid = primaryKey job, let cseq = claimSeq job]
+          [ [QQ.sql|(#{jid :: CInt8}, #{cseq :: CInt8}, #{holder :: Maybe CUuid})|]
+          | job <- jobs
+          , let jid = primaryKey job
+          , let cseq = claimSeq job
+          , let holder = claimedBy job
+          ]
 
   MA.executeQuery $
     Q.rows visibilityUpdateCodec $
@@ -1162,14 +1174,18 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
   let ids = map (primaryKey . fst) jobsWithErrors
       cseqs = map (claimSeq . fst) jobsWithErrors
       msgs = map snd jobsWithErrors
-      rollupIds = Set.toDescList . Set.fromList $ map (primaryKey . fst) (filter (isRollup . fst) jobsWithErrors)
-  for_ rollupIds $ \jid -> void $ countOr0 (Tmpl.lockJobTreeSQL schemaName tableName jid)
+      rollupIds = Set.toList . Set.fromList $ map (primaryKey . fst) (filter (isRollup . fst) jobsWithErrors)
+  unless (null rollupIds) $ do
+    -- Every row the move will lock, plus the trees, in one descending pass.
+    void $ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+    -- Before the move, which takes a named rollup's results with it.
+    for_ rollupIds $ snapshotDescendantRollups schemaName tableName
   moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
   let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
   for_ movedJobs $ \(job, _) ->
-    when (isRollup job) $ do
-      snapshotDescendantRollups schemaName tableName (primaryKey job)
-      void $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
+    when (isRollup job) $
+      void $
+        cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
   let parentIds = Set.toAscList . Set.fromList $ mapMaybe (parentId . fst) movedJobs
   for_ parentIds $ tryResumeParent schemaName tableName
   pure (fromIntegral (Set.size moved))
@@ -2680,6 +2696,8 @@ data Shared a
     Ran a
   | -- | Read from the gate, with its age in seconds.
     Published Double a
+  | -- | A published result this caller could not decode, with the parse error.
+    Unreadable Text
   deriving stock (Eq, Functor, Show)
 
 -- | 'runGated' where the callers that lost the gate read the winner's published
@@ -2688,7 +2706,7 @@ data Shared a
 -- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
 -- restarts from the publish. A run or publish that throws puts the watermark back, so a
 -- winner that keeps failing does not keep every other caller from running. That
--- compensation is bounded by @interval@, so unwinding cannot outlast the run it replaces.
+-- compensation is bounded by @interval@.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName
@@ -2706,15 +2724,15 @@ runGatedShared schemaName task interval maxAge work =
       Tmpl.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
     shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
       (Just at, Just previous) -> Just . Ran <$> publish at previous
-      _ -> traverse (\(v, age) -> Published age <$> decode v) ((,) <$> mPayload <*> mAge)
+      _ -> pure (uncurry decoded <$> ((,) <$> mPayload <*> mAge))
     publish at previous = flip onException (reopen at previous) $ do
       a <- work
       a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task)
     reopen at previous =
-      void (tryAny (timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
+      void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
     micros :: NominalDiffTime -> Int
     micros t = round (realToFrac t * 1_000_000 :: Double)
-    decode = either (\e -> throwParsing (task <> " gate payload: " <> T.pack e)) pure . parseEither parseJSON
+    decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

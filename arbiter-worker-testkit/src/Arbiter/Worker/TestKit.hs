@@ -1193,6 +1193,65 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         -- One call finished the batch. A second means the heartbeat killed the first.
         readIORef callsRef `shouldReturn` 1
 
+    it "keeps a bulk-acked batch successful across a heartbeat tick" $ \env -> do
+      -- Window 1. ackAll deletes every row at once, so a tick during the success
+      -- hooks finds them gone.
+      successRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ -> liftIO $ do
+                  threadDelay 400_000
+                  atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = ackAll cbs (toList jobs)
+      let jobs =
+            [ (defaultJob (mkSimple "hbg-1")) {groupKey = Just "hbg"}
+            , (defaultJob (mkSimple "hbg-2")) {groupKey = Just "hbg"}
+            , (defaultJob (mkSimple "hbg-3")) {groupKey = Just "hbg"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ (>= 3) . length <$> readIORef successRef
+          readIORef successRef >>= (`shouldMatchList` map mkSimple ["hbg-1", "hbg-2", "hbg-3"])
+          readIORef unavailableRef `shouldReturn` []
+
+    it "reports a nack the claim no longer covers" $ \env -> do
+      unavailableRef <- newIORef ([] :: [payload])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            -- Lapse the lease and let the next claim take the token, so the nack
+            -- matches no row.
+            traverse_ (void . HL.setVisibilityTimeout 0) (toList jobs)
+            void (HL.claimNextVisibleJobs @payload 10 60)
+            traverse_ (nack cbs) (toList jobs)
+      let jobs = [(defaultJob (mkSimple "nk-gone")) {groupKey = Just "nkg"}]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        (runM env $ runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 10, observabilityHooks = hooks})
+        $ \_ ->
+          waitUntil 15_000 $ (mkSimple "nk-gone" `elem`) <$> readIORef unavailableRef
+
     it "a thrown JobGoneException skips retry and leaves the job to reprocess" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
@@ -1361,6 +1420,37 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       traverse_ (\p -> map payload jobs `shouldNotContain` [p]) treePayloads
       dlqJobs <- runM env $ HL.listDLQJobs @payload 100 0
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) treePayloads
+
+    it "reports each job of a force-cancelled batch exactly once" $ \env -> do
+      -- Window 3 of INVARIANTS.md. A tree cancel signals once per claimed job.
+      cancelledRef <- newIORef ([] :: [Int64])
+      startedRef <- newIORef (0 :: Int)
+      let hooks =
+            defaultObservabilityHooks
+              { onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef (\s -> (primaryKey job : s, ()))
+              }
+          handler jobs _cbs = do
+            liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
+            liftIO $ threadDelay 10_000_000
+      Right (parent :| children) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkSimple "fc-parent"))
+              (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
+      config <- mkBatchedConfig 1 10 handler
+
+      withAsync
+        (runM env $ runWorkerPool config {pollInterval = 0.1, jobHeartbeatInterval = 0.2, observabilityHooks = hooks})
+        $ \_ -> do
+          waitUntil 10_000 $ (== 2) <$> readIORef startedRef
+          void $ runM env (HL.forceCancelJob @payload (primaryKey parent))
+          waitUntil 10_000 $ (== 2) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      cancelled <- readIORef cancelledRef
+      cancelled `shouldMatchList` map primaryKey children
 
     it "throwBranchCancel deletes branch but resumes grandparent" $ \env -> do
       rootProcessedRef <- newIORef False

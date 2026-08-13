@@ -7,6 +7,7 @@ module Arbiter.Core.Sql.Tree
   , resumeChildrenSQL
   , descendantsCte
   , lockJobTreeSQL
+  , lockJobTreesSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
   , deleteCancelledJobsSQL
@@ -107,18 +108,52 @@ descendantsCte tbl jobId =
     )
   |]
 
+-- | CTE binding @locked@ to the rows @descendants@ names, locked children-first to
+-- match ack and force-cancel.
+lockDescendantsCte :: Text -> Query ()
+lockDescendantsCte tbl =
+  [sql|
+    locked AS (
+      SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
+      ORDER BY id DESC
+      FOR UPDATE
+    )
+  |]
+
+-- | 'descendantsCte' seeded from several roots, so their union locks in one pass.
+-- Deduplicating, since a root named alongside its own ancestor is reached twice.
+descendantsOfCte :: Text -> [Int64] -> Query ()
+descendantsOfCte tbl jobIds =
+  [sql|
+    WITH RECURSIVE descendants AS (
+      SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
+      UNION
+      SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+    )
+  |]
+
 -- | Lock a job and all its descendants descending, to match ack and force-cancel.
 lockJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
 lockJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
       cte = descendantsCte tbl jobId
+      locked = lockDescendantsCte tbl
    in [sql|
         ${cte},
-        locked AS (
-          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
-          ORDER BY id DESC
-          FOR UPDATE
-        )
+        ${locked}
+        SELECT count(*) AS @{count :: CInt8} FROM locked
+      |]
+
+-- | 'lockJobTreeSQL' over several trees at once, so their union is taken in one
+-- descending pass rather than one tree at a time.
+lockJobTreesSQL :: Text -> Text -> [Int64] -> Query Int64
+lockJobTreesSQL schema tableName jobIds =
+  let tbl = jobQueueTable schema tableName
+      cte = descendantsOfCte tbl jobIds
+      locked = lockDescendantsCte tbl
+   in [sql|
+        ${cte},
+        ${locked}
         SELECT count(*) AS @{count :: CInt8} FROM locked
       |]
 
@@ -128,13 +163,10 @@ cancelJobCascadeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobCascadeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
       cte = descendantsCte tbl jobId
+      locked = lockDescendantsCte tbl
    in [sql|
         ${cte},
-        locked AS (
-          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
-          ORDER BY id DESC
-          FOR UPDATE
-        ),
+        ${locked},
         deleted AS (
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id
@@ -214,6 +246,7 @@ selectCancelledReapableJobsSQL schema tableName limit =
 cancelJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
+      locked = lockDescendantsCte tbl
    in [sql|
         WITH RECURSIVE
         ancestors AS (
@@ -229,11 +262,7 @@ cancelJobTreeSQL schema tableName jobId =
           UNION ALL
           SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         ),
-        locked AS (
-          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM descendants)
-          ORDER BY id DESC
-          FOR UPDATE
-        ),
+        ${locked},
         deleted AS (
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id

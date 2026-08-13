@@ -119,8 +119,7 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
 -- | SQL template for setting visibility timeout
 --
 -- Matches on the claim token, so a job another worker reclaimed after the
--- visibility timeout expired is left alone. A suspended finalizer waits on its
--- children rather than on a lease, so it is left alone too.
+-- visibility timeout expired is left alone. Suspended rows hold no lease.
 setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -134,18 +133,17 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- | Atomically updates the visibility timeout for a batch of jobs and returns
 -- the detailed status of each job in a single query.
 --
--- This is used for heartbeating. The query extends every job still under this
--- claim, and reports each row's claim token, cancel flag and suspension, from
--- which the caller reads what happened to it. A suspended finalizer waits on
--- its children rather than on a lease, so its deadline is left alone.
--- @valuesFrag@ is the @(id, claim_seq)@ rows for the input VALUES.
+-- This is used for heartbeating. Extends every job still under this claim, held
+-- by the same worker and suspended by none, and reports whether the update
+-- landed alongside each row's claim token, cancel flag and suspension.
+-- @valuesFrag@ is the @(id, claim_seq, claimed_by)@ rows for the input VALUES.
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
   let tbl = jobQueueTable schema tableName
    in [sql|
         WITH input_jobs AS (
-          SELECT v.id::bigint AS id, v.expected_claim_seq::bigint AS expected_claim_seq
-          FROM (VALUES ${valuesFrag}) AS v(id, expected_claim_seq)
+          SELECT v.id::bigint AS id, v.expected_claim_seq::bigint AS expected_claim_seq, v.expected_claimed_by::uuid AS expected_claimed_by
+          FROM (VALUES ${valuesFrag}) AS v(id, expected_claim_seq, expected_claimed_by)
         ),
         updated AS (
           UPDATE ${tbl} j
@@ -153,14 +151,18 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
               updated_at = NOW()
           FROM input_jobs ij
           WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
+            AND j.claimed_by IS NOT DISTINCT FROM ij.expected_claimed_by
           RETURNING j.id
         )
         SELECT
           ij.id,
+          (u.id IS NOT NULL) as was_heartbeated,
           j.claim_seq as current_db_claim_seq,
           (j.cancel_requested_at IS NOT NULL) as cancel_requested,
-          (j.suspended IS TRUE) as suspended
+          (j.suspended IS TRUE) as suspended,
+          j.claimed_by as claimed_by
         FROM input_jobs ij
+        LEFT JOIN updated u ON u.id = ij.id
         LEFT JOIN ${tbl} j ON j.id = ij.id
       |]
 

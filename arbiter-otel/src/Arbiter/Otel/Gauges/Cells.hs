@@ -6,6 +6,7 @@ module Arbiter.Otel.Gauges.Cells
   , Cached (..)
   , Export (..)
   , live
+  , retire
   , GaugeCells (..)
   , Baseline
   , SeriesKey
@@ -41,14 +42,22 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
--- | What the instruments export.
-data Export = Pending | Live Cached | Retired
+-- | What the instruments export. 'Retired' keeps the last reading's scan time, which
+-- the staleness series goes on growing from.
+data Export = Pending | Live Cached | Retired (Maybe Double)
 
 -- | The scan behind an export, if it has one.
 live :: Export -> Maybe Cached
 live = \case
   Live c -> Just c
   _ -> Nothing
+
+-- | Stop exporting readings, keeping when the last one was scanned.
+retire :: Export -> Export
+retire = \case
+  Live c -> Retired (Just (takenAt c))
+  Retired at -> Retired at
+  Pending -> Retired Nothing
 
 -- | One counter series: its instrument and attributes.
 type SeriesKey = (Text, [(Text, Text)])

@@ -22,7 +22,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
-import Data.List (nub, sort)
+import Data.List (find, nub, sort)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -430,8 +430,7 @@ operationsSpec mkMessage mkResult runM = do
       sort successJobs `shouldBe` sort (map primaryKey stillProcessing)
 
     it "leaves a finalizer the ack suspended out of the beat" $ \env -> do
-      -- A handler that spawns children turns its own job into a finalizer: the
-      -- ack suspends it under the same claim token the heartbeat beats on.
+      -- Window 1. Spawning a child turns the job into a finalizer at ack.
       Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "SuspendedFinalizer")))
       [claimedParent] <- claimJobs env 1
       void $
@@ -443,12 +442,70 @@ operationsSpec mkMessage mkResult runM = do
       results <- runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
       results `shouldBe` [JobSuspended (primaryKey parent)]
 
-      -- The finalizer waits on its child, not on a deadline, so completing the
-      -- child leaves it claimable at once.
+      -- Completing the child leaves the finalizer claimable at once.
       [child] <- claimJobs env 1
       void $ runM env (HL.ackJob child)
       woken <- claimJobs env 1
       map primaryKey woken `shouldBe` [primaryKey parent]
+
+  -- One test per row of the window table in INVARIANTS.md.
+  describe "Handoff windows" $ do
+    it "refuses the retry write for a claim that was stolen" $ \env -> do
+      -- Window 2.
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window2")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 held)
+      [stolen] <- claimJobsAs env 1 (UUID.fromWords 3 3 3 3)
+      primaryKey stolen `shouldBe` primaryKey inserted
+      claimSeq stolen `shouldNotBe` claimSeq held
+
+      runM env (HL.updateJobForRetry 60 "boom" held) `shouldReturn` 0
+      runM env (HL.updateJobForRetry 60 "boom" stolen) `shouldReturn` 1
+
+    it "leaves a written retry's backoff alone when a tick lands on it" $ \env -> do
+      -- Window 2, with the heartbeat as the second actor. The retry releases the
+      -- row without moving its token, so only the holder tells the two apart.
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window2-backoff")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env (HL.updateJobForRetry 3600 "boom" held) `shouldReturn` 1
+      backoff <- getJob env (primaryKey inserted)
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [held])
+        >>= (`shouldBe` [VisibilityUnchanged (primaryKey inserted)])
+
+      beaten <- getJob env (primaryKey inserted)
+      (notVisibleUntil <$> beaten) `shouldBe` (notVisibleUntil <$> backoff)
+
+    it "reports a flagged job and a vanished one in the same tick" $ \env -> do
+      -- Window 4.
+      Just flagged <- runM env (HL.insertJob (defaultJob (mkMessage "window4-flagged")))
+      Just vanished <- runM env (HL.insertJob (defaultJob (mkMessage "window4-gone")))
+      claimed <- claimJobsAs env 2 UUID.nil
+      length claimed `shouldBe` 2
+
+      runM env (HL.forceCancelJob @payload (primaryKey flagged)) `shouldReturn` 1
+      runM env (HL.cancelJob @payload (primaryKey vanished)) `shouldReturn` 1
+
+      results <- runM env (HL.setVisibilityTimeoutBatch 120 claimed)
+      results `shouldMatchList` [JobCancelled (primaryKey flagged), JobGone (primaryKey vanished)]
+
+    it "sweeps a flagged job only once its lease lapses" $ \env -> do
+      -- Window 5.
+      let owner = UUID.nil
+          reaper = UUID.fromWords 2 2 2 2
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window5")))
+      let jobId = primaryKey inserted
+      claimed <- claimJobsAs env 1 owner
+      length claimed `shouldBe` 1
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [])
+
+      -- The flag bumped the token, so the lapse is written against the row's.
+      Just flaggedRow <- getJob env jobId
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [jobId])
+      assertGone env jobId
 
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do
@@ -3521,6 +3578,36 @@ operationsSpec mkMessage mkResult runM = do
       mainCount <- runM env (HL.countJobs @payload)
       mainCount `shouldBe` 2 -- parent + remaining child
   describe "moveToDLQBatch cascades for rollup parents" $ do
+    it "moveToDLQBatch snapshots a rollup it names alongside its parent" $ \env -> do
+      Right tree <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "BatchSnapRoot"))
+              ( JT.rollup
+                  (defaultJob (mkMessage "BatchSnapMid"))
+                  (JT.leaf (defaultJob (mkMessage "BatchSnapLeaf")) :| [])
+                  :| []
+              )
+      let nodeNamed n = find ((== mkMessage n) . payload) (NE.toList tree)
+      Just root <- pure (nodeNamed "BatchSnapRoot")
+      Just mid <- pure (nodeNamed "BatchSnapMid")
+      Just leaf <- pure (nodeNamed "BatchSnapLeaf")
+
+      void $
+        runM env $
+          HL.insertResultUnsafe @payload (primaryKey mid) (primaryKey leaf) (Aeson.String "batch-snap")
+      resultMap <- runM env $ HL.getResultsByParent @payload (primaryKey mid)
+      Map.size resultMap `shouldBe` 1
+
+      -- Naming both puts the child's delete in the same statement as the parent's.
+      runM env (HL.moveToDLQBatch [(root, "root err"), (mid, "mid err")]) `shouldReturn` 2
+
+      dlqJobs <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      Just midDlq <- pure (find ((== mkMessage "BatchSnapMid") . payload . DLQ.jobSnapshot) dlqJobs)
+      let expected = Map.map Right resultMap :: Map.Map Int64 (Either Text Aeson.Value)
+      parentState (DLQ.jobSnapshot midDlq) `shouldBe` Just (Aeson.toJSON expected)
+
     it "moveToDLQBatch on rollup parent cascades children to DLQ" $ \env -> do
       -- Insert rollup tree: parent + 2 children (parent is suspended with attempts=0)
       Right (parent :| _children) <-

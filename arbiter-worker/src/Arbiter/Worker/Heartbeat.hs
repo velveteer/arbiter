@@ -14,6 +14,7 @@ import Control.Monad (forever, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty)
+import Data.Set qualified as Set
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Void (absurd)
 import UnliftIO.Async (race)
@@ -84,12 +85,13 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs pending logCfg s
       atomically $ void $ STM.tryPutTMVar signal ()
       let cancelledJobs = [jobId | Arb.JobCancelled jobId <- results]
           stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
+          goneJobs = [jobId | Arb.JobGone jobId <- results]
       unless (null cancelledJobs) $
-        liftIO (throwIO (JobForceCancelled cancelledJobs stolenJobs))
+        liftIO (throwIO (JobForceCancelled cancelledJobs (stolenJobs <> goneJobs)))
       unless (null stolenJobs) $
         throwJobGoneIds "reclaimed by another worker" stolenJobs
-      let activeJobIds = [jobId | Arb.VisibilityExtended jobId <- results]
-          activeJobs = filter (\job -> primaryKey job `elem` activeJobIds) live
+      let activeJobIds = Set.fromList [jobId | Arb.VisibilityExtended jobId <- results]
+          activeJobs = filter (\job -> Set.member (primaryKey job) activeJobIds) live
       currentTime <- liftIO getCurrentTime
       traverse_
         ( \job ->

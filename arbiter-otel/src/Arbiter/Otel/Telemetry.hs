@@ -18,7 +18,7 @@ import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Bifunctor (first)
 import Data.Foldable (traverse_)
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
@@ -96,28 +96,27 @@ withTelemetry action = do
       detectNote = either (Just . signalFailed "traces") (const Nothing) detected
   resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
   evalContT $ do
-    -- Detection forks the span exporter, so its bracket takes ownership first.
     traces <- ContT (withTraces processors traceOpts)
-    (mp, env) <- ContT (withMeterProvider resources previousMeters)
-    reader <- ContT (withReader readerOpts env)
+    metrics <- ContT (withMeterProvider resources previousMeters)
+    reader <- ContT (withReader readerOpts (snd <$> metrics))
     logs <- ContT withLogs
     liftIO $ do
-      ms <- ifStarted (noteOf reader) (newArbiterMeters mp)
+      let mp = either (const noopMeterProvider) fst metrics
+      ms <- either (pure . Left) (const (instrumentsFor mp)) reader
       action
         (baseTelemetry mp)
-          { meters = ms
+          { meters = either (const Nothing) Just ms
           , logDestination = either (const Nothing) (Just . loggerDestination) logs
           , gaugeRefresh = refreshFor readerOpts
           , telemetrySummary =
-              summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf reader, noteOf logs])
+              summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf ms, noteOf logs])
           }
   where
     -- Why a signal is off, for the ones that are.
     noteOf :: Either Text r -> Maybe Text
     noteOf = either Just (const Nothing)
-    -- Bind a signal's handle only when nothing went wrong starting it.
-    ifStarted :: Maybe Text -> IO b -> IO (Maybe b)
-    ifStarted note act = if isNothing note then Just <$> act else pure Nothing
+    instrumentsFor :: MeterProvider -> IO (Either Text ArbiterMeters)
+    instrumentsFor mp = first (signalFailed "metrics") <$> tryAny (newArbiterMeters mp)
     withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Either Text TracerProvider -> IO a) -> IO a
     withTraces processors opts inner =
       bracket getGlobalTextMapPropagator setGlobalTextMapPropagator $ \_ ->
@@ -132,16 +131,17 @@ withTelemetry action = do
         initialize = do
           setGlobalTextMapPropagator (tracerProviderOptionsPropagators opts)
           createTracerProvider processors opts
-    withMeterProvider resources previous inner =
-      bracket
-        (createMeterProvider resources defaultSdkMeterProviderOptions)
+    withMeterProvider resources previous =
+      bracketSignal
+        "metrics"
+        (createMeterProvider resources defaultSdkMeterProviderOptions >>= \r -> r <$ setGlobalMeterProvider (fst r))
         (\(m, _) -> setGlobalMeterProvider previous >> void (shutdownMeterProvider m Nothing))
-        (\(m, env) -> setGlobalMeterProvider m >> inner (m, env))
     withReader readerOpts env inner = do
       selection <- lookupMetricsExporterSelection
-      maybe (bracketSignal "metrics" forkReader stopPeriodicMetricReader inner) (inner . Left) (metricsOffNote selection)
+      maybe (either (inner . Left) forked env) (inner . Left) (metricsOffNote selection)
       where
-        forkReader = resolveMetricExporter >>= \e -> forkPeriodicMetricReader env e readerOpts
+        forked e = bracketSignal "metrics" (forkReader e) stopPeriodicMetricReader inner
+        forkReader e = resolveMetricExporter >>= \x -> forkPeriodicMetricReader e x readerOpts
     withLogs =
       withGlobalProvider
         "logs"
