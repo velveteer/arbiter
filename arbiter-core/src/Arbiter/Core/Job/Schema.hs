@@ -240,23 +240,23 @@ jobColumns =
   , "  suspended BOOLEAN NOT NULL DEFAULT FALSE"
   ]
 
+-- | @ADD COLUMN IF NOT EXISTS@ over a queue's three job tables, one statement each.
+addJobColumnsSQL :: Text -> Text -> [Text] -> Text
+addJobColumnsSQL schemaName tableName columns =
+  T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
+  where
+    alter table = "ALTER TABLE " <> table <> " " <> T.intercalate ", " (map addColumn columns) <> ";"
+    addColumn column = "ADD COLUMN IF NOT EXISTS " <> column
+
 -- | Add the W3C trace-context columns to a queue's three job tables.
 addTraceContextColumnSQL :: Text -> Text -> Text
 addTraceContextColumnSQL schemaName tableName =
-  T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
-  where
-    alter table = "ALTER TABLE " <> table <> " " <> T.intercalate ", " (map addColumn ["traceparent", "tracestate"]) <> ";"
-    addColumn column = "ADD COLUMN IF NOT EXISTS " <> column <> " TEXT"
+  addJobColumnsSQL schemaName tableName ["traceparent TEXT", "tracestate TEXT"]
 
 -- | Add the per-claim token column to a queue's three job tables.
---
--- Bumped by every claim and never decremented, so it identifies one claim where
--- @attempts@ cannot: a nack gives an attempt back, so that counter repeats values.
 addClaimSeqColumnSQL :: Text -> Text -> Text
 addClaimSeqColumnSQL schemaName tableName =
-  T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
-  where
-    alter table = "ALTER TABLE " <> table <> " ADD COLUMN IF NOT EXISTS claim_seq BIGINT NOT NULL DEFAULT 0;"
+  addJobColumnsSQL schemaName tableName ["claim_seq BIGINT NOT NULL DEFAULT 0"]
 
 -- | Job column definitions for DLQ table (with job_id instead of id)
 jobColumnsForDLQ :: Text

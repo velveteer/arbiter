@@ -41,6 +41,7 @@ module Arbiter.Core.HighLevel
   , ackJobsBatch
   , updateJobForRetry
   , nackJob
+  , nackJobsBatch
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , SetVisibilityResult (..)
@@ -543,6 +544,19 @@ nackJob job = do
   schemaName <- getSchema
   let tableName = job.queueName
   Ops.nackJob schemaName tableName job
+
+-- | 'nackJob' over a batch from one queue in a single statement.
+--
+-- Returns the ids nacked. Jobs another worker holds are absent.
+nackJobsBatch
+  :: forall payload m
+   . (JobOperation m payload)
+  => [JobRead payload]
+  -> m [Int64]
+nackJobsBatch [] = pure []
+nackJobsBatch jobs@(firstJob : _) = do
+  schemaName <- getSchema
+  Ops.nackJobsBatch schemaName firstJob.queueName jobs
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --
@@ -1271,15 +1285,16 @@ getParentStateSnapshot jobId = do
 -- @in_flight_until@ for each. Returns the rows rewritten and the queue names
 -- that failed.
 --
--- Intended for the reaper loop, which wraps it in 'Ops.runGated' so only
--- one pool runs it per interval.
+-- Walks every queue's groups table to the end, one bounded batch and one transaction
+-- at a time. A deliberate repair, not a hot path: the reaper runs
+-- 'Ops.refreshAllGroups' for a single batch per tick instead.
 refreshAllGroups
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m (Int64, [Text])
 refreshAllGroups = do
   schemaName <- getSchema
-  Ops.refreshAllGroups schemaName (registryTableNames (Proxy @(RegistryOf m)))
+  Ops.refreshAllGroupsFully schemaName (registryTableNames (Proxy @(RegistryOf m)))
 
 -- ---------------------------------------------------------------------------
 -- Worker Registry Operations

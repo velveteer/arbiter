@@ -6,7 +6,6 @@ module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
   , descendantsCte
-  , lockJobTreeSQL
   , lockJobTreesSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
@@ -14,7 +13,7 @@ module Arbiter.Core.Sql.Tree
   , selectCancelledReapableJobsSQL
   , cancelJobTreeSQL
   , tryWakeAncestorSQL
-  , descendantRollupIdsSQL
+  , treeRollupIdsSQL
   , suspendJobSQL
   , resumeJobSQL
   , jobExistsSQL
@@ -56,15 +55,14 @@ import Arbiter.Core.Sql.Query (Query)
 pauseChildrenSQL :: Text -> Text -> Int64 -> Query ()
 pauseChildrenSQL schema tableName parentId =
   let tbl = jobQueueTable schema tableName
+      cte = childDescendantsCte tbl parentId
+      locked = lockDescendantsCte tbl
    in [sql|
-        WITH RECURSIVE descendants AS (
-          SELECT id FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
-          UNION ALL
-          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
-        )
+        ${cte},
+        ${locked}
         UPDATE ${tbl}
         SET suspended = TRUE, updated_at = NOW()
-        WHERE id IN (SELECT id FROM descendants)
+        WHERE id IN (SELECT id FROM locked)
           AND NOT suspended
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       |]
@@ -80,21 +78,31 @@ pauseChildrenSQL schema tableName parentId =
 resumeChildrenSQL :: Text -> Text -> Int64 -> Query ()
 resumeChildrenSQL schema tableName parentId =
   let tbl = jobQueueTable schema tableName
+      cte = childDescendantsCte tbl parentId
+      locked = lockDescendantsCte tbl
    in [sql|
-        WITH RECURSIVE descendants AS (
-          SELECT id FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
-          UNION ALL
-          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
-        )
+        ${cte},
+        ${locked}
         UPDATE ${tbl} t
         SET suspended = FALSE, updated_at = NOW()
-        WHERE t.id IN (SELECT id FROM descendants)
+        WHERE t.id IN (SELECT id FROM locked)
           AND t.suspended = TRUE
           AND NOT (
             t.parent_state IS NOT NULL
             AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = t.id)
           )
       |]
+
+-- | 'descendantsCte' seeded from a parent's children, excluding the parent itself.
+childDescendantsCte :: Text -> Int64 -> Query ()
+childDescendantsCte tbl parentId =
+  [sql|
+    WITH RECURSIVE descendants AS (
+      SELECT id FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
+      UNION ALL
+      SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+    )
+  |]
 
 -- | Recursive CTE binding @descendants@ to a job id and all its descendants.
 -- Shared by the cascade-delete templates.
@@ -132,20 +140,8 @@ descendantsOfCte tbl jobIds =
     )
   |]
 
--- | Lock a job and all its descendants descending, to match ack and force-cancel.
-lockJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
-lockJobTreeSQL schema tableName jobId =
-  let tbl = jobQueueTable schema tableName
-      cte = descendantsCte tbl jobId
-      locked = lockDescendantsCte tbl
-   in [sql|
-        ${cte},
-        ${locked}
-        SELECT count(*) AS @{count :: CInt8} FROM locked
-      |]
-
--- | 'lockJobTreeSQL' over several trees at once, so their union is taken in one
--- descending pass rather than one tree at a time.
+-- | Lock the named jobs and all their descendants descending, to match ack and
+-- force-cancel. Several trees at once, so their union is taken in one pass.
 lockJobTreesSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
@@ -286,16 +282,16 @@ tryWakeAncestorSQL schema tableName ancestorId =
           AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = #{ancestorId :: CInt8})
       |]
 
--- | Find descendant rollup finalizer IDs for snapshot preservation.
+-- | Rollup finalizer ids in a job's tree, the job itself included.
 --
--- Used before cascade-DLQ to identify intermediate rollup nodes that
--- need their results persisted into @parent_state@ before deletion.
-descendantRollupIdsSQL :: Text -> Text -> Int64 -> Query Int64
-descendantRollupIdsSQL schema tableName parentId =
+-- Used before a DLQ move to identify the rollup nodes whose results need
+-- persisting into @parent_state@ before deletion takes them.
+treeRollupIdsSQL :: Text -> Text -> Int64 -> Query Int64
+treeRollupIdsSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|
         WITH RECURSIVE descendants AS (
-          SELECT id, parent_state FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
+          SELECT id, parent_state FROM ${tbl} WHERE id = #{jobId :: CInt8}
           UNION ALL
           SELECT j.id, j.parent_state FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         )

@@ -916,15 +916,7 @@ Metrics are pushed over OTLP, so scrape a collector rather than the process.
 
 ### Local stack
 
-Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm) with the arbiter
-dashboard provisioned at http://localhost:3000/dash:
-
-```
-docker compose -f arbiter-otel/deploy/observability/compose.yaml up -d
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  OTEL_SERVICE_NAME=arbiter-demo \
-  cabal run arbiter-demo
-```
+Grafana's [LGTM stack](https://github.com/grafana/docker-otel-lgtm)
 
 `arbiter-demo/run-local.sh` runs this repository's demo against that stack at
 http://localhost:8000, dashboard at /dash. The [live demo](https://demo.arbiterq.dev/)

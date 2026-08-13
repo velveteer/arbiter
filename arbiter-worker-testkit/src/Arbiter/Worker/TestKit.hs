@@ -37,7 +37,7 @@ import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (JobHandler, RegistryOf, ResultOf, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
+import Arbiter.Worker.BackoffStrategy (BackoffStrategy (Constant), Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks
   , WorkerConfig (..)
@@ -1229,6 +1229,108 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           waitUntil 15_000 $ (>= 3) . length <$> readIORef successRef
           readIORef successRef >>= (`shouldMatchList` map mkSimple ["hbg-1", "hbg-2", "hbg-3"])
           readIORef unavailableRef `shouldReturn` []
+
+    it "keeps an acked job successful when a sibling is force-cancelled" $ \env -> do
+      -- Window 1b.
+      successRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      cancelledRef <- newIORef ([] :: [payload])
+      ackedRef <- newIORef False
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ ->
+                  liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) (toList jobs))
+            liftIO $ atomicModifyIORef' ackedRef (const (True, ()))
+            liftIO $ threadDelay 10_000_000
+      let jobs =
+            [ (defaultJob (mkSimple "fca-done")) {groupKey = Just "fca"}
+            , (defaultJob (mkSimple "fca-cancelled")) {groupKey = Just "fca"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ readIORef ackedRef
+          remaining <- runM env $ HL.listJobs @payload 100 0
+          Just victim <- pure (find ((== mkSimple "fca-cancelled") . payload) remaining)
+          void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
+          waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      readIORef successRef >>= (`shouldBe` [mkSimple "fca-done"])
+      readIORef cancelledRef >>= (`shouldBe` [mkSimple "fca-cancelled"])
+      readIORef unavailableRef >>= (`shouldBe` [])
+
+    it "keeps a retried job's failure its own when a sibling is force-cancelled" $ \env -> do
+      -- Window 2b.
+      retriedRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      cancelledRef <- newIORef ([] :: [payload])
+      failedRef <- newIORef False
+      let hooks =
+            defaultObservabilityHooks
+              { onJobRetry = \job _ ->
+                  liftIO $ atomicModifyIORef' retriedRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            traverse_
+              (\j -> failRetry cbs j "transient")
+              (find ((== mkSimple "fcr-retried") . payload) jobs)
+            liftIO $ atomicModifyIORef' failedRef (const (True, ()))
+            liftIO $ threadDelay 10_000_000
+      let jobs =
+            [ (defaultJob (mkSimple "fcr-retried")) {groupKey = Just "fcr"}
+            , (defaultJob (mkSimple "fcr-cancelled")) {groupKey = Just "fcr"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                , -- Parks the retry past the test, so the pool cannot take it again.
+                  backoffStrategy = Constant 60
+                , jitter = NoJitter
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ readIORef failedRef
+          remaining <- runM env $ HL.listJobs @payload 100 0
+          Just victim <- pure (find ((== mkSimple "fcr-cancelled") . payload) remaining)
+          void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
+          waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      readIORef retriedRef >>= (`shouldBe` [mkSimple "fcr-retried"])
+      readIORef cancelledRef >>= (`shouldBe` [mkSimple "fcr-cancelled"])
+      -- The retry is written and recorded, so the finalizer has nothing to re-settle.
+      readIORef unavailableRef >>= (`shouldBe` [])
 
     it "reports a nack the claim no longer covers" $ \env -> do
       unavailableRef <- newIORef ([] :: [payload])

@@ -10,11 +10,11 @@ module Arbiter.Core.Sql.Gates
   , releaseGateSQL
   , gateNameDigestSQL
   , bumpGateSQL
+  , bumpGateStateSQL
   , setGateMetadataSQL
   ) where
 
 import Data.Aeson (Value)
-import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
@@ -43,12 +43,13 @@ checkGateSQL schemaName intervalSecs task =
         WHERE task_name = #{task :: CText}
       |]
 
--- | Atomically claim the gate row iff the interval elapsed and no concurrent tx holds it.
-tryClaimGateSQL :: SchemaName -> Text -> Double -> Query Int64
+-- | Atomically claim the gate row iff the interval elapsed and no concurrent tx holds it,
+-- returning the state the last run left. One row back means claimed, NULL payload or not.
+tryClaimGateSQL :: SchemaName -> Text -> Double -> Query (Maybe Value)
 tryClaimGateSQL schemaName task intervalSecs =
   let tbl = arbiterGatesTable schemaName
    in [sql|
-        SELECT 1::bigint AS @{result :: CInt8} FROM ${tbl}
+        SELECT metadata -> 'payload' AS @{payload :: Maybe CJsonb} FROM ${tbl}
         WHERE task_name = #{task :: CText}
           AND last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
         FOR UPDATE SKIP LOCKED
@@ -114,6 +115,18 @@ bumpGateSQL :: SchemaName -> Text -> Query ()
 bumpGateSQL schemaName task =
   let tbl = arbiterGatesTable schemaName
    in [sql|UPDATE ${tbl} SET last_run_at = NOW() WHERE task_name = #{task :: CText}|]
+
+-- | 'bumpGateSQL' carrying the state the task resumes from, written under the claim so
+-- it commits with the work that produced it.
+bumpGateStateSQL :: SchemaName -> Text -> Value -> Query ()
+bumpGateStateSQL schemaName task payload =
+  let tbl = arbiterGatesTable schemaName
+   in [sql|
+        UPDATE ${tbl}
+        SET last_run_at = NOW(),
+            metadata = jsonb_build_object('at', to_jsonb(NOW()), 'payload', #{payload :: CJsonb}::jsonb)
+        WHERE task_name = #{task :: CText}
+      |]
 
 -- | Publish what the task computed, stamped with the claim the work started from, which
 -- is what a reader ages the payload by. The gate's interval restarts from the publish.

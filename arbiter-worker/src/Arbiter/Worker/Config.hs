@@ -161,13 +161,15 @@ data BatchCallbacks m payload result = BatchCallbacks
   { ack :: JobRead payload -> m ()
   -- ^ Ack and fire onJobSuccess, storing no result. Available on any queue: a
   -- job acked this way is absent from its parent rollup's child results and
-  -- leaves its archive entry's result @NULL@.
+  -- leaves its archive entry's result @NULL@. Aborts the handler if another
+  -- worker holds the job, which nacks the siblings still unfinalized.
   , ackWith :: JobRead payload -> result -> m ()
   -- ^ Ack, store the result for the parent rollup or the job's archive entry,
   -- fire onJobSuccess.
   , ackAll :: [JobRead payload] -> m ()
   -- ^ Bulk-'ack' in one parent-aware transaction, storing no results. Fires
-  -- onJobSuccess per acked job.
+  -- onJobSuccess per acked job. Unlike 'ack', a job another worker holds is
+  -- reported and skipped, and the handler continues.
   , ackAllWith :: [(JobRead payload, result)] -> m ()
   -- ^ 'ackAll' storing each job's result for its parent rollup or archive entry.
   , failRetry :: JobRead payload -> Text -> m ()

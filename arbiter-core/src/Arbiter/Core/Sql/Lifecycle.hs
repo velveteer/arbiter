@@ -9,6 +9,7 @@ module Arbiter.Core.Sql.Lifecycle
   , setVisibilityTimeoutBatchSQL
   , updateJobForRetrySQL
   , nackJobSQL
+  , nackJobsBatchSQL
   , promoteJobSQL
   ) where
 
@@ -200,6 +201,30 @@ nackJobSQL schema tableName jobId cseq att =
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
           AND claimed_by IS NOT NULL
+      |]
+
+-- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays, locking
+-- children-first to match ack and force-cancel. Returns the ids nacked.
+nackJobsBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Int32] -> Query Int64
+nackJobsBatchSQL schema tableName ids cseqs atts =
+  let tbl = jobQueueTable schema tableName
+   in [sql|
+        WITH input AS (
+          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS in_id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq, unnest(#{atts :: [CInt4]}::int[]) AS att
+        ),
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
+          ORDER BY id DESC
+          FOR UPDATE
+        )
+        UPDATE ${tbl} j
+        SET attempts = LEAST(GREATEST(i.att - 1, j.attempts - 1, 0), j.attempts),
+            updated_at = NOW()
+        FROM input i
+        WHERE j.id = i.in_id AND j.id IN (SELECT id FROM locked)
+          AND j.claim_seq = i.cseq AND NOT j.suspended
+          AND j.claimed_by IS NOT NULL
+        RETURNING @{id :: CInt8}
       |]
 
 -- | Promote a delayed or retrying job to be immediately visible.

@@ -27,7 +27,7 @@ import Data.Text.Encoding (decodeUtf8Lenient)
 import Data.UUID (UUID)
 import UnliftIO (MonadUnliftIO, atomically, liftIO)
 import UnliftIO.Async qualified as Async
-import UnliftIO.Exception (throwTo)
+import UnliftIO.Exception (finally, throwTo)
 import UnliftIO.STM (TVar, readTVar)
 import UnliftIO.STM qualified as STM
 
@@ -83,7 +83,8 @@ handleCronRunNotif ownNames runNowVar notif =
     atomically $
       STM.writeTVar runNowVar True
 
--- | Run @work@ as an async registered in 'RunningJobs' for its lifetime.
+-- | Run @work@ as an async registered in 'RunningJobs' for its lifetime, dropping
+-- only the entries this call made.
 withRegisteredJobs
   :: forall m
    . (MonadUnliftIO m)
@@ -97,12 +98,17 @@ withRegisteredJobs runningJobs jobIds work = do
       gated unmask = unmask $ do
         atomically (STM.readTMVar startGate)
         work
-  Async.withAsyncWithUnmask gated $ \a -> do
-    atomically $ do
-      STM.modifyTVar' runningJobs $ \m ->
-        foldl' (\acc jid -> Map.insert jid a acc) m jobIds
-      STM.putTMVar startGate ()
-    Async.waitCatch a
+      unregister a =
+        atomically $
+          STM.modifyTVar' runningJobs $ \m ->
+            foldl' (\acc jid -> Map.update (\b -> if b == a then Nothing else Just b) jid acc) m jobIds
+  Async.withAsyncWithUnmask gated $ \a ->
+    flip finally (unregister a) $ do
+      atomically $ do
+        STM.modifyTVar' runningJobs $ \m ->
+          foldl' (\acc jid -> Map.insert jid a acc) m jobIds
+        STM.putTMVar startGate ()
+      Async.waitCatch a
 
 data PausePayload = PausePayload UUID Bool
 

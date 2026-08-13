@@ -11,7 +11,7 @@ import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types (JobStatus (..), jobStatusToText)
-import Arbiter.Core.MonadArbiter (MonadArbiter)
+import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations
   ( QueueOverview (..)
   , QueueStats (..)
@@ -20,7 +20,9 @@ import Arbiter.Core.Operations
   , getAllQueueStats
   , listConcurrencyPolicies
   , listRateLimitPolicies
+  , micros
   , runGatedShared
+  , setLocalStatementTimeout
   )
 import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
 import Arbiter.Worker (LogConfig, LogLevel (..), tryLog, warnEx)
@@ -260,7 +262,8 @@ registerInstruments meter cells = do
 
 -- | The loop that scans and publishes the reading every instrument reads from.
 gaugeRefreshLoop
-  :: (MonadArbiter m)
+  :: forall m
+   . (MonadArbiter m)
   => LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
@@ -283,8 +286,6 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
     -- slack would otherwise lose the gate on the very next tick.
     threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
   where
-    micros :: NominalDiffTime -> Int
-    micros t = round (realToFrac t * 1_000_000 :: Double)
     refresh gateRef = tryAny (resolveGate gateRef) >>= either (pure . Left) sharedScan
     sharedScan gate =
       bounded (gatedScan gate) >>= \case
@@ -296,7 +297,7 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
       readIORef gateRef
         >>= maybe (runDb (gaugeGate queueTables) >>= \gate -> gate <$ writeIORef gateRef (Just gate)) pure
     -- A scan that outlives the freshness window is abandoned, so long as a fresh
-    -- reading stands in for it.
+    -- reading stands in for it. Only unblocks a driver that yields to the runtime.
     bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
     bounded act = do
       stale <- readingStale
@@ -320,13 +321,17 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
     gateInterval = 0.9 * refreshInterval
     -- Covers a slow scan plus one missed refresh.
     staleAfter = 3 * refreshInterval
+    -- The bound that holds whether or not the driver is interruptible. Per read, so
+    -- none of them pins a snapshot for the whole scan.
+    boundedRead :: forall a. m a -> m a
+    boundedRead q = withDbTransaction (setLocalStatementTimeout staleAfter >> q)
     scan = do
-      overviews <- getAllQueueStats schema queueTables
-      (dbHealth, tableHealth) <- Health.getPgHealth schema queueTables
-      concPolicies <- listConcurrencyPolicies schema
+      overviews <- boundedRead (getAllQueueStats schema queueTables)
+      (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth schema queueTables)
+      concPolicies <- boundedRead (listConcurrencyPolicies schema)
       -- No queue tables, so the policy read stays off the job tables: the
       -- queue-side throttled count is already a depth gauge.
-      rlPolicies <- listRateLimitPolicies schema []
+      rlPolicies <- boundedRead (listRateLimitPolicies schema [])
       pure
         Snapshot
           { queues = overviews

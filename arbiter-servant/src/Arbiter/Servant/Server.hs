@@ -48,9 +48,8 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
-import Control.Monad (forever, guard, join, unless, void, when)
+import Control.Monad (forever, guard, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LBS
@@ -372,15 +371,7 @@ moveToDLQHandler tableName config jobId = do
     mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
     case mJob of
       Nothing -> pure Nothing
-      Just job -> do
-        -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-        when (isRollup job) $ do
-          (results, failures, mSnapshot, _dlqFailures) <-
-            Ops.readChildResultsRaw schemaName tableName (primaryKey job)
-          let merged = Ops.mergeRawChildResults results failures mSnapshot
-          when (not (Map.null merged)) $
-            void $
-              Ops.persistParentState schemaName tableName (primaryKey job) (toJSON merged)
+      Just job ->
         Just <$> Ops.moveToDLQ schemaName tableName "Manually moved to DLQ via admin API" job
 
   case result of

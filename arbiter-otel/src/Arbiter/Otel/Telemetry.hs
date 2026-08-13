@@ -168,6 +168,8 @@ metricsOffNote :: Maybe MetricsExporterSelection -> Maybe Text
 metricsOffNote = \case
   Just MetricsExporterNone -> Just "metrics off, OTEL_METRICS_EXPORTER=none"
   Just MetricsExporterPrometheus -> Just "metrics off, no Prometheus endpoint is served, point OTEL_EXPORTER_OTLP_ENDPOINT at a collector"
+  -- The SDK's exporter resolution has no case for this one.
+  Just (MetricsExporterCustom v) -> Just ("metrics off, unrecognized OTEL_METRICS_EXPORTER=" <> T.pack v)
   _ -> Nothing
 
 -- | The resource every signal exports under, detected the way "OpenTelemetry.Trace" does.
@@ -229,17 +231,23 @@ telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 
 -- | Build 'Telemetry' over providers the caller installed itself, which the meters and
--- the log destination bind to here. A 'Nothing' provider leaves that signal off.
+-- the log destination bind to here. A 'Nothing' provider leaves that signal off, as
+-- does a provider whose instruments fail to build.
 withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
 withExternalTelemetry mmp mlp action = do
   tracing <- isJust <$> resolveTracer
-  ms <- traverse newArbiterMeters mmp
+  ms <- traverse (\mp -> first (signalFailed "metrics") <$> tryAny (newArbiterMeters mp)) mmp
   readerOpts <- periodicMetricReaderOptionsFromEnv
   action
     (baseTelemetry (fromMaybe noopMeterProvider mmp))
-      { meters = ms
+      { meters = either (const Nothing) Just =<< ms
       , logDestination = loggerDestination <$> mlp
       , gaugeRefresh = refreshFor readerOpts
       , telemetrySummary =
-          "telemetry on, caller's providers" <> if tracing then mempty else ", no global tracer provider installed"
+          T.intercalate ", " $
+            "telemetry on, caller's providers"
+              : catMaybes
+                [ if tracing then Nothing else Just "no global tracer provider installed"
+                , either Just (const Nothing) =<< ms
+                ]
       }

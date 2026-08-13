@@ -361,21 +361,24 @@ requeuedCols mAlias = aliasedCols mAlias requeuedColumns
 enqueuedAgainCols :: Text
 enqueuedAgainCols = aliasedCols Nothing (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
 
+-- | The columns a DLQ retry carries back to the main table.
 requeuedColumns :: [Text]
-requeuedColumns = filter (`notElem` reArmed) dlqCarriedColumns
-  where
-    reArmed =
-      [ "inserted_at"
-      , "updated_at"
-      , "attempts"
-      , "claim_seq"
-      , "last_attempted_at"
-      , "not_visible_until"
-      , "dedup_key"
-      , "dedup_strategy"
-      , "suspended"
-      , "claimed_by"
-      ]
+requeuedColumns =
+  [ "payload"
+  , "group_key"
+  , "priority"
+  , "max_attempts"
+  , "parent_id"
+  , "parent_state"
+  , "traceparent"
+  , "tracestate"
+  , "archive_for"
+  , "rate_limit_key"
+  , "rate_limit_prefix"
+  , "concurrency_key"
+  , "concurrency_prefix"
+  , "rate_limit_cost"
+  ]
 
 -- | Standard job column list (for SELECT and RETURNING)
 jobColumns :: Maybe Text -> Text
@@ -393,7 +396,7 @@ dedupUpdateSet :: Text -> Text
 dedupUpdateSet tbl = T.intercalate ", " (copied <> rearm)
   where
     -- dedup_key is the conflict key. attempts, claim_seq and last_error are re-armed below.
-    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "last_error"]) writeColumnNames)
+    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "claim_seq", "last_error"]) writeColumnNames)
     rearm =
       [ "attempts = 0"
       , "claim_seq = " <> tbl <> ".claim_seq + 1"
@@ -404,7 +407,7 @@ dedupUpdateSet tbl = T.intercalate ", " (copied <> rearm)
       , "claimed_by = NULL"
       ]
 
--- | Guard: an existing row may be replaced only if idle and childless.
+-- | Guard: an existing row may be replaced only if idle, unflagged and childless.
 replaceableGuard :: Text -> Text -> Text
 replaceableGuard tbl dlqTbl =
   [text|
@@ -412,6 +415,7 @@ replaceableGuard tbl dlqTbl =
       OR ${tbl}.not_visible_until IS NULL
       OR ${tbl}.not_visible_until <= NOW()
       OR ${tbl}.last_error IS NOT NULL)
+      AND ${tbl}.cancel_requested_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
       AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
   |]
