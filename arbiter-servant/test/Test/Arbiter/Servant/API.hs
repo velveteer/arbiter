@@ -833,6 +833,29 @@ spec connStr = do
 
   -- QueueOverview's instances are also how a gauge snapshot round-trips through the
   -- shared gate, so a change made for that payload would silently reshape this response.
+  describe "Job wire contract" $ do
+    -- A job object as a server predating the trace and claim fields sends it.
+    let olderJob =
+          [aesonQQ|
+            { "primaryKey": 1
+            , "payload": {"tag": "TestMessage", "contents": "older server"}
+            , "queueName": "arbiter_servant_test"
+            , "groupKey": null
+            , "insertedAt": "2026-01-01T00:00:00Z"
+            , "updatedAt": "2026-01-01T00:00:00Z"
+            , "attempts": 0
+            , "lastError": null
+            , "priority": 0
+            , "lastAttemptedAt": null
+            , "notVisibleUntil": null
+            , "dedupKey": null
+            , "maxAttempts": null
+            }
+          |]
+
+    it "decodes a job object carrying none of the fields added since" $
+      (claimSeq . unApiJob <$> decode @(ApiJob ServantTestPayload) (encode olderJob)) `shouldBe` Just 0
+
   describe "Landing overview wire contract" $ do
     let overview =
           Ops.QueueOverview

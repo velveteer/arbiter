@@ -209,8 +209,8 @@ deleteDLQJobSQL schema tableName dlqId =
 
 -- | SQL template for moving multiple jobs to DLQ in a single operation
 --
--- Uses unnest to process multiple (id, claim_seq, error_msg) tuples.
--- Returns the id of each job moved.
+-- Uses unnest to process multiple (id, claim_seq, error_msg) tuples, locking
+-- descending to match ack and force-cancel. Returns the id of each job moved.
 moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Text] -> Query Int64
 moveToDLQBatchSQL schema tableName ids cseqs errs =
   let tbl = jobQueueTable schema tableName
@@ -222,10 +222,16 @@ moveToDLQBatchSQL schema tableName ids cseqs errs =
                  unnest(#{cseqs :: [CInt8]}::bigint[]) AS expected_claim_seq,
                  unnest(#{errs :: [CText]}::text[]) AS error_msg
         ),
+        locked AS (
+          SELECT j.id FROM ${tbl} j WHERE j.id IN (SELECT id FROM input_jobs)
+          ORDER BY j.id DESC
+          FOR UPDATE
+        ),
         deleted_jobs AS (
           DELETE FROM ${tbl} j
           USING input_jobs ij
           WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq
+            AND j.id IN (SELECT id FROM locked)
           RETURNING j.*, ij.error_msg AS new_error
         ),
         inserted_dlq AS (

@@ -119,7 +119,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
 -- | SQL template for setting visibility timeout
 --
 -- Matches on the claim token, so a job another worker reclaimed after the
--- visibility timeout expired is left alone.
+-- visibility timeout expired is left alone. A suspended finalizer waits on its
+-- children rather than on a lease, so it is left alone too.
 setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -127,16 +128,17 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
         UPDATE ${tbl}
         SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
             updated_at = NOW()
-        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
 -- | Atomically updates the visibility timeout for a batch of jobs and returns
 -- the detailed status of each job in a single query.
 --
--- This is used for heartbeating. The query attempts to update all jobs, and
--- then reports on which ones succeeded, which were missing (acked), which are
--- force-cancel-flagged (cancelled), and which are under a different claim
--- (stolen). @valuesFrag@ is the @(id, claim_seq)@ rows for the input VALUES.
+-- This is used for heartbeating. The query extends every job still under this
+-- claim, and reports each row's claim token, cancel flag and suspension, from
+-- which the caller reads what happened to it. A suspended finalizer waits on
+-- its children rather than on a lease, so its deadline is left alone.
+-- @valuesFrag@ is the @(id, claim_seq)@ rows for the input VALUES.
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
   let tbl = jobQueueTable schema tableName
@@ -150,17 +152,15 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
           SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
               updated_at = NOW()
           FROM input_jobs ij
-          WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq
+          WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
           RETURNING j.id
         )
         SELECT
           ij.id,
-          (u.id IS NOT NULL) as was_heartbeated,
           j.claim_seq as current_db_claim_seq,
           (j.cancel_requested_at IS NOT NULL) as cancel_requested,
-          j.claimed_by as claimed_by
+          (j.suspended IS TRUE) as suspended
         FROM input_jobs ij
-        LEFT JOIN updated u ON ij.id = u.id
         LEFT JOIN ${tbl} j ON j.id = ij.id
       |]
 

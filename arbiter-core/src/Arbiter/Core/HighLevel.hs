@@ -570,6 +570,8 @@ data SetVisibilityResult
     JobReclaimed JobId ClaimSeq ClaimSeq
   | -- | Job was force-cancel-flagged.
     JobCancelled JobId
+  | -- | Job is a finalizer waiting on its children, so it holds no lease.
+    JobSuspended JobId
   deriving stock (Eq, Show)
 
 -- | Extends visibility timeout for multiple jobs. All jobs must be from
@@ -588,14 +590,14 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   let tableName = firstJob.queueName
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
-      stillHeld jobId holder = maybe False (\j -> j.claimedBy == holder) (Map.lookup jobId jobMap)
-      toResult info = case info of
-        Ops.VisibilityUpdateInfo jobId _ _ True holder | stillHeld jobId holder -> JobCancelled jobId
-        Ops.VisibilityUpdateInfo jobId True _ _ _ -> VisibilityExtended jobId
-        Ops.VisibilityUpdateInfo jobId False Nothing _ _ -> JobGone jobId
-        Ops.VisibilityUpdateInfo jobId False (Just actual) _ _ ->
-          let expected = maybe 0 claimSeq (Map.lookup jobId jobMap)
-           in JobReclaimed jobId expected actual
+      toResult (Ops.VisibilityUpdateInfo jobId mActual cancelled suspended) =
+        case (mActual, maybe 0 claimSeq (Map.lookup jobId jobMap)) of
+          (Nothing, _) -> JobGone jobId
+          (Just actual, expected)
+            | actual /= expected -> JobReclaimed jobId expected actual
+            | suspended -> JobSuspended jobId
+            | cancelled -> JobCancelled jobId
+            | otherwise -> VisibilityExtended jobId
   pure $ map toResult infos
 
 -- | Move a job to the DLQ. Returns 0 if already claimed by another worker.

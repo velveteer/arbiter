@@ -429,6 +429,27 @@ operationsSpec mkMessage mkResult runM = do
       sort goneJobs `shouldBe` sort (map primaryKey toAck)
       sort successJobs `shouldBe` sort (map primaryKey stillProcessing)
 
+    it "leaves a finalizer the ack suspended out of the beat" $ \env -> do
+      -- A handler that spawns children turns its own job into a finalizer: the
+      -- ack suspends it under the same claim token the heartbeat beats on.
+      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "SuspendedFinalizer")))
+      [claimedParent] <- claimJobs env 1
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkMessage "SuspendedFinalizerChild")) {parentId = Just (primaryKey parent)})
+      void $ runM env (HL.ackJob claimedParent)
+      assertSuspended env (primaryKey parent)
+
+      results <- runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
+      results `shouldBe` [JobSuspended (primaryKey parent)]
+
+      -- The finalizer waits on its child, not on a deadline, so completing the
+      -- child leaves it claimable at once.
+      [child] <- claimJobs env 1
+      void $ runM env (HL.ackJob child)
+      woken <- claimJobs env 1
+      map primaryKey woken `shouldBe` [primaryKey parent]
+
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do
       let job1 =

@@ -89,16 +89,17 @@ data Telemetry = Telemetry
 -- 'withTelemetryFromEnv' is the gated form.
 withTelemetry :: (Telemetry -> IO a) -> IO a
 withTelemetry action = do
+  previousMeters <- getGlobalMeterProvider
+  readerOpts <- periodicMetricReaderOptionsFromEnv
   detected <- tryAny getTracerProviderInitializationOptions
   let (processors, traceOpts) = either (const ([], emptyTracerProviderOptions)) id detected
       detectNote = either (Just . signalFailed "traces") (const Nothing) detected
   resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
-  previousMeters <- getGlobalMeterProvider
-  readerOpts <- periodicMetricReaderOptionsFromEnv
   evalContT $ do
+    -- Detection forks the span exporter, so its bracket takes ownership first.
+    traces <- ContT (withTraces processors traceOpts)
     (mp, env) <- ContT (withMeterProvider resources previousMeters)
     reader <- ContT (withReader readerOpts env)
-    traces <- ContT (withTraces processors traceOpts)
     logs <- ContT withLogs
     liftIO $ do
       ms <- ifStarted (noteOf reader) (newArbiterMeters mp)

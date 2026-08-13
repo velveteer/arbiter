@@ -127,7 +127,7 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
-        <*> v .: "claimSeq"
+        <*> v .:? "claimSeq" .!= 0
         <*> v .:? "archiveFor"
         <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
     pure $ ApiJob job

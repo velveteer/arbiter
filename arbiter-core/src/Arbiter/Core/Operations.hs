@@ -198,7 +198,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, onException, tryAny)
+import UnliftIO (MonadUnliftIO, onException, timeout, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
@@ -279,10 +279,9 @@ visibilityUpdateCodec :: RowCodec VisibilityUpdateInfo
 visibilityUpdateCodec =
   VisibilityUpdateInfo
     <$> col "id" CInt8
-    <*> col "was_heartbeated" CBool
     <*> ncol "current_db_claim_seq" CInt8
     <*> col "cancel_requested" CBool
-    <*> ncol "claimed_by" CUuid
+    <*> col "suspended" CBool
 
 parentCountCodec :: RowCodec (Int64, (Int64, Int64))
 parentCountCodec =
@@ -981,19 +980,17 @@ setVisibilityTimeout schemaName tableName timeout job =
 data VisibilityUpdateInfo = VisibilityUpdateInfo
   { vuiJobId :: JobId
   -- ^ The ID of the job that was targeted.
-  , vuiWasUpdated :: Bool
-  -- ^ 'True' if the job's visibility timeout was successfully extended.
   , vuiCurrentDbClaimSeq :: Maybe ClaimSeq
   -- ^ The row's claim token now. 'Nothing' when the row is gone.
   , vuiCancelRequested :: Bool
   -- ^ 'True' if a force-cancel has flagged this job.
-  , vuiClaimedBy :: Maybe UUID
-  -- ^ Who holds the row's claim now.
+  , vuiSuspended :: Bool
+  -- ^ 'True' if the row is a finalizer waiting on its children.
   }
   deriving stock (Eq, Generic, Show)
 
--- | Batch variant of 'setVisibilityTimeout'. Returns per-job status
--- (success, acked, or stolen).
+-- | Batch variant of 'setVisibilityTimeout'. Returns each row's state as
+-- 'VisibilityUpdateInfo' records it.
 setVisibilityTimeoutBatch
   :: forall m payload
    . (MonadArbiter m)
@@ -2690,7 +2687,8 @@ data Shared a
 -- after the gate transaction commits, so a slow scan holds neither the gate row
 -- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
 -- restarts from the publish. A run or publish that throws puts the watermark back, so a
--- winner that keeps failing does not keep every other caller from running.
+-- winner that keeps failing does not keep every other caller from running. That
+-- compensation is bounded by @interval@, so unwinding cannot outlast the run it replaces.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName
@@ -2712,7 +2710,10 @@ runGatedShared schemaName task interval maxAge work =
     publish at previous = flip onException (reopen at previous) $ do
       a <- work
       a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task)
-    reopen at previous = void (tryAny (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous)))
+    reopen at previous =
+      void (tryAny (timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
+    micros :: NominalDiffTime -> Int
+    micros t = round (realToFrac t * 1_000_000 :: Double)
     decode = either (\e -> throwParsing (task <> " gate payload: " <> T.pack e)) pure . parseEither parseJSON
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
