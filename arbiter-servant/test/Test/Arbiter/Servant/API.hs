@@ -39,7 +39,7 @@ import Network.HTTP.Types (status200, status204, status400, status404, status409
 import Test.Hspec
 import Test.Hspec.Wai
 
-import Arbiter.Servant (arbiterApp, initArbiterServer)
+import Arbiter.Servant (ArbiterServerConfig (..), arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
   ( ApiJob (..)
   , ApiJobWithStatus (..)
@@ -91,7 +91,7 @@ spec connStr = do
   runIO (setupOnce connStr testSchema testTable False)
   sharedPool <- runIO (createSharedPool connStr)
   serverConfig <- runIO (initArbiterServer (Proxy @ServantTestRegistry) connStr testSchema)
-  let app = arbiterApp @ServantTestRegistry serverConfig
+  let app = arbiterApp @ServantTestRegistry serverConfig {queueStatsCacheTtl = 0}
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn

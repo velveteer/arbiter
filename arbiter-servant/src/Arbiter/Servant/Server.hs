@@ -17,6 +17,7 @@ module Arbiter.Servant.Server
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
+  , defaultQueueStatsCacheTtl
   , BuildServer (..)
   ) where
 
@@ -33,7 +34,7 @@ import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), crea
 import Arbiter.Worker.Cron (updateCronScheduleChecked)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM
   ( TChan
   , TVar
@@ -113,6 +114,11 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- ^ Short-TTL cache for the concurrency policy list, collapsing dashboard polls.
   , allQueueStatsCache :: CacheCell AllStatsResponse
   -- ^ Short-TTL cache for the all-queues overview aggregate, collapsing landing polls.
+  , queueStatsCache :: CacheCell StatsResponse
+  -- ^ Per-queue stats cache, collapsing the dashboard's event-driven refetches.
+  , queueStatsCacheTtl :: NominalDiffTime
+  -- ^ Per-queue stats staleness, or zero to always hit the database.
+  -- Default: 'defaultQueueStatsCacheTtl'.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -144,9 +150,10 @@ initArbiterServer
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   hub <- newMVar Nothing
-  rlCache <- newTVarIO (0, Nothing)
-  ccCache <- newTVarIO (0, Nothing)
-  statsCache <- newTVarIO (0, Nothing)
+  rlCache <- newCacheCell
+  ccCache <- newCacheCell
+  statsCache <- newCacheCell
+  perQueueCache <- newCacheCell
   pure
     ArbiterServerConfig
       { serverEnv = env
@@ -155,6 +162,8 @@ initArbiterServer _proxy connStr schemaName = do
       , rateLimitPoliciesCache = rlCache
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
+      , queueStatsCache = perQueueCache
+      , queueStatsCacheTtl = defaultQueueStatsCacheTtl
       }
 
 -- | Jobs API handlers for a specific table
@@ -707,15 +716,16 @@ getStatsHandler
    . Text
   -> ArbiterServerConfig registry
   -> Handler StatsResponse
-getStatsHandler tableName config = do
-  let env = serverEnv config
-      schemaName = schema env
+getStatsHandler tableName config =
+  liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
+    let env = serverEnv config
+        schemaName = schema env
 
-  queueStats <- liftIO $ runSimpleDb env $ Ops.getQueueStats schemaName tableName
-  now <- liftIO getCurrentTime
-  let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
+    queueStats <- runSimpleDb env $ Ops.getQueueStats schemaName tableName
+    now <- getCurrentTime
+    let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
 
-  pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
+    pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
 
 -- | Every queue's stats in one request, for the landing overview.
 getAllStatsHandler
@@ -789,6 +799,7 @@ setQueuePausedHandler config knownQueues p queue = do
   void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
   -- The landing overview shows each queue's paused flag, so refresh it promptly.
   invalidate (allQueueStatsCache config)
+  invalidate (queueStatsCache config)
   pure NoContent
 
 -- | Events server - raw WAI application for SSE streaming.
@@ -1056,24 +1067,49 @@ policyStatsCacheTtl = 10
 overviewStatsCacheTtl :: NominalDiffTime
 overviewStatsCacheTtl = 5
 
--- | A TTL cache cell: an epoch bumped by 'invalidate', plus the current entry.
-type CacheCell a = TVar (Word, Maybe (UTCTime, a))
+-- | Default floor between per-queue stats scans.
+defaultQueueStatsCacheTtl :: NominalDiffTime
+defaultQueueStatsCacheTtl = 2
 
--- | Serve from a short-TTL cache cell, skipping the write when 'invalidate' bumped the epoch mid-produce, so an invalidation is never clobbered.
+-- | Keyed TTL cache under an epoch bumped by 'invalidate'.
+data CacheCell a = CacheCell
+  { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
+  , cacheFillLock :: MVar ()
+  }
+
+newCacheCell :: IO (CacheCell a)
+newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newMVar ()
+
+-- | Serve the sole entry of a single-key cell.
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
-cachedFor ttl cell produce = do
-  now <- getCurrentTime
-  (epoch, cached) <- readTVarIO cell
-  case cached of
-    Just (ts, v) | diffUTCTime now ts < ttl -> pure v
-    _ -> do
+cachedFor ttl cell = cachedForKey ttl cell ""
+
+-- | Serve one key. Concurrent misses collapse onto one 'produce', whose
+-- write is skipped if 'invalidate' bumped the epoch meanwhile.
+cachedForKey :: NominalDiffTime -> CacheCell a -> Text -> IO a -> IO a
+cachedForKey ttl cell key produce
+  | ttl <= 0 = produce
+  | otherwise = fresh >>= maybe fill pure
+  where
+    fresh = do
+      now <- getCurrentTime
+      (_, entries) <- readTVarIO (cacheEntries cell)
+      pure $ do
+        (ts, v) <- Map.lookup key entries
+        guard (diffUTCTime now ts < ttl)
+        pure v
+    fill = withMVar (cacheFillLock cell) $ \() -> fresh >>= maybe store pure
+    store = do
+      (epoch, _) <- readTVarIO (cacheEntries cell)
       v <- produce
-      atomically $ modifyTVar' cell $ \(e, cur) -> if e == epoch then (e, Just (now, v)) else (e, cur)
+      now <- getCurrentTime
+      atomically $ modifyTVar' (cacheEntries cell) $ \(e, m) ->
+        if e == epoch then (e, Map.insert key (now, v) m) else (e, m)
       pure v
 
--- | Bump a cache cell's epoch and drop its entry, after an operator mutation.
+-- | Bump a cache cell's epoch and drop its entries, after an operator mutation.
 invalidate :: CacheCell a -> Handler ()
-invalidate cell = liftIO $ atomically $ modifyTVar' cell $ \(e, _) -> (e + 1, Nothing)
+invalidate cell = liftIO $ atomically $ modifyTVar' (cacheEntries cell) $ \(e, _) -> (e + 1, Map.empty)
 
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler

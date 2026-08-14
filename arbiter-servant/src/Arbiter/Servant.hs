@@ -28,6 +28,7 @@ module Arbiter.Servant
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
+  , defaultQueueStatsCacheTtl
   , BuildServer (..)
 
     -- * API Types
