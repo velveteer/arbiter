@@ -17,6 +17,7 @@ import Control.Exception (SomeException, bracket, displayException)
 import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Bifunctor (first)
+import Data.Either (fromRight)
 import Data.Foldable (traverse_)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
@@ -92,7 +93,7 @@ withTelemetry action = do
   previousMeters <- getGlobalMeterProvider
   readerOpts <- periodicMetricReaderOptionsFromEnv
   detected <- tryAny getTracerProviderInitializationOptions
-  let (processors, traceOpts) = either (const ([], emptyTracerProviderOptions)) id detected
+  let (processors, traceOpts) = fromRight ([], emptyTracerProviderOptions) detected
       detectNote = either (Just . signalFailed "traces") (const Nothing) detected
   resources <- either (const detectResources) (pure . tracerProviderOptionsResources . snd) detected
   evalContT $ do
@@ -169,7 +170,7 @@ metricsOffNote = \case
 
 -- | The resource every signal exports under, detected the way "OpenTelemetry.Trace" does.
 detectResources :: IO MaterializedResources
-detectResources = either (const emptyMaterializedResources) id <$> tryAny detect
+detectResources = fromRight emptyMaterializedResources <$> tryAny detect
   where
     detect = do
       builtIn <- detectBuiltInResources

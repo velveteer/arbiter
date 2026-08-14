@@ -195,7 +195,7 @@ queueTable = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m))
 publishSpan
   :: forall payload m a
    . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
-  => Int
+  => [JobWrite payload]
   -> m a
   -> m a
 publishSpan = withPublishSpan (queueTable @payload @m)
@@ -207,7 +207,7 @@ insertJob
    . (QueueOperation m payload)
   => JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob job = publishSpan @payload 1 $ do
+insertJob job = publishSpan @payload [job] $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJob schemaName tableName job
@@ -221,7 +221,7 @@ insertJobsBatch
   => [JobWrite payload]
   -> m [JobRead payload]
 insertJobsBatch [] = pure []
-insertJobsBatch jobs = publishSpan @payload (length jobs) $ do
+insertJobsBatch jobs = publishSpan @payload jobs $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch schemaName tableName jobs
@@ -233,7 +233,7 @@ insertJobsBatch_
   => [JobWrite payload]
   -> m Int64
 insertJobsBatch_ [] = pure 0
-insertJobsBatch_ jobs = publishSpan @payload (length jobs) $ do
+insertJobsBatch_ jobs = publishSpan @payload jobs $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch_ schemaName tableName jobs

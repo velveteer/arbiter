@@ -138,9 +138,9 @@ spanning mTracer name args action =
   maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
 -- | Run an action inside a @publish \<queue\>@ producer span over @n@ jobs.
-withPublishSpan :: (MonadUnliftIO m) => TableName -> Int -> m a -> m a
-withPublishSpan queue n action =
-  resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue n) action
+withPublishSpan :: (MonadUnliftIO m) => TableName -> [JobWrite payload] -> m a -> m a
+withPublishSpan queue jobs action =
+  resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue jobs) action
 
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()
@@ -156,7 +156,7 @@ recordJobCancelled :: (MonadIO m) => JobRead payload -> Text -> m ()
 recordJobCancelled = jobEvent "job.cancelled" "arbiter.job.cancel_reason"
 
 jobEvent :: (MonadIO m) => Text -> Text -> JobRead payload -> Text -> m ()
-jobEvent name reasonKey job msg = withActiveSpan (\sp -> addEvent sp event)
+jobEvent name reasonKey job msg = withActiveSpan (`addEvent` event)
   where
     event =
       NewEvent
@@ -228,11 +228,21 @@ spanContextForJob job = do
   ctx <- traceContext job
   decodeSpanContext (Just (encodeUtf8 (traceparent ctx))) (encodeUtf8 <$> tracestate ctx)
 
-producerArgs :: TableName -> Int -> SpanArguments
-producerArgs queue n =
-  defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish" <> batchAttr}
+-- | A lone job contributes its own attributes. A batch reports its size instead, per
+-- the messaging conventions, since the jobs in it need not agree.
+producerArgs :: TableName -> [JobWrite payload] -> SpanArguments
+producerArgs queue jobs =
+  defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish" <> published}
   where
-    batchAttr = HM.fromList [("messaging.batch.message_count", toAttribute n) | n > 1]
+    published = case jobs of
+      [job] -> writeAttrs job
+      _ -> HM.fromList [("messaging.batch.message_count", toAttribute (length jobs))]
+
+writeAttrs :: JobWrite payload -> AttributeMap
+writeAttrs job =
+  HM.fromList $
+    ("arbiter.priority", toAttribute (fromIntegral (priority job) :: Int))
+      : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (groupKey job)
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =

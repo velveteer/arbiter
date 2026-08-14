@@ -260,7 +260,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let env = serverEnv config
       schemaName = schema env
 
-  mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName 1 $ do
+  mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
     case (inserted, dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
@@ -286,7 +286,7 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
   inserted <-
     liftIO $
       runSimpleDb env $
-        withPublishSpan tableName (length writes) $
+        withPublishSpan tableName writes $
           Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}

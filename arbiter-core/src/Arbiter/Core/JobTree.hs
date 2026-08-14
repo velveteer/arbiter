@@ -148,7 +148,7 @@ insertJobTree
   -> JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree schemaName tableName tree =
-  withPublishSpan tableName (treeSize tree) $ do
+  withPublishSpan tableName (treeWrites tree) $ do
     inserted <- UE.try $ do
       stamp <- Ops.traceStamp
       withDbTransaction $ go stamp Nothing (rootSuspended tree) tree
@@ -159,9 +159,9 @@ insertJobTree schemaName tableName tree =
     rootSuspended (Finalizer _ _) = True
     rootSuspended _ = False
 
-    treeSize :: JobTree payload -> Int
-    treeSize (Leaf _) = 1
-    treeSize (Finalizer _ children) = 1 + sum (fmap treeSize children)
+    treeWrites :: JobTree payload -> [JobWrite payload]
+    treeWrites (Leaf j) = [j]
+    treeWrites (Finalizer j children) = j : foldMap treeWrites children
 
     go
       :: Ops.TraceStamp payload

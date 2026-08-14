@@ -47,6 +47,7 @@ library
     Arbiter.Worker.Logger.Internal
     Arbiter.Worker.NotificationListener
     Arbiter.Worker.Retry
+    Arbiter.Worker.Settle
 
   build-depends:
     , aeson               >=2.0  && <2.3

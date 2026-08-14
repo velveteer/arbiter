@@ -1246,7 +1246,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
                   liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
               }
           batchHandler jobs cbs = do
-            traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) (toList jobs))
+            traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) jobs)
             liftIO $ atomicModifyIORef' ackedRef (const (True, ()))
             liftIO $ threadDelay 10_000_000
       let jobs =

@@ -190,7 +190,7 @@ import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, obj
 import Data.Aeson.Types (parseEither, parseMaybe)
 import Data.Bifunctor (first, second)
 import Data.Bitraversable (bitraverse)
-import Data.Either (partitionEithers)
+import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.IntMap qualified as IntMap
@@ -2356,7 +2356,7 @@ sweepExhaustedForQueue schemaName tableName = withDbTransaction $ do
   where
     moveOne (jobId, cseq, mParentId, rollup) =
       Ap $
-        Sum . either (const 0) id
+        Sum . fromRight 0
           <$> tryAny (moveToDLQFields LocksHeld Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup)
     sweepError = "max attempts exceeded (reaper sweep)"
 
