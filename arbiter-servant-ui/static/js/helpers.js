@@ -284,10 +284,14 @@ function tableTab(loadMethod, refreshStorageKey) {
     ...busyRows(),
     ...pollSpinner(),
     ...confirmArm(),
+    ...tabActive(),
     refreshMode: (refreshStorageKey && localStorage.getItem(refreshStorageKey)) || '5s',
     _refreshTimer: null,
     _lastInvalidParentId: null,
     _lastInvalidJobId: null,
+    _onQueueChanged: null,
+    _onSseReconnect: null,
+    _onSseEvent: null,
     pendingChanges: 0,
 
     // Filter builder: the group/parent/job filters, surfaced as chips plus one
@@ -476,7 +480,9 @@ function pollingTab(loadMethod, intervalMs) {
   return {
     ...busyRows(),
     ...pollSpinner(),
+    ...tabActive(),
     refreshInterval: null,
+    _visibilityHandler: null,
 
     startPolling() {
       this.stopPolling();
@@ -951,6 +957,15 @@ function plainNavClick(e) {
 // ---------------------------------------------------------------------------
 // Tab-active tracking
 // ---------------------------------------------------------------------------
+
+// Slots for trackTabActive's listeners. Teardown only sees a property the data
+// object declared, so every component calling trackTabActive must spread this.
+function tabActive() {
+  return {
+    _tabShownHandler: null,
+    _tabHiddenHandler: null,
+  };
+}
 
 /**
  * Sets `component.active` from DOM state and registers Bootstrap tab listeners.

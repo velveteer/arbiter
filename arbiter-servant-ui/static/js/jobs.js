@@ -32,6 +32,7 @@ document.addEventListener('alpine:init', () => {
     _appliedGroupKey: '',
     _appliedParentId: '',
     _appliedJobId: '',
+    _onFilterJobs: null,
     childCounts: {},
     dlqChildCounts: {},
     expandedParents: {},

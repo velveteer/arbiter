@@ -7,6 +7,7 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('statsTab', () => ({
     ...eventBusTab(),
+    ...tabActive(),
     stats: null,
     loading: false,
     active: false,
