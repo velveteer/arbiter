@@ -182,6 +182,7 @@ module Arbiter.Core.Operations
   , mergeRawChildResults
   ) where
 
+import Control.Exception qualified as E
 import Control.Monad (foldM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
@@ -207,7 +208,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, modifyIORef', newIORef, onException, readIORef, tryAny)
+import UnliftIO (MonadUnliftIO, modifyIORef', newIORef, readIORef, tryAny, withRunInIO)
 import UnliftIO.Timeout qualified as UIO
 
 import Arbiter.Core.Codec
@@ -2861,9 +2862,10 @@ runGatedShared schemaName task interval maxAge work =
     shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
       (Just at, Just previous) -> Just . Ran <$> publish at previous
       _ -> pure (uncurry decoded <$> ((,) <$> mPayload <*> mAge))
-    publish at previous = flip onException (reopen at previous) $ do
-      a <- work
-      a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task)
+    -- Base onException: UnliftIO's masks the handler uninterruptibly.
+    publish at previous = withRunInIO $ \run ->
+      run (work >>= \a -> a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task))
+        `E.onException` run (reopen at previous)
     reopen at previous =
       void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
     decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)

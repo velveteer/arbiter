@@ -119,7 +119,8 @@ runWorkerPools
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools =
-  withTelemetryHere $ \tel -> runWorkerPoolsWith tel defaultLogConfig pools
+  let baseLog = poolsLogConfig pools
+   in withTelemetryHere baseLog $ \tel -> runWorkerPoolsWith tel baseLog pools
 
 -- | 'runWorkerPools' over an explicit queue list.
 runSelectedWorkerPools
@@ -129,7 +130,13 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools =
-  withTelemetryHere $ \tel -> runSelectedWorkerPoolsWith tel defaultLogConfig enabled pools
+  let baseLog = poolsLogConfig pools
+   in withTelemetryHere baseLog $ \tel -> runSelectedWorkerPoolsWith tel baseLog enabled pools
+
+-- | The gauge loop's base log config: the first pool's.
+poolsLogConfig :: [NamedWorkerPool m] -> LogConfig
+poolsLogConfig (NamedWorkerPool _ cfg : _) = logConfig cfg
+poolsLogConfig [] = defaultLogConfig
 
 -- | 'runWorkerPools' over a handle the caller installed itself, with the gauge loop's
 -- base log config.
@@ -156,10 +163,10 @@ runSelectedWorkerPoolsWith tel baseLog enabled pools =
   withGauges tel baseLog (Worker.runSelectedWorkerPools enabled (instrumentPools tel pools))
 
 -- | Install the SDK around an action in the database monad, logging how it started.
-withTelemetryHere :: (MonadUnliftIO m) => (Telemetry -> m a) -> m a
-withTelemetryHere use = withRunInIO $ \runDb ->
+withTelemetryHere :: (MonadUnliftIO m) => LogConfig -> (Telemetry -> m a) -> m a
+withTelemetryHere baseLog use = withRunInIO $ \runDb ->
   withTelemetryFromEnv $ \tel ->
-    runDb (tryLog (telemetryLogConfig tel defaultLogConfig) Info (telemetrySummary tel) >> use tel)
+    runDb (tryLog (telemetryLogConfig tel baseLog) Info (telemetrySummary tel) >> use tel)
 
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig

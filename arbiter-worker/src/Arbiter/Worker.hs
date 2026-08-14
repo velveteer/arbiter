@@ -550,9 +550,6 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
 
   let jobIds = map Job.primaryKey (toList jobBatch)
       batchLog = withJobContext (logConfig config) jobBatch
-      claimHook now job =
-        runHook (jobLog config job) "onJobClaimed" $
-          Job.onJobClaimed (observabilityHooks config) job now
 
   flip
     finally
@@ -561,8 +558,6 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
         writeTVar workerFinishedVar True
     )
     $ do
-      currentTime <- liftIO getCurrentTime
-      traverse_ (claimHook currentTime) jobBatch
       handoff <- newCancelHandoff
       result <-
         withRegisteredJobs runningJobs jobIds $
@@ -618,9 +613,13 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         finalizeForceCancelled config jobs cancelledIds goneIds handoff
         markCancelFinalized handoff
         liftIO $ E.throwIO exc
-  -- The span covers the outcome report and the force-cancel finalizer too, so every
-  -- terminal hook fires while it is open.
+      claimHook job =
+        runHook (jobLog config job) "onJobClaimed" $
+          Job.onJobClaimed (observabilityHooks config) job startTime
+  -- The span covers the claim hooks, the outcome report and the force-cancel
+  -- finalizer, so every terminal hook fires while it is open.
   withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
+    traverse_ claimHook jobs
     result <-
       tryAny
         $ withJobsHeartbeat
@@ -750,12 +749,14 @@ finalizeForceCancelled config jobs cancelledIds goneIds handoff = do
   pending <- pendingJobs handoff jobs
   -- A nack keeps the claim, so the cancel can name a job the handler already finalized.
   let settling = byIdDesc (hasIdIn (Set.fromList (cancelledIds <> map Job.primaryKey pending))) jobs
+      goneSet = Set.fromList goneIds
+      deletable = [Job.primaryKey j | j <- settling, not (hasIdIn goneSet j)]
   deleted <-
-    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey settling)
+    deleteCancelledOrWarn batchLog (workerId config) schemaName (Job.queueName firstJob) deletable
   (fresh, cancelled) <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
   let (gone, interrupted) = partition (hasIdIn cancelled) settling
       (unreported, alreadyReported) = partition (hasIdIn fresh) gone
-      (unavailable, siblings) = partition (hasIdIn (Set.fromList goneIds)) interrupted
+      (unavailable, siblings) = partition (hasIdIn goneSet) interrupted
       unavailableLog = withJobContextList (logConfig config) unavailable
   reportGoneJobs config (markJobHandled handoff) cancelled "force-cancelled" unreported
   traverse_ (markJobHandled handoff) alreadyReported

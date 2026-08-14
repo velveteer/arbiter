@@ -47,6 +47,11 @@ lockGroupsSQL schema tableName limit cursor upper =
         FOR UPDATE SKIP LOCKED
       |]
 
+-- | Summary columns, shared by the refresh and the insert.
+summaryAggregates :: Text
+summaryAggregates =
+  groupAggregates "" <> ", MAX(not_visible_until) FILTER (WHERE " <> inFlightPredicate "" <> ") AS in_flight_until"
+
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
 -- returning the rows it rewrote. A separate statement, so its snapshot post-dates
 -- the lock and cannot clobber a concurrent claim's @in_flight_until@.
@@ -54,7 +59,7 @@ refreshGroupsSQL :: Text -> Text -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      aggs = groupAggregates "" <> ", MAX(not_visible_until) FILTER (WHERE " <> inFlightPredicate "" <> ") AS in_flight_until"
+      aggs = summaryAggregates
    in [sql|
         WITH params AS (
           SELECT unnest(#{keys :: [CText]}::text[]) AS group_key
@@ -98,7 +103,7 @@ insertMissingGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Que
 insertMissingGroupsSQL schema tableName limit lower upper =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      aggs = groupAggregates "" <> ", MAX(not_visible_until) FILTER (WHERE " <> inFlightPredicate "" <> ") AS in_flight_until"
+      aggs = summaryAggregates
       lim = fromIntegral limit :: Int64
       after = foldMap (\k -> [sql|AND j.group_key > #{k :: CText}|]) lower
       upTo = foldMap (\k -> [sql|AND j.group_key <= #{k :: CText}|]) upper

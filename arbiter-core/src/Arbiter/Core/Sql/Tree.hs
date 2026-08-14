@@ -155,7 +155,8 @@ lockJobTreesSQL schema tableName jobIds =
       |]
 
 -- | 'lockJobTreesSQL' widened to each named job's whole tree, so it covers what a tree
--- cancel goes on to delete rather than the subtree alone.
+-- cancel goes on to delete rather than the subtree alone. The named ids seed the walk
+-- down too, so an orphan locks its own subtree.
 lockJobTreesFromRootSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesFromRootSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
@@ -171,7 +172,7 @@ lockJobTreesFromRootSQL schema tableName jobIds =
           SELECT id FROM ancestors WHERE parent_id IS NULL
         ),
         descendants AS (
-          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM roots)
+          SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)
           UNION
           SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         ),

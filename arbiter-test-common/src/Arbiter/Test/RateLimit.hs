@@ -29,11 +29,13 @@ import Arbiter.Core.Job.Types
   , JobWrite
   , admission
   , attempts
+  , claimSeq
   , dedupKey
   , defaultGroupedJob
   , defaultJob
   , jobRateLimitKey
   , payload
+  , primaryKey
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema)
 import Arbiter.Core.QueueRegistry (Queue)
@@ -182,6 +184,18 @@ rateLimitSpec runM = do
     enqueue env (replicate 3 (job "claimskip"))
     skipped <- claim env
     length skipped `shouldBe` 0
+
+  it "moves the claim token when a defer parks a lapsed claim's row" $ \env -> do
+    enqueue env [job "defertoken"]
+    [held] <- claim env
+    enqueue env (replicate 2 (job "defertoken"))
+    drained <- claim env
+    length drained `shouldBe` 2
+    void (runM env (HL.setVisibilityTimeout 0 held))
+    parked <- claim env
+    parked `shouldSatisfy` null
+    runM env (HL.setVisibilityTimeoutBatch 120 [held])
+      >>= (`shouldBe` [HL.JobReclaimed (primaryKey held) (claimSeq held) (claimSeq held + 1)])
 
   it "refills over time" $ \env -> do
     enqueue env (replicate 3 (job "refill"))

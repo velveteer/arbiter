@@ -9,7 +9,14 @@ module Main (main) where
 import Arbiter.Concurrency (HasConcurrency)
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ (DLQJob (dlqPrimaryKey))
-import Arbiter.Core.Job.Types (Job (..), ObservabilityHooks (..), TraceContext (..), defaultJob)
+import Arbiter.Core.Job.Types
+  ( Job (..)
+  , ObservabilityHooks (..)
+  , TraceContext (..)
+  , defaultJob
+  , defaultObservabilityHooks
+  )
+import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
@@ -25,13 +32,19 @@ import Arbiter.Core.Trace
   )
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (HasRateLimit)
-import Arbiter.Simple (createSimpleEnv, runSimpleDb)
+import Arbiter.Simple (SimpleDb, createSimpleEnv, runSimpleDb)
 import Arbiter.Test.Config (getTestConnectionString)
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (execute_)
-import Arbiter.Worker (MaintenanceOp (..), defaultLogConfig)
+import Arbiter.Worker
+  ( MaintenanceOp (..)
+  , WorkerConfig (..)
+  , defaultLogConfig
+  , runWorkerPool
+  , transactionalWorkerConfig
+  )
 import Control.Exception (bracket)
-import Control.Monad (void)
+import Control.Monad (join, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -298,6 +311,28 @@ spec = do
       map (traceId . frozenLinkContext) (values (hotLinks hot))
         `shouldBe` map traceId (toList (spanContextOf . traceparent =<< traceContext job))
       (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext sp))
+
+  describe "lifecycle hooks" $
+    it "fires onJobClaimed under the job's consumer span" $ do
+      (recorded, provider) <- recordingTracerProvider
+      setGlobalTracerProvider provider
+      seen <- newIORef []
+      let handler :: JobHandler (SimpleDb Reg IO) Greeting ()
+          handler _conn _job = pure ()
+          hooks =
+            defaultObservabilityHooks
+              { onJobClaimed = \j _ -> liftIO $ do
+                  ctx <- currentTraceContext
+                  modifyIORef' seen ((payload j, traceparent <$> ctx) :)
+              }
+      config <- transactionalWorkerConfig 1 handler
+      void $ enqueue plainEnv (Greeting "claim-hook")
+      withAsync (runSimpleDb plainEnv (runWorkerPool config {observabilityHooks = hooks, pollInterval = 0.05})) $ \_ -> do
+        waitUntil 20_000 $ any ((== Greeting "claim-hook") . fst) <$> readIORef seen
+        claimed <- lookup (Greeting "claim-hook") <$> readIORef seen
+        hookTrace <- orFail "claim hook ran under no span" (join claimed)
+        hookTraceId <- orFail "claim hook's traceparent did not decode" (traceId <$> spanContextOf hookTrace)
+        waitUntil 20_000 $ elem hookTraceId . map (traceId . spanContext) <$> readIORef recorded
   where
     values = toList . appendOnlyBoundedCollectionValues
     spanContextOf tp = decodeSpanContext (Just (encodeUtf8 tp)) Nothing

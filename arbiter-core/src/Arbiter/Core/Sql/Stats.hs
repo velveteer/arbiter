@@ -49,8 +49,8 @@ statsAggColumns =
     COUNT(*) FILTER (WHERE status = 'throttled') AS throttled_jobs,
     COUNT(*) FILTER (WHERE status = 'suspended') AS suspended_jobs,
     COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_jobs,
-    EXTRACT(EPOCH FROM (NOW() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds,
-    EXTRACT(EPOCH FROM (NOW() - MIN(last_attempted_at) FILTER (WHERE status = 'in_flight')))::float8 AS oldest_in_flight_age_seconds
+    EXTRACT(EPOCH FROM (clock_timestamp() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds,
+    EXTRACT(EPOCH FROM (clock_timestamp() - MIN(last_attempted_at) FILTER (WHERE status = 'in_flight')))::float8 AS oldest_in_flight_age_seconds
   |]
 
 -- | Every queue's stats in one query, tagged by name. Caller guards the empty list.

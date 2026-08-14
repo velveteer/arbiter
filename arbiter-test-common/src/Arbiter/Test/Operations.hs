@@ -22,6 +22,7 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
 import Arbiter.Core.Sql.DLQ qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as GroupsTmpl
+import Arbiter.Core.Sql.Tree qualified as TreeTmpl
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
@@ -80,6 +81,15 @@ operationsSpec mkMessage mkResult runM = do
       groupsTable = do
         schemaName <- getSchema
         pure (Schema.jobQueueGroupsTable schemaName (HL.queueTable @payload @m))
+      deleteRowDirectly env jobId =
+        runM env $ do
+          schemaName <- getSchema
+          let tbl = Schema.jobQueueTable schemaName (HL.queueTable @payload @m)
+          void $ execStatement ("DELETE FROM " <> tbl <> " WHERE id = ?") [pval CInt8 jobId]
+      lockedFromRoot env jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          sum <$> MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
       driftGroupCount env key n =
         runM env $ do
           tbl <- groupsTable
@@ -572,6 +582,21 @@ operationsSpec mkMessage mkResult runM = do
       woken <- claimJobs env 1
       map primaryKey woken `shouldBe` [primaryKey parent]
 
+    it "refuses a flagged job to a lapsed claim carrying the same worker id" $ \env -> do
+      let owner = UUID.nil
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "same-pool-flag")))
+      let jobId = primaryKey inserted
+      [stale] <- claimJobsAs env 1 owner
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [live] <- claimJobsAs env 1 owner
+      claimSeq live `shouldBe` claimSeq stale + 1
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [stale])
+        >>= (`shouldBe` [JobReclaimed jobId (claimSeq stale) (claimSeq live + 1)])
+      runM env (HL.setVisibilityTimeoutBatch 120 [live])
+        >>= (`shouldBe` [JobCancelled jobId])
+
   -- One test per row of the window table in INVARIANTS.md.
   describe "Handoff windows" $ do
     it "refuses the retry write for a claim that was stolen" $ \env -> do
@@ -630,6 +655,16 @@ operationsSpec mkMessage mkResult runM = do
       void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
       deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [jobId])
       assertGone env jobId
+
+  describe "Tree locks" $
+    it "locks an orphaned job's own subtree when its parent row is gone" $ \env -> do
+      Just root <- runM env (HL.insertJob (defaultJob (mkMessage "orphan-root")))
+      Just mid <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-mid")) {parentId = Just (primaryKey root)}))
+      Just leaf <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-leaf")) {parentId = Just (primaryKey mid)}))
+
+      lockedFromRoot env [primaryKey leaf] `shouldReturn` 3
+      deleteRowDirectly env (primaryKey root)
+      lockedFromRoot env [primaryKey mid] `shouldReturn` 2
 
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do

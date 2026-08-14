@@ -614,8 +614,7 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
          in case mActual of
               Nothing -> JobGone jobId
               Just actual
-                -- A flag bumps the token, so a flagged row is attributed by its holder.
-                | cancelled, heldHere -> JobCancelled jobId
+                | cancelled, heldHere, actual == expected + 1 -> JobCancelled jobId
                 | actual /= expected -> JobReclaimed jobId expected actual
                 | suspended -> JobSuspended jobId
                 | heartbeated -> VisibilityExtended jobId

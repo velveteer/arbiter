@@ -14,7 +14,7 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
 import Data.HashMap.Strict qualified as HM
-import Data.Scientific (toBoundedInteger, toRealFloat)
+import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import OpenTelemetry.Log.Core qualified as Log
 
@@ -39,19 +39,13 @@ otelLogCallback logger level msg context =
       { Log.timestamp = Nothing
       , Log.observedTimestamp = Nothing
       , Log.context = Nothing
-      , Log.severityText = Just (severityLabel level)
+      , -- Left to the record, which derives the spec's short name.
+        Log.severityText = Nothing
       , Log.severityNumber = Just (severityOf level)
       , Log.body = Log.TextValue msg
       , Log.attributes = HM.fromList (map logAttribute context)
       , Log.eventName = Nothing
       }
-
-severityLabel :: LogLevel -> Text
-severityLabel = \case
-  Debug -> "Debug"
-  Info -> "Info"
-  Warning -> "Warning"
-  Error -> "Error"
 
 severityOf :: LogLevel -> Log.SeverityNumber
 severityOf = \case
@@ -67,8 +61,8 @@ anyValue :: Value -> Log.AnyValue
 anyValue = \case
   String t -> Log.TextValue t
   Bool b -> Log.BoolValue b
-  -- Integral only when it fits the record's Int64, so a huge exponent stays a double.
-  Number n -> maybe (Log.DoubleValue (toRealFloat n)) Log.IntValue (toBoundedInteger n)
+  -- JSON has one number type, so a key keeps one wire type.
+  Number n -> Log.DoubleValue (toRealFloat n)
   Array a -> Log.ArrayValue (map anyValue (toList a))
   Object o -> Log.HashMapValue (HM.fromList (map logAttribute (KM.toList o)))
   Null -> Log.NullValue
