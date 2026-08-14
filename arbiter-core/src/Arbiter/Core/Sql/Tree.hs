@@ -6,6 +6,7 @@ module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
   , descendantsCte
+  , lockedByIdsCte
   , lockJobTreesSQL
   , lockJobTreesFromRootSQL
   , cancelJobCascadeSQL
@@ -94,28 +95,25 @@ resumeChildrenSQL schema tableName parentId =
           )
       |]
 
--- | 'descendantsCte' seeded from a parent's children, excluding the parent itself.
-childDescendantsCte :: Text -> Int64 -> Query ()
-childDescendantsCte tbl parentId =
+-- | Recursive CTE binding @descendants@ to the rows @seed@ names and all of theirs.
+-- A tree reaches each node from one seed row, so the walk does not deduplicate.
+descendantsFromCte :: Text -> Query () -> Query ()
+descendantsFromCte tbl seed =
   [sql|
     WITH RECURSIVE descendants AS (
-      SELECT id FROM ${tbl} WHERE parent_id = #{parentId :: CInt8}
+      SELECT id FROM ${tbl} WHERE ${seed}
       UNION ALL
       SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
     )
   |]
 
--- | Recursive CTE binding @descendants@ to a job id and all its descendants.
--- Shared by the cascade-delete templates.
+-- | 'descendantsFromCte' seeded from a parent's children, excluding the parent itself.
+childDescendantsCte :: Text -> Int64 -> Query ()
+childDescendantsCte tbl parentId = descendantsFromCte tbl [sql|parent_id = #{parentId :: CInt8}|]
+
+-- | 'descendantsFromCte' seeded from a job id. Shared by the cascade-delete templates.
 descendantsCte :: Text -> Int64 -> Query ()
-descendantsCte tbl jobId =
-  [sql|
-    WITH RECURSIVE descendants AS (
-      SELECT id FROM ${tbl} WHERE id = #{jobId :: CInt8}
-      UNION ALL
-      SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
-    )
-  |]
+descendantsCte tbl jobId = descendantsFromCte tbl [sql|id = #{jobId :: CInt8}|]
 
 -- | CTE binding @locked@ to the rows @descendants@ names, locked children-first to
 -- match ack and force-cancel.
@@ -129,7 +127,20 @@ lockDescendantsCte tbl =
     )
   |]
 
--- | 'descendantsCte' seeded from several roots, so their union locks in one pass.
+-- | CTE binding @locked@ to the ids named, in the descending order every multi-row
+-- statement on a queue table takes its row locks in. The statement carries
+-- @id IN (SELECT id FROM locked)@ so the CTE cannot be optimized away.
+lockedByIdsCte :: Text -> [Int64] -> Query ()
+lockedByIdsCte tbl ids =
+  [sql|
+    locked AS (
+      SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
+      ORDER BY id DESC
+      FOR UPDATE
+    )
+  |]
+
+-- | 'descendantsFromCte' seeded from several roots, so their union locks in one pass.
 -- Deduplicating, since a root named alongside its own ancestor is reached twice.
 descendantsOfCte :: Text -> [Int64] -> Query ()
 descendantsOfCte tbl jobIds =

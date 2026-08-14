@@ -6,6 +6,7 @@ module Arbiter.Otel.Gauges.Cells
   , Cached (..)
   , Export (..)
   , live
+  , lastScan
   , retire
   , GaugeCells (..)
   , Baseline
@@ -42,22 +43,25 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
--- | What the instruments export. 'Retired' keeps the last reading's scan time, which
--- the staleness series goes on growing from.
-data Export = Pending | Live Cached | Retired (Maybe Double)
+-- | What the instruments export. 'Idle' keeps the last reading's scan time, which the
+-- staleness series goes on growing from, and has none before the first scan.
+data Export = Live Cached | Idle (Maybe Double)
 
 -- | The scan behind an export, if it has one.
 live :: Export -> Maybe Cached
 live = \case
   Live c -> Just c
-  _ -> Nothing
+  Idle _ -> Nothing
+
+-- | When the export was last scanned, if it ever was.
+lastScan :: Export -> Maybe Double
+lastScan = \case
+  Live c -> Just (takenAt c)
+  Idle at -> at
 
 -- | Stop exporting readings, keeping when the last one was scanned.
 retire :: Export -> Export
-retire = \case
-  Live c -> Retired (Just (takenAt c))
-  Retired at -> Retired at
-  Pending -> Retired Nothing
+retire = Idle . lastScan
 
 -- | One counter series: its instrument and attributes.
 type SeriesKey = (Text, [(Text, Text)])
@@ -77,7 +81,7 @@ data GaugeCells = GaugeCells
 
 -- | Cells for a registration starting at @now@.
 newGaugeCells :: Double -> IO GaugeCells
-newGaugeCells now = GaugeCells <$> newTVarIO Pending <*> newIORef HM.empty <*> pure now
+newGaugeCells now = GaugeCells <$> newTVarIO (Idle Nothing) <*> newIORef HM.empty <*> pure now
 
 -- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
 -- reading or one already counted, the whole total for a counter that was reset,

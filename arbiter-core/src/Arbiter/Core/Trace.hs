@@ -94,7 +94,8 @@ import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
 
 -- | Fill a job's trace context, leaving a job that carries one of its own alone.
 stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
-stampTraceContext ctx job = job {traceContext = traceContext job <|> ctx}
+stampTraceContext Nothing = id
+stampTraceContext ctx = \job -> job {traceContext = traceContext job <|> ctx}
 
 -- | The ambient span's trace context, or 'Nothing' when no span is active. Read from
 -- thread-local context, so it answers for the thread that enqueues.
@@ -137,9 +138,9 @@ spanning mTracer name args action =
   maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
 -- | Run an action inside a @publish \<queue\>@ producer span over @n@ jobs.
-withPublishSpan :: (MonadUnliftIO m) => Maybe Tracer -> TableName -> Int -> m a -> m a
-withPublishSpan mTracer queue n =
-  spanning mTracer ("publish " <> queue) (producerArgs queue n)
+withPublishSpan :: (MonadUnliftIO m) => TableName -> Int -> m a -> m a
+withPublishSpan queue n action =
+  resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue n) action
 
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()

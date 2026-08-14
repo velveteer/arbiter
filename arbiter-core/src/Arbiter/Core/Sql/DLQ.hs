@@ -26,6 +26,7 @@ import Arbiter.Core.Job.Types (JobRead, defaultMaxAttempts)
 import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
+import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
 data DLQMove = MoveNow | MoveIfExhausted
@@ -216,17 +217,14 @@ moveToDLQBatchSQL schema tableName ids cseqs errs =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input_jobs AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id,
                  unnest(#{cseqs :: [CInt8]}::bigint[]) AS expected_claim_seq,
                  unnest(#{errs :: [CText]}::text[]) AS error_msg
         ),
-        locked AS (
-          SELECT j.id FROM ${tbl} j WHERE j.id IN (SELECT id FROM input_jobs)
-          ORDER BY j.id DESC
-          FOR UPDATE
-        ),
+        ${locked},
         deleted_jobs AS (
           DELETE FROM ${tbl} j
           USING input_jobs ij

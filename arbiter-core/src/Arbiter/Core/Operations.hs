@@ -103,6 +103,7 @@ module Arbiter.Core.Operations
   , cancelJobsBatch
   , promoteJob
   , QueueStats (..)
+  , queueStatusCounts
   , QueueOverview (..)
   , getQueueStats
   , getAllQueueStats
@@ -190,7 +191,7 @@ import Data.Aeson.Types (parseEither, parseMaybe)
 import Data.Bifunctor (first, second)
 import Data.Bitraversable (bitraverse)
 import Data.Either (partitionEithers)
-import Data.Foldable (for_, toList)
+import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.IntMap qualified as IntMap
 import Data.List (groupBy, sort, sortOn)
@@ -241,7 +242,7 @@ import Arbiter.Core.Job.Types
   , JobId
   , JobPayload
   , JobRead
-  , JobStatus
+  , JobStatus (..)
   , JobWrite
   , dedupParts
   , isRollup
@@ -362,10 +363,6 @@ type TraceStamp payload = JobWrite payload -> JobWrite payload
 -- | The stamp for the context in scope. One read covers every job inserted under it.
 traceStamp :: (MonadIO m) => m (TraceStamp payload)
 traceStamp = stampTraceContext <$> liftIO currentTraceContext
-
--- | The rows an insert writes: the stamped jobs and their admission columns.
-insertRows :: (JobPayload payload, MonadIO m) => [JobWrite payload] -> m [(JobWrite payload, AdmissionColumns)]
-insertRows jobs = (\stamp -> map (stampedRow stamp) jobs) <$> traceStamp
 
 stampedRow
   :: (JobPayload payload)
@@ -647,7 +644,8 @@ insertJobsBatch_
   -> m Int64
 insertJobsBatch_ _ _ [] = pure 0
 insertJobsBatch_ schemaName tableName jobs = do
-  batchSrc <- batchFrag (jobCodec tableName) <$> insertRows (dedupBatch jobs)
+  stamp <- traceStamp
+  let batchSrc = batchFrag (jobCodec tableName) (map (stampedRow stamp) (dedupBatch jobs))
   withDbTransaction (MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName batchSrc))
 
 -- | Insert a child's result into the results table.
@@ -931,10 +929,7 @@ ackJobInner
    . (MonadArbiter m)
   => SchemaName -> TableName -> JobRead payload -> m Int64
 ackJobInner schemaName tableName job = do
-  for_ (parentId job) $ \pid ->
-    void $
-      MA.executeQuery
-        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+  lockJobParents schemaName tableName [parentId job]
   let jid = primaryKey job
       cseq = claimSeq job
   countOr0 (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid cseq)
@@ -947,6 +942,20 @@ lockJobParents schemaName tableName parents =
     void $
       MA.executeQuery
         (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+
+-- | Read a job's parent and take its advisory lock, before any row lock the caller takes.
+lockParentOf :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m (Maybe Int64)
+lockParentOf schemaName tableName jobId = do
+  parentRows <- MA.executeQuery (Tmpl.getParentIdSQL schemaName tableName jobId)
+  let mParentId = case parentRows of
+        [Just pid] -> Just pid
+        _ -> Nothing
+  mParentId <$ lockJobParents schemaName tableName [mParentId]
+
+-- | Wake every distinct parent named, ascending, matching the order the locks were taken.
+resumeJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
+resumeJobParents schemaName tableName =
+  traverse_ (tryResumeParent schemaName tableName) . Set.toAscList . Set.fromList . catMaybes
 
 -- | Lock every job named and all of its descendants, in one descending pass.
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
@@ -1250,8 +1259,7 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
     when (isRollup job) $
       void $
         cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
-  let parentIds = Set.toAscList . Set.fromList $ mapMaybe (parentId . fst) movedJobs
-  for_ parentIds $ tryResumeParent schemaName tableName
+  resumeJobParents schemaName tableName (map (parentId . fst) movedJobs)
   pure (fromIntegral (Set.size moved))
 
 -- * Dead Letter Queue Operations
@@ -1688,8 +1696,7 @@ deleteJobsResumingParents
 deleteJobsResumingParents _ _ _ [] = pure []
 deleteJobsResumingParents schemaName tableName mkSql jobIds = withDbTransaction $ do
   rows <- MA.executeQuery (mkSql jobIds)
-  let parentIds = Set.toAscList . Set.fromList $ mapMaybe snd rows
-  for_ parentIds $ tryResumeParent schemaName tableName
+  resumeJobParents schemaName tableName (map snd rows)
   pure (map fst rows)
 
 -- | Delete multiple jobs from the dead letter queue, resuming any parents left
@@ -1829,14 +1836,7 @@ cancelJobInner
   :: (MonadArbiter m)
   => SchemaName -> TableName -> Int64 -> m Int64
 cancelJobInner schemaName tableName jobId = do
-  parentRows <- MA.executeQuery (Tmpl.getParentIdSQL schemaName tableName jobId)
-  let mParentId = case parentRows of
-        [Just pid] -> Just pid
-        _ -> Nothing
-  for_ mParentId $ \pid ->
-    void $
-      MA.executeQuery
-        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+  void $ lockParentOf schemaName tableName jobId
   rows <- MA.executeQuery (Tmpl.cancelJobSQL schemaName tableName jobId)
   case rows of
     [n] -> pure n
@@ -1910,6 +1910,18 @@ data QueueStats = QueueStats
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | The per-status depths a 'QueueStats' carries.
+queueStatusCounts :: QueueStats -> [(JobStatus, Int64)]
+queueStatusCounts s =
+  [ (Ready, readyJobs s)
+  , (InFlight, inFlightJobs s)
+  , (Scheduled, scheduledJobs s)
+  , (Backoff, backoffJobs s)
+  , (Throttled, throttledJobs s)
+  , (Suspended, suspendedJobs s)
+  , (Cancelled, cancelledJobs s)
+  ]
 
 -- | Decodes the single aggregate row produced by 'Tmpl.getQueueStatsSQL'
 -- straight into 'QueueStats', so column names map to fields by name.
@@ -2139,12 +2151,7 @@ cascadeDeleteJob
   -> Int64
   -> m Int64
 cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
-  parentRows <- MA.executeQuery (Tmpl.getParentIdSQL schemaName tableName jobId)
-  let rootParentId = case parentRows of
-        [Just pid] -> Just pid
-        _ -> Nothing
-
-  lockJobParents schemaName tableName [rootParentId]
+  rootParentId <- lockParentOf schemaName tableName jobId
   deleted <- countOr0 (mkSql schemaName tableName jobId)
 
   when (deleted > 0) $
@@ -2282,8 +2289,7 @@ refreshAllGroups schemaName queues cursors = do
   where
     perQueue = max 1 (groupsRefreshBatch `div` max 1 (length queues))
     one ref schema tbl = do
-      cursor <- liftIO (Map.lookup tbl <$> readIORef ref)
-      (n, next) <- refreshGroupsForQueue schema tbl perQueue cursor
+      (n, next) <- refreshGroupsForQueue schema tbl perQueue (Map.lookup tbl cursors)
       liftIO (modifyIORef' ref (Map.alter (const next) tbl))
       pure n
 
@@ -2861,7 +2867,7 @@ runGatedShared schemaName task interval maxAge work =
       Tmpl.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
     shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
       (Just at, Just previous) -> Just . Ran <$> publish at previous
-      _ -> pure (uncurry decoded <$> ((,) <$> mPayload <*> mAge))
+      _ -> pure (decoded <$> mPayload <*> mAge)
     -- Base onException: UnliftIO's masks the handler uninterruptibly.
     publish at previous = withRunInIO $ \run ->
       run (work >>= \a -> a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task))

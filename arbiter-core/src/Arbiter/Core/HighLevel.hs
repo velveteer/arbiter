@@ -172,7 +172,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate, RateLimitPolicyView)
-import Arbiter.Core.Trace (resolveTracer, withPublishSpan)
+import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
@@ -198,9 +198,7 @@ publishSpan
   => Int
   -> m a
   -> m a
-publishSpan n action = do
-  tracer <- resolveTracer
-  withPublishSpan tracer (queueTable @payload @m) n action
+publishSpan = withPublishSpan (queueTable @payload @m)
 
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
 -- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.

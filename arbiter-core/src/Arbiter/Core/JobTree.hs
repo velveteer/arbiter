@@ -65,7 +65,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.Trace (markSpanError, resolveTracer, withPublishSpan)
+import Arbiter.Core.Trace (markSpanError, withPublishSpan)
 
 -- | Internal exception used to abort a tree insertion transaction.
 -- Not exported - caught and converted to @Left@ by 'insertJobTree'.
@@ -147,16 +147,12 @@ insertJobTree
   -- ^ Table name
   -> JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
-insertJobTree schemaName tableName tree = do
-  tracer <- resolveTracer
-  result <- withPublishSpan tracer tableName (treeSize tree) $ do
+insertJobTree schemaName tableName tree =
+  withPublishSpan tableName (treeSize tree) $ do
     inserted <- UE.try $ do
       stamp <- Ops.traceStamp
       withDbTransaction $ go stamp Nothing (rootSuspended tree) tree
-    inserted <$ either (\(TreeInsertFailed msg) -> markSpanError msg) (const (pure ())) inserted
-  pure $ case result of
-    Left (TreeInsertFailed msg) -> Left msg
-    Right jobs -> Right jobs
+    either (\(TreeInsertFailed msg) -> Left msg <$ markSpanError msg) (pure . Right) inserted
   where
     -- Finalizer roots are suspended (waiting for children to complete).
     rootSuspended :: JobTree payload -> Bool

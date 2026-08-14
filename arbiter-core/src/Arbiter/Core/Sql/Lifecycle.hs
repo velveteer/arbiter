@@ -20,6 +20,7 @@ import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
+import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Smart ack CTE for job dependencies.
 --
@@ -80,15 +81,12 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "j.*" else "j.id, j.parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
         ),
-        locked AS (
-          SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
-          ORDER BY id DESC
-          FOR UPDATE
-        ),
+        ${locked},
         ack AS (
           DELETE FROM ${tbl} j
           USING input i
@@ -214,15 +212,12 @@ nackJobSQL schema tableName jobId cseq att =
 nackJobsBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Int32] -> Query Int64
 nackJobsBatchSQL schema tableName ids cseqs atts =
   let tbl = jobQueueTable schema tableName
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS in_id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq, unnest(#{atts :: [CInt4]}::int[]) AS att
         ),
-        locked AS (
-          SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
-          ORDER BY id DESC
-          FOR UPDATE
-        )
+        ${locked}
         UPDATE ${tbl} j
         SET attempts = LEAST(GREATEST(i.att - 1, j.attempts - 1, 0), j.attempts),
             updated_at = NOW()

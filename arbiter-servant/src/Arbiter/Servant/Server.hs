@@ -23,12 +23,12 @@ module Arbiter.Servant.Server
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
-import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
-import Arbiter.Core.Trace (resolveTracer, withPublishSpan)
+import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (updateCronScheduleChecked)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
@@ -250,7 +250,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let env = serverEnv config
       schemaName = schema env
 
-  mJob <- liftIO $ runSimpleDb env $ publishing tableName 1 $ do
+  mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName 1 $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
     case (inserted, dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
@@ -276,16 +276,10 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
   inserted <-
     liftIO $
       runSimpleDb env $
-        publishing tableName (length writes) $
+        withPublishSpan tableName (length writes) $
           Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
-
--- | Run an enqueue under the @publish \<queue\>@ producer span, named by the runtime queue.
-publishing :: (MonadArbiter m) => Text -> Int -> m a -> m a
-publishing tableName n action = do
-  tracer <- resolveTracer
-  withPublishSpan tracer tableName n action
 
 -- | Get a specific job by ID
 getJobHandler

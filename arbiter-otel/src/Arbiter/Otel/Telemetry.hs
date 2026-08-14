@@ -102,7 +102,7 @@ withTelemetry action = do
     logs <- ContT withLogs
     liftIO $ do
       let mp = either (const noopMeterProvider) fst metrics
-      ms <- either (pure . Left) (const (instrumentsFor mp)) reader
+      ms <- either (pure . Left) (const (arbiterInstruments mp)) reader
       action
         (baseTelemetry mp)
           { meters = either (const Nothing) Just ms
@@ -112,11 +112,6 @@ withTelemetry action = do
               summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf ms, noteOf logs])
           }
   where
-    -- Why a signal is off, for the ones that are.
-    noteOf :: Either Text r -> Maybe Text
-    noteOf = either Just (const Nothing)
-    instrumentsFor :: MeterProvider -> IO (Either Text ArbiterMeters)
-    instrumentsFor mp = first (signalFailed "metrics") <$> tryAny (newArbiterMeters mp)
     withTraces :: [SpanProcessor] -> TracerProviderOptions -> (Either Text TracerProvider -> IO a) -> IO a
     withTraces processors opts inner =
       bracket getGlobalTextMapPropagator setGlobalTextMapPropagator $ \_ ->
@@ -186,6 +181,14 @@ detectResources = either (const emptyMaterializedResources) id <$> tryAny detect
 signalFailed :: Text -> SomeException -> Text
 signalFailed signal e = signal <> " exporter did not start: " <> T.pack (displayException e)
 
+-- | Why a signal is off, for the ones that are.
+noteOf :: Either Text r -> Maybe Text
+noteOf = either Just (const Nothing)
+
+-- | The lifecycle instruments over a provider, or why they could not be built.
+arbiterInstruments :: MeterProvider -> IO (Either Text ArbiterMeters)
+arbiterInstruments mp = first (signalFailed "metrics") <$> tryAny (newArbiterMeters mp)
+
 -- | One line for the caller to log at startup, with whatever could not be started.
 summarize :: Maybe Text -> [Text] -> Text
 summarize service notes =
@@ -236,7 +239,7 @@ telemetryLogConfig = otelLogs . logDestination
 withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
 withExternalTelemetry mmp mlp action = do
   tracing <- isJust <$> resolveTracer
-  ms <- traverse (\mp -> first (signalFailed "metrics") <$> tryAny (newArbiterMeters mp)) mmp
+  ms <- traverse arbiterInstruments mmp
   readerOpts <- periodicMetricReaderOptionsFromEnv
   action
     (baseTelemetry (fromMaybe noopMeterProvider mmp))
@@ -248,6 +251,6 @@ withExternalTelemetry mmp mlp action = do
             "telemetry on, caller's providers"
               : catMaybes
                 [ if tracing then Nothing else Just "no global tracer provider installed"
-                , either Just (const Nothing) =<< ms
+                , noteOf =<< ms
                 ]
       }

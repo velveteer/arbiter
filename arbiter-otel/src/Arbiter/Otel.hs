@@ -57,7 +57,6 @@ import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
 import Arbiter.Worker.Config (WorkerConfig (..), withHooks, withMaintenance)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), defaultLogConfig, tryLog)
-import Data.Foldable (traverse_)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.TypeLits (KnownSymbol)
@@ -184,8 +183,6 @@ labelledConfig
   -> WorkerConfig m payload
   -> WorkerConfig m payload
 labelledConfig tel queue cfg =
-  withHooks metricHooks $
-    withMaintenance (\op n -> traverse_ (\ms -> otelMaintenance ms op n) (meters tel)) $
-      cfg {logConfig = telemetryLogConfig tel (logConfig cfg)}
+  maybe id instrument (meters tel) $ cfg {logConfig = telemetryLogConfig tel (logConfig cfg)}
   where
-    metricHooks hooks = maybe hooks (\ms -> otelHooks ms queue <> hooks) (meters tel)
+    instrument ms = withHooks (otelHooks ms queue <>) . withMaintenance (otelMaintenance ms)

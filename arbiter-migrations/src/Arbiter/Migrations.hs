@@ -71,6 +71,7 @@ import Arbiter.Core.Job.Schema
   , createDedupKeyIndexSQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
+  , createGroupsEmptiedIndexSQL
   , createGroupsTableSQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
@@ -80,7 +81,6 @@ import Arbiter.Core.Job.Schema
   , createJobQueueTableSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
-  , createGroupsEmptiedIndexSQL
   , createParentIdIndexSQL
   , createResultsTableSQL
   , createSchemaSQL

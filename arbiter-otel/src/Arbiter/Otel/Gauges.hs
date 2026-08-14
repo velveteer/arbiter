@@ -10,7 +10,7 @@ module Arbiter.Otel.Gauges
 import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (..))
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
-import Arbiter.Core.Job.Types (JobStatus (..), jobStatusToText)
+import Arbiter.Core.Job.Types (jobStatusToText)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations
   ( QueueOverview (..)
@@ -21,6 +21,7 @@ import Arbiter.Core.Operations
   , listConcurrencyPolicies
   , listRateLimitPolicies
   , micros
+  , queueStatusCounts
   , runGatedShared
   , setLocalStatementTimeout
   )
@@ -30,6 +31,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically, modifyTVar', readTVarIO, writeTVar)
 import Control.Exception (SomeException)
 import Control.Monad (forever, void)
+import Data.Bifunctor (first)
 import Data.Foldable (toList, traverse_)
 import Data.HashMap.Strict (HashMap)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -55,6 +57,7 @@ import Arbiter.Otel.Gauges.Cells
   , GaugeCells (..)
   , SeriesKey
   , Snapshot (..)
+  , lastScan
   , live
   , newGaugeCells
   , retire
@@ -216,23 +219,13 @@ registerInstruments meter cells = do
     "Seconds since the exported readings were scanned"
     [ \res -> do
         now <- getMonotonicTime
-        readTVarIO (cache cells) >>= \case
-          Pending -> observe res (now - registeredAt cells) (attrs [])
-          Live c -> observe res (now - takenAt c) (attrs [])
-          Retired mAt -> observe res (now - fromMaybe (registeredAt cells) mAt) (attrs [])
+        scanned <- lastScan <$> readTVarIO (cache cells)
+        observe res (now - fromMaybe (registeredAt cells) scanned) (attrs [])
     ]
   where
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
     effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
-    statusCounts s =
-      [ (jobStatusToText Ready, readyJobs s)
-      , (jobStatusToText InFlight, inFlightJobs s)
-      , (jobStatusToText Scheduled, scheduledJobs s)
-      , (jobStatusToText Backoff, backoffJobs s)
-      , (jobStatusToText Throttled, throttledJobs s)
-      , (jobStatusToText Suspended, suspendedJobs s)
-      , (jobStatusToText Cancelled, cancelledJobs s)
-      ]
+    statusCounts = map (first jobStatusToText) . queueStatusCounts
     connCounts h =
       [ ("active", Health.connActive h)
       , ("idle", Health.connIdle h)
