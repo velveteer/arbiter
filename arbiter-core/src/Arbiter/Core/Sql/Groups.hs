@@ -3,7 +3,8 @@
 
 -- | Groups SQL templates.
 module Arbiter.Core.Sql.Groups
-  ( lockGroupsSQL
+  ( groupsWindowSQL
+  , lockGroupsSQL
   , refreshGroupsSQL
   , insertMissingGroupsSQL
   ) where
@@ -15,15 +16,36 @@ import Arbiter.Core.Job.Schema (groupAggregates, inFlightPredicate, jobQueueGrou
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 
--- | @FOR UPDATE SKIP LOCKED@ over at most @limit@ groups rows past @cursor@, in key
--- order, returning the locked keys for the reaper to recompute. Claim-locked groups
--- are skipped, and the caller resumes from the last key returned.
-lockGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
-lockGroupsSQL schema tableName limit cursor =
+-- | At most @limit@ groups keys past @cursor@, in the database's key order, unlocked.
+-- Its last key is the caller's resume cursor.
+groupsWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
+groupsWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
       after = foldMap (\k -> [sql|WHERE group_key > #{k :: CText}|]) cursor
-   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} ${after} ORDER BY group_key LIMIT #{lim :: CInt8} FOR UPDATE SKIP LOCKED|]
+   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} ${after} ORDER BY group_key LIMIT #{lim :: CInt8}|]
+
+-- | @FOR UPDATE SKIP LOCKED@ over the window 'groupsWindowSQL' returned plus at most
+-- @limit@ rows the maintenance triggers emptied in place, one ascending pass in the key
+-- order those triggers use. Returns the keys this transaction holds.
+lockGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Query Text
+lockGroupsSQL schema tableName limit cursor upper =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+      lim = fromIntegral limit :: Int64
+      after = foldMap (\k -> [sql|AND group_key > #{k :: CText}|]) cursor
+      window = foldMap (\hi -> [sql|SELECT group_key FROM ${groupsTbl} WHERE group_key <= #{hi :: CText} ${after} UNION |]) upper
+   in [sql|
+        WITH emptied AS (
+          SELECT group_key FROM ${groupsTbl} WHERE job_count = 0 ORDER BY group_key LIMIT #{lim :: CInt8}
+        ),
+        targets AS (
+          ${window}SELECT group_key FROM emptied
+        )
+        SELECT @{group_key :: CText} FROM ${groupsTbl}
+        WHERE group_key IN (SELECT group_key FROM targets)
+        ORDER BY group_key
+        FOR UPDATE SKIP LOCKED
+      |]
 
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
 -- returning the rows it rewrote. A separate statement, so its snapshot post-dates
@@ -70,10 +92,9 @@ refreshGroupsSQL schema tableName keys =
       |]
 
 -- | Insert summary rows for grouped jobs the triggers left without one, at most
--- @limit@ keys per call. Bounded to the key window its caller locked, so the anti-join
--- reads that slice of the group-key index rather than every job row. A key past the
--- window waits for the pass that covers it.
-insertMissingGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Query Int64
+-- @limit@ keys per call in key order, bounded to the @lower@ to @upper@ key window its
+-- caller locked. Returns each key it covered and whether the insert landed.
+insertMissingGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Query (Text, Bool)
 insertMissingGroupsSQL schema tableName limit lower upper =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -89,6 +110,7 @@ insertMissingGroupsSQL schema tableName limit lower upper =
             ${after}
             ${upTo}
             AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
+          ORDER BY j.group_key
           LIMIT #{lim :: CInt8}
         ),
         missing AS (
@@ -101,8 +123,12 @@ insertMissingGroupsSQL schema tableName limit lower upper =
           INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until)
           SELECT group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until
           FROM missing
+          ORDER BY group_key
           ON CONFLICT (group_key) DO NOTHING
-          RETURNING 1
+          RETURNING group_key
         )
-        SELECT (SELECT count(*) FROM inserted) AS @{rewritten :: CInt8}
+        SELECT k.group_key AS @{group_key :: CText}, (i.group_key IS NOT NULL) AS @{inserted :: CBool}
+        FROM missing_keys k
+        LEFT JOIN inserted i ON i.group_key = k.group_key
+        ORDER BY k.group_key
       |]

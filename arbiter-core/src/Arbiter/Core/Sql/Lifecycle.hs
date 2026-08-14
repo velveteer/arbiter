@@ -73,8 +73,8 @@ smartAckJobSQL archiveEnabled schema tableName jobId cseq =
 -- suspends finalizers that still have children, and wakes parents whose last
 -- child completed. The wake check excludes acked children explicitly, since a
 -- sibling CTE's deletes are not visible within the same statement. Returns the
--- acked ids. Reclaimed jobs (a different claim) are absent. The caller
--- holds the parent locks.
+-- acked ids. Reclaimed jobs (a different claim) are absent. Locks children-first
+-- to match nack and force-cancel. The caller holds the parent locks.
 smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
 smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
   let tbl = jobQueueTable schema tableName
@@ -84,10 +84,16 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
         ),
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
         ack AS (
           DELETE FROM ${tbl} j
           USING input i
           WHERE j.id = i.id AND j.claim_seq = i.cseq
+            AND j.id IN (SELECT id FROM locked)
             AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
           RETURNING ${returning}
         )${archived},

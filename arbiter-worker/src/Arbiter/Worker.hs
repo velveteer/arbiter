@@ -704,7 +704,7 @@ batchCallbacks config handoff jobs startTime schemaName =
       outcome <- mask_ $ do
         result <-
           withDbTransaction $
-            handleJobFailure config (batchSpanShape jobs) (classifyException exc) (jobMaxAtts j) startTime endT j
+            handleJobFailure config Ops.TakeLocks (batchSpanShape jobs) (classifyException exc) (jobMaxAtts j) startTime endT j
         result <$ markHandled j
       reportWritten outcome
       settleUnwritten config handoff [(j, outcome)]
@@ -768,7 +768,7 @@ finalizeForceCancelled config jobs cancelledIds goneIds handoff = do
     batchLog = withJobContext (logConfig config) jobs
 
 -- | Hand back the attempt the claim consumed for the jobs left unfinalized, in one
--- transaction, and report whichever of them the nack found under another claim.
+-- statement, and report whichever of them the nack found under another claim.
 releaseJobs
   :: (JobOperation m payload)
   => WorkerConfig m payload
@@ -778,7 +778,7 @@ releaseJobs
 releaseJobs _ _ [] = pure ()
 releaseJobs config handoff js = do
   released <- mask_ $ do
-    nacked <- Set.fromList <$> withDbTransaction (Arb.nackJobsBatch js)
+    nacked <- Set.fromList <$> Arb.nackJobsBatch js
     nacked <$ traverse_ (markJobHandled handoff) js
   settleUnwritten config handoff [(j, Left "no longer claimed by this worker") | j <- js, not (hasIdIn released j)]
 
@@ -949,21 +949,32 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
           let failure@(_, kind) = classifyException exc
+              queue = Job.queueName firstJob
           schemaName <- getSchema
-          outcomes <- withDbTransaction $ do
-            Ops.lockJobParents schemaName (Job.queueName firstJob) (map Job.parentId unhandled)
-            outcomes <- traverse (\j -> (j,) <$> failJob failure j) unhandled
-            -- A tree or branch cancel acts on the tree, not on this worker's claim.
-            when (cancelsTree kind) $ unownedOf >>= traverse_ (void . cancelJobFor kind)
-            pure outcomes
-          traverse_ (markJobHandled handoff) unhandled
-          traverse_ (reportWritten . snd) outcomes
+          -- A tree or branch cancel acts on the tree, not on this worker's claim.
+          unowned <- if cancelsTree kind then unownedOf else pure []
+          -- Every row the settles below touch, in one pass. A cancel reaches the whole
+          -- tree, so its pass has to as well.
+          let lockTrees
+                | cancelsTree kind = Ops.lockJobTreesFromRoot
+                | otherwise = Ops.lockJobTrees
+          outcomes <- mask_ $ do
+            outcomes <- withDbTransaction $ do
+              Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
+              lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
+              outcomes <- traverse (\j -> (j,) <$> failJob failure j) unhandled
+              traverse_ (void . cancelJobFor kind) unowned
+              pure outcomes
+            outcomes <$ traverse_ (markJobHandled handoff) unhandled
+          traverse_ report outcomes
           settleUnwritten config handoff outcomes
   where
     (firstJob :| _) = jobs
     batchLog = withJobContext (logConfig config) jobs
+    report (job, written) =
+      tryWarn (jobLog config job) "Reporting a job's failure failed" (reportWritten written)
     failJob failure job =
-      handleJobFailure config (batchSpanShape jobs) failure (jobMaxAtts job) startTime endTime job
+      handleJobFailure config Ops.LocksHeld (batchSpanShape jobs) failure (jobMaxAtts job) startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -1159,6 +1170,8 @@ handleJobFailure
   :: forall payload m
    . (JobOperation m payload)
   => WorkerConfig m payload
+  -> Ops.TreeLocks
+  -- ^ Whether the caller already holds the parent and tree locks.
   -> ConsumeShape
   -- ^ What the span this job ran under covers.
   -> (Text, FailureKind)
@@ -1168,7 +1181,7 @@ handleJobFailure
   -> UTCTime
   -> Job.JobRead payload
   -> m (FailureOutcome m)
-handleJobFailure config shape (errorMsg, failureKind) maxAtts startTime endTime job = do
+handleJobFailure config locks shape (errorMsg, failureKind) maxAtts startTime endTime job = do
   let cfg = jobLog config job
       hooks = observabilityHooks config
       -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
@@ -1178,8 +1191,9 @@ handleJobFailure config shape (errorMsg, failureKind) maxAtts startTime endTime 
     wrote reason after rowsAffected
       | rowsAffected == 0 = pure (Left reason)
       | otherwise = pure (Right (fireFailure config shape job errorMsg startTime endTime >> after))
-    deadLetter =
-      Arb.moveToDLQ errorMsg job
+    deadLetter = do
+      schemaName <- getSchema
+      Ops.moveToDLQ locks schemaName (Job.queueName job) errorMsg job
         >>= wrote
           "no longer available for the dead-letter queue"
           (runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job)

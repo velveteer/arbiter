@@ -7,6 +7,7 @@ module Arbiter.Core.Sql.Tree
   , resumeChildrenSQL
   , descendantsCte
   , lockJobTreesSQL
+  , lockJobTreesFromRootSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
   , deleteCancelledJobsSQL
@@ -149,6 +150,31 @@ lockJobTreesSQL schema tableName jobIds =
       locked = lockDescendantsCte tbl
    in [sql|
         ${cte},
+        ${locked}
+        SELECT count(*) AS @{count :: CInt8} FROM locked
+      |]
+
+-- | 'lockJobTreesSQL' widened to each named job's whole tree, so it covers what a tree
+-- cancel goes on to delete rather than the subtree alone.
+lockJobTreesFromRootSQL :: Text -> Text -> [Int64] -> Query Int64
+lockJobTreesFromRootSQL schema tableName jobIds =
+  let tbl = jobQueueTable schema tableName
+      locked = lockDescendantsCte tbl
+   in [sql|
+        WITH RECURSIVE
+        ancestors AS (
+          SELECT id, parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
+          UNION
+          SELECT j.id, j.parent_id FROM ${tbl} j JOIN ancestors a ON j.id = a.parent_id
+        ),
+        roots AS (
+          SELECT id FROM ancestors WHERE parent_id IS NULL
+        ),
+        descendants AS (
+          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM roots)
+          UNION
+          SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
+        ),
         ${locked}
         SELECT count(*) AS @{count :: CInt8} FROM locked
       |]

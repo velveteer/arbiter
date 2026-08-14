@@ -76,6 +76,7 @@ module Arbiter.Core.Job.Schema
     -- * Groups Table
   , createGroupsTableSQL
   , migrateGroupsReadyRankingSQL
+  , createGroupsEmptiedIndexSQL
 
     -- * Groups Trigger SQL
   , createGroupsTriggerFunctionsSQL
@@ -523,6 +524,15 @@ migrateGroupsReadyRankingSQL schemaName tableName =
             <> groupsTbl
             <> " (next_due ASC) WHERE next_due IS NOT NULL;"
         ]
+
+-- | Index over the summary rows the maintenance triggers emptied in place.
+createGroupsEmptiedIndexSQL :: Text -> Text -> Text
+createGroupsEmptiedIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_groups_emptied")
+    , "ON " <> jobQueueGroupsTable schemaName tableName <> " (group_key)"
+    , "WHERE job_count = 0;"
+    ]
 
 -- ---------------------------------------------------------------------------
 -- Groups Maintenance Triggers

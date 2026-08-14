@@ -80,6 +80,7 @@ import Arbiter.Core.Job.Schema
   , createJobQueueTableSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
+  , createGroupsEmptiedIndexSQL
   , createParentIdIndexSQL
   , createResultsTableSQL
   , createSchemaSQL
@@ -485,6 +486,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , -- After the archive table exists, since it alters that too.
           script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
         , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
+        , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

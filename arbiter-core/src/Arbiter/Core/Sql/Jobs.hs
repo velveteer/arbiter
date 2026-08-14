@@ -361,23 +361,26 @@ requeuedCols mAlias = aliasedCols mAlias requeuedColumns
 enqueuedAgainCols :: Text
 enqueuedAgainCols = aliasedCols Nothing (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
 
--- | The columns a DLQ retry carries back to the main table.
+-- | The columns a DLQ retry carries back to the main table: every read column it does
+-- not re-arm, plus write-only rate_limit_cost.
 requeuedColumns :: [Text]
-requeuedColumns =
-  [ "payload"
-  , "group_key"
-  , "priority"
-  , "max_attempts"
-  , "parent_id"
-  , "parent_state"
-  , "traceparent"
-  , "tracestate"
-  , "archive_for"
-  , "rate_limit_key"
-  , "rate_limit_prefix"
-  , "concurrency_key"
-  , "concurrency_prefix"
-  , "rate_limit_cost"
+requeuedColumns = filter (`notElem` reArmedColumns) allJobColumns <> ["rate_limit_cost"]
+
+-- | The columns a requeue sets for itself rather than copying from the failed run.
+reArmedColumns :: [Text]
+reArmedColumns =
+  [ "id"
+  , "inserted_at"
+  , "updated_at"
+  , "attempts"
+  , "last_error"
+  , "last_attempted_at"
+  , "not_visible_until"
+  , "dedup_key"
+  , "dedup_strategy"
+  , "suspended"
+  , "claimed_by"
+  , "claim_seq"
   ]
 
 -- | Standard job column list (for SELECT and RETURNING)

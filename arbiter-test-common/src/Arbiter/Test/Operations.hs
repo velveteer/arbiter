@@ -361,17 +361,32 @@ operationsSpec mkMessage mkResult runM = do
       attempts rereadB `shouldBe` 2
 
   describe "refreshGroups" $ do
-    it "locks past the keys a pass already covered" $ \env -> do
+    it "covers the keys past the ones a pass already walked" $ \env -> do
       let keys = ["grp-cursor-a", "grp-cursor-b", "grp-cursor-c"]
-          lockGroups limit cursor =
+          groupsWindow limit cursor =
             runM env $ do
               schemaName <- getSchema
-              MA.executeQuery (GroupsTmpl.lockGroupsSQL schemaName (HL.queueTable @payload @m) limit cursor)
+              MA.executeQuery (GroupsTmpl.groupsWindowSQL schemaName (HL.queueTable @payload @m) limit cursor)
       runM env $ forM_ keys $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
 
-      lockGroups 2 Nothing >>= (`shouldBe` take 2 keys)
-      lockGroups 2 (Just "grp-cursor-b") >>= (`shouldBe` drop 2 keys)
-      lockGroups 2 (Just "grp-cursor-c") >>= (`shouldBe` [])
+      groupsWindow 2 Nothing >>= (`shouldBe` take 2 keys)
+      groupsWindow 2 (Just "grp-cursor-b") >>= (`shouldBe` drop 2 keys)
+      groupsWindow 2 (Just "grp-cursor-c") >>= (`shouldBe` [])
+
+    it "reclaims an emptied group the cursor has already passed" $ \env -> do
+      let emptied = "grp-reclaim-a"
+          laterKeys = ["grp-reclaim-b", "grp-reclaim-c"]
+      runM env $ forM_ (emptied : laterKeys) $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.ackJob (head claimed))
+
+      -- Acking the only job resets the summary in place rather than deleting it.
+      groupCount env emptied `shouldReturn` Just 0
+
+      runM env $ do
+        schemaName <- getSchema
+        void (Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 (Just "grp-reclaim-b"))
+      groupCount env emptied `shouldReturn` Nothing
 
     it "repairs a tail group only once the cursor reaches it" $ \env -> do
       let keys = ["grp-pass-1", "grp-pass-2", "grp-pass-3", "grp-pass-4", "grp-pass-5"]
@@ -1264,6 +1279,7 @@ operationsSpec mkMessage mkResult runM = do
       moved <- runM env $ do
         schemaName <- getSchema
         Ops.moveToDLQFields
+          Ops.TakeLocks
           Tmpl.MoveIfExhausted
           schemaName
           (HL.queueTable @payload @m)

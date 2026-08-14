@@ -47,6 +47,9 @@ module Arbiter.Core.Operations
   , ackJob
   , ackJobsBatch
   , lockJobParents
+  , lockJobTrees
+  , lockJobTreesFromRoot
+  , TreeLocks (..)
   , archivesOnAck
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
@@ -944,6 +947,18 @@ lockJobParents schemaName tableName parents =
       MA.executeQuery
         (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
 
+-- | Lock every job named and all of its descendants, in one descending pass.
+lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
+lockJobTrees _ _ [] = pure ()
+lockJobTrees schemaName tableName ids = void $ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+
+-- | 'lockJobTrees' widened to each named job's whole tree, for a caller that goes on to
+-- cancel trees rather than settle single jobs.
+lockJobTreesFromRoot :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
+lockJobTreesFromRoot _ _ [] = pure ()
+lockJobTreesFromRoot schemaName tableName ids =
+  void $ countOr0 (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
+
 -- | Wake a suspended parent if all children are done.
 tryResumeParent :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m ()
 tryResumeParent schemaName tableName pid = do
@@ -987,7 +1002,7 @@ setVisibilityTimeout
   -- ^ Timeout in seconds
   -> JobRead payload
   -> m Int64
-  -- ^ Returns the number of rows updated (0 if job was reclaimed by another worker)
+  -- ^ Rows updated. 0 for a row that is gone, reclaimed, or suspended.
 setVisibilityTimeout schemaName tableName timeout job =
   MA.executeStatement
     (Tmpl.setVisibilityTimeoutSQL schemaName tableName (realToFrac timeout) (primaryKey job) (claimSeq job))
@@ -1093,6 +1108,12 @@ nackJobsBatch schemaName tableName jobs =
   MA.executeQuery
     (Tmpl.nackJobsBatchSQL schemaName tableName (map primaryKey jobs) (map claimSeq jobs) (map attempts jobs))
 
+-- | Whether the caller already took the parent and tree locks over its whole set.
+data TreeLocks
+  = TakeLocks
+  | LocksHeld
+  deriving stock (Eq, Show)
+
 -- | Move a job to the DLQ. Cascades descendants for rollup parents.
 -- Wakes the parent if this was a child job.
 --
@@ -1100,7 +1121,8 @@ nackJobsBatch schemaName tableName jobs =
 moveToDLQ
   :: forall m payload
    . (MonadArbiter m)
-  => SchemaName
+  => TreeLocks
+  -> SchemaName
   -- ^ Schema name
   -> TableName
   -- ^ Table name
@@ -1108,14 +1130,24 @@ moveToDLQ
   -- ^ Error message (the final error that caused the DLQ move)
   -> JobRead payload
   -> m Int64
-moveToDLQ schemaName tableName errorMsg job =
-  moveToDLQFields Tmpl.MoveNow schemaName tableName errorMsg (primaryKey job) (claimSeq job) (parentId job) (isRollup job)
+moveToDLQ locks schemaName tableName errorMsg job =
+  moveToDLQFields
+    locks
+    Tmpl.MoveNow
+    schemaName
+    tableName
+    errorMsg
+    (primaryKey job)
+    (claimSeq job)
+    (parentId job)
+    (isRollup job)
 
 -- | 'moveToDLQ' driven by scalar fields, so callers without a typed 'JobRead'
 -- (the reaper sweep) can reuse the tree-aware move.
 moveToDLQFields
   :: (MonadArbiter m)
-  => Tmpl.DLQMove
+  => TreeLocks
+  -> Tmpl.DLQMove
   -> SchemaName
   -> TableName
   -> Text
@@ -1129,11 +1161,11 @@ moveToDLQFields
   -> Bool
   -- ^ Whether the job is a rollup finalizer
   -> m Int64
-moveToDLQFields move schemaName tableName errorMsg jobId cseq mParentId rollup = withDbTransaction $ do
-  lockJobParents schemaName tableName [mParentId]
-  when rollup $ do
-    void $ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName [jobId])
-    snapshotTreeRollups schemaName tableName jobId
+moveToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup = withDbTransaction $ do
+  when (locks == TakeLocks) $ do
+    lockJobParents schemaName tableName [mParentId]
+    when rollup $ lockJobTrees schemaName tableName [jobId]
+  when rollup $ snapshotTreeRollups schemaName tableName jobId
   rows <- countOr0 (Tmpl.moveToDLQSQL move schemaName tableName jobId cseq errorMsg)
   when (rows > 0) $ do
     when rollup $ void $ cascadeChildrenToDLQ schemaName tableName jobId "Parent moved to DLQ"
@@ -1208,7 +1240,7 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
   lockJobParents schemaName tableName (map (parentId . fst) jobsWithErrors)
   unless (null rollupIds) $ do
     -- Every row the move will lock, plus the trees, in one descending pass.
-    void $ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+    lockJobTrees schemaName tableName ids
     -- Before the move, which takes a named rollup's results with it.
     for_ rollupIds $ snapshotTreeRollups schemaName tableName
   moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
@@ -2192,11 +2224,12 @@ resumeJob schemaName tableName jobId =
 -- | Recompute of the groups table from the main queue, over one bounded batch of
 -- rows past @cursor@.
 --
--- Locks the groups rows currently free (FOR UPDATE SKIP LOCKED) to avoid fighting
--- with live job claims, then rewrites them and inserts the summary rows missing over
--- the same key window. Returns the key to resume from, or 'Nothing' once the pass
--- found nothing past @cursor@. The caller is responsible for any cross-pool
--- coordination (see 'runGatedState' and 'refreshAllGroups').
+-- Locks the window's groups rows and the emptied ones (FOR UPDATE SKIP LOCKED) to avoid
+-- fighting with live job claims, then rewrites them, which deletes the emptied, and
+-- inserts the summary rows missing over the same key window. Returns the key to resume
+-- from, or 'Nothing' once the pass found nothing past @cursor@. The caller is
+-- responsible for any cross-pool coordination (see 'runGatedState' and
+-- 'refreshAllGroups').
 refreshGroupsForQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -2207,14 +2240,21 @@ refreshGroupsForQueue
   -- ^ Resume past this key, or start at the first.
   -> m (Int64, Maybe Text)
 refreshGroupsForQueue schemaName tableName batch cursor = withDbTransaction $ do
-  keys <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName batch cursor)
-  let next = Q.mwhen (not (null keys)) (Just (maximum keys))
+  window <- MA.executeQuery (Tmpl.groupsWindowSQL schemaName tableName batch cursor)
+  let windowEnd = lastRow window
+  locked <- MA.executeQuery (Tmpl.lockGroupsSQL schemaName tableName batch cursor windowEnd)
   rewritten <-
-    if null keys
+    if null locked
       then pure 0
-      else sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName keys)
-  inserted <- sum <$> MA.executeQuery (Tmpl.insertMissingGroupsSQL schemaName tableName batch cursor next)
-  pure (rewritten + inserted, next)
+      else sum <$> MA.executeQuery (Tmpl.refreshGroupsSQL schemaName tableName locked)
+  repaired <- MA.executeQuery (Tmpl.insertMissingGroupsSQL schemaName tableName batch cursor windowEnd)
+  -- A filled repair batch left keys behind.
+  let next = if length repaired >= batch then lastRow (map fst repaired) else windowEnd
+  pure (rewritten + fromIntegral (length (filter snd repaired)), next)
+
+-- | The last row, in the order the database returned it.
+lastRow :: [a] -> Maybe a
+lastRow = foldl' (\_ x -> Just x) Nothing
 
 -- | Groups rows one refresh transaction recomputes, split across the queues sharing
 -- it, so the locks it holds do not grow with the number of queues.
@@ -2298,13 +2338,13 @@ sweepExhaustedForQueue schemaName tableName = withDbTransaction $ do
   exhausted <- MA.executeQuery (Tmpl.selectExhaustedJobsSQL schemaName tableName exhaustedSweepBatch)
   let ids = [jobId | (jobId, _, _, _) <- exhausted]
   lockJobParents schemaName tableName [mParentId | (_, _, mParentId, _) <- exhausted]
-  unless (null ids) $ void $ countOr0 (Tmpl.lockJobTreesSQL schemaName tableName ids)
+  lockJobTrees schemaName tableName ids
   getSum <$> getAp (foldMap moveOne exhausted)
   where
     moveOne (jobId, cseq, mParentId, rollup) =
       Ap $
         Sum
-          <$> moveToDLQFields Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup
+          <$> moveToDLQFields LocksHeld Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup
     sweepError = "max attempts exceeded (reaper sweep)"
 
 -- | Per-queue cap on jobs swept to the DLQ in one reaper pass, so a large

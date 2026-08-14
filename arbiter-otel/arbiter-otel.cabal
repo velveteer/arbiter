@@ -75,6 +75,7 @@ test-suite arbiter-otel-tests
     , arbiter-worker
     , base
     , bytestring
+    , directory
     , hs-opentelemetry-api
     , hs-opentelemetry-propagator-w3c
     , hs-opentelemetry-sdk

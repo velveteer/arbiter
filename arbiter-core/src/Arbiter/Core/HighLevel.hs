@@ -560,7 +560,8 @@ nackJobsBatch jobs@(firstJob : _) = do
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --
--- Returns the number of rows updated (0 if job was already reclaimed by another worker).
+-- Returns the number of rows updated. 0 for a job that is gone, reclaimed, or
+-- suspended. 'setVisibilityTimeoutBatch' tells those apart.
 setVisibilityTimeout
   :: forall payload m
    . (JobOperation m payload)
@@ -632,7 +633,7 @@ moveToDLQ
 moveToDLQ errorMsg job = do
   schemaName <- getSchema
   let tableName = job.queueName
-  Ops.moveToDLQ schemaName tableName errorMsg job
+  Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
 
 -- | Lists jobs in the dead-letter queue with pagination.
 listDLQJobs

@@ -84,6 +84,7 @@ import OpenTelemetry.Trace.Core
   , wrapSpanContext
   )
 import OpenTelemetry.Util (appendOnlyBoundedCollectionValues)
+import System.Directory (doesFileExist)
 import Test.Hspec
 import UnliftIO.Async (withAsync)
 
@@ -147,6 +148,14 @@ dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
 
 alertingPath :: FilePath
 alertingPath = "deploy/observability/grafana/provisioning/alerting/arbiter.yaml"
+
+-- | The provisioned files live in the repo, not the package, so an sdist run has none.
+withProvisioned :: FilePath -> ([Text] -> Spec) -> Spec
+withProvisioned path checks = do
+  present <- runIO (doesFileExist path)
+  if present
+    then runIO (referencedMetrics <$> TIO.readFile path) >>= checks
+    else it "ships outside the package" $ pendingWith (path <> " is not in this tree")
 
 -- | Every @arbiter_*@ family a provisioned file names, Prometheus having flattened the
 -- dots. Read from the whole file rather than the queries alone: a metric named in a
@@ -218,7 +227,7 @@ spec = do
     it "survives the DLQ round trip" $ do
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv (defaultJob (Greeting "dlq'd"))
       entry <- runSimpleDb plainEnv $ do
-        void $ Ops.moveToDLQ schema queue "boom" stored
+        void $ Ops.moveToDLQ Ops.TakeLocks schema queue "boom" stored
         listToMaybe <$> Ops.listDLQJobs @_ @Greeting schema queue 1 0
       retried <- traverse (runSimpleDb plainEnv . Ops.retryFromDLQ @_ @Greeting schema queue . dlqPrimaryKey) entry
       fmap (fmap traceContext) retried `shouldBe` Just (Just (traceContext stored))
@@ -254,17 +263,13 @@ spec = do
             ]
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
-  describe "provisioned dashboard" $ do
-    referenced <- runIO (referencedMetrics <$> TIO.readFile dashboardPath)
-
+  describe "provisioned dashboard" $ withProvisioned dashboardPath $ \referenced -> do
     it "queries only metrics the library registers" $ queriesOnlyDeclared referenced
 
     it "has a panel for every metric the library registers" $
       filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
 
-  describe "provisioned alerts" $ do
-    referenced <- runIO (referencedMetrics <$> TIO.readFile alertingPath)
-
+  describe "provisioned alerts" $ withProvisioned alertingPath $ \referenced ->
     it "query only metrics the library registers" $ queriesOnlyDeclared referenced
 
   describe "consumer spans" $ do
