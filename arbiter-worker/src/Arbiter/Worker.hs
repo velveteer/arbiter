@@ -945,7 +945,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
           -- left unfinalized, so the nacked reprocess does not record a failure.
-          releaseJobs config handoff unhandled
+          releaseOrWarn config handoff "Handing back a nacked batch's attempt failed" unhandled
           tryLog (batchLog config jobs) Info "Job(s) nacked, will be reprocessed"
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.

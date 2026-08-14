@@ -100,6 +100,7 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
           FROM input i
           WHERE j.id = i.id AND j.claim_seq = i.cseq
+            AND j.id IN (SELECT id FROM locked)
             AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = j.id)
             AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
           RETURNING j.id

@@ -958,8 +958,7 @@ function plainNavClick(e) {
 // Tab-active tracking
 // ---------------------------------------------------------------------------
 
-// Slots for trackTabActive's listeners. Teardown only sees a property the data
-// object declared, so every component calling trackTabActive must spread this.
+// Listener slots for trackTabActive.
 function tabActive() {
   return {
     _tabShownHandler: null,

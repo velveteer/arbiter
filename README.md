@@ -874,14 +874,9 @@ Exporters, endpoints and intervals come from the standard `OTEL_*` variables, in
 `OTEL_SDK_DISABLED=true`. Logs are emitted alongside your configured destination,
 carrying the job's trace, id, queue, and attempt.
 
-| Need | Use |
-|------|-----|
-| The telemetry handle, for `telemetrySummary` or other instrumentation | `withTelemetryFromEnv`, then `runWorkerPoolsWith` |
-| Your program installs its own SDK | `withExternalTelemetry`, then `runWorkerPoolsWith` |
-| Driving the pools some other way | `instrumentPools` + `withGauges` |
-
-The `With` variants also take the gauge loop's base log config. `withExternalTelemetry`
-covers metrics and logs, and spans find whatever tracer provider you install.
+To hold the telemetry handle yourself, to install your own SDK, or to drive the pools
+some other way, use `runWorkerPoolsWith` and the bracket that suits you. `Arbiter.Otel`
+has them. The `With` variants also take the gauge loop's base log config.
 
 ### Traces
 

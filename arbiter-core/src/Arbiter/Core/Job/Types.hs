@@ -391,7 +391,7 @@ defaultObservabilityHooks =
     }
 
 -- | Runs both hooks at each lifecycle point, left before right. The right one runs
--- however the left ended, and the left's failure is the one that propagates.
+-- however the left ended, and when both throw the right's failure propagates.
 instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
   a <> b =
     ObservabilityHooks

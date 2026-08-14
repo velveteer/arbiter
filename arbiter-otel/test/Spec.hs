@@ -102,6 +102,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel qualified as Otel
+import Arbiter.Otel.Gauges.Cells qualified as Cells
 
 newtype Greeting = Greeting Text
   deriving stock (Eq, Generic, Show)
@@ -274,6 +275,38 @@ spec = do
             , ("arbiter.queue.depth", [("queue", queue)])
             , ("arbiter.pg.backends", [])
             ]
+
+  -- The one series that tells a stopped refresh loop from a fresh reading.
+  describe "reading staleness" $ do
+    let scanned at = Cells.Live (Cells.Cached at (Cells.Snapshot [] Nothing [] [] []))
+
+    it "keeps the scan time a retired reading was taken at" $
+      Cells.lastScan (Cells.retire (scanned 100)) `shouldBe` Just 100
+
+    it "keeps it across a second retire" $
+      Cells.lastScan (Cells.retire (Cells.retire (scanned 100))) `shouldBe` Just 100
+
+    it "stops exporting the reading it retired" $
+      fmap Cells.takenAt (Cells.live (Cells.retire (scanned 100))) `shouldBe` Nothing
+
+    it "has no scan time before the first reading" $
+      Cells.lastScan (Cells.Idle Nothing) `shouldBe` Nothing
+
+  describe "counter baselines" $ do
+    let rise = Cells.riseSince ("arbiter.jobs.processed", [("outcome", "success")])
+        counted at total = fst (rise at total mempty)
+
+    it "counts nothing from the first scan" $
+      snd (rise 10 7 mempty) `shouldBe` 0
+
+    it "counts the rise between consecutive scans" $
+      snd (rise 20 11 (counted 10 7)) `shouldBe` 4
+
+    it "counts the whole total when the counter reset" $
+      snd (rise 20 3 (counted 10 7)) `shouldBe` 3
+
+    it "counts nothing from a scan already counted" $
+      snd (rise 10 9 (counted 10 7)) `shouldBe` 0
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
   describe "provisioned dashboard" $ withProvisioned dashboardPath $ \referenced -> do

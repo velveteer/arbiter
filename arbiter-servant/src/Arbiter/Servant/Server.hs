@@ -34,7 +34,7 @@ import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), crea
 import Arbiter.Worker.Cron (updateCronScheduleChecked)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Concurrent.STM
   ( TChan
   , TVar
@@ -49,7 +49,7 @@ import Control.Concurrent.STM
   , readTVarIO
   , writeTChan
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
+import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO)
 import Control.Monad (forever, guard, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -60,6 +60,7 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Pool qualified as Pool
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -1074,17 +1075,17 @@ defaultQueueStatsCacheTtl = 2
 -- | Keyed TTL cache under an epoch bumped by 'invalidate'.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
-  , cacheFillLock :: MVar ()
+  , cacheFilling :: TVar (Set.Set Text)
   }
 
 newCacheCell :: IO (CacheCell a)
-newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newMVar ()
+newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newTVarIO Set.empty
 
 -- | Serve the sole entry of a single-key cell.
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
 cachedFor ttl cell = cachedForKey ttl cell ""
 
--- | Serve one key. Concurrent misses collapse onto one 'produce', whose
+-- | Serve one key. Concurrent misses on a key collapse onto one 'produce', whose
 -- write is skipped if 'invalidate' bumped the epoch meanwhile.
 cachedForKey :: NominalDiffTime -> CacheCell a -> Text -> IO a -> IO a
 cachedForKey ttl cell key produce
@@ -1098,7 +1099,12 @@ cachedForKey ttl cell key produce
         (ts, v) <- Map.lookup key entries
         guard (diffUTCTime now ts < ttl)
         pure v
-    fill = withMVar (cacheFillLock cell) $ \() -> fresh >>= maybe store pure
+    fill = bracket_ acquire release (fresh >>= maybe store pure)
+    acquire = atomically $ do
+      inflight <- readTVar (cacheFilling cell)
+      check (Set.notMember key inflight)
+      modifyTVar' (cacheFilling cell) (Set.insert key)
+    release = atomically $ modifyTVar' (cacheFilling cell) (Set.delete key)
     store = do
       (epoch, _) <- readTVarIO (cacheEntries cell)
       v <- produce

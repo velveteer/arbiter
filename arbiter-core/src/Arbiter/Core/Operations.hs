@@ -343,6 +343,11 @@ advisoryXactLockSQL :: Text -> Int64 -> Q.Query (Maybe Text)
 advisoryXactLockSQL key pid =
   [QQ.sql|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, #{pid :: CInt8}))::text AS @{result :: Maybe CText}|]
 
+-- | 'advisoryXactLockSQL' over many ids, ascending, in one round trip.
+advisoryXactLockManySQL :: Text -> [Int64] -> Q.Query (Maybe Text)
+advisoryXactLockManySQL key pids =
+  [QQ.sql|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText} FROM unnest(#{pids :: [CInt8]}::bigint[]) AS t(id) ORDER BY id|]
+
 -- | The admission columns for a job, derived from its payload.
 admissionColumns
   :: forall payload. (HasConcurrency payload, HasRateLimit payload) => payload -> AdmissionColumns
@@ -938,10 +943,11 @@ ackJobInner schemaName tableName job = do
 -- row lock the caller goes on to take.
 lockJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
 lockJobParents schemaName tableName parents =
-  for_ (Set.toAscList (Set.fromList (catMaybes parents))) $ \pid ->
+  unless (null pids) $
     void $
-      MA.executeQuery
-        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+      MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
+  where
+    pids = Set.toAscList (Set.fromList (catMaybes parents))
 
 -- | Read a job's parent and take its advisory lock, before any row lock the caller takes.
 lockParentOf :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m (Maybe Int64)
@@ -2350,8 +2356,8 @@ sweepExhaustedForQueue schemaName tableName = withDbTransaction $ do
   where
     moveOne (jobId, cseq, mParentId, rollup) =
       Ap $
-        Sum
-          <$> moveToDLQFields LocksHeld Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup
+        Sum . either (const 0) id
+          <$> tryAny (moveToDLQFields LocksHeld Tmpl.MoveIfExhausted schemaName tableName sweepError jobId cseq mParentId rollup)
     sweepError = "max attempts exceeded (reaper sweep)"
 
 -- | Per-queue cap on jobs swept to the DLQ in one reaper pass, so a large
