@@ -172,6 +172,7 @@ module Arbiter.Core.Operations
   , runGatedBounded
   , runGatedShared
   , runGatedState
+  , runGatedStateBounded
   , setLocalStatementTimeout
   , micros
   , gateNameFor
@@ -188,7 +189,7 @@ import Control.Monad (foldM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither, parseMaybe)
-import Data.Bifunctor (first, second)
+import Data.Bifunctor (bimap, first, second)
 import Data.Bitraversable (bitraverse)
 import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
@@ -209,7 +210,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, modifyIORef', newIORef, readIORef, tryAny, withRunInIO)
+import UnliftIO (MonadUnliftIO, tryAny, withRunInIO)
 import UnliftIO.Timeout qualified as UIO
 
 import Arbiter.Core.Codec
@@ -2290,15 +2291,13 @@ refreshAllGroups
   -- ^ Where the previous pass left off, per queue.
   -> m ((Int64, [Text]), Map.Map TableName Text)
 refreshAllGroups schemaName queues cursors = do
-  ref <- liftIO (newIORef cursors)
-  swept <- sweepQueues (one ref) schemaName queues
-  (swept,) <$> liftIO (readIORef ref)
+  (refreshed, failed) <- sweepEachQueue one schemaName queues
+  let rewritten = sum [n | (_, (n, _)) <- refreshed]
+      resumed = foldl' (\acc (tbl, (_, next)) -> Map.alter (const next) tbl acc) cursors refreshed
+  pure ((rewritten, failed), resumed)
   where
     perQueue = max 1 (groupsRefreshBatch `div` max 1 (length queues))
-    one ref schema tbl = do
-      (n, next) <- refreshGroupsForQueue schema tbl perQueue (Map.lookup tbl cursors)
-      liftIO (modifyIORef' ref (Map.alter (const next) tbl))
-      pure n
+    one schema tbl = refreshGroupsForQueue schema tbl perQueue (Map.lookup tbl cursors)
 
 -- | 'refreshAllGroups' run to completion: each queue's groups table walked to the end,
 -- one batch and one transaction per pass. A deliberate repair, rather than the reaper's
@@ -2317,19 +2316,29 @@ refreshAllGroupsFully = sweepQueues walk
           let total = acc + n
           maybe (pure total) (go total . Just) next
 
--- | Run a per-queue sweep over every queue, returning the total and the names
--- of queues whose sweep threw.
+-- | Run a per-queue sweep over every queue, returning what each one swept and the
+-- names of queues whose sweep threw.
+sweepEachQueue
+  :: (MonadUnliftIO m)
+  => (SchemaName -> TableName -> m a)
+  -> SchemaName
+  -> [TableName]
+  -> m ([(TableName, a)], [Text])
+sweepEachQueue sweepOne schemaName queues = do
+  (failures, swept) <- partitionEithers <$> traverse run queues
+  pure (swept, failures)
+  where
+    run queue = bimap (const queue) (queue,) <$> tryAny (sweepOne schemaName queue)
+
+-- | 'sweepEachQueue' for a sweep reporting the rows it touched, totalled.
 sweepQueues
   :: (MonadUnliftIO m)
   => (SchemaName -> TableName -> m Int64)
   -> SchemaName
   -> [TableName]
   -> m (Int64, [Text])
-sweepQueues sweepOne schemaName queues = do
-  (failures, counts) <- partitionEithers <$> traverse run queues
-  pure (sum counts, failures)
-  where
-    run queue = first (const queue) <$> tryAny (sweepOne schemaName queue)
+sweepQueues sweepOne schemaName queues =
+  first (sum . map snd) <$> sweepEachQueue sweepOne schemaName queues
 
 -- | Sweep exhausted jobs across all queues. Returns the total moved and the
 -- names of queues whose sweep failed.
@@ -2794,6 +2803,19 @@ runGatedState
   -> m (Maybe a)
 runGatedState schemaName task interval work =
   runGatedInner schemaName task interval (fmap (second (Just . toJSON)) . work . (>>= parseMaybe parseJSON))
+
+-- | 'runGatedState' with each statement of @work@ bounded by @limit@, as
+-- 'runGatedBounded' bounds 'runGated'.
+runGatedStateBounded
+  :: (FromJSON s, MonadArbiter m, ToJSON s)
+  => SchemaName
+  -> Text
+  -> NominalDiffTime
+  -> NominalDiffTime
+  -> (Maybe s -> m (a, s))
+  -> m (Maybe a)
+runGatedStateBounded schemaName task interval limit work =
+  runGatedState schemaName task interval (\state -> setLocalStatementTimeout limit >> work state)
 
 -- | The gate body both forms share. 'Nothing' back from @work@ leaves the row's state
 -- as it was.

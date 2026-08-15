@@ -7,7 +7,7 @@ module Arbiter.Worker.Heartbeat
 import Arbiter.Core.Exceptions (JobForceCancelled (..), throwJobGoneIds)
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
-import Arbiter.Core.Job.Types (Job (..), JobRead, ObservabilityHooks (..))
+import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks (..))
 import Arbiter.Core.Trace (capturingContext)
 import Control.Exception (throwIO)
 import Control.Monad (forever, unless, void)
@@ -25,6 +25,7 @@ import UnliftIO.STM qualified as STM
 import Arbiter.Worker.Logger (LogConfig)
 import Arbiter.Worker.Logger.Internal (runHook, withJobContext, withJobContextOne)
 import Arbiter.Worker.Retry (retryOnExceptionForever)
+import Arbiter.Worker.Settle (hasIdIn)
 
 -- | Run an action with a heartbeat that extends visibility timeout for all jobs.
 --
@@ -91,7 +92,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs startTime jobs pending logCfg s
       unless (null stolenJobs) $
         throwJobGoneIds "reclaimed by another worker" stolenJobs
       let activeJobIds = Set.fromList [jobId | Arb.VisibilityExtended jobId <- results]
-          activeJobs = filter (\job -> Set.member (primaryKey job) activeJobIds) live
+          activeJobs = filter (hasIdIn activeJobIds) live
       currentTime <- liftIO getCurrentTime
       traverse_
         ( \job ->

@@ -1268,8 +1268,7 @@ runReaperStateOp
   -> m (Maybe a)
 runReaperStateOp logCfg schemaName stmtTimeout task every work =
   reaperGate logCfg task $
-    Ops.runGatedState schemaName task every $ \state ->
-      Ops.setLocalStatementTimeout stmtTimeout >> work state
+    Ops.runGatedStateBounded schemaName task every stmtTimeout work
 
 -- | Swallow a reaper op's failure, so one bad tick does not end the loop.
 reaperGate :: (MonadArbiter m) => LogConfig -> Text -> m (Maybe a) -> m (Maybe a)

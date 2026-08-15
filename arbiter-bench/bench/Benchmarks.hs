@@ -1039,7 +1039,7 @@ setupQueue simpleEnv totalJobs flavor = do
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue DISABLE TRIGGER USER")
   go 0
   execute_ conn ("ALTER TABLE " <> benchSchema <> ".bench_queue ENABLE TRIGGER USER")
-  runSimpleDb simpleEnv $ void HL.refreshAllGroups
+  runSimpleDb simpleEnv $ void HL.refreshAllGroupsFully
 
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue")
   execute_ conn ("ANALYZE " <> benchSchema <> ".bench_queue_groups")

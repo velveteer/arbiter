@@ -110,7 +110,7 @@ module Arbiter.Core.HighLevel
   , getParentStateSnapshot
 
     -- * Groups Table Operations
-  , refreshAllGroups
+  , refreshAllGroupsFully
 
     -- * Worker Registry Operations
   , registerWorker
@@ -1286,11 +1286,11 @@ getParentStateSnapshot jobId = do
 -- Walks every queue's groups table to the end, one bounded batch and one transaction
 -- at a time. A deliberate repair, not a hot path: the reaper runs
 -- 'Ops.refreshAllGroups' for a single batch per tick instead.
-refreshAllGroups
+refreshAllGroupsFully
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m (Int64, [Text])
-refreshAllGroups = do
+refreshAllGroupsFully = do
   schemaName <- getSchema
   Ops.refreshAllGroupsFully schemaName (registryTableNames (Proxy @(RegistryOf m)))
 

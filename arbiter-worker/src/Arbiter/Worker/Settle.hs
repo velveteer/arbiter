@@ -108,9 +108,6 @@ data Settled payload = Settled [Job.JobRead payload] [Job.JobRead payload]
 instance Semigroup (Settled payload) where
   Settled a b <> Settled c d = Settled (a <> c) (b <> d)
 
-instance Monoid (Settled payload) where
-  mempty = Settled [] []
-
 -- | Jobs a settle finalized.
 finalized :: [Job.JobRead payload] -> Settled payload
 finalized js = Settled js []

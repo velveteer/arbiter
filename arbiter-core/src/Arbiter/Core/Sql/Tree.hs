@@ -140,6 +140,22 @@ lockedByIdsCte tbl ids =
     )
   |]
 
+-- | Recursive CTEs binding @ancestors@ to the rows @seed@ names and every parent above
+-- them, and @roots@ to the tops of those trees. Deduplicating, since two seeds under one
+-- ancestor reach it twice.
+rootsFromCte :: Text -> Query () -> Query ()
+rootsFromCte tbl seed =
+  [sql|
+    WITH RECURSIVE ancestors AS (
+      SELECT id, parent_id FROM ${tbl} WHERE ${seed}
+      UNION
+      SELECT j.id, j.parent_id FROM ${tbl} j JOIN ancestors a ON j.id = a.parent_id
+    ),
+    roots AS (
+      SELECT id FROM ancestors WHERE parent_id IS NULL
+    )
+  |]
+
 -- | 'descendantsFromCte' seeded from several roots, so their union locks in one pass.
 -- Deduplicating, since a root named alongside its own ancestor is reached twice.
 descendantsOfCte :: Text -> [Int64] -> Query ()
@@ -171,17 +187,10 @@ lockJobTreesSQL schema tableName jobIds =
 lockJobTreesFromRootSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesFromRootSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
+      cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       locked = lockDescendantsCte tbl
    in [sql|
-        WITH RECURSIVE
-        ancestors AS (
-          SELECT id, parent_id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})
-          UNION
-          SELECT j.id, j.parent_id FROM ${tbl} j JOIN ancestors a ON j.id = a.parent_id
-        ),
-        roots AS (
-          SELECT id FROM ancestors WHERE parent_id IS NULL
-        ),
+        ${cte},
         descendants AS (
           SELECT id FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]}) OR id IN (SELECT id FROM roots)
           UNION
@@ -280,19 +289,12 @@ selectCancelledReapableJobsSQL schema tableName limit =
 cancelJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
+      cte = rootsFromCte tbl [sql|id = #{jobId :: CInt8}|]
       locked = lockDescendantsCte tbl
    in [sql|
-        WITH RECURSIVE
-        ancestors AS (
-          SELECT id, parent_id FROM ${tbl} WHERE id = #{jobId :: CInt8}
-          UNION ALL
-          SELECT j.id, j.parent_id FROM ${tbl} j JOIN ancestors a ON j.id = a.parent_id
-        ),
-        root AS (
-          SELECT id FROM ancestors WHERE parent_id IS NULL
-        ),
+        ${cte},
         descendants AS (
-          SELECT id FROM ${tbl} WHERE id = (SELECT id FROM root)
+          SELECT id FROM ${tbl} WHERE id IN (SELECT id FROM roots)
           UNION ALL
           SELECT j.id FROM ${tbl} j JOIN descendants d ON j.parent_id = d.id
         ),

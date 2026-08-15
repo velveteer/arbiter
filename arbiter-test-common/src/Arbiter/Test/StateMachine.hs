@@ -1049,7 +1049,7 @@ runReaper
   -> Text
   -> sm ()
 runReaper schema table = do
-  void (HL.refreshAllGroups @sm)
+  void (HL.refreshAllGroupsFully @sm)
   void (Ops.sweepExhaustedJobs schema [table])
 
 cRefresh
@@ -1477,7 +1477,7 @@ serializationGuard run schema table withConn reset = do
         actor = replicateM_ rounds $ do
           act <- Gen.sample (genAction @sm schema table withConn)
           withRetry (run act)
-        reaper = replicateM_ (rounds * 2) $ withRetry (run (void (HL.refreshAllGroups @sm)))
+        reaper = replicateM_ (rounds * 2) $ withRetry (run (void (HL.refreshAllGroupsFully @sm)))
     mapConcurrently_ id (reaper : replicate nActors actor)
     hol <- countHolViolations schema table withConn
     hol `shouldBe` []
@@ -1716,7 +1716,7 @@ reclaimGuard run reset = do
   -- After a reaper recompute of in_flight_until.
   reset
   insClaimExpire "rc-reaper"
-  void (run (HL.refreshAllGroups @sm))
+  void (run (HL.refreshAllGroupsFully @sm))
   c2 <- claim1
   length c2 `shouldBe` 1
 
