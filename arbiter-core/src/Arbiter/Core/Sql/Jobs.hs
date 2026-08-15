@@ -30,9 +30,10 @@ module Arbiter.Core.Sql.Jobs
   , countDLQFilteredSQL
   , allJobColumns
   , allDLQColumns
-  , jobColsExceptError
   , jobColsExceptId
   , dlqCarriedCols
+  , requeuedCols
+  , enqueuedAgainCols
   , jobColumns
   , insertJobSQL
   , insertJobReplaceSQL
@@ -332,36 +333,76 @@ allJobColumns = codecColumns (jobRowCodec "")
 allDLQColumns :: [Text]
 allDLQColumns = codecColumns (dlqRowCodec "")
 
--- | All job columns except @id@ and @last_error@, comma-separated.
--- Used for DLQ INSERT operations where @id@ becomes @job_id@ and @last_error@ is overridden.
-jobColsExceptError :: Text
-jobColsExceptError = T.intercalate ", " $ filter (/= "last_error") (drop 1 allJobColumns)
+-- | All job columns except @id@ and @last_error@.
+jobColsExceptErrorColumns :: [Text]
+jobColsExceptErrorColumns = filter (/= "last_error") (drop 1 allJobColumns)
 
 -- | All job read columns except @id@, comma-separated. Used for the archive
 -- INSERT, where the main table's @id@ becomes the archive's @job_id@ and every
 -- other read column is copied verbatim.
 jobColsExceptId :: Text
-jobColsExceptId = T.intercalate ", " (drop 1 allJobColumns)
+jobColsExceptId = aliasedCols Nothing (drop 1 allJobColumns)
 
 -- | Job columns carried through a DLQ round-trip: the read columns plus write-only rate_limit_cost.
 dlqCarriedCols :: Text
-dlqCarriedCols = jobColsExceptError <> ", rate_limit_cost"
+dlqCarriedCols = aliasedCols Nothing dlqCarriedColumns
+
+dlqCarriedColumns :: [Text]
+dlqCarriedColumns = jobColsExceptErrorColumns <> ["rate_limit_cost"]
+
+-- | Job columns a DLQ retry carries back to the main table, optionally aliased. The
+-- rest are re-armed by the retry itself: a fresh attempt count, a bumped claim token,
+-- a recomputed suspended flag, no claim, no dedup key, and no timestamps of the failed run.
+requeuedCols :: Maybe Text -> Text
+requeuedCols mAlias = aliasedCols mAlias requeuedColumns
+
+-- | 'requeuedCols' for an archive re-enqueue, which starts a standalone job and so
+-- leaves the parent link behind too.
+enqueuedAgainCols :: Text
+enqueuedAgainCols = aliasedCols Nothing (filter (`notElem` ["parent_id", "parent_state"]) requeuedColumns)
+
+-- | The columns a DLQ retry carries back to the main table: every read column it does
+-- not re-arm, plus write-only rate_limit_cost.
+requeuedColumns :: [Text]
+requeuedColumns = filter (`notElem` reArmedColumns) allJobColumns <> ["rate_limit_cost"]
+
+-- | The columns a requeue sets for itself rather than copying from the failed run.
+reArmedColumns :: [Text]
+reArmedColumns =
+  [ "id"
+  , "inserted_at"
+  , "updated_at"
+  , "attempts"
+  , "last_error"
+  , "last_attempted_at"
+  , "not_visible_until"
+  , "dedup_key"
+  , "dedup_strategy"
+  , "suspended"
+  , "claimed_by"
+  , "claim_seq"
+  ]
 
 -- | Standard job column list (for SELECT and RETURNING)
 jobColumns :: Maybe Text -> Text
-jobColumns mAlias = T.intercalate ", " $ map withAlias allJobColumns
+jobColumns mAlias = aliasedCols mAlias allJobColumns
+
+-- | Comma-separated column list, each name qualified by @alias@ when given.
+aliasedCols :: Maybe Text -> [Text] -> Text
+aliasedCols mAlias = T.intercalate ", " . map withAlias
   where
     withAlias name = maybe name (\alias -> alias <> "." <> name) mAlias
 
 -- | @DO UPDATE SET@ body for a replace-dedup upsert. Copies each writable column
 -- from the excluded row, then re-arms the replaced job for a fresh run.
-dedupUpdateSet :: Text
-dedupUpdateSet = T.intercalate ", " (copied <> rearm)
+dedupUpdateSet :: Text -> Text
+dedupUpdateSet tbl = T.intercalate ", " (copied <> rearm)
   where
-    -- dedup_key is the conflict key. attempts and last_error are re-armed below.
-    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "last_error"]) writeColumnNames)
+    -- dedup_key is the conflict key. attempts, claim_seq and last_error are re-armed below.
+    copied = map excludedAssignment (filter (`notElem` ["dedup_key", "attempts", "claim_seq", "last_error"]) writeColumnNames)
     rearm =
       [ "attempts = 0"
+      , "claim_seq = " <> tbl <> ".claim_seq + 1"
       , "last_error = NULL"
       , "updated_at = NOW()"
       , "throttled_until = NULL"
@@ -369,7 +410,7 @@ dedupUpdateSet = T.intercalate ", " (copied <> rearm)
       , "claimed_by = NULL"
       ]
 
--- | Guard: an existing row may be replaced only if idle and childless.
+-- | Guard: an existing row may be replaced only if idle, unflagged and childless.
 replaceableGuard :: Text -> Text -> Text
 replaceableGuard tbl dlqTbl =
   [text|
@@ -377,6 +418,7 @@ replaceableGuard tbl dlqTbl =
       OR ${tbl}.not_visible_until IS NULL
       OR ${tbl}.not_visible_until <= NOW()
       OR ${tbl}.last_error IS NOT NULL)
+      AND ${tbl}.cancel_requested_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
       AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)
   |]
@@ -408,12 +450,13 @@ insertJobReplaceSQL schema tableName valuesFrag =
       dlqTbl = jobQueueDLQTable schema tableName
       columns = jobColumns Nothing
       guard = replaceableGuard tbl dlqTbl
+      dedupSet = dedupUpdateSet tbl
    in rows
         (jobRowCodec tableName)
         [sql|
           INSERT INTO ${tbl} ${valuesFrag}
           ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-            ${dedupUpdateSet}
+            ${dedupSet}
           WHERE ${guard}
           RETURNING ${columns}
         |]
@@ -437,12 +480,13 @@ insertJobsBatchBase schema tableName batchSrc returning =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       guard = replaceableGuard tbl dlqTbl
+      dedupSet = dedupUpdateSet tbl
    in [sql|
         INSERT INTO ${tbl} ${batchSrc}
         WHERE (src.parent_id IS NULL
             OR EXISTS (SELECT 1 FROM ${tbl} p WHERE p.id = src.parent_id))
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          ${dedupUpdateSet}
+          ${dedupSet}
         WHERE EXCLUDED.dedup_strategy = 'replace'
           AND ${guard}
         ${returning}

@@ -7,6 +7,7 @@ module Arbiter.Servant.Types
   ( module Arbiter.Servant.Types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
+  , QueueOverview (..)
   , QueueRow (..)
   , WorkerRow (..)
   , RateLimitPolicyView (..)
@@ -25,9 +26,18 @@ import Arbiter.Core.Concurrency.Stats
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobStatus, JobWrite, isRollup)
+import Arbiter.Core.Job.Types
+  ( Job (..)
+  , JobRead
+  , JobStatus
+  , JobWrite
+  , isRollup
+  , toTraceContext
+  , traceparent
+  , tracestate
+  )
 import Arbiter.Core.Job.Types qualified as Arb
-import Arbiter.Core.Operations (QueueStats)
+import Arbiter.Core.Operations (QueueOverview (..), QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Stats
   ( RateLimitBucketView (..)
@@ -79,8 +89,11 @@ apiJobPairs job =
   , "parentId" .= parentId job
   , "parentState" .= parentState job
   , "isRollup" .= isRollup job
+  , "traceparent" .= (traceparent <$> traceContext job)
+  , "tracestate" .= (tracestate =<< traceContext job)
   , "suspended" .= suspended job
   , "claimedBy" .= Arb.claimedBy job
+  , "claimSeq" .= Arb.claimSeq job
   , "archiveFor" .= archiveFor job
   , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
   , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
@@ -111,8 +124,10 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
         <*> v .: "maxAttempts"
         <*> v .:? "parentId"
         <*> v .:? "parentState"
+        <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
         <*> v .:? "suspended" .!= False
         <*> v .:? "claimedBy"
+        <*> v .:? "claimSeq" .!= 0
         <*> v .:? "archiveFor"
         <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
     pure $ ApiJob job
@@ -154,8 +169,10 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
         <*> v .:? "maxAttempts"
         <*> pure Nothing -- parentId: managed internally
         <*> pure Nothing -- parentState: managed internally
+        <*> pure Nothing -- traceContext: stamped at enqueue
         <*> pure False -- suspended: managed internally
         <*> pure Nothing -- claimedBy: managed internally
+        <*> pure 0 -- claimSeq: stamped by the claim
         -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.
         <*> v .:! "archiveFor" .!= Nothing
         <*> pure () -- admission: server attaches from the payload's selectors
@@ -253,21 +270,9 @@ data StatsResponse = StatsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | One queue's stats in the bulk landing response, with pause state: the queue's
--- own paused flag, plus how many of its live workers are paused.
-data QueueStatsEntry = QueueStatsEntry
-  { queue :: Text
-  , stats :: QueueStats
-  , paused :: Bool
-  , workersLive :: Int
-  , workersPaused :: Int
-  }
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
-
 -- | Every queue's stats, for the landing overview.
 data AllStatsResponse = AllStatsResponse
-  { queues :: [QueueStatsEntry]
+  { queues :: [QueueOverview]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

@@ -26,7 +26,7 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead)
-import Arbiter.Core.Sql.Jobs (jobColsExceptId, jobColumns)
+import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, jobColsExceptId, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
@@ -125,19 +125,21 @@ deleteArchiveJobsBatchSQL schema tableName archiveIds =
    in [sql|DELETE FROM ${archiveTbl} WHERE id = ANY(#{archiveIds :: [CInt8]})|]
 
 -- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
--- row. Carries payload, group, priority, max_attempts, admission keys/cost, and
--- archive_for. Resets everything else (attempts, error, parent, dedup) to
--- column defaults. Parameters: id (archive primary key)
+-- row. Carries payload, group, priority, max_attempts, admission keys/cost,
+-- archive_for, and the trace context it was enqueued with. Resets everything
+-- else (attempts, error, parent, dedup) to column defaults.
+-- Parameters: id (archive primary key)
 reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 reEnqueueFromArchiveSQL schema tableName archiveId =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
+      carried = enqueuedAgainCols
    in rows
         (jobRowCodec tableName)
         [sql|
-          INSERT INTO ${tbl} (payload, group_key, priority, max_attempts, archive_for, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix)
-          SELECT payload, group_key, priority, max_attempts, archive_for, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix
+          INSERT INTO ${tbl} (${carried})
+          SELECT ${carried}
           FROM ${archiveTbl}
           WHERE id = #{archiveId :: CInt8}
           RETURNING ${columns}

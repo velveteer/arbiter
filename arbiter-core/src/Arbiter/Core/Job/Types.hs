@@ -26,9 +26,16 @@ module Arbiter.Core.Job.Types
   , DedupKey (..)
   , dedupParts
 
+    -- * Trace context
+  , TraceContext (..)
+  , toTraceContext
+
     -- * Observability
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
+  , andThen
+  , JobId
+  , ClaimSeq
   , ClaimTime
   , CurrentTime
   , StartTime
@@ -37,6 +44,7 @@ module Arbiter.Core.Job.Types
   , BackoffDelay
   ) where
 
+import Control.Exception qualified as E
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Int (Int32, Int64)
@@ -45,6 +53,7 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
+import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
@@ -90,12 +99,18 @@ data Job payload key q insertedAt adm = Job
   -- rollup finalizer, and overwrites it with the final results map before
   -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
   -- results table. 'isRollup' is derived from whether this is non-null.
+  , traceContext :: Maybe TraceContext
+  -- ^ W3C trace context captured at enqueue.
   , suspended :: Bool
   -- ^ Whether this job is suspended (not claimable).
   -- @TRUE@ for: finalizers waiting for children to complete,
   -- or operator-paused jobs.
   , claimedBy :: Maybe UUID
   -- ^ Worker pool UUID that last claimed this job.
+  , claimSeq :: Int64
+  -- ^ Identifies the claim this row was read under. Every claim bumps it and
+  -- nothing decrements it, so a finalize matching on it cannot hit a later claim
+  -- the way an @attempts@ match can. @0@ in 'JobWrite', which never sets it.
   , archiveFor :: Maybe Int32
   -- ^ Retention in seconds for this job's completed-job archive entry.
   -- @Just n@ archives the job on ack and keeps the entry for @n@ seconds.
@@ -188,8 +203,10 @@ defaultJob p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , claimSeq = 0
     , archiveFor = Nothing
     , admission = ()
     }
@@ -217,8 +234,10 @@ defaultGroupedJob gk p =
     , maxAttempts = Nothing
     , parentId = Nothing
     , parentState = Nothing
+    , traceContext = Nothing
     , suspended = False
     , claimedBy = Nothing
+    , claimSeq = 0
     , archiveFor = Nothing
     , admission = ()
     }
@@ -237,6 +256,17 @@ type JobPayload payload =
 -- | The registry declares both admission policy kinds.
 type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
+
+-- | A job's W3C trace context.
+data TraceContext = TraceContext
+  { traceparent :: Text
+  , tracestate :: Maybe Text
+  }
+  deriving stock (Eq, Generic, Show)
+
+-- | A trace context from its two stored halves.
+toTraceContext :: Maybe Text -> Maybe Text -> Maybe TraceContext
+toTraceContext tp ts = flip TraceContext ts <$> tp
 
 -- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 data DedupKey
@@ -266,6 +296,8 @@ dedupParts Nothing = (Nothing, Nothing)
 dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
 dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
 
+type JobId = Int64
+type ClaimSeq = Int64
 type ClaimTime = UTCTime
 type CurrentTime = UTCTime
 type StartTime = UTCTime
@@ -300,8 +332,9 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> StartTime
       -> EndTime
       -> m ()
-  -- ^ Called after a job handler fails. Use @diffUTCTime@ on the timestamps
-  -- to calculate job duration.
+  -- ^ Called after a job handler fails and the job was retried or dead-lettered.
+  -- A deliberate cancel reports through 'onJobCancelled' instead. Use @diffUTCTime@
+  -- on the timestamps to calculate job duration.
   , onJobRetry
       :: (JobPayload payload)
       => JobRead payload
@@ -314,6 +347,18 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> JobRead payload
       -> m ()
   -- ^ Called when a job is successfully moved to the dead-letter queue.
+  , onJobCancelled
+      :: (JobPayload payload)
+      => JobRead payload
+      -> ErrorMsg
+      -> m ()
+  -- ^ Called when a handler cancelled the job's tree or branch and the rows were deleted.
+  , onJobUnavailable
+      :: (JobPayload payload)
+      => JobRead payload
+      -> ErrorMsg
+      -> m ()
+  -- ^ Called when a claimed job went away mid-flight and will not be retried here.
   , onJobHeartbeat
       :: (JobPayload payload)
       => JobRead payload
@@ -340,5 +385,29 @@ defaultObservabilityHooks =
     , onJobFailure = \_ _ _ _ -> pure ()
     , onJobRetry = \_ _ -> pure ()
     , onJobFailedAndMovedToDLQ = \_ _ -> pure ()
+    , onJobCancelled = \_ _ -> pure ()
+    , onJobUnavailable = \_ _ -> pure ()
     , onJobHeartbeat = \_ _ _ -> pure ()
     }
+
+-- | Runs both hooks at each lifecycle point, left before right. The right one runs
+-- however the left ended, and when both throw the right's failure propagates.
+instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
+  a <> b =
+    ObservabilityHooks
+      { onJobClaimed = \j t -> onJobClaimed a j t `andThen` onJobClaimed b j t
+      , onJobSuccess = \j s e -> onJobSuccess a j s e `andThen` onJobSuccess b j s e
+      , onJobFailure = \j msg s e -> onJobFailure a j msg s e `andThen` onJobFailure b j msg s e
+      , onJobRetry = \j d -> onJobRetry a j d `andThen` onJobRetry b j d
+      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j `andThen` onJobFailedAndMovedToDLQ b msg j
+      , onJobCancelled = \j msg -> onJobCancelled a j msg `andThen` onJobCancelled b j msg
+      , onJobUnavailable = \j msg -> onJobUnavailable a j msg `andThen` onJobUnavailable b j msg
+      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s `andThen` onJobHeartbeat b j c s
+      }
+
+instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
+  mempty = defaultObservabilityHooks
+
+-- | base's @finally@, so the second action stays interruptible unlike UnliftIO's.
+andThen :: (MonadUnliftIO m) => m () -> m () -> m ()
+andThen first second = withRunInIO $ \run -> run first `E.finally` run second

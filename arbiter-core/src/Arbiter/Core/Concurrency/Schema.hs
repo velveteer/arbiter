@@ -7,7 +7,9 @@
 module Arbiter.Core.Concurrency.Schema
   ( -- * Table names
     arbiterConcurrencyTable
+  , arbiterConcurrencyTableName
   , arbiterConcurrencyPoliciesTable
+  , arbiterConcurrencyPoliciesTableName
 
     -- * SQL fragments
   , concurrencyAdvisoryLockExpr
@@ -41,12 +43,18 @@ import Arbiter.Core.SqlLiterals (intLiteral, quoteIdentifier, textLiteral)
 -- | Qualified name of the global per-key in-flight count table.
 arbiterConcurrencyTable :: SchemaName -> Text
 arbiterConcurrencyTable schemaName =
-  quoteIdentifier schemaName <> ".arbiter_concurrency"
+  quoteIdentifier schemaName <> "." <> arbiterConcurrencyTableName
+
+arbiterConcurrencyTableName :: Text
+arbiterConcurrencyTableName = "arbiter_concurrency"
 
 -- | Qualified name of the app-global pool policies table.
 arbiterConcurrencyPoliciesTable :: SchemaName -> Text
 arbiterConcurrencyPoliciesTable schemaName =
-  quoteIdentifier schemaName <> ".arbiter_concurrency_policies"
+  quoteIdentifier schemaName <> "." <> arbiterConcurrencyPoliciesTableName
+
+arbiterConcurrencyPoliciesTableName :: Text
+arbiterConcurrencyPoliciesTableName = "arbiter_concurrency_policies"
 
 -- | The per-key advisory lock id, identical for the enqueue trigger and the prune.
 concurrencyAdvisoryLockExpr :: Text -> Text

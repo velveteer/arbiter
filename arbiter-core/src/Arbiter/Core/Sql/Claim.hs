@@ -465,7 +465,8 @@ decisionCte admission =
       | otherwise = "UNION ALL SELECT id, FALSE, defer_until FROM rl_deferred"
 
 -- | The @claimed@ UPDATE. Rate limiting splits it into an admit/defer decision.
--- Without it, a straight claim of the admitted ids.
+-- Without it, a straight claim of the admitted ids. A defer clears the holder, so it
+-- moves the token too.
 claimedCte :: ClaimAdmission -> Text -> Text -> Text -> Text
 claimedCte admission tbl timeout claimedBy
   | admitRateLimited admission =
@@ -480,6 +481,7 @@ claimedCte admission tbl timeout claimedBy
                 WHEN dc._admit THEN j.attempts + 1
                 ELSE j.attempts
               END,
+              claim_seq = j.claim_seq + 1,
               last_attempted_at = CASE
                 WHEN dc._admit THEN NOW()
                 ELSE j.last_attempted_at
@@ -502,6 +504,7 @@ claimedCte admission tbl timeout claimedBy
           UPDATE ${tbl} j
           SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
               attempts = j.attempts + 1,
+              claim_seq = j.claim_seq + 1,
               last_attempted_at = NOW(),
               updated_at = NOW(),
               claimed_by = ${claimedBy}

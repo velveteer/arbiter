@@ -60,6 +60,7 @@ import UnliftIO.Exception (tryAny)
 
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.Threads (labelArbiterThread)
 
 -- | A received notification: the channel it arrived on and its payload.
 data Notification = Notification
@@ -176,7 +177,7 @@ startHub listener = do
           , hubSubscribed = subV
           , hubThread = threadVar
           }
-  thread <- Async.asyncWithUnmask $ \unmask -> unmask (hubLoop listener hub)
+  thread <- Async.asyncWithUnmask $ \unmask -> unmask (labelArbiterThread "listener" Nothing >> hubLoop listener hub)
   putMVar threadVar thread
   pure hub
 

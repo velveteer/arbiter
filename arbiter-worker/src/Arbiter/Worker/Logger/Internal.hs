@@ -4,37 +4,22 @@
 --
 -- This module is not part of the public API.
 module Arbiter.Worker.Logger.Internal
-  ( logMessage
-  , tryLog
-  , withJobContext
+  ( withJobContext
   , withJobContextOne
   , withJobContextList
-  , showJobIds
   , runHook
   ) where
 
 import Arbiter.Core.Job.Types qualified as Job
 import Control.Exception (displayException)
-import Control.Monad (void, when)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Logger qualified as ML
-import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson (KeyValue (..), object)
-import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
-import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, tryAny)
 
-import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
-
--- | Log a message using the given config.
-logMessage :: LogConfig -> LogLevel -> Text -> IO ()
-logMessage config level msg = when (level >= minLogLevel config) $ do
-  extraCtx <- additionalContext config
-  runWithDestination (logDestination config) extraCtx level msg
+import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), tryLog)
 
 -- | Augment a 'LogConfig' so every message it emits carries the jobs' fields.
 -- The context is folded into 'additionalContext', which is evaluated only when a
@@ -54,13 +39,13 @@ withJobContextList config = maybe config (withJobContext config) . nonEmpty
 
 -- | Building job context is wasted work when logs are discarded.
 loggingActive :: LogConfig -> Bool
-loggingActive config = case logDestination config of
-  LogDiscard -> False
-  _ -> True
+loggingActive = destinationActive . logDestination
 
--- | Comma-separated job ids for log messages.
-showJobIds :: [Int64] -> Text
-showJobIds = T.intercalate ", " . map (T.pack . show)
+destinationActive :: LogDestination -> Bool
+destinationActive = \case
+  LogDiscard -> False
+  LogTee first second -> destinationActive first || destinationActive second
+  _ -> True
 
 -- | Build structured context for a batch of jobs.
 buildJobContext :: NonEmpty (Job.JobRead payload) -> [Pair]
@@ -73,27 +58,6 @@ buildJobContext jobs = ["jobs" .= map (object . mkContext) (toList jobs)]
       , "job_group_key" .= Job.groupKey job
       , "job_queue" .= Job.queueName job
       ]
-
--- | Run the logger with the appropriate destination and context.
-runWithDestination :: LogDestination -> [Pair] -> LogLevel -> Text -> IO ()
-runWithDestination dest ctx level msg = case dest of
-  LogStdout -> MLA.runStdoutLoggingT $ MLA.withThreadContext ctx $ logAt level msg
-  LogStderr -> MLA.runStderrLoggingT $ MLA.withThreadContext ctx $ logAt level msg
-  LogFastLogger loggerSet -> MLA.runFastLoggingT loggerSet $ MLA.withThreadContext ctx $ logAt level msg
-  LogCallback cb -> do
-    threadCtx <- KM.toList <$> MLA.myThreadContext
-    cb level msg (threadCtx <> ctx)
-  LogDiscard -> pure ()
-  where
-    logAt :: (ML.MonadLogger m) => LogLevel -> Text -> m ()
-    logAt Debug = ML.logDebugN
-    logAt Info = ML.logInfoN
-    logAt Warning = ML.logWarnN
-    logAt Error = ML.logErrorN
-
--- | Log a message, swallowing any exceptions from the logging infrastructure.
-tryLog :: (MonadUnliftIO m) => LogConfig -> LogLevel -> Text -> m ()
-tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
 
 -- | Run an observability hook, catching and logging any exceptions.
 runHook

@@ -17,6 +17,7 @@ module Arbiter.Servant.Server
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
+  , defaultQueueStatsCacheTtl
   , BuildServer (..)
   ) where
 
@@ -28,6 +29,7 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
+import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker.Cron (updateCronScheduleChecked)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
@@ -47,10 +49,9 @@ import Control.Concurrent.STM
   , readTVarIO
   , writeTChan
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, handle, throwIO)
-import Control.Monad (forever, guard, join, unless, void, when)
+import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO)
+import Control.Monad (forever, guard, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LBS
@@ -59,6 +60,7 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Pool qualified as Pool
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -113,6 +115,11 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- ^ Short-TTL cache for the concurrency policy list, collapsing dashboard polls.
   , allQueueStatsCache :: CacheCell AllStatsResponse
   -- ^ Short-TTL cache for the all-queues overview aggregate, collapsing landing polls.
+  , queueStatsCache :: CacheCell StatsResponse
+  -- ^ Per-queue stats cache, collapsing the dashboard's event-driven refetches.
+  , queueStatsCacheTtl :: NominalDiffTime
+  -- ^ Per-queue stats staleness, or zero to always hit the database.
+  -- Default: 'defaultQueueStatsCacheTtl'.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -144,9 +151,10 @@ initArbiterServer
 initArbiterServer _proxy connStr schemaName = do
   env <- createSimpleEnvWithConfig (Proxy @registry) connStr schemaName serverPoolConfig
   hub <- newMVar Nothing
-  rlCache <- newTVarIO (0, Nothing)
-  ccCache <- newTVarIO (0, Nothing)
-  statsCache <- newTVarIO (0, Nothing)
+  rlCache <- newCacheCell
+  ccCache <- newCacheCell
+  statsCache <- newCacheCell
+  perQueueCache <- newCacheCell
   pure
     ArbiterServerConfig
       { serverEnv = env
@@ -155,6 +163,8 @@ initArbiterServer _proxy connStr schemaName = do
       , rateLimitPoliciesCache = rlCache
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
+      , queueStatsCache = perQueueCache
+      , queueStatsCacheTtl = defaultQueueStatsCacheTtl
       }
 
 -- | Jobs API handlers for a specific table
@@ -250,7 +260,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let env = serverEnv config
       schemaName = schema env
 
-  mJob <- liftIO $ runSimpleDb env $ do
+  mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
     case (inserted, dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
@@ -273,7 +283,11 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
       schemaName = schema env
       writes = map unApiJobWrite jobWrites
 
-  inserted <- liftIO $ runSimpleDb env $ Ops.insertJobsBatch schemaName tableName writes
+  inserted <-
+    liftIO $
+      runSimpleDb env $
+        withPublishSpan tableName writes $
+          Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 
@@ -372,16 +386,8 @@ moveToDLQHandler tableName config jobId = do
     mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
     case mJob of
       Nothing -> pure Nothing
-      Just job -> do
-        -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-        when (isRollup job) $ do
-          (results, failures, mSnapshot, _dlqFailures) <-
-            Ops.readChildResultsRaw schemaName tableName (primaryKey job)
-          let merged = Ops.mergeRawChildResults results failures mSnapshot
-          when (not (Map.null merged)) $
-            void $
-              Ops.persistParentState schemaName tableName (primaryKey job) (toJSON merged)
-        Just <$> Ops.moveToDLQ schemaName tableName "Manually moved to DLQ via admin API" job
+      Just job ->
+        Just <$> Ops.moveToDLQ Ops.TakeLocks schemaName tableName "Manually moved to DLQ via admin API" job
 
   case result of
     Nothing -> throwError err404 {errBody = "Job not found"}
@@ -711,15 +717,16 @@ getStatsHandler
    . Text
   -> ArbiterServerConfig registry
   -> Handler StatsResponse
-getStatsHandler tableName config = do
-  let env = serverEnv config
-      schemaName = schema env
+getStatsHandler tableName config =
+  liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
+    let env = serverEnv config
+        schemaName = schema env
 
-  queueStats <- liftIO $ runSimpleDb env $ Ops.getQueueStats schemaName tableName
-  now <- liftIO getCurrentTime
-  let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
+    queueStats <- runSimpleDb env $ Ops.getQueueStats schemaName tableName
+    now <- getCurrentTime
+    let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
 
-  pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
+    pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
 
 -- | Every queue's stats in one request, for the landing overview.
 getAllStatsHandler
@@ -731,11 +738,7 @@ getAllStatsHandler config tables =
   liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
     let env = serverEnv config
         schemaName = schema env
-    rows <- runSimpleDb env $ Ops.getAllQueueStats schemaName tables
-    pure $ AllStatsResponse {queues = map toEntry rows}
-  where
-    toEntry (Ops.QueueOverview q s qp wl wp) =
-      QueueStatsEntry {queue = q, stats = s, paused = qp, workersLive = fromIntegral wl, workersPaused = fromIntegral wp}
+    AllStatsResponse <$> runSimpleDb env (Ops.getAllQueueStats schemaName tables)
 
 -- | Table API handlers for a specific table
 tableServer
@@ -797,6 +800,7 @@ setQueuePausedHandler config knownQueues p queue = do
   void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
   -- The landing overview shows each queue's paused flag, so refresh it promptly.
   invalidate (allQueueStatsCache config)
+  invalidate (queueStatsCache config)
   pure NoContent
 
 -- | Events server - raw WAI application for SSE streaming.
@@ -1064,24 +1068,54 @@ policyStatsCacheTtl = 10
 overviewStatsCacheTtl :: NominalDiffTime
 overviewStatsCacheTtl = 5
 
--- | A TTL cache cell: an epoch bumped by 'invalidate', plus the current entry.
-type CacheCell a = TVar (Word, Maybe (UTCTime, a))
+-- | Default floor between per-queue stats scans.
+defaultQueueStatsCacheTtl :: NominalDiffTime
+defaultQueueStatsCacheTtl = 2
 
--- | Serve from a short-TTL cache cell, skipping the write when 'invalidate' bumped the epoch mid-produce, so an invalidation is never clobbered.
+-- | Keyed TTL cache under an epoch bumped by 'invalidate'.
+data CacheCell a = CacheCell
+  { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
+  , cacheFilling :: TVar (Set.Set Text)
+  }
+
+newCacheCell :: IO (CacheCell a)
+newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newTVarIO Set.empty
+
+-- | Serve the sole entry of a single-key cell.
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
-cachedFor ttl cell produce = do
-  now <- getCurrentTime
-  (epoch, cached) <- readTVarIO cell
-  case cached of
-    Just (ts, v) | diffUTCTime now ts < ttl -> pure v
-    _ -> do
+cachedFor ttl cell = cachedForKey ttl cell ""
+
+-- | Serve one key. Concurrent misses on a key collapse onto one 'produce', whose
+-- write is skipped if 'invalidate' bumped the epoch meanwhile.
+cachedForKey :: NominalDiffTime -> CacheCell a -> Text -> IO a -> IO a
+cachedForKey ttl cell key produce
+  | ttl <= 0 = produce
+  | otherwise = fresh >>= maybe fill pure
+  where
+    fresh = do
+      now <- getCurrentTime
+      (_, entries) <- readTVarIO (cacheEntries cell)
+      pure $ do
+        (ts, v) <- Map.lookup key entries
+        guard (diffUTCTime now ts < ttl)
+        pure v
+    fill = bracket_ acquire release (fresh >>= maybe store pure)
+    acquire = atomically $ do
+      inflight <- readTVar (cacheFilling cell)
+      check (Set.notMember key inflight)
+      modifyTVar' (cacheFilling cell) (Set.insert key)
+    release = atomically $ modifyTVar' (cacheFilling cell) (Set.delete key)
+    store = do
+      (epoch, _) <- readTVarIO (cacheEntries cell)
       v <- produce
-      atomically $ modifyTVar' cell $ \(e, cur) -> if e == epoch then (e, Just (now, v)) else (e, cur)
+      now <- getCurrentTime
+      atomically $ modifyTVar' (cacheEntries cell) $ \(e, m) ->
+        if e == epoch then (e, Map.insert key (now, v) m) else (e, m)
       pure v
 
--- | Bump a cache cell's epoch and drop its entry, after an operator mutation.
+-- | Bump a cache cell's epoch and drop its entries, after an operator mutation.
 invalidate :: CacheCell a -> Handler ()
-invalidate cell = liftIO $ atomically $ modifyTVar' cell $ \(e, _) -> (e + 1, Nothing)
+invalidate cell = liftIO $ atomically $ modifyTVar' (cacheEntries cell) $ \(e, _) -> (e + 1, Map.empty)
 
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler

@@ -7,33 +7,40 @@ module Arbiter.Test.Operations
   ( operationsSpec
   ) where
 
+import Arbiter.Core.Codec (Col (..), col, pval)
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
+import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult (EncodeJobResult)
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, ResultOf, getSchema)
+import Arbiter.Core.MonadArbiter qualified as MA
+import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.Sql.DLQ qualified as Tmpl
+import Arbiter.Core.Sql.Groups qualified as GroupsTmpl
+import Arbiter.Core.Sql.Tree qualified as TreeTmpl
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
-import Data.Int (Int64)
-import Data.List (nub, sort)
+import Data.Int (Int32, Int64)
+import Data.List (find, nub, sort)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (addUTCTime, getCurrentTime)
 import Data.UUID.Types qualified as UUID
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
-import UnliftIO (MonadUnliftIO)
+import UnliftIO.Async (concurrently)
 
-import Arbiter.Test.Setup (truncateToMicros)
+import Arbiter.Test.Setup (execQuery, execStatement, truncateToMicros)
 
 -- | Build a test suite for the given 'MonadArbiter' runner.
 operationsSpec
@@ -43,7 +50,6 @@ operationsSpec
      , JobPayload payload
      , KnownSymbol (TableForPayload payload (RegistryOf m))
      , MonadArbiter m
-     , MonadUnliftIO m
      , Show payload
      )
   => (Text -> payload)
@@ -56,6 +62,7 @@ operationsSpec
 operationsSpec mkMessage mkResult runM = do
   -- Test helpers
   let claimJobs env n = runM env (HL.claimNextVisibleJobs n 60) :: IO [JobRead payload]
+      claimJobsAs env n worker = runM env (HL.claimNextVisibleJobsAs n 60 worker) :: IO [JobRead payload]
       getJob env jobId = runM env (HL.getJobById @payload jobId)
       assertSuspended env jobId = do
         Just j <- getJob env jobId
@@ -67,6 +74,34 @@ operationsSpec mkMessage mkResult runM = do
         j <- getJob env jobId
         j `shouldBe` Nothing
       dlqAll env = runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      deleteCancelledAs env owner jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          Ops.deleteCancelledJobs schemaName (HL.queueTable @payload @m) (Just owner) jobIds
+      groupsTable = do
+        schemaName <- getSchema
+        pure (Schema.jobQueueGroupsTable schemaName (HL.queueTable @payload @m))
+      deleteRowDirectly env jobId =
+        runM env $ do
+          schemaName <- getSchema
+          let tbl = Schema.jobQueueTable schemaName (HL.queueTable @payload @m)
+          void $ execStatement ("DELETE FROM " <> tbl <> " WHERE id = ?") [pval CInt8 jobId]
+      lockedFromRoot env jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          sum <$> MA.executeQuery (TreeTmpl.lockJobTreesFromRootSQL schemaName (HL.queueTable @payload @m) jobIds)
+      driftGroupCount env key n =
+        runM env $ do
+          tbl <- groupsTable
+          void $
+            execStatement
+              ("UPDATE " <> tbl <> " SET job_count = ? WHERE group_key = ?")
+              [pval CInt4 n, pval CText key]
+      groupCount env key =
+        runM env $ do
+          tbl <- groupsTable
+          rows <- execQuery ("SELECT job_count FROM " <> tbl <> " WHERE group_key = ?") [pval CText key] (col "job_count" CInt4)
+          pure (listToMaybe rows :: Maybe Int32)
 
   describe "claimNextVisibleJobs" $ do
     it "claims jobs in priority order" $ \env -> do
@@ -254,6 +289,142 @@ operationsSpec mkMessage mkResult runM = do
       -- The flagged row survives, left for the cancel path to reap.
       getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
 
+    it "leaves a force-cancel-flagged job for the worker holding its lease" $ \env -> do
+      -- Deleting it elsewhere takes the flag away before its holder can read it.
+      let owner = UUID.nil
+          other = UUID.fromWords 1 1 1 1
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-lease-owner")))
+      let jobId = primaryKey inserted
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 owner) :: IO [JobRead payload]
+      length claimed `shouldBe` 1
+
+      flagged <- runM env (HL.forceCancelJob @payload jobId)
+      flagged `shouldBe` 1
+
+      deleteCancelledAs env other [jobId] >>= (`shouldBe` [])
+      getJob env jobId >>= (`shouldSatisfy` isJust)
+
+      deleteCancelledAs env owner [jobId] >>= (`shouldBe` [jobId])
+      assertGone env jobId
+
+  describe "nackJob" $ do
+    it "refunds one attempt however often the same claim nacks" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-repeat")))
+      firstClaim <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 (head firstClaim))
+      held <- claimJobsAs env 1 UUID.nil
+      map attempts held `shouldBe` [2]
+
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+
+      Just reread <- getJob env (primaryKey inserted)
+      attempts reread `shouldBe` 1
+
+    it "settles two batches over the same parents concurrently without deadlocking" $ \env -> do
+      -- A bulk ack and a bulk DLQ move, each holding one parent and wanting the
+      -- other, deadlock unless both take the union of parent locks up front.
+      forM_ [1 .. 8 :: Int] $ \round' -> do
+        let name side = mkMessage ("lockorder-" <> T.pack (show round') <> "-" <> side)
+            tree side =
+              JT.rollup
+                (defaultJob (name (side <> "-parent")))
+                (JT.leaf (defaultJob (name (side <> "-ack"))) :| [JT.leaf (defaultJob (name (side <> "-dlq")))])
+        Right _ <- runM env (HL.insertJobTree (tree "a"))
+        Right _ <- runM env (HL.insertJobTree (tree "b"))
+        children <- claimJobs env 4
+        length children `shouldBe` 4
+        let pick suffix = find ((== name suffix) . payload) children
+            Just ackA = pick "a-ack"
+            Just ackB = pick "b-ack"
+            Just dlqA = pick "a-dlq"
+            Just dlqB = pick "b-dlq"
+        -- Opposite child order on each side, so an unordered lock pass cycles.
+        (acked, moved) <-
+          concurrently
+            (runM env (HL.ackJobsBatch [ackB, ackA]))
+            (runM env (HL.moveToDLQBatch [(dlqA, "boom"), (dlqB, "boom")]))
+        length acked `shouldBe` 2
+        moved `shouldBe` 2
+        -- Both parents woke, so the two settles serialized on the parent lock rather
+        -- than each reading the other's child as still present.
+        parents <- claimJobs env 2
+        length parents `shouldBe` 2
+        runM env (HL.ackJobsBatch parents) >>= ((`shouldBe` 2) . length)
+        runM env (HL.listJobs @payload 100 0) >>= (`shouldBe` [])
+
+    it "nacks a batch in one statement, leaving a reclaimed job alone" $ \env -> do
+      Just a <- runM env (HL.insertJob (defaultJob (mkMessage "nack-batch-a")))
+      Just b <- runM env (HL.insertJob (defaultJob (mkMessage "nack-batch-b")))
+      held <- claimJobsAs env 2 UUID.nil
+      map attempts held `shouldBe` [1, 1]
+
+      Just heldB <- pure (find ((== primaryKey b) . primaryKey) held)
+      void $ runM env (HL.setVisibilityTimeout 0 heldB)
+      stolen <- claimJobsAs env 1 (UUID.fromWords 4 4 4 4)
+      map primaryKey stolen `shouldBe` [primaryKey b]
+
+      runM env (HL.nackJobsBatch held) >>= (`shouldBe` [primaryKey a])
+      Just rereadA <- getJob env (primaryKey a)
+      Just rereadB <- getJob env (primaryKey b)
+      attempts rereadA `shouldBe` 0
+      attempts rereadB `shouldBe` 2
+
+  describe "refreshGroups" $ do
+    it "covers the keys past the ones a pass already walked" $ \env -> do
+      let keys = ["grp-cursor-a", "grp-cursor-b", "grp-cursor-c"]
+          groupsWindow limit cursor =
+            runM env $ do
+              schemaName <- getSchema
+              MA.executeQuery (GroupsTmpl.groupsWindowSQL schemaName (HL.queueTable @payload @m) limit cursor)
+      runM env $ forM_ keys $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+
+      groupsWindow 2 Nothing >>= (`shouldBe` take 2 keys)
+      groupsWindow 2 (Just "grp-cursor-b") >>= (`shouldBe` drop 2 keys)
+      groupsWindow 2 (Just "grp-cursor-c") >>= (`shouldBe` [])
+
+    it "reclaims an emptied group the cursor has already passed" $ \env -> do
+      let emptied = "grp-reclaim-a"
+          laterKeys = ["grp-reclaim-b", "grp-reclaim-c"]
+      runM env $ forM_ (emptied : laterKeys) $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.ackJob (head claimed))
+
+      -- Acking the only job resets the summary in place rather than deleting it.
+      groupCount env emptied `shouldReturn` Just 0
+
+      runM env $ do
+        schemaName <- getSchema
+        void (Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 (Just "grp-reclaim-b"))
+      groupCount env emptied `shouldReturn` Nothing
+
+    it "repairs a tail group only once the cursor reaches it" $ \env -> do
+      let keys = ["grp-pass-1", "grp-pass-2", "grp-pass-3", "grp-pass-4", "grp-pass-5"]
+          tailKey = last keys
+          pass cursor =
+            runM env $ do
+              schemaName <- getSchema
+              snd <$> Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 cursor
+      runM env $ forM_ keys $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+      driftGroupCount env tailKey 99
+      groupCount env tailKey `shouldReturn` Just 99
+
+      -- Two keys per pass, so the drifted fifth is out of reach until the third.
+      afterFirst <- pass Nothing
+      afterFirst `shouldBe` Just "grp-pass-2"
+      groupCount env tailKey `shouldReturn` Just 99
+
+      afterSecond <- pass afterFirst
+      afterSecond `shouldBe` Just "grp-pass-4"
+      groupCount env tailKey `shouldReturn` Just 99
+
+      afterThird <- pass afterSecond
+      afterThird `shouldBe` Just tailKey
+      groupCount env tailKey `shouldReturn` Just 1
+
+      -- The cycle ends on a pass that finds nothing, not on a short one.
+      pass afterThird `shouldReturn` Nothing
+
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
       let job = (defaultJob (mkMessage "Test")) {groupKey = Just "visibility-extend-test"}
@@ -391,6 +562,109 @@ operationsSpec mkMessage mkResult runM = do
       -- Verify the IDs match
       sort goneJobs `shouldBe` sort (map primaryKey toAck)
       sort successJobs `shouldBe` sort (map primaryKey stillProcessing)
+
+    it "leaves a finalizer the ack suspended out of the beat" $ \env -> do
+      -- Window 1. Spawning a child turns the job into a finalizer at ack.
+      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "SuspendedFinalizer")))
+      [claimedParent] <- claimJobs env 1
+      void $
+        runM env $
+          HL.insertJob ((defaultJob (mkMessage "SuspendedFinalizerChild")) {parentId = Just (primaryKey parent)})
+      void $ runM env (HL.ackJob claimedParent)
+      assertSuspended env (primaryKey parent)
+
+      results <- runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
+      results `shouldBe` [JobSuspended (primaryKey parent)]
+
+      -- Completing the child leaves the finalizer claimable at once.
+      [child] <- claimJobs env 1
+      void $ runM env (HL.ackJob child)
+      woken <- claimJobs env 1
+      map primaryKey woken `shouldBe` [primaryKey parent]
+
+    it "refuses a flagged job to a lapsed claim carrying the same worker id" $ \env -> do
+      let owner = UUID.nil
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "same-pool-flag")))
+      let jobId = primaryKey inserted
+      [stale] <- claimJobsAs env 1 owner
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [live] <- claimJobsAs env 1 owner
+      claimSeq live `shouldBe` claimSeq stale + 1
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [stale])
+        >>= (`shouldBe` [JobReclaimed jobId (claimSeq stale) (claimSeq live + 1)])
+      runM env (HL.setVisibilityTimeoutBatch 120 [live])
+        >>= (`shouldBe` [JobCancelled jobId])
+
+  -- One test per row of the window table in INVARIANTS.md.
+  describe "Handoff windows" $ do
+    it "refuses the retry write for a claim that was stolen" $ \env -> do
+      -- Window 2.
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window2")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 held)
+      [stolen] <- claimJobsAs env 1 (UUID.fromWords 3 3 3 3)
+      primaryKey stolen `shouldBe` primaryKey inserted
+      claimSeq stolen `shouldNotBe` claimSeq held
+
+      runM env (HL.updateJobForRetry 60 "boom" held) `shouldReturn` 0
+      runM env (HL.updateJobForRetry 60 "boom" stolen) `shouldReturn` 1
+
+    it "leaves a written retry's backoff alone when a tick lands on it" $ \env -> do
+      -- Window 2, with the heartbeat as the second actor. The retry releases the
+      -- row without moving its token, so only the holder tells the two apart.
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window2-backoff")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env (HL.updateJobForRetry 3600 "boom" held) `shouldReturn` 1
+      backoff <- getJob env (primaryKey inserted)
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [held])
+        >>= (`shouldBe` [VisibilityUnchanged (primaryKey inserted)])
+
+      beaten <- getJob env (primaryKey inserted)
+      (notVisibleUntil <$> beaten) `shouldBe` (notVisibleUntil <$> backoff)
+
+    it "reports a flagged job and a vanished one in the same tick" $ \env -> do
+      -- Window 4.
+      Just flagged <- runM env (HL.insertJob (defaultJob (mkMessage "window4-flagged")))
+      Just vanished <- runM env (HL.insertJob (defaultJob (mkMessage "window4-gone")))
+      claimed <- claimJobsAs env 2 UUID.nil
+      length claimed `shouldBe` 2
+
+      runM env (HL.forceCancelJob @payload (primaryKey flagged)) `shouldReturn` 1
+      runM env (HL.cancelJob @payload (primaryKey vanished)) `shouldReturn` 1
+
+      results <- runM env (HL.setVisibilityTimeoutBatch 120 claimed)
+      results `shouldMatchList` [JobCancelled (primaryKey flagged), JobGone (primaryKey vanished)]
+
+    it "sweeps a flagged job only once its lease lapses" $ \env -> do
+      -- Window 5.
+      let owner = UUID.nil
+          reaper = UUID.fromWords 2 2 2 2
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window5")))
+      let jobId = primaryKey inserted
+      claimed <- claimJobsAs env 1 owner
+      length claimed `shouldBe` 1
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [])
+
+      -- The flag bumped the token, so the lapse is written against the row's.
+      Just flaggedRow <- getJob env jobId
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [jobId])
+      assertGone env jobId
+
+  describe "Tree locks" $
+    it "locks an orphaned job's own subtree when its parent row is gone" $ \env -> do
+      Just root <- runM env (HL.insertJob (defaultJob (mkMessage "orphan-root")))
+      Just mid <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-mid")) {parentId = Just (primaryKey root)}))
+      Just leaf <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-leaf")) {parentId = Just (primaryKey mid)}))
+
+      lockedFromRoot env [primaryKey leaf] `shouldReturn` 3
+      deleteRowDirectly env (primaryKey root)
+      lockedFromRoot env [primaryKey mid] `shouldReturn` 2
 
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do
@@ -550,6 +824,35 @@ operationsSpec mkMessage mkResult runM = do
       length reclaimed `shouldBe` 1
       primaryKey (head reclaimed) `shouldBe` primaryKey claimedJob
       payload (head reclaimed) `shouldBe` mkMessage "Original"
+
+    it "ReplaceDuplicate returns Nothing for a force-cancel-flagged job" $ \env -> do
+      let job1 =
+            (defaultGroupedJob "dedup-flagged-test-1" (mkMessage "Original"))
+              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
+              }
+      Just inserted1 <- runM env (HL.insertJob job1)
+      let jobId = primaryKey inserted1
+      claimed <- claimJobsAs env 1 UUID.nil
+      map primaryKey claimed `shouldBe` [jobId]
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      -- Lapse the lease, so the refusal below is the flag's and not the lease's.
+      Just flaggedRow <- getJob env jobId
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+
+      let job2 =
+            (defaultGroupedJob "dedup-flagged-test-2" (mkMessage "Replacement"))
+              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
+              }
+      runM env (HL.insertJob job2) >>= (`shouldBe` Nothing)
+
+      Just untouched <- getJob env jobId
+      payload untouched `shouldBe` mkMessage "Original"
+      claimJobs env 1 >>= (`shouldBe` [])
+
+      deleteCancelledAs env UUID.nil [jobId] >>= (`shouldBe` [jobId])
+      Just fresh <- runM env (HL.insertJob job2)
+      payload fresh `shouldBe` mkMessage "Replacement"
 
     it "ReplaceDuplicate succeeds when job is in retry backoff (has last_error)" $ \env -> do
       let job1 =
@@ -984,6 +1287,45 @@ operationsSpec mkMessage mkResult runM = do
       -- Should be removed from DLQ
       dlqJobs2 <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
       length dlqJobs2 `shouldBe` 0
+
+    it "retryFromDLQ advances the claim token, so the pre-DLQ claim cannot ack it" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-retry-token")))
+      claimed <- claimJobs env 1
+      claimSeq (head claimed) `shouldBe` 1
+      void $ runM env (HL.moveToDLQ "Failed" (head claimed))
+
+      dlqJobs <- dlqAll env
+      Just retried <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
+      claimSeq retried `shouldBe` 2
+
+      runM env (HL.ackJob (head claimed)) `shouldReturn` 0
+      getJob env (primaryKey retried) >>= (`shouldSatisfy` isJust)
+
+    it "an exhausted-sweep move refuses a job whose nack restored the attempt" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "sweep-nack")) {maxAttempts = Just 1})
+      claimed <- claimJobsAs env 1 UUID.nil
+      map attempts claimed `shouldBe` [1]
+      runM env (HL.nackJob (head claimed)) `shouldReturn` 1
+
+      -- Make the job visible, so only the attempt budget can refuse the move.
+      runM env (HL.promoteJob @payload (primaryKey inserted)) `shouldReturn` 1
+
+      -- The sweep's snapshot, taken while the job was still out of attempts.
+      moved <- runM env $ do
+        schemaName <- getSchema
+        Ops.moveToDLQFields
+          Ops.TakeLocks
+          Tmpl.MoveIfExhausted
+          schemaName
+          (HL.queueTable @payload @m)
+          "max attempts exceeded (reaper sweep)"
+          (primaryKey inserted)
+          (claimSeq (head claimed))
+          Nothing
+          False
+      moved `shouldBe` 0
+      dlqAll env >>= (`shouldBe` [])
+      getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
 
     it "retryFromDLQ returns Nothing for non-existent DLQ job" $ \env -> do
       -- Fabricate a DLQ job with a bogus ID
@@ -1735,6 +2077,27 @@ operationsSpec mkMessage mkResult runM = do
       -- Parent should be resumed (not suspended)
       Just parentResumed <- runM env (HL.getJobById @payload (primaryKey parent))
       suspended parentResumed `shouldBe` False
+
+    it "moveToDLQ snapshots the rollup's own child results before the cascade" $ \env -> do
+      Right (parent :| _) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "SnapshotParent"))
+              (JT.leaf (defaultJob (mkMessage "SnapshotChild")) :| [])
+      [child] <- claimJobs env 1
+      void $ runM env (HL.insertResult @payload (primaryKey parent) (primaryKey child) (mkResult "child-done"))
+      void $ runM env (HL.ackJob child)
+
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+      runM env (HL.moveToDLQ "rollup failed" claimedParent) `shouldReturn` 1
+
+      [dlq] <- dlqAll env
+      Just requeued <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlq))
+      (results, failures, snapshot, _) <- runM env (HL.readChildResultsRaw @payload (primaryKey requeued))
+      Map.keys results `shouldBe` []
+      Map.keys (HL.mergeRawChildResults results failures snapshot) `shouldBe` [primaryKey child]
 
     it "multi-level: grandparent wakes when all descendants complete" $ \env -> do
       -- Build: Grandparent → Parent → [Child1, Child2] using nested finalizers
@@ -3425,6 +3788,36 @@ operationsSpec mkMessage mkResult runM = do
       mainCount <- runM env (HL.countJobs @payload)
       mainCount `shouldBe` 2 -- parent + remaining child
   describe "moveToDLQBatch cascades for rollup parents" $ do
+    it "moveToDLQBatch snapshots a rollup it names alongside its parent" $ \env -> do
+      Right tree <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "BatchSnapRoot"))
+              ( JT.rollup
+                  (defaultJob (mkMessage "BatchSnapMid"))
+                  (JT.leaf (defaultJob (mkMessage "BatchSnapLeaf")) :| [])
+                  :| []
+              )
+      let nodeNamed n = find ((== mkMessage n) . payload) (NE.toList tree)
+      Just root <- pure (nodeNamed "BatchSnapRoot")
+      Just mid <- pure (nodeNamed "BatchSnapMid")
+      Just leaf <- pure (nodeNamed "BatchSnapLeaf")
+
+      void $
+        runM env $
+          HL.insertResultUnsafe @payload (primaryKey mid) (primaryKey leaf) (Aeson.String "batch-snap")
+      resultMap <- runM env $ HL.getResultsByParent @payload (primaryKey mid)
+      Map.size resultMap `shouldBe` 1
+
+      -- Naming both puts the child's delete in the same statement as the parent's.
+      runM env (HL.moveToDLQBatch [(root, "root err"), (mid, "mid err")]) `shouldReturn` 2
+
+      dlqJobs <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      Just midDlq <- pure (find ((== mkMessage "BatchSnapMid") . payload . DLQ.jobSnapshot) dlqJobs)
+      let expected = Map.map Right resultMap :: Map.Map Int64 (Either Text Aeson.Value)
+      parentState (DLQ.jobSnapshot midDlq) `shouldBe` Just (Aeson.toJSON expected)
+
     it "moveToDLQBatch on rollup parent cascades children to DLQ" $ \env -> do
       -- Insert rollup tree: parent + 2 children (parent is suspended with attempts=0)
       Right (parent :| _children) <-

@@ -76,8 +76,10 @@ import Arbiter.Core.Job.Types
   , Job (..)
   , JobRead
   , JobWrite
+  , TraceContext (..)
   , dedupParts
   , defaultMaxAttempts
+  , toTraceContext
   )
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
@@ -264,14 +266,22 @@ jobCodecWith idColumn queueName =
     <*> lmap (Just . fromMaybe defaultMaxAttempts . maxAttempts . fst) (rwN "max_attempts" CInt4)
     <*> lmap (parentId . fst) (rwN "parent_id" CInt8)
     <*> lmap (parentState . fst) (rwN "parent_state" CJsonb)
+    <*> traceCodec
     <*> lmap (suspended . fst) (rw "suspended" CBool)
     <*> ro (ncol "claimed_by" CUuid)
+    <*> ro (col "claim_seq" CInt8)
     <*> lmap (archiveFor . fst) (rwN "archive_for" CInt4)
     <*> lmap snd admissionCodec
 
 -- | Decoder for a main-table job row.
 jobRowCodec :: Text -> RowCodec (JobRead Value)
 jobRowCodec queueName = cDecode (jobCodec queueName :: JobCodec (JobRead Value))
+
+traceCodec :: Codec (JobWrite payload, AdmissionColumns) (Maybe TraceContext)
+traceCodec =
+  toTraceContext
+    <$> lmap (fmap traceparent . traceContext . fst) (rwN "traceparent" CText)
+    <*> lmap ((tracestate =<<) . traceContext . fst) (rwN "tracestate" CText)
 
 dedupCodec :: Codec (JobWrite payload, AdmissionColumns) (Maybe DedupKey)
 dedupCodec =

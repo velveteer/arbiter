@@ -8,11 +8,8 @@ module Arbiter.Worker.Retry
   , spawnRetried
   ) where
 
-import Arbiter.Core.Exceptions
-  ( JobException
-  , JobNotFoundException
-  , JobStolenException
-  )
+import Arbiter.Core.Exceptions (JobException, JobGoneException)
+import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Exception (displayException)
 import Control.Monad (forever)
 import Control.Monad.Trans.Cont (ContT (..))
@@ -25,8 +22,7 @@ import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
 import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
 
-import Arbiter.Worker.Logger (LogConfig, LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Run an action in a retry loop, surviving transient failures.
@@ -71,7 +67,7 @@ retryOnException stateVar logCfg label action = loop
 -- | Like 'retryOnException' but never returns on its own, even if the worker
 -- is shutting down. Job signals propagate so they reach the worker layer
 -- where they have semantic meaning ('JobException' user decisions,
--- 'JobStolenException' and 'JobNotFoundException' reclaim signals).
+-- 'JobGoneException' reclaim signals).
 -- Everything else (including transient DB errors) is retried.
 retryOnExceptionForever
   :: (MonadUnliftIO m)
@@ -97,8 +93,7 @@ retryOnExceptionForever logCfg label delay action = forever $ do
 isJobSignal :: SomeException -> Bool
 isJobSignal e =
   isJust (fromException e :: Maybe JobException)
-    || isJust (fromException e :: Maybe JobStolenException)
-    || isJust (fromException e :: Maybe JobNotFoundException)
+    || isJust (fromException e :: Maybe JobGoneException)
 
 -- | Spawn a thread under 'withAsync', wrapped in 'retryOnException' so
 -- transient failures restart the action instead of killing the thread.
@@ -107,9 +102,13 @@ spawnRetried
   => TVar WorkerState
   -> LogConfig
   -> T.Text
-  -- ^ Label for log messages.
+  -- ^ The queue this thread serves, for its RTS label.
+  -> T.Text
+  -- ^ Label for log messages, and the role in its RTS label.
   -> m ()
   -- ^ Action to run.
   -> ContT r m (Async ())
-spawnRetried stateVar logCfg label action =
-  ContT . withAsync $ retryOnException stateVar logCfg label action
+spawnRetried stateVar logCfg queue label action =
+  ContT . withAsync $ do
+    labelArbiterThread label (Just queue)
+    retryOnException stateVar logCfg label action

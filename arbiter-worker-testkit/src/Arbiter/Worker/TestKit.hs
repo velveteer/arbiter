@@ -12,7 +12,7 @@ module Arbiter.Worker.TestKit
 
 import Arbiter.Core.Exceptions
   ( throwBranchCancel
-  , throwJobStolen
+  , throwJobGone
   , throwNack
   , throwPermanent
   , throwRetryable
@@ -37,7 +37,7 @@ import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (JobHandler, RegistryOf, ResultOf, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
+import Arbiter.Worker.BackoffStrategy (BackoffStrategy (Constant), Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks
   , WorkerConfig (..)
@@ -71,7 +71,7 @@ import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Types (Identifier (..))
 import Test.Hspec
-import UnliftIO (MonadUnliftIO, atomically, bracket)
+import UnliftIO (atomically, bracket)
 import UnliftIO.Async (withAsync)
 
 -- | Build a worker-pool test suite for the given 'MonadArbiter' runner.
@@ -84,7 +84,6 @@ import UnliftIO.Async (withAsync)
 workerSpec
   :: forall payload m env
    . ( Eq payload
-     , MonadUnliftIO m
      , QueueOperation m payload
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)
@@ -1158,12 +1157,210 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           -- The nack (call 1) fires no success hook. Only the ack (call 2) does.
           length successes `shouldBe` 1
 
-    it "a thrown JobStolenException skips retry and leaves the job to reprocess" $ \env -> do
+    it "a nacked job leaves its batch siblings running past the next heartbeat" $ \env -> do
+      successRef <- newIORef ([] :: [payload])
+      callsRef <- newIORef (0 :: Int)
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              }
+      let isNacked j = payload j == mkSimple "hb-nacked"
+          batchHandler jobs cbs = do
+            liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
+            traverse_ (nack cbs) (filter isNacked (toList jobs))
+            -- Outlast a heartbeat tick, which the nack's given-back attempt reads as a steal.
+            liftIO $ threadDelay 1_500_000
+            traverse_ (ack cbs) (filter (not . isNacked) (toList jobs))
+      let jobs =
+            [ (defaultJob (mkSimple "hb-nacked")) {groupKey = Just "hb"}
+            , (defaultJob (mkSimple "hb-kept1")) {groupKey = Just "hb"}
+            , (defaultJob (mkSimple "hb-kept2")) {groupKey = Just "hb"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+      let batchedConfig =
+            config
+              { pollInterval = 0.05
+              , visibilityTimeout = 10
+              , jobHeartbeatInterval = 0.5
+              , observabilityHooks = hooks
+              }
+
+      withAsync (runM env $ runWorkerPool batchedConfig) $ \_ -> do
+        waitUntil 15_000 $ (>= 2) . length <$> readIORef successRef
+        successes <- readIORef successRef
+        successes `shouldMatchList` [mkSimple "hb-kept1", mkSimple "hb-kept2"]
+        -- One call finished the batch. A second means the heartbeat killed the first.
+        readIORef callsRef `shouldReturn` 1
+
+    it "keeps a bulk-acked batch successful across a heartbeat tick" $ \env -> do
+      -- Window 1. ackAll deletes every row at once, so a tick during the success
+      -- hooks finds them gone.
+      successRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ -> liftIO $ do
+                  threadDelay 400_000
+                  atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = ackAll cbs (toList jobs)
+      let jobs =
+            [ (defaultJob (mkSimple "hbg-1")) {groupKey = Just "hbg"}
+            , (defaultJob (mkSimple "hbg-2")) {groupKey = Just "hbg"}
+            , (defaultJob (mkSimple "hbg-3")) {groupKey = Just "hbg"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ (>= 3) . length <$> readIORef successRef
+          threadDelay 300_000
+          readIORef successRef >>= (`shouldMatchList` map mkSimple ["hbg-1", "hbg-2", "hbg-3"])
+          readIORef unavailableRef `shouldReturn` []
+
+    it "keeps an acked job successful when a sibling is force-cancelled" $ \env -> do
+      -- Window 1b.
+      successRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      cancelledRef <- newIORef ([] :: [payload])
+      ackedRef <- newIORef False
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \job _ _ ->
+                  liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) jobs)
+            liftIO $ atomicModifyIORef' ackedRef (const (True, ()))
+            liftIO $ threadDelay 10_000_000
+      let jobs =
+            [ (defaultJob (mkSimple "fca-done")) {groupKey = Just "fca"}
+            , (defaultJob (mkSimple "fca-cancelled")) {groupKey = Just "fca"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ readIORef ackedRef
+          remaining <- runM env $ HL.listJobs @payload 100 0
+          Just victim <- pure (find ((== mkSimple "fca-cancelled") . payload) remaining)
+          void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
+          waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      readIORef successRef >>= (`shouldBe` [mkSimple "fca-done"])
+      readIORef cancelledRef >>= (`shouldBe` [mkSimple "fca-cancelled"])
+      readIORef unavailableRef >>= (`shouldBe` [])
+
+    it "keeps a retried job's failure its own when a sibling is force-cancelled" $ \env -> do
+      -- Window 2b.
+      retriedRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      cancelledRef <- newIORef ([] :: [payload])
+      failedRef <- newIORef False
+      let hooks =
+            defaultObservabilityHooks
+              { onJobRetry = \job _ ->
+                  liftIO $ atomicModifyIORef' retriedRef $ \xs -> (payload job : xs, ())
+              , onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            traverse_
+              (\j -> failRetry cbs j "transient")
+              (find ((== mkSimple "fcr-retried") . payload) jobs)
+            liftIO $ atomicModifyIORef' failedRef (const (True, ()))
+            liftIO $ threadDelay 10_000_000
+      let jobs =
+            [ (defaultJob (mkSimple "fcr-retried")) {groupKey = Just "fcr"}
+            , (defaultJob (mkSimple "fcr-cancelled")) {groupKey = Just "fcr"}
+            ]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.05
+                , visibilityTimeout = 10
+                , jobHeartbeatInterval = 0.2
+                , observabilityHooks = hooks
+                , -- Parks the retry past the test, so the pool cannot take it again.
+                  backoffStrategy = Constant 60
+                , jitter = NoJitter
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ readIORef failedRef
+          remaining <- runM env $ HL.listJobs @payload 100 0
+          Just victim <- pure (find ((== mkSimple "fcr-cancelled") . payload) remaining)
+          void $ runM env (HL.forceCancelJob @payload (primaryKey victim))
+          waitUntil 15_000 $ (== 1) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      readIORef retriedRef >>= (`shouldBe` [mkSimple "fcr-retried"])
+      readIORef cancelledRef >>= (`shouldBe` [mkSimple "fcr-cancelled"])
+      -- The retry is written and recorded, so the finalizer has nothing to re-settle.
+      readIORef unavailableRef >>= (`shouldBe` [])
+
+    it "reports a nack the claim no longer covers" $ \env -> do
+      unavailableRef <- newIORef ([] :: [payload])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+              }
+          batchHandler jobs cbs = do
+            -- Lapse the lease and let the next claim take the token, so the nack
+            -- matches no row.
+            traverse_ (void . HL.setVisibilityTimeout 0) (toList jobs)
+            void (HL.claimNextVisibleJobs @payload 10 60)
+            traverse_ (nack cbs) (toList jobs)
+      let jobs = [(defaultJob (mkSimple "nk-gone")) {groupKey = Just "nkg"}]
+      runM env $ traverse_ HL.insertJob jobs
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync
+        (runM env $ runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 10, observabilityHooks = hooks})
+        $ \_ ->
+          waitUntil 15_000 $ (mkSimple "nk-gone" `elem`) <$> readIORef unavailableRef
+
+    it "a thrown JobGoneException skips retry and leaves the job to reprocess" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
             n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
             if n == 1
-              then throwJobStolen "stolen mid-batch"
+              then throwJobGone "stolen mid-batch"
               else traverse_ (ack cbs) (toList jobs)
       let jobs = [(defaultJob (mkSimple "stolen-job")) {groupKey = Just "st"}]
       runM env $ traverse_ HL.insertJob jobs
@@ -1327,6 +1524,37 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       dlqJobs <- runM env $ HL.listDLQJobs @payload 100 0
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) treePayloads
 
+    it "reports each job of a force-cancelled batch exactly once" $ \env -> do
+      -- Window 3 of INVARIANTS.md. A tree cancel signals once per claimed job.
+      cancelledRef <- newIORef ([] :: [Int64])
+      startedRef <- newIORef (0 :: Int)
+      let hooks =
+            defaultObservabilityHooks
+              { onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef (\s -> (primaryKey job : s, ()))
+              }
+          handler jobs _cbs = do
+            liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
+            liftIO $ threadDelay 10_000_000
+      Right (parent :| children) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkSimple "fc-parent"))
+              (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
+      config <- mkBatchedConfig 1 10 handler
+
+      withAsync
+        (runM env $ runWorkerPool config {pollInterval = 0.1, jobHeartbeatInterval = 0.2, observabilityHooks = hooks})
+        $ \_ -> do
+          waitUntil 10_000 $ (== 2) <$> readIORef startedRef
+          void $ runM env (HL.forceCancelJob @payload (primaryKey parent))
+          waitUntil 10_000 $ (== 2) . length <$> readIORef cancelledRef
+          threadDelay 300_000
+
+      cancelled <- readIORef cancelledRef
+      cancelled `shouldMatchList` map primaryKey children
+
     it "throwBranchCancel deletes branch but resumes grandparent" $ \env -> do
       rootProcessedRef <- newIORef False
       runM env $
@@ -1369,8 +1597,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 -- in time, so completion proves the listener fired.
 listenerSpec
   :: forall payload m env
-   . ( MonadUnliftIO m
-     , QueueOperation m payload
+   . ( QueueOperation m payload
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)
      , ResultOf m payload ~ ()
@@ -1532,8 +1759,7 @@ killListener connStr schema =
 -- @tableA@ queue and @payloadB@ to @tableB@.
 multiQueueListenerSpec
   :: forall payloadA payloadB m env
-   . ( MonadUnliftIO m
-     , QueueOperation m payloadA
+   . ( QueueOperation m payloadA
      , QueueOperation m payloadB
      , RegistryAdmissionPolicies (RegistryOf m)
      , RegistryTables (RegistryOf m)

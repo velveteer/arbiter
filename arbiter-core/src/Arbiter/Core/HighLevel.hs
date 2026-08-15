@@ -41,6 +41,7 @@ module Arbiter.Core.HighLevel
   , ackJobsBatch
   , updateJobForRetry
   , nackJob
+  , nackJobsBatch
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
   , SetVisibilityResult (..)
@@ -109,7 +110,7 @@ module Arbiter.Core.HighLevel
   , getParentStateSnapshot
 
     -- * Groups Table Operations
-  , refreshAllGroups
+  , refreshAllGroupsFully
 
     -- * Worker Registry Operations
   , registerWorker
@@ -162,7 +163,7 @@ import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpda
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (Job (..), JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
+import Arbiter.Core.Job.Types (ClaimSeq, Job (..), JobId, JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
@@ -171,6 +172,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate, RateLimitPolicyView)
+import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Core.Worker (WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
@@ -190,6 +192,14 @@ type JobOperation m payload =
 queueTable :: forall payload m. (KnownSymbol (TableForPayload payload (RegistryOf m))) => Text
 queueTable = T.pack $ symbolVal (Proxy @(TableForPayload payload (RegistryOf m)))
 
+publishSpan
+  :: forall payload m a
+   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+  => [JobWrite payload]
+  -> m a
+  -> m a
+publishSpan = withPublishSpan (queueTable @payload @m)
+
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
 -- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
 insertJob
@@ -197,7 +207,7 @@ insertJob
    . (QueueOperation m payload)
   => JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob job = do
+insertJob job = publishSpan @payload [job] $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJob schemaName tableName job
@@ -210,7 +220,8 @@ insertJobsBatch
    . (QueueOperation m payload)
   => [JobWrite payload]
   -> m [JobRead payload]
-insertJobsBatch jobs = do
+insertJobsBatch [] = pure []
+insertJobsBatch jobs = publishSpan @payload jobs $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch schemaName tableName jobs
@@ -221,7 +232,8 @@ insertJobsBatch_
    . (QueueOperation m payload)
   => [JobWrite payload]
   -> m Int64
-insertJobsBatch_ jobs = do
+insertJobsBatch_ [] = pure 0
+insertJobsBatch_ jobs = publishSpan @payload jobs $ do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch_ schemaName tableName jobs
@@ -412,7 +424,7 @@ reconcileConcurrencyCounts = do
 reconcileConcurrencyCountsIfStale
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
-  => m ()
+  => m Int64
 reconcileConcurrencyCountsIfStale = do
   schemaName <- getSchema
   Ops.reconcileConcurrencyCountsIfStale schemaName (registryTableNames (Proxy @(RegistryOf m)))
@@ -421,7 +433,7 @@ reconcileConcurrencyCountsIfStale = do
 reconcileAndPruneConcurrency
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
-  => m ()
+  => m Int64
 reconcileAndPruneConcurrency = do
   schemaName <- getSchema
   Ops.reconcileAndPruneConcurrency schemaName (registryTableNames (Proxy @(RegistryOf m)))
@@ -531,9 +543,23 @@ nackJob job = do
   let tableName = job.queueName
   Ops.nackJob schemaName tableName job
 
+-- | 'nackJob' over a batch from one queue in a single statement.
+--
+-- Returns the ids nacked. Jobs another worker holds are absent.
+nackJobsBatch
+  :: forall payload m
+   . (JobOperation m payload)
+  => [JobRead payload]
+  -> m [Int64]
+nackJobsBatch [] = pure []
+nackJobsBatch jobs@(firstJob : _) = do
+  schemaName <- getSchema
+  Ops.nackJobsBatch schemaName firstJob.queueName jobs
+
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --
--- Returns the number of rows updated (0 if job was already reclaimed by another worker).
+-- Returns the number of rows updated. 0 for a job that is gone, reclaimed, or
+-- suspended. 'setVisibilityTimeoutBatch' tells those apart.
 setVisibilityTimeout
   :: forall payload m
    . (JobOperation m payload)
@@ -548,15 +574,19 @@ setVisibilityTimeout timeout job = do
 
 -- | Result of setting visibility timeout for a single job in a batch.
 data SetVisibilityResult
-  = -- | Visibility timeout was successfully extended. Contains job ID.
-    VisibilityExtended Int64
-  | -- | Job no longer exists (was deleted/acked). Contains job ID.
-    JobGone Int64
-  | -- | Job was reclaimed by another worker (attempts count changed).
-    -- Contains: job ID, expected attempts, actual attempts.
-    JobReclaimed Int64 Int32 Int32
-  | -- | Job was force-cancel-flagged. Contains job ID.
-    JobCancelled Int64
+  = -- | Visibility timeout was successfully extended.
+    VisibilityExtended JobId
+  | -- | Job no longer exists (was deleted/acked).
+    JobGone JobId
+  | -- | Job was reclaimed by another worker: this claim's token, then the row's
+    -- token now.
+    JobReclaimed JobId ClaimSeq ClaimSeq
+  | -- | Job was force-cancel-flagged.
+    JobCancelled JobId
+  | -- | Job is a finalizer waiting on its children, so it holds no lease.
+    JobSuspended JobId
+  | -- | The row changed under this claim mid-statement, so nothing was extended.
+    VisibilityUnchanged JobId
   deriving stock (Eq, Show)
 
 -- | Extends visibility timeout for multiple jobs. All jobs must be from
@@ -575,13 +605,18 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   let tableName = firstJob.queueName
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
-      toResult info = case info of
-        Ops.VisibilityUpdateInfo jobId _ _ True -> JobCancelled jobId
-        Ops.VisibilityUpdateInfo jobId True _ False -> VisibilityExtended jobId
-        Ops.VisibilityUpdateInfo jobId False Nothing False -> JobGone jobId
-        Ops.VisibilityUpdateInfo jobId False (Just actual) False ->
-          let jobAttempts = maybe 0 attempts (Map.lookup jobId jobMap)
-           in JobReclaimed jobId jobAttempts actual
+      toResult (Ops.VisibilityUpdateInfo jobId heartbeated mActual cancelled suspended holder) =
+        let mJob = Map.lookup jobId jobMap
+            expected = maybe 0 claimSeq mJob
+            heldHere = maybe False (\j -> j.claimedBy == holder) mJob
+         in case mActual of
+              Nothing -> JobGone jobId
+              Just actual
+                | cancelled, heldHere, actual == expected + 1 -> JobCancelled jobId
+                | actual /= expected -> JobReclaimed jobId expected actual
+                | suspended -> JobSuspended jobId
+                | heartbeated -> VisibilityExtended jobId
+                | otherwise -> VisibilityUnchanged jobId
   pure $ map toResult infos
 
 -- | Move a job to the DLQ. Returns 0 if already claimed by another worker.
@@ -595,7 +630,7 @@ moveToDLQ
 moveToDLQ errorMsg job = do
   schemaName <- getSchema
   let tableName = job.queueName
-  Ops.moveToDLQ schemaName tableName errorMsg job
+  Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
 
 -- | Lists jobs in the dead-letter queue with pagination.
 listDLQJobs
@@ -1245,17 +1280,19 @@ getParentStateSnapshot jobId = do
 
 -- | Schema-wide groups-table refresh. Iterates all registered queues and
 -- corrects drift in @job_count@, @min_priority@, @min_id@, and
--- @in_flight_until@ for each. Returns the queue names that failed.
+-- @in_flight_until@ for each. Returns the rows rewritten and the queue names
+-- that failed.
 --
--- Intended for the reaper loop, which wraps it in 'Ops.runGated' so only
--- one pool runs it per interval.
-refreshAllGroups
+-- Walks every queue's groups table to the end, one bounded batch and one transaction
+-- at a time. A deliberate repair, not a hot path: the reaper runs
+-- 'Ops.refreshAllGroups' for a single batch per tick instead.
+refreshAllGroupsFully
   :: forall m
-   . (MonadArbiter m, MonadUnliftIO m, RegistryTables (RegistryOf m))
-  => m [Text]
-refreshAllGroups = do
+   . (MonadArbiter m, RegistryTables (RegistryOf m))
+  => m (Int64, [Text])
+refreshAllGroupsFully = do
   schemaName <- getSchema
-  Ops.refreshAllGroups schemaName (registryTableNames (Proxy @(RegistryOf m)))
+  Ops.refreshAllGroupsFully schemaName (registryTableNames (Proxy @(RegistryOf m)))
 
 -- ---------------------------------------------------------------------------
 -- Worker Registry Operations
@@ -1460,7 +1497,7 @@ runGated task interval work = do
 -- or @Left@ if the root has a dedup conflict. Rolls back on any failure.
 insertJobTree
   :: forall payload m
-   . (MonadUnliftIO m, QueueOperation m payload)
+   . (QueueOperation m payload)
   => JT.JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree tree = do

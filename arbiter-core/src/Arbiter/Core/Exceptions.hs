@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
 -- 'JobException' is the user-facing decision sum. A handler throws one of
@@ -6,7 +8,7 @@
 -- 'throwNack') to reprocess the job without recording a failure.
 --
 -- The engine-internal exceptions ('ParsingException', 'InternalException',
--- 'JobNotFoundException', 'JobStolenException') are thrown directly as
+-- 'JobGoneException') are thrown directly as
 -- their own types, not wrapped in any sum. They are handled by the worker's
 -- retry combinators and classifier, and are not part of the surface API
 -- that user handlers throw.
@@ -22,8 +24,8 @@ module Arbiter.Core.Exceptions
     -- * Engine-internal signals
   , ParsingException (..)
   , InternalException (..)
-  , JobNotFoundException (..)
-  , JobStolenException (..)
+  , JobGoneException (..)
+  , JobForceCancelled (..)
 
     -- * Helpers
   , throwRetryable
@@ -33,12 +35,14 @@ module Arbiter.Core.Exceptions
   , throwNack
   , throwParsing
   , throwInternal
-  , throwJobNotFound
-  , throwJobStolen
+  , throwJobGone
+  , throwJobGoneIds
+  , namedJobIds
   ) where
 
-import Control.Exception (Exception (..))
+import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -116,21 +120,24 @@ newtype InternalException = InternalException Text
 instance Exception InternalException where
   displayException (InternalException msg) = T.unpack msg
 
--- | Job was deleted or reclaimed between claim and ack. The worker recognizes
--- this signal via 'Arbiter.Worker.isJobGoneException' and skips retry/DLQ.
-newtype JobNotFoundException = JobNotFoundException Text
+-- | Job was deleted or reclaimed between claim and ack. The worker recognizes this
+-- signal and skips retry/DLQ. The message is the reason reported to
+-- 'Arbiter.Core.Job.Types.onJobUnavailable'. The ids are the jobs actually gone,
+-- empty when the thrower did not name them.
+data JobGoneException = JobGoneException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
-instance Exception JobNotFoundException where
-  displayException (JobNotFoundException msg) = T.unpack msg
+instance Exception JobGoneException where
+  displayException (JobGoneException msg ids) = T.unpack (msg <> namedJobIds ids)
 
--- | Heartbeat detected another worker reclaimed the job. The heartbeat retry
--- combinator propagates this signal so the worker can stop duplicate work.
-newtype JobStolenException = JobStolenException Text
-  deriving stock (Eq, Generic, Show)
+-- | Async exception for user-initiated force-cancel, naming the jobs it cancels
+-- and any the same check found reclaimed by another worker.
+data JobForceCancelled = JobForceCancelled [Int64] [Int64]
+  deriving stock (Show)
 
-instance Exception JobStolenException where
-  displayException (JobStolenException msg) = T.unpack msg
+instance Exception JobForceCancelled where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
 
 throwRetryable :: (MonadIO m) => Text -> m a
 throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
@@ -153,8 +160,14 @@ throwParsing msg = UE.throwIO (ParsingException msg)
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
-throwJobNotFound :: (MonadIO m) => Text -> m a
-throwJobNotFound msg = UE.throwIO (JobNotFoundException msg)
+-- | Names the jobs that went away, so the worker can tell them from the rest of the batch.
+throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
+throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 
-throwJobStolen :: (MonadIO m) => Text -> m a
-throwJobStolen msg = UE.throwIO (JobStolenException msg)
+throwJobGone :: (MonadIO m) => Text -> m a
+throwJobGone msg = throwJobGoneIds msg []
+
+-- | The ids a signal names, appended to its message. Empty when it names none.
+namedJobIds :: [Int64] -> Text
+namedJobIds [] = ""
+namedJobIds ids = ": " <> T.intercalate ", " (map (T.pack . show) ids)

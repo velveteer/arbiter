@@ -19,6 +19,7 @@ module Arbiter.Core.CronSchedule
 
     -- * DDL
   , cronSchedulesTable
+  , cronSchedulesTableName
   , createCronSchedulesTableSQL
   , addTimezoneColumnSQL
   , addQueueNameColumnSQL
@@ -112,7 +113,10 @@ instance FromJSON CronScheduleUpdate where
 
 -- | Qualified table name for the cron_schedules table.
 cronSchedulesTable :: Text -> Text
-cronSchedulesTable schemaName = quoteIdentifier schemaName <> ".cron_schedules"
+cronSchedulesTable schemaName = quoteIdentifier schemaName <> "." <> cronSchedulesTableName
+
+cronSchedulesTableName :: Text
+cronSchedulesTableName = "cron_schedules"
 
 -- | DDL for the @cron_schedules@ table.
 createCronSchedulesTableSQL :: Text -> Text

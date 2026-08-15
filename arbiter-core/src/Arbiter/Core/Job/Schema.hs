@@ -15,6 +15,9 @@ module Arbiter.Core.Job.Schema
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueArchiveTableSQL
+  , queueTableNames
+  , addTraceContextColumnSQL
+  , addClaimSeqColumnSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
@@ -60,6 +63,7 @@ module Arbiter.Core.Job.Schema
   , eventStreamingDLQTriggerName
 
     -- * Table Name Helpers
+  , qualifiedTable
   , jobQueueTable
   , jobQueueDLQTable
   , jobQueueArchiveTable
@@ -72,6 +76,7 @@ module Arbiter.Core.Job.Schema
     -- * Groups Table
   , createGroupsTableSQL
   , migrateGroupsReadyRankingSQL
+  , createGroupsEmptiedIndexSQL
 
     -- * Groups Trigger SQL
   , createGroupsTriggerFunctionsSQL
@@ -80,6 +85,7 @@ module Arbiter.Core.Job.Schema
   , createMaintenanceTriggersSQL
   , statementTriggerSQL
   , inFlightPredicate
+  , groupAggregates
   ) where
 
 import Data.Text (Text)
@@ -159,17 +165,21 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
 
+-- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
+qualifiedTable :: SchemaName -> TableName -> Text
+qualifiedTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
+
 -- | Qualified table name: @jobQueueTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs"@
 jobQueueTable :: SchemaName -> TableName -> Text
-jobQueueTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier tableName
+jobQueueTable = qualifiedTable
 
 -- | Qualified DLQ table name: @jobQueueDLQTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_dlq"@
 jobQueueDLQTable :: SchemaName -> TableName -> Text
-jobQueueDLQTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_dlq")
+jobQueueDLQTable schemaName tableName = qualifiedTable schemaName (tableName <> dlqSuffix)
 
 -- | Qualified archive table name: @jobQueueArchiveTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_archive"@
 jobQueueArchiveTable :: SchemaName -> TableName -> Text
-jobQueueArchiveTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_archive")
+jobQueueArchiveTable schemaName tableName = qualifiedTable schemaName (tableName <> archiveSuffix)
 
 -- | Backfill NULL @max_attempts@ to the default and set the column default.
 -- Left nullable for rolling-deploy safety (old code may still insert NULL).
@@ -184,11 +194,22 @@ setMaxAttemptsDefaultSQL schemaName tableName =
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
 jobQueueResultsTable :: Text -> Text -> Text
-jobQueueResultsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_results")
+jobQueueResultsTable schemaName tableName = qualifiedTable schemaName (tableName <> resultsSuffix)
 
 -- | Qualified groups table name: @jobQueueGroupsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_groups"@
 jobQueueGroupsTable :: Text -> Text -> Text
-jobQueueGroupsTable schemaName tableName = quoteIdentifier schemaName <> "." <> quoteIdentifier (tableName <> "_groups")
+jobQueueGroupsTable schemaName tableName = qualifiedTable schemaName (tableName <> groupsSuffix)
+
+dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix :: Text
+dlqSuffix = "_dlq"
+archiveSuffix = "_archive"
+resultsSuffix = "_results"
+groupsSuffix = "_groups"
+
+-- | A queue's own table and its companions, unqualified and unquoted, for callers that
+-- match on @pg_catalog@ relnames.
+queueTableNames :: TableName -> [TableName]
+queueTableNames tableName = tableName : map (tableName <>) [dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix]
 
 -- | SQL to create the schema for Arbiter tables
 createSchemaSQL :: SchemaName -> Text
@@ -198,6 +219,8 @@ createSchemaSQL schemaName =
 -- | Common job column definitions (matches the Job type structure)
 --
 -- These columns are shared between job_queue and dead_letter_queue tables.
+--
+-- Checksummed by the create-table migration: a new column ships as its own ALTER script.
 jobColumns :: [Text]
 jobColumns =
   [ "  id BIGSERIAL PRIMARY KEY,"
@@ -217,6 +240,24 @@ jobColumns =
   , "  parent_state JSONB,"
   , "  suspended BOOLEAN NOT NULL DEFAULT FALSE"
   ]
+
+-- | @ADD COLUMN IF NOT EXISTS@ over a queue's three job tables, one statement each.
+addJobColumnsSQL :: Text -> Text -> [Text] -> Text
+addJobColumnsSQL schemaName tableName columns =
+  T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
+  where
+    alter table = "ALTER TABLE " <> table <> " " <> T.intercalate ", " (map addColumn columns) <> ";"
+    addColumn column = "ADD COLUMN IF NOT EXISTS " <> column
+
+-- | Add the W3C trace-context columns to a queue's three job tables.
+addTraceContextColumnSQL :: Text -> Text -> Text
+addTraceContextColumnSQL schemaName tableName =
+  addJobColumnsSQL schemaName tableName ["traceparent TEXT", "tracestate TEXT"]
+
+-- | Add the per-claim token column to a queue's three job tables.
+addClaimSeqColumnSQL :: Text -> Text -> Text
+addClaimSeqColumnSQL schemaName tableName =
+  addJobColumnsSQL schemaName tableName ["claim_seq BIGINT NOT NULL DEFAULT 0"]
 
 -- | Job column definitions for DLQ table (with job_id instead of id)
 jobColumnsForDLQ :: Text
@@ -484,6 +525,15 @@ migrateGroupsReadyRankingSQL schemaName tableName =
             <> " (next_due ASC) WHERE next_due IS NOT NULL;"
         ]
 
+-- | Index over the summary rows the maintenance triggers emptied in place.
+createGroupsEmptiedIndexSQL :: Text -> Text -> Text
+createGroupsEmptiedIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_groups_emptied")
+    , "ON " <> jobQueueGroupsTable schemaName tableName <> " (group_key)"
+    , "WHERE job_count = 0;"
+    ]
+
 -- ---------------------------------------------------------------------------
 -- Groups Maintenance Triggers
 -- ---------------------------------------------------------------------------
@@ -510,9 +560,24 @@ maintenanceFunctionNames schemaName baseName =
   where
     func suffix = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
 
+-- | The @ON CONFLICT@ merge of newly grouped rows into an existing group summary.
+groupsMergeSet :: Text -> Text
+groupsMergeSet groupsTbl =
+  [text|
+    min_priority = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_priority
+      ELSE LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority) END,
+    min_id = CASE WHEN ${groupsTbl}.job_count = 0 THEN EXCLUDED.min_id
+      ELSE LEAST(${groupsTbl}.min_id, EXCLUDED.min_id) END,
+    job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
+    ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
+    next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due)
+  |]
+
 groupsInsertFunction :: Text -> Text -> Text -> Text
 groupsInsertFunction funcName groupsTbl dd =
-  [text|
+  let mergeSet = groupsMergeSet groupsTbl
+      aggs = groupAggregates ""
+   in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
     BEGIN
@@ -527,22 +592,13 @@ groupsInsertFunction funcName groupsTbl dd =
       FOR UPDATE;
 
       INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
-      SELECT group_key,
-        MIN(priority),
-        MIN(id),
-        COUNT(*),
-        COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended),
-        MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended)
+      SELECT group_key, ${aggs}
       FROM new_table
       WHERE group_key IS NOT NULL
       GROUP BY group_key
       ORDER BY group_key
       ON CONFLICT (group_key) DO UPDATE SET
-        min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
-        min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
-        job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
-        ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
-        next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due),
+        ${mergeSet},
         in_flight_until = CASE WHEN ${groupsTbl}.in_flight_until <= NOW()
           THEN NULL ELSE ${groupsTbl}.in_flight_until END;
 
@@ -550,6 +606,12 @@ groupsInsertFunction funcName groupsTbl dd =
     END;
     ${dd} LANGUAGE plpgsql;
   |]
+
+-- | The group summary aggregates over job rows grouped by @group_key@. @col@ prefixes
+-- each column.
+groupAggregates :: Text -> Text
+groupAggregates col =
+  [text|MIN(${col}priority) AS min_priority, MIN(${col}id) AS min_id, COUNT(*) AS job_count, COUNT(*) FILTER (WHERE ${col}not_visible_until IS NULL AND NOT ${col}suspended) AS ready_count, MIN(${col}not_visible_until) FILTER (WHERE ${col}not_visible_until IS NOT NULL AND NOT ${col}suspended) AS next_due|]
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text
@@ -563,10 +625,66 @@ inFlightPredicate col =
     <> col
     <> "throttled_until > NOW())"
 
+-- | Ordering and visibility recomputed from the rows a group has left, aliased @t@.
+survivingAggregates :: Text
+survivingAggregates =
+  [text|
+    MIN(t.priority) AS new_min_priority,
+    MIN(t.id) AS new_min_id,
+    MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
+  |]
+
+-- | Decrement a group summary for removed rows, resetting an emptied group in place.
+-- @removedRows@ aggregates them as @group_key@, @removed_count@, @removed_ready_count@
+-- and @had_inflight@.
+groupsRemoveUpdate :: Text -> Text -> Text -> Text
+groupsRemoveUpdate groupsTbl tbl removedRows =
+  let ifSurv = inFlightPredicate "t."
+   in [text|
+    UPDATE ${groupsTbl} g
+    SET job_count = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE GREATEST(0, g.job_count - sub.removed_count) END,
+        min_priority = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE sub.new_min_priority END,
+        min_id = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE sub.new_min_id END,
+        ready_count = CASE WHEN sub.new_min_id IS NULL THEN 0
+          ELSE GREATEST(0, g.ready_count - sub.removed_ready_count) END,
+        next_due = CASE WHEN sub.new_min_id IS NULL THEN NULL
+          ELSE sub.new_next_due END,
+        in_flight_until = CASE
+          WHEN sub.new_min_id IS NULL THEN NULL
+          WHEN sub.had_inflight THEN sub.surviving_ift
+          ELSE g.in_flight_until
+        END
+    FROM (
+      SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
+        ${survivingAggregates},
+        MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
+      FROM (
+        ${removedRows}
+      ) d
+      LEFT JOIN ${tbl} t ON t.group_key = d.group_key
+      GROUP BY d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight
+    ) sub
+    WHERE g.group_key = sub.group_key;
+  |]
+
 groupsDeleteFunction :: Text -> Text -> Text -> Text -> Text
 groupsDeleteFunction funcName groupsTbl tbl dd =
   let ifOld = inFlightPredicate ""
-      ifSurv = inFlightPredicate "t."
+      removeUpdate =
+        groupsRemoveUpdate
+          groupsTbl
+          tbl
+          [text|
+            SELECT group_key, COUNT(*) AS removed_count,
+              COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS removed_ready_count,
+              bool_or(${ifOld}) AS had_inflight
+            FROM old_table
+            WHERE group_key IS NOT NULL
+            GROUP BY group_key
+          |]
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
@@ -581,38 +699,7 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
       ORDER BY g.group_key
       FOR UPDATE;
 
-      UPDATE ${groupsTbl} g
-      SET job_count = g.job_count - sub.removed_count,
-          min_priority = COALESCE(sub.new_min_priority, g.min_priority),
-          min_id = COALESCE(sub.new_min_id, g.min_id),
-          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
-          next_due = sub.new_next_due,
-          in_flight_until = CASE
-            WHEN sub.had_inflight THEN sub.surviving_ift
-            ELSE g.in_flight_until
-          END
-      FROM (
-        SELECT d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight,
-          MIN(t.priority) AS new_min_priority,
-          MIN(t.id) AS new_min_id,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
-          MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
-        FROM (
-          SELECT group_key, COUNT(*) AS removed_count,
-            COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS removed_ready_count,
-            bool_or(${ifOld}) AS had_inflight
-          FROM old_table
-          WHERE group_key IS NOT NULL
-          GROUP BY group_key
-        ) d
-        LEFT JOIN ${tbl} t ON t.group_key = d.group_key
-        GROUP BY d.group_key, d.removed_count, d.removed_ready_count, d.had_inflight
-      ) sub
-      WHERE g.group_key = sub.group_key;
-
-      DELETE FROM ${groupsTbl}
-      WHERE job_count <= 0
-        AND group_key IN (SELECT group_key FROM old_table WHERE group_key IS NOT NULL);
+      ${removeUpdate}
 
       RETURN NULL;
     END;
@@ -623,6 +710,22 @@ groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
 groupsUpdateFunction funcName groupsTbl tbl dd =
   let ifSurv = inFlightPredicate "t."
       ifOld = inFlightPredicate "o."
+      aggsN = groupAggregates "n."
+      mergeSet = groupsMergeSet groupsTbl
+      removeUpdate =
+        groupsRemoveUpdate
+          groupsTbl
+          tbl
+          [text|
+            SELECT o.group_key, COUNT(*) AS removed_count,
+              COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
+              bool_or(${ifOld}) AS had_inflight
+            FROM old_table o
+            JOIN new_table n ON o.id = n.id
+            WHERE o.group_key IS NOT NULL
+              AND o.group_key IS DISTINCT FROM n.group_key
+            GROUP BY o.group_key
+          |]
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dd}
@@ -672,127 +775,93 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       WHERE g.group_key = sub.group_key
         AND g.in_flight_until IS DISTINCT FROM sub.new_ift;
 
-      -- Step 2: group_key change (dedup replace) - remove from old group
+      IF EXISTS (
+        SELECT 1 FROM new_table n JOIN old_table o ON o.id = n.id
+        WHERE o.group_key IS DISTINCT FROM n.group_key
+        LIMIT 1
+      ) THEN
+        -- Step 2: group_key change (dedup replace) - remove from old group
+        ${removeUpdate}
+
+        -- Step 3: group_key change - add to new group
+        INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
+        SELECT n.group_key, ${aggsN}
+        FROM new_table n
+        JOIN old_table o ON o.id = n.id
+        WHERE n.group_key IS NOT NULL
+          AND o.group_key IS DISTINCT FROM n.group_key
+        GROUP BY n.group_key
+        ORDER BY n.group_key
+        ON CONFLICT (group_key) DO UPDATE SET
+          ${mergeSet};
+      END IF;
+
+      -- Step 4: same-group ordering and visibility recompute, in-flight extend and ready delta in one write.
       UPDATE ${groupsTbl} g
-      SET job_count = g.job_count - sub.cnt,
-          min_priority = COALESCE(sub.new_min_priority, g.min_priority),
-          min_id = COALESCE(sub.new_min_id, g.min_id),
-          ready_count = GREATEST(0, g.ready_count - sub.removed_ready_count),
-          next_due = sub.new_next_due,
-          in_flight_until = CASE
-            WHEN sub.had_inflight THEN sub.surviving_ift
-            ELSE g.in_flight_until
-          END
+      SET min_priority = CASE WHEN m.recompute THEN m.new_min_priority ELSE g.min_priority END,
+          min_id = CASE WHEN m.recompute THEN m.new_min_id ELSE g.min_id END,
+          next_due = CASE WHEN m.recompute THEN m.new_next_due ELSE g.next_due END,
+          in_flight_until = GREATEST(g.in_flight_until, m.new_ift),
+          ready_count = GREATEST(0, g.ready_count + COALESCE(m.delta, 0))
       FROM (
-        SELECT d.group_key, d.cnt, d.removed_ready_count, d.had_inflight,
-          MIN(t.priority) AS new_min_priority, MIN(t.id) AS new_min_id,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due,
-          MAX(t.not_visible_until) FILTER (WHERE ${ifSurv}) AS surviving_ift
+        SELECT COALESCE(sub.group_key, s.group_key) AS group_key,
+          sub.group_key IS NOT NULL AS recompute,
+          sub.new_min_priority, sub.new_min_id, sub.new_next_due,
+          s.new_ift, s.delta
         FROM (
-          SELECT o.group_key, COUNT(*) AS cnt,
-            COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended) AS removed_ready_count,
-            bool_or(${ifOld}) AS had_inflight
-          FROM old_table o
-          JOIN new_table n ON o.id = n.id
-          WHERE o.group_key IS NOT NULL
-            AND o.group_key IS DISTINCT FROM n.group_key
-          GROUP BY o.group_key
-        ) d
-        LEFT JOIN ${tbl} t ON t.group_key = d.group_key
-        GROUP BY d.group_key, d.cnt, d.removed_ready_count, d.had_inflight
-      ) sub
-      WHERE g.group_key = sub.group_key;
-
-      DELETE FROM ${groupsTbl}
-      WHERE job_count <= 0
-        AND group_key IN (
-          SELECT o.group_key FROM old_table o
-          JOIN new_table n ON o.id = n.id
-          WHERE o.group_key IS NOT NULL
-            AND o.group_key IS DISTINCT FROM n.group_key
-        );
-
-      -- Step 3: group_key change - add to new group
-      INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
-      SELECT n.group_key, MIN(n.priority), MIN(n.id), COUNT(*),
-        COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended),
-        MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended)
-      FROM new_table n
-      JOIN old_table o ON o.id = n.id
-      WHERE n.group_key IS NOT NULL
-        AND o.group_key IS DISTINCT FROM n.group_key
-      GROUP BY n.group_key
-      ORDER BY n.group_key
-      ON CONFLICT (group_key) DO UPDATE SET
-        min_priority = LEAST(${groupsTbl}.min_priority, EXCLUDED.min_priority),
-        min_id = LEAST(${groupsTbl}.min_id, EXCLUDED.min_id),
-        job_count = ${groupsTbl}.job_count + EXCLUDED.job_count,
-        ready_count = ${groupsTbl}.ready_count + EXCLUDED.ready_count,
-        next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due);
-
-      -- Step 4: same-group ordering/visibility change - recompute min and next_due.
-      UPDATE ${groupsTbl} g
-      SET min_priority = sub.new_min_priority,
-          min_id = sub.new_min_id,
-          next_due = sub.new_next_due
-      FROM (
-        SELECT d.group_key,
-          MIN(t.priority) AS new_min_priority,
-          MIN(t.id) AS new_min_id,
-          MIN(t.not_visible_until) FILTER (WHERE t.not_visible_until IS NOT NULL AND NOT t.suspended) AS new_next_due
-        FROM (
-          SELECT DISTINCT n.group_key
-          FROM new_table n
-          JOIN old_table o ON o.id = n.id
-          WHERE n.group_key IS NOT NULL
-            AND n.group_key IS NOT DISTINCT FROM o.group_key
-            AND (n.priority IS DISTINCT FROM o.priority
-                 OR o.not_visible_until IS DISTINCT FROM n.not_visible_until
-                 OR o.suspended IS DISTINCT FROM n.suspended)
-        ) d
-        LEFT JOIN ${tbl} t ON t.group_key = d.group_key
-        GROUP BY d.group_key
-      ) sub
-      WHERE g.group_key = sub.group_key
-        AND (g.min_priority IS DISTINCT FROM sub.new_min_priority
-             OR g.min_id IS DISTINCT FROM sub.new_min_id
-             OR g.next_due IS DISTINCT FROM sub.new_next_due);
-
-      -- Step 5: commutative in_flight_until extend and ready_count delta in one write.
-      UPDATE ${groupsTbl} g
-      SET in_flight_until = GREATEST(g.in_flight_until, s.new_ift),
-          ready_count = GREATEST(0, g.ready_count + COALESCE(s.delta, 0))
-      FROM (
-        SELECT COALESCE(ift.group_key, rc.group_key) AS group_key, ift.new_ift, rc.delta
-        FROM (
-          SELECT n.group_key, MAX(n.not_visible_until) AS new_ift
-          FROM new_table n
-          JOIN old_table o ON o.id = n.id
-          WHERE n.group_key IS NOT NULL
-            AND n.not_visible_until > NOW()
-            AND NOT n.suspended
-            AND n.attempts > 0
-            AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
-                 OR n.not_visible_until > o.not_visible_until)
-          GROUP BY n.group_key
-        ) ift
-        FULL OUTER JOIN (
-          SELECT group_key, delta FROM (
-            SELECT n.group_key,
-              SUM(
-                (CASE WHEN n.not_visible_until IS NULL AND NOT n.suspended THEN 1 ELSE 0 END)
-                - (CASE WHEN o.not_visible_until IS NULL AND NOT o.suspended THEN 1 ELSE 0 END)
-              )::int AS delta
+          SELECT d.group_key,
+            ${survivingAggregates}
+          FROM (
+            SELECT DISTINCT n.group_key
             FROM new_table n
             JOIN old_table o ON o.id = n.id
             WHERE n.group_key IS NOT NULL
               AND n.group_key IS NOT DISTINCT FROM o.group_key
+              AND (n.priority IS DISTINCT FROM o.priority
+                   OR o.not_visible_until IS DISTINCT FROM n.not_visible_until
+                   OR o.suspended IS DISTINCT FROM n.suspended)
+          ) d
+          LEFT JOIN ${tbl} t ON t.group_key = d.group_key
+          GROUP BY d.group_key
+        ) sub
+        FULL OUTER JOIN (
+          SELECT COALESCE(ift.group_key, rc.group_key) AS group_key, ift.new_ift, rc.delta
+          FROM (
+            SELECT n.group_key, MAX(n.not_visible_until) AS new_ift
+            FROM new_table n
+            JOIN old_table o ON o.id = n.id
+            WHERE n.group_key IS NOT NULL
+              AND n.not_visible_until > NOW()
+              AND NOT n.suspended
+              AND n.attempts > 0
+              AND (o.not_visible_until IS NULL OR o.not_visible_until <= NOW()
+                   OR n.not_visible_until > o.not_visible_until)
             GROUP BY n.group_key
-          ) z
-          WHERE delta <> 0
-        ) rc ON ift.group_key = rc.group_key
-      ) s
-      WHERE g.group_key = s.group_key;
+          ) ift
+          FULL OUTER JOIN (
+            SELECT group_key, delta FROM (
+              SELECT n.group_key,
+                SUM(
+                  (CASE WHEN n.not_visible_until IS NULL AND NOT n.suspended THEN 1 ELSE 0 END)
+                  - (CASE WHEN o.not_visible_until IS NULL AND NOT o.suspended THEN 1 ELSE 0 END)
+                )::int AS delta
+              FROM new_table n
+              JOIN old_table o ON o.id = n.id
+              WHERE n.group_key IS NOT NULL
+                AND n.group_key IS NOT DISTINCT FROM o.group_key
+              GROUP BY n.group_key
+            ) z
+            WHERE delta <> 0
+          ) rc ON ift.group_key = rc.group_key
+        ) s ON s.group_key = sub.group_key
+      ) m
+      WHERE g.group_key = m.group_key
+        AND ((m.recompute
+              AND (g.min_priority IS DISTINCT FROM m.new_min_priority
+                   OR g.min_id IS DISTINCT FROM m.new_min_id
+                   OR g.next_due IS DISTINCT FROM m.new_next_due))
+             OR g.in_flight_until IS DISTINCT FROM GREATEST(g.in_flight_until, m.new_ift)
+             OR COALESCE(m.delta, 0) <> 0);
 
       RETURN NULL;
     END;

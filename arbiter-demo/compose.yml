@@ -4,6 +4,11 @@
 #
 #   DEMO_DOMAIN=demo.example.com docker compose -f arbiter-demo/compose.yml up -d
 #
+# DEMO_DOMAIN defaults to localhost, where Caddy issues a cert from its own CA.
+#
+# Run from the repository root: the dashboard is mounted from
+# arbiter-otel/deploy/observability. The dashboard is served at /dash.
+#
 # Postgres is intentionally stateless (no volume): the demo drops and reseeds
 # its schema on every boot, so a fresh start is the desired behavior.
 name: arbiter-demo
@@ -32,19 +37,44 @@ services:
       # Self-restart cadence: the watchdog raises SIGTERM after this many
       # minutes, the process exits, and restart:always reseeds a clean demo.
       RESET_INTERVAL_MINUTES: "20"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://lgtm:4318"
+      OTEL_SERVICE_NAME: arbiter-demo
     labels:
       com.centurylinklabs.watchtower.enable: "true"
+    restart: always
+
+  # Grafana's all-in-one LGTM stack, taking OTLP from the demo. Only its Grafana
+  # is reachable outside, through caddy.
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    environment:
+      # Caddy serves it under a subpath.
+      GF_SERVER_ROOT_URL: "https://${DEMO_DOMAIN:-localhost}/dash"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Land on the arbiter dashboard rather than Grafana's home.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/arbiter/arbiter.json
+      # Public: read-only, no login form. The local stack grants Admin instead.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../arbiter-otel/deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter:ro
+      - ../arbiter-otel/deploy/observability/grafana/provisioning/dashboards/provider.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/arbiter.yaml:ro
+      - ../arbiter-otel/deploy/observability/grafana/provisioning/alerting/arbiter.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/arbiter.yaml:ro
     restart: always
 
   caddy:
     image: caddy:2
     depends_on:
       - demo
+      - lgtm
     ports:
       - "80:80"
       - "443:443"
     environment:
-      DEMO_DOMAIN: ${DEMO_DOMAIN:?set DEMO_DOMAIN to the public hostname}
+      DEMO_DOMAIN: ${DEMO_DOMAIN:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

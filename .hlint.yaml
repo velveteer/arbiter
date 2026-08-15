@@ -55,3 +55,7 @@
 
 # Sometimes we like seeing how many args a constructor has
 - ignore: { name: Use record patterns }
+
+# Fires on the bare name with no type to go on. The pairs there are a list, and
+# Data.List.unzip is not deprecated.
+- ignore: { name: Avoid NonEmpty.unzip, within: Arbiter.Core.Operations }

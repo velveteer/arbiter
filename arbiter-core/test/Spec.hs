@@ -9,8 +9,11 @@ import Data.Text qualified as T
 import Test.Hspec
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
+import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
+import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
+import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
 
 -- | A short tag per parameter, so tests can assert the encoders and their order.
 paramTags :: [SomeParam] -> [Text]
@@ -34,6 +37,12 @@ colTag CUuid = "uuid"
 
 sqlOf :: Query a -> Text
 sqlOf = T.strip . qSql
+
+squished :: Query a -> Text
+squished = squish . qSql
+
+squish :: Text -> Text
+squish = T.unwords . T.words
 
 main :: IO ()
 main = hspec $ do
@@ -81,3 +90,19 @@ main = hspec $ do
           w = sepBy " AND " [f1, f2]
       sqlOf w `shouldBe` "group_key = ? AND parent_id = ?"
       paramTags (qParams w) `shouldBe` ["text", "int8"]
+
+  describe "statement shapes" $ do
+    it "locks a named job's own subtree as well as its root's" $ do
+      let rendered = squished (lockJobTreesFromRootSQL "arbiter" "jobs" [1, 2])
+      rendered `shouldSatisfy` T.isInfixOf "WHERE id = ANY(?) OR id IN (SELECT id FROM roots)"
+
+    it "moves the claim token on a rate-limited defer as well as an admit" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60 Nothing)
+      rendered `shouldSatisfy` T.isInfixOf "claim_seq = j.claim_seq + 1,"
+      rendered `shouldSatisfy` (not . T.isInfixOf "WHEN dc._admit THEN j.claim_seq + 1")
+
+    it "measures queue ages from clock_timestamp, so none of them can go negative" $ do
+      let rendered = squish (getQueueStatsSQL "arbiter" "jobs")
+      rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(last_attempted_at)"
+      rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(inserted_at)"
+      rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")

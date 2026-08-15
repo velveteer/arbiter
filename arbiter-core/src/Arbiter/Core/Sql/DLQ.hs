@@ -3,7 +3,8 @@
 
 -- | DLQ SQL templates.
 module Arbiter.Core.Sql.DLQ
-  ( moveToDLQSQL
+  ( DLQMove (..)
+  , moveToDLQSQL
   , selectExhaustedJobsSQL
   , retryFromDLQSQL
   , dlqJobExistsSQL
@@ -15,16 +16,28 @@ module Arbiter.Core.Sql.DLQ
   ) where
 
 import Data.Aeson (Value)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 
 import Arbiter.Core.Codec (jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, defaultMaxAttempts)
-import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns)
+import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, rows)
+import Arbiter.Core.Sql.Query (Query, mwhen, rows)
+import Arbiter.Core.Sql.Tree (lockedByIdsCte)
+
+-- | Whether a DLQ move re-checks the attempt budget it was selected on.
+data DLQMove = MoveNow | MoveIfExhausted
+  deriving stock (Eq, Show)
+
+-- | The sweep's predicate: claimable, not cancelled, and out of attempt budget.
+sweepableGuard :: Text
+sweepableGuard =
+  "NOT suspended AND cancel_requested_at IS NULL AND attempts >= COALESCE(max_attempts, "
+    <> T.pack (show defaultMaxAttempts)
+    <> ") AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
 
 -- | SQL template for moving job to DLQ atomically
 --
@@ -32,15 +45,16 @@ import Arbiter.Core.Sql.Query (Query, rows)
 -- The operation is atomic: the job is deleted from the main queue and
 -- inserted into the DLQ in a single statement. The final error message
 -- is passed as a parameter to capture the error that caused the DLQ move.
-moveToDLQSQL :: Text -> Text -> Int64 -> Int32 -> Text -> Query Int64
-moveToDLQSQL schema tableName jobId att errorMsg =
+moveToDLQSQL :: DLQMove -> Text -> Text -> Int64 -> Int64 -> Text -> Query Int64
+moveToDLQSQL move schema tableName jobId cseq errorMsg =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
+      exhausted = mwhen (move == MoveIfExhausted) ("AND " <> sweepableGuard)
    in [sql|
         WITH deleted_job AS (
           DELETE FROM ${tbl}
-          WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4}
+          WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} ${exhausted}
           RETURNING *
         ),
         inserted_dlq AS (
@@ -58,18 +72,14 @@ moveToDLQSQL schema tableName jobId att errorMsg =
 -- with the scalar fields the tree-aware DLQ move needs. Each row is then moved
 -- via 'moveToDLQFields'. The cap drains a large backlog over several passes
 -- rather than fetching an unbounded set at once.
-selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int32, Maybe Int64, Bool)
+selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
-      dma = T.pack (show defaultMaxAttempts)
       lim = T.pack (show limit)
    in [sql|
-        SELECT @{id :: CInt8}, @{attempts :: CInt4}, @{parent_id :: Maybe CInt8}, (parent_state IS NOT NULL) AS @{is_rollup :: CBool}
+        SELECT @{id :: CInt8}, @{claim_seq :: CInt8}, @{parent_id :: Maybe CInt8}, (parent_state IS NOT NULL) AS @{is_rollup :: CBool}
         FROM ${tbl}
-        WHERE NOT suspended
-          AND cancel_requested_at IS NULL
-          AND attempts >= COALESCE(max_attempts, ${dma})
-          AND (not_visible_until IS NULL OR not_visible_until <= NOW())
+        WHERE ${sweepableGuard}
         ORDER BY id ASC
         LIMIT ${lim}
       |]
@@ -99,6 +109,8 @@ retryFromDLQSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
       columns = jobColumns Nothing
+      carried = requeuedCols Nothing
+      carriedFrom = requeuedCols (Just "d")
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -141,15 +153,11 @@ retryFromDLQSQL schema tableName dlqId =
         ),
         -- Walk down from root to collect all DLQ tree members
         tree AS (
-          SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
-                 d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
+          SELECT d.id AS dlq_id, d.job_id
           FROM ${dlqTbl} d
           WHERE d.job_id = (SELECT job_id FROM root_job_id)
           UNION ALL
-          SELECT d.id AS dlq_id, d.job_id, d.payload, d.group_key, d.priority,
-                 d.max_attempts, d.parent_id, d.parent_state, d.rate_limit_key, d.rate_limit_prefix,
-                 d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix, d.archive_for
+          SELECT d.id AS dlq_id, d.job_id
           FROM ${dlqTbl} d
           JOIN tree t ON d.parent_id = t.job_id
         ),
@@ -158,23 +166,20 @@ retryFromDLQSQL schema tableName dlqId =
           DELETE FROM ${dlqTbl}
           WHERE id IN (SELECT dlq_id FROM tree)
             AND (SELECT val FROM can_retry)
-          RETURNING job_id, payload, group_key, priority, max_attempts, parent_id, parent_state, rate_limit_key, rate_limit_prefix, rate_limit_cost, concurrency_key, concurrency_prefix, archive_for
+          RETURNING job_id, claim_seq, ${carried}
         ),
         -- Re-insert into main queue with computed suspended state:
         -- rollup finalizers are suspended if they have children (in this
         -- retry batch OR already in the main queue).
         inserted AS (
-          INSERT INTO ${tbl} (id, payload, group_key, attempts, priority, max_attempts,
-                              parent_id, parent_state, archive_for, suspended, rate_limit_key, rate_limit_prefix,
-                              rate_limit_cost, concurrency_key, concurrency_prefix)
-          SELECT d.job_id, d.payload, d.group_key, 0, d.priority, d.max_attempts,
-                 d.parent_id, d.parent_state, d.archive_for,
+          INSERT INTO ${tbl} (id, attempts, claim_seq, suspended, ${carried})
+          SELECT d.job_id, 0, d.claim_seq + 1,
                  CASE WHEN d.parent_state IS NOT NULL
                    THEN EXISTS (SELECT 1 FROM deleted c WHERE c.parent_id = d.job_id)
                      OR EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = d.job_id)
                    ELSE FALSE
                  END,
-                 d.rate_limit_key, d.rate_limit_prefix, d.rate_limit_cost, d.concurrency_key, d.concurrency_prefix
+                 ${carriedFrom}
           FROM deleted d
           RETURNING *
         ),
@@ -205,23 +210,26 @@ deleteDLQJobSQL schema tableName dlqId =
 
 -- | SQL template for moving multiple jobs to DLQ in a single operation
 --
--- Uses unnest to process multiple (id, attempts, error_msg) tuples.
--- Returns the number of jobs moved.
-moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int32] -> [Text] -> Query Int64
-moveToDLQBatchSQL schema tableName ids atts errs =
+-- Uses unnest to process multiple (id, claim_seq, error_msg) tuples, locking
+-- descending to match ack. Returns the id of each job moved.
+moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Text] -> Query Int64
+moveToDLQBatchSQL schema tableName ids cseqs errs =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       cols = dlqCarriedCols
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input_jobs AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id,
-                 unnest(#{atts :: [CInt4]}::int[]) AS expected_attempts,
+                 unnest(#{cseqs :: [CInt8]}::bigint[]) AS expected_claim_seq,
                  unnest(#{errs :: [CText]}::text[]) AS error_msg
         ),
+        ${locked},
         deleted_jobs AS (
           DELETE FROM ${tbl} j
           USING input_jobs ij
-          WHERE j.id = ij.id AND j.attempts = ij.expected_attempts
+          WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq
+            AND j.id IN (SELECT id FROM locked)
           RETURNING j.*, ij.error_msg AS new_error
         ),
         inserted_dlq AS (
@@ -229,16 +237,16 @@ moveToDLQBatchSQL schema tableName ids atts errs =
           SELECT id, NOW(), ${cols}, new_error
           FROM deleted_jobs
         )
-        SELECT count(*) AS @{count :: CInt8} FROM deleted_jobs
+        SELECT id AS @{result :: CInt8} FROM deleted_jobs
       |]
 
 -- | SQL template for deleting multiple DLQ jobs by ID
 --
 -- | Delete multiple DLQ jobs by id, returning each deleted job's parent_id (NULL if no parent).
-deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Maybe Int64)
 deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
-   in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{parent_id :: Maybe CInt8}|]
+   in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
 
 -- | Cascade all descendants of a rollup parent to the DLQ.
 --

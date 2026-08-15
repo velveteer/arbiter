@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 
 env:
-  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui arbiter-otel
 
 jobs:
   release:
@@ -30,7 +30,7 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.10'
+          ghc-version: '9.14'
           cabal-version: '3.12'
 
       - name: Configure

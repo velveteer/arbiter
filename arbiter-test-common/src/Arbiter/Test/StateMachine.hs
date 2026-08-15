@@ -300,9 +300,8 @@ driftViolations schema table withConn = withConn $ \conn -> do
 -- churn (unlike the eventually-settled summary oracle):
 --
 --   * serialization: more than one in-flight (leased\/backoff) job per group
---   * attempt bound: a live uncancelled job past its limit. The claim guard caps
---     @attempts@ at @max_attempts@, and force-cancel's void-bump is not an execution
---     (like the reaper's exhausted-to-DLQ sweep, cancelled rows are excluded)
+--   * attempt bound: a live job past its limit. The claim guard caps @attempts@
+--     at @max_attempts@
 --   * dedup uniqueness: two live jobs sharing a @dedup_key@
 --   * rate-limit integrity: a bucket's tokens stay within [0, max]. Negative means
 --     the gate over-spent, above max means a refill\/top-up\/seed skipped the cap.
@@ -398,7 +397,6 @@ exactViolations schema table withConn = withConn $ \conn -> do
         <> " WHERE attempts > COALESCE(max_attempts, "
         <> dma
         <> ")"
-        <> " AND cancel_requested_at IS NULL"
     dupSql =
       "SELECT dedup_key FROM "
         <> tbl
@@ -1046,12 +1044,12 @@ data Refresh (v :: Type -> Type) = Refresh
 -- the DLQ. Both are backstops, so neither may break an invariant.
 runReaper
   :: forall sm
-   . (MonadArbiter sm, MonadUnliftIO sm, RegistryTables (RegistryOf sm))
+   . (MonadArbiter sm, RegistryTables (RegistryOf sm))
   => Text
   -> Text
   -> sm ()
 runReaper schema table = do
-  void (HL.refreshAllGroups @sm)
+  void (HL.refreshAllGroupsFully @sm)
   void (Ops.sweepExhaustedJobs schema [table])
 
 cRefresh
@@ -1479,7 +1477,7 @@ serializationGuard run schema table withConn reset = do
         actor = replicateM_ rounds $ do
           act <- Gen.sample (genAction @sm schema table withConn)
           withRetry (run act)
-        reaper = replicateM_ (rounds * 2) $ withRetry (run (void (HL.refreshAllGroups @sm)))
+        reaper = replicateM_ (rounds * 2) $ withRetry (run (void (HL.refreshAllGroupsFully @sm)))
     mapConcurrently_ id (reaper : replicate nActors actor)
     hol <- countHolViolations schema table withConn
     hol `shouldBe` []
@@ -1718,7 +1716,7 @@ reclaimGuard run reset = do
   -- After a reaper recompute of in_flight_until.
   reset
   insClaimExpire "rc-reaper"
-  void (run (HL.refreshAllGroups @sm))
+  void (run (HL.refreshAllGroupsFully @sm))
   c2 <- claim1
   length c2 `shouldBe` 1
 

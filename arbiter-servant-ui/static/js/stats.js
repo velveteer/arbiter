@@ -7,10 +7,12 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('statsTab', () => ({
     ...eventBusTab(),
+    ...tabActive(),
     stats: null,
     loading: false,
     active: false,
     _statsDebounce: null,
+    _statsPending: false,
     _loadErrored: false,
 
     init() {
@@ -34,15 +36,19 @@ document.addEventListener('alpine:init', () => {
     destroy() {
       untrackTabActive(this);
       if (this._statsDebounce) { clearTimeout(this._statsDebounce); this._statsDebounce = null; }
+      this._statsPending = false;
       this._unbindBus();
       releaseInitialLoad(this);
     },
 
     _debouncedLoadStats() {
-      if (this._statsDebounce) return;
+      if (this._statsDebounce) { this._statsPending = true; return; }
       this._statsDebounce = setTimeout(() => {
-        this._statsDebounce = null;
-        this.loadStats();
+        this._statsPending = false;
+        this.loadStats().finally(() => {
+          this._statsDebounce = null;
+          if (this._statsPending) this._debouncedLoadStats();
+        });
       }, ARB_TIMING.statsDebounceMs);
     },
 

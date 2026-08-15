@@ -52,14 +52,15 @@ import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
+  , JobForceCancelled (..)
+  , JobGoneException (..)
   , JobNackException (..)
-  , JobNotFoundException (..)
   , JobPermanentException (..)
   , JobRetryableException (..)
-  , JobStolenException (..)
   , ParsingException (..)
   , TreeCancelException (..)
-  , throwJobNotFound
+  , namedJobIds
+  , throwJobGoneIds
   )
 import Arbiter.Core.HighLevel (JobOperation, QueueOperation)
 import Arbiter.Core.HighLevel qualified as Arb
@@ -73,15 +74,28 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..), defaultPoolConfig)
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
+import Arbiter.Core.Threads (labelArbiterThread)
+import Arbiter.Core.Trace
+  ( ConsumeShape (..)
+  , ConsumeSpan
+  , consumeSpanFor
+  , markSpanError
+  , recordJobCancelled
+  , recordJobFailure
+  , resolveTracer
+  , withConsumeSpan
+  )
 import Control.Exception (SomeException, displayException, fromException, toException)
+import Control.Exception qualified as E
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (FromJSON, Value, toJSON)
-import Data.Either (partitionEithers)
+import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Bifunctor (second)
+import Data.Bool (bool)
+import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (fold, foldMap', toList, traverse_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -95,11 +109,13 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.Traversable (for)
+import Data.UUID (UUID)
 import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
   , bracket
+  , catchSyncOrAsync
   , checkSTM
   , finally
   , isEmptyTBQueue
@@ -110,7 +126,6 @@ import UnliftIO
   , newTVarIO
   , readTBQueue
   , readTVar
-  , throwIO
   , tryAny
   , waitAnyCatch
   , writeTVar
@@ -122,8 +137,7 @@ import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy
 import Arbiter.Worker.ChannelHandlers
-  ( JobForceCancelled (..)
-  , RunningJobs
+  ( RunningJobs
   , handleCancelNotif
   , handleCronRunNotif
   , handlePauseNotif
@@ -148,12 +162,28 @@ import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal
   ( runHook
-  , tryLog
   , withJobContext
   , withJobContextList
   , withJobContextOne
   )
 import Arbiter.Worker.Retry (spawnRetried)
+import Arbiter.Worker.Settle
+  ( CancelHandoff
+  , byIdDesc
+  , cancelFinalized
+  , disowned
+  , finalized
+  , hasIdIn
+  , markCancelFinalized
+  , newCancelHandoff
+  , pendingJobs
+  , record
+  , recordCancelled
+  , settle
+  , settleBy
+  , settleInterruptibly
+  , unownedJobs
+  )
 import Arbiter.Worker.WorkerState
 
 -- ---------------------------------------------------------------------------
@@ -164,8 +194,8 @@ import Arbiter.Worker.WorkerState
 --
 -- @
 -- allWorkers =
---   [ namedWorkerPool emailConfig      -- "email_jobs"
---   , namedWorkerPool imageConfig      -- "image_jobs"
+--   [ namedWorkerPool emailConfig -- "email_jobs"
+--   , namedWorkerPool imageConfig -- "image_jobs"
 --   ]
 --
 -- main = runWorkerPools allWorkers
@@ -219,7 +249,7 @@ shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
 shutdownPools pools =
   liftIO . STM.atomically $
     traverse_
-      (\var -> STM.writeTVar var ShuttingDown)
+      (`STM.writeTVar` ShuttingDown)
       [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
 -- | Run only the worker pools whose names appear in the enabled list. The first
@@ -243,7 +273,7 @@ runSelectedWorkerPools enabled pools =
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
       let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
-       in ContT $ Async.withAsync (runWorkerPool cfg')
+       in ContT $ Async.withAsync (labelArbiterThread "pool" (Just name) >> runWorkerPool cfg')
 
 -- | Inject the pool name into log context. User-supplied pairs come after
 -- so they win on key collision.
@@ -276,7 +306,6 @@ runWorkerPool
   :: forall payload m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , EncodeJobResult (ResultOf m payload)
-     , MonadUnliftIO m
      , QueueOperation m payload
      , RegistryTables (RegistryOf m)
      )
@@ -285,6 +314,8 @@ runWorkerPool
 runWorkerPool config = do
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
+      -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.
+      consumeSpan = consumeSpanFor queueName (poolSpanShape config)
 
   schemaName <- getSchema
   workQueue <- newTBQueueIO (fromIntegral workerCap)
@@ -330,23 +361,24 @@ runWorkerPool config = do
             (Listen.HubLog (tryLog (logConfig config) Warning) (tryLog (logConfig config) Error))
             handlers
     void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
+    let spawn = spawnRetried (workerStateVar config) (logConfig config) queueName
     heartbeat <-
-      spawnRetried (workerStateVar config) (logConfig config) "Worker heartbeat" $
+      spawn "Worker heartbeat" $
         heartbeatLoop config schemaName queueName
     dispatcher <-
-      spawnRetried (workerStateVar config) (logConfig config) "Dispatcher" $
+      spawn "Dispatcher" $
         runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
     workers <-
       replicateM workerCap $
-        spawnRetried (workerStateVar config) (logConfig config) "Worker thread" $
-          workerLoop config runningJobs workQueue busyWorkerCount workerFinishedVar
+        spawn "Worker thread" $
+          workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
     crons <-
       unlessNull (cronJobs config) $
-        spawnRetried (workerStateVar config) (logConfig config) "Cron scheduler" $
+        spawn "Cron scheduler" $
           runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
-      spawnRetried (workerStateVar config) (logConfig config) "Reaper" $
-        reaperLoop (logConfig config) (reaperInterval config) (reaperTimeout config)
+      spawn "Reaper" $
+        reaperLoop (logConfig config) (onMaintenance config) (reaperInterval config) (reaperTimeout config)
 
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
     case res of
@@ -390,7 +422,7 @@ registerSelf config schemaName queueName =
 -- | Mark shutting-down, drain, then deregister. All DB
 -- writes are best-effort and logged on failure.
 shutdownPool
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
   -> TBQueue a
@@ -452,7 +484,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
 -- @paused@ flag into local state, and re-registers if the sweeper deleted
 -- the row.
 heartbeatLoop
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
   -> Text
@@ -497,19 +529,38 @@ unlessNull xs act = if null xs then pure [] else (: []) <$> act
 
 -- | Run @act@. On exception, log a warning under @label@ and continue.
 tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
-tryWarn logCfg label act = tryAny act >>= either (warnEx logCfg label) (const (pure ()))
+tryWarn logCfg label act = tryWarnWith logCfg label () (void act)
 
-warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
-warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
+-- | 'tryWarn' keeping @act@'s result, falling back to @fallback@ when it threw.
+tryWarnWith :: (MonadUnliftIO m) => LogConfig -> Text -> a -> m a -> m a
+tryWarnWith logCfg label fallback act =
+  tryAny act >>= either (\e -> fallback <$ warnEx logCfg label e) pure
+
+-- | The pool's log context narrowed to one job.
+jobLog :: WorkerConfig m payload -> Job.JobRead payload -> LogConfig
+jobLog config = withJobContextOne (logConfig config)
+
+-- | The pool's log context narrowed to a set of jobs.
+jobsLog :: WorkerConfig m payload -> [Job.JobRead payload] -> LogConfig
+jobsLog config = withJobContextList (logConfig config)
+
+-- | The pool's log context narrowed to a claimed batch.
+batchLog :: WorkerConfig m payload -> NonEmpty (Job.JobRead payload) -> LogConfig
+batchLog config = withJobContext (logConfig config)
+
+-- | Why a job a worker no longer holds is reported unavailable.
+unownedReason :: Text
+unownedReason = "no longer claimed by this worker"
 
 -- | Main loop for a single worker thread.
 workerLoop
   :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m payload
-     , MonadUnliftIO m
      )
   => WorkerConfig m payload
+  -> ConsumeSpan
+  -- ^ The pool's consumer-span shape, built once for its queue.
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
   -> TBQueue (NonEmpty (Job.JobRead payload))
@@ -518,7 +569,7 @@ workerLoop
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
+workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
   -- Mask covers the window between the atomic claim (which increments
   -- busyCount) and entering the finally block that decrements it.
   jobBatch <- atomically $ do
@@ -527,41 +578,30 @@ workerLoop config runningJobs workQueue busyCount workerFinishedVar = forever $ 
     pure batch
 
   let jobIds = map Job.primaryKey (toList jobBatch)
-      jobLog job = withJobContextOne (logConfig config) job
-      batchLog = withJobContext (logConfig config) jobBatch
-      claimHook now job =
-        runHook (jobLog job) "onJobClaimed" $
-          Job.onJobClaimed (observabilityHooks config) job now
 
   flip
     finally
     ( atomically $ do
         modifyTVar' busyCount (subtract 1)
-        modifyTVar' runningJobs $ \m -> foldl' (flip Map.delete) m jobIds
         writeTVar workerFinishedVar True
     )
     $ do
-      currentTime <- liftIO getCurrentTime
-      traverse_ (claimHook currentTime) jobBatch
+      handoff <- newCancelHandoff
       result <-
         withRegisteredJobs runningJobs jobIds $
-          processJobsWithRetry config jobBatch
+          processJobsWithRetry config consumeSpan handoff jobBatch
       case result of
         Right () -> pure ()
         Left e
-          | Just JobForceCancelled <- fromException e -> do
-              tryLog batchLog Info "Job(s) force-cancelled"
-              schemaName <- getSchema
-              let (firstJob :| rest) = jobBatch
-              tryWarn batchLog "Deleting force-cancelled jobs failed" $
-                void $
-                  Ops.deleteCancelledJobs schemaName (Job.queueName firstJob) jobIds
-              unless (null rest) $
-                tryWarn batchLog "Releasing force-cancel batch siblings failed" $
-                  traverse_ (void . Arb.nackJob) (toList jobBatch)
-          | Just Async.AsyncCancelled <- fromException e -> throwIO e
+          -- Finalized inside the job span, so the trace carries the cancel. One
+          -- delivered before that catch, or interrupting it, arrives here undone.
+          | Just (JobForceCancelled cancelledIds reclaimedIds) <- fromException e -> do
+              alreadyFinalized <- cancelFinalized handoff
+              unless alreadyFinalized $
+                finalizeForceCancelled config jobBatch cancelledIds reclaimedIds handoff
+          | Just Async.AsyncCancelled <- fromException e -> liftIO (E.throwIO e)
           | otherwise -> do
-              tryLog batchLog Error $ "Worker exception: " <> T.pack (displayException e)
+              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> T.pack (displayException e)
               threadDelay 2_000_000
 
 -- | Read and decode child results for a rollup finalizer.
@@ -583,126 +623,321 @@ processJobsWithRetry
   :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
      , JobOperation m payload
-     , MonadUnliftIO m
      )
   => WorkerConfig m payload
+  -> ConsumeSpan
+  -- ^ The pool's consumer-span shape, built once for its queue.
+  -> CancelHandoff
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config jobs = do
-  let hooks = observabilityHooks config
-      jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
-      -- Ack a job, throwing if it was reclaimed by another worker mid-flight.
-      ackJobOrSkip job = do
-        rowsAffected <- Arb.ackJob job
-        when (rowsAffected == 0) $
-          throwJobNotFound "reclaimed by another worker during processing"
+processJobsWithRetry config consumeSpan handoff jobs = do
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
-  handledRef <- liftIO $ newIORef Set.empty
-  let jobLog j = withJobContextOne (logConfig config) j
-      markHandled j = liftIO $ atomicModifyIORef' handledRef $ \s -> (Set.insert (Job.primaryKey j) s, ())
-      fireSuccess j = do
-        endT <- liftIO getCurrentTime
-        runHook (jobLog j) "onJobSuccess" $ Job.onJobSuccess hooks j startTime endT
-      finalize j = fireSuccess j >> markHandled j
-      nackOne j = Arb.nackJob j >> markHandled j
-      failWith j exc = do
-        endT <- liftIO getCurrentTime
-        withDbTransaction $ handleJobFailure config {logConfig = jobLog j} hooks exc (jobMaxAtts j) startTime endT j
-        markHandled j
-      failAs mkExc j msg = failWith j (toException (mkExc msg))
-      ackOneStoring j mVal = do
-        withDbTransaction $ do
-          ackJobOrSkip j
-          storeEncodedResult schemaName j mVal
-        finalize j
-      ackBatchStoring pairs = do
-        let js = map fst pairs
-            isAcked acked j = Job.primaryKey j `Set.member` acked
-        acked <- withDbTransaction $ do
-          ackedSet <- Set.fromList <$> Arb.ackJobsBatch js
-          storeEncodedResults schemaName (filter (isAcked ackedSet . fst) pairs)
-          pure ackedSet
-        let (done, reclaimed) = partition (isAcked acked) js
-        unless (null reclaimed) $
-          tryLog
-            (withJobContextList (logConfig config) reclaimed)
-            Info
-            "Jobs reclaimed during bulk completion, skipped"
-        traverse_ finalize done
-      callbacks =
-        BatchCallbacks
-          { ack = \job -> ackOneStoring job Nothing
-          , ackWith = \job r -> ackOneStoring job (encodeJobResult r)
-          , ackAll = \js -> ackBatchStoring (map (\j -> (j, Nothing)) js)
-          , ackAllWith = \prs -> ackBatchStoring (map (\(j, r) -> (j, encodeJobResult r)) prs)
-          , failRetry = failAs (Retryable . JobRetryableException)
-          , failPermanent = failAs (Permanent . JobPermanentException)
-          , cancelBranch = failAs (BranchCancel . BranchCancelException)
-          , cancelTree = failAs (TreeCancel . TreeCancelException)
-          , nack = nackOne
-          }
-  result <-
-    tryAny
-      $ withJobsHeartbeat
-        hooks
-        (jobHeartbeatInterval config)
-        (visibilityTimeout config)
-        startTime
-        jobs
-        (logConfig config)
-        (heartbeatSignal config)
-      $ case handlerMode config of
-        SingleJobMode handler -> do
-          let (job :| _) = jobs
-          withDbTransaction $ do
-            handlerResult <- runHandlerWithConnection handler job
-            ackJobOrSkip job
-            storeJobResult schemaName job handlerResult
-          finalize job
-        BatchedJobsMode _ handler -> handler jobs callbacks
-  endTime <- liftIO getCurrentTime
-  handled <- liftIO $ readIORef handledRef
-  reportBatchOutcome config hooks startTime endTime jobs handled result
+  tracer <- resolveTracer
+  let (firstJob :| _) = jobs
+      -- Rethrown with base throwIO, UnliftIO's wrapping it as synchronous. The flag
+      -- is set last, so an interrupted finalizer leaves the rest to 'workerLoop'.
+      onForceCancel exc@(JobForceCancelled cancelledIds goneIds) = do
+        finalizeForceCancelled config jobs cancelledIds goneIds handoff
+        markCancelFinalized handoff
+        liftIO $ E.throwIO exc
+      claimHook job =
+        runHook (jobLog config job) "onJobClaimed" $
+          Job.onJobClaimed (observabilityHooks config) job startTime
+  -- The span covers the claim hooks, the outcome report and the force-cancel
+  -- finalizer, so every terminal hook fires while it is open.
+  withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
+    traverse_ claimHook jobs
+    result <-
+      tryAny
+        $ withJobsHeartbeat
+          (observabilityHooks config)
+          (jobHeartbeatInterval config)
+          (visibilityTimeout config)
+          startTime
+          jobs
+          (pendingJobs handoff jobs)
+          (logConfig config)
+          (heartbeatSignal config)
+        $ case handlerMode config of
+          SingleJobMode handler ->
+            settleInterruptibly
+              handoff
+              (finalized [firstJob])
+              ( withDbTransaction $ do
+                  handlerResult <- runHandlerWithConnection handler firstJob
+                  ackOrGone firstJob
+                  storeJobResult schemaName firstJob handlerResult
+              )
+              (const (reportSuccess config startTime firstJob))
+          BatchedJobsMode _ handler -> handler jobs (batchCallbacks config handoff jobs startTime schemaName)
+    endTime <- liftIO getCurrentTime
+    reportBatchOutcome config startTime endTime jobs handoff result
+
+-- | Ack a job, throwing if another worker reclaimed it mid-flight.
+ackOrGone :: (JobOperation m payload) => Job.JobRead payload -> m ()
+ackOrGone job = do
+  rowsAffected <- Arb.ackJob job
+  when (rowsAffected == 0) $
+    throwJobGoneIds "reclaimed by another worker during processing" [Job.primaryKey job]
+
+-- | Report a completed job, once the handoff already records it.
+reportSuccess
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> UTCTime
+  -> Job.JobRead payload
+  -> m ()
+reportSuccess config startTime j = do
+  endT <- liftIO getCurrentTime
+  runHook (jobLog config j) "onJobSuccess" $ Job.onJobSuccess (observabilityHooks config) j startTime endT
+
+-- | The settle operations a batch handler drives its jobs through.
+batchCallbacks
+  :: forall payload m
+   . ( EncodeJobResult (ResultOf m payload)
+     , JobOperation m payload
+     )
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> NonEmpty (Job.JobRead payload)
+  -> UTCTime
+  -> Text
+  -> BatchCallbacks m payload (ResultOf m payload)
+batchCallbacks config handoff jobs startTime schemaName =
+  BatchCallbacks
+    { ack = (`ackOneStoring` Nothing)
+    , ackWith = \job r -> ackOneStoring job (encodeJobResult r)
+    , ackAll = \js -> ackBatchStoring (map (\j -> (j, Nothing)) js)
+    , ackAllWith = \prs -> ackBatchStoring (map (second encodeJobResult) prs)
+    , failRetry = failAs (Retryable . JobRetryableException)
+    , failPermanent = failAs (Permanent . JobPermanentException)
+    , cancelBranch = failAs (BranchCancel . BranchCancelException)
+    , cancelTree = failAs (TreeCancel . TreeCancelException)
+    , nack = nackOne
+    }
+  where
+    shape = batchSpanShape jobs
+    nackOne j = releaseJobs config handoff [j]
+    failAs mkExc j msg = failWith j (toException (mkExc msg))
+    failWith j exc = do
+      endT <- liftIO getCurrentTime
+      settle
+        handoff
+        (finalized [j])
+        ( withDbTransaction $
+            handleJobFailure config Ops.TakeLocks shape (classifyException exc) startTime endT j
+        )
+        $ \outcome -> do
+          reportWritten outcome
+          settleUnwritten config handoff [(j, outcome)]
+    ackOneStoring j mVal =
+      settle
+        handoff
+        (finalized [j])
+        ( withDbTransaction $ do
+            ackOrGone j
+            storeEncodedResult schemaName j mVal
+        )
+        (const (reportSuccess config startTime j))
+    ackBatchStoring pairs =
+      let js = map fst pairs
+       in settleBy
+            handoff
+            ( withDbTransaction $ do
+                acked <- Set.fromList <$> Arb.ackJobsBatch js
+                storeEncodedResults schemaName (filter (hasIdIn acked . fst) pairs)
+                pure (partition (hasIdIn acked) js)
+            )
+            (\(done, reclaimed) -> finalized done <> disowned reclaimed)
+            $ \(done, reclaimed) -> do
+              traverse_ (reportSuccess config startTime) done
+              let reclaimedLog = jobsLog config reclaimed
+              unless (null reclaimed) $ do
+                tryLog reclaimedLog Info "Jobs no longer claimed by this worker during bulk completion, skipped"
+                void $ settleGoneJobs config handoff unownedReason reclaimed
+
+-- | Delete the jobs a force-cancel flagged, report them, and hand back the attempt
+-- the claim consumed for the batch siblings it interrupted.
+finalizeForceCancelled
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> NonEmpty (Job.JobRead payload)
+  -> [Int64]
+  -- ^ The jobs the cancel named.
+  -> [Int64]
+  -- ^ Jobs the same signal found gone, which report rather than take a nack.
+  -> CancelHandoff
+  -> m ()
+finalizeForceCancelled config jobs cancelledIds goneIds handoff = do
+  tryLog (batchLog config jobs) Info "Job(s) force-cancelled"
+  schemaName <- getSchema
+  pending <- pendingJobs handoff jobs
+  -- A nack keeps the claim, so the cancel can name a job the handler already finalized.
+  let settling = byIdDesc (hasIdIn (Set.fromList (cancelledIds <> map Job.primaryKey pending))) jobs
+      goneSet = Set.fromList goneIds
+      deletable = [Job.primaryKey j | j <- settling, not (hasIdIn goneSet j)]
+  deleted <-
+    deleteCancelledOrWarn (batchLog config jobs) (workerId config) schemaName (Job.queueName firstJob) deletable
+  (fresh, cancelled) <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
+  let (gone, interrupted) = partition (hasIdIn cancelled) settling
+      (unreported, alreadyReported) = partition (hasIdIn fresh) gone
+      (unavailable, siblings) = partition (hasIdIn goneSet) interrupted
+      unavailableLog = jobsLog config unavailable
+  reportGoneJobs config handoff cancelled "force-cancelled" unreported
+  record handoff (finalized alreadyReported)
+  unless (null unavailable) $ do
+    tryLog unavailableLog Info "Job(s) no longer claimed by this worker, skipping retry"
+    reportGoneJobs config handoff mempty unownedReason unavailable
+  releaseOrWarn config handoff "Releasing a force-cancel batch sibling failed" siblings
+  where
+    (firstJob :| _) = jobs
+
+-- | Hand back the attempt the claim consumed for the jobs left unfinalized, in one
+-- statement, and report whichever of them the nack found under another claim.
+releaseJobs
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> [Job.JobRead payload]
+  -> m ()
+releaseJobs _ _ [] = pure ()
+releaseJobs config handoff js =
+  settle
+    handoff
+    (finalized js)
+    (Set.fromList <$> Arb.nackJobsBatch js)
+    $ \released ->
+      settleUnwritten config handoff [(j, Left unownedReason) | j <- js, not (hasIdIn released j)]
+
+-- | 'releaseJobs' on an unwinding path, which has nothing left to throw to.
+releaseOrWarn
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> Text
+  -> [Job.JobRead payload]
+  -> m ()
+releaseOrWarn config handoff warning js =
+  tryWarn (jobsLog config js) warning (releaseJobs config handoff js)
+
+-- | Settle the jobs a failure could not be written for, each under its own reason.
+settleUnwritten
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> [(Job.JobRead payload, FailureOutcome m)]
+  -> m ()
+settleUnwritten config handoff pairs =
+  traverse_ settleOne (Map.toList (Map.fromListWith (<>) [(reason, [j]) | (j, Left reason) <- pairs]))
+  where
+    settleOne (reason, js) = do
+      cancelled <- settleGoneJobs config handoff reason js
+      let (forced, unavailable) = partition (hasIdIn cancelled) js
+      unless (null forced) $ tryLog (jobsLog config forced) Info "Job(s) force-cancelled"
+      unless (null unavailable) $ tryLog (jobsLog config unavailable) Warning ("Job(s) " <> reason)
+
+-- | Delete whichever of @jobs@ a force-cancel flagged, report them all, return those ids.
+-- The delete is recorded, so a cancel signal arriving later does not report them again.
+settleGoneJobs
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> Text
+  -> [Job.JobRead payload]
+  -> m (Set.Set Int64)
+settleGoneJobs config handoff reason = \case
+  [] -> pure mempty
+  jobs@(j : _) -> do
+    schemaName <- getSchema
+    let logCfg = jobsLog config jobs
+    cancelled <- deleteCancelledOrWarn logCfg (workerId config) schemaName (Job.queueName j) (map Job.primaryKey jobs)
+    void $ recordCancelled handoff cancelled
+    cancelled <$ reportGoneJobs config handoff cancelled reason jobs
+
+-- | Delete whichever of @jobIds@ a force-cancel flagged against this worker's lease,
+-- or against none, returning the ids it deleted. One held elsewhere is that worker's.
+deleteCancelledOrWarn
+  :: (MonadArbiter m)
+  => LogConfig
+  -> UUID
+  -> SchemaName
+  -> Text
+  -- ^ Queue the jobs belong to.
+  -> [Int64]
+  -> m (Set.Set Int64)
+deleteCancelledOrWarn logCfg owner schemaName queue jobIds =
+  tryWarnWith logCfg "Deleting force-cancelled jobs failed" mempty $
+    Set.fromList <$> Ops.deleteCancelledJobs schemaName queue (Just owner) jobIds
 
 -- | Interpret a finished batch: warn when the handler left jobs unfinalized,
 -- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
 reportBatchOutcome
   :: forall payload m
-   . (JobOperation m payload, MonadUnliftIO m)
+   . (JobOperation m payload)
   => WorkerConfig m payload
-  -> Job.ObservabilityHooks m payload
   -> UTCTime
   -> UTCTime
   -> NonEmpty (Job.JobRead payload)
-  -> Set.Set Int64
+  -> CancelHandoff
   -> Either SomeException ()
   -> m ()
-reportBatchOutcome config hooks startTime endTime jobs handled = \case
-  Right () ->
-    unless (null unhandled) $
-      tryLog (withJobContextList (logConfig config) unhandled) Warning "Handler left jobs unfinalized, will reprocess"
-  Left e
-    | Just (JobStolenException ids) <- fromException e ->
-        tryLog batchLog Info $ "Job(s) reclaimed by another worker, skipping retry: " <> ids
-    | isJobGoneException e ->
-        tryLog batchLog Info "Job(s) no longer available, skipping retry"
-    | Just JobNackException <- fromException e -> do
-        -- Hand back the attempt the claim consumed for every job the handler
-        -- left unfinalized, so the nacked reprocess does not record a failure.
-        withDbTransaction $ traverse_ (void . Arb.nackJob) unhandled
-        tryLog batchLog Info "Job(s) nacked, will be reprocessed"
-    | otherwise ->
-        -- Fail the jobs the handler did not finalize, in a separate transaction.
-        withDbTransaction $
-          traverse_
-            (\job -> handleJobFailure config {logConfig = jobLog job} hooks e (jobMaxAtts job) startTime endTime job)
-            unhandled
+reportBatchOutcome config startTime endTime jobs handoff outcome = do
+  unhandled <- pendingJobs handoff jobs
+  let splitNamed ids = partition (hasIdIn (Set.fromList ids)) unhandled
+      reportUnavailable ids reason = do
+        -- An exception naming no job speaks for none of them, so the remainder keeps
+        -- its attempt and reports when it runs.
+        let (jobsGone, siblings) = splitNamed ids
+        void $ settleGoneJobs config handoff reason jobsGone
+        unless (null ids) $
+          releaseOrWarn config handoff "Releasing an interrupted batch sibling failed" siblings
+      unownedOf = unownedJobs handoff jobs
+  case outcome of
+    Right () ->
+      unless (null unhandled) $
+        tryLog (jobsLog config unhandled) Warning "Handler left jobs unfinalized, will reprocess"
+    Left exc
+      | Just (JobGoneException reason gone) <- fromException exc -> do
+          tryLog (batchLog config jobs) Info $ "Job(s) " <> reason <> ", skipping retry" <> namedJobIds gone
+          reportUnavailable gone reason
+      | Just JobNackException <- fromException exc -> do
+          -- Hand back the attempt the claim consumed for every job the handler
+          -- left unfinalized, so the nacked reprocess does not record a failure.
+          releaseOrWarn config handoff "Handing back a nacked batch's attempt failed" unhandled
+          tryLog (batchLog config jobs) Info "Job(s) nacked, will be reprocessed"
+      | otherwise -> do
+          -- Fail the jobs the handler did not finalize, in a separate transaction.
+          let failure@(_, kind) = classifyException exc
+              queue = Job.queueName firstJob
+          schemaName <- getSchema
+          -- A tree or branch cancel acts on the tree, not on this worker's claim.
+          unowned <- if cancelsTree kind then unownedOf else pure []
+          -- Every row the settles below touch, in one pass. A cancel reaches the whole
+          -- tree, so its pass has to as well.
+          let lockTrees
+                | cancelsTree kind = Ops.lockJobTreesFromRoot
+                | otherwise = Ops.lockJobTrees
+          settle
+            handoff
+            (finalized unhandled)
+            ( withDbTransaction $ do
+                Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
+                lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
+                outcomes <- traverse (\j -> (j,) <$> failJob failure j) unhandled
+                traverse_ (void . cancelJobFor kind) unowned
+                pure outcomes
+            )
+            $ \outcomes -> do
+              traverse_ report outcomes
+              settleUnwritten config handoff outcomes
   where
-    unhandled = filter (\j -> not (Set.member (Job.primaryKey j) handled)) (toList jobs)
-    batchLog = withJobContext (logConfig config) jobs
-    jobLog job = withJobContextOne (logConfig config) job
-    jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
+    (firstJob :| _) = jobs
+    shape = batchSpanShape jobs
+    report (job, written) =
+      tryWarn (jobLog config job) "Reporting a job's failure failed" (reportWritten written)
+    failJob failure job =
+      handleJobFailure config Ops.LocksHeld shape failure startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -779,23 +1014,15 @@ storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
           | Ops.archivesOnAck job -> Just (Right (Job.primaryKey job, val))
           | otherwise -> Nothing
 
--- | Check if an exception indicates the job is gone (stolen or not found).
--- These jobs should not be retried or moved to DLQ.
-isJobGoneException :: SomeException -> Bool
-isJobGoneException e =
-  case (fromException e :: Maybe JobNotFoundException, fromException e :: Maybe JobStolenException) of
-    (Just _, _) -> True
-    (_, Just _) -> True
-    _ -> False
-
--- | Classify a handler exception into an error message and failure disposition.
---
--- Note: 'JobNotFoundException' and 'JobStolenException' are intercepted by
--- 'isJobGoneException' before reaching 'handleJobFailure', so they never
--- arrive here.
 data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure
   deriving stock (Eq)
 
+-- | The job's own attempt budget, or the default.
+jobMaxAtts :: Job.JobRead payload -> Int32
+jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
+
+-- | Classify a handler exception into an error message and failure disposition.
+-- 'reportBatchOutcome' intercepts 'JobGoneException' first, so it never arrives here.
 classifyException :: SomeException -> (T.Text, FailureKind)
 classifyException e
   | Just (Retryable (JobRetryableException msg)) <- fromException e = (msg, RetryFailure)
@@ -805,72 +1032,130 @@ classifyException e
   | Just (ParsingException msg) <- fromException e = (msg, PermanentFailure)
   | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
 
--- | Handle failure for a single job (retry or move to DLQ).
+-- | Whether a failure deletes a job tree rather than acting on the job's own claim.
+cancelsTree :: FailureKind -> Bool
+cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
+
+-- | Report jobs this worker can no longer act on, as cancelled where a force-cancel
+-- deleted them, recording each against the handoff.
+reportGoneJobs
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> CancelHandoff
+  -> Set.Set Int64
+  -- ^ Ids a force-cancel accounted for.
+  -> Text
+  -> [Job.JobRead payload]
+  -> m ()
+reportGoneJobs config handoff cancelled reason js =
+  settleInterruptibly handoff (finalized js) (pure ()) (const (traverse_ report js))
+  where
+    report job
+      | hasIdIn cancelled job = fireCancelled config job "force-cancelled"
+      | otherwise =
+          runHook (jobLog config job) "onJobUnavailable" $
+            Job.onJobUnavailable (observabilityHooks config) job reason
+
+-- | What this pool's consumer spans cover.
+poolSpanShape :: WorkerConfig m payload -> ConsumeShape
+poolSpanShape = bool PerJob PerBatch . (> 1) . handlerBatchSize
+
+-- | What the consumer span over this batch covers, which a pool claiming fewer jobs
+-- than it asked for narrows to the one job in hand.
+batchSpanShape :: NonEmpty (Job.JobRead payload) -> ConsumeShape
+batchSpanShape = bool PerJob PerBatch . (> 1) . length
+
+-- | Report a failed job to its hooks and to the consumer span it ran under. A span
+-- covering more than this job also covers the ones that succeeded, so only a
+-- single-job span takes the error status.
+fireFailure
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> ConsumeShape
+  -- ^ What the span this job ran under covers.
+  -> Job.JobRead payload
+  -> Text
+  -> UTCTime
+  -> UTCTime
+  -> m ()
+fireFailure config shape job errorMsg startTime endTime = do
+  recordJobFailure job errorMsg
+  when (shape == PerJob) (markSpanError errorMsg)
+  runHook (jobLog config job) "onJobFailure" $
+    Job.onJobFailure (observabilityHooks config) job errorMsg startTime endTime
+
+-- | Report a cancelled job.
+fireCancelled
+  :: (JobOperation m payload)
+  => WorkerConfig m payload
+  -> Job.JobRead payload
+  -> Text
+  -> m ()
+fireCancelled config job errorMsg = do
+  recordJobCancelled job errorMsg
+  runHook (jobLog config job) "onJobCancelled" $
+    Job.onJobCancelled (observabilityHooks config) job errorMsg
+
+-- | Delete what a tree or branch cancel names, returning the rows deleted.
+cancelJobFor
+  :: (JobOperation m payload)
+  => FailureKind
+  -> Job.JobRead payload
+  -> m Int64
+cancelJobFor kind job = do
+  schemaName <- getSchema
+  case kind of
+    BranchCancelFailure ->
+      Ops.cancelJobCascade schemaName (Job.queueName job) (fromMaybe (Job.primaryKey job) (Job.parentId job))
+    _ -> Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
+
+-- | 'Left' why a failure write found no row, 'Right' how to report the one it wrote.
+type FailureOutcome m = Either Text (m ())
+
+-- | Report a failure the write landed.
+reportWritten :: (Monad m) => FailureOutcome m -> m ()
+reportWritten = fromRight (pure ())
+
+-- | Handle failure for a single job (retry or move to DLQ), for the caller to report
+-- once it commits.
 handleJobFailure
   :: forall payload m
-   . ( JobOperation m payload
-     , MonadUnliftIO m
-     )
+   . (JobOperation m payload)
   => WorkerConfig m payload
-  -> Job.ObservabilityHooks m payload
-  -> SomeException
-  -> Int32
+  -> Ops.TreeLocks
+  -- ^ Whether the caller already holds the parent and tree locks.
+  -> ConsumeShape
+  -- ^ What the span this job ran under covers.
+  -> (Text, FailureKind)
+  -- ^ The handler exception, classified once for the whole batch.
   -> UTCTime
   -> UTCTime
   -> Job.JobRead payload
-  -> m ()
-handleJobFailure config hooks e maxAtts startTime endTime job = do
-  let (errorMsg, failureKind) = classifyException e
-      cfg = logConfig config
-  schemaName <- getSchema
-  case failureKind of
-    TreeCancelFailure -> do
-      -- TreeCancel: delete the entire tree from root down (including this job)
-      deleted <- Ops.cancelJobTree schemaName (Job.queueName job) (Job.primaryKey job)
-      when (deleted > 0) $
-        runHook cfg "onJobFailure" $
-          Job.onJobFailure hooks job errorMsg startTime endTime
-    BranchCancelFailure -> do
-      -- BranchCancel: cascade-delete the parent + all siblings (including this job).
-      -- If no parent, just delete this job.
-      let target = fromMaybe (Job.primaryKey job) (Job.parentId job)
-      deleted <- Ops.cancelJobCascade schemaName (Job.queueName job) target
-      when (deleted > 0) $
-        runHook cfg "onJobFailure" $
-          Job.onJobFailure hooks job errorMsg startTime endTime
-    _
-      | failureKind == PermanentFailure || Job.attempts job >= maxAtts -> do
-          -- Snapshot into parent_state before DLQ move (survives CASCADE delete).
-          -- Merges old snapshot so repeated DLQ round-trips don't lose data.
-          when (Job.isRollup job) $ do
-            (results, failures, mSnapshot, _dlqFailures) <-
-              Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
-            let merged = Ops.mergeRawChildResults results failures mSnapshot
-            unless (Map.null merged) $
-              void $
-                Ops.persistParentState schemaName (Job.queueName job) (Job.primaryKey job) (toJSON merged)
-          -- Permanent failure or max attempts reached - move to DLQ
-          rowsAffected <- Arb.moveToDLQ errorMsg job
-          if rowsAffected == 0
-            then
-              tryLog cfg Warning "Job not available for moving to DLQ"
-            else do
-              -- Successfully moved to DLQ
-              runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
-              runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
-      | otherwise -> do
-          -- Retry with configured backoff strategy and jitter
-          let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
-          backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
-          rowsAffected <- Arb.updateJobForRetry backoffSecs errorMsg job
-          if rowsAffected == 0
-            then
-              tryLog cfg Warning $
-                "Job " <> T.pack (show (Job.primaryKey job)) <> " not available for retry"
-            else do
-              -- Successfully updated for retry
-              runHook cfg "onJobFailure" $ Job.onJobFailure hooks job errorMsg startTime endTime
-              runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs
+  -> m (FailureOutcome m)
+handleJobFailure config locks shape (errorMsg, failureKind) startTime endTime job
+  -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
+  | cancelsTree failureKind =
+      Right (fireCancelled config job errorMsg) <$ cancelJobFor failureKind job
+  | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
+      schemaName <- getSchema
+      wrote
+        "no longer available for the dead-letter queue"
+        (runHook cfg "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job)
+        <$> Ops.moveToDLQ locks schemaName (Job.queueName job) errorMsg job
+  | otherwise = do
+      let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
+      backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay
+      wrote
+        "no longer available for retry"
+        (runHook cfg "onJobRetry" $ Job.onJobRetry hooks job backoffSecs)
+        <$> Arb.updateJobForRetry backoffSecs errorMsg job
+  where
+    cfg = jobLog config job
+    hooks = observabilityHooks config
+    -- Nothing written means the job went elsewhere, so the failure is not ours to report.
+    wrote reason after rowsAffected
+      | rowsAffected == 0 = Left reason
+      | otherwise = Right (fireFailure config shape job errorMsg startTime endTime >> after)
 
 -- | Refreshes the groups tables, sweeps stale worker registry rows, moves
 -- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
@@ -879,63 +1164,87 @@ reaperLoop
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
      , MonadArbiter m
-     , MonadUnliftIO m
      , RegistryTables (RegistryOf m)
      )
   => LogConfig
+  -> (MaintenanceOp -> Int64 -> m ())
+  -- ^ Reports the rows each op touched.
   -> NominalDiffTime
   -- ^ How often this loop runs.
   -> NominalDiffTime
   -- ^ Abort any single statement that exceeds this.
   -> m ()
-reaperLoop logCfg interval stmtTimeout = do
-  let intervalSecs = ceiling interval
+reaperLoop logCfg report interval stmtTimeout = do
+  let reaped op n = runHook logCfg "onMaintenance" $ report op n
+      intervalSecs = ceiling interval
       queues = registryTableNames (Proxy @(RegistryOf m))
       pruneInterval = interval * 12
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schemaName <- Arb.getSchema
-  let gated :: forall a. Text -> NominalDiffTime -> m a -> m (Maybe a)
-      gated = runReaperOp logCfg schemaName stmtTimeout
+  let
+    -- Reports the rows the op touched.
+    gatedCount :: MaintenanceOp -> NominalDiffTime -> m Int64 -> m ()
+    gatedCount op every work =
+      runReaperOp logCfg schemaName stmtTimeout (maintenanceOpName op) every work
+        >>= traverse_ (reaped op)
+    reportFailed :: MaintenanceOp -> [Text] -> m ()
+    reportFailed op =
+      traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName op <> " failed for queue: " <> queue)
+    -- Reports what a per-queue sweep touched, whichever gate ran it.
+    reportSwept :: MaintenanceOp -> (Int64 -> m ()) -> Maybe (Int64, [Text]) -> m ()
+    reportSwept op done =
+      traverse_ (\(n, failed) -> reaped op n >> reportFailed op failed >> when (n > 0) (done n))
+    sweep
+      :: MaintenanceOp
+      -> NominalDiffTime
+      -> (Int64 -> m ())
+      -> m (Int64, [Text])
+      -> m ()
+    sweep op every done work =
+      runReaperOp logCfg schemaName stmtTimeout (maintenanceOpName op) every work
+        >>= reportSwept op done
+    -- The cursors ride in the gate row, so every pool resumes from one set of them.
+    refreshGroups =
+      runReaperStateOp
+        logCfg
+        schemaName
+        stmtTimeout
+        (maintenanceOpName RefreshGroups)
+        interval
+        (Ops.refreshAllGroups schemaName queues . fold)
+        >>= reportSwept RefreshGroups (const (pure ()))
   forever $ do
-    mFailed <- gated "refresh-all-groups" interval $ Ops.refreshAllGroups schemaName queues
-    traverse_ (traverse_ (\queue -> tryLog logCfg Warning $ "Groups refresh failed for queue: " <> queue)) mFailed
-    void $ gated "sweep-stale-workers" interval $ Ops.sweepStaleWorkers schemaName
-    mSwept <- gated "sweep-exhausted-jobs" interval $ Ops.sweepExhaustedJobs schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Exhausted-job sweep failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ"
-      )
-      mSwept
-    mCancelled <- gated "sweep-cancelled-jobs" interval $ Ops.sweepCancelledJobs schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Cancelled-job sweep failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)"
-      )
-      mCancelled
+    refreshGroups
+    gatedCount SweepStaleWorkers interval $ Ops.sweepStaleWorkers schemaName
+    sweep
+      SweepExhaustedJobs
+      interval
+      (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
+      $ Ops.sweepExhaustedJobs schemaName queues
+    sweep
+      SweepCancelledJobs
+      interval
+      (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
+      $ Ops.sweepCancelledJobs schemaName queues
     when hasRateLimit $
-      void $
-        gated "prune-rate-limit-buckets" pruneInterval $
-          Arb.pruneRateLimitBuckets @m interval
+      gatedCount PruneRateLimitBuckets pruneInterval $
+        Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
-      void $ gated "reconcile-concurrency-stale" interval $ Arb.reconcileConcurrencyCountsIfStale @m
-      void $ gated "reconcile-prune-concurrency" pruneInterval $ Arb.reconcileAndPruneConcurrency @m
-    mPurged <- gated "purge-archives" interval $ Ops.purgeArchives schemaName queues
-    traverse_
-      ( \(n, failed) -> do
-          traverse_ (\queue -> tryLog logCfg Warning $ "Archive purge failed for queue: " <> queue) failed
-          when (n > 0) $ tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)"
-      )
-      mPurged
+      gatedCount ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
+      gatedCount ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m
+    sweep
+      PurgeArchives
+      interval
+      (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
+      $ Ops.purgeArchives schemaName queues
     threadDelay (intervalSecs * 1_000_000)
 
 -- | Run one gated reaper op, logging and swallowing failures so the loop survives.
 -- statement_timeout bounds each statement (aborting a stuck one at the DB), while a
 -- legitimately long multi-statement op still runs to completion.
 runReaperOp
-  :: (MonadArbiter m, MonadUnliftIO m)
+  :: (MonadArbiter m)
   => LogConfig
   -> SchemaName
   -> NominalDiffTime
@@ -943,8 +1252,24 @@ runReaperOp
   -> NominalDiffTime
   -> m a
   -> m (Maybe a)
-runReaperOp logCfg schemaName stmtTimeout task every work = do
-  r <- tryAny $ Ops.runGatedBounded schemaName task every stmtTimeout work
-  case r of
-    Left e -> Nothing <$ warnEx logCfg ("Reaper op failed: " <> task) e
-    Right mr -> pure mr
+runReaperOp logCfg schemaName stmtTimeout task every work =
+  reaperGate logCfg task $
+    Ops.runGatedBounded schemaName task every stmtTimeout work
+
+-- | 'runReaperOp' for an op that resumes from where its last run left off.
+runReaperStateOp
+  :: (FromJSON s, MonadArbiter m, ToJSON s)
+  => LogConfig
+  -> SchemaName
+  -> NominalDiffTime
+  -> Text
+  -> NominalDiffTime
+  -> (Maybe s -> m (a, s))
+  -> m (Maybe a)
+runReaperStateOp logCfg schemaName stmtTimeout task every work =
+  reaperGate logCfg task $
+    Ops.runGatedStateBounded schemaName task every stmtTimeout work
+
+-- | Swallow a reaper op's failure, so one bad tick does not end the loop.
+reaperGate :: (MonadArbiter m) => LogConfig -> Text -> m (Maybe a) -> m (Maybe a)
+reaperGate logCfg task = tryWarnWith logCfg ("Reaper op failed: " <> task) Nothing

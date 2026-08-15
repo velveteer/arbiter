@@ -8,6 +8,7 @@ module Arbiter.Core.Worker
   , WorkerHealth (..)
   , workerHealthFromText
   , arbiterWorkersTable
+  , arbiterWorkersTableName
   , createWorkersTableSQL
   , addClaimedByColumnSQL
   , addCancelRequestedAtColumnSQL
@@ -72,7 +73,10 @@ data WorkerRow = WorkerRow
 
 -- | Qualified table name for the arbiter_workers table.
 arbiterWorkersTable :: SchemaName -> Text
-arbiterWorkersTable schemaName = quoteIdentifier schemaName <> ".arbiter_workers"
+arbiterWorkersTable schemaName = quoteIdentifier schemaName <> "." <> arbiterWorkersTableName
+
+arbiterWorkersTableName :: Text
+arbiterWorkersTableName = "arbiter_workers"
 
 -- | DDL for the @arbiter_workers@ table.
 createWorkersTableSQL :: SchemaName -> Text

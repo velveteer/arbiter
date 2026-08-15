@@ -1,0 +1,86 @@
+cabal-version:   3.0
+name:            arbiter-otel
+version:         0.1.0.0
+synopsis:        OpenTelemetry traces, metrics, and logs for arbiter
+description:
+  Instruments arbiter with the three OpenTelemetry signals, all pushed
+  over OTLP: consumer spans linked to the enqueue that produced them,
+  job-lifecycle metrics, queue-depth and Postgres-health gauges, and
+  Arbiter's structured logs as OTel log records.
+
+license:         MIT
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Database
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter
+
+common shared-properties
+  default-language:   GHC2024
+  default-extensions: StrictData
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Otel
+    Arbiter.Otel.Gauges
+    Arbiter.Otel.Gauges.Cells
+    Arbiter.Otel.Logs
+    Arbiter.Otel.MetricNames
+    Arbiter.Otel.Metrics
+    Arbiter.Otel.Telemetry
+
+  build-depends:
+    , aeson                 >=2.0  && <2.3
+    , arbiter-core          <0.2
+    , arbiter-worker        <0.2
+    , base                  >=4.14 && <5
+    , hs-opentelemetry-api  >=1.0  && <1.1
+    , hs-opentelemetry-sdk  >=1.0  && <1.1
+    , scientific            >=0.3  && <0.4
+    , stm                   >=2.5  && <2.6
+    , text                  >=1.2  && <2.2
+    , time                  >=1.9  && <1.16
+    , transformers          >=0.5  && <0.7
+    , unliftio              >=0.2  && <0.3
+    , unordered-containers  >=0.2  && <0.3
+
+test-suite arbiter-otel-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , aeson
+    , arbiter-core
+    , arbiter-migrations
+    , arbiter-otel
+    , arbiter-simple
+    , arbiter-test-common
+    , arbiter-worker
+    , base
+    , bytestring
+    , directory
+    , hs-opentelemetry-api
+    , hs-opentelemetry-propagator-w3c
+    , hs-opentelemetry-sdk
+    , hspec
+    , postgresql-simple
+    , text
+    , time
+    , unliftio

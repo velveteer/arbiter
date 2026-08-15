@@ -19,19 +19,21 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
--- | Per-status queue counts plus the age of the oldest @ready@ job.
+-- | Per-status queue counts plus the age of the oldest @ready@ and @in_flight@ job.
 --
 -- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
 -- UI can distinguish actively-leased ('in_flight') jobs from merely delayed
 -- ('scheduled'/'backoff'/'throttled') or 'suspended' ones. The status counts
 -- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
 -- far-future scheduled job no longer skews the queue's backlog latency.
+-- @oldest_in_flight_age_seconds@ measures from the claim that leased each row, so a
+-- handler that never returns keeps climbing instead of never being measured.
 getQueueStatsSQL :: Text -> Text -> Text
 getQueueStatsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       statusCase = jobStatusCaseSQL
    in [text|
-        WITH classified AS (SELECT inserted_at, ${statusCase} AS status FROM ${tbl})
+        WITH classified AS (SELECT inserted_at, last_attempted_at, ${statusCase} AS status FROM ${tbl})
         SELECT ${statsAggColumns} FROM classified
       |]
 
@@ -47,7 +49,8 @@ statsAggColumns =
     COUNT(*) FILTER (WHERE status = 'throttled') AS throttled_jobs,
     COUNT(*) FILTER (WHERE status = 'suspended') AS suspended_jobs,
     COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_jobs,
-    EXTRACT(EPOCH FROM (NOW() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds
+    EXTRACT(EPOCH FROM (clock_timestamp() - MIN(inserted_at) FILTER (WHERE status = 'ready')))::float8 AS oldest_ready_age_seconds,
+    EXTRACT(EPOCH FROM (clock_timestamp() - MIN(last_attempted_at) FILTER (WHERE status = 'in_flight')))::float8 AS oldest_in_flight_age_seconds
   |]
 
 -- | Every queue's stats in one query, tagged by name. Caller guards the empty list.
@@ -63,7 +66,7 @@ allQueueStatsSQL schema tableNames =
           SELECT '${tableName}' AS queue, s.*,
                  COALESCE((SELECT paused FROM ${qTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
                  w.workers_live, w.workers_paused
-          FROM (SELECT ${statsAggColumns} FROM (SELECT inserted_at, ${statusCase} AS status FROM ${tbl}) classified) s
+          FROM (SELECT ${statsAggColumns} FROM (SELECT inserted_at, last_attempted_at, ${statusCase} AS status FROM ${tbl}) classified) s
           CROSS JOIN (
             SELECT COUNT(*)::int8 AS workers_live, COUNT(*) FILTER (WHERE paused)::int8 AS workers_paused
             FROM ${wTbl} WHERE queue_name = '${tableName}' AND ${liveWorker}

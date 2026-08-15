@@ -54,10 +54,12 @@ import Arbiter.Core.CronSchedule
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
   )
-import Arbiter.Core.Gates (createGatesTableSQL)
+import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
+  , addClaimSeqColumnSQL
+  , addTraceContextColumnSQL
   , createArchiveCompletedAtIndexSQL
   , createArchiveExpiresAtIndexSQL
   , createArchiveGroupKeyIndexSQL
@@ -69,6 +71,7 @@ import Arbiter.Core.Job.Schema
   , createDedupKeyIndexSQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
+  , createGroupsEmptiedIndexSQL
   , createGroupsTableSQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
@@ -419,6 +422,7 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "create-arbiter-workers" (encodeUtf8 $ createWorkersTableSQL schemaName)
   , MigrationScript "create-arbiter-queues" (encodeUtf8 $ createQueuesTableSQL schemaName)
   , MigrationScript "create-arbiter-gates" (encodeUtf8 $ createGatesTableSQL schemaName)
+  , MigrationScript "arbiter-gates-add-metadata" (encodeUtf8 $ addGateMetadataColumnSQL schemaName)
   , MigrationScript "create-arbiter-rate-limit-policies" (encodeUtf8 $ createRateLimitPoliciesTableSQL schemaName)
   , MigrationScript "create-arbiter-rate-limits" (encodeUtf8 $ createRateLimitsTableSQL schemaName)
   , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
@@ -463,7 +467,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
         , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
         , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v7" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v8" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
         , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName
@@ -479,6 +483,10 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         , script "create-archive-job-id-index" $ createArchiveJobIdIndexSQL schemaName tableName
         , script "create-archive-parent-id-index" $ createArchiveParentIdIndexSQL schemaName tableName
         , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
+        , -- After the archive table exists, since it alters that too.
+          script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
+        , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
+        , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

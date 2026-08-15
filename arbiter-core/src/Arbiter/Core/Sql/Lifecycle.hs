@@ -9,6 +9,7 @@ module Arbiter.Core.Sql.Lifecycle
   , setVisibilityTimeoutBatchSQL
   , updateJobForRetrySQL
   , nackJobSQL
+  , nackJobsBatchSQL
   , promoteJobSQL
   ) where
 
@@ -19,6 +20,7 @@ import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
+import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Smart ack CTE for job dependencies.
 --
@@ -32,22 +34,22 @@ import Arbiter.Core.Sql.Query (Query, mwhen)
 -- Returns @rows_affected@ (1 on success, 0 if stolen/gone/cancelled).
 --
 -- When @archiveEnabled@, the deleted row is teed into the archive per-row on @archive_for@.
-smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int32 -> Query Int64
-smartAckJobSQL archiveEnabled schema tableName jobId att =
+smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
+smartAckJobSQL archiveEnabled schema tableName jobId cseq =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "*" else "id, parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
    in [sql|
         WITH ack AS (
           DELETE FROM ${tbl}
-          WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4}
+          WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
             AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = #{jobId :: CInt8})
           RETURNING ${returning}
         )${archived},
         suspend AS (
           UPDATE ${tbl}
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
-          WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4}
+          WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
             AND NOT EXISTS (SELECT 1 FROM ack)
             AND EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = #{jobId :: CInt8})
           RETURNING id
@@ -68,25 +70,28 @@ smartAckJobSQL archiveEnabled schema tableName jobId att =
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS @{result :: CInt8}
       |]
 
--- | Set-based smart ack over @unnest@ed @(id, attempts)@ arrays: deletes leaves,
+-- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays: deletes leaves,
 -- suspends finalizers that still have children, and wakes parents whose last
 -- child completed. The wake check excludes acked children explicitly, since a
 -- sibling CTE's deletes are not visible within the same statement. Returns the
--- acked ids. Reclaimed jobs (attempts no longer match) are absent. The caller
--- holds the parent locks.
-smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int32] -> Query Int64
-smartAckJobsBatchSQL archiveEnabled schema tableName ids atts =
+-- acked ids. Reclaimed jobs (a different claim) are absent. Locks children-first
+-- to match nack and force-cancel. The caller holds the parent locks.
+smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
+smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "j.*" else "j.id, j.parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input AS (
-          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{atts :: [CInt4]}::int[]) AS att
+          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
         ),
+        ${locked},
         ack AS (
           DELETE FROM ${tbl} j
           USING input i
-          WHERE j.id = i.id AND j.attempts = i.att
+          WHERE j.id = i.id AND j.claim_seq = i.cseq
+            AND j.id IN (SELECT id FROM locked)
             AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
           RETURNING ${returning}
         )${archived},
@@ -94,7 +99,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids atts =
           UPDATE ${tbl} j
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
           FROM input i
-          WHERE j.id = i.id AND j.attempts = i.att
+          WHERE j.id = i.id AND j.claim_seq = i.cseq
+            AND j.id IN (SELECT id FROM locked)
             AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = j.id)
             AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
           RETURNING j.id
@@ -118,58 +124,63 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids atts =
 
 -- | SQL template for setting visibility timeout
 --
--- Uses optimistic locking (attempts check) to prevent race conditions when
--- another worker has reclaimed the job after visibility timeout expired.
-setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int32 -> Query ()
-setVisibilityTimeoutSQL schema tableName secs jobId att =
+-- Matches on the claim token, so a job another worker reclaimed after the
+-- visibility timeout expired is left alone. Suspended rows hold no lease.
+setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
+setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
         SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
             updated_at = NOW()
-        WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4}
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
 -- | Atomically updates the visibility timeout for a batch of jobs and returns
 -- the detailed status of each job in a single query.
 --
--- This is used for heartbeating. The query attempts to update all jobs, and
--- then reports on which ones succeeded, which were missing (acked), which are
--- force-cancel-flagged (cancelled), and which had a different attempts count
--- (stolen). @valuesFrag@ is the @(id, attempts)@ rows for the input VALUES.
-setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> Double -> Query ()
-setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
+-- This is used for heartbeating. Extends every job still under this claim, held
+-- by the same worker and suspended by none, and reports whether the update
+-- landed alongside each row's claim token, cancel flag and suspension.
+-- @valuesFrag@ is the @(id, claim_seq, claimed_by)@ rows for the input VALUES.
+setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
+setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input_jobs AS (
-          SELECT v.id::bigint AS id, v.expected_attempts::int AS expected_attempts
-          FROM (VALUES ${valuesFrag}) AS v(id, expected_attempts)
+          SELECT v.id::bigint AS id, v.expected_claim_seq::bigint AS expected_claim_seq, v.expected_claimed_by::uuid AS expected_claimed_by
+          FROM (VALUES ${valuesFrag}) AS v(id, expected_claim_seq, expected_claimed_by)
         ),
+        ${locked},
         updated AS (
           UPDATE ${tbl} j
           SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
               updated_at = NOW()
           FROM input_jobs ij
-          WHERE j.id = ij.id AND j.attempts = ij.expected_attempts
+          WHERE j.id = ij.id AND j.id IN (SELECT id FROM locked)
+            AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
+            AND j.claimed_by IS NOT DISTINCT FROM ij.expected_claimed_by
           RETURNING j.id
         )
         SELECT
           ij.id,
           (u.id IS NOT NULL) as was_heartbeated,
-          j.attempts as current_db_attempts,
-          (j.cancel_requested_at IS NOT NULL) as cancel_requested
+          j.claim_seq as current_db_claim_seq,
+          (j.cancel_requested_at IS NOT NULL) as cancel_requested,
+          (j.suspended IS TRUE) as suspended,
+          j.claimed_by as claimed_by
         FROM input_jobs ij
-        LEFT JOIN updated u ON ij.id = u.id
+        LEFT JOIN updated u ON u.id = ij.id
         LEFT JOIN ${tbl} j ON j.id = ij.id
       |]
 
 -- | SQL template for updating job for retry
 --
--- Uses optimistic locking (attempts check) to prevent race conditions when
--- a job's visibility timeout expires and another worker claims it before
--- the retry update completes.
-updateJobForRetrySQL :: Text -> Text -> Int64 -> Text -> Int64 -> Int32 -> Query ()
-updateJobForRetrySQL schema tableName backoff errorMsg jobId att =
+-- Matches on the claim token, so a job another worker claimed after this one's
+-- visibility timeout expired is left alone.
+updateJobForRetrySQL :: Text -> Text -> Int64 -> Text -> Int64 -> Int64 -> Query ()
+updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
@@ -177,7 +188,7 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId att =
             last_error = #{errorMsg :: CText},
             updated_at = NOW(),
             claimed_by = NULL
-        WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4} AND NOT suspended
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
 -- | SQL template for a soft nack: give back the attempt the claim consumed so
@@ -185,16 +196,40 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId att =
 --
 -- Leaves not_visible_until untouched so the job becomes visible again when the
 -- claim's visibility timeout lapses, matching the documented nack semantics.
--- Uses optimistic locking (attempts check) so a job reclaimed by another worker
--- is left alone. The GREATEST floor keeps attempts non-negative.
-nackJobSQL :: Text -> Text -> Int64 -> Int32 -> Query ()
-nackJobSQL schema tableName jobId att =
+-- Matches on the claim token so a job reclaimed by another worker is left alone.
+-- @att@ is the claim's own attempt count. The row clamps the result to one
+-- refund, so repeated nacks on a claim settle at the same value and a
+-- caller-supplied @att@ cannot move attempts further than that.
+nackJobSQL :: Text -> Text -> Int64 -> Int64 -> Int32 -> Query ()
+nackJobSQL schema tableName jobId cseq att =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
-        SET attempts = GREATEST(attempts - 1, 0),
+        SET attempts = LEAST(GREATEST(#{att :: CInt4} - 1, attempts - 1, 0), attempts),
             updated_at = NOW()
-        WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4} AND NOT suspended
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
+          AND claimed_by IS NOT NULL
+      |]
+
+-- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays, locking
+-- children-first to match ack and force-cancel. Returns the ids nacked.
+nackJobsBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Int32] -> Query Int64
+nackJobsBatchSQL schema tableName ids cseqs atts =
+  let tbl = jobQueueTable schema tableName
+      locked = lockedByIdsCte tbl ids
+   in [sql|
+        WITH input AS (
+          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS in_id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq, unnest(#{atts :: [CInt4]}::int[]) AS att
+        ),
+        ${locked}
+        UPDATE ${tbl} j
+        SET attempts = LEAST(GREATEST(i.att - 1, j.attempts - 1, 0), j.attempts),
+            updated_at = NOW()
+        FROM input i
+        WHERE j.id = i.in_id AND j.id IN (SELECT id FROM locked)
+          AND j.claim_seq = i.cseq AND NOT j.suspended
+          AND j.claimed_by IS NOT NULL
+        RETURNING @{id :: CInt8}
       |]
 
 -- | Promote a delayed or retrying job to be immediately visible.

@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: Arbiter
+    folder: Arbiter
+    type: file
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/arbiter

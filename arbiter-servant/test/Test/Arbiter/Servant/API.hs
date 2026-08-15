@@ -19,7 +19,7 @@ import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce, truncateToMicros)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, toJSON, (.=))
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
@@ -39,7 +39,7 @@ import Network.HTTP.Types (status200, status204, status400, status404, status409
 import Test.Hspec
 import Test.Hspec.Wai
 
-import Arbiter.Servant (arbiterApp, initArbiterServer)
+import Arbiter.Servant (ArbiterServerConfig (..), arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
   ( ApiJob (..)
   , ApiJobWithStatus (..)
@@ -91,7 +91,7 @@ spec connStr = do
   runIO (setupOnce connStr testSchema testTable False)
   sharedPool <- runIO (createSharedPool connStr)
   serverConfig <- runIO (initArbiterServer (Proxy @ServantTestRegistry) connStr testSchema)
-  let app = arbiterApp @ServantTestRegistry serverConfig
+  let app = arbiterApp @ServantTestRegistry serverConfig {queueStatsCacheTtl = 0}
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
@@ -830,6 +830,66 @@ spec connStr = do
         visible <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         length visible `shouldBe` 1
         primaryKey (head visible) `shouldBe` jobId
+
+  -- QueueOverview's instances are also how a gauge snapshot round-trips through the
+  -- shared gate, so a change made for that payload would silently reshape this response.
+  describe "Job wire contract" $ do
+    -- A job object as a server predating the trace and claim fields sends it.
+    let olderJob =
+          [aesonQQ|
+            { "primaryKey": 1
+            , "payload": {"tag": "TestMessage", "contents": "older server"}
+            , "queueName": "arbiter_servant_test"
+            , "groupKey": null
+            , "insertedAt": "2026-01-01T00:00:00Z"
+            , "updatedAt": "2026-01-01T00:00:00Z"
+            , "attempts": 0
+            , "lastError": null
+            , "priority": 0
+            , "lastAttemptedAt": null
+            , "notVisibleUntil": null
+            , "dedupKey": null
+            , "maxAttempts": null
+            }
+          |]
+
+    it "decodes a job object carrying none of the fields added since" $
+      (claimSeq . unApiJob <$> decode @(ApiJob ServantTestPayload) (encode olderJob)) `shouldBe` Just 0
+
+  describe "Landing overview wire contract" $ do
+    let overview =
+          Ops.QueueOverview
+            { Ops.overviewQueue = "greetings"
+            , Ops.overviewStats = Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5) (Just 4.5)
+            , Ops.overviewQueuePaused = True
+            , Ops.overviewWorkersLive = 4
+            , Ops.overviewWorkersPaused = 1
+            }
+
+    it "encodes one queue's entry exactly" $
+      toJSON overview
+        `shouldBe` [aesonQQ|
+          { "queue": "greetings"
+          , "paused": true
+          , "workersLive": 4
+          , "workersPaused": 1
+          , "stats":
+              { "totalJobs": 8
+              , "readyJobs": 3
+              , "inFlightJobs": 2
+              , "scheduledJobs": 1
+              , "backoffJobs": 1
+              , "throttledJobs": 0
+              , "suspendedJobs": 1
+              , "cancelledJobs": 0
+              , "oldestReadyAgeSeconds": 12.5
+              , "oldestInFlightAgeSeconds": 4.5
+              }
+          }
+        |]
+
+    it "round-trips, which is what the shared gauge payload relies on" $
+      decode (encode overview) `shouldBe` Just overview
 
   describe "Stats API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/stats returns zero counts for empty queue" $ do

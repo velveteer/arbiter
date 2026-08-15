@@ -131,7 +131,7 @@ concurrencyLimitSpec runM = do
       overridePool env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpool" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
       prune env = runM env HL.pruneConcurrencyKeys :: IO Int64
       reconcile env = void (runM env HL.reconcileConcurrencyCounts :: IO Int64)
-      reconcileIfStale env = runM env HL.reconcileConcurrencyCountsIfStale :: IO ()
+      reconcileIfStale env = void (runM env HL.reconcileConcurrencyCountsIfStale) :: IO ()
       -- Empty the UNLOGGED count table the way a Postgres crash recovery would.
       truncateCounts env =
         runM env $ do

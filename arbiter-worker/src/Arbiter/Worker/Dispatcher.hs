@@ -14,22 +14,18 @@ import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO)
 import UnliftIO.Exception qualified as Ex
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), readEffectiveState)
-import Arbiter.Worker.Logger (LogLevel (..))
-import Arbiter.Worker.Logger.Internal (tryLog)
+import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), handlerBatchSize, readEffectiveState)
+import Arbiter.Worker.Logger (LogLevel (..), tryLog)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 
 -- | Wake on NOTIFY, poll timer, or worker-finished, then claim up to capacity.
 -- @notifVar@ is filled from the shared hub in "Arbiter.Core.Listen".
 runDispatcher
   :: forall payload m
-   . ( MonadUnliftIO m
-     , QueueOperation m payload
-     )
+   . (QueueOperation m payload)
   => WorkerConfig m payload
   -> Int
   -> STM.TBQueue (NonEmpty (JobRead payload))
@@ -40,10 +36,7 @@ runDispatcher
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
   claimSql <-
-    let batchSize = case handlerMode config of
-          SingleJobMode _ -> 1
-          BatchedJobsMode n _ -> n
-     in Arb.mkClaimSql @payload batchSize workerCapacity (visibilityTimeout config) (Just (workerId config))
+    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (Just (workerId config))
   let
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do

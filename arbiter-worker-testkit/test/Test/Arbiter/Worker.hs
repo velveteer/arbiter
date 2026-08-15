@@ -45,13 +45,15 @@ import Arbiter.Worker.Config
   , defaultBatchedWorkerConfig
   , getListenerReady
   , getWorkerState
+  , nack
   , shutdownWorker
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Logger (silentLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, try)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -105,6 +107,12 @@ testSchema = "arbiter_worker_test"
 
 testTable :: Text
 testTable = "arbiter_worker_test"
+
+-- | Take a job's row lock on a connection of the test's own.
+lockJobRow :: PG.Connection -> Int64 -> IO (Either SomeException [Only Int64])
+lockJobRow conn jobId = try (PG.query conn lockSql (Only jobId))
+  where
+    lockSql = fromString . T.unpack $ "SELECT id FROM " <> testSchema <> "." <> testTable <> " WHERE id = ? FOR UPDATE"
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
@@ -352,7 +360,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 }
         let batchHandler jobs cbs = do
               let js = toList jobs
-              -- Simulate a reclaim of "ca-stolen": bump its attempts so the bulk ack won't match it.
+              -- Simulate a reclaim of "ca-stolen": a claim bumps both counters, so the bulk ack won't match it.
               liftIO $
                 traverse_
                   ( \j ->
@@ -363,7 +371,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                             execute
                               conn
                               ( fromString . T.unpack $
-                                  "UPDATE " <> Schema.jobQueueTable testSchema testTable <> " SET attempts = attempts + 1 WHERE id = ?"
+                                  "UPDATE "
+                                    <> Schema.jobQueueTable testSchema testTable
+                                    <> " SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
                               )
                               (Only (primaryKey j))
                   )
@@ -1172,7 +1182,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   <> "."
                   <> testTable
                   <> " SET claimed_by = '00000000-0000-0000-0000-000000000abc'::uuid"
-                  <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1 WHERE id = ?"
+                  <> ", not_visible_until = NOW() + interval '60 second', attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
 
         connB <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connB "BEGIN"
@@ -1235,25 +1245,145 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let pid = primaryKey parent
         Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-child")) {parentId = Just pid}
         let cid = primaryKey child
-            lockSql =
-              fromString . T.unpack $
-                "SELECT id FROM " <> testSchema <> "." <> testTable <> " WHERE id = ? FOR UPDATE"
-            lockRow conn i = try (PG.query conn lockSql (Only i) :: IO [Only Int64]) :: IO (Either SomeException [Only Int64])
 
         connA <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connA "BEGIN"
-        void $ lockRow connA cid
+        void $ lockJobRow connA cid
 
         (efc, epA) <-
           withAsync (try (runSimpleDb env $ Ops.forceCancelJob testSchema testTable pid) :: IO (Either SomeException Int64)) $ \fc -> do
             threadDelay 300_000
-            epA <- lockRow connA pid
+            epA <- lockJobRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
             efc <- Async.wait fc
             pure (efc, epA)
         PG.close connA
 
         efc `shouldSatisfy` isRight
+        epA `shouldSatisfy` isRight
+
+      it "settles a failed batch children-first, so a tree lock cannot deadlock it" $ \env -> do
+        startedRef <- newIORef False
+        goVar <- newEmptyMVar
+        let batchHandler _jobs _cbs = liftIO $ do
+              writeIORef startedRef True
+              takeMVar goVar
+              throwIO (userError "dlb-boom")
+        let jobs =
+              [ (defaultJob (SimpleTask "dlb-1")) {groupKey = Just "dlb", maxAttempts = Just 1}
+              , (defaultJob (SimpleTask "dlb-2")) {groupKey = Just "dlb", maxAttempts = Just 1}
+              ]
+        inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
+        let ids = map primaryKey inserted
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 batchHandler
+
+        withAsync
+          (runSimpleDb env $ runWorkerPool config {pollInterval = 0.05, jobHeartbeatInterval = 30, visibilityTimeout = 60})
+          $ \_ -> do
+            waitUntil 5_000 $ readIORef startedRef
+
+            connA <- PG.connectPostgreSQL connStr
+            void $ PG.execute_ connA "BEGIN"
+            -- Hold the batch's higher id, the row a force-cancel over the tree takes first.
+            void $ lockJobRow connA (maximum ids)
+            putMVar goVar ()
+            threadDelay 300_000
+            -- The failure transaction must not already hold the lower id.
+            eLo <- lockJobRow connA (minimum ids)
+            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+            PG.close connA
+
+            eLo `shouldSatisfy` isRight
+            waitUntil 10_000 $ do
+              dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+              pure (length dlqJobs == 2)
+
+      it "deletes a flagged job the handler already nacked" $ \env -> do
+        -- A nack keeps the claim, so a later cancel flags the row rather than deleting it.
+        nackedRef <- newIORef False
+        let jobs =
+              [ (defaultJob (SimpleTask "fcn-1")) {groupKey = Just "fcn"}
+              , (defaultJob (SimpleTask "fcn-2")) {groupKey = Just "fcn"}
+              ]
+        inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
+        let firstId = primaryKey (head inserted)
+            batchHandler batch cbs = do
+              traverse_ (\j -> when (primaryKey j == firstId) (nack cbs j)) batch
+              liftIO $ writeIORef nackedRef True
+              liftIO $ threadDelay 30_000_000
+
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 batchHandler
+        let config = baseConfig {pollInterval = 0.1, jobHeartbeatInterval = 0.3, visibilityTimeout = 60}
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ readIORef nackedRef
+
+          runSimpleDb env (Ops.forceCancelJob testSchema testTable firstId) `shouldReturn` 1
+
+          waitUntil 10_000 $ do
+            mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload firstId
+            pure (isNothing mJob)
+
+          dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+          dlqJobs `shouldBe` []
+
+      it "refuses a stale worker's ack after a reclaim and nack restored attempts" $ \env -> do
+        -- A nack restores the attempt it consumed, so attempts alone repeats across claims.
+        w1 <- UUID.nextRandom
+        w2 <- UUID.nextRandom
+        Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "aba"))
+        let jid = primaryKey job
+            pool = fromJust (connectionPool (simplePool env))
+            expire =
+              fromString . T.unpack $
+                "UPDATE " <> testSchema <> "." <> testTable <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
+
+        [stale] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w1) :: IO [JobRead WorkerTestPayload]
+        primaryKey stale `shouldBe` jid
+        void $ withResource pool $ \c -> PG.execute c expire (Only jid)
+
+        [held] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w2) :: IO [JobRead WorkerTestPayload]
+        primaryKey held `shouldBe` jid
+        runSimpleDb env (HL.nackJob held) `shouldReturn` 1
+
+        -- The nack put attempts back to what w1 recorded, so an attempts-keyed
+        -- predicate would match here.
+        reread <- runSimpleDb env $ HL.getJobById @WorkerTestPayload jid
+        fmap attempts reread `shouldBe` Just (attempts stale)
+
+        -- w1 is stale: every finalize it can still issue must match no row.
+        runSimpleDb env (HL.setVisibilityTimeoutBatch 60 [stale])
+          `shouldReturn` [HL.JobReclaimed jid (claimSeq stale) (claimSeq held)]
+        runSimpleDb env (HL.nackJob stale) `shouldReturn` 0
+        runSimpleDb env (HL.ackJob stale) `shouldReturn` 0
+        runSimpleDb env (HL.getJobById @WorkerTestPayload jid) >>= (`shouldSatisfy` isJust)
+
+        -- w2 still owns it and can finish.
+        runSimpleDb env (HL.ackJob held) `shouldReturn` 1
+
+      it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
+        Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-parent"))
+        let pid = primaryKey parent
+        Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-child")) {parentId = Just pid}
+        let cid = primaryKey child
+
+        connA <- PG.connectPostgreSQL connStr
+        void $ PG.execute_ connA "BEGIN"
+        -- Hold the child, the row a tree cancel takes first.
+        void $ lockJobRow connA cid
+
+        (etc, epA) <-
+          withAsync (try (runSimpleDb env $ Ops.cancelJobTree testSchema testTable cid) :: IO (Either SomeException Int64)) $ \tc -> do
+            threadDelay 300_000
+            epA <- lockJobRow connA pid
+            void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
+            etc <- Async.wait tc
+            pure (etc, epA)
+        PG.close connA
+
+        etc `shouldSatisfy` isRight
         epA `shouldSatisfy` isRight
 
     describe "Sweeper" $ do

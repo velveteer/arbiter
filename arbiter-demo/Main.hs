@@ -15,16 +15,17 @@ import Arbiter.Core.Job.Types (Job (..), defaultJob)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
+import Arbiter.Otel qualified as Otel
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
 import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( WorkerConfig (..)
+  , defaultLogConfig
   , mergedChildResults
   , namedWorkerPool
   , poolConfigForWorkers
-  , runWorkerPools
   , shutdownPools
   , transactionalWorkerConfig
   )
@@ -32,9 +33,11 @@ import Arbiter.Worker.Cron (OverlapPolicy (..), cronJob)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race_)
 import Control.Monad (forM_, void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 qualified as BS
+import Data.Foldable (traverse_)
+import Data.HashMap.Strict qualified as HM
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe)
@@ -52,9 +55,13 @@ import Network.Wai.Middleware.Cors
   , simpleCorsResourcePolicy
   )
 import Network.Wai.Middleware.RequestLogger (logStdout)
+import OpenTelemetry.Attributes qualified as Attr
+import OpenTelemetry.Instrumentation.Wai (newOpenTelemetryWaiMiddleware)
+import OpenTelemetry.Trace.Core qualified as Trace
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
+import System.Random (randomRIO)
 
 -- ---------------------------------------------------------------------------
 -- Payload types
@@ -136,7 +143,11 @@ emailKeySuffix :: EmailPayload -> Text
 emailKeySuffix = fromMaybe "system" . emailDomain
 
 main :: IO ()
-main = do
+main = Otel.withTelemetryFromEnv runDemo
+
+-- | The demo proper.
+runDemo :: Otel.Telemetry -> IO ()
+runDemo tel = do
   -- Get config from environment or use defaults
   connStr <-
     maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS.pack
@@ -192,7 +203,8 @@ main = do
 
   -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
   mDevDir <- lookupEnv "ADMIN_DEV_DIR"
-  let app = case mDevDir of
+  traceHttp <- newOpenTelemetryWaiMiddleware
+  let app = traceHttp $ case mDevDir of
         Just dir -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
         Nothing -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdmin @DemoRegistry serverConfig
 
@@ -216,7 +228,7 @@ main = do
         , namedWorkerPool notifWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
-      handler = Signals.Catch $ shutdownPools workers
+  let handler = Signals.Catch $ shutdownPools workers
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
 
@@ -241,8 +253,10 @@ main = do
 
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
+
+  putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
   race_
-    (runSimpleDb workerEnv $ runWorkerPools workers)
+    (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig workers)
     (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
 
 -- ---------------------------------------------------------------------------
@@ -250,6 +264,11 @@ main = do
 -- ---------------------------------------------------------------------------
 
 type DemoM = SimpleDb DemoRegistry IO
+
+simulateWork :: Double -> IO ()
+simulateWork mean = do
+  u <- randomRIO (1.0e-6, 1.0)
+  threadDelay (round (mean * negate (log u) * 1e6))
 
 mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
@@ -261,7 +280,7 @@ mkDemoWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
+    handler _conn _job = liftIO $ simulateWork 2
     demoCrons =
       [ either error id $
           cronJob
@@ -281,7 +300,7 @@ mkEmailWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = liftIO $ threadDelay 5_000_000 -- simulate work
+    handler _conn _job = liftIO $ simulateWork 2
     emailCrons =
       [ either error id $
           cronJob
@@ -301,7 +320,7 @@ mkNotifWorker = do
       , livenessFile = Nothing
       }
   where
-    handler _conn _job = pure ()
+    handler _conn _job = liftIO $ simulateWork 0.05
     notifCrons =
       [ either error id $
           cronJob
@@ -322,7 +341,7 @@ mkPipelineWorker = do
   where
     handler _conn job = case payload job of
       ProcessChunk chunkName -> do
-        liftIO $ threadDelay 1_500_000 -- simulate 1.5s of work
+        liftIO $ simulateWork 1
         pure (chunkFindings chunkName)
       AggregateResults _ -> fst <$> mergedChildResults job
 
@@ -358,17 +377,29 @@ seedPipeline schemaName = do
   let bg p = (defaultJob p) {priority = 10}
       chunk = JT.leaf . bg . ProcessChunk
       agg name = JT.rollup (bg (AggregateResults name))
-  result <-
-    JT.insertJobTree schemaName "pipeline" $
-      agg
-        "final-report"
-        ( NE.fromList $
-            NE.take 300 $
-              NE.cycle
-                [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
-                , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
-                ]
-        )
+  tracer <- demoTracer
+  result <- Trace.inSpan' tracer "seed pipeline" Trace.defaultSpanArguments $ \sp -> do
+    tree <-
+      JT.insertJobTree schemaName "pipeline" $
+        agg
+          "final-report"
+          ( NE.fromList $
+              NE.take 300 $
+                NE.cycle
+                  [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
+                  , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
+                  ]
+          )
+    traverse_
+      ( \(root :| rest) ->
+          Trace.addAttributes sp $
+            HM.fromList
+              [ ("demo.pipeline.node_count", Attr.toAttribute (1 + length rest :: Int))
+              , ("demo.pipeline.root_id", Attr.toAttribute (tshow (primaryKey root)))
+              ]
+      )
+      tree
+    pure tree
   case result of
     Left err -> liftIO $ die $ "pipeline seed failed: " <> show err
     Right (root :| rest) ->
@@ -494,6 +525,11 @@ pipelinePulse env schemaName sec = go 0
           leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
       runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
       go (n + 1)
+
+demoTracer :: (MonadIO m) => m Trace.Tracer
+demoTracer = do
+  tp <- Trace.getGlobalTracerProvider
+  pure (Trace.makeTracer tp "arbiter-demo" Trace.tracerOptions)
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show
