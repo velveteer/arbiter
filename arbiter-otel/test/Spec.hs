@@ -183,9 +183,10 @@ referencedMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
 declaredMetrics :: [Text]
 declaredMetrics = map (T.replace "." "_") Otel.arbiterMetricNames
 
--- | No metric a provisioned file names is one the library never registers.
+-- | A provisioned file names at least one metric, and only ones the library registers.
 queriesOnlyDeclared :: [Text] -> Expectation
-queriesOnlyDeclared referenced =
+queriesOnlyDeclared referenced = do
+  referenced `shouldSatisfy` (not . null)
   filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
 
 -- | Every point a collection produced, as its metric name and attributes.

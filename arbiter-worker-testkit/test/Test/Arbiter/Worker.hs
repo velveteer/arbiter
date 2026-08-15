@@ -1300,9 +1300,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               pure (length dlqJobs == 2)
 
       it "deletes a flagged job the handler already nacked" $ \env -> do
-        -- A nack keeps the claim, so a later cancel flags the row rather than deleting
-        -- it. The finalizer must delete the job the cancel names, not just the pending
-        -- ones, or the row waits for the reaper.
+        -- A nack keeps the claim, so a later cancel flags the row rather than deleting it.
         nackedRef <- newIORef False
         let jobs =
               [ (defaultJob (SimpleTask "fcn-1")) {groupKey = Just "fcn"}
@@ -1332,9 +1330,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           dlqJobs `shouldBe` []
 
       it "refuses a stale worker's ack after a reclaim and nack restored attempts" $ \env -> do
-        -- A nack gives back the attempt the claim consumed, so attempts alone repeats
-        -- values across claims. The claim token must not, or the first worker's ack
-        -- matches the second worker's claim.
+        -- A nack restores the attempt it consumed, so attempts alone repeats across claims.
         w1 <- UUID.nextRandom
         w2 <- UUID.nextRandom
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "aba"))

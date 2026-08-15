@@ -189,7 +189,7 @@ insertJobTree schemaName tableName tree =
                   [case c of Leaf j -> Left j; t -> Right t | c <- NE.toList children]
 
           -- Recursively insert sub-finalizers first (preserves pre-order)
-          subTreeJobs <- mapM (\child -> go stamp (Just parentPK) True child) subTrees
+          subTreeJobs <- traverse (go stamp (Just parentPK) True) subTrees
 
           -- Batch-insert all leaf children in one roundtrip
           let leafWrites = [j {parentId = Just parentPK, suspended = False} | j <- leaves]

@@ -361,22 +361,23 @@ runWorkerPool config = do
             (Listen.HubLog (tryLog (logConfig config) Warning) (tryLog (logConfig config) Error))
             handlers
     void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
+    let spawn = spawnRetried (workerStateVar config) (logConfig config) queueName
     heartbeat <-
-      spawnRetried (workerStateVar config) (logConfig config) queueName "Worker heartbeat" $
+      spawn "Worker heartbeat" $
         heartbeatLoop config schemaName queueName
     dispatcher <-
-      spawnRetried (workerStateVar config) (logConfig config) queueName "Dispatcher" $
+      spawn "Dispatcher" $
         runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
     workers <-
       replicateM workerCap $
-        spawnRetried (workerStateVar config) (logConfig config) queueName "Worker thread" $
+        spawn "Worker thread" $
           workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
     crons <-
       unlessNull (cronJobs config) $
-        spawnRetried (workerStateVar config) (logConfig config) queueName "Cron scheduler" $
+        spawn "Cron scheduler" $
           runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
-      spawnRetried (workerStateVar config) (logConfig config) queueName "Reaper" $
+      spawn "Reaper" $
         reaperLoop (logConfig config) (onMaintenance config) (reaperInterval config) (reaperTimeout config)
 
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
@@ -725,7 +726,7 @@ batchCallbacks config handoff jobs startTime schemaName =
         handoff
         (finalized [j])
         ( withDbTransaction $
-            handleJobFailure config Ops.TakeLocks shape (classifyException exc) (jobMaxAtts j) startTime endT j
+            handleJobFailure config Ops.TakeLocks shape (classifyException exc) startTime endT j
         )
         $ \outcome -> do
           reportWritten outcome
@@ -936,7 +937,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
     report (job, written) =
       tryWarn (jobLog config job) "Reporting a job's failure failed" (reportWritten written)
     failJob failure job =
-      handleJobFailure config Ops.LocksHeld shape failure (jobMaxAtts job) startTime endTime job
+      handleJobFailure config Ops.LocksHeld shape failure startTime endTime job
 
 -- | A rollup parent's immediate child results, keyed by child id, with @Left@
 -- for results that failed to decode, plus a map of DLQ'd immediate children.
@@ -1127,16 +1128,15 @@ handleJobFailure
   -- ^ What the span this job ran under covers.
   -> (Text, FailureKind)
   -- ^ The handler exception, classified once for the whole batch.
-  -> Int32
   -> UTCTime
   -> UTCTime
   -> Job.JobRead payload
   -> m (FailureOutcome m)
-handleJobFailure config locks shape (errorMsg, failureKind) maxAtts startTime endTime job
+handleJobFailure config locks shape (errorMsg, failureKind) startTime endTime job
   -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
   | cancelsTree failureKind =
       Right (fireCancelled config job errorMsg) <$ cancelJobFor failureKind job
-  | failureKind == PermanentFailure || Job.attempts job >= maxAtts = do
+  | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
       schemaName <- getSchema
       wrote
         "no longer available for the dead-letter queue"

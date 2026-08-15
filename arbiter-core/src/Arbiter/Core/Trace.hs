@@ -238,11 +238,14 @@ producerArgs queue jobs =
       [job] -> writeAttrs job
       _ -> HM.fromList [("messaging.batch.message_count", toAttribute (length jobs))]
 
+-- | What a job carries whichever end of the queue reads it.
+jobShapeAttrs :: Job payload key q ins adm -> [(Text, Attribute)]
+jobShapeAttrs job =
+  ("arbiter.priority", toAttribute (fromIntegral (priority job) :: Int))
+    : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (groupKey job)
+
 writeAttrs :: JobWrite payload -> AttributeMap
-writeAttrs job =
-  HM.fromList $
-    ("arbiter.priority", toAttribute (fromIntegral (priority job) :: Int))
-      : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (groupKey job)
+writeAttrs = HM.fromList . jobShapeAttrs
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =
@@ -286,6 +289,5 @@ jobAttrs job =
   HM.fromList $
     [ ("messaging.message.id", messageId job)
     , ("messaging.message.retry.count", toAttribute (max 0 (fromIntegral (attempts job) - 1) :: Int))
-    , ("arbiter.priority", toAttribute (fromIntegral (priority job) :: Int))
     ]
-      <> foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (groupKey job)
+      <> jobShapeAttrs job

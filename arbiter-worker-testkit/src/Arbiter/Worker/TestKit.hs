@@ -1227,6 +1227,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         )
         $ \_ -> do
           waitUntil 15_000 $ (>= 3) . length <$> readIORef successRef
+          threadDelay 300_000
           readIORef successRef >>= (`shouldMatchList` map mkSimple ["hbg-1", "hbg-2", "hbg-3"])
           readIORef unavailableRef `shouldReturn` []
 

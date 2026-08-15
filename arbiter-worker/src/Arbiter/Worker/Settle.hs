@@ -2,8 +2,8 @@
 --
 -- A settle commits a job's outcome, records that it did, then reports it. The record
 -- has to land before the report, or a heartbeat tick reads a job this worker already
--- settled and reports it a second time. 'settle' is the only way to reach that record:
--- the marks behind it are not exported, so the hooks cannot be run first.
+-- settled and reports it a second time. 'settle' runs the three in that order, so a
+-- caller reaching the handoff through it cannot fire a hook first.
 module Arbiter.Worker.Settle
   ( -- * Handoff
     CancelHandoff
@@ -30,7 +30,7 @@ module Arbiter.Worker.Settle
 
 import Arbiter.Core.Job.Types qualified as Job
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (toList)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List (sortOn)
@@ -119,19 +119,20 @@ finalized js = Settled js []
 disowned :: [Job.JobRead payload] -> Settled payload
 disowned js = Settled [] js
 
-markJobHandled :: (MonadIO m) => CancelHandoff -> Job.JobRead payload -> m ()
-markJobHandled handoff job =
-  onProgress handoff $ \p -> (p {progressHandled = Set.insert (Job.primaryKey job) (progressHandled p)}, ())
-
-markJobUnowned :: (MonadIO m) => CancelHandoff -> Job.JobRead payload -> m ()
-markJobUnowned handoff job =
-  onProgress handoff $ \p -> (p {progressUnowned = Set.insert (Job.primaryKey job) (progressUnowned p)}, ())
-
--- | Write a settle into the handoff, for a caller that has no outcome to report.
+-- | Write a settle into the handoff in one update, so no reader sees half of it. A job
+-- found under another claim counts as handled too.
 record :: (MonadIO m) => CancelHandoff -> Settled payload -> m ()
-record handoff (Settled handled unowned) = do
-  traverse_ (markJobHandled handoff) handled
-  traverse_ (\j -> markJobUnowned handoff j >> markJobHandled handoff j) unowned
+record handoff (Settled handled unowned) =
+  onProgress handoff $ \p ->
+    ( p
+        { progressHandled = progressHandled p <> ids handled <> gone
+        , progressUnowned = progressUnowned p <> gone
+        }
+    , ()
+    )
+  where
+    gone = ids unowned
+    ids = Set.fromList . map Job.primaryKey
 
 -- | Commit a settle, record it, then run its hooks. @protect@ covers the commit and
 -- the record together.

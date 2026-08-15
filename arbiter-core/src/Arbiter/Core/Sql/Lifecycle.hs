@@ -143,20 +143,23 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- by the same worker and suspended by none, and reports whether the update
 -- landed alongside each row's claim token, cancel flag and suspension.
 -- @valuesFrag@ is the @(id, claim_seq, claimed_by)@ rows for the input VALUES.
-setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> Double -> Query ()
-setVisibilityTimeoutBatchSQL schema tableName valuesFrag secs =
+setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
+setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
+      locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input_jobs AS (
           SELECT v.id::bigint AS id, v.expected_claim_seq::bigint AS expected_claim_seq, v.expected_claimed_by::uuid AS expected_claimed_by
           FROM (VALUES ${valuesFrag}) AS v(id, expected_claim_seq, expected_claimed_by)
         ),
+        ${locked},
         updated AS (
           UPDATE ${tbl} j
           SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
               updated_at = NOW()
           FROM input_jobs ij
-          WHERE j.id = ij.id AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
+          WHERE j.id = ij.id AND j.id IN (SELECT id FROM locked)
+            AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
             AND j.claimed_by IS NOT DISTINCT FROM ij.expected_claimed_by
           RETURNING j.id
         )

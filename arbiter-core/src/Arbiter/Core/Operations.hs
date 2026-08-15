@@ -959,9 +959,9 @@ lockParentOf schemaName tableName jobId = do
   mParentId <$ lockJobParents schemaName tableName [mParentId]
 
 -- | Wake every distinct parent named, ascending, matching the order the locks were taken.
-resumeJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
-resumeJobParents schemaName tableName =
-  traverse_ (tryResumeParent schemaName tableName) . Set.toAscList . Set.fromList . catMaybes
+resumeJobParents :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> [Maybe Int64] -> m ()
+resumeJobParents locks schemaName tableName =
+  traverse_ (tryResumeParent locks schemaName tableName) . Set.toAscList . Set.fromList . catMaybes
 
 -- | Lock every job named and all of its descendants, in one descending pass.
 lockJobTrees :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
@@ -976,11 +976,12 @@ lockJobTreesFromRoot schemaName tableName ids =
   void $ countOr0 (Tmpl.lockJobTreesFromRootSQL schemaName tableName ids)
 
 -- | Wake a suspended parent if all children are done.
-tryResumeParent :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m ()
-tryResumeParent schemaName tableName pid = do
-  void $
-    MA.executeQuery
-      (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+tryResumeParent :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> Int64 -> m ()
+tryResumeParent locks schemaName tableName pid = do
+  when (locks == TakeLocks) $
+    void $
+      MA.executeQuery
+        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
   void $
     MA.executeStatement
       (Tmpl.tryWakeAncestorSQL schemaName tableName pid)
@@ -1068,7 +1069,7 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
 
   MA.executeQuery $
     Q.rows visibilityUpdateCodec $
-      Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (realToFrac timeout)
+      Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
 
 -- | Update a job for retry with backoff and error tracking
 --
@@ -1186,7 +1187,7 @@ moveToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId ro
   when (rows > 0) $ do
     when rollup $ void $ cascadeChildrenToDLQ schemaName tableName jobId "Parent moved to DLQ"
     for_ mParentId $ \pid ->
-      tryResumeParent schemaName tableName pid
+      tryResumeParent LocksHeld schemaName tableName pid
   pure rows
 
 -- | Cascade all descendants of a rollup parent to the DLQ.
@@ -1265,7 +1266,7 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
     when (isRollup job) $
       void $
         cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
-  resumeJobParents schemaName tableName (map (parentId . fst) movedJobs)
+  resumeJobParents LocksHeld schemaName tableName (map (parentId . fst) movedJobs)
   pure (fromIntegral (Set.size moved))
 
 -- * Dead Letter Queue Operations
@@ -1685,7 +1686,7 @@ deleteDLQJob schemaName tableName dlqId = withDbTransaction $ do
   case rows of
     [] -> pure 0
     (Just pid : _) -> do
-      tryResumeParent schemaName tableName pid
+      tryResumeParent TakeLocks schemaName tableName pid
       pure 1
     _ -> pure 1
 
@@ -1702,7 +1703,7 @@ deleteJobsResumingParents
 deleteJobsResumingParents _ _ _ [] = pure []
 deleteJobsResumingParents schemaName tableName mkSql jobIds = withDbTransaction $ do
   rows <- MA.executeQuery (mkSql jobIds)
-  resumeJobParents schemaName tableName (map snd rows)
+  resumeJobParents TakeLocks schemaName tableName (map snd rows)
   pure (map fst rows)
 
 -- | Delete multiple jobs from the dead letter queue, resuming any parents left
@@ -2162,7 +2163,7 @@ cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
 
   when (deleted > 0) $
     for_ rootParentId $
-      tryResumeParent schemaName tableName
+      tryResumeParent LocksHeld schemaName tableName
 
   pure deleted
 
