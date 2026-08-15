@@ -39,6 +39,9 @@ services:
       RESET_INTERVAL_MINUTES: "20"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://lgtm:4318"
       OTEL_SERVICE_NAME: arbiter-demo
+      # The dashboard's rate panels use a 1m window, which needs samples well
+      # inside it. The SDK default of 60s leaves them empty.
+      OTEL_METRIC_EXPORT_INTERVAL: "10000"
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     restart: always

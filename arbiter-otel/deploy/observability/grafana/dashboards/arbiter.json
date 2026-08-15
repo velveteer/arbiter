@@ -62,7 +62,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0
         }
       }
@@ -186,7 +185,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0
         }
       }
@@ -209,7 +207,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0,
           "custom": {
             "stacking": {
@@ -244,7 +241,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0,
           "custom": {
             "axisLabel": "per key"
@@ -621,7 +617,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0
         }
       },
@@ -735,7 +730,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "decimals": 0,
           "min": 0
         }
       },
