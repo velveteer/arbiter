@@ -189,8 +189,8 @@ registerInstruments meter cells = do
 
   reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
   reg Name.PgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
-  reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum (-1 = never)" $
-    perTable Health.autovacuumAge
+  reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum, absent until one runs" $
+    perTableMaybe Health.autovacuumAge
   reg Name.PgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
   reg Name.PgConnections "{connection}" "Backends by state" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)
@@ -248,6 +248,8 @@ registerInstruments meter cells = do
     perDbTotals label pairs = over dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
     dbTotal field = over dbOf (\h -> [([], field h)])
     perTable field = observed (over tables (\t -> [([("table", Health.table t)], field t)]))
+    perTableMaybe field =
+      observed (over tables (\t -> [([("table", Health.table t)], v) | v <- toList (field t)]))
     perQueue field =
       observed (over queues (\o -> [([("queue", overviewQueue o)], fromMaybe 0 (field (overviewStats o)))]))
     perDb = observed . dbTotal

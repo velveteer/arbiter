@@ -231,6 +231,38 @@ groups:
                     type: gt
                     params: [86400]
 
+      - uid: arbiter-autovacuum-never
+        title: Queue table has never been autovacuumed
+        condition: threshold
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.table }}: past the autovacuum threshold and no vacuum has ever run."
+          description: The age gauge is absent for this table, so neither autovacuum nor a manual vacuum has reached it. Check that autovacuum is enabled and not starved. The comparison mirrors postgres's own trigger at its default settings, so a table that has legitimately never earned a vacuum stays quiet. Raise it to match if you have tuned autovacuum_vacuum_threshold or autovacuum_vacuum_scale_factor.
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: query
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: query
+              instant: true
+              expr: max by (table) (arbiter_pg_table_dead_tuples > (50 + 0.2 * arbiter_pg_table_live_tuples)) unless max by (table) (arbiter_pg_table_autovacuum_age_seconds)
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+
       - uid: arbiter-dead-tuples
         title: Queue table is bloating with dead tuples
         condition: threshold

@@ -122,12 +122,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(arbiter_jobs_processed_total[1m]))",
+          "expr": "sum by (outcome) (rate(arbiter_jobs_processed_total[5m]))",
           "legendFormat": "{{outcome}}"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(arbiter_jobs_retries_total[1m]))",
+          "expr": "sum(rate(arbiter_jobs_retries_total[5m]))",
           "legendFormat": "retry (rescheduled)"
         }
       ]
@@ -226,15 +226,15 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Admission: concurrency slots in use",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. The cap is per key, so read it against the fullest key. Total in flight counts every key at once and sits on the right axis.",
+      "title": "Admission: concurrency slots per key",
+      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. The cap is per key, so read the fullest key against it.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 0,
         "y": 24
       },
@@ -243,34 +243,12 @@
           "unit": "short",
           "min": 0,
           "custom": {
-            "axisLabel": "per key"
+            "axisLabel": "slots per key"
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* in flight$"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.axisLabel",
-                "value": "total across keys"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (policy) (arbiter_admission_in_flight)",
-          "legendFormat": "{{policy}} in flight"
-        },
         {
           "refId": "B",
           "expr": "max by (policy) (arbiter_admission_limit{kind=\"concurrency\"})",
@@ -280,6 +258,39 @@
           "refId": "C",
           "expr": "max by (policy) (arbiter_admission_busiest_key)",
           "legendFormat": "{{policy}} fullest key"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Admission: concurrency jobs in flight",
+      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Counts every key at once, so it is not comparable to the per-key cap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "axisLabel": "jobs"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (policy) (arbiter_admission_in_flight)",
+          "legendFormat": "{{policy}} in flight"
         }
       ]
     },
@@ -344,7 +355,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind, policy) (rate(arbiter_admission_admitted_total[1m]))",
+          "expr": "sum by (kind, policy) (rate(arbiter_admission_admitted_total[5m]))",
           "legendFormat": "{{kind}} {{policy}}"
         }
       ]
@@ -372,7 +383,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (op) (rate(arbiter_maintenance_rows_total[1m]))",
+          "expr": "sum by (op) (rate(arbiter_maintenance_rows_total[5m]))",
           "legendFormat": "{{op}}"
         }
       ]
@@ -545,7 +556,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (queue) (rate(arbiter_jobs_claimed_total[1m]))",
+          "expr": "sum by (queue) (rate(arbiter_jobs_claimed_total[5m]))",
           "legendFormat": "{{queue}}"
         }
       ]
@@ -764,7 +775,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_autovacuum_age_seconds >= 0)",
+          "expr": "max by (table) (arbiter_pg_table_autovacuum_age_seconds)",
           "legendFormat": "{{table}}"
         }
       ]

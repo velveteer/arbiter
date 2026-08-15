@@ -49,7 +49,7 @@ pgTableHealthSQL schemaName tableNames =
   [sql|
     SELECT
       relname::text, n_live_tup::int8, n_dead_tup::int8,
-      COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - GREATEST(last_autovacuum, last_vacuum)), -1)::float8 AS autovacuum_age,
+      EXTRACT(EPOCH FROM clock_timestamp() - GREATEST(last_autovacuum, last_vacuum))::float8 AS autovacuum_age,
       pg_total_relation_size(relid)::int8 AS total_bytes,
       seq_scan::float8, COALESCE(idx_scan, 0)::float8 AS idx_scan
     FROM pg_stat_user_tables

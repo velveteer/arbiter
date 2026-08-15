@@ -15,7 +15,7 @@ import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
-import Arbiter.Core.Codec (Col (..), RowCodec, col)
+import Arbiter.Core.Codec (Col (..), RowCodec, col, ncol)
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.SchemaTables (allSchemaTables)
@@ -46,7 +46,8 @@ data PgTableHealth = PgTableHealth
   { table :: Text
   , liveTup :: Int64
   , deadTup :: Int64
-  , autovacuumAge :: Double
+  , autovacuumAge :: Maybe Double
+  -- ^ Nothing when the table has never been vacuumed.
   , totalBytes :: Int64
   , seqScan :: Double
   , idxScan :: Double
@@ -80,7 +81,7 @@ pgTableHealthCodec =
     <$> col "relname" CText
     <*> col "n_live_tup" CInt8
     <*> col "n_dead_tup" CInt8
-    <*> col "autovacuum_age" CFloat8
+    <*> ncol "autovacuum_age" CFloat8
     <*> col "total_bytes" CInt8
     <*> col "seq_scan" CFloat8
     <*> col "idx_scan" CFloat8
