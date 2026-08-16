@@ -8,8 +8,9 @@
 --
 -- Children run immediately. The finalizer (parent) is suspended until all
 -- children complete, then becomes claimable for a completion round.
--- Child results are auto-stored in @{queue}_results@ and passed to the
--- finalizer handler as @Map Int64 (Either Text result)@.
+-- Child results are auto-stored in @{queue}_results@. A finalizer reads them
+-- explicitly with 'Arbiter.Worker.childResults' or
+-- 'Arbiter.Worker.mergedChildResults'.
 --
 -- __Important:__ The results table is a transient coordination buffer, not
 -- persistent storage. When the finalizer is acked (deleted), @ON DELETE CASCADE@

@@ -57,16 +57,13 @@ test-suite arbiter-simple-tests
   other-modules:
     Test.Arbiter.Simple.Concurrency
     Test.Arbiter.Simple.ConcurrencyLimit
-    Test.Arbiter.Simple.MigrationDurability
     Test.Arbiter.Simple.Operations
     Test.Arbiter.Simple.RateLimit
     Test.Arbiter.Simple.StateMachine
     Test.Arbiter.Simple.TestHelpers
 
   build-depends:
-    , aeson
     , arbiter-core         <0.2
-    , arbiter-migrations   <0.2
     , arbiter-simple
     , arbiter-test-common
     , base

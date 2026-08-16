@@ -268,7 +268,8 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
       _ -> pure Nothing
   case mJob of
     Just j -> pure $ JobResponse (ApiJob j)
-    Nothing -> throwError err409 {errBody = "Replace blocked: existing job is in-flight on first attempt or has children"}
+    Nothing ->
+      throwError err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
 
 -- | Insert multiple jobs in a single batch operation
 insertJobsBatchHandler

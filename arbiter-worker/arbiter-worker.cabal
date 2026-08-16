@@ -39,6 +39,7 @@ library
     Arbiter.Worker.Cron
     Arbiter.Worker.EnabledQueues
     Arbiter.Worker.Logger
+    Arbiter.Worker.MultiQueue
     Arbiter.Worker.WorkerState
 
   other-modules:
@@ -46,6 +47,7 @@ library
     Arbiter.Worker.Heartbeat
     Arbiter.Worker.Logger.Internal
     Arbiter.Worker.NotificationListener
+    Arbiter.Worker.Pool
     Arbiter.Worker.Retry
     Arbiter.Worker.Settle
 
@@ -79,6 +81,7 @@ test-suite arbiter-worker-tests
     Test.Arbiter.Worker.Concurrency
     Test.Arbiter.Worker.ConnectionRecovery
     Test.Arbiter.Worker.Cron
+    Test.Arbiter.Worker.MultiQueue
     Test.Arbiter.Worker.PoolSizing
 
   build-depends:

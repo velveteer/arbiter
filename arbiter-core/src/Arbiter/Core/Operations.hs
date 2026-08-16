@@ -190,7 +190,6 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
 import Data.Aeson.Types (parseEither, parseMaybe)
 import Data.Bifunctor (bimap, first, second)
-import Data.Bitraversable (bitraverse)
 import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
 import Data.Int (Int32, Int64)
@@ -573,13 +572,11 @@ reconcileAndPruneConcurrency schemaName tableNames = do
 --
 -- * @Nothing@: Always insert (dedup_key is NULL)
 -- * @Just (IgnoreDuplicate k)@: Skip if dedup_key exists, return Nothing
--- * @Just (ReplaceDuplicate k)@: Replace existing job unless actively in-flight on its
---   first attempt. Returns Nothing only when @attempts > 0@,
---   @not_visible_until > NOW()@, and @last_error IS NULL@ (i.e., the job is
---   being processed for the first time). Jobs that have previously failed
---   (@last_error IS NOT NULL@) can always be replaced, even if currently
---   in-flight on a retry attempt - this is by design, so that a fresh
---   replacement takes priority over a failing job.
+-- * @Just (ReplaceDuplicate k)@: Replace the existing job unless it is actively
+--   claimed, force-cancel flagged, or has children. An active claim has
+--   @attempts > 0@, @not_visible_until > NOW()@, and @last_error IS NULL@.
+--   A job waiting in retry backoff has @last_error IS NOT NULL@ and is safe to
+--   replace because no handler owns it.
 --
 -- @parentId@ is validated: if set to a non-existent job ID, returns @Nothing@.
 -- For building parent-child trees, prefer @insertJobTree@ which handles
@@ -1348,10 +1345,12 @@ isStatusFilter :: Tmpl.JobFilter -> Bool
 isStatusFilter (Tmpl.FilterStatus _) = True
 isStatusFilter _ = False
 
--- | Decode a job row plus its derived @status@ trailing column.
-jobRowWithStatusCodec :: TableName -> RowCodec (JobRead Value, JobStatus)
+-- | Decode a job row plus its raw derived @status@ trailing column. Status is
+-- validated after the backend codec runs so an unknown SQL value is a parsing
+-- failure rather than silently becoming another status.
+jobRowWithStatusCodec :: TableName -> RowCodec (JobRead Value, Text)
 jobRowWithStatusCodec tableName =
-  (,) <$> jobRowCodec tableName <*> (jobStatusFromText <$> col "status" CText)
+  (,) <$> jobRowCodec tableName <*> col "status" CText
 
 -- | 'listJobsFilteredOrdered' that also returns each job's derived status.
 listJobsWithStatus
@@ -1376,7 +1375,17 @@ listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset = 
           (fromIntegral limit)
           (fromIntegral offset)
   rows <- MA.executeQuery (Q.rows (jobRowWithStatusCodec tableName) query)
-  traverse (bitraverse decodePayload pure) rows
+  traverse decodeJobStatusRow rows
+
+-- | Decode the payload and strictly validate the SQL-derived status.
+decodeJobStatusRow
+  :: (JobPayload payload, MonadArbiter m)
+  => (JobRead Value, Text)
+  -> m (JobRead payload, JobStatus)
+decodeJobStatusRow (job, rawStatus) = do
+  decodedJob <- decodePayload job
+  status <- either throwParsing pure (jobStatusFromText rawStatus)
+  pure (decodedJob, status)
 
 -- | List jobs with composable filters.
 --
@@ -1787,7 +1796,7 @@ getJobByIdWithStatus schemaName tableName jobId = do
   rows <-
     MA.executeQuery $
       Q.rows (jobRowWithStatusCodec tableName) (Tmpl.getJobByIdWithStatusSQL schemaName tableName jobId)
-  traverse (bitraverse decodePayload pure) (listToMaybe rows)
+  traverse decodeJobStatusRow (listToMaybe rows)
 
 -- | Get a single job by its dedup key.
 getJobByDedupKey

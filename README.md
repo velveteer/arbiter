@@ -132,6 +132,11 @@ CREATE SCHEMA IF NOT EXISTS arbiter;
 GRANT USAGE, CREATE ON SCHEMA arbiter TO your_app_user;
 ```
 
+`enableNotifications` and `enableEventStreaming` are reconciled settings.
+Re-running migrations after changing either option installs or removes its
+triggers, so these features can be enabled and disabled without editing
+migration history.
+
 ### Inserting Jobs
 
 ```haskell
@@ -303,6 +308,7 @@ Children run in parallel. Parents run when all of their children are acked or DL
 ```haskell
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
+import Data.List.NonEmpty (NonEmpty ((:|)))
 
 data PipelinePayload
   = ProcessChunk Text
@@ -315,10 +321,11 @@ data PipelinePayload
 type PipelineRegistry = '[ QueueWithResult "pipeline_queue" PipelinePayload [Text] ]
 
 myTree = Arb.defaultJob Aggregate <~~
-  [ Arb.defaultJob (ProcessChunk "chunk-1")
-  , Arb.defaultJob (ProcessChunk "chunk-2")
-  , Arb.defaultJob (ProcessChunk "chunk-3")
-  ]
+  ( Arb.defaultJob (ProcessChunk "chunk-1")
+      :| [ Arb.defaultJob (ProcessChunk "chunk-2")
+         , Arb.defaultJob (ProcessChunk "chunk-3")
+         ]
+  )
 Right _ <- Arb.insertJobTree myTree
 ```
 
@@ -369,7 +376,7 @@ Tree-scoped cancellation:
 Use a job tree to replace a staging table. Each child job carries its chunk of row IDs - the tree tracks completion and the finalizer runs when all chunks are processed:
 
 ```haskell
-{-# LANGUAGE OverloadedLists #-}
+import Data.List.NonEmpty qualified as NE
 
 data MigrationJob
   = MigrateChunk [Int64]
@@ -379,10 +386,13 @@ type MigrationRegistry =
   '[ QueueWithResult "migration_queue" MigrationJob (Sum Int) ]
 
 rowIds <- findRowsToMigrate  -- SELECT id FROM orders WHERE needs_migration
-let chunks = chunksOf 1000 rowIds  -- from the split package
-    tree = Arb.defaultJob MigrationComplete
-      <~~ [Arb.defaultJob (MigrateChunk ids) | ids <- chunks]
-Right _ <- Arb.insertJobTree tree
+case NE.nonEmpty (chunksOf 1000 rowIds) of  -- chunksOf is from the split package
+  Nothing -> reportComplete 0
+  Just chunks -> do
+    let tree = Arb.defaultJob MigrationComplete
+          <~~ fmap (Arb.defaultJob . MigrateChunk) chunks
+    Right _ <- Arb.insertJobTree tree
+    pure ()
 ```
 
 ```haskell
@@ -690,9 +700,8 @@ record.
 
 ### Graceful Shutdown
 
-Install signal handlers through the setup callback, which receives the shared
-shutdown state. One pool or several, it's the same shape - add entries to the
-list:
+Install signal handlers after constructing the worker configs. One pool or
+several, use `shutdownPools` with the same list passed to `runWorkerPools`:
 
 ```haskell
 import System.Posix.Signals qualified as Signals
@@ -761,7 +770,7 @@ env <- ArbS.disableListener <$> ArbS.createSimpleEnv (Proxy @AppRegistry) connSt
 
 ### Other Options
 
-- **Logging** - structured JSON to stderr, fast-logger, or a custom callback
+- **Logging** - structured JSON to stdout by default, with stderr, fast-logger, and custom callback destinations available
 - **Liveness probes** - file-based health check. Kubernetes example:
   ```yaml
   livenessProbe:

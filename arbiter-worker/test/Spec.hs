@@ -6,6 +6,7 @@ import Test.Hspec
 import Test.Arbiter.Worker.Concurrency qualified as Concurrency
 import Test.Arbiter.Worker.ConnectionRecovery qualified as ConnRecovery
 import Test.Arbiter.Worker.Cron qualified as Cron
+import Test.Arbiter.Worker.MultiQueue qualified as MultiQueue
 import Test.Arbiter.Worker.PoolSizing qualified as PoolSizing
 
 main :: IO ()
@@ -20,3 +21,4 @@ main = do
       Cron.spec connStr
     describe "Pool Sizing" $
       PoolSizing.spec connStr
+    MultiQueue.spec

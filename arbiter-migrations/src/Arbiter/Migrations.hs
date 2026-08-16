@@ -84,6 +84,10 @@ import Arbiter.Core.Job.Schema
   , createParentIdIndexSQL
   , createResultsTableSQL
   , createSchemaSQL
+  , dropEventStreamingFunctionSQL
+  , dropEventStreamingTriggersSQL
+  , dropNotifyFunctionSQL
+  , dropNotifyTriggerSQL
   , jobQueueTable
   , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
@@ -146,15 +150,14 @@ import Database.PostgreSQL.Simple.Types (Query (..))
 -- Controls which optional features are enabled when creating job queue tables.
 data MigrationConfig = MigrationConfig
   { enableNotifications :: Bool
-  -- ^ Whether to create LISTEN/NOTIFY triggers for reactive job claiming.
-  -- When enabled, workers can subscribe to notifications instead of polling.
-  -- Default: 'True'
+  -- ^ Whether LISTEN/NOTIFY triggers for reactive job claiming should be
+  -- installed. Re-running migrations reconciles existing schemas in either
+  -- direction. Default: 'True'.
   , enableEventStreaming :: Bool
-  -- ^ Whether to create event streaming triggers for the admin UI.
+  -- ^ Whether event-streaming triggers for the admin UI should be installed.
   -- When enabled, every INSERT\/UPDATE\/DELETE on job tables fires an enriched
-  -- JSON event via @pg_notify@ on the @arbiter_job_events@ channel.
-  -- This adds overhead to every row operation - disable for maximum throughput.
-  -- Default: 'False'
+  -- JSON event via @pg_notify@. Re-running migrations with this disabled drops
+  -- the triggers and shared function. Default: 'False'.
   , rateLimitDurability :: Durability
   -- ^ WAL-logging for the rate-limit bucket table in this schema. 'Unlogged'
   -- (default) resets buckets on crash\/failover. 'Durable' preserves them at a
@@ -317,6 +320,7 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
             reconcileRateLimitPolicies conn schemaName policyRows
             reconcileConcurrencyPolicies conn schemaName concRows
             reconcileRateLimitDurability conn schemaName durability
+            reconcileOptionalTriggers conn schemaName (map fst tableNames) config
         case reconciled of
           Right () -> pure MigrationSuccess
           -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
@@ -409,6 +413,32 @@ reconcileRateLimitDurability conn schemaName durability = do
       | current /= target ->
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
     _ -> pure ()
+
+-- | Reconcile optional trigger features after tracked migrations. This is
+-- desired-state reconciliation rather than another tracked migration: a
+-- true/false/true sequence must work even though the original create migration
+-- remains recorded in @schema_migrations@.
+reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
+reconcileOptionalTriggers conn schemaName tables config =
+  PG.withTransaction conn $ do
+    traverse_ reconcileNotify tables
+    if enableEventStreaming config
+      then do
+        executeSQL (createEventStreamingFunctionSQL schemaName)
+        traverse_ (executeSQL . createEventStreamingTriggersSQL schemaName) tables
+      else do
+        traverse_ (executeSQL . dropEventStreamingTriggersSQL schemaName) tables
+        executeSQL (dropEventStreamingFunctionSQL schemaName)
+  where
+    reconcileNotify table
+      | enableNotifications config = do
+          executeSQL (createNotifyFunctionSQL schemaName table)
+          executeSQL (createNotifyTriggerSQL schemaName table)
+      | otherwise = do
+          executeSQL (dropNotifyTriggerSQL schemaName table)
+          executeSQL (dropNotifyFunctionSQL schemaName table)
+
+    executeSQL = void . execute_ conn . Query . encodeUtf8
 
 -- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
 -- the golden suite can pin every shipped migration body.

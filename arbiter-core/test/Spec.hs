@@ -9,6 +9,7 @@ import Data.Text qualified as T
 import Test.Hspec
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
+import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
@@ -46,6 +47,13 @@ squish = T.unwords . T.words
 
 main :: IO ()
 main = hspec $ do
+  describe "job status decoding" $ do
+    it "accepts a known status" $
+      jobStatusFromText "ready" `shouldBe` Right Ready
+
+    it "rejects an unknown SQL status" $
+      jobStatusFromText "new_status" `shouldBe` Left "unknown job status: new_status"
+
   describe "sql quasiquoter" $ do
     it "emits one placeholder per input hole, in order" $ do
       let jobId = 7 :: Int64

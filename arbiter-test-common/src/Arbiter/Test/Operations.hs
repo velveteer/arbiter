@@ -794,7 +794,7 @@ operationsSpec mkMessage mkResult runM = do
       lastError inserted2 `shouldBe` Nothing
       payload inserted2 `shouldBe` mkMessage "Replacement"
 
-    it "ReplaceDuplicate returns Nothing when job is actively in-flight (first attempt)" $ \env -> do
+    it "ReplaceDuplicate returns Nothing when the existing job is actively claimed" $ \env -> do
       let job1 =
             (defaultGroupedJob "dedup-inflight-test-1" (mkMessage "Original"))
               { dedupKey = Just (ReplaceDuplicate "inflight-test-key")
@@ -802,7 +802,7 @@ operationsSpec mkMessage mkResult runM = do
 
       Just _inserted1 <- runM env (HL.insertJob job1)
 
-      -- Claim the job (now in first attempt: attempts=1, last_error=NULL, not_visible_until > NOW)
+      -- Claim the job (attempts=1, last_error=NULL, not_visible_until > NOW).
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
       let claimedJob = head claimed
@@ -1082,7 +1082,7 @@ operationsSpec mkMessage mkResult runM = do
       payload (head inserted) `shouldBe` mkMessage "ReplaceSecond"
 
     it "batch ReplaceDuplicate does not replace in-flight job" $ \env -> do
-      -- Insert and claim a job (making it in-flight on first attempt)
+      -- Insert and claim a job, making it actively owned by a worker.
       let existingJob =
             (defaultJob (mkMessage "InFlight"))
               { dedupKey = Just (ReplaceDuplicate "batch-inflight-key")

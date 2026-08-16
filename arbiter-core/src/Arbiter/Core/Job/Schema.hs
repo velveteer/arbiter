@@ -45,6 +45,8 @@ module Arbiter.Core.Job.Schema
     -- * Event Streaming Trigger SQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
+  , dropEventStreamingFunctionSQL
+  , dropEventStreamingTriggersSQL
 
     -- * Notification Channel Helpers
   , notificationChannelForTable
@@ -1026,3 +1028,27 @@ createEventStreamingTriggersSQL schemaName tableName =
         , "AFTER INSERT ON " <> dlqTbl
         , "FOR EACH ROW EXECUTE FUNCTION " <> funcName <> "();"
         ]
+
+-- | Drop current and legacy event-streaming triggers for a queue and its DLQ.
+-- The shared function is dropped separately after every queue is detached.
+dropEventStreamingTriggersSQL :: Text -> Text -> Text
+dropEventStreamingTriggersSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
+   in T.unlines
+        [ "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_insert" <> " ON " <> tbl <> ";"
+        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_update" <> " ON " <> tbl <> ";"
+        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_delete" <> " ON " <> tbl <> ";"
+        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_dlq_insert" <> " ON " <> dlqTbl <> ";"
+        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingTriggerName tableName) <> " ON " <> tbl <> ";"
+        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingDLQTriggerName tableName) <> " ON " <> dlqTbl <> ";"
+        ]
+
+-- | Drop the schema-wide event-streaming function after its triggers are gone.
+dropEventStreamingFunctionSQL :: SchemaName -> Text
+dropEventStreamingFunctionSQL schemaName =
+  "DROP FUNCTION IF EXISTS "
+    <> quoteIdentifier schemaName
+    <> "."
+    <> quoteIdentifier eventStreamingFunctionName
+    <> "();"
