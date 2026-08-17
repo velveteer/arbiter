@@ -133,14 +133,14 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
     dedup <- v .:? "dedupKey"
     attempts <- v .:? "maxAttempts"
     retention <- v .:! "archiveFor" .!= Nothing
-    pure . ApiJobWrite $
-      Arb.setArchiveFor retention $
-        Arb.setMaxAttempts attempts $
-          Arb.setDedupKey dedup $
-            Arb.setNotVisibleUntil visibleAt $
-              Arb.setPriority priority $
-                Arb.setGroupKey group $
-                  Arb.defaultJob payload
+    pure . ApiJobWrite
+      $ Arb.setArchiveFor retention
+      $ Arb.setMaxAttempts attempts
+      $ Arb.setDedupKey dedup
+      $ Arb.setNotVisibleUntil visibleAt
+      $ Arb.setPriority priority
+      $ Arb.setGroupKey group
+      $ Arb.defaultJob payload
 
 newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
   deriving stock (Eq, Show)

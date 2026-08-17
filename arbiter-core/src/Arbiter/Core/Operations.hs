@@ -7,8 +7,7 @@
 module Arbiter.Core.Operations
   ( -- * Job Insertion
     insertJob
-  , insertJobUnsafe
-  , insertJobUnsafeStamped
+  , insertJobStamped
   , insertJobTreeNodeStamped
   , insertJobTreeLeavesStamped
   , insertJobsBatch
@@ -413,25 +412,8 @@ internalStampedRow stamp parent state suspended job =
   let stamped = stamp job
    in (stamped, admissionColumns (JT.payload stamped), parent, state, suspended)
 
--- | Insert a job without validating that the parent exists.
---
--- This is an internal fast path for callers that already guarantee the parent
--- is present (e.g. 'insertJobTree'). External callers
--- should use 'insertJob' which validates the parent first.
-insertJobUnsafe
-  :: forall m payload
-   . (JobPayload payload, MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
-  -> TableName
-  -- ^ Table name
-  -> JobWrite payload
-  -> m (Maybe (JobRead payload))
-insertJobUnsafe schemaName tableName job =
-  traceStamp >>= \stamp -> insertJobUnsafeStamped schemaName tableName stamp job
-
--- | 'insertJobUnsafe' over a stamp the caller shares across its inserts.
-insertJobUnsafeStamped
+-- | 'insertJob' over a stamp the caller shares across its inserts.
+insertJobStamped
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
@@ -439,7 +421,7 @@ insertJobUnsafeStamped
   -> TraceStamp payload
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafeStamped schemaName tableName stamp job =
+insertJobStamped schemaName tableName stamp job =
   insertJobSource schemaName tableName job (stampedRow stamp job)
 
 -- | Internal tree insertion path for engine-owned parent and suspension state.
@@ -672,7 +654,8 @@ insertJob
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob = insertJobUnsafe
+insertJob schemaName tableName job =
+  traceStamp >>= \stamp -> insertJobStamped schemaName tableName stamp job
 
 -- | Insert multiple jobs in a single batch operation.
 --
@@ -1018,9 +1001,9 @@ ackJobInner schemaName tableName job = do
 -- row lock the caller goes on to take.
 lockJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
 lockJobParents schemaName tableName parents =
-  unless (null pids) $
-    void $
-      MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
+  unless (null pids)
+    $ void
+    $ MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
   where
     pids = Set.toAscList (Set.fromList (catMaybes parents))
 
@@ -1053,10 +1036,10 @@ lockJobTreesFromRoot schemaName tableName ids =
 -- | Wake a suspended parent if all children are done.
 tryResumeParent :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> Int64 -> m ()
 tryResumeParent locks schemaName tableName pid = do
-  when (locks == TakeLocks) $
-    void $
-      MA.executeQuery
-        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+  when (locks == TakeLocks)
+    $ void
+    $ MA.executeQuery
+      (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
   void $
     MA.executeStatement
       (Tmpl.tryWakeAncestorSQL schemaName tableName pid)
@@ -1142,9 +1125,9 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
           , let holder = claimedBy job
           ]
 
-  MA.executeQuery $
-    Q.rows visibilityUpdateCodec $
-      Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
+  MA.executeQuery
+    $ Q.rows visibilityUpdateCodec
+    $ Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
 
 -- | Update a job for retry with backoff and error tracking
 --
@@ -1301,11 +1284,11 @@ snapshotTreeRollups
 snapshotTreeRollups schemaName tableName parentJobId = do
   rollupIds <- MA.executeQuery (Tmpl.treeRollupIdsSQL schemaName tableName parentJobId)
   for_ rollupIds $ \rid -> do
-    (results, errors, snap, _) <- readChildResultsRaw schemaName tableName rid
+    (results, errors, snap) <- readChildResultsRaw schemaName tableName rid
     let merged = mergeRawChildResults results errors snap
-    when (not $ Map.null merged) $
-      void $
-        persistParentState schemaName tableName rid (toJSON merged)
+    when (not $ Map.null merged)
+      $ void
+      $ persistParentState schemaName tableName rid (toJSON merged)
 
 -- | Moves multiple jobs from the main queue to the dead-letter queue.
 --
@@ -1338,9 +1321,9 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
   moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
   let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
   for_ movedJobs $ \(job, _) ->
-    when (isRollup job) $
-      void $
-        cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
+    when (isRollup job)
+      $ void
+      $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
   resumeJobParents LocksHeld schemaName tableName (map (parentId . fst) movedJobs)
   pure (fromIntegral (Set.size moved))
 
@@ -2248,9 +2231,9 @@ cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
   rootParentId <- lockParentOf schemaName tableName jobId
   deleted <- countOr0 (mkSql schemaName tableName jobId)
 
-  when (deleted > 0) $
-    for_ rootParentId $
-      tryResumeParent LocksHeld schemaName tableName
+  when (deleted > 0)
+    $ for_ rootParentId
+    $ tryResumeParent LocksHeld schemaName tableName
 
   pure deleted
 
@@ -2742,8 +2725,8 @@ listQueues
 listQueues schemaName =
   MA.executeQuery (Tmpl.listQueuesSQL schemaName)
 
--- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
--- for a rollup finalizer in a single query.
+-- | Read child results, DLQ errors, and the parent_state snapshot for a rollup
+-- finalizer in a single query.
 readChildResultsRaw
   :: (MonadArbiter m)
   => SchemaName
@@ -2752,20 +2735,20 @@ readChildResultsRaw
   -- ^ Table name
   -> Int64
   -- ^ Parent job ID
-  -> m (Map.Map Int64 Value, Map.Map Int64 Text, Maybe Value, Map.Map Int64 Text)
+  -> m (Map.Map Int64 Value, Map.Map Int64 Text, Maybe Value)
 readChildResultsRaw schemaName tableName parentJobId = do
   rows <- MA.executeQuery (Tmpl.readChildResultsSQL schemaName tableName parentJobId)
-  foldM parseRow (Map.empty, Map.empty, Nothing, Map.empty) rows
+  foldM parseRow (Map.empty, Map.empty, Nothing) rows
   where
-    parseRow (!results, !errors, !snap, !dlqFailures) row = case row of
+    parseRow (!results, !errors, !snap) row = case row of
       ("r", Just cid, Just val, _, _) ->
-        pure (Map.insert cid val results, errors, snap, dlqFailures)
+        pure (Map.insert cid val results, errors, snap)
       ("e", Just jid, _, Just err, Just _) ->
-        pure (results, Map.insert jid err errors, snap, Map.insert jid err dlqFailures)
+        pure (results, Map.insert jid err errors, snap)
       ("e", Just jid, _, Nothing, Just _) ->
-        pure (results, Map.insert jid "" errors, snap, Map.insert jid "" dlqFailures)
+        pure (results, Map.insert jid "" errors, snap)
       ("s", _, Just val, _, _) ->
-        pure (results, errors, Just val, dlqFailures)
+        pure (results, errors, Just val)
       _ -> throwParsing $ "readChildResultsRaw: unexpected row: " <> T.pack (show row)
 
 -- | Read the raw @parent_state@ snapshot from the DB.

@@ -143,29 +143,29 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         r `shouldBe` Just 42
       it "aborts a stuck statement at the timeout without killing the caller" $ \env -> do
         r <-
-          runSimpleDb env $
-            runReaperOp silentLogConfig testSchema 0.5 "test-reaper-stuck-op" 0 $
-              executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(5); END $$")
+          runSimpleDb env
+            $ runReaperOp silentLogConfig testSchema 0.5 "test-reaper-stuck-op" 0
+            $ executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(5); END $$")
         r `shouldBe` Nothing
 
     describe "Transactional Atomicity" $ do
       it "rolls back user operations when handler fails" $ \env -> withTestOpsTable env $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler conn job = do
-              liftIO $
-                void $
-                  execute
-                    conn
-                    (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
-                    (primaryKey job, "processed" :: Text)
+              liftIO
+                $ void
+                $ execute
+                  conn
+                  (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
+                  (primaryKey job, "processed" :: Text)
               throwRetryable "Simulated failure"
 
-        void $
-          runSimpleDb env $
-            HL.insertJob $
-              setMaxAttempts (Just 1) $
-                setGroupKey (Just "g1") $
-                  defaultJob (SimpleTask "WillFail")
+        void
+          $ runSimpleDb env
+          $ HL.insertJob
+          $ setMaxAttempts (Just 1)
+          $ setGroupKey (Just "g1")
+          $ defaultJob (SimpleTask "WillFail")
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 (noResult handler)
@@ -186,12 +186,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "commits user operations when handler succeeds" $ \env -> withTestOpsTable env $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler conn job = do
-              liftIO $
-                void $
-                  execute
-                    conn
-                    (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
-                    (primaryKey job, "processed" :: Text)
+              liftIO
+                $ void
+                $ execute
+                  conn
+                  (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
+                  (primaryKey job, "processed" :: Text)
               pure ()
 
         void $ runSimpleDb env $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (SimpleTask "WillSucceed")
@@ -210,22 +210,22 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "manual commit inside handler persists despite subsequent failure" $ \env -> withTestOpsTable env $ do
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler conn job = do
-              liftIO $
-                void $
-                  execute
-                    conn
-                    (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
-                    (primaryKey job, "processed" :: Text)
+              liftIO
+                $ void
+                $ execute
+                  conn
+                  (fromString . T.unpack $ "INSERT INTO " <> testSchema <> ".test_operations (job_id, operation) VALUES (?, ?)")
+                  (primaryKey job, "processed" :: Text)
               -- User manually commits the transaction (violates our transaction semantics)
               liftIO $ PG.commit conn
               throwRetryable "Simulated failure after commit"
 
-        void $
-          runSimpleDb env $
-            HL.insertJob $
-              setMaxAttempts (Just 1) $
-                setGroupKey (Just "g1") $
-                  defaultJob (SimpleTask "ManualCommit")
+        void
+          $ runSimpleDb env
+          $ HL.insertJob
+          $ setMaxAttempts (Just 1)
+          $ setGroupKey (Just "g1")
+          $ defaultJob (SimpleTask "ManualCommit")
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 (noResult handler)
@@ -426,11 +426,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     )
                     (toList jobs)
                 else ackAllWith cbs (map (\j -> (j, resultFor (payload j))) (toList jobs))
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              defaultJob (SimpleTask "rb-reducer")
-                <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ defaultJob (SimpleTask "rb-reducer")
+            <~~ (defaultJob (SimpleTask "rb-ca") :| [defaultJob (SimpleTask "rb-cb")])
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           defaultBatchedWorkerConfig 1 10 handler
         withAsync (runSimpleDb env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
@@ -453,15 +453,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               _ -> pure Nothing
 
         -- Insert the rollup tree
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              defaultJob (SimpleTask "reducer")
-                <~~ ( defaultJob (SimpleTask "mapper-a")
-                        :| [ defaultJob (SimpleTask "mapper-b")
-                           , defaultJob (SimpleTask "mapper-c")
-                           ]
-                    )
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ defaultJob (SimpleTask "reducer")
+            <~~ ( defaultJob (SimpleTask "mapper-a")
+                    :| [ defaultJob (SimpleTask "mapper-b")
+                       , defaultJob (SimpleTask "mapper-c")
+                       ]
+                )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
@@ -506,16 +506,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 pure merged
               _ -> pure Nothing
 
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              JT.rollup (defaultJob (SimpleTask "root")) $
-                ( defaultJob (SimpleTask "section-1")
-                    <~~ (defaultJob (SimpleTask "mapper-1a") :| [defaultJob (SimpleTask "mapper-1b")])
-                )
-                  :| [ defaultJob (SimpleTask "section-2")
-                         <~~ (defaultJob (SimpleTask "mapper-2a") :| [defaultJob (SimpleTask "mapper-2b")])
-                     ]
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ JT.rollup (defaultJob (SimpleTask "root"))
+          $ ( defaultJob (SimpleTask "section-1")
+                <~~ (defaultJob (SimpleTask "mapper-1a") :| [defaultJob (SimpleTask "mapper-1b")])
+            )
+            :| [ defaultJob (SimpleTask "section-2")
+                   <~~ (defaultJob (SimpleTask "mapper-2a") :| [defaultJob (SimpleTask "mapper-2b")])
+               ]
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
@@ -553,13 +553,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 _ -> ackWith cbs job Nothing
 
         -- Insert the rollup tree
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              defaultJob (SimpleTask "manual-reducer")
-                <~~ ( defaultJob (SimpleTask "child-a")
-                        :| [defaultJob (SimpleTask "child-b")]
-                    )
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ defaultJob (SimpleTask "manual-reducer")
+            <~~ ( defaultJob (SimpleTask "child-a")
+                    :| [defaultJob (SimpleTask "child-b")]
+                )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           defaultBatchedWorkerConfig 3 1 handler
@@ -603,16 +603,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Two independent rollup trees, all ungrouped. The four children drain in
         -- one ungrouped batch, then both parents unblock and batch together.
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              defaultJob (SimpleTask "reducer-1")
-                <~~ (defaultJob (SimpleTask "child-1a") :| [defaultJob (SimpleTask "child-1b")])
-        runSimpleDb env $
-          void $
-            HL.insertJobTree $
-              defaultJob (SimpleTask "reducer-2")
-                <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ defaultJob (SimpleTask "reducer-1")
+            <~~ (defaultJob (SimpleTask "child-1a") :| [defaultJob (SimpleTask "child-1b")])
+        runSimpleDb env
+          $ void
+          $ HL.insertJobTree
+          $ defaultJob (SimpleTask "reducer-2")
+            <~~ (defaultJob (SimpleTask "child-2a") :| [defaultJob (SimpleTask "child-2b")])
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           defaultBatchedWorkerConfig 1 10 handler
@@ -651,12 +651,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert the rollup tree
         Right (_parent :| _children) <-
-          runSimpleDb env $
-            HL.insertJobTree $
-              (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "dlq-reducer"))
-                <~~ ( defaultJob (SimpleTask "dlq-child-a")
-                        :| [defaultJob (SimpleTask "dlq-child-b")]
-                    )
+          runSimpleDb env
+            $ HL.insertJobTree
+            $ (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "dlq-reducer"))
+              <~~ ( defaultJob (SimpleTask "dlq-child-a")
+                      :| [defaultJob (SimpleTask "dlq-child-b")]
+                  )
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 handler
@@ -712,12 +712,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert rollup tree: reducer + 2 children
         Right (_parent :| _children) <-
-          runSimpleDb env $
-            HL.insertJobTree $
-              (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-reducer"))
-                <~~ ( defaultJob (SimpleTask "recover-child-ok")
-                        :| [setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-child-fail")]
-                    )
+          runSimpleDb env
+            $ HL.insertJobTree
+            $ (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-reducer"))
+              <~~ ( defaultJob (SimpleTask "recover-child-ok")
+                      :| [setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-child-fail")]
+                  )
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
@@ -881,12 +881,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "lists workers filtered by liveness across all queues" $ \env -> do
         liveWid <- liftIO UUID.nextRandom
         staleWid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema liveWid testTable Nothing (Just 1) 300 Nothing
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema staleWid testTable Nothing (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema liveWid testTable Nothing (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema staleWid testTable Nothing (Just 1) 300 Nothing
 
         -- Age both rows past the query threshold, then bump only the live row.
         threadDelay 1_200_000
@@ -1256,11 +1256,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "does not deadlock against a concurrent ack of the last child" $ \env -> do
         Right (parent :| [child]) <-
-          runSimpleDb env $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultJob (SimpleTask "dl-parent"))
-                (JT.leaf (defaultJob (SimpleTask "dl-child")) :| [])
+          runSimpleDb env
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultJob (SimpleTask "dl-parent"))
+              (JT.leaf (defaultJob (SimpleTask "dl-child")) :| [])
         let pid = primaryKey parent
             cid = primaryKey child
 
@@ -1383,11 +1383,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
         Right (parent :| [child]) <-
-          runSimpleDb env $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultJob (SimpleTask "tc-parent"))
-                (JT.leaf (defaultJob (SimpleTask "tc-child")) :| [])
+          runSimpleDb env
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultJob (SimpleTask "tc-parent"))
+              (JT.leaf (defaultJob (SimpleTask "tc-child")) :| [])
         let pid = primaryKey parent
             cid = primaryKey child
 
@@ -1411,9 +1411,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
     describe "Sweeper" $ do
       it "deletes a stale unpaused worker row" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         threadDelay 1_500_000
         n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
         n `shouldSatisfy` (>= 1)
@@ -1422,9 +1422,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "deletes a stale paused worker row" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
         threadDelay 1_500_000
         n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
@@ -1434,9 +1434,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "deletes a stale shutting-down worker row" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         void $ runSimpleDb env $ Ops.markWorkerShuttingDown testSchema wid
         threadDelay 1_500_000
         n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
@@ -1446,14 +1446,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "preserves paused state across re-registration" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
         void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
         -- Re-register with different metadata to confirm upsert touches the row.
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable (Just "fresh-host") (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable (Just "fresh-host") (Just 1) 300 Nothing
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         case filter ((== wid) . WR.workerId) rows of
           [row] -> do
@@ -1464,9 +1464,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
     describe "Worker health" $ do
       it "reports a freshly-registered worker as live" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         case filter ((== wid) . WR.workerId) rows of
           [row] -> WR.health row `shouldBe` WR.Live
@@ -1474,9 +1474,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "reports a worker past its stale threshold as stale" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         threadDelay 1_500_000
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         case filter ((== wid) . WR.workerId) rows of
@@ -1485,9 +1485,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "reports a fresh shutting-down worker as draining" $ \env -> do
         wid <- liftIO UUID.nextRandom
-        void $
-          runSimpleDb env $
-            Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
+        void
+          $ runSimpleDb env
+          $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 300 Nothing
         void $ runSimpleDb env $ Ops.markWorkerShuttingDown testSchema wid
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         case filter ((== wid) . WR.workerId) rows of

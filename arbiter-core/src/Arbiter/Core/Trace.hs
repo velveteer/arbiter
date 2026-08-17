@@ -246,10 +246,7 @@ jobShapeAttrs job =
     : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
 
 writeAttrs :: JobWrite payload -> AttributeMap
-writeAttrs job =
-  HM.fromList $
-    ("arbiter.priority", toAttribute (fromIntegral (JT.priority job) :: Int))
-      : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
+writeAttrs = HM.fromList . jobShapeAttrs
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =

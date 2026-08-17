@@ -84,9 +84,9 @@ reaperLoop logCfg report interval stmtTimeout = do
       interval
       (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
       $ Ops.sweepCancelledJobs schema queues
-    when hasRateLimit $
-      gatedCount PruneRateLimitBuckets pruneInterval $
-        Arb.pruneRateLimitBuckets @m interval
+    when hasRateLimit
+      $ gatedCount PruneRateLimitBuckets pruneInterval
+      $ Arb.pruneRateLimitBuckets @m interval
     when hasConcurrency $ do
       gatedCount ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
       gatedCount ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m

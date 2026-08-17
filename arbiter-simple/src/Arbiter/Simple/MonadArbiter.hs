@@ -96,13 +96,13 @@ simpleWithDbTransaction action = do
       Nothing -> throwInternal "No active connection and no connection pool available"
       Just p -> withRunInIO $ \run ->
         withResource p $ \conn ->
-          PG.withTransaction conn $
-            run $
-              localSimplePool (\sp -> sp {activeConn = Just conn, transactionDepth = 1}) action
+          PG.withTransaction conn
+            $ run
+            $ localSimplePool (\sp -> sp {activeConn = Just conn, transactionDepth = 1}) action
     (Just conn, 0) -> withRunInIO $ \run ->
-      PG.withTransaction conn $
-        run $
-          localSimplePool (\p -> p {transactionDepth = 1}) action
+      PG.withTransaction conn
+        $ run
+        $ localSimplePool (\p -> p {transactionDepth = 1}) action
     (Just conn, _) -> mask $ \restore -> do
       let spName = Query $ "arbiter_sp_" <> BSC.pack (show depth)
       void . liftIO $ PG.execute_ conn $ "SAVEPOINT " <> spName

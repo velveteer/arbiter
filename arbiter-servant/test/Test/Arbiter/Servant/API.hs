@@ -366,13 +366,13 @@ spec connStr = do
     it "GET /api/v1/arbiter_servant_test/jobs roots_only and parent_id filter the tree" $ do
       (parentId, childIds) <- liftIO $ do
         Right (parent :| children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "tree-parent" (TestMessage "parent"))
-                ( JT.leaf (defaultJob (TestMessage "child-a"))
-                    :| [JT.leaf (defaultJob (TestMessage "child-b"))]
-                )
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "tree-parent" (TestMessage "parent"))
+              ( JT.leaf (defaultJob (TestMessage "child-a"))
+                  :| [JT.leaf (defaultJob (TestMessage "child-b"))]
+              )
         pure (primaryKey parent, map primaryKey children)
 
       -- roots_only excludes children, keeping only the root parent
@@ -411,11 +411,11 @@ spec connStr = do
       -- Insert parent + child
       parentId <- liftIO $ do
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "dlq-count-parent" (TestMessage "parent"))
-                (JT.leaf (defaultJob (TestMessage "dlq-count-child")) :| [])
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "dlq-count-parent" (TestMessage "parent"))
+              (JT.leaf (defaultJob (TestMessage "dlq-count-child")) :| [])
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
@@ -520,13 +520,13 @@ spec connStr = do
       -- Plain cancel refuses a parent with children. force-cancel cascade-deletes the tree.
       (parentId, childId) <- liftIO $ do
         Right (parent :| (child1 : _)) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "force-cancel-tree" (TestMessage "parent"))
-                ( JT.leaf (defaultJob (TestMessage "fc-child-a"))
-                    :| [JT.leaf (defaultJob (TestMessage "fc-child-b"))]
-                )
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "force-cancel-tree" (TestMessage "parent"))
+              ( JT.leaf (defaultJob (TestMessage "fc-child-a"))
+                  :| [JT.leaf (defaultJob (TestMessage "fc-child-b"))]
+              )
         pure (primaryKey parent, primaryKey child1)
 
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show parentId) <> "/force-cancel") ""
@@ -569,11 +569,11 @@ spec connStr = do
       -- Insert a finalizer tree - parent suspended, children unsuspended
       parentId <- liftIO $ do
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            JT.insertJobTree testSchema testTable $
-              JT.rollup
-                (defaultGroupedJob "pause-parent" (TestMessage "parent"))
-                (JT.leaf (defaultGroupedJob "pause-child" (TestMessage "child")) :| [])
+          runSimpleDb mkEnv
+            $ JT.insertJobTree testSchema testTable
+            $ JT.rollup
+              (defaultGroupedJob "pause-parent" (TestMessage "parent"))
+              (JT.leaf (defaultGroupedJob "pause-child" (TestMessage "child")) :| [])
         pure $ primaryKey parent
 
       -- Pause children (they start unsuspended in finalizer pattern)
@@ -598,11 +598,11 @@ spec connStr = do
       -- Insert a finalizer tree, then pause the children
       parentId <- liftIO $ do
         Right (parent :| _) <-
-          runSimpleDb mkEnv $
-            JT.insertJobTree testSchema testTable $
-              JT.rollup
-                (defaultGroupedJob "resume-parent" (TestMessage "parent"))
-                (JT.leaf (defaultGroupedJob "resume-child" (TestMessage "child")) :| [])
+          runSimpleDb mkEnv
+            $ JT.insertJobTree testSchema testTable
+            $ JT.rollup
+              (defaultGroupedJob "resume-parent" (TestMessage "parent"))
+              (JT.leaf (defaultGroupedJob "resume-child" (TestMessage "child")) :| [])
         _ <- runSimpleDb mkEnv $ Ops.pauseChildren testSchema testTable (primaryKey parent)
         pure $ primaryKey parent
 
@@ -738,11 +738,11 @@ spec connStr = do
       dlqId <- liftIO $ do
         -- Insert parent with one child
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "orphan-parent" (TestMessage "parent"))
-                (JT.leaf (defaultJob (TestMessage "orphan-child")) :| [])
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "orphan-parent" (TestMessage "parent"))
+              (JT.leaf (defaultJob (TestMessage "orphan-child")) :| [])
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)

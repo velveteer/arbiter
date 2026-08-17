@@ -77,11 +77,11 @@ dedicatedListenerSpec connStr =
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
       withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
         threadDelay 1_000_000
-        runSimpleDb env $
-          void $
-            HL.insertJob $
-              setGroupKey (Just "g1") $
-                defaultJob (SimpleTask "dedicated")
+        runSimpleDb env
+          $ void
+          $ HL.insertJob
+          $ setGroupKey (Just "g1")
+          $ defaultJob (SimpleTask "dedicated")
         waitUntil 5_000 $ (== 1) <$> readIORef ref
         readIORef ref >>= (`shouldBe` 1)
       destroySimpleEnv env

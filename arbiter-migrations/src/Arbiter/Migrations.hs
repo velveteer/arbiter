@@ -149,7 +149,7 @@ import Database.PostgreSQL.Simple.Migration
   , defaultOptions
   , runMigrations
   )
-import Database.PostgreSQL.Simple.Types (Query (..))
+import Database.PostgreSQL.Simple.Types (Binary (..), PGArray (..), Query (..))
 
 -- | Configuration for job queue migrations
 --
@@ -261,8 +261,9 @@ allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission True True
 
 -- | Validate identifiers before PostgreSQL can truncate generated object or
--- channel names. The 35-byte queue limit accommodates the longest generated
--- index suffix.
+-- channel names into another queue's. The 35-byte queue limit leaves generated
+-- indexes and channels untruncated. Rate-limit bucket triggers do truncate past
+-- 30 bytes and stay distinct.
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
@@ -296,7 +297,9 @@ validateRegistryNames schemaName tables
 
 -- | Run migrations for multiple tables within a single schema, seeding the given
 -- rate-limit policies. On migration success, reconciles the policy and bucket
--- tables on the same connection.
+-- tables on the same connection. The table list must be the schema's whole queue
+-- set. Reconciliation reads it as authoritative and treats an omitted queue as
+-- removed, dropping its notify and event-streaming objects.
 runMigrationsTrackedForTables
   :: ByteString
   -> SchemaName
@@ -458,19 +461,25 @@ reconcileRateLimitDurability conn schemaName durability = do
 
 -- | Converge optional triggers after tracked migrations. This restores objects
 -- removed by an earlier disabled configuration without changing migration history.
+-- The sweep is schema-wide by design: the table list is the schema's whole queue
+-- set, so objects belonging to a queue outside it are left over from a registry
+-- that shrank and are dropped.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
     if enableNotifications config
-      then traverse_ reconcileNotify tables
-      else dropAllNotifyObjects
+      then do
+        dropNotifyObjectsExcept tables
+        traverse_ reconcileNotify tables
+      else dropNotifyObjectsExcept []
     if enableEventStreaming config
       then do
         current <- eventFunctionCurrent
         unless current $ executeSQL (createEventStreamingFunctionSQL schemaName)
+        dropEventTriggersExcept (concatMap (\table -> [table, table <> "_dlq"]) tables)
         traverse_ reconcileEventStream tables
       else do
-        dropAllEventTriggers
+        dropEventTriggersExcept []
         functionInstalled <- eventFunctionExists
         when functionInstalled $ executeSQL (dropEventStreamingFunctionSQL schemaName)
   where
@@ -513,36 +522,39 @@ reconcileOptionalTriggers conn schemaName tables config =
         _ -> False
 
     triggerCurrent table trigger triggerType queue isDLQ = do
-      let args = queue <> "\\000" <> (if isDLQ then "true" else "false") <> "\\000"
+      let nul = BS.singleton 0
+          args = encodeUtf8 queue <> nul <> (if isDLQ then "true" else "false") <> nul
       rows <-
         query
           conn
-          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND t.tgtype = ? AND t.tgnargs = 2 AND encode(t.tgargs, 'escape') = ?)"
-          (schemaName, table, trigger, schemaName, triggerType :: Int, args)
+          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND t.tgtype = ? AND t.tgnargs = 2 AND t.tgargs = ?)"
+          (schemaName, table, trigger, schemaName, triggerType :: Int, Binary args)
       pure $ case rows of
         Only current : _ -> current
         _ -> False
 
-    dropAllEventTriggers = do
+    -- Triggers on tables outside the registry keep a stale zero-arg signature the
+    -- current function body cannot read, so they are swept on both paths.
+    dropEventTriggersExcept keep = do
       commands <-
         query
           conn
-          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND NOT t.tgisinternal"
-          (Only schemaName)
+          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) commands
 
-    dropAllNotifyObjects = do
+    dropNotifyObjectsExcept keep = do
       triggerCommands <-
         query
           conn
-          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND pn.nspname = ? AND t.tgname = c.relname || '_notify_trigger' AND p.proname = 'notify_' || c.relname || '_created' AND p.pronargs = 0 AND NOT t.tgisinternal"
-          (schemaName, schemaName)
+          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND pn.nspname = ? AND t.tgname = c.relname || '_notify_trigger' AND p.proname = 'notify_' || c.relname || '_created' AND p.pronargs = 0 AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          (schemaName, schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) triggerCommands
       functionCommands <-
         query
           conn
-          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_class c ON c.relname = substring(p.proname FROM 8 FOR char_length(p.proname) - 15) JOIN pg_namespace cn ON cn.oid = c.relnamespace AND cn.oid = n.oid WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0"
-          (Only schemaName)
+          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_class c ON c.relname = substring(p.proname FROM 8 FOR char_length(p.proname) - 15) JOIN pg_namespace cn ON cn.oid = c.relnamespace AND cn.oid = n.oid WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0 AND NOT (c.relname::text = ANY(?::text[]))"
+          (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) functionCommands
 
     eventFunctionExists = do

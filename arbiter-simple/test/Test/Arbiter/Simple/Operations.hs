@@ -156,19 +156,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         -- A starts transaction and inserts (holds lock on groups table row)
         _ <- PG.execute_ connA "BEGIN"
         Just _ <-
-          inTransaction @SimpleOpsTestRegistry connA testSchema $
-            HL.insertJob $
-              setGroupKey (Just "g1") $
-                defaultJob (TestMessage "JobA")
+          inTransaction @SimpleOpsTestRegistry connA testSchema
+            $ HL.insertJob
+            $ setGroupKey (Just "g1")
+            $ defaultJob (TestMessage "JobA")
 
         -- B tries to insert same group - BLOCKS on groups table upsert until A commits
         asyncB <- async $ do
           _ <- PG.execute_ connB "BEGIN"
           Just job <-
-            inTransaction @SimpleOpsTestRegistry connB testSchema $
-              HL.insertJob $
-                setGroupKey (Just "g1") $
-                  defaultJob (TestMessage "JobB")
+            inTransaction @SimpleOpsTestRegistry connB testSchema
+              $ HL.insertJob
+              $ setGroupKey (Just "g1")
+              $ defaultJob (TestMessage "JobB")
           _ <- PG.execute_ connB "COMMIT"
           pure job
 

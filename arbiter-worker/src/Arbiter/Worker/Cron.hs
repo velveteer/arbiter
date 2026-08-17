@@ -368,9 +368,9 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
         let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
             ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
             replayCount = length (filter (/= currentTick) ticksToFire)
-        when (replayCount > 0) $
-          logCron logCfg Info $
-            "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
+        when (replayCount > 0)
+          $ logCron logCfg Info
+          $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
         forM_ ticksToFire $ \t ->
           void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
 

@@ -118,11 +118,11 @@ spec connStr =
         cleanup connStr
         withEnv $ \env -> do
           Right (parent :| [child]) <-
-            runSimpleDb env $
-              HL.insertJobTree $
-                JT.rollup
-                  (defaultJob (NoResultTask "declining-parent"))
-                  (JT.leaf (defaultJob (NoResultTask "declining-child")) :| [])
+            runSimpleDb env
+              $ HL.insertJobTree
+              $ JT.rollup
+                (defaultJob (NoResultTask "declining-parent"))
+                (JT.leaf (defaultJob (NoResultTask "declining-child")) :| [])
           rowsInserted <-
             runSimpleDb env $
               HL.insertResult @NoResultPayload (primaryKey parent) (primaryKey child) ()
@@ -137,9 +137,9 @@ spec connStr =
           let handler :: JobHandler (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
               handler _conn _job = pure ["alpha", "beta"]
           cfg <- transactionalWorkerConfig 1 handler
-          void $
-            runSimpleDb env $
-              HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (PlainResultTask "archived"))
+          void
+            $ runSimpleDb env
+            $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (PlainResultTask "archived"))
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ do
               arch <- runSimpleDb env $ HL.listArchiveJobs @PlainResultPayload 100 0
@@ -172,11 +172,11 @@ spec connStr =
                   )
                   parents
           cfg <- defaultBatchedWorkerConfig 1 10 handler
-          void $
-            runSimpleDb env $
-              HL.insertJobTree $
-                defaultJob (PlainResultTask "parent")
-                  <~~ (defaultJob (PlainResultTask "kid1") :| [defaultJob (PlainResultTask "kid2")])
+          void
+            $ runSimpleDb env
+            $ HL.insertJobTree
+            $ defaultJob (PlainResultTask "parent")
+              <~~ (defaultJob (PlainResultTask "kid1") :| [defaultJob (PlainResultTask "kid2")])
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ isJust <$> readIORef mergedRef
           readIORef mergedRef >>= (`shouldBe` Just ["from-kid1", "from-kid2"])

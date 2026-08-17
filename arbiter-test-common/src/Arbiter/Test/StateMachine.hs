@@ -592,10 +592,10 @@ mkInsert
 mkInsert deco g d p ma = do
   nvu <- traverse (\s -> liftIO (addUTCTime (fromIntegral s) <$> getCurrentTime)) d
   let job =
-        setMaxAttempts (fromIntegral <$> ma) $
-          setPriority (fromIntegral p) $
-            setNotVisibleUntil nvu $
-              maybe (defaultJob payload) (`defaultGroupedJob` payload) g
+        setMaxAttempts (fromIntegral <$> ma)
+          $ setPriority (fromIntegral p)
+          $ setNotVisibleUntil nvu
+          $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
   mj <- HL.insertJob (deco job)
   pure (primaryKey (fromJust mj))
   where

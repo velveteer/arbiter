@@ -76,9 +76,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
               id
               $ replicate 10 (runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload])
                 <> [ do
-                       void $
-                         runSimpleDb env $
-                           HL.insertJob (setGroupKey (Just "serialize") $ defaultJob (TestMessage "FastPod"))
+                       void
+                         $ runSimpleDb env
+                         $ HL.insertJob (setGroupKey (Just "serialize") $ defaultJob (TestMessage "FastPod"))
                        pure []
                    , do
                        _ <- PG.execute_ connSlow "COMMIT"
@@ -112,12 +112,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         doneRef <- newIORef False
         let inserter = do
-              replicateM_ 200 $
-                void $
-                  runSimpleDb env $
-                    HL.insertJob $
-                      setGroupKey (Just "ooo-race") $
-                        defaultJob (TestMessage "ooo")
+              replicateM_ 200
+                $ void
+                $ runSimpleDb env
+                $ HL.insertJob
+                $ setGroupKey (Just "ooo-race")
+                $ defaultJob (TestMessage "ooo")
               atomicModifyIORef' doneRef (const (True, ()))
 
             claimer = do

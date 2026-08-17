@@ -224,7 +224,7 @@ publishSpan
 publishSpan = withPublishSpan (queueTable @payload @m)
 
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
--- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
+-- ('IgnoreDuplicate').
 insertJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -1262,13 +1262,13 @@ getDLQChildErrorsByParent parentJobId = do
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
--- @(childId->result, childId->error, parentStateSnapshot, dlqPK->error)@.
+-- @(childId->result, childId->error, parentStateSnapshot)@.
 readChildResultsRaw
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
   -- ^ Parent job ID
-  -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
+  -> m (Map Int64 Value, Map Int64 Text, Maybe Value)
 readChildResultsRaw parentJobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m

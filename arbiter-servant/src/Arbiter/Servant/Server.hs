@@ -286,10 +286,10 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
       writes = map unApiJobWrite jobWrites
 
   inserted <-
-    liftIO $
-      runSimpleDb env $
-        withPublishSpan tableName writes $
-          Ops.insertJobsBatch schemaName tableName writes
+    liftIO
+      $ runSimpleDb env
+      $ withPublishSpan tableName writes
+      $ Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 

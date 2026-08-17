@@ -77,10 +77,10 @@ installHolDetector conn schemaName tableName =
 countHolViolations :: PG.Connection -> Text -> Text -> IO Int64
 countHolViolations conn schemaName tableName = do
   [PG.Only count] <-
-    PG.query_ conn $
-      fromString $
-        T.unpack $
-          "SELECT count(*)::bigint FROM " <> holViolTbl schemaName tableName
+    PG.query_ conn
+      $ fromString
+      $ T.unpack
+      $ "SELECT count(*)::bigint FROM " <> holViolTbl schemaName tableName
   pure count
 
 -- | Remove the HOL detector trigger, function, and violations table.
@@ -200,9 +200,9 @@ concurrencySpec mkMessage runM = do
 
       forM_ [(1 :: Int) .. numIterations] $ \_ -> do
         -- Insert 5 jobs in one group
-        void $
-          runM env $
-            HL.insertJobsBatch (replicate seedPerRound $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "Grouped"))
+        void
+          $ runM env
+          $ HL.insertJobsBatch (replicate seedPerRound $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "Grouped"))
         atomicModifyIORef' insertedRef (\n -> (n + seedPerRound + insertersPerRound, ()))
 
         -- Race N workers to claim + 2 concurrent inserters to the same group.
@@ -301,10 +301,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "stress-group-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "grouped"))
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "grouped"))
 
         claimedRef <- newIORef ([] :: [Int64])
 
@@ -420,10 +420,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "batch-stress-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "batched"))
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "batched"))
 
         claimedRef <- newIORef ([] :: [Int64])
 
@@ -447,10 +447,10 @@ raceConditionSpec mkMessage runM = do
 
         replicateM_ numRounds $ do
           forM_ [1 .. numGroups] $ \(g :: Int) ->
-            void $
-              runM env $
-                HL.insertJobsBatch
-                  (replicate jobsPerGroup $ setGroupKey (Just ("split-" <> T.pack (show g))) $ defaultJob (mkMessage "split"))
+            void
+              $ runM env
+              $ HL.insertJobsBatch
+                (replicate jobsPerGroup $ setGroupKey (Just ("split-" <> T.pack (show g))) $ defaultJob (mkMessage "split"))
 
           resultsRef <- newIORef ([] :: [(Int, [(Maybe Text, Int64)])])
           _ <-
@@ -497,10 +497,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "mixed-mode-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "mixed"))
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "mixed"))
 
         claimedRef <- newIORef ([] :: [Int64])
 

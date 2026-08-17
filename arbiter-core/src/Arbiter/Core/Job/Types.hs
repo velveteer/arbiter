@@ -76,8 +76,7 @@ module Arbiter.Core.Job.Types
   ) where
 
 import Control.Exception qualified as E
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
-import Data.Aeson.Types (Parser)
+import Data.Aeson (FromJSON (..), ToJSON (..), withObject, (.!=), (.:), (.:?))
 import Data.Int (Int32, Int64)
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -86,7 +85,9 @@ import GHC.Generics (Generic)
 import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
+import Arbiter.Core.Job.Dedup (DedupKey (..), dedupParts)
 import Arbiter.Core.Job.Status (JobStatus (..), jobStatusFromText, jobStatusToText)
+import Arbiter.Core.Job.TraceContext (TraceContext (..), toTraceContext)
 import Arbiter.Core.Job.Types.Internal
   ( JobRecord (..)
   , admission
@@ -116,7 +117,7 @@ import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimi
 -- | A job parametrized over payload, primary key, queue name, insertion
 -- timestamp, and admission metadata. The constructor is internal.
 type Job payload key q insertedAt adm =
-  JobRecord payload key q insertedAt adm DedupKey TraceContext
+  JobRecord payload key q insertedAt adm
 
 -- | The admission keys gating a stored job's claim, one field per kind.
 data AdmissionKeys = AdmissionKeys
@@ -148,7 +149,7 @@ dayRetention = 86400
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
 -- (an empty object on insert, the merged child results before a DLQ move).
-isRollup :: Job p k q t adm -> Bool
+isRollup :: Job p Int64 q t adm -> Bool
 isRollup = isJust . parentState
 
 -- | A job read from the database.
@@ -212,7 +213,7 @@ defaultJob value =
     , admission = ()
     }
 
--- | Grouped 'JobWrite'. Jobs sharing a group key are processed serially.
+-- | 'defaultJob' with a group key. Jobs sharing a group key are processed serially.
 defaultGroupedJob :: Text -> payload -> JobWrite payload
 defaultGroupedJob key = setGroupKey (Just key) . defaultJob
 
@@ -254,45 +255,6 @@ type JobPayload payload =
 -- | The registry declares both admission policy kinds.
 type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
-
--- | A job's W3C trace context.
-data TraceContext = TraceContext
-  { traceparent :: Text
-  , tracestate :: Maybe Text
-  }
-  deriving stock (Eq, Generic, Show)
-
--- | A trace context from its two stored halves.
-toTraceContext :: Maybe Text -> Maybe Text -> Maybe TraceContext
-toTraceContext tp ts = flip TraceContext ts <$> tp
-
--- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
-data DedupKey
-  = -- | Skip if a job with this key exists (@DO NOTHING@).
-    IgnoreDuplicate Text
-  | -- | Replace the existing job with this key (@DO UPDATE@), unless it is
-    -- actively claimed, force-cancel flagged, or has children.
-    ReplaceDuplicate Text
-  deriving stock (Eq, Generic, Show)
-
-instance ToJSON DedupKey where
-  toJSON (IgnoreDuplicate k) = object ["key" .= k, "strategy" .= ("ignore" :: Text)]
-  toJSON (ReplaceDuplicate k) = object ["key" .= k, "strategy" .= ("replace" :: Text)]
-
-instance FromJSON DedupKey where
-  parseJSON = withObject "DedupKey" $ \v -> do
-    key <- v .: "key"
-    strategy <- v .: "strategy" :: Parser Text
-    case strategy of
-      "ignore" -> pure $ IgnoreDuplicate key
-      "replace" -> pure $ ReplaceDuplicate key
-      _ -> fail $ "Unknown dedup strategy: " <> show strategy
-
--- | The @dedup_key@ and @dedup_strategy@ column values for a 'DedupKey'.
-dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
-dedupParts Nothing = (Nothing, Nothing)
-dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
-dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
 
 type JobId = Int64
 type ClaimSeq = Int64

@@ -143,9 +143,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               }
 
       -- Insert a job
-      void $
-        runSimpleDb env $
-          Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "will-fail"))
+      void
+        $ runSimpleDb env
+        $ Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "will-fail"))
 
       -- Handler that always throws (retryable exception, not job-gone)
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()

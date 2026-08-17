@@ -94,9 +94,8 @@ parent <~~ children = Finalizer parent (fmap Leaf children)
 -- | Insert a 'JobTree' atomically in a single transaction.
 --
 -- Returns a flat 'NonEmpty' list of all inserted jobs (pre-order: root first).
--- Returns @Left errMsg@ if any insertion fails (e.g. dedup conflict on root,
--- phantom parent). The entire transaction is rolled back on failure - no
--- partial trees are committed.
+-- Returns @Left errMsg@ if any insertion fails, such as a dedup conflict. The
+-- entire transaction is rolled back on failure - no partial trees are committed.
 insertJobTree
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -133,12 +132,12 @@ insertJobTree schemaName tableName tree =
     go stamp mParentId susp (Leaf jobW) = do
       mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId Nothing susp jobW
       case mInserted of
-        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: job insert failed (dedup conflict or invalid parent)"
+        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: job insert failed (dedup conflict)"
         Just inserted -> pure (inserted :| [])
     go stamp mParentId susp (Finalizer jobW children) = do
       mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId (Just emptyState) susp jobW
       case mInserted of
-        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict or invalid parent)"
+        Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict)"
         Just inserted -> do
           descendants <- insertChildren (primaryKey inserted) (NE.toList children)
           pure (inserted :| descendants)
@@ -149,9 +148,9 @@ insertJobTree schemaName tableName tree =
           let (leaves, rest) = span isLeaf children'
               leafWrites = [job | Leaf job <- leaves]
           leafJobs <- Ops.insertJobTreeLeavesStamped schemaName tableName stamp parentPK leafWrites
-          when (length leafJobs /= length leafWrites) $
-            UE.throwIO $
-              TreeInsertFailed "insertJobTree: leaf batch insert had dedup conflicts"
+          when (length leafJobs /= length leafWrites)
+            $ UE.throwIO
+            $ TreeInsertFailed "insertJobTree: leaf batch insert had dedup conflicts"
           (leafJobs <>) <$> insertChildren parentPK rest
         insertChildren parentPK (subTree : rest) = do
           subTreeJobs <- go stamp (Just parentPK) True subTree

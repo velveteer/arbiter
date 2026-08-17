@@ -27,7 +27,8 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
-import Data.List (nub)
+import Data.Maybe (fromMaybe)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO)
@@ -35,7 +36,7 @@ import UnliftIO.Async qualified as Async
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config (WorkerConfig (..), WorkerConfigException (..), validateWorkerConfig)
-import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad)
+import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad, requestedQueuesForMonad)
 import Arbiter.Worker.Logger (LogConfig (..), (.=))
 import Arbiter.Worker.Pool (runWorkerPool)
 import Arbiter.Worker.WorkerState (WorkerState (ShuttingDown))
@@ -70,15 +71,16 @@ namedWorkerPool
   -> NamedWorkerPool m
 namedWorkerPool cfg = NamedWorkerPool (Arb.queueTable @payload @m) cfg
 
--- | Run the pools selected by @ARBITER_ENABLED_QUEUES@.
+-- | Run the pools selected by @ARBITER_ENABLED_QUEUES@, or every configured
+-- pool when it is unset.
 runWorkerPools
   :: forall m
    . (MonadUnliftIO m, RegistryTables (RegistryOf m))
   => [NamedWorkerPool m]
   -> m ()
 runWorkerPools pools = do
-  enabled <- liftIO $ enabledQueuesForMonad @m
-  runSelectedWorkerPools enabled pools
+  requested <- liftIO $ requestedQueuesForMonad @m
+  runSelectedWorkerPools (fromMaybe [name | NamedWorkerPool name _ <- pools] requested) pools
 
 -- | Signal graceful shutdown to every pool atomically.
 shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
@@ -86,8 +88,8 @@ shutdownPools pools =
   liftIO . STM.atomically $
     traverse_ (`STM.writeTVar` ShuttingDown) [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
--- | Run only named pools. A pool that exits winds down its peers. If it failed,
--- its exception is rethrown after every peer has been joined.
+-- | Run only named pools. A pool that exits winds down its peers. The first
+-- failure among them is rethrown after every peer has been joined.
 runSelectedWorkerPools
   :: forall m
    . (MonadUnliftIO m)
@@ -95,20 +97,20 @@ runSelectedWorkerPools
   -> [NamedWorkerPool m]
   -> m ()
 runSelectedWorkerPools enabled pools = do
-  let available = [name | NamedWorkerPool name _ <- pools]
-      missing = filter (`notElem` available) (nub enabled)
-  unlessNull missing $
-    liftIO . E.throwIO . WorkerPoolSelectionException $
-      "No worker pool configured for: " <> T.intercalate ", " missing
+  let available = Set.fromList [name | NamedWorkerPool name _ <- pools]
+      missing = Set.toList (Set.fromList enabled `Set.difference` available)
+  unlessNull missing
+    $ liftIO . E.throwIO . WorkerPoolSelectionException
+    $ "No worker pool configured for: " <> T.intercalate ", " missing
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
     [] -> liftIO $ E.throwIO (WorkerPoolSelectionException "No worker pools selected")
     selected -> evalContT $ do
       asyncs <- traverse withPoolAsync selected
       lift $ do
-        (_, firstResult) <- Async.waitAnyCatch asyncs
+        _ <- Async.waitAnyCatch asyncs
         shutdownPools selected
-        traverse_ Async.waitCatch asyncs
-        either (liftIO . E.throwIO) pure firstResult
+        results <- traverse Async.waitCatch asyncs
+        either (liftIO . E.throwIO) pure (sequence_ results)
   where
     unlessNull values action = if null values then pure () else action
 

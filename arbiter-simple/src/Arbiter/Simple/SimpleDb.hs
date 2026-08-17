@@ -192,13 +192,13 @@ createSimpleEnvWithConfig
 createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
   let stripes = poolStripes config
   connPool <-
-    newPool $
-      setNumStripes stripes $
-        defaultPoolConfig
-          (connectPostgreSQL connStr)
-          close
-          (fromIntegral $ poolIdleTimeout config) -- idle time (seconds)
-          (poolSize config)
+    newPool
+      $ setNumStripes stripes
+      $ defaultPoolConfig
+        (connectPostgreSQL connStr)
+        close
+        (fromIntegral $ poolIdleTimeout config) -- idle time (seconds)
+        (poolSize config)
   lstn <- poolListener connPool
   pure
     SimpleEnv

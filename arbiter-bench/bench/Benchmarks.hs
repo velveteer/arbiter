@@ -1000,9 +1000,9 @@ gatingBenches settle trial =
         ]
       where
         mode label m =
-          singleTest label $
-            ThroughputBench $
-              multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial m table mkJob trialDurationUs)
+          singleTest label
+            $ ThroughputBench
+            $ multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial m table mkJob trialDurationUs)
 
 setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
 setupQueue simpleEnv totalJobs flavor = do
@@ -1069,9 +1069,9 @@ main = do
   execute_ statsConn "ALTER TABLE arbiter.arbiter_concurrency SET (autovacuum_enabled = false)"
   execute_ statsConn "ALTER TABLE arbiter.arbiter_rate_limits SET (autovacuum_enabled = false)"
   [Only trackSetting] <- PG.query_ statsConn "SHOW track_functions"
-  when (trackSetting /= ("all" :: Text)) $
-    putStrLn $
-      "WARNING: track_functions = " <> T.unpack trackSetting <> " (set to 'all' in postgresql.conf for trigger stats)"
+  when (trackSetting /= ("all" :: Text))
+    $ putStrLn
+    $ "WARNING: track_functions = " <> T.unpack trackSetting <> " (set to 'all' in postgresql.conf for trigger stats)"
 
   putStrLn $
     "Running benchmarks ("
@@ -1127,13 +1127,13 @@ _claimBenches :: SimpleEnv BenchRegistry -> Int -> [(String, QueueFlavor)] -> [B
 _claimBenches simpleEnv queueSize flavors =
   flip map flavors $ \(label, flavor) ->
     let mkBench name action =
-          singleTest name $
-            ThroughputBench $
-              multiTrial
-                trialCount
-                (setupQueue simpleEnv queueSize flavor)
-                (claimTrial (runSimpleDb simpleEnv) trialDurationUs action)
-                "claims/sec"
+          singleTest name
+            $ ThroughputBench
+            $ multiTrial
+              trialCount
+              (setupQueue simpleEnv queueSize flavor)
+              (claimTrial (runSimpleDb simpleEnv) trialDurationUs action)
+              "claims/sec"
      in bgroup
           label
           [ mkBench "claim 1" $
@@ -1212,12 +1212,12 @@ mkWorkerFlavorBenches simpleEnv trial pools workers flavors =
   let numJobs = 1000000
    in flip map flavors $ \(label, flavor) ->
         let mkBench name mode =
-              singleTest name $
-                ThroughputBench $
-                  multiTrialSteady
-                    trialCount
-                    (setupQueue simpleEnv numJobs flavor)
-                    (trial numJobs trialDurationUs pools workers mode)
+              singleTest name
+                $ ThroughputBench
+                $ multiTrialSteady
+                  trialCount
+                  (setupQueue simpleEnv numJobs flavor)
+                  (trial numJobs trialDurationUs pools workers mode)
          in bgroup
               label
               [ mkBench "single job mode" BenchSingleJobMode
@@ -1232,12 +1232,12 @@ steadyStateBenches trial =
       flip map steadyStateFlavors $ \(label, flavor) ->
         let producerBatch = 100
             mkBench name mode otel =
-              singleTest name $
-                ThroughputBench $
-                  multiTrialSteady
-                    trialCount
-                    cleanupFresh
-                    (trial trialDurationUs 4 10 producerBatch mode flavor otel)
+              singleTest name
+                $ ThroughputBench
+                $ multiTrialSteady
+                  trialCount
+                  cleanupFresh
+                  (trial trialDurationUs 4 10 producerBatch mode flavor otel)
          in bgroup label $
               [ mkBench "single job mode" BenchSingleJobMode Plain
               , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10) Plain

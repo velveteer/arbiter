@@ -88,9 +88,9 @@ spec connStr = do
         withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema
           forM_ [1 :: Int .. 6] $ \i ->
-            runSimpleDb producer $
-              void $
-                HL.insertJob (defaultJob (SimpleTask (T.pack ("sizing " <> show i))))
+            runSimpleDb producer
+              $ void
+              $ HL.insertJob (defaultJob (SimpleTask (T.pack ("sizing " <> show i))))
           waitUntil 10_000 $ (== 6) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 6)
           destroySimpleEnv producer

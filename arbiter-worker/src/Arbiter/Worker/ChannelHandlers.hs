@@ -79,9 +79,9 @@ handleCronRunNotif
   -> Notification
   -> m ()
 handleCronRunNotif ownNames runNowVar notif =
-  when (Set.member (decodeUtf8Lenient (notificationData notif)) ownNames) $
-    atomically $
-      STM.writeTVar runNowVar True
+  when (Set.member (decodeUtf8Lenient (notificationData notif)) ownNames)
+    $ atomically
+    $ STM.writeTVar runNowVar True
 
 -- | Run @work@ as an async registered in 'RunningJobs' for its lifetime, dropping
 -- only the entries this call made.

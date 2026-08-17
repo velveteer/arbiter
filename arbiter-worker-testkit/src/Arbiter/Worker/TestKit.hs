@@ -184,9 +184,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "archives a completed job when archiveFor is set" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "arch-done"))
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "arch-done"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -197,9 +197,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "fetches an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "gk") $ defaultJob (mkSimple "arch-byid"))
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "gk") $ defaultJob (mkSimple "arch-byid"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -256,9 +256,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "re-enqueues an archived job, keeping the archive row" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "rg") $ defaultJob (mkSimple "re-job"))
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "rg") $ defaultJob (mkSimple "re-job"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         let countReJob arch = length (filter ((== mkSimple "re-job") . payload . Archive.jobSnapshot) arch)
@@ -276,9 +276,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "purges an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "pg") $ defaultJob (mkSimple "purge-one"))
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "pg") $ defaultJob (mkSimple "purge-one"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -315,10 +315,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> do
         n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
         when (n == 1) $ throwPermanent "fail first time"
-      void $
-        runM env $
-          HL.insertJob
-            (setArchiveFor (Just dayRetention) $ setMaxAttempts (Just 1) $ setGroupKey (Just "da") $ defaultJob (mkSimple "dlq-arch"))
+      void
+        $ runM env
+        $ HL.insertJob
+          (setArchiveFor (Just dayRetention) $ setMaxAttempts (Just 1) $ setGroupKey (Just "da") $ defaultJob (mkSimple "dlq-arch"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -391,14 +391,14 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> do
         n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
         when (n == 1) $ throwRetryable "fail once"
-      void $
-        runM env $
-          HL.insertJob
-            ( setArchiveFor (Just dayRetention) $
-                setMaxAttempts (Just 5) $
-                  setGroupKey (Just "aa") $
-                    defaultJob (mkSimple "arch-attempts")
-            )
+      void
+        $ runM env
+        $ HL.insertJob
+          ( setArchiveFor (Just dayRetention)
+              $ setMaxAttempts (Just 5)
+              $ setGroupKey (Just "aa")
+              $ defaultJob (mkSimple "arch-attempts")
+          )
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, jitter = NoJitter}) $ \_ -> do
         waitUntil 15_000 $ do
@@ -1410,10 +1410,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "cancelTree callback deletes the entire tree" $ \env -> do
       Right (root :| _) <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkSimple "ct-root")
-              <~~ (defaultJob (mkSimple "ct-c1") :| [defaultJob (mkSimple "ct-c2")])
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "ct-root")
+            <~~ (defaultJob (mkSimple "ct-c1") :| [defaultJob (mkSimple "ct-c2")])
       let rootId = primaryKey root
       let batchHandler jobs cbs = traverse_ (\j -> cancelTree cbs j "abort") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1425,10 +1425,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "cancelBranch callback deletes the job's branch" $ \env -> do
       Right (root :| _) <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkSimple "cb-root")
-              <~~ (defaultJob (mkSimple "cb-c1") :| [defaultJob (mkSimple "cb-c2")])
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "cb-root")
+            <~~ (defaultJob (mkSimple "cb-c1") :| [defaultJob (mkSimple "cb-c2")])
       let rootId = primaryKey root
       let batchHandler jobs cbs = traverse_ (\j -> cancelBranch cbs j "branch failed") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1510,16 +1510,16 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
   describe "Tree and Branch Cancel" $ do
     it "throwTreeCancel deletes the entire tree (not DLQ'd)" $ \env -> do
-      runM env $
-        void $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "tc-root"))
-              ( JT.rollup
-                  (defaultJob (mkSimple "tc-mid"))
-                  (JT.leaf (defaultJob (mkSimple "tc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "tc-leaf2"))])
-                  :| []
-              )
+      runM env
+        $ void
+        $ HL.insertJobTree
+        $ JT.rollup
+          (defaultJob (mkSimple "tc-root"))
+          ( JT.rollup
+              (defaultJob (mkSimple "tc-mid"))
+              (JT.leaf (defaultJob (mkSimple "tc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "tc-leaf2"))])
+              :| []
+          )
       config <- mkConfig $ \job ->
         when (payload job == mkSimple "tc-leaf1") $ liftIO (throwTreeCancel "abort everything")
 
@@ -1550,11 +1550,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
             liftIO $ threadDelay 10_000_000
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "fc-parent"))
-              (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkSimple "fc-parent"))
+            (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
       config <- mkBatchedConfig 1 10 handler
 
       withAsync
@@ -1570,16 +1570,16 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "throwBranchCancel deletes branch but resumes grandparent" $ \env -> do
       rootProcessedRef <- newIORef False
-      runM env $
-        void $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "bc-root"))
-              ( JT.rollup
-                  (defaultJob (mkSimple "bc-mid"))
-                  (JT.leaf (defaultJob (mkSimple "bc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "bc-leaf2"))])
-                  :| []
-              )
+      runM env
+        $ void
+        $ HL.insertJobTree
+        $ JT.rollup
+          (defaultJob (mkSimple "bc-root"))
+          ( JT.rollup
+              (defaultJob (mkSimple "bc-mid"))
+              (JT.leaf (defaultJob (mkSimple "bc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "bc-leaf2"))])
+              :| []
+          )
       config <- mkConfig $ \job ->
         if payload job == mkSimple "bc-leaf1"
           then liftIO (throwBranchCancel "abort this branch")

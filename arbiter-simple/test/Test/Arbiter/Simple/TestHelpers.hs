@@ -16,13 +16,13 @@ import Arbiter.Simple.SimpleDb (SimpleEnv (..))
 
 createSimplePool :: Int -> ByteString -> IO (Pool PG.Connection)
 createSimplePool numConnections connStr =
-  newPool $
-    setNumStripes (Just 1) $
-      defaultPoolConfig
-        (connectPostgreSQL connStr)
-        close
-        60
-        numConnections
+  newPool
+    $ setNumStripes (Just 1)
+    $ defaultPoolConfig
+      (connectPostgreSQL connStr)
+      close
+      60
+      numConnections
 
 cleanupSimpleTest :: SimpleEnv registry -> Text -> Text -> IO ()
 cleanupSimpleTest env schema tableName =

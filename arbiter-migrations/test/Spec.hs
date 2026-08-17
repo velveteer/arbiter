@@ -85,6 +85,8 @@ registryNameTests =
   , testCase "rejects queue names too long for generated identifiers" $
       validateRegistryNames "arbiter" ["abcdefghijklmnopqrstuvwxyz0123456789"]
         @?= Left "Arbiter queue name exceeds the 35-byte generated-identifier limit: abcdefghijklmnopqrstuvwxyz0123456789"
+  , testCase "accepts a queue name at the limit" $
+      validateRegistryNames "arbiter" ["abcdefghijklmnopqrstuvwxyz012345678"] @?= Right ()
   ]
 
 newtype MigrationPayload = MigrationPayload Int
@@ -150,6 +152,15 @@ migrationReconciliationTests connStr =
           removedQueueTriggerCount conn >>= (@?= 0)
           removedNotifyObjectCount conn >>= (@?= 0)
           optionalFunctionCount conn >>= (@?= 0)
+    , testCase "drops notify objects for queues removed from the registry" $
+        withFreshSchema connStr $ \conn -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
+          removedNotifyObjectCount conn >>= (@?= 2)
+
+          migrate triggerOn
+          removedNotifyObjectCount conn >>= (@?= 0)
+          optionalTriggerCount conn >>= (@?= 3)
+          optionalFunctionCount conn >>= (@?= 2)
     , testCase "repairs stale notification objects" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn

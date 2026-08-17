@@ -26,10 +26,10 @@ childResults
   -> m (Map Int64 (Either Text (ResultOf m payload)), Map Int64 Text)
 childResults job = do
   schema <- getSchema
-  (results, failures, snapshot, dlqFailures) <-
+  (results, failures, snapshot) <-
     Ops.readChildResultsRaw schema (queueName job) (primaryKey job)
   let raw = Ops.mergeRawChildResults results failures snapshot
-  pure (Map.map (>>= decodeJobResult) raw, dlqFailures)
+  pure (Map.map (>>= decodeJobResult) raw, failures)
 
 -- | 'childResults' with successfully decoded values combined through 'Monoid'.
 mergedChildResults

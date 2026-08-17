@@ -5,6 +5,7 @@ module Arbiter.Worker
   ( -- * Running workers
     runWorkerPool
   , module Arbiter.Worker.MultiQueue
+  , getEnabledQueues
 
     -- * Job results
   , module Arbiter.Core.JobResult
@@ -52,6 +53,7 @@ import Arbiter.Worker.Cron
   , updateCronScheduleChecked
   , validateCronScheduleUpdate
   )
+import Arbiter.Worker.EnabledQueues (getEnabledQueues)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.MultiQueue
 import Arbiter.Worker.Pool (runReaperOp, runWorkerPool)

@@ -204,13 +204,13 @@ runWorkerPool config = do
       spawn "Dispatcher" $
         runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
     workers <-
-      replicateM workerCap $
-        spawn "Worker thread" $
-          workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
+      replicateM workerCap
+        $ spawn "Worker thread"
+        $ workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
     crons <-
-      unlessNull (cronJobs config) $
-        spawn "Cron scheduler" $
-          runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
+      unlessNull (cronJobs config)
+        $ spawn "Cron scheduler"
+        $ runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
       spawn "Reaper" $
         reaperLoop (logConfig config) (onMaintenance config) (reaperInterval config) (reaperTimeout config)

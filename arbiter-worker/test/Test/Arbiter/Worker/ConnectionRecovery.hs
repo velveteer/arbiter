@@ -68,11 +68,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert 3 jobs before the kill
         forM_ [1 :: Int .. 3] $ \i ->
-          runSimpleDb env $
-            void $
-              HL.insertJob $
-                setGroupKey (Just "g1") $
-                  defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))
+          runSimpleDb env
+            $ void
+            $ HL.insertJob
+            $ setGroupKey (Just "g1")
+            $ defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -132,12 +132,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
 
         -- Insert the slow job that will get its connection killed
-        runSimpleDb env $
-          void $
-            HL.insertJob $
-              setMaxAttempts (Just 3) $
-                setGroupKey (Just "g1") $
-                  defaultJob (SlowTask 1)
+        runSimpleDb env
+          $ void
+          $ HL.insertJob
+          $ setMaxAttempts (Just 3)
+          $ setGroupKey (Just "g1")
+          $ defaultJob (SlowTask 1)
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -188,9 +188,9 @@ insertJobsDirect _env connStr payloads = do
   conn <- connectPostgreSQL connStr
   PG.withTransaction conn $
     forM_ payloads $ \p ->
-      inTransaction @WorkerTestRegistry conn testSchema $
-        void $
-          HL.insertJob $
-            setGroupKey (Just "g1") $
-              defaultJob p
+      inTransaction @WorkerTestRegistry conn testSchema
+        $ void
+        $ HL.insertJob
+        $ setGroupKey (Just "g1")
+        $ defaultJob p
   close conn

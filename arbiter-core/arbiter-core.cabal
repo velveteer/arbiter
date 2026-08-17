@@ -47,9 +47,11 @@ library
     Arbiter.Core.Health
     Arbiter.Core.HighLevel
     Arbiter.Core.Job.Archive
+    Arbiter.Core.Job.Dedup
     Arbiter.Core.Job.DLQ
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Status
+    Arbiter.Core.Job.TraceContext
     Arbiter.Core.Job.Types
     Arbiter.Core.JobResult
     Arbiter.Core.JobTree

@@ -259,12 +259,12 @@ reconcile hub conn = do
               <> " returned no result"
         Just res -> do
           st <- PQ.resultStatus res
-          when (st /= PQ.CommandOk) $
-            throwInternal $
-              "arbiter listener: "
-                <> T.pack (BSC.unpack verb)
-                <> " failed with "
-                <> T.pack (show st)
+          when (st /= PQ.CommandOk)
+            $ throwInternal
+            $ "arbiter listener: "
+              <> T.pack (BSC.unpack verb)
+              <> " failed with "
+              <> T.pack (show st)
     escapeChannel chan =
       fromMaybe (quoteChannel chan) <$> PQ.escapeIdentifier conn chan
 

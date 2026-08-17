@@ -392,12 +392,12 @@ seedPipeline schemaName = do
       JT.insertJobTree schemaName "pipeline" $
         agg
           "final-report"
-          ( NE.fromList $
-              NE.take 300 $
-                NE.cycle
-                  [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
-                  , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
-                  ]
+          ( NE.fromList
+              $ NE.take 300
+              $ NE.cycle
+                [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
+                , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
+                ]
           )
     traverse_
       ( \(root :| rest) ->
@@ -444,9 +444,9 @@ seedQueues = do
   -- scheduled (not visible yet) and suspended (paused)
   void $
     HL.insertJob
-      ( setGroupKey (Just "maintenance") $
-          setNotVisibleUntil (Just (addUTCTime 3600 now)) $
-            defaultJob (TestMessage "nightly-reindex")
+      ( setGroupKey (Just "maintenance")
+          $ setNotVisibleUntil (Just (addUTCTime 3600 now))
+          $ defaultJob (TestMessage "nightly-reindex")
       )
   paused <- need =<< HL.insertJob (setGroupKey (Just "maintenance") $ defaultJob (TestMessage "paused-migration"))
   void $ HL.suspendJob @DemoPayload (primaryKey paused)
@@ -497,9 +497,9 @@ loadPulse env sec = go 0
           HL.insertJob
             (setArchiveFor (keepEvery 4 n) $ setPriority (fromIntegral (n `mod` 5)) $ defaultJob (TestMessage ("pulse #" <> tshow n)))
         when (even n) $ void $ HL.insertJob (setArchiveFor (keepEvery 6 n) $ defaultJob (SendEmail ("digest #" <> tshow n)))
-        when (n `mod` 3 == 0) $
-          void $
-            HL.insertJob (setArchiveFor (keepEvery 9 n) $ defaultJob (PushNotification ("alert #" <> tshow n)))
+        when (n `mod` 3 == 0)
+          $ void
+          $ HL.insertJob (setArchiveFor (keepEvery 9 n) $ defaultJob (PushNotification ("alert #" <> tshow n)))
       go (n + 1)
 
 -- | Chunk sets a quick pipeline picks from, for variety across runs.
