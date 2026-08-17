@@ -14,7 +14,7 @@ module Arbiter.Otel.Metrics
   ) where
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
-import Arbiter.Core.Job.Types (AdmissionKeys (..), Job (..), ObservabilityHooks (..), defaultObservabilityHooks)
+import Arbiter.Core.Job.Types (AdmissionKeys (..), ObservabilityHooks (..), admission, defaultObservabilityHooks)
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
 import Control.Monad.IO.Class (MonadIO, liftIO)

@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -15,6 +16,8 @@ module Arbiter.Worker.Config
   , MaintenanceOp (..)
   , maintenanceOpName
   , ResultOf
+  , WorkerConfigException (..)
+  , validateWorkerConfig
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
@@ -29,8 +32,10 @@ module Arbiter.Worker.Config
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
+import Control.Exception (Exception)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
+import Data.Foldable (traverse_)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
@@ -72,6 +77,11 @@ maintenanceOpName op = case op of
   ReconcileConcurrencyStale -> "reconcile-concurrency-stale"
   ReconcilePruneConcurrency -> "reconcile-prune-concurrency"
   PurgeArchives -> "purge-archives"
+
+-- | Invalid worker configuration detected before a pool starts.
+newtype WorkerConfigException = WorkerConfigException Text
+  deriving stock (Eq, Show)
+  deriving anyclass (Exception)
 
 -- | Configuration for a worker pool.
 data WorkerConfig m payload = WorkerConfig
@@ -201,6 +211,30 @@ handlerBatchSize :: WorkerConfig m payload -> Int
 handlerBatchSize config = case handlerMode config of
   SingleJobMode _ -> 1
   BatchedJobsMode n _ -> n
+
+-- | Validate invariants required for safe worker execution.
+validateWorkerConfig :: WorkerConfig m payload -> Either Text ()
+validateWorkerConfig config = do
+  positive "workerCount" (workerCount config)
+  positive "handler batch size" (handlerBatchSize config)
+  positiveDuration "pollInterval" (pollInterval config)
+  positiveDuration "visibilityTimeout" (visibilityTimeout config)
+  positiveDuration "jobHeartbeatInterval" (jobHeartbeatInterval config)
+  positiveDuration "workerHeartbeatInterval" (workerHeartbeatInterval config)
+  positiveDuration "reaperInterval" (reaperInterval config)
+  positiveDuration "reaperTimeout" (reaperTimeout config)
+  positiveDuration "workerStaleThreshold" (workerStaleThreshold config)
+  traverse_ (positiveDuration "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
+  require
+    (jobHeartbeatInterval config < visibilityTimeout config)
+    "jobHeartbeatInterval must be less than visibilityTimeout"
+  require
+    (workerHeartbeatInterval config < workerStaleThreshold config)
+    "workerHeartbeatInterval must be less than workerStaleThreshold"
+  where
+    positive label value = require (value > 0) (label <> " must be greater than zero")
+    positiveDuration label value = require (value > 0) (label <> " must be greater than zero")
+    require condition message = if condition then Right () else Left message
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.

@@ -1,14 +1,45 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Arbiter.Core.Job.Types
   ( -- * Core Job Type
-    Job (..)
+    Job
   , AdmissionKeys (..)
   , AdmissionColumns (..)
   , JobRead
   , JobWrite
+  , primaryKey
+  , payload
+  , queueName
+  , groupKey
+  , insertedAt
+  , updatedAt
+  , attempts
+  , lastError
+  , priority
+  , lastAttemptedAt
+  , notVisibleUntil
+  , dedupKey
+  , maxAttempts
+  , parentId
+  , parentState
+  , traceContext
+  , suspended
+  , claimedBy
+  , claimSeq
+  , archiveFor
+  , admission
   , defaultJob
   , defaultGroupedJob
+  , setPayload
+  , setGroupKey
+  , setPriority
+  , setNotVisibleUntil
+  , setDedupKey
+  , setMaxAttempts
+  , setTraceContext
+  , setArchiveFor
+  , mapPayload
   , defaultMaxAttempts
   , dayRetention
   , isRollup
@@ -45,82 +76,47 @@ module Arbiter.Core.Job.Types
   ) where
 
 import Control.Exception qualified as E
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:?), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Int (Int32, Int64)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, UTCTime)
-import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.Job.Status (JobStatus (..), jobStatusFromText, jobStatusToText)
+import Arbiter.Core.Job.Types.Internal
+  ( JobRecord (..)
+  , admission
+  , archiveFor
+  , attempts
+  , claimSeq
+  , claimedBy
+  , dedupKey
+  , groupKey
+  , insertedAt
+  , lastAttemptedAt
+  , lastError
+  , maxAttempts
+  , notVisibleUntil
+  , parentId
+  , parentState
+  , payload
+  , primaryKey
+  , priority
+  , queueName
+  , suspended
+  , traceContext
+  , updatedAt
+  )
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
 
--- | A job in the queue. Parametrized over payload, primary key, queue name,
--- and inserted-at timestamp. See 'JobWrite' (for insertion) and 'JobRead'
--- (returned from claims/queries).
-data Job payload key q insertedAt adm = Job
-  { primaryKey :: key
-  -- ^ @()@ in 'JobWrite' (assigned by DB), @Int64@ in 'JobRead'.
-  , payload :: payload
-  -- ^ User-defined payload, stored as JSONB.
-  , queueName :: q
-  -- ^ @()@ in 'JobWrite', table name ('Text') in 'JobRead'. Not serialized.
-  , groupKey :: Maybe Text
-  -- ^ Jobs with the same group key are processed serially, one at a time per group.
-  -- @Nothing@ for ungrouped jobs that can run in parallel.
-  , insertedAt :: insertedAt
-  -- ^ @()@ in 'JobWrite' (set by DB), @UTCTime@ in 'JobRead'.
-  , updatedAt :: Maybe UTCTime
-  -- ^ The time the job was last updated.
-  , attempts :: Int32
-  -- ^ The number of times this job has been attempted.
-  , lastError :: Maybe Text
-  -- ^ The error message from the last failed attempt.
-  , priority :: Int32
-  -- ^ The job's priority. Lower numbers are higher priority.
-  , lastAttemptedAt :: Maybe UTCTime
-  -- ^ The time this job was last claimed by a worker.
-  , notVisibleUntil :: Maybe UTCTime
-  -- ^ When this job becomes visible for claiming.
-  , dedupKey :: Maybe DedupKey
-  -- ^ The deduplication strategy for this job.
-  , maxAttempts :: Maybe Int32
-  -- ^ Attempt limit before the job moves to the DLQ. @Nothing@ defaults to
-  -- 'defaultMaxAttempts' at insert time.
-  , parentId :: Maybe Int64
-  -- ^ Parent job ID. Set by 'insertJobTree', not manually. When this child
-  -- is the last to complete, the parent (if a rollup finalizer) is resumed.
-  , parentState :: Maybe Value
-  -- ^ Snapshot of accumulated child results for rollup finalizers. The
-  -- engine sets this to an empty object on insert when the job is a
-  -- rollup finalizer, and overwrites it with the final results map before
-  -- a DLQ move so the snapshot survives the @ON DELETE CASCADE@ on the
-  -- results table. 'isRollup' is derived from whether this is non-null.
-  , traceContext :: Maybe TraceContext
-  -- ^ W3C trace context captured at enqueue.
-  , suspended :: Bool
-  -- ^ Whether this job is suspended (not claimable).
-  -- @TRUE@ for: finalizers waiting for children to complete,
-  -- or operator-paused jobs.
-  , claimedBy :: Maybe UUID
-  -- ^ Worker pool UUID that last claimed this job.
-  , claimSeq :: Int64
-  -- ^ Identifies the claim this row was read under. Every claim bumps it and
-  -- nothing decrements it, so a finalize matching on it cannot hit a later claim
-  -- the way an @attempts@ match can. @0@ in 'JobWrite', which never sets it.
-  , archiveFor :: Maybe Int32
-  -- ^ Retention in seconds for this job's completed-job archive entry.
-  -- @Just n@ archives the job on ack and keeps the entry for @n@ seconds.
-  -- @Nothing@ (the default) deletes on ack with no archive write.
-  , admission :: adm
-  -- ^ @()@ in 'JobWrite'. 'AdmissionKeys' in 'JobRead', stamped at enqueue from
-  -- the payload's admission selectors.
-  }
-  deriving stock (Eq, Generic, Show)
+-- | A job parametrized over payload, primary key, queue name, insertion
+-- timestamp, and admission metadata. The constructor is internal.
+type Job payload key q insertedAt adm =
+  JobRecord payload key q insertedAt adm DedupKey TraceContext
 
 -- | The admission keys gating a stored job's claim, one field per kind.
 data AdmissionKeys = AdmissionKeys
@@ -155,13 +151,46 @@ dayRetention = 86400
 isRollup :: Job p k q t adm -> Bool
 isRollup = isJust . parentState
 
+-- | A job read from the database.
+type JobRead payload = Job payload Int64 Text UTCTime AdmissionKeys
+
+-- | A job ready to enqueue. Arbiter owns claim, retry, parent, rollup, and
+-- suspension state. Use the exported setters to configure enqueue fields.
+type JobWrite payload = Job payload () () () ()
+
+-- | Decode the complete persisted representation of a job.
+instance (FromJSON payload) => FromJSON (JobRead payload) where
+  parseJSON = withObject "Job" $ \v ->
+    Job
+      <$> v .: "primaryKey"
+      <*> v .: "payload"
+      <*> v .: "queueName"
+      <*> v .: "groupKey"
+      <*> v .: "insertedAt"
+      <*> v .: "updatedAt"
+      <*> v .: "attempts"
+      <*> v .: "lastError"
+      <*> v .: "priority"
+      <*> v .: "lastAttemptedAt"
+      <*> v .: "notVisibleUntil"
+      <*> v .: "dedupKey"
+      <*> v .: "maxAttempts"
+      <*> v .:? "parentId"
+      <*> v .:? "parentState"
+      <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
+      <*> v .:? "suspended" .!= False
+      <*> v .:? "claimedBy"
+      <*> v .:? "claimSeq" .!= 0
+      <*> v .:? "archiveFor"
+      <*> (AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
+
 -- | Ungrouped 'JobWrite' with default values. For serial processing within a
 -- group, use 'defaultGroupedJob'.
 defaultJob :: payload -> JobWrite payload
-defaultJob p =
+defaultJob value =
   Job
     { primaryKey = ()
-    , payload = p
+    , payload = value
     , queueName = ()
     , groupKey = Nothing
     , insertedAt = ()
@@ -184,42 +213,39 @@ defaultJob p =
     }
 
 -- | Grouped 'JobWrite'. Jobs sharing a group key are processed serially.
---
--- @
--- defaultGroupedJob "user-123" (ProcessEvent eventData)
--- @
 defaultGroupedJob :: Text -> payload -> JobWrite payload
-defaultGroupedJob gk p =
-  Job
-    { primaryKey = ()
-    , payload = p
-    , queueName = ()
-    , groupKey = Just gk
-    , insertedAt = ()
-    , updatedAt = Nothing
-    , attempts = 0
-    , lastError = Nothing
-    , priority = 0
-    , lastAttemptedAt = Nothing
-    , notVisibleUntil = Nothing
-    , dedupKey = Nothing
-    , maxAttempts = Nothing
-    , parentId = Nothing
-    , parentState = Nothing
-    , traceContext = Nothing
-    , suspended = False
-    , claimedBy = Nothing
-    , claimSeq = 0
-    , archiveFor = Nothing
-    , admission = ()
-    }
+defaultGroupedJob key = setGroupKey (Just key) . defaultJob
 
--- | A type alias for a job that has been read from the database.
-type JobRead payload = Job payload Int64 Text UTCTime AdmissionKeys
+setPayload :: payload' -> JobWrite payload -> JobWrite payload'
+setPayload value job = job {payload = value}
 
--- | A type alias for a job that is ready to be written to the database.
--- It does not yet have an ID or insertion timestamp.
-type JobWrite payload = Job payload () () () ()
+setGroupKey :: Maybe Text -> JobWrite payload -> JobWrite payload
+setGroupKey value job = job {groupKey = value}
+
+setPriority :: Int32 -> JobWrite payload -> JobWrite payload
+setPriority value job = job {priority = value}
+
+setNotVisibleUntil :: Maybe UTCTime -> JobWrite payload -> JobWrite payload
+setNotVisibleUntil value job = job {notVisibleUntil = value}
+
+setDedupKey :: Maybe DedupKey -> JobWrite payload -> JobWrite payload
+setDedupKey value job = job {dedupKey = value}
+
+setMaxAttempts :: Maybe Int32 -> JobWrite payload -> JobWrite payload
+setMaxAttempts value job = job {maxAttempts = value}
+
+setTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
+setTraceContext value job = job {traceContext = value}
+
+setArchiveFor :: Maybe Int32 -> JobWrite payload -> JobWrite payload
+setArchiveFor value job = job {archiveFor = value}
+
+-- | Transform a job's payload without changing its stored metadata.
+mapPayload
+  :: (payload -> payload')
+  -> Job payload key q insertedAt adm
+  -> Job payload' key q insertedAt adm
+mapPayload f job = job {payload = f (payload job)}
 
 -- | The full payload contract: JSON round-trip for JSONB storage plus the rate-limit and concurrency declarations (both default to unlimited).
 type JobPayload payload =

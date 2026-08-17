@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
 -- | High-level API for job queue operations.
 --
@@ -176,7 +175,18 @@ import Arbiter.Core.HighLevel.Runtime
   )
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (ClaimSeq, Job (..), JobId, JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
+import Arbiter.Core.Job.Types
+  ( ClaimSeq
+  , JobId
+  , JobPayload
+  , JobRead
+  , JobWrite
+  , RegistryAdmissionPolicies
+  , claimSeq
+  , claimedBy
+  , primaryKey
+  )
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
@@ -226,8 +236,8 @@ insertJob job = publishSpan @payload [job] $ do
   Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns only the jobs that were
--- actually inserted (dedup'd jobs are excluded). Does not validate @parentId@ -
--- use 'insertJobTree' for parent-child relationships.
+-- actually inserted (dedup'd jobs are excluded). Use 'insertJobTree' for
+-- parent-child relationships.
 insertJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -508,7 +518,7 @@ ackJob
   -> m Int64
 ackJob job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.ackJob schemaName tableName job
 
 -- | Acknowledges multiple jobs as complete in one statement (parent-aware:
@@ -522,7 +532,7 @@ ackJobsBatch
 ackJobsBatch [] = pure []
 ackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   Ops.ackJobsBatch schemaName tableName jobs
 
 -- | Marks a failed job for retry at a later time.
@@ -539,7 +549,7 @@ updateJobForRetry
   -> m Int64
 updateJobForRetry delay errorMsg job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.updateJobForRetry schemaName tableName delay errorMsg job
 
 -- | Soft-nack a job so it is reprocessed after its visibility timeout without
@@ -553,7 +563,7 @@ nackJob
   -> m Int64
 nackJob job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.nackJob schemaName tableName job
 
 -- | 'nackJob' over a batch from one queue in a single statement.
@@ -567,7 +577,7 @@ nackJobsBatch
 nackJobsBatch [] = pure []
 nackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
-  Ops.nackJobsBatch schemaName firstJob.queueName jobs
+  Ops.nackJobsBatch schemaName (Job.queueName firstJob) jobs
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --
@@ -582,7 +592,7 @@ setVisibilityTimeout
   -> m Int64
 setVisibilityTimeout timeout job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.setVisibilityTimeout schemaName tableName timeout job
 
 -- | Result of setting visibility timeout for a single job in a batch.
@@ -615,13 +625,13 @@ setVisibilityTimeoutBatch
 setVisibilityTimeoutBatch _ [] = pure []
 setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
       toResult (Ops.VisibilityUpdateInfo jobId heartbeated mActual cancelled suspended holder) =
         let mJob = Map.lookup jobId jobMap
             expected = maybe 0 claimSeq mJob
-            heldHere = maybe False (\j -> j.claimedBy == holder) mJob
+            heldHere = maybe False (\j -> claimedBy j == holder) mJob
          in case mActual of
               Nothing -> JobGone jobId
               Just actual
@@ -642,7 +652,7 @@ moveToDLQ
   -> m Int64
 moveToDLQ errorMsg job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
 
 -- | Lists jobs in the dead-letter queue with pagination.
@@ -787,7 +797,7 @@ moveToDLQBatch
 moveToDLQBatch [] = pure 0
 moveToDLQBatch jobsWithErrors@((firstJob, _) : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   Ops.moveToDLQBatch schemaName tableName jobsWithErrors
 
 -- | Permanently deletes multiple jobs from the dead-letter queue.

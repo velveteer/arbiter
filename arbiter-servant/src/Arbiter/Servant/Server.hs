@@ -23,7 +23,8 @@ module Arbiter.Servant.Server
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
@@ -225,7 +226,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
     -- Only query child/DLQ counts if any returned job could be a parent.
     -- All parents are rollup finalizers (isRollup = True), so we
     -- skip the extra queries for queues that don't use job trees.
-    let jobIds = map (primaryKey . fst) j
+    let jobIds = map (Job.primaryKey . fst) j
         hasParents = any (isRollup . fst) j
     if null j || not hasParents
       then pure (j, c, Map.empty, Map.empty)
@@ -262,7 +263,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
 
   mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
-    case (inserted, dedupKey jobWrite) of
+    case (inserted, Job.dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
       (Nothing, Just (IgnoreDuplicate k)) -> Ops.getJobByDedupKey schemaName tableName k
       _ -> pure Nothing
@@ -362,7 +363,7 @@ promoteJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | suspended job ->
+            | Job.suspended job ->
                 pure (Left err409 {errBody = "Job is suspended - use resume endpoint"})
             | otherwise ->
                 pure (Left err409 {errBody = "Job is already visible"})
@@ -452,7 +453,7 @@ suspendJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | suspended job ->
+            | Job.suspended job ->
                 pure (Left err409 {errBody = "Job is already suspended"})
             | otherwise ->
                 pure (Left err409 {errBody = "Job is in-flight - cannot suspend"})
@@ -485,7 +486,7 @@ resumeJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | not (suspended job) ->
+            | not (Job.suspended job) ->
                 pure (Left err409 {errBody = "Job is not suspended"})
             | isRollup job ->
                 pure (Left err409 {errBody = "Cannot resume a rollup finalizer with active children"})

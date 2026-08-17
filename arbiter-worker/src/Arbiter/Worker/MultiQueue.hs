@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -6,6 +7,7 @@
 module Arbiter.Worker.MultiQueue
   ( NamedWorkerPool (..)
   , namedWorkerPool
+  , WorkerPoolSelectionException (..)
   , shutdownPools
   , runWorkerPools
   , runSelectedWorkerPools
@@ -25,16 +27,23 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
+import Data.List (nub)
 import Data.Text (Text)
+import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async qualified as Async
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (WorkerConfig (..))
+import Arbiter.Worker.Config (WorkerConfig (..), WorkerConfigException (..), validateWorkerConfig)
 import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad)
 import Arbiter.Worker.Logger (LogConfig (..), (.=))
 import Arbiter.Worker.Pool (runWorkerPool)
 import Arbiter.Worker.WorkerState (WorkerState (ShuttingDown))
+
+-- | A requested queue has no configured pool, or selection is empty.
+newtype WorkerPoolSelectionException = WorkerPoolSelectionException Text
+  deriving stock (Eq, Show)
+  deriving anyclass (E.Exception)
 
 -- | A worker pool paired with its registry-derived queue name.
 data NamedWorkerPool m
@@ -85,9 +94,14 @@ runSelectedWorkerPools
   => [Text]
   -> [NamedWorkerPool m]
   -> m ()
-runSelectedWorkerPools enabled pools =
+runSelectedWorkerPools enabled pools = do
+  let available = [name | NamedWorkerPool name _ <- pools]
+      missing = filter (`notElem` available) (nub enabled)
+  unlessNull missing $
+    liftIO . E.throwIO . WorkerPoolSelectionException $
+      "No worker pool configured for: " <> T.intercalate ", " missing
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
-    [] -> pure ()
+    [] -> liftIO $ E.throwIO (WorkerPoolSelectionException "No worker pools selected")
     selected -> evalContT $ do
       asyncs <- traverse withPoolAsync selected
       lift $ do
@@ -96,6 +110,8 @@ runSelectedWorkerPools enabled pools =
         traverse_ Async.waitCatch asyncs
         either (liftIO . E.throwIO) pure firstResult
   where
+    unlessNull values action = if null values then pure () else action
+
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
       let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
@@ -115,5 +131,13 @@ poolConfigForWorkers
   -> IO PoolConfig
 poolConfigForWorkers pools = do
   enabled <- enabledQueuesForMonad @m
+  traverse_ (validateSelected enabled) pools
   let n = sum [workerCount cfg | NamedWorkerPool name cfg <- pools, name `elem` enabled]
   pure defaultPoolConfig {poolSize = max 2 (2 * n) + 1}
+  where
+    validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
+    validateSelected enabled (NamedWorkerPool name cfg)
+      | name `notElem` enabled = pure ()
+      | otherwise = case validateWorkerConfig cfg of
+          Left err -> E.throwIO (WorkerConfigException err)
+          Right () -> pure ()

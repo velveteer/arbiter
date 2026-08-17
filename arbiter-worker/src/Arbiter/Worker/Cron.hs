@@ -48,7 +48,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey, parentId)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, setDedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
@@ -450,7 +450,7 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
     fired <- Ops.tryFireCronGate schemaName (name cj) tick
     when fired $ do
       let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
-          jobWrite = (builder cj kind tick) {dedupKey = Just (IgnoreDuplicate key)}
+          jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cj kind tick
       void $ HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cj]
   case result of
@@ -461,7 +461,7 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
       pure True
 
-data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
+data RunNowOutcome = Fired | Skipped | NotRequested
 
 -- | Claim and fire every schedule with a pending run request. A 'SkipOverlap'
 -- schedule reuses its constant dedup key, so a manual run is skipped while one
@@ -492,25 +492,17 @@ processRunRequests logCfg schemaName jobs now = do
           logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
         Right Skipped ->
           logCron logCfg Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
-        Right Dropped ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now inserted no job, the parent job it references is gone"
     fireClaimed tick cj row = do
       let key = case effectiveOverlapFor cj row of
             SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cj)))
             AllowOverlap -> Nothing
-          jobWrite = (builder cj Live tick) {dedupKey = key}
+          jobWrite = setDedupKey key $ builder cj Live tick
       inserted <- HL.insertJob jobWrite
       case inserted of
         Just _ -> do
           void $ Ops.touchCronManualRun schemaName tick (name cj)
           pure Fired
-        -- An absent job is either the dedup key or a missing parent, and only
-        -- the parent it names can tell the two apart.
-        Nothing -> do
-          parentGone <- case parentId jobWrite of
-            Nothing -> pure False
-            Just pid -> not <$> HL.jobExists @payload pid
-          pure $ if parentGone then Dropped else Skipped
+        Nothing -> pure Skipped
 
 -- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()

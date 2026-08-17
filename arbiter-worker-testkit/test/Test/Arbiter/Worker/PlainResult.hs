@@ -10,7 +10,15 @@ module Test.Arbiter.Worker.PlainResult (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
-import Arbiter.Core.Job.Types (Job (..), JobRead, dayRetention, defaultJob, isRollup, payload, primaryKey)
+import Arbiter.Core.Job.Types
+  ( JobRead
+  , dayRetention
+  , defaultJob
+  , isRollup
+  , payload
+  , primaryKey
+  , setArchiveFor
+  )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (JobHandler)
@@ -94,7 +102,7 @@ spec connStr =
           cfg <- defaultBatchedWorkerConfig 1 10 handler
           runSimpleDb env $
             traverse_
-              (\i -> void $ HL.insertJob ((defaultJob (NoResultTask i)) {archiveFor = Just dayRetention}))
+              (\i -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (NoResultTask i)))
               ["a", "b", "c"]
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ (== 3) <$> readIORef ackedRef
@@ -131,7 +139,7 @@ spec connStr =
           cfg <- transactionalWorkerConfig 1 handler
           void $
             runSimpleDb env $
-              HL.insertJob ((defaultJob (PlainResultTask "archived")) {archiveFor = Just dayRetention})
+              HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (PlainResultTask "archived"))
           withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ do
               arch <- runSimpleDb env $ HL.listArchiveJobs @PlainResultPayload 100 0

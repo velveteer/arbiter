@@ -125,9 +125,11 @@ migrationReconciliationTests connStr =
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
           triggerOids <- optionalTriggerOids conn
+          functionOids <- optionalFunctionOids conn
 
           migrate triggerOn
           optionalTriggerOids conn >>= (@?= triggerOids)
+          optionalFunctionOids conn >>= (@?= functionOids)
 
           migrate triggerOff
           optionalTriggerCount conn >>= (@?= 0)
@@ -142,10 +144,42 @@ migrationReconciliationTests connStr =
         withFreshSchema connStr $ \conn -> do
           runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
           removedQueueTriggerCount conn >>= (@?= 2)
+          removedNotifyObjectCount conn >>= (@?= 2)
 
           migrate triggerOff
           removedQueueTriggerCount conn >>= (@?= 0)
+          removedNotifyObjectCount conn >>= (@?= 0)
           optionalFunctionCount conn >>= (@?= 0)
+    , testCase "repairs stale notification objects" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "CREATE OR REPLACE FUNCTION arbiter_migration_reconciliation_test.notify_migration_reconciliation_q_created() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql; DROP TRIGGER migration_reconciliation_q_notify_trigger ON arbiter_migration_reconciliation_test.migration_reconciliation_q; CREATE TRIGGER migration_reconciliation_q_notify_trigger BEFORE INSERT ON arbiter_migration_reconciliation_test.migration_reconciliation_q FOR EACH ROW EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_migration_reconciliation_q_created()"
+          notificationObjectsAreCurrent conn >>= (@?= False)
+          migrate triggerOn
+          notificationObjectsAreCurrent conn >>= (@?= True)
+    , testCase "repairs a stale event function body" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "CREATE OR REPLACE FUNCTION arbiter_migration_reconciliation_test.notify_job_event() RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql"
+          eventFunctionIsCurrent conn >>= (@?= False)
+          migrate triggerOn
+          eventFunctionIsCurrent conn >>= (@?= True)
+    , testCase "repairs an event trigger with stale arguments" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "DROP TRIGGER notify_job_event_migration_reconciliation_q ON arbiter_migration_reconciliation_test.migration_reconciliation_q; CREATE TRIGGER notify_job_event_migration_reconciliation_q AFTER INSERT OR UPDATE OR DELETE ON arbiter_migration_reconciliation_test.migration_reconciliation_q FOR EACH ROW EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_job_event('wrong_queue', 'true')"
+          migrate triggerOn
+          definitions <- eventTriggerDefinitionsFor conn "notify_job_event_migration_reconciliation_q"
+          length (filter (T.isInfixOf "('migration_reconciliation_q', 'false')") definitions) @?= 1
     , testCase "preserves queue names ending in the DLQ suffix" $
         withFreshSchema connStr $ \conn -> do
           runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
@@ -178,6 +212,14 @@ optionalTriggerOids conn =
       "SELECT t.oid::bigint FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('migration_reconciliation_q_notify_trigger', 'notify_job_event_migration_reconciliation_q', 'notify_job_event_migration_reconciliation_q_dlq') ORDER BY t.tgname"
       (PG.Only reconciliationSchema)
 
+optionalFunctionOids :: PG.Connection -> IO [Int64]
+optionalFunctionOids conn =
+  map PG.fromOnly
+    <$> PG.query
+      conn
+      "SELECT p.oid::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname IN ('notify_migration_reconciliation_q_created', 'notify_job_event') ORDER BY p.proname"
+      (PG.Only reconciliationSchema)
+
 optionalTriggerCount :: PG.Connection -> IO Int64
 optionalTriggerCount conn =
   fromOnlyOne
@@ -186,13 +228,35 @@ optionalTriggerCount conn =
       "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('migration_reconciliation_q_notify_trigger', 'notify_job_event_migration_reconciliation_q', 'notify_job_event_migration_reconciliation_q_dlq')"
       (PG.Only reconciliationSchema)
 
+notificationObjectsAreCurrent :: PG.Connection -> IO Bool
+notificationObjectsAreCurrent conn =
+  any PG.fromOnly
+    <$> PG.query
+      conn
+      "SELECT p.prosrc LIKE '%pg_notify(''migration_reconciliation_q_created'', '''')%' AND t.tgtype = 5 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = 'migration_reconciliation_q' AND t.tgname = 'migration_reconciliation_q_notify_trigger'"
+      (PG.Only reconciliationSchema)
+
+eventFunctionIsCurrent :: PG.Connection -> IO Bool
+eventFunctionIsCurrent conn =
+  any PG.fromOnly
+    <$> PG.query
+      conn
+      "SELECT p.prosrc LIKE '%queue_name text := TG_ARGV[0]%' AND p.prosrc LIKE '%is_dlq boolean := TG_ARGV[1]::boolean%' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0"
+      (PG.Only reconciliationSchema)
+
 eventTriggerDefinitions :: PG.Connection -> IO [Text]
-eventTriggerDefinitions conn =
+eventTriggerDefinitions conn = do
+  first <- eventTriggerDefinitionsFor conn "notify_job_event_events_dlq"
+  second <- eventTriggerDefinitionsFor conn "notify_job_event_events_dlq_dlq"
+  pure (first <> second)
+
+eventTriggerDefinitionsFor :: PG.Connection -> Text -> IO [Text]
+eventTriggerDefinitionsFor conn trigger =
   map PG.fromOnly
     <$> PG.query
       conn
-      "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('notify_job_event_events_dlq', 'notify_job_event_events_dlq_dlq') ORDER BY t.tgname"
-      (PG.Only reconciliationSchema)
+      "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname = ? ORDER BY t.tgname"
+      (reconciliationSchema, trigger)
 
 removedQueueTriggerCount :: PG.Connection -> IO Int64
 removedQueueTriggerCount conn =
@@ -201,6 +265,22 @@ removedQueueTriggerCount conn =
       conn
       "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('notify_job_event_removed_reconciliation_q', 'notify_job_event_removed_reconciliation_q_dlq')"
       (PG.Only reconciliationSchema)
+
+removedNotifyObjectCount :: PG.Connection -> IO Int64
+removedNotifyObjectCount conn = do
+  triggerCount <-
+    fromOnlyOne
+      <$> PG.query
+        conn
+        "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname = 'removed_reconciliation_q_notify_trigger'"
+        (PG.Only reconciliationSchema)
+  functionCount <-
+    fromOnlyOne
+      <$> PG.query
+        conn
+        "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_removed_reconciliation_q_created'"
+        (PG.Only reconciliationSchema)
+  pure (triggerCount + functionCount)
 
 optionalFunctionCount :: PG.Connection -> IO Int64
 optionalFunctionCount conn =

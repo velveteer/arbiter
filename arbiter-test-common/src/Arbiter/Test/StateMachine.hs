@@ -59,17 +59,20 @@ import Arbiter.Core.Job.Types
   , JobRead
   , JobWrite
   , attempts
-  , dedupKey
   , defaultGroupedJob
   , defaultJob
   , defaultMaxAttempts
-  , maxAttempts
   , notVisibleUntil
-  , payload
   , primaryKey
   , priority
+  , setDedupKey
+  , setMaxAttempts
+  , setNotVisibleUntil
+  , setPayload
+  , setPriority
   , suspended
   )
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
 import Arbiter.Core.Operations qualified as Ops
@@ -476,7 +479,7 @@ genExtras :: (MonadGen g) => g Extras
 genExtras = Extras <$> Gen.maybe (Gen.element (map fst smConcSlots)) <*> Gen.maybe (Gen.element smRateKeys)
 
 applyExtras :: Extras -> JobWrite SMPayload -> JobWrite SMPayload
-applyExtras (Extras mc mr) j = j {payload = (payload j) {smConcSlot = mc, smRateKey = mr}}
+applyExtras (Extras mc mr) j = setPayload ((Job.payload j) {smConcSlot = mc, smRateKey = mr}) j
 
 data SMPayload = SMPayload
   { smMessage :: Text
@@ -589,11 +592,10 @@ mkInsert
 mkInsert deco g d p ma = do
   nvu <- traverse (\s -> liftIO (addUTCTime (fromIntegral s) <$> getCurrentTime)) d
   let job =
-        (maybe (defaultJob payload) (`defaultGroupedJob` payload) g)
-          { notVisibleUntil = nvu
-          , priority = fromIntegral p
-          , maxAttempts = fromIntegral <$> ma
-          }
+        setMaxAttempts (fromIntegral <$> ma) $
+          setPriority (fromIntegral p) $
+            setNotVisibleUntil nvu $
+              maybe (defaultJob payload) (`defaultGroupedJob` payload) g
   mj <- HL.insertJob (deco job)
   pure (primaryKey (fromJust mj))
   where
@@ -914,7 +916,7 @@ mkBatchInsert
 mkBatchInsert specs = void (HL.insertJobsBatch_ (map toJob specs))
   where
     toJob (g, p) =
-      (maybe (defaultJob payload) (`defaultGroupedJob` payload) g) {priority = fromIntegral p}
+      setPriority (fromIntegral p) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
     payload = smPayload "sm batch"
 
 cInsertTree
@@ -1029,10 +1031,7 @@ mkDedup key replace g p = void (HL.insertJob job)
   where
     dk = if replace then ReplaceDuplicate key else IgnoreDuplicate key
     job =
-      (maybe (defaultJob payload) (`defaultGroupedJob` payload) g)
-        { dedupKey = Just dk
-        , priority = fromIntegral p
-        }
+      setPriority (fromIntegral p) $ setDedupKey (Just dk) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
     payload = smPayload "sm dedup"
 
 -- | Run the reaper. Drift-correcting, so it must never break an invariant.
@@ -1681,7 +1680,7 @@ dedupReplaceStaleLeaseGuard
   -> IO ()
 dedupReplaceStaleLeaseGuard run schema table withConn reset = do
   reset
-  let job = (defaultGroupedJob "drslg" (smPayload "drsl")) {dedupKey = Just (ReplaceDuplicate "drsl-key")}
+  let job = setDedupKey (Just (ReplaceDuplicate "drsl-key")) $ defaultGroupedJob "drslg" (smPayload "drsl")
   void (run (HL.insertJob job))
   _ <- run (HL.claimNextVisibleJobsAs 1 1 (UUID.fromWords 0 0 0 1) :: sm [JobRead SMPayload])
   threadDelay 2_000_000

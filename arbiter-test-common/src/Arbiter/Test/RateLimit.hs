@@ -30,12 +30,12 @@ import Arbiter.Core.Job.Types
   , admission
   , attempts
   , claimSeq
-  , dedupKey
   , defaultGroupedJob
   , defaultJob
   , jobRateLimitKey
   , payload
   , primaryKey
+  , setDedupKey
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema)
 import Arbiter.Core.QueueRegistry (Queue)
@@ -326,11 +326,11 @@ rateLimitSpec runM = do
     -- throttled survivor, not null it, or the ready "ov-free" sibling overtakes.
     enqueue env (replicate 3 (job "ov"))
     _ <- claim env
-    let mover = (groupedJob "ovgrp" "ov") {dedupKey = Just (ReplaceDuplicate "mover-key")}
+    let mover = setDedupKey (Just (ReplaceDuplicate "mover-key")) $ groupedJob "ovgrp" "ov"
     enqueue env [groupedJob "ovgrp" "ov", mover, groupedJob "ovgrp" "ov-free"]
     batches <- runM env (HL.claimNextVisibleJobsBatched 2 100 60) :: IO [NE.NonEmpty (JobRead RLPayload)]
     length (concatMap NE.toList batches) `shouldBe` 0
-    enqueue env [(groupedJob "othergrp" "ov") {dedupKey = Just (ReplaceDuplicate "mover-key")}]
+    enqueue env [setDedupKey (Just (ReplaceDuplicate "mover-key")) $ groupedJob "othergrp" "ov"]
     overtaken <- claim env
     map (rlTenant . payload) overtaken `shouldSatisfy` notElem "ov-free"
 

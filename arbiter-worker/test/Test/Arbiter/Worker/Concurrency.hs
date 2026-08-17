@@ -10,11 +10,13 @@
 module Test.Arbiter.Worker.Concurrency (spec) where
 
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , JobRead
+  ( JobRead
   , ObservabilityHooks (..)
   , defaultJob
   , defaultObservabilityHooks
+  , payload
+  , primaryKey
+  , setMaxAttempts
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
@@ -143,7 +145,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       -- Insert a job
       void $
         runSimpleDb env $
-          Ops.insertJob testSchema testTable ((defaultJob (SimpleTask "will-fail")) {maxAttempts = Just 1})
+          Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "will-fail"))
 
       -- Handler that always throws (retryable exception, not job-gone)
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
@@ -227,9 +229,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       -- Insert jobs that always fail (FailingTask 999 means fail 999 times)
       runSimpleDb env $ do
-        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
-        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
-        void $ Ops.insertJob testSchema testTable ((defaultJob (FailingTask 999)) {maxAttempts = Just 1})
+        void $ Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (FailingTask 999))
+        void $ Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (FailingTask 999))
+        void $ Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (FailingTask 999))
 
       -- Use default handler (FailingTask will throw exceptions)
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()

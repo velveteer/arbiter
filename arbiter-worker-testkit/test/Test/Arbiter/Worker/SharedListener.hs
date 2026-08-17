@@ -6,7 +6,7 @@
 module Test.Arbiter.Worker.SharedListener (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (Job (..), defaultJob)
+import Arbiter.Core.Job.Types (defaultJob, setGroupKey)
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple
@@ -79,7 +79,9 @@ dedicatedListenerSpec connStr =
         threadDelay 1_000_000
         runSimpleDb env $
           void $
-            HL.insertJob (defaultJob (SimpleTask "dedicated")) {groupKey = Just "g1"}
+            HL.insertJob $
+              setGroupKey (Just "g1") $
+                defaultJob (SimpleTask "dedicated")
         waitUntil 5_000 $ (== 1) <$> readIORef ref
         readIORef ref >>= (`shouldBe` 1)
       destroySimpleEnv env

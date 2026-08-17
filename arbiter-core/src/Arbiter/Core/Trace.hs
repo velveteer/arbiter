@@ -87,15 +87,16 @@ import Arbiter.Core.Exceptions
   , JobNackException (..)
   )
 import Arbiter.Core.Job.Schema (TableName)
-import Arbiter.Core.Job.Types (Job (..), JobRead, JobWrite, TraceContext (..))
+import Arbiter.Core.Job.Types (Job, JobRead, JobWrite, TraceContext (..))
+import Arbiter.Core.Job.Types qualified as JT
 
 -- $enrichment
 -- Reach for @hs-opentelemetry-api@ directly for custom spans and attributes.
 
 -- | Fill a job's trace context, leaving a job that carries one of its own alone.
 stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
-stampTraceContext Nothing = id
-stampTraceContext ctx = \job -> job {traceContext = traceContext job <|> ctx}
+stampTraceContext Nothing job = job
+stampTraceContext ctx job = JT.setTraceContext (JT.traceContext job <|> ctx) job
 
 -- | The ambient span's trace context, or 'Nothing' when no span is active. Read from
 -- thread-local context, so it answers for the thread that enqueues.
@@ -225,7 +226,7 @@ spanLinkForJob job =
 
 spanContextForJob :: JobRead payload -> Maybe SpanContext
 spanContextForJob job = do
-  ctx <- traceContext job
+  ctx <- JT.traceContext job
   decodeSpanContext (Just (encodeUtf8 (traceparent ctx))) (encodeUtf8 <$> tracestate ctx)
 
 -- | A lone job contributes its own attributes. A batch reports its size instead, per
@@ -241,11 +242,14 @@ producerArgs queue jobs =
 -- | What a job carries whichever end of the queue reads it.
 jobShapeAttrs :: Job payload key q ins adm -> [(Text, Attribute)]
 jobShapeAttrs job =
-  ("arbiter.priority", toAttribute (fromIntegral (priority job) :: Int))
-    : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (groupKey job)
+  ("arbiter.priority", toAttribute (fromIntegral (JT.priority job) :: Int))
+    : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
 
 writeAttrs :: JobWrite payload -> AttributeMap
-writeAttrs = HM.fromList . jobShapeAttrs
+writeAttrs job =
+  HM.fromList $
+    ("arbiter.priority", toAttribute (fromIntegral (JT.priority job) :: Int))
+      : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =
@@ -282,12 +286,12 @@ messagingAttrs queue op =
 
 -- | Textual per the messaging semantic conventions, not the raw key.
 messageId :: JobRead payload -> Attribute
-messageId = toAttribute . toStrict . toLazyText . decimal . primaryKey
+messageId = toAttribute . toStrict . toLazyText . decimal . JT.primaryKey
 
 jobAttrs :: JobRead payload -> AttributeMap
 jobAttrs job =
   HM.fromList $
     [ ("messaging.message.id", messageId job)
-    , ("messaging.message.retry.count", toAttribute (max 0 (fromIntegral (attempts job) - 1) :: Int))
+    , ("messaging.message.retry.count", toAttribute (max 0 (fromIntegral (JT.attempts job) - 1) :: Int))
     ]
       <> jobShapeAttrs job

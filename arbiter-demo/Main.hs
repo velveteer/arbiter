@@ -11,7 +11,16 @@ module Main (main) where
 
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (Job (..), defaultJob)
+import Arbiter.Core.Job.Types
+  ( defaultJob
+  , payload
+  , primaryKey
+  , setArchiveFor
+  , setGroupKey
+  , setMaxAttempts
+  , setNotVisibleUntil
+  , setPriority
+  )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
@@ -374,7 +383,7 @@ seedDemoData env schemaName = runSimpleDb env $ do
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: Text -> DemoM ()
 seedPipeline schemaName = do
-  let bg p = (defaultJob p) {priority = 10}
+  let bg p = setPriority 10 $ defaultJob p
       chunk = JT.leaf . bg . ProcessChunk
       agg name = JT.rollup (bg (AggregateResults name))
   tracer <- demoTracer
@@ -411,55 +420,47 @@ seedQueues :: DemoM ()
 seedQueues = do
   now <- liftIO getCurrentTime
 
+  -- Backoff and DLQ examples are produced through the normal lifecycle.
+  void $
+    HL.insertJob
+      (setGroupKey (Just "integrations") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "flaky-webhook"))
+  [flaky1] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.updateJobForRetry 0 "connection reset by upstream" flaky1
+  [flaky2] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.updateJobForRetry 180 "connection reset by upstream" flaky2
+
+  void $
+    HL.insertJob
+      (setGroupKey (Just "integrations") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "corrupt-record"))
+  forM_ ([1 .. 4] :: [Int]) $ \_ -> do
+    [failed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+    void $ HL.updateJobForRetry 0 "unparseable payload" failed
+  [doomed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+
   -- demo_queue: ready jobs with varied priority and group keys
   forM_ (zip [0 :: Int ..] demoTasks) $ \(i, (grp, msg)) ->
-    void $ HL.insertJob ((defaultJob (TestMessage msg)) {priority = fromIntegral (i `mod` 5), groupKey = Just grp})
+    void $ HL.insertJob (setGroupKey (Just grp) $ setPriority (fromIntegral (i `mod` 5)) $ defaultJob (TestMessage msg))
   -- scheduled (not visible yet) and suspended (paused)
   void $
     HL.insertJob
-      ( (defaultJob (TestMessage "nightly-reindex"))
-          { notVisibleUntil = Just (addUTCTime 3600 now)
-          , groupKey = Just "maintenance"
-          }
+      ( setGroupKey (Just "maintenance") $
+          setNotVisibleUntil (Just (addUTCTime 3600 now)) $
+            defaultJob (TestMessage "nightly-reindex")
       )
-  void $ HL.insertJob ((defaultJob (TestMessage "paused-migration")) {suspended = True, groupKey = Just "maintenance"})
-  -- backoff: failed twice, waiting to retry
-  void $
-    HL.insertJob
-      ( (defaultJob (TestMessage "flaky-webhook"))
-          { attempts = 2
-          , lastError = Just "connection reset by upstream"
-          , notVisibleUntil = Just (addUTCTime 180 now)
-          , groupKey = Just "integrations"
-          }
-      )
-  -- dead-letter: exhausted its retries
-  doomed <-
-    need
-      =<< HL.insertJob
-        ( (defaultJob (TestMessage "corrupt-record"))
-            { attempts = 5
-            , maxAttempts = Just 5
-            , lastError = Just "unparseable payload"
-            , groupKey = Just "integrations"
-            }
-        )
-  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+  paused <- need =<< HL.insertJob (setGroupKey (Just "maintenance") $ defaultJob (TestMessage "paused-migration"))
+  void $ HL.suspendJob @DemoPayload (primaryKey paused)
 
   -- email_queue: a few ready, one scheduled, one bounced to the DLQ
+  void $ HL.insertJob (setMaxAttempts (Just 3) $ defaultJob (SendEmail "nobody@invalid.test"))
+  forM_ ([1 .. 2] :: [Int]) $ \_ -> do
+    [failed] <- HL.claimNextVisibleJobs @EmailPayload 1 60
+    void $ HL.updateJobForRetry 0 "recipient rejected (550)" failed
+  [bounced] <- HL.claimNextVisibleJobs @EmailPayload 1 60
+  void $ HL.moveToDLQ "recipient rejected (550)" bounced
   forM_ (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text]) $ \addr ->
     void $ HL.insertJob (defaultJob (SendEmail addr))
-  void $ HL.insertJob ((defaultJob (SendEmail "weekly-digest")) {notVisibleUntil = Just (addUTCTime 1800 now)})
-  bounced <-
-    need
-      =<< HL.insertJob
-        ( (defaultJob (SendEmail "nobody@invalid.test"))
-            { attempts = 3
-            , maxAttempts = Just 3
-            , lastError = Just "recipient rejected (550)"
-            }
-        )
-  void $ HL.moveToDLQ "recipient rejected (550)" bounced
+  void $ HL.insertJob (setNotVisibleUntil (Just (addUTCTime 1800 now)) $ defaultJob (SendEmail "weekly-digest"))
 
   -- notifications: a few ready
   forM_ (["deploy finished", "build green", "nightly backup ok"] :: [Text]) $ \msg ->
@@ -494,11 +495,11 @@ loadPulse env sec = go 0
       runSimpleDb env $ do
         void $
           HL.insertJob
-            ((defaultJob (TestMessage ("pulse #" <> tshow n))) {priority = fromIntegral (n `mod` 5), archiveFor = keepEvery 4 n})
-        when (even n) $ void $ HL.insertJob ((defaultJob (SendEmail ("digest #" <> tshow n))) {archiveFor = keepEvery 6 n})
+            (setArchiveFor (keepEvery 4 n) $ setPriority (fromIntegral (n `mod` 5)) $ defaultJob (TestMessage ("pulse #" <> tshow n)))
+        when (even n) $ void $ HL.insertJob (setArchiveFor (keepEvery 6 n) $ defaultJob (SendEmail ("digest #" <> tshow n)))
         when (n `mod` 3 == 0) $
           void $
-            HL.insertJob ((defaultJob (PushNotification ("alert #" <> tshow n))) {archiveFor = keepEvery 9 n})
+            HL.insertJob (setArchiveFor (keepEvery 9 n) $ defaultJob (PushNotification ("alert #" <> tshow n)))
       go (n + 1)
 
 -- | Chunk sets a quick pipeline picks from, for variety across runs.
@@ -521,7 +522,7 @@ pipelinePulse env schemaName sec = go 0
       t <- getCurrentTime
       let seed = fromInteger (diffTimeToPicoseconds (utctDayTime t)) :: Int
           chosen = quickChunkSets !! (seed `mod` length quickChunkSets)
-          root = (defaultJob (AggregateResults ("quick-report-" <> tshow n))) {archiveFor = Just 3600}
+          root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow n))
           leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
       runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
       go (n + 1)

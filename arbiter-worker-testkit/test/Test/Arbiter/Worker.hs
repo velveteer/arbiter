@@ -11,11 +11,17 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , JobRead
+  ( JobRead
   , ObservabilityHooks (..)
+  , attempts
+  , claimSeq
+  , claimedBy
   , defaultJob
   , defaultObservabilityHooks
+  , payload
+  , primaryKey
+  , setGroupKey
+  , setMaxAttempts
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
@@ -154,7 +160,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     (primaryKey job, "processed" :: Text)
               throwRetryable "Simulated failure"
 
-        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillFail")) {groupKey = Just "g1", maxAttempts = Just 1}
+        void $
+          runSimpleDb env $
+            HL.insertJob $
+              setMaxAttempts (Just 1) $
+                setGroupKey (Just "g1") $
+                  defaultJob (SimpleTask "WillFail")
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 (noResult handler)
@@ -183,7 +194,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                     (primaryKey job, "processed" :: Text)
               pure ()
 
-        void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "WillSucceed")) {groupKey = Just "g1"}
+        void $ runSimpleDb env $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (SimpleTask "WillSucceed")
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 (noResult handler)
@@ -211,7 +222,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         void $
           runSimpleDb env $
-            HL.insertJob (defaultJob (SimpleTask "ManualCommit")) {groupKey = Just "g1", maxAttempts = Just 1}
+            HL.insertJob $
+              setMaxAttempts (Just 1) $
+                setGroupKey (Just "g1") $
+                  defaultJob (SimpleTask "ManualCommit")
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 10 (noResult handler)
@@ -245,7 +259,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               pure ()
 
         -- Insert a job
-        let job = (defaultJob (SimpleTask "LongJob")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (SimpleTask "LongJob")
         void $ runSimpleDb env $ HL.insertJob job
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
@@ -287,7 +301,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               pure ()
 
         -- Insert a job
-        let job = (defaultJob (SimpleTask "VeryLongJob")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (SimpleTask "VeryLongJob")
         void $ runSimpleDb env $ HL.insertJob job
 
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
@@ -380,9 +394,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                   js
               ackAll cbs js
         let jobs =
-              [ (defaultJob (SimpleTask "ca-keep1")) {groupKey = Just "ca"}
-              , (defaultJob (SimpleTask "ca-stolen")) {groupKey = Just "ca"}
-              , (defaultJob (SimpleTask "ca-keep2")) {groupKey = Just "ca"}
+              [ setGroupKey (Just "ca") $ defaultJob (SimpleTask "ca-keep1")
+              , setGroupKey (Just "ca") $ defaultJob (SimpleTask "ca-stolen")
+              , setGroupKey (Just "ca") $ defaultJob (SimpleTask "ca-keep2")
               ]
         void $ runSimpleDb env $ HL.insertJobsBatch jobs
         config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
@@ -639,7 +653,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Right (_parent :| _children) <-
           runSimpleDb env $
             HL.insertJobTree $
-              (defaultJob (SimpleTask "dlq-reducer")) {maxAttempts = Just 1}
+              (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "dlq-reducer"))
                 <~~ ( defaultJob (SimpleTask "dlq-child-a")
                         :| [defaultJob (SimpleTask "dlq-child-b")]
                     )
@@ -700,9 +714,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Right (_parent :| _children) <-
           runSimpleDb env $
             HL.insertJobTree $
-              (defaultJob (SimpleTask "recover-reducer")) {maxAttempts = Just 1}
+              (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-reducer"))
                 <~~ ( defaultJob (SimpleTask "recover-child-ok")
-                        :| [(defaultJob (SimpleTask "recover-child-fail")) {maxAttempts = Just 1}]
+                        :| [setMaxAttempts (Just 1) $ defaultJob (SimpleTask "recover-child-fail")]
                     )
 
         -- Phase 1: Worker runs - child-ok succeeds, child-fail DLQs, reducer wakes, reducer DLQs
@@ -1102,8 +1116,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ writeIORef completedRef True
 
         let jobs =
-              [ (defaultJob (SimpleTask "bc-1")) {groupKey = Just "bc"}
-              , (defaultJob (SimpleTask "bc-2")) {groupKey = Just "bc"}
+              [ setGroupKey (Just "bc") $ defaultJob (SimpleTask "bc-1")
+              , setGroupKey (Just "bc") $ defaultJob (SimpleTask "bc-2")
               ]
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
@@ -1241,10 +1255,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           Just notif -> notificationData notif `shouldSatisfy` BSC.isInfixOf (BSC.pack (show jid))
 
       it "does not deadlock against a concurrent ack of the last child" $ \env -> do
-        Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-parent"))
+        Right (parent :| [child]) <-
+          runSimpleDb env $
+            HL.insertJobTree $
+              JT.rollup
+                (defaultJob (SimpleTask "dl-parent"))
+                (JT.leaf (defaultJob (SimpleTask "dl-child")) :| [])
         let pid = primaryKey parent
-        Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "dl-child")) {parentId = Just pid}
-        let cid = primaryKey child
+            cid = primaryKey child
 
         connA <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connA "BEGIN"
@@ -1270,8 +1288,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               takeMVar goVar
               throwIO (userError "dlb-boom")
         let jobs =
-              [ (defaultJob (SimpleTask "dlb-1")) {groupKey = Just "dlb", maxAttempts = Just 1}
-              , (defaultJob (SimpleTask "dlb-2")) {groupKey = Just "dlb", maxAttempts = Just 1}
+              [ setMaxAttempts (Just 1) $ setGroupKey (Just "dlb") $ defaultJob (SimpleTask "dlb-1")
+              , setMaxAttempts (Just 1) $ setGroupKey (Just "dlb") $ defaultJob (SimpleTask "dlb-2")
               ]
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let ids = map primaryKey inserted
@@ -1303,8 +1321,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- A nack keeps the claim, so a later cancel flags the row rather than deleting it.
         nackedRef <- newIORef False
         let jobs =
-              [ (defaultJob (SimpleTask "fcn-1")) {groupKey = Just "fcn"}
-              , (defaultJob (SimpleTask "fcn-2")) {groupKey = Just "fcn"}
+              [ setGroupKey (Just "fcn") $ defaultJob (SimpleTask "fcn-1")
+              , setGroupKey (Just "fcn") $ defaultJob (SimpleTask "fcn-2")
               ]
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
@@ -1364,10 +1382,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         runSimpleDb env (HL.ackJob held) `shouldReturn` 1
 
       it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
-        Just parent <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-parent"))
+        Right (parent :| [child]) <-
+          runSimpleDb env $
+            HL.insertJobTree $
+              JT.rollup
+                (defaultJob (SimpleTask "tc-parent"))
+                (JT.leaf (defaultJob (SimpleTask "tc-child")) :| [])
         let pid = primaryKey parent
-        Just child <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "tc-child")) {parentId = Just pid}
-        let cid = primaryKey child
+            cid = primaryKey child
 
         connA <- PG.connectPostgreSQL connStr
         void $ PG.execute_ connA "BEGIN"

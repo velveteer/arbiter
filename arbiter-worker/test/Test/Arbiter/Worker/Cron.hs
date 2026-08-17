@@ -7,7 +7,7 @@ module Test.Arbiter.Worker.Cron (spec) where
 import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)

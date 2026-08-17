@@ -7,7 +7,7 @@ module Arbiter.Worker.Results
   , mergeChildResults
   ) where
 
-import Arbiter.Core.Job.Types (Job (..), JobRead)
+import Arbiter.Core.Job.Types (JobRead, primaryKey, queueName)
 import Arbiter.Core.JobResult (decodeJobResult)
 import Arbiter.Core.MonadArbiter (MonadArbiter, ResultOf, getSchema)
 import Arbiter.Core.Operations qualified as Ops

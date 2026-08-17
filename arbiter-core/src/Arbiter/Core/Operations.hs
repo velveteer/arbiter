@@ -9,6 +9,8 @@ module Arbiter.Core.Operations
     insertJob
   , insertJobUnsafe
   , insertJobUnsafeStamped
+  , insertJobTreeNodeStamped
+  , insertJobTreeLeavesStamped
   , insertJobsBatch
   , insertJobsBatchStamped
   , insertJobsBatch_
@@ -211,6 +213,7 @@ import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
+  , JobWriteSource
   , RowCodec
   , col
   , jobCodec
@@ -235,17 +238,26 @@ import Arbiter.Core.Job.Types
   ( AdmissionColumns (..)
   , ClaimSeq
   , DedupKey (IgnoreDuplicate, ReplaceDuplicate)
-  , Job (..)
   , JobId
   , JobPayload
   , JobRead
   , JobStatus (..)
   , JobWrite
+  , archiveFor
+  , attempts
+  , claimSeq
+  , claimedBy
   , dedupParts
+  , groupKey
   , isRollup
   , jobStatusFromText
   , jobStatusToText
+  , mapPayload
+  , parentId
+  , payload
+  , primaryKey
   )
+import Arbiter.Core.Job.Types qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Operations.Gates
@@ -297,7 +309,7 @@ import Arbiter.Core.Trace (currentTraceContext, stampTraceContext)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
 decodePayload job = case fromJSON (payload job) of
-  Success p -> pure $ job {payload = p}
+  Success p -> pure $ mapPayload (const p) job
   Error e -> throwParsing $ "Failed to decode job payload: " <> T.pack e
 
 visibilityUpdateCodec :: RowCodec VisibilityUpdateInfo
@@ -386,8 +398,20 @@ stampedRow
   :: (JobPayload payload)
   => TraceStamp payload
   -> JobWrite payload
-  -> (JobWrite payload, AdmissionColumns)
-stampedRow stamp job = (stamp job, admissionColumns (payload job))
+  -> JobWriteSource payload
+stampedRow stamp job = internalStampedRow stamp Nothing Nothing False job
+
+internalStampedRow
+  :: (JobPayload payload)
+  => TraceStamp payload
+  -> Maybe Int64
+  -> Maybe Value
+  -> Bool
+  -> JobWrite payload
+  -> JobWriteSource payload
+internalStampedRow stamp parent state suspended job =
+  let stamped = stamp job
+   in (stamped, admissionColumns (JT.payload stamped), parent, state, suspended)
 
 -- | Insert a job without validating that the parent exists.
 --
@@ -415,20 +439,67 @@ insertJobUnsafeStamped
   -> TraceStamp payload
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafeStamped schemaName tableName stamp job = do
-  let valuesFrag = insertFrag (jobCodec tableName) (stampedRow stamp job)
-      query = case dedupKey job of
+insertJobUnsafeStamped schemaName tableName stamp job =
+  insertJobSource schemaName tableName job (stampedRow stamp job)
+
+-- | Internal tree insertion path for engine-owned parent and suspension state.
+insertJobTreeNodeStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> Maybe Int64
+  -> Maybe Value
+  -> Bool
+  -> JobWrite payload
+  -> m (Maybe (JobRead payload))
+insertJobTreeNodeStamped schemaName tableName stamp parent state suspended job =
+  insertJobSource schemaName tableName job (internalStampedRow stamp parent state suspended job)
+
+insertJobSource
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> JobWrite payload
+  -> JobWriteSource payload
+  -> m (Maybe (JobRead payload))
+insertJobSource schemaName tableName job source = do
+  let valuesFrag = insertFrag (jobCodec tableName) source
+      query = case JT.dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
         _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
 
   withDbTransaction $ do
     rawJobs <- MA.executeQuery query
     case rawJobs of
-      [] -> case dedupKey job of
+      [] -> case JT.dedupKey job of
         Just (IgnoreDuplicate _) -> pure Nothing
         Just (ReplaceDuplicate _) -> pure Nothing
         Nothing -> throwParsing "insertJob: No rows returned from INSERT"
       (raw : _) -> Just <$> decodePayload raw
+
+-- | Batch-insert direct tree leaves under one parent.
+insertJobTreeLeavesStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> Int64
+  -> [JobWrite payload]
+  -> m [JobRead payload]
+insertJobTreeLeavesStamped _ _ _ _ [] = pure []
+insertJobTreeLeavesStamped schemaName tableName stamp parent jobs = do
+  let rows =
+        [ internalStampedRow stamp (Just parent) Nothing False job
+        | job <- dedupBatch jobs
+        ]
+      batchSrc = batchFrag (jobCodec tableName) rows
+  withDbTransaction $ do
+    rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
+    traverse decodePayload rawJobs
 
 -- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
 -- manually-refilled policies.
@@ -591,9 +662,7 @@ reconcileAndPruneConcurrency schemaName tableNames = do
 --   A job waiting in retry backoff has @last_error IS NOT NULL@ and is safe to
 --   replace because no handler owns it.
 --
--- @parentId@ is validated: if set to a non-existent job ID, returns @Nothing@.
--- For building parent-child trees, prefer @insertJobTree@ which handles
--- @parentId@, @isRollup@, and @suspended@ atomically.
+-- Parent and rollup state can only be created through @insertJobTree@.
 insertJob
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -603,11 +672,7 @@ insertJob
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob schemaName tableName job = do
-  parentOk <- maybe (pure True) (jobExists schemaName tableName) (parentId job)
-  if not parentOk
-    then pure Nothing
-    else insertJobUnsafe schemaName tableName job
+insertJob = insertJobUnsafe
 
 -- | Insert multiple jobs in a single batch operation.
 --
@@ -619,8 +684,7 @@ insertJob schemaName tableName job = do
 -- occurrence is kept (last writer wins), consistent with sequential
 -- 'insertJob' calls.
 --
--- Does not validate @parentId@ - callers must ensure referenced parents
--- exist. For parent-child trees, use @insertJobTree@ instead.
+-- Parent-child relationships must be inserted with @insertJobTree@.
 insertJobsBatch
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -758,7 +822,7 @@ persistParentState schemaName tableName jobId state =
 dedupBatch :: [JobWrite payload] -> [JobWrite payload]
 dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
   where
-    step (!seen, !rows) job = case dedupKeyText (dedupKey job) of
+    step (!seen, !rows) job = case dedupKeyText (JT.dedupKey job) of
       Nothing -> (seen, rows |> job)
       Just k -> case Map.lookup k seen of
         Nothing -> (Map.insert k (Seq.length rows) seen, rows |> job)
@@ -766,7 +830,7 @@ dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
           | isReplace job -> (seen, Seq.update idx job rows)
           | otherwise -> (seen, rows)
 
-    isReplace job = case dedupKey job of
+    isReplace job = case JT.dedupKey job of
       Just (ReplaceDuplicate _) -> True
       _ -> False
 
@@ -1612,8 +1676,8 @@ listArchivedJobsByGroupKey
   -> Int
   -> Int
   -> m [Archive.ArchiveJob payload]
-listArchivedJobsByGroupKey schemaName tableName groupKey =
-  listArchiveFiltered schemaName tableName [Tmpl.FilterGroupKey groupKey] Nothing Nothing
+listArchivedJobsByGroupKey schemaName tableName key =
+  listArchiveFiltered schemaName tableName [Tmpl.FilterGroupKey key] Nothing Nothing
 
 -- | Count archived jobs with composable filters.
 countArchiveFiltered
@@ -2696,10 +2760,10 @@ readChildResultsRaw schemaName tableName parentJobId = do
     parseRow (!results, !errors, !snap, !dlqFailures) row = case row of
       ("r", Just cid, Just val, _, _) ->
         pure (Map.insert cid val results, errors, snap, dlqFailures)
-      ("e", Just jid, _, Just err, Just dlqPk) ->
-        pure (results, Map.insert jid err errors, snap, Map.insert dlqPk err dlqFailures)
-      ("e", Just jid, _, Nothing, Just dlqPk) ->
-        pure (results, Map.insert jid "" errors, snap, Map.insert dlqPk "" dlqFailures)
+      ("e", Just jid, _, Just err, Just _) ->
+        pure (results, Map.insert jid err errors, snap, Map.insert jid err dlqFailures)
+      ("e", Just jid, _, Nothing, Just _) ->
+        pure (results, Map.insert jid "" errors, snap, Map.insert jid "" dlqFailures)
       ("s", _, Just val, _, _) ->
         pure (results, errors, Just val, dlqFailures)
       _ -> throwParsing $ "readChildResultsRaw: unexpected row: " <> T.pack (show row)

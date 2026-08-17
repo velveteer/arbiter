@@ -87,14 +87,12 @@ import Arbiter.Core.Job.Schema
   , createResultsTableSQL
   , createSchemaSQL
   , dropEventStreamingFunctionSQL
-  , dropEventStreamingTriggersSQL
-  , dropNotifyFunctionSQL
-  , dropNotifyTriggerSQL
   , eventStreamingDLQTriggerName
   , eventStreamingTriggerName
   , jobQueueTable
   , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
+  , notifyFunctionName
   , notifyTriggerName
   , pauseNotifyChannel
   , queueTableNames
@@ -463,48 +461,89 @@ reconcileRateLimitDurability conn schemaName durability = do
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
-    traverse_ reconcileNotify tables
+    if enableNotifications config
+      then traverse_ reconcileNotify tables
+      else dropAllNotifyObjects
     if enableEventStreaming config
       then do
-        executeSQL (createEventStreamingFunctionSQL schemaName)
+        current <- eventFunctionCurrent
+        unless current $ executeSQL (createEventStreamingFunctionSQL schemaName)
         traverse_ reconcileEventStream tables
       else do
-        traverse_ dropKnownEventTriggers tables
+        dropAllEventTriggers
         functionInstalled <- eventFunctionExists
-        -- CASCADE also removes triggers on queue tables retained from an older
-        -- registry, which are no longer present in @tables@.
         when functionInstalled $ executeSQL (dropEventStreamingFunctionSQL schemaName)
   where
     reconcileNotify table = do
-      installed <- triggerExists table (notifyTriggerName table)
-      case (enableNotifications config, installed) of
-        (True, False) -> do
-          executeSQL (createNotifyFunctionSQL schemaName table)
-          executeSQL (createNotifyTriggerSQL schemaName table)
-        (False, True) -> do
-          executeSQL (dropNotifyTriggerSQL schemaName table)
-          executeSQL (dropNotifyFunctionSQL schemaName table)
-        _ -> pure ()
+      current <- notifyObjectsCurrent table
+      unless current $ do
+        executeSQL (createNotifyFunctionSQL schemaName table)
+        executeSQL (createNotifyTriggerSQL schemaName table)
+
+    notifyObjectsCurrent table = do
+      let desiredBody = case T.splitOn "$$" (createNotifyFunctionSQL schemaName table) of
+            _ : body : _ -> body
+            _ -> ""
+      rows <-
+        query
+          conn
+          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND t.tgtype = 5 AND t.tgnargs = 0 AND pn.nspname = ? AND p.proname = ? AND p.pronargs = 0 AND p.prosrc = ?)"
+          (schemaName, table, notifyTriggerName table, schemaName, notifyFunctionName table, desiredBody)
+      pure $ case rows of
+        Only current : _ -> current
+        _ -> False
 
     reconcileEventStream table = do
-      mainInstalled <- triggerExists table (eventStreamingTriggerName table)
-      dlqInstalled <- triggerExists (table <> "_dlq") (eventStreamingDLQTriggerName table)
-      unless (mainInstalled && dlqInstalled) $
+      mainCurrent <- triggerCurrent table (eventStreamingTriggerName table) 29 table False
+      dlqCurrent <- triggerCurrent (table <> "_dlq") (eventStreamingDLQTriggerName table) 5 table True
+      unless (mainCurrent && dlqCurrent) $
         executeSQL (createEventStreamingTriggersSQL schemaName table)
 
-    dropKnownEventTriggers table = do
-      installed <-
-        or
-          <$> traverse
-            (uncurry triggerExists)
-            [ (table, eventStreamingTriggerName table)
-            , (table <> "_dlq", eventStreamingDLQTriggerName table)
-            , (table, "notify_job_insert")
-            , (table, "notify_job_update")
-            , (table, "notify_job_delete")
-            , (table <> "_dlq", "notify_dlq_insert")
-            ]
-      when installed $ executeSQL (dropEventStreamingTriggersSQL schemaName table)
+    eventFunctionCurrent = do
+      let desiredBody = case T.splitOn "$$" (createEventStreamingFunctionSQL schemaName) of
+            _ : body : _ -> body
+            _ -> ""
+      rows <-
+        query
+          conn
+          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND p.prosrc = ?)"
+          (schemaName, desiredBody)
+      pure $ case rows of
+        Only current : _ -> current
+        _ -> False
+
+    triggerCurrent table trigger triggerType queue isDLQ = do
+      let args = queue <> "\\000" <> (if isDLQ then "true" else "false") <> "\\000"
+      rows <-
+        query
+          conn
+          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND t.tgtype = ? AND t.tgnargs = 2 AND encode(t.tgargs, 'escape') = ?)"
+          (schemaName, table, trigger, schemaName, triggerType :: Int, args)
+      pure $ case rows of
+        Only current : _ -> current
+        _ -> False
+
+    dropAllEventTriggers = do
+      commands <-
+        query
+          conn
+          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND NOT t.tgisinternal"
+          (Only schemaName)
+      traverse_ (\(Only command) -> executeSQL command) commands
+
+    dropAllNotifyObjects = do
+      triggerCommands <-
+        query
+          conn
+          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND pn.nspname = ? AND t.tgname = c.relname || '_notify_trigger' AND p.proname = 'notify_' || c.relname || '_created' AND p.pronargs = 0 AND NOT t.tgisinternal"
+          (schemaName, schemaName)
+      traverse_ (\(Only command) -> executeSQL command) triggerCommands
+      functionCommands <-
+        query
+          conn
+          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_class c ON c.relname = substring(p.proname FROM 8 FOR char_length(p.proname) - 15) JOIN pg_namespace cn ON cn.oid = c.relnamespace AND cn.oid = n.oid WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0"
+          (Only schemaName)
+      traverse_ (\(Only command) -> executeSQL command) functionCommands
 
     eventFunctionExists = do
       rows <-
@@ -512,16 +551,6 @@ reconcileOptionalTriggers conn schemaName tables config =
           conn
           "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0)"
           (Only schemaName)
-      pure $ case rows of
-        Only exists : _ -> exists
-        _ -> False
-
-    triggerExists table trigger = do
-      rows <-
-        query
-          conn
-          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal)"
-          (schemaName, table, trigger)
       pure $ case rows of
         Only exists : _ -> exists
         _ -> False

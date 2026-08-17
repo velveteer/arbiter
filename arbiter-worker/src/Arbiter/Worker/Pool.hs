@@ -144,6 +144,9 @@ runWorkerPool
   => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
+  case validateWorkerConfig config of
+    Left err -> liftIO $ E.throwIO (WorkerConfigException err)
+    Right () -> pure ()
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
       -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.

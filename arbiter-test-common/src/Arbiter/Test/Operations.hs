@@ -107,13 +107,9 @@ operationsSpec mkMessage mkResult runM = do
     it "claims jobs in priority order" $ \env -> do
       -- Insert jobs with different priorities
       let highPriority =
-            (defaultGroupedJob "claim-priority-test" (mkMessage "High"))
-              { priority = 0
-              }
+            setPriority 0 $ defaultGroupedJob "claim-priority-test" (mkMessage "High")
           lowPriority =
-            (defaultGroupedJob "claim-priority-test" (mkMessage "Low"))
-              { priority = 10
-              }
+            setPriority 10 $ defaultGroupedJob "claim-priority-test" (mkMessage "Low")
 
       void $ runM env (HL.insertJob lowPriority)
       void $ runM env (HL.insertJob highPriority)
@@ -130,14 +126,9 @@ operationsSpec mkMessage mkResult runM = do
       -- is the older job (lower id) and would be the group head by id alone.
       let future = truncateToMicros (addUTCTime 3600 now)
           deprioritizedScheduled =
-            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Scheduled"))
-              { priority = 10
-              , notVisibleUntil = Just future
-              }
+            setNotVisibleUntil (Just future) $ setPriority 10 $ defaultGroupedJob "claim-priority-scheduled" (mkMessage "Scheduled")
           topPriority =
-            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Top"))
-              { priority = 0
-              }
+            setPriority 0 $ defaultGroupedJob "claim-priority-scheduled" (mkMessage "Top")
 
       void $ runM env (HL.insertJob deprioritizedScheduled)
       void $ runM env (HL.insertJob topPriority)
@@ -151,8 +142,8 @@ operationsSpec mkMessage mkResult runM = do
       priority (head claimed) `shouldBe` 0
 
     it "claims jobs from different groups" $ \env -> do
-      let job1 = (defaultJob (mkMessage "G1")) {groupKey = Just "group1"}
-          job2 = (defaultJob (mkMessage "G2")) {groupKey = Just "group2"}
+      let job1 = setGroupKey (Just "group1") $ defaultJob (mkMessage "G1")
+          job2 = setGroupKey (Just "group2") $ defaultJob (mkMessage "G2")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -164,8 +155,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "respects per-group ordering" $ \env -> do
       -- Insert two jobs in the same group
-      let job1 = (defaultJob (mkMessage "First")) {groupKey = Just "claim-hol-test"}
-          job2 = (defaultJob (mkMessage "Second")) {groupKey = Just "claim-hol-test"}
+      let job1 = setGroupKey (Just "claim-hol-test") $ defaultJob (mkMessage "First")
+          job2 = setGroupKey (Just "claim-hol-test") $ defaultJob (mkMessage "Second")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -215,7 +206,7 @@ operationsSpec mkMessage mkResult runM = do
       map payload claimed `shouldBe` [mkMessage "U1", mkMessage "G1", mkMessage "U2"]
 
     it "increments attempts on claim" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "claim-attempts-test"}
+      let job = setGroupKey (Just "claim-attempts-test") $ defaultJob (mkMessage "Test")
 
       Just inserted <- runM env (HL.insertJob job)
       attempts inserted `shouldBe` 0
@@ -224,7 +215,7 @@ operationsSpec mkMessage mkResult runM = do
       attempts (head claimed) `shouldBe` 1
 
     it "claimed jobs are not re-claimable" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "claim-visibility-test"}
+      let job = setGroupKey (Just "claim-visibility-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
 
@@ -238,7 +229,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "ackJob" $ do
     it "removes a job from the queue" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "ack-remove-test"}
+      let job = setGroupKey (Just "ack-remove-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -253,8 +244,8 @@ operationsSpec mkMessage mkResult runM = do
       length claimed2 `shouldBe` 0
 
     it "allows next job in group to be claimed after ack" $ \env -> do
-      let job1 = (defaultJob (mkMessage "First")) {groupKey = Just "ack-next-test"}
-          job2 = (defaultJob (mkMessage "Second")) {groupKey = Just "ack-next-test"}
+      let job1 = setGroupKey (Just "ack-next-test") $ defaultJob (mkMessage "First")
+          job2 = setGroupKey (Just "ack-next-test") $ defaultJob (mkMessage "Second")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -427,7 +418,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "visibility-extend-test"}
+      let job = setGroupKey (Just "visibility-extend-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -488,12 +479,12 @@ operationsSpec mkMessage mkResult runM = do
 
     it "allows next jobs in groups to be claimed after batch ack" $ \env -> do
       let batch1 =
-            [ (defaultJob (mkMessage "First-A")) {groupKey = Just "batch-ack-test-1"}
-            , (defaultJob (mkMessage "First-B")) {groupKey = Just "batch-ack-test-2"}
+            [ setGroupKey (Just "batch-ack-test-1") $ defaultJob (mkMessage "First-A")
+            , setGroupKey (Just "batch-ack-test-2") $ defaultJob (mkMessage "First-B")
             ]
           batch2 =
-            [ (defaultJob (mkMessage "Second-A")) {groupKey = Just "batch-ack-test-1"}
-            , (defaultJob (mkMessage "Second-B")) {groupKey = Just "batch-ack-test-2"}
+            [ setGroupKey (Just "batch-ack-test-1") $ defaultJob (mkMessage "Second-A")
+            , setGroupKey (Just "batch-ack-test-2") $ defaultJob (mkMessage "Second-B")
             ]
 
       void $ runM env (HL.insertJobsBatch (batch1 <> batch2))
@@ -562,25 +553,6 @@ operationsSpec mkMessage mkResult runM = do
       -- Verify the IDs match
       sort goneJobs `shouldBe` sort (map primaryKey toAck)
       sort successJobs `shouldBe` sort (map primaryKey stillProcessing)
-
-    it "leaves a finalizer the ack suspended out of the beat" $ \env -> do
-      -- Window 1. Spawning a child turns the job into a finalizer at ack.
-      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "SuspendedFinalizer")))
-      [claimedParent] <- claimJobs env 1
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkMessage "SuspendedFinalizerChild")) {parentId = Just (primaryKey parent)})
-      void $ runM env (HL.ackJob claimedParent)
-      assertSuspended env (primaryKey parent)
-
-      results <- runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
-      results `shouldBe` [JobSuspended (primaryKey parent)]
-
-      -- Completing the child leaves the finalizer claimable at once.
-      [child] <- claimJobs env 1
-      void $ runM env (HL.ackJob child)
-      woken <- claimJobs env 1
-      map primaryKey woken `shouldBe` [primaryKey parent]
 
     it "refuses a flagged job to a lapsed claim carrying the same worker id" $ \env -> do
       let owner = UUID.nil
@@ -658,9 +630,12 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "Tree locks" $
     it "locks an orphaned job's own subtree when its parent row is gone" $ \env -> do
-      Just root <- runM env (HL.insertJob (defaultJob (mkMessage "orphan-root")))
-      Just mid <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-mid")) {parentId = Just (primaryKey root)}))
-      Just leaf <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-leaf")) {parentId = Just (primaryKey mid)}))
+      Right (root :| [mid, leaf]) <-
+        runM env $
+          HL.insertJobTree $
+            JT.rollup
+              (defaultJob (mkMessage "orphan-root"))
+              (JT.rollup (defaultJob (mkMessage "orphan-mid")) (JT.leaf (defaultJob (mkMessage "orphan-leaf")) :| []) :| [])
 
       lockedFromRoot env [primaryKey leaf] `shouldReturn` 3
       deleteRowDirectly env (primaryKey root)
@@ -669,13 +644,9 @@ operationsSpec mkMessage mkResult runM = do
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-always-test" (mkMessage "Same"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-always-test" (mkMessage "Same")
           job2 =
-            (defaultGroupedJob "dedup-always-test" (mkMessage "Same"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-always-test" (mkMessage "Same")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -689,13 +660,9 @@ operationsSpec mkMessage mkResult runM = do
       -- groupKey does not participate in dedup: the same key conflicts whether
       -- the jobs are grouped or ungrouped.
       let job1 =
-            (defaultGroupedJob "dedup-ignore-test-1" (mkMessage "First"))
-              { dedupKey = Just (IgnoreDuplicate "unique-key-1")
-              }
+            setDedupKey (Just (IgnoreDuplicate "unique-key-1")) $ defaultGroupedJob "dedup-ignore-test-1" (mkMessage "First")
           job2 =
-            (defaultGroupedJob "dedup-ignore-test-2" (mkMessage "Second"))
-              { dedupKey = Just (IgnoreDuplicate "unique-key-1") -- Same dedup key, different group
-              }
+            setDedupKey (Just (IgnoreDuplicate "unique-key-1")) $ defaultGroupedJob "dedup-ignore-test-2" (mkMessage "Second")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       inserted2 <- runM env (HL.insertJob job2)
@@ -706,13 +673,9 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Same conflict holds for ungrouped jobs sharing a dedup key.
       let ungrouped1 =
-            (defaultJob (mkMessage "Ungrouped1"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ungrouped-key")) $ defaultJob (mkMessage "Ungrouped1")
           ungrouped2 =
-            (defaultJob (mkMessage "Ungrouped2"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ungrouped-key")) $ defaultJob (mkMessage "Ungrouped2")
 
       Just insertedU1 <- runM env (HL.insertJob ungrouped1)
       insertedU2 <- runM env (HL.insertJob ungrouped2)
@@ -720,13 +683,9 @@ operationsSpec mkMessage mkResult runM = do
       payload insertedU1 `shouldBe` mkMessage "Ungrouped1"
     it "IgnoreDuplicate with different keys creates separate jobs" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-diffkey-test-1" (mkMessage "Job1"))
-              { dedupKey = Just (IgnoreDuplicate "key-1")
-              }
+            setDedupKey (Just (IgnoreDuplicate "key-1")) $ defaultGroupedJob "dedup-diffkey-test-1" (mkMessage "Job1")
           job2 =
-            (defaultGroupedJob "dedup-diffkey-test-2" (mkMessage "Job2"))
-              { dedupKey = Just (IgnoreDuplicate "key-2") -- Different dedup key
-              }
+            setDedupKey (Just (IgnoreDuplicate "key-2")) $ defaultGroupedJob "dedup-diffkey-test-2" (mkMessage "Job2")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -738,15 +697,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate replaces existing job completely" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-replace-test-1" (mkMessage "Original"))
-              { priority = 10
-              , dedupKey = Just (ReplaceDuplicate "replace-key-1")
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key-1")) $
+              setPriority 10 $
+                defaultGroupedJob "dedup-replace-test-1" (mkMessage "Original")
           job2 =
-            (defaultGroupedJob "dedup-replace-test-2" (mkMessage "Replacement"))
-              { priority = 5
-              , dedupKey = Just (ReplaceDuplicate "replace-key-1") -- Same dedup key
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key-1")) $
+              setPriority 5 $
+                defaultGroupedJob "dedup-replace-test-2" (mkMessage "Replacement")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -764,9 +721,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate resets job state (attempts, errors)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-reset-test-1" (mkMessage "First"))
-              { dedupKey = Just (ReplaceDuplicate "reset-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "reset-key")) $ defaultGroupedJob "dedup-reset-test-1" (mkMessage "First")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -782,9 +737,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Now insert replacement job
       let job2 =
-            (defaultGroupedJob "dedup-reset-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "reset-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "reset-key")) $ defaultGroupedJob "dedup-reset-test-2" (mkMessage "Replacement")
 
       Just inserted2 <- runM env (HL.insertJob job2)
 
@@ -796,9 +749,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate returns Nothing when the existing job is actively claimed" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-inflight-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "inflight-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "inflight-test-key")) $
+              defaultGroupedJob "dedup-inflight-test-1" (mkMessage "Original")
 
       Just _inserted1 <- runM env (HL.insertJob job1)
 
@@ -811,9 +763,8 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Try to replace while actively in-flight - should return Nothing (unsafe to replace)
       let job2 =
-            (defaultGroupedJob "dedup-inflight-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "inflight-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "inflight-test-key")) $
+              defaultGroupedJob "dedup-inflight-test-2" (mkMessage "Replacement")
 
       replaced <- runM env (HL.insertJob job2)
       replaced `shouldBe` Nothing
@@ -827,9 +778,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate returns Nothing for a force-cancel-flagged job" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-flagged-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "flagged-test-key")) $
+              defaultGroupedJob "dedup-flagged-test-1" (mkMessage "Original")
       Just inserted1 <- runM env (HL.insertJob job1)
       let jobId = primaryKey inserted1
       claimed <- claimJobsAs env 1 UUID.nil
@@ -841,9 +791,8 @@ operationsSpec mkMessage mkResult runM = do
       void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
 
       let job2 =
-            (defaultGroupedJob "dedup-flagged-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "flagged-test-key")) $
+              defaultGroupedJob "dedup-flagged-test-2" (mkMessage "Replacement")
       runM env (HL.insertJob job2) >>= (`shouldBe` Nothing)
 
       Just untouched <- getJob env jobId
@@ -856,9 +805,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate succeeds when job is in retry backoff (has last_error)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-backoff-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "retry-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "retry-backoff-key")) $
+              defaultGroupedJob "dedup-backoff-test-1" (mkMessage "Original")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -873,9 +821,8 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Now try to replace - should succeed because last_error IS NOT NULL (safe to replace)
       let job2 =
-            (defaultGroupedJob "dedup-backoff-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "retry-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "retry-backoff-key")) $
+              defaultGroupedJob "dedup-backoff-test-2" (mkMessage "Replacement")
 
       Just replaced <- runM env (HL.insertJob job2)
 
@@ -887,9 +834,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "Dedup key only applies to jobs in queue (not after ack)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-ack-test-1" (mkMessage "First"))
-              { dedupKey = Just (IgnoreDuplicate "ack-test-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-1" (mkMessage "First")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -900,9 +845,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Insert another job with same dedup key
       let job2 =
-            (defaultGroupedJob "dedup-ack-test-2" (mkMessage "Second"))
-              { dedupKey = Just (IgnoreDuplicate "ack-test-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-2" (mkMessage "Second")
 
       Just inserted2 <- runM env (HL.insertJob job2)
 
@@ -912,25 +855,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "Mixed dedup strategies work independently" $ \env -> do
       let noDedupJob =
-            (defaultGroupedJob "dedup-mixed-test-1" (mkMessage "NoDedupe"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-mixed-test-1" (mkMessage "NoDedupe")
           ignoreJob1 =
-            (defaultGroupedJob "dedup-mixed-test-2" (mkMessage "Ignore1"))
-              { dedupKey = Just (IgnoreDuplicate "ignore-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ignore-key")) $ defaultGroupedJob "dedup-mixed-test-2" (mkMessage "Ignore1")
           ignoreJob2 =
-            (defaultGroupedJob "dedup-mixed-test-3" (mkMessage "Ignore2"))
-              { dedupKey = Just (IgnoreDuplicate "ignore-key") -- Duplicate
-              }
+            setDedupKey (Just (IgnoreDuplicate "ignore-key")) $ defaultGroupedJob "dedup-mixed-test-3" (mkMessage "Ignore2")
           replaceJob1 =
-            (defaultGroupedJob "dedup-mixed-test-4" (mkMessage "Replace1"))
-              { dedupKey = Just (ReplaceDuplicate "replace-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key")) $ defaultGroupedJob "dedup-mixed-test-4" (mkMessage "Replace1")
           replaceJob2 =
-            (defaultGroupedJob "dedup-mixed-test-5" (mkMessage "Replace2"))
-              { dedupKey = Just (ReplaceDuplicate "replace-key") -- Duplicate
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key")) $ defaultGroupedJob "dedup-mixed-test-5" (mkMessage "Replace2")
 
       Just noDedup <- runM env (HL.insertJob noDedupJob)
       Just ignore1 <- runM env (HL.insertJob ignoreJob1)
@@ -951,13 +884,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "IgnoreDuplicate and ReplaceDuplicate with same key conflict" $ \env -> do
       let job1 =
-            (defaultJob (mkMessage "IgnoreFirst"))
-              { dedupKey = Just (IgnoreDuplicate "cross-strategy-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "cross-strategy-key")) $ defaultJob (mkMessage "IgnoreFirst")
           job2 =
-            (defaultJob (mkMessage "ReplaceSecond"))
-              { dedupKey = Just (ReplaceDuplicate "cross-strategy-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "cross-strategy-key")) $ defaultJob (mkMessage "ReplaceSecond")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -979,16 +908,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with IgnoreDuplicate skips conflicts" $ \env -> do
       -- Pre-insert a job with a dedup key
       let existingJob =
-            (defaultJob (mkMessage "Existing"))
-              { dedupKey = Just (IgnoreDuplicate "batch-ignore-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-ignore-key")) $ defaultJob (mkMessage "Existing")
       Just _ <- runM env (HL.insertJob existingJob)
 
       -- Batch insert: one conflicting, two new
       let batchJobs =
-            [ (defaultJob (mkMessage "Conflict"))
-                { dedupKey = Just (IgnoreDuplicate "batch-ignore-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "batch-ignore-key")) $ defaultJob (mkMessage "Conflict")
             , defaultJob (mkMessage "New1")
             , defaultJob (mkMessage "New2")
             ]
@@ -1001,18 +926,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with ReplaceDuplicate replaces existing job" $ \env -> do
       -- Pre-insert a job with a dedup key
       let existingJob =
-            (defaultJob (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "batch-replace-key")
-              , priority = 10
-              }
+            setPriority 10 $ setDedupKey (Just (ReplaceDuplicate "batch-replace-key")) $ defaultJob (mkMessage "Original")
       Just original <- runM env (HL.insertJob existingJob)
 
       -- Batch insert with a replacement
       let batchJobs =
-            [ (defaultJob (mkMessage "Replacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-replace-key")
-                , priority = 5
-                }
+            [ setPriority 5 $ setDedupKey (Just (ReplaceDuplicate "batch-replace-key")) $ defaultJob (mkMessage "Replacement")
             , defaultJob (mkMessage "Other")
             ]
 
@@ -1028,25 +947,17 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with mixed strategies" $ \env -> do
       -- Pre-insert two jobs
       let ignoreExisting =
-            (defaultJob (mkMessage "IgnoreExisting"))
-              { dedupKey = Just (IgnoreDuplicate "batch-mixed-ignore")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-mixed-ignore")) $ defaultJob (mkMessage "IgnoreExisting")
           replaceExisting =
-            (defaultJob (mkMessage "ReplaceExisting"))
-              { dedupKey = Just (ReplaceDuplicate "batch-mixed-replace")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-mixed-replace")) $ defaultJob (mkMessage "ReplaceExisting")
       Just _ <- runM env (HL.insertJob ignoreExisting)
       Just origReplace <- runM env (HL.insertJob replaceExisting)
 
       -- Batch: conflict on ignore (skipped), conflict on replace (updated),
       -- plus one job with no dedup key (always inserted)
       let batchJobs =
-            [ (defaultJob (mkMessage "IgnoreConflict"))
-                { dedupKey = Just (IgnoreDuplicate "batch-mixed-ignore")
-                }
-            , (defaultJob (mkMessage "ReplaceConflict"))
-                { dedupKey = Just (ReplaceDuplicate "batch-mixed-replace")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "batch-mixed-ignore")) $ defaultJob (mkMessage "IgnoreConflict")
+            , setDedupKey (Just (ReplaceDuplicate "batch-mixed-replace")) $ defaultJob (mkMessage "ReplaceConflict")
             , defaultJob (mkMessage "NoDedupJob")
             ]
 
@@ -1063,16 +974,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert cross-strategy conflict (IgnoreDuplicate then ReplaceDuplicate)" $ \env -> do
       -- Pre-insert with IgnoreDuplicate
       let existingJob =
-            (defaultJob (mkMessage "IgnoreFirst"))
-              { dedupKey = Just (IgnoreDuplicate "batch-cross-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-cross-key")) $ defaultJob (mkMessage "IgnoreFirst")
       Just original <- runM env (HL.insertJob existingJob)
 
       -- Batch insert with ReplaceDuplicate on the same key
       let batchJobs =
-            [ (defaultJob (mkMessage "ReplaceSecond"))
-                { dedupKey = Just (ReplaceDuplicate "batch-cross-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-cross-key")) $ defaultJob (mkMessage "ReplaceSecond")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1084,9 +991,7 @@ operationsSpec mkMessage mkResult runM = do
     it "batch ReplaceDuplicate does not replace in-flight job" $ \env -> do
       -- Insert and claim a job, making it actively owned by a worker.
       let existingJob =
-            (defaultJob (mkMessage "InFlight"))
-              { dedupKey = Just (ReplaceDuplicate "batch-inflight-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-inflight-key")) $ defaultJob (mkMessage "InFlight")
       Just _ <- runM env (HL.insertJob existingJob)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
@@ -1094,9 +999,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Batch insert with ReplaceDuplicate on the same key
       let batchJobs =
-            [ (defaultJob (mkMessage "Replacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-inflight-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-inflight-key")) $ defaultJob (mkMessage "Replacement")
             , defaultJob (mkMessage "Other")
             ]
 
@@ -1107,12 +1010,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "duplicate IgnoreDuplicate keys within batch: first wins" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (IgnoreDuplicate "ign-ign-key")
-                }
-            , (defaultJob (mkMessage "Second"))
-                { dedupKey = Just (IgnoreDuplicate "ign-ign-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "ign-ign-key")) $ defaultJob (mkMessage "First")
+            , setDedupKey (Just (IgnoreDuplicate "ign-ign-key")) $ defaultJob (mkMessage "Second")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1121,12 +1020,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "duplicate ReplaceDuplicate keys within batch: last wins" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (ReplaceDuplicate "rep-rep-key")
-                }
-            , (defaultJob (mkMessage "Second"))
-                { dedupKey = Just (ReplaceDuplicate "rep-rep-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "rep-rep-key")) $ defaultJob (mkMessage "First")
+            , setDedupKey (Just (ReplaceDuplicate "rep-rep-key")) $ defaultJob (mkMessage "Second")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1135,13 +1030,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "mixed strategies within batch: ReplaceDuplicate takes precedence" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (IgnoreDuplicate "mixed-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "mixed-key")) $ defaultJob (mkMessage "First")
             , defaultJob (mkMessage "Middle")
-            , (defaultJob (mkMessage "Last"))
-                { dedupKey = Just (ReplaceDuplicate "mixed-key")
-                }
+            , setDedupKey (Just (ReplaceDuplicate "mixed-key")) $ defaultJob (mkMessage "Last")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1157,18 +1048,14 @@ operationsSpec mkMessage mkResult runM = do
     it "batch ReplaceDuplicate succeeds when job is in retry backoff" $ \env -> do
       -- Insert, claim, then fail the job (putting it in retry backoff)
       let existingJob =
-            (defaultJob (mkMessage "WillFail"))
-              { dedupKey = Just (ReplaceDuplicate "batch-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-backoff-key")) $ defaultJob (mkMessage "WillFail")
       Just original <- runM env (HL.insertJob existingJob)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.updateJobForRetry 5 "Simulated failure" (head claimed))
 
       -- Batch insert with ReplaceDuplicate - should succeed because last_error IS NOT NULL
       let batchJobs =
-            [ (defaultJob (mkMessage "FreshReplacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-backoff-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-backoff-key")) $ defaultJob (mkMessage "FreshReplacement")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1180,7 +1067,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "updateJobForRetry" $ do
     it "updates job with error message and visibility timeout" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "retry-update-test"}
+      let job = setGroupKey (Just "retry-update-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1227,7 +1114,7 @@ operationsSpec mkMessage mkResult runM = do
       getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
   describe "Dead Letter Queue Operations" $ do
     it "moveToDLQ moves failed job to DLQ and removes from main queue" $ \env -> do
-      let job = (defaultJob (mkMessage "Failed")) {groupKey = Just "dlq-move-test"}
+      let job = setGroupKey (Just "dlq-move-test") $ defaultJob (mkMessage "Failed")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1259,7 +1146,7 @@ operationsSpec mkMessage mkResult runM = do
       attempts dlqJobSnapshot `shouldBe` 2
 
     it "retryFromDLQ moves job back to main queue with attempts reset" $ \env -> do
-      let job = (defaultJob (mkMessage "Retry")) {groupKey = Just "dlq-retry-test"}
+      let job = setGroupKey (Just "dlq-retry-test") $ defaultJob (mkMessage "Retry")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1302,7 +1189,7 @@ operationsSpec mkMessage mkResult runM = do
       getJob env (primaryKey retried) >>= (`shouldSatisfy` isJust)
 
     it "an exhausted-sweep move refuses a job whose nack restored the attempt" $ \env -> do
-      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "sweep-nack")) {maxAttempts = Just 1})
+      Just inserted <- runM env (HL.insertJob $ setMaxAttempts (Just 1) $ defaultJob (mkMessage "sweep-nack"))
       claimed <- claimJobsAs env 1 UUID.nil
       map attempts claimed `shouldBe` [1]
       runM env (HL.nackJob (head claimed)) `shouldReturn` 1
@@ -1329,7 +1216,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ returns Nothing for non-existent DLQ job" $ \env -> do
       -- Fabricate a DLQ job with a bogus ID
-      let job = (defaultJob (mkMessage "Phantom")) {groupKey = Just "dlq-phantom"}
+      let job = setGroupKey (Just "dlq-phantom") $ defaultJob (mkMessage "Phantom")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "err" (head claimed))
@@ -1340,7 +1227,7 @@ operationsSpec mkMessage mkResult runM = do
       result `shouldBe` Nothing
 
     it "deleteDLQJob returns 0 for non-existent DLQ job" $ \env -> do
-      let job = (defaultJob (mkMessage "Ghost")) {groupKey = Just "dlq-ghost"}
+      let job = setGroupKey (Just "dlq-ghost") $ defaultJob (mkMessage "Ghost")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "err" (head claimed))
@@ -1351,7 +1238,7 @@ operationsSpec mkMessage mkResult runM = do
       n `shouldBe` 0
 
     it "deleteDLQJob permanently removes job from DLQ" $ \env -> do
-      let job = (defaultJob (mkMessage "Delete")) {groupKey = Just "dlq-delete-test"}
+      let job = setGroupKey (Just "dlq-delete-test") $ defaultJob (mkMessage "Delete")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1376,9 +1263,7 @@ operationsSpec mkMessage mkResult runM = do
     it "listDLQJobs supports pagination" $ \env -> do
       -- Insert and move 5 jobs to DLQ
       let jobs =
-            [ (defaultJob (mkMessage ("Job" <> T.pack (show i))))
-                { groupKey = Just ("dlq-pagination-test-" <> T.pack (show i))
-                }
+            [ setGroupKey (Just ("dlq-pagination-test-" <> T.pack (show i))) $ defaultJob (mkMessage ("Job" <> T.pack (show i)))
             | i <- [1 .. 5 :: Int]
             ]
 
@@ -1406,7 +1291,7 @@ operationsSpec mkMessage mkResult runM = do
       length allDlqIds `shouldBe` length (nub allDlqIds)
 
     it "moveToDLQ returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-move-test"}
+      let job = setGroupKey (Just "dlq-race-move-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1423,7 +1308,7 @@ operationsSpec mkMessage mkResult runM = do
       rowsAffected `shouldBe` 0
 
     it "updateJobForRetry returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-retry-test"}
+      let job = setGroupKey (Just "dlq-race-retry-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1440,7 +1325,7 @@ operationsSpec mkMessage mkResult runM = do
       rowsAffected `shouldBe` 0
 
     it "ackJob returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-ack-test"}
+      let job = setGroupKey (Just "dlq-race-ack-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1458,10 +1343,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "maxAttempts=2 retries once then moves to DLQ on the second attempt" $ \env -> do
       let job =
-            (defaultJob (mkMessage "MaxAtt2"))
-              { groupKey = Just "max-attempts-2-test"
-              , maxAttempts = Just 2
-              }
+            setMaxAttempts (Just 2) $ setGroupKey (Just "max-attempts-2-test") $ defaultJob (mkMessage "MaxAtt2")
       Just _inserted <- runM env (HL.insertJob job)
 
       -- First attempt: claim brings attempts to 1, below maxAttempts, so retry.
@@ -1493,9 +1375,7 @@ operationsSpec mkMessage mkResult runM = do
     it "retryFromDLQ drops dedup_key so the same key no longer dedups" $ \env -> do
       -- A DLQ'd job carrying an IgnoreDuplicate key.
       let job =
-            (defaultJob (mkMessage "RetryDropKey"))
-              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "retry-drop-key")) $ defaultJob (mkMessage "RetryDropKey")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "boom" (head claimed))
@@ -1509,9 +1389,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- A fresh insert with the original key is therefore NOT deduped.
       let again =
-            (defaultJob (mkMessage "RetryDropKeyAgain"))
-              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "retry-drop-key")) $ defaultJob (mkMessage "RetryDropKeyAgain")
       Just insertedAgain <- runM env (HL.insertJob again)
       primaryKey insertedAgain `shouldNotBe` primaryKey retried
       payload insertedAgain `shouldBe` mkMessage "RetryDropKeyAgain"
@@ -1621,9 +1499,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "respects priority within batches" $ \env -> do
       -- Insert jobs with different priorities in same group
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "Low")) {priority = 10}))
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "High")) {priority = 0}))
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "Med")) {priority = 5}))
+      void $ runM env (HL.insertJob (setPriority 10 $ defaultGroupedJob "batch-priority-test" (mkMessage "Low")))
+      void $ runM env (HL.insertJob (setPriority 0 $ defaultGroupedJob "batch-priority-test" (mkMessage "High")))
+      void $ runM env (HL.insertJob (setPriority 5 $ defaultGroupedJob "batch-priority-test" (mkMessage "Med")))
 
       -- Claim batch of 3
       batches <- claimBatched env 3 10 :: IO [NonEmpty (JobRead payload)]
@@ -2077,6 +1955,8 @@ operationsSpec mkMessage mkResult runM = do
       -- Parent should be resumed (not suspended)
       Just parentResumed <- runM env (HL.getJobById @payload (primaryKey parent))
       suspended parentResumed `shouldBe` False
+      (_, _, _, dlqFailures) <- runM env (HL.readChildResultsRaw @payload (primaryKey parent))
+      Map.keys dlqFailures `shouldBe` [primaryKey (head claimedChild)]
 
     it "moveToDLQ snapshots the rollup's own child results before the cascade" $ \env -> do
       Right (parent :| _) <-
@@ -2303,34 +2183,10 @@ operationsSpec mkMessage mkResult runM = do
       n <- runM env (HL.resumeJob @payload (primaryKey inserted))
       n `shouldBe` 0
 
-    it "phantom parent: insert child with non-existent parentId returns Nothing" $ \env -> do
-      let child = (defaultJob (mkMessage "Orphan")) {parentId = Just 999999, suspended = True}
-      result <- runM env (HL.insertJob child)
-      result `shouldBe` Nothing
-
-    it "insertJob respects explicit suspended = True" $ \env -> do
-      -- User explicitly creates a pre-suspended job
-      let job = (defaultJob (mkMessage "PreSuspended")) {suspended = True}
-      Just inserted <- runM env (HL.insertJob job)
-      suspended inserted `shouldBe` True
-
-      -- Job should not be claimable
-      claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
-      length claimed `shouldBe` 0
-
-      -- Resume it
-      n <- runM env (HL.resumeJob @payload (primaryKey inserted))
-      n `shouldBe` 1
-
-      -- Now it should be claimable
-      claimed2 <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
-      length claimed2 `shouldBe` 1
-      payload (head claimed2) `shouldBe` mkMessage "PreSuspended"
-
     it "insertJob respects notVisibleUntil (delayed job)" $ \env -> do
       now <- getCurrentTime
       let futureTime = truncateToMicros (addUTCTime 3600 now)
-          job = (defaultJob (mkMessage "Delayed")) {notVisibleUntil = Just futureTime}
+          job = setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "Delayed")
       Just inserted <- runM env (HL.insertJob job)
       notVisibleUntil inserted `shouldBe` Just futureTime
 
@@ -2342,7 +2198,7 @@ operationsSpec mkMessage mkResult runM = do
       now <- getCurrentTime
       let futureTime = addUTCTime 3600 now
           jobs =
-            [ (defaultJob (mkMessage "BatchDelayed1")) {notVisibleUntil = Just futureTime}
+            [ setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "BatchDelayed1")
             , defaultJob (mkMessage "BatchImmediate")
             ]
       inserted <- runM env (HL.insertJobsBatch jobs)
@@ -2624,22 +2480,6 @@ operationsSpec mkMessage mkResult runM = do
       deleted <- runM env (HL.cancelJobCascade @payload (primaryKey parent))
       deleted `shouldBe` 3 -- parent + 2 children
       assertNotSuspended env (primaryKey grandparent)
-
-    it "insertJobsBatch skips jobs with invalid parentId" $ \env -> do
-      -- Insert one job with a valid parentId and one with a phantom parentId
-      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "BatchValidParent")))
-      let validChild = (defaultJob (mkMessage "BatchValidChild")) {parentId = Just (primaryKey parent), suspended = True}
-          phantomChild = (defaultJob (mkMessage "BatchPhantomChild")) {parentId = Just 999999, suspended = True}
-          standaloneJob = defaultJob (mkMessage "BatchStandalone")
-
-      inserted <- runM env (HL.insertJobsBatch [validChild, phantomChild, standaloneJob])
-
-      -- Only the valid child and standalone should be inserted (phantom skipped)
-      length inserted `shouldBe` 2
-      let payloads = map payload inserted
-      payloads `shouldContain` [mkMessage "BatchValidChild"]
-      payloads `shouldContain` [mkMessage "BatchStandalone"]
-      payloads `shouldNotContain` [mkMessage "BatchPhantomChild"]
 
     it "retryFromDLQ then ack wakes parent (end-to-end DLQ recovery)" $ \env -> do
       Right (parent :| _children) <-
@@ -3034,12 +2874,12 @@ operationsSpec mkMessage mkResult runM = do
         runM env $
           HL.insertJobTree
             ( JT.rollup
-                ((defaultJob (mkMessage "DedupParentOrig")) {dedupKey = Just (ReplaceDuplicate "parent-dedup-key")})
+                (setDedupKey (Just (ReplaceDuplicate "parent-dedup-key")) $ defaultJob (mkMessage "DedupParentOrig"))
                 (JT.leaf (defaultJob (mkMessage "DedupParentChild")) NE.:| [])
             )
 
       -- Try to replace - blocked because child rows exist
-      let replacement = (defaultJob (mkMessage "DedupParentReplacement")) {dedupKey = Just (ReplaceDuplicate "parent-dedup-key")}
+      let replacement = setDedupKey (Just (ReplaceDuplicate "parent-dedup-key")) $ defaultJob (mkMessage "DedupParentReplacement")
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
 
@@ -3053,7 +2893,7 @@ operationsSpec mkMessage mkResult runM = do
         runM env $
           HL.insertJobTree
             ( JT.rollup
-                ((defaultJob (mkMessage "DedupDLQParentOrig")) {dedupKey = Just (ReplaceDuplicate "dlq-dedup-key")})
+                (setDedupKey (Just (ReplaceDuplicate "dlq-dedup-key")) $ defaultJob (mkMessage "DedupDLQParentOrig"))
                 (JT.leaf (defaultJob (mkMessage "DedupDLQChild")) NE.:| [])
             )
 
@@ -3062,7 +2902,7 @@ operationsSpec mkMessage mkResult runM = do
       void $ runM env (HL.moveToDLQ "child failed" c)
 
       -- Try to replace parent - blocked because DLQ child row exists
-      let replacement = (defaultJob (mkMessage "DedupDLQParentRepl")) {dedupKey = Just (ReplaceDuplicate "dlq-dedup-key")}
+      let replacement = setDedupKey (Just (ReplaceDuplicate "dlq-dedup-key")) $ defaultJob (mkMessage "DedupDLQParentRepl")
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
 
@@ -3072,12 +2912,12 @@ operationsSpec mkMessage mkResult runM = do
       Just _existing <-
         runM
           env
-          (HL.insertJob (defaultJob (mkMessage "TreeDedupExisting")) {dedupKey = Just (IgnoreDuplicate "tree-dedup-root")})
+          (HL.insertJob $ setDedupKey (Just (IgnoreDuplicate "tree-dedup-root")) $ defaultJob (mkMessage "TreeDedupExisting"))
 
       -- Try to insert a tree whose root has the same dedup key
       let tree =
             JT.rollup
-              ((defaultJob (mkMessage "TreeDedupConflict")) {dedupKey = Just (IgnoreDuplicate "tree-dedup-root")})
+              (setDedupKey (Just (IgnoreDuplicate "tree-dedup-root")) $ defaultJob (mkMessage "TreeDedupConflict"))
               (JT.leaf (defaultJob (mkMessage "TreeDedupChild")) NE.:| [])
       result <- runM env (HL.insertJobTree tree)
       case result of

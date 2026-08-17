@@ -14,8 +14,8 @@ import Arbiter.Core.Job.Types
   , attempts
   , defaultGroupedJob
   , defaultJob
-  , notVisibleUntil
   , payload
+  , setNotVisibleUntil
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, MonadArbiter (..), ResultOf)
 import Arbiter.Core.PoolConfig (PoolConfig (..))
@@ -241,7 +241,7 @@ backlogJob now numGroups i =
   let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
    in case i `mod` 5 of
         0 -> defaultGroupedJob gk (BenchFlaky i)
-        1 -> (defaultGroupedJob gk (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (scheduledDelay i) now)}
+        1 -> setNotVisibleUntil (Just (addUTCTime (scheduledDelay i) now)) $ defaultGroupedJob gk (BenchBatch i)
         _ -> defaultGroupedJob gk (BenchBatch i)
 
 -- | Spread scheduled jobs across the first few seconds so they come due during
@@ -256,14 +256,14 @@ dormantJob :: UTCTime -> Int -> Int -> JobWrite BenchPayload
 dormantJob now numGroups i =
   let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
    in if odd (i `div` numGroups)
-        then (defaultGroupedJob gk (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (30 * 86400) now)}
+        then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultGroupedJob gk (BenchBatch i)
         else defaultGroupedJob gk (BenchBatch i)
 
 -- | Ungrouped 'dormantJob': alternate ready jobs with jobs parked 30 days out.
 dormantUngroupedJob :: UTCTime -> Int -> JobWrite BenchPayload
 dormantUngroupedJob now i =
   if odd i
-    then (defaultJob (BenchBatch i)) {notVisibleUntil = Just (addUTCTime (30 * 86400) now)}
+    then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultJob (BenchBatch i)
     else defaultJob (BenchBatch i)
 
 -- | A flaky job on its first attempt. The dispatcher increments attempts at

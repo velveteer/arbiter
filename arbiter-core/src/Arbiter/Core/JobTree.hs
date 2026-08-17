@@ -30,10 +30,10 @@ import Data.Text (Text)
 import UnliftIO.Exception qualified as UE
 
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , JobPayload
+  ( JobPayload
   , JobRead
   , JobWrite
+  , primaryKey
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
@@ -72,8 +72,7 @@ leaf = Leaf
 --   )
 -- @
 rollup :: JobWrite payload -> NonEmpty (JobTree payload) -> JobTree payload
-rollup parent children =
-  Finalizer (parent {parentState = Just emptyState}) children
+rollup = Finalizer
 
 -- | An empty rollup snapshot @{}@. The DB stores this on insert for any
 -- rollup finalizer. Presence-of-non-null is the canonical signal of
@@ -90,7 +89,7 @@ emptyState = Object (mempty :: Object)
 infixr 6 <~~
 
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
-parent <~~ children = Finalizer (parent {parentState = Just emptyState}) (fmap Leaf children)
+parent <~~ children = Finalizer parent (fmap Leaf children)
 
 -- | Insert a 'JobTree' atomically in a single transaction.
 --
@@ -132,14 +131,12 @@ insertJobTree schemaName tableName tree =
       -> JobTree payload
       -> m (NonEmpty (JobRead payload))
     go stamp mParentId susp (Leaf jobW) = do
-      let jobW' = jobW {parentId = mParentId, suspended = susp}
-      mInserted <- Ops.insertJobUnsafeStamped schemaName tableName stamp jobW'
+      mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId Nothing susp jobW
       case mInserted of
         Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: job insert failed (dedup conflict or invalid parent)"
         Just inserted -> pure (inserted :| [])
     go stamp mParentId susp (Finalizer jobW children) = do
-      let jobW' = jobW {parentId = mParentId, suspended = susp}
-      mInserted <- Ops.insertJobUnsafeStamped schemaName tableName stamp jobW'
+      mInserted <- Ops.insertJobTreeNodeStamped schemaName tableName stamp mParentId (Just emptyState) susp jobW
       case mInserted of
         Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict or invalid parent)"
         Just inserted -> do
@@ -150,11 +147,8 @@ insertJobTree schemaName tableName tree =
         insertChildren _ [] = pure []
         insertChildren parentPK children'@(Leaf _ : _) = do
           let (leaves, rest) = span isLeaf children'
-              leafWrites =
-                [ job {parentId = Just parentPK, suspended = False}
-                | Leaf job <- leaves
-                ]
-          leafJobs <- Ops.insertJobsBatchStamped schemaName tableName stamp leafWrites
+              leafWrites = [job | Leaf job <- leaves]
+          leafJobs <- Ops.insertJobTreeLeavesStamped schemaName tableName stamp parentPK leafWrites
           when (length leafJobs /= length leafWrites) $
             UE.throwIO $
               TreeInsertFailed "insertJobTree: leaf batch insert had dedup conflicts"

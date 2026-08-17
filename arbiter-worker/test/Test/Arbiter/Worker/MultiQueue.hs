@@ -14,7 +14,8 @@ import Test.Hspec (Spec, describe, it, shouldBe, shouldThrow)
 import UnliftIO (MonadUnliftIO, throwIO)
 
 import Arbiter.Worker
-  ( WorkerState (ShuttingDown)
+  ( WorkerPoolSelectionException (..)
+  , WorkerState (ShuttingDown)
   , getWorkerState
   , namedWorkerPool
   , runSelectedWorkerPools
@@ -44,7 +45,14 @@ instance MonadArbiter FailingDb where
 
 spec :: Spec
 spec =
-  describe "multi-pool lifecycle" $
+  describe "multi-pool lifecycle" $ do
+    it "rejects selected queues without a configured pool" $ do
+      let handler :: JobHandler FailingDb WorkerTestPayload ()
+          handler _ = pure ()
+      config <- transactionalWorkerConfig 1 handler
+      runFailingDb (runSelectedWorkerPools ["missing_queue"] [namedWorkerPool config])
+        `shouldThrow` (\(WorkerPoolSelectionException message) -> message == "No worker pool configured for: missing_queue")
+
     it "rethrows the first pool failure after winding down its peers" $ do
       let handler :: JobHandler FailingDb WorkerTestPayload ()
           handler _ = pure ()

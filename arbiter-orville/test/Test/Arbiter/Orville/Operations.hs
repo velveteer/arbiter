@@ -64,11 +64,9 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
       length claimed `shouldBe` 0
 
     it "shares transaction with user's database operations" $ \env -> do
-      let job = (defaultJob (TestMessage "SharedTx")) {groupKey = Just "g1"}
+      let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
       let testDLQJob =
-            (defaultJob (TestMessage "TestDLQ"))
-              { groupKey = Just "g2"
-              }
+            setGroupKey (Just "g2") $ defaultJob (TestMessage "TestDLQ")
 
       -- Start transaction with both user operation and job insertion
       runOrvilleTest env $ do
@@ -85,8 +83,8 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
       map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "TestDLQ"]
 
     it "rolls back both user operations and job when transaction fails" $ \env -> do
-      let job1 = (defaultJob (TestMessage "FirstJob")) {groupKey = Just "g1"}
-      let job2 = (defaultJob (TestMessage "SecondJob")) {groupKey = Just "g2"}
+      let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "FirstJob")
+      let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SecondJob")
 
       -- Start transaction, insert two jobs, then fail
       result <-

@@ -10,7 +10,14 @@ import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types
+  ( JobRead
+  , defaultJob
+  , payload
+  , primaryKey
+  , setGroupKey
+  , setMaxAttempts
+  )
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Worker (runWorkerPool)
@@ -89,10 +96,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
 
       -- Insert a job
       let job =
-            (defaultJob (SimpleTask "WillFail"))
-              { groupKey = Just "g1"
-              , maxAttempts = Just 1
-              }
+            setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (SimpleTask "WillFail")
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool with max 1 attempt so it goes to DLQ
@@ -159,9 +163,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
 
       -- Insert a job
       let job =
-            (defaultJob (SimpleTask "WillSucceed"))
-              { groupKey = Just "g1"
-              }
+            setGroupKey (Just "g1") $ defaultJob (SimpleTask "WillSucceed")
       void $ runOrvilleTest env $ HL.insertJob job
 
       -- Start worker pool

@@ -1037,12 +1037,11 @@ dropEventStreamingTriggersSQL schemaName tableName =
         , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingDLQTriggerName tableName) <> " ON " <> dlqTbl <> ";"
         ]
 
--- | Drop the schema-wide event-streaming function and any triggers attached to
--- queues no longer present in the current registry.
+-- | Drop the schema-wide event-streaming function after its triggers are detached.
 dropEventStreamingFunctionSQL :: SchemaName -> Text
 dropEventStreamingFunctionSQL schemaName =
   "DROP FUNCTION IF EXISTS "
     <> quoteIdentifier schemaName
     <> "."
     <> quoteIdentifier eventStreamingFunctionName
-    <> "() CASCADE;"
+    <> "();"

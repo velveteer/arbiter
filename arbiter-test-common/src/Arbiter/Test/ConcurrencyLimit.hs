@@ -40,9 +40,9 @@ import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
   , JobWrite
-  , dedupKey
   , defaultGroupedJob
   , defaultJob
+  , setDedupKey
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
@@ -510,7 +510,7 @@ concurrencyLimitSpec runM = do
 
   it "moves the count row when a dedup replace changes the concurrency key" $ \env -> do
     seed env 1
-    let mk suffix = (job "ck" suffix) {dedupKey = Just (ReplaceDuplicate "movekey")}
+    let mk suffix = setDedupKey (Just (ReplaceDuplicate "movekey")) $ job "ck" suffix
     enqueue env [mk "old"]
     enqueue env [mk "new"]
     inFlight env (fullKey "ck" "old") `shouldReturn` Just 0

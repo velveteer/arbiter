@@ -10,7 +10,22 @@ module Test.Arbiter.Servant.API (spec) where
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
+import Arbiter.Core.Job.Types
+  ( DedupKey (..)
+  , JobRead
+  , JobStatus (..)
+  , claimSeq
+  , dedupKey
+  , defaultGroupedJob
+  , defaultJob
+  , groupKey
+  , notVisibleUntil
+  , payload
+  , primaryKey
+  , setDedupKey
+  , setNotVisibleUntil
+  , suspended
+  )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
@@ -270,7 +285,7 @@ spec connStr = do
                 [ ApiJobWrite
                     (defaultJob (TestMessage "new job"))
                 , ApiJobWrite
-                    ((defaultJob (TestMessage "duplicate")) {dedupKey = Just (IgnoreDuplicate "batch-dedup")})
+                    (setDedupKey (Just (IgnoreDuplicate "batch-dedup")) $ defaultJob (TestMessage "duplicate"))
                 ]
           )
 
@@ -444,7 +459,7 @@ spec connStr = do
         -- ready
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "ready-job"))
         -- scheduled: future visibility, never attempted
-        _ <- runSimpleDb mkEnv $ HL.insertJob ((defaultJob (TestMessage "scheduled-job")) {notVisibleUntil = Just future})
+        _ <- runSimpleDb mkEnv $ HL.insertJob (setNotVisibleUntil (Just future) $ defaultJob (TestMessage "scheduled-job"))
         -- suspended
         Just sj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "suspended-job"))
         _ <- runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable (primaryKey sj)
@@ -813,7 +828,7 @@ spec connStr = do
     it "POST /:id/promote makes a delayed job immediately visible" $ do
       futureTime <- liftIO $ truncateToMicros . addUTCTime 3600 <$> getCurrentTime
       jobId <- liftIO $ do
-        let job = (defaultJob (TestMessage "promote delayed")) {notVisibleUntil = Just futureTime}
+        let job = setNotVisibleUntil (Just futureTime) $ defaultJob (TestMessage "promote delayed")
         Just inserted <- runSimpleDb mkEnv $ HL.insertJob job
         pure $ primaryKey inserted
 

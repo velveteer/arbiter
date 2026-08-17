@@ -23,17 +23,23 @@ import Arbiter.Test.Setup (cleanupData, setupOnce)
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
-import Test.Hspec (Spec, beforeAll, describe, it, shouldBe)
+import Test.Hspec (Spec, beforeAll, describe, it, shouldBe, shouldSatisfy)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
-import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
+import Arbiter.Worker.Config
+  ( WorkerConfig (..)
+  , defaultBatchedWorkerConfig
+  , transactionalWorkerConfig
+  , validateWorkerConfig
+  )
 
 type SizingTestRegistry = '[Queue "arbiter_worker_sizing_test" WorkerTestPayload]
 
@@ -47,7 +53,26 @@ cleanup connStr = do
   close conn
 
 spec :: ByteString -> Spec
-spec connStr =
+spec connStr = do
+  describe "worker configuration" $ do
+    it "rejects a non-positive worker count" $ do
+      let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
+          handler _conn _job = pure ()
+      config <- transactionalWorkerConfig 0 handler :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
+      validateWorkerConfig config `shouldSatisfy` isLeft
+
+    it "rejects a non-positive handler batch size" $ do
+      config <-
+        defaultBatchedWorkerConfig 1 0 (\_ _ -> pure ())
+          :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
+      validateWorkerConfig config `shouldSatisfy` isLeft
+
+    it "rejects a heartbeat that can outlive visibility" $ do
+      let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
+          handler _conn _job = pure ()
+      config <- transactionalWorkerConfig 1 handler :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
+      validateWorkerConfig config {jobHeartbeatInterval = visibilityTimeout config} `shouldSatisfy` isLeft
+
   beforeAll (setupOnce connStr testSchema testSchema True) $
     describe "pool sizing" $
       it "sizes the pool for the workers and processes jobs" $ do

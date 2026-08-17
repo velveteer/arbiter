@@ -91,6 +91,7 @@ library
 
   other-modules:
     Arbiter.Core.HighLevel.Runtime
+    Arbiter.Core.Job.Types.Internal
     Arbiter.Core.Operations.Gates
     Arbiter.Core.Operations.Workers
 

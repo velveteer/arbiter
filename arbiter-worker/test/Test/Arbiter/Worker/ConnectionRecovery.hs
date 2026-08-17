@@ -9,7 +9,13 @@
 module Test.Arbiter.Worker.ConnectionRecovery (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types
+  ( JobRead
+  , defaultJob
+  , payload
+  , setGroupKey
+  , setMaxAttempts
+  )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnvWithPool, inTransaction, runSimpleDb)
@@ -64,7 +70,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         forM_ [1 :: Int .. 3] $ \i ->
           runSimpleDb env $
             void $
-              HL.insertJob (defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))) {groupKey = Just "g1"}
+              HL.insertJob $
+                setGroupKey (Just "g1") $
+                  defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -126,7 +134,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         -- Insert the slow job that will get its connection killed
         runSimpleDb env $
           void $
-            HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1", maxAttempts = Just 3}
+            HL.insertJob $
+              setMaxAttempts (Just 3) $
+                setGroupKey (Just "g1") $
+                  defaultJob (SlowTask 1)
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -179,5 +190,7 @@ insertJobsDirect _env connStr payloads = do
     forM_ payloads $ \p ->
       inTransaction @WorkerTestRegistry conn testSchema $
         void $
-          HL.insertJob (defaultJob p) {groupKey = Just "g1"}
+          HL.insertJob $
+            setGroupKey (Just "g1") $
+              defaultJob p
   close conn

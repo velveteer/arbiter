@@ -247,7 +247,7 @@ Jobs carry an integer `priority` (default `0`), and lower numbers are claimed fi
 
 ```haskell
 -- runs behind default-priority work
-job = (Arb.defaultJob payload) { Arb.priority = 10 }
+job = Arb.defaultJob payload & Arb.setPriority 10
 ```
 
 ### Deduplication
@@ -256,10 +256,10 @@ Control duplicate job insertion with dedup keys:
 
 ```haskell
 -- IgnoreDuplicate: silently skip if key exists
-job1 = (Arb.defaultJob payload) { Arb.dedupKey = Just (IgnoreDuplicate "order-123") }
+job1 = Arb.defaultJob payload & Arb.setDedupKey (Just $ IgnoreDuplicate "order-123")
 
 -- ReplaceDuplicate: update existing job's payload and reset attempts
-job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-123") }
+job2 = Arb.defaultJob payload & Arb.setDedupKey (Just $ ReplaceDuplicate "order-123")
 ```
 
 ### Job Results
@@ -422,9 +422,11 @@ Right healthCheck = Cron.cronJob
 Right nightlyReport = Cron.cronJob
   "nightly-report"
   "0 3 * * *"           -- 03:00 UTC daily
-  Cron.AllowOverlap     -- each tick produces its own job
-  (\kind tick -> (Arb.defaultJob (GenerateReport tick))
-    { Arb.priority = case kind of Cron.Replay -> 10; Cron.Live -> 0 })
+  Cron.AllowOverlap $ \kind tick -> -- each tick produces its own job
+    let jobPriority = case kind of
+          Cron.Replay -> 10
+          Cron.Live -> 0
+     in Arb.defaultJob (GenerateReport tick) & Arb.setPriority jobPriority
 let nightlyWithBackfill = nightlyReport { Cron.backfill = Cron.Backfill 86400 }
 
 -- in a specific timezone (validated at construction)
@@ -614,8 +616,8 @@ Completed jobs are deleted on ack by default. Set `archiveFor` to keep a copy in
 a per-queue archive for that many seconds after completion.
 
 ```haskell
-job1 = (Arb.defaultJob payload) { Arb.archiveFor = Just Arb.dayRetention }       -- 24h
-job2 = (Arb.defaultJob payload) { Arb.archiveFor = Just (Arb.dayRetention * 7) } -- 1 week
+job1 = Arb.defaultJob payload & Arb.setArchiveFor (Just Arb.dayRetention)       -- 24h
+job2 = Arb.defaultJob payload & Arb.setArchiveFor (Just $ Arb.dayRetention * 7) -- 1 week
 ```
 
 Archiving is opt-in per job (`archiveFor = Nothing` deletes as before), and
