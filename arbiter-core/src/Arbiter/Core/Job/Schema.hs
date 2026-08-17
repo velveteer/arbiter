@@ -958,10 +958,9 @@ dropNotifyFunctionSQL schemaName tableName =
 -- Event Streaming Triggers (for admin UI / SSE)
 -- ---------------------------------------------------------------------------
 
--- | Shared event streaming function (one per schema). Fires on
--- INSERT\/UPDATE\/DELETE of job tables and INSERT on DLQ tables. Sends a JSON
--- event via @pg_notify@ on the @arbiter_job_events@ channel. Uses
--- @TG_TABLE_NAME@ and @TG_OP@ so a single function covers all tables.
+-- | Event-streaming function that receives the logical queue name and DLQ flag
+-- from each trigger. Trigger arguments avoid inferring either value from table
+-- suffixes, so queue names ending in @_dlq@ remain unambiguous.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
@@ -970,13 +969,12 @@ createEventStreamingFunctionSQL schemaName =
         , "DECLARE"
         , "  event_type text;"
         , "  job_id bigint;"
+        , "  queue_name text := TG_ARGV[0];"
+        , "  is_dlq boolean := TG_ARGV[1]::boolean;"
         , "BEGIN"
         , "  CASE TG_OP"
         , "    WHEN 'INSERT' THEN"
-        , "      event_type := CASE"
-        , "        WHEN TG_TABLE_NAME LIKE '%_dlq' THEN 'job_dlq'"
-        , "        ELSE 'job_inserted'"
-        , "      END;"
+        , "      event_type := CASE WHEN is_dlq THEN 'job_dlq' ELSE 'job_inserted' END;"
         , "      job_id := NEW.id;"
         , "    WHEN 'UPDATE' THEN"
         , "      event_type := 'job_updated';"
@@ -989,7 +987,7 @@ createEventStreamingFunctionSQL schemaName =
         , "  PERFORM pg_notify('" <> eventStreamingChannel <> "',"
         , "    json_build_object("
         , "      'event', event_type,"
-        , "      'table', regexp_replace(TG_TABLE_NAME, '_dlq$', ''),"
+        , "      'table', queue_name,"
         , "      'job_id', job_id"
         , "    )::text);"
         , "  RETURN NULL;"
@@ -997,37 +995,32 @@ createEventStreamingFunctionSQL schemaName =
         , "$$ LANGUAGE plpgsql;"
         ]
 
--- | SQL to create event streaming triggers for a table and its DLQ
---
--- Creates a combined INSERT/UPDATE/DELETE trigger on the main table and an
--- INSERT trigger on the DLQ table, both calling the shared @notify_job_event@
--- function. Also drops any legacy per-operation triggers left by older versions
--- of @setupEventTriggers@.
-createEventStreamingTriggersSQL :: Text -> Text -> Text
+-- | Install event-streaming triggers with explicit logical queue metadata.
+createEventStreamingTriggersSQL :: SchemaName -> TableName -> Text
 createEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName
       funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
-      trigName = eventStreamingTriggerName tableName
-      dlqTrigName = eventStreamingDLQTriggerName tableName
-   in T.unlines
-        [ -- Drop legacy per-operation triggers (from setupEventTriggers)
-          "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_insert" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_update" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_delete" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_dlq_insert" <> " ON " <> dlqTbl <> ";"
-        , ""
-        , -- Create combined triggers (drop first for idempotency)
-          "DROP TRIGGER IF EXISTS " <> quoteIdentifier trigName <> " ON " <> tbl <> ";"
-        , "CREATE TRIGGER " <> quoteIdentifier trigName
-        , "AFTER INSERT OR UPDATE OR DELETE ON " <> tbl
-        , "FOR EACH ROW EXECUTE FUNCTION " <> funcName <> "();"
-        , ""
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier dlqTrigName <> " ON " <> dlqTbl <> ";"
-        , "CREATE TRIGGER " <> quoteIdentifier dlqTrigName
-        , "AFTER INSERT ON " <> dlqTbl
-        , "FOR EACH ROW EXECUTE FUNCTION " <> funcName <> "();"
-        ]
+      triggerCall isDLQ =
+        "FOR EACH ROW EXECUTE FUNCTION "
+          <> funcName
+          <> "("
+          <> quoteLiteral tableName
+          <> ", "
+          <> quoteLiteral isDLQ
+          <> ");"
+   in dropEventStreamingTriggersSQL schemaName tableName
+        <> T.unlines
+          [ "CREATE TRIGGER " <> quoteIdentifier (eventStreamingTriggerName tableName)
+          , "AFTER INSERT OR UPDATE OR DELETE ON " <> tbl
+          , triggerCall "false"
+          , ""
+          , "CREATE TRIGGER " <> quoteIdentifier (eventStreamingDLQTriggerName tableName)
+          , "AFTER INSERT ON " <> dlqTbl
+          , triggerCall "true"
+          ]
+  where
+    quoteLiteral = ("'" <>) . (<> "'") . T.replace "'" "''"
 
 -- | Drop current and legacy event-streaming triggers for a queue and its DLQ.
 -- The shared function is dropped separately after every queue is detached.
@@ -1044,11 +1037,12 @@ dropEventStreamingTriggersSQL schemaName tableName =
         , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingDLQTriggerName tableName) <> " ON " <> dlqTbl <> ";"
         ]
 
--- | Drop the schema-wide event-streaming function after its triggers are gone.
+-- | Drop the schema-wide event-streaming function and any triggers attached to
+-- queues no longer present in the current registry.
 dropEventStreamingFunctionSQL :: SchemaName -> Text
 dropEventStreamingFunctionSQL schemaName =
   "DROP FUNCTION IF EXISTS "
     <> quoteIdentifier schemaName
     <> "."
     <> quoteIdentifier eventStreamingFunctionName
-    <> "();"
+    <> "() CASCADE;"

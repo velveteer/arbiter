@@ -3,10 +3,12 @@ name:          arbiter-demo
 version:       0.1.0.0
 synopsis:      Demo application for arbiter-servant with admin UI
 license:       MIT
+license-file:    LICENSE
 author:        Joshua Miller
 maintainer:    joshua.ian.miller@pm.me
 category:      Web
 build-type:    Simple
+extra-doc-files: README.md
 homepage:      https://github.com/velveteer/arbiter
 bug-reports:   https://github.com/velveteer/arbiter/issues
 
@@ -38,7 +40,7 @@ executable arbiter-demo
     , arbiter-simple
     , arbiter-worker
     , async                                 >=2.2
-    , base                                  >=4.14 && <5
+    , base                                  >=4.20 && <5
     , bytestring                            >=0.10
     , hs-opentelemetry-api                  >=1.0  && <1.1
     , hs-opentelemetry-instrumentation-wai  >=1.0  && <1.1

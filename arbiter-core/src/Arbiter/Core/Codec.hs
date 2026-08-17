@@ -51,7 +51,7 @@ module Arbiter.Core.Codec
   , cronScheduleRowCodec
 
     -- * Worker codecs
-  , workerRowCodec
+  , workerRowWithHealthCodec
 
     -- * Queue codecs
   , queueRowCodec
@@ -84,7 +84,7 @@ import Arbiter.Core.Job.Types
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
-import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
+import Arbiter.Core.Worker (WorkerHealth (Live), WorkerRow (..))
 
 -- | Scalar PostgreSQL column type. The GADT tag recovers the Haskell type.
 data Col a where
@@ -410,9 +410,11 @@ cronScheduleRowCodec =
 -- Worker codecs
 -- ---------------------------------------------------------------------------
 
-workerRowCodec :: RowCodec WorkerRow
-workerRowCodec =
-  WorkerRow
+-- | Worker columns plus the raw derived health token. The operation layer
+-- validates the token before returning a 'WorkerRow'.
+workerRowWithHealthCodec :: RowCodec (WorkerRow, Text)
+workerRowWithHealthCodec =
+  toRow
     <$> col "worker_id" CUuid
     <*> col "queue_name" CText
     <*> ncol "host_name" CText
@@ -423,7 +425,12 @@ workerRowCodec =
     <*> col "paused" CBool
     <*> col "stale_threshold_secs" CFloat8
     <*> ncol "metadata" CJsonb
-    <*> (workerHealthFromText <$> col "health" CText)
+    <*> col "health" CText
+  where
+    toRow wid queue host count started heartbeat shuttingDown paused stale metadata rawHealth =
+      ( WorkerRow wid queue host count started heartbeat shuttingDown paused stale metadata Live
+      , rawHealth
+      )
 
 -- ---------------------------------------------------------------------------
 -- Queue codecs

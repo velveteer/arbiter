@@ -1,38 +1,10 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Compositional DSL for building multi-level job trees.
---
--- A 'JobTree' describes a hierarchy of parent-child jobs that is inserted
--- atomically (in a single transaction). Trees can be arbitrarily deep.
---
--- Children run immediately. The finalizer (parent) is suspended until all
--- children complete, then becomes claimable for a completion round.
--- Child results are auto-stored in @{queue}_results@. A finalizer reads them
--- explicitly with 'Arbiter.Worker.childResults' or
--- 'Arbiter.Worker.mergedChildResults'.
---
--- __Important:__ The results table is a transient coordination buffer, not
--- persistent storage. When the finalizer is acked (deleted), @ON DELETE CASCADE@
--- wipes all associated result rows. If you need results to survive beyond the
--- job tree's lifetime, persist them in your finalizer handler (e.g. write to
--- your own database table, publish to a message broker, etc.).
---
--- @
--- import Arbiter.Core.JobTree
---
--- -- Flat (leaf-only children):
--- myTree = defaultJob (CompileReport "q4")
---   \<~~ (defaultJob (RenderChart "sales") :| [defaultJob (RenderChart "growth")])
---
--- -- Nested:
--- myTree = rollup (defaultJob root)
---   ( (defaultJob mid \<~~ (defaultJob leaf1 :| [defaultJob leaf2]))
---   :| [leaf (defaultJob leaf3)]
---   )
---
--- result <- insertJobTree "arbiter" "reports" myTree
--- @
+-- | Atomic parent-child job trees. Children run before their suspended
+-- finalizer, which becomes claimable when no children remain in the main queue.
+-- Child results are transient and are deleted when the finalizer is acked.
+-- Finalizers must persist any results that need to outlive the tree.
 module Arbiter.Core.JobTree
   ( -- * Tree type
     JobTree
@@ -51,7 +23,6 @@ module Arbiter.Core.JobTree
 import Control.Exception (Exception)
 import Control.Monad (when)
 import Data.Aeson (Object, Value (..))
-import Data.Either (partitionEithers)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -83,10 +54,6 @@ data JobTree payload
     -- all children complete, then it becomes claimable for a completion round.
     Finalizer (JobWrite payload) (NonEmpty (JobTree payload))
 
--- ---------------------------------------------------------------------------
--- Smart constructors
--- ---------------------------------------------------------------------------
-
 -- | A single job (leaf node) - a terminal node with no children.
 leaf :: JobWrite payload -> JobTree payload
 leaf = Leaf
@@ -115,10 +82,6 @@ rollup parent children =
 emptyState :: Value
 emptyState = Object (mempty :: Object)
 
--- ---------------------------------------------------------------------------
--- Operators
--- ---------------------------------------------------------------------------
-
 -- | Infix 'rollup' for leaf-only children.
 --
 -- @
@@ -128,10 +91,6 @@ infixr 6 <~~
 
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
 parent <~~ children = Finalizer (parent {parentState = Just emptyState}) (fmap Leaf children)
-
--- ---------------------------------------------------------------------------
--- Interpreter
--- ---------------------------------------------------------------------------
 
 -- | Insert a 'JobTree' atomically in a single transaction.
 --
@@ -184,19 +143,26 @@ insertJobTree schemaName tableName tree =
       case mInserted of
         Nothing -> UE.throwIO $ TreeInsertFailed "insertJobTree: parent insert failed (dedup conflict or invalid parent)"
         Just inserted -> do
-          let parentPK = primaryKey inserted
-              (leaves, subTrees) =
-                partitionEithers
-                  [case c of Leaf j -> Left j; t -> Right t | c <- NE.toList children]
-
-          -- Recursively insert sub-finalizers first (preserves pre-order)
-          subTreeJobs <- traverse (go stamp (Just parentPK) True) subTrees
-
-          -- Batch-insert all leaf children in one roundtrip
-          let leafWrites = [j {parentId = Just parentPK, suspended = False} | j <- leaves]
+          descendants <- insertChildren (primaryKey inserted) (NE.toList children)
+          pure (inserted :| descendants)
+      where
+        -- Batch adjacent leaves without reordering them around nested trees.
+        insertChildren _ [] = pure []
+        insertChildren parentPK children'@(Leaf _ : _) = do
+          let (leaves, rest) = span isLeaf children'
+              leafWrites =
+                [ job {parentId = Just parentPK, suspended = False}
+                | Leaf job <- leaves
+                ]
           leafJobs <- Ops.insertJobsBatchStamped schemaName tableName stamp leafWrites
-          when (length leafJobs /= length leaves) $
+          when (length leafJobs /= length leafWrites) $
             UE.throwIO $
               TreeInsertFailed "insertJobTree: leaf batch insert had dedup conflicts"
+          (leafJobs <>) <$> insertChildren parentPK rest
+        insertChildren parentPK (subTree : rest) = do
+          subTreeJobs <- go stamp (Just parentPK) True subTree
+          remaining <- insertChildren parentPK rest
+          pure (NE.toList subTreeJobs <> remaining)
 
-          pure (inserted :| concatMap NE.toList subTreeJobs <> leafJobs)
+        isLeaf (Leaf _) = True
+        isLeaf _ = False

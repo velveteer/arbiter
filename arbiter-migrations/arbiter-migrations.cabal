@@ -6,11 +6,13 @@ description:
   Tracked DDL migrations for arbiter job queue tables via postgresql-migration.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+extra-doc-files:    CHANGELOG.md, README.md
+extra-source-files: test/golden/*.sql
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -34,7 +36,7 @@ library
   exposed-modules: Arbiter.Migrations
   build-depends:
     , arbiter-core          <0.2
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , containers            >=0.6  && <0.9
     , postgresql-libpq      >=0.10 && <0.12
@@ -51,7 +53,7 @@ test-suite arbiter-migrations-tests
     , arbiter-core
     , aeson                 >=2.0  && <2.3
     , arbiter-migrations
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , filepath              >=1.4  && <1.6
     , postgresql-migration  >=0.2  && <0.3

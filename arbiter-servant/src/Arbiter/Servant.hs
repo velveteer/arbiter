@@ -11,7 +11,8 @@
 --
 -- main :: IO ()
 -- main = do
---   -- Create server config (creates its own pool and registers event triggers)
+--   -- Run migrations with event streaming enabled before starting the server.
+--   -- The server config creates its own connection pool.
 --   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
 --
 --   -- Start API server on port 8080

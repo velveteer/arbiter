@@ -6,10 +6,12 @@ description:
   Performance benchmarks for the arbiter PostgreSQL job queue library.
 
 license:       MIT
+license-file:    LICENSE
 author:        Joshua Miller
 maintainer:    joshua.ian.miller@pm.me
 category:      Database
 build-type:    Simple
+extra-doc-files: README.md
 homepage:      https://github.com/velveteer/arbiter
 bug-reports:   https://github.com/velveteer/arbiter/issues
 
@@ -43,7 +45,7 @@ benchmark benchmarks
     , arbiter-simple
     , arbiter-worker
     , async                 >=2.2
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10
     , exceptions            >=0.10
     , hasql                 >=1.9

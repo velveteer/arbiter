@@ -6,11 +6,12 @@ description:
   Bootstrap 5 + Alpine.js admin dashboard served from embedded static files.
 
 license:            MIT
+license-file:    LICENSE
 author:             Joshua Miller
 maintainer:         joshua.ian.miller@pm.me
 category:           Web
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
+extra-doc-files:    CHANGELOG.md, README.md
 extra-source-files:
   static/css/*.css
   static/favicon.ico
@@ -44,7 +45,7 @@ library
   exposed-modules: Arbiter.Servant.UI
   build-depends:
     , arbiter-servant  <0.2
-    , base             >=4.14   && <5
+    , base             >=4.20   && <5
     , bytestring       >=0.10   && <0.13
     , file-embed       >=0.0.10 && <0.1
     , filepath         >=1.4    && <1.6

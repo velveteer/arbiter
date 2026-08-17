@@ -146,7 +146,7 @@ module Arbiter.Core.HighLevel
 
 import Control.Monad (void, when)
 import Data.Aeson (Value)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -161,6 +161,19 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
+import Arbiter.Core.HighLevel.Runtime
+  ( deregisterWorker
+  , ensureQueue
+  , getQueue
+  , heartbeatWorker
+  , listQueues
+  , listWorkers
+  , markWorkerShuttingDown
+  , registerWorker
+  , setQueuePaused
+  , setWorkerPaused
+  , sweepStaleWorkers
+  )
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (ClaimSeq, Job (..), JobId, JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
@@ -1293,141 +1306,6 @@ refreshAllGroupsFully
 refreshAllGroupsFully = do
   schemaName <- getSchema
   Ops.refreshAllGroupsFully schemaName (registryTableNames (Proxy @(RegistryOf m)))
-
--- ---------------------------------------------------------------------------
--- Worker Registry Operations
--- ---------------------------------------------------------------------------
-
--- | Register a worker pool. See 'Ops.registerWorker'.
-registerWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> Text
-  -- ^ Queue name
-  -> Maybe Text
-  -- ^ Host name
-  -> Maybe Int32
-  -- ^ Worker thread count
-  -> NominalDiffTime
-  -- ^ Stale threshold seconds
-  -> Maybe Value
-  -- ^ Extra JSONB metadata
-  -> m (Maybe Bool)
-registerWorker workerId queue host threads staleThreshold metadata = do
-  schemaName <- getSchema
-  Ops.registerWorker schemaName workerId queue host threads staleThreshold metadata
-
--- | Bump a worker's heartbeat. See 'Ops.heartbeatWorker'.
-heartbeatWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m (Maybe Bool)
-heartbeatWorker workerId = do
-  schemaName <- getSchema
-  Ops.heartbeatWorker schemaName workerId
-
--- | Set the @paused@ flag for a registered worker.
-setWorkerPaused
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> Bool
-  -> m Int64
-setWorkerPaused workerId p = do
-  schemaName <- getSchema
-  Ops.setWorkerPaused schemaName workerId p
-
--- | Mark a worker as gracefully draining.
-markWorkerShuttingDown
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m Int64
-markWorkerShuttingDown workerId = do
-  schemaName <- getSchema
-  Ops.markWorkerShuttingDown schemaName workerId
-
--- | Remove a worker row.
-deregisterWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m Int64
-deregisterWorker workerId = do
-  schemaName <- getSchema
-  Ops.deregisterWorker schemaName workerId
-
--- | List workers, optionally scoped to a queue and a heartbeat-age threshold.
-listWorkers
-  :: forall m
-   . (MonadArbiter m)
-  => Maybe Text
-  -- ^ Queue name. 'Nothing' returns workers from all queues.
-  -> Maybe NominalDiffTime
-  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
-  -> m [WorkerRow]
-listWorkers mQueue mLiveSecs = do
-  schemaName <- getSchema
-  Ops.listWorkers schemaName mQueue mLiveSecs
-
--- | Delete worker rows older than each row's own @stale_threshold_secs@.
-sweepStaleWorkers
-  :: forall m
-   . (MonadArbiter m)
-  => m Int64
-sweepStaleWorkers = do
-  schemaName <- getSchema
-  Ops.sweepStaleWorkers schemaName
-
--- ---------------------------------------------------------------------------
--- Queue Operations
--- ---------------------------------------------------------------------------
-
--- | Insert an @arbiter_queues@ row with defaults if one doesn't already exist.
-ensureQueue
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> m Int64
-ensureQueue queue = do
-  schemaName <- getSchema
-  Ops.ensureQueue schemaName queue
-
--- | Set the queue's @paused@ flag. Fans out a NOTIFY to each registered worker
--- on the queue.
-setQueuePaused
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> Bool
-  -> m Int64
-setQueuePaused queue p = do
-  schemaName <- getSchema
-  Ops.setQueuePaused schemaName queue p
-
--- | Get the queue's row. 'Nothing' if absent.
-getQueue
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> m (Maybe QueueRow)
-getQueue queue = do
-  schemaName <- getSchema
-  Ops.getQueue schemaName queue
-
--- | List all queues registered in this schema.
-listQueues
-  :: forall m
-   . (MonadArbiter m)
-  => m [QueueRow]
-listQueues = do
-  schemaName <- getSchema
-  Ops.listQueues schemaName
 
 -- ---------------------------------------------------------------------------
 -- Cron Schedules

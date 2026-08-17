@@ -4,11 +4,12 @@ version:         0.1.0.0
 synopsis:        Hasql backend for arbiter
 description:     Hasql backend for arbiter.
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+extra-doc-files: CHANGELOG.md, README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -39,7 +40,7 @@ library
 
   build-depends:
     , arbiter-core      <0.2
-    , base              >=4.14 && <5
+    , base              >=4.20 && <5
     , bytestring        >=0.10 && <0.13
     , exceptions        >=0.10 && <0.11
     , hasql             >=1.9  && <1.11

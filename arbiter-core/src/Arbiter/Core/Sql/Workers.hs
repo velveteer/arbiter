@@ -20,7 +20,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID.Types (UUID)
 
-import Arbiter.Core.Codec (codecColumns, workerRowCodec)
+import Arbiter.Core.Codec (codecColumns, workerRowWithHealthCodec)
 import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Sql.QQ (sql)
@@ -29,7 +29,7 @@ import Arbiter.Core.Worker (WorkerRow, arbiterWorkersTable)
 
 -- | Worker SELECT columns from the codec, with @health@ rendered as a computed expression.
 workerColumnList :: Text
-workerColumnList = T.intercalate ", " (map render (codecColumns workerRowCodec))
+workerColumnList = T.intercalate ", " (map render (codecColumns workerRowWithHealthCodec))
   where
     render "health" = workerHealthCaseSQL <> " AS health"
     render c = c
@@ -119,12 +119,12 @@ deleteWorkerSQL schemaName workerId =
    in [sql|DELETE FROM ${tbl} WHERE worker_id = #{workerId :: CUuid}|]
 
 -- | List workers, with NULL parameters short-circuiting the corresponding filter.
-listWorkersSQL :: SchemaName -> Maybe Text -> Maybe Double -> Query WorkerRow
+listWorkersSQL :: SchemaName -> Maybe Text -> Maybe Double -> Query (WorkerRow, Text)
 listWorkersSQL schemaName queue liveSecs =
   let tbl = arbiterWorkersTable schemaName
       cols = workerColumnList
    in rows
-        workerRowCodec
+        workerRowWithHealthCodec
         [sql|
           WITH filt AS (SELECT #{queue :: Maybe CText}::text AS queue, #{liveSecs :: Maybe CFloat8}::float8 AS live_secs)
           SELECT ${cols} FROM ${tbl}, filt

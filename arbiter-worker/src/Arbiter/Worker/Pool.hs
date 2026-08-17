@@ -7,13 +7,9 @@
 -- orchestration lives in "Arbiter.Worker.MultiQueue".
 module Arbiter.Worker.Pool
   ( runWorkerPool
-  , childResults
-  , mergedChildResults
-  , mergeChildResults
   , runReaperOp
   ) where
 
-import Arbiter.Core.Concurrency.Spec (registryConcurrencyPolicies)
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
   , JobException (..)
@@ -37,7 +33,6 @@ import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
-import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Arbiter.Core.Trace
   ( ConsumeShape (..)
   , ConsumeSpan
@@ -54,18 +49,16 @@ import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Aeson (Value)
 import Data.Bifunctor (second)
 import Data.Bool (bool)
 import Data.Either (fromRight, partitionEithers)
-import Data.Foldable (fold, foldMap', toList, traverse_)
+import Data.Foldable (toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Map (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
-import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -116,6 +109,7 @@ import Arbiter.Worker.Logger.Internal
   , withJobContextList
   , withJobContextOne
   )
+import Arbiter.Worker.Reaper (reaperLoop, runReaperOp)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.Settle
   ( CancelHandoff
@@ -442,21 +436,6 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
               tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> T.pack (displayException e)
               threadDelay 2_000_000
 
--- | Read and decode child results for a rollup finalizer.
--- Decode failures appear as @Left decodeError@ - the child succeeded but
--- its result JSON doesn't match the expected type.
-readChildResults
-  :: (FromJSON a, MonadArbiter m)
-  => Text
-  -> Job.JobRead payload
-  -> m (Map.Map Int64 (Either Text a), Map.Map Int64 T.Text)
-readChildResults schemaName job = do
-  (results, failures, mSnapshot, dlqFailures) <-
-    Ops.readChildResultsRaw schemaName (Job.queueName job) (Job.primaryKey job)
-  let raw = Ops.mergeRawChildResults results failures mSnapshot
-      merged = Map.map (>>= decodeJobResult) raw
-  pure (merged, dlqFailures)
-
 processJobsWithRetry
   :: forall payload m
    . ( EncodeJobResult (ResultOf m payload)
@@ -777,34 +756,6 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
     failJob failure job =
       handleJobFailure config Ops.LocksHeld shape failure startTime endTime job
 
--- | A rollup parent's immediate child results, keyed by child id, with @Left@
--- for results that failed to decode, plus a map of DLQ'd immediate children.
--- Both are empty for a job with no children.
-childResults
-  :: (FromJSON (ResultOf m payload), MonadArbiter m)
-  => Job.JobRead payload
-  -> m (Map.Map Int64 (Either Text (ResultOf m payload)), Map.Map Int64 T.Text)
-childResults job = do
-  schemaName <- getSchema
-  readChildResults schemaName job
-
--- | 'childResults' with the child results 'Monoid'-merged (decode failures
--- contribute 'mempty').
-mergedChildResults
-  :: ( FromJSON (ResultOf m payload)
-     , MonadArbiter m
-     , Monoid (ResultOf m payload)
-     )
-  => Job.JobRead payload
-  -> m (ResultOf m payload, Map.Map Int64 T.Text)
-mergedChildResults job = do
-  (results, dlqFailures) <- childResults job
-  pure (mergeChildResults results, dlqFailures)
-
--- | Fold child results via 'Monoid', treating failures as 'mempty'.
-mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
-mergeChildResults = foldMap' fold
-
 -- | Store a job's result for its parent rollup, if it has one.
 storeJobResult
   :: (EncodeJobResult result, MonadArbiter m)
@@ -994,120 +945,3 @@ handleJobFailure config locks shape (errorMsg, failureKind) startTime endTime jo
     wrote reason after rowsAffected
       | rowsAffected == 0 = Left reason
       | otherwise = Right (fireFailure config shape job errorMsg startTime endTime >> after)
-
--- | Refreshes the groups tables, sweeps stale worker registry rows, moves
--- exhausted jobs to the DLQ, and purges expired archived jobs (all schema-wide).
--- Each gated so only one pool runs it per interval.
-reaperLoop
-  :: forall m
-   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
-     , MonadArbiter m
-     , RegistryTables (RegistryOf m)
-     )
-  => LogConfig
-  -> (MaintenanceOp -> Int64 -> m ())
-  -- ^ Reports the rows each op touched.
-  -> NominalDiffTime
-  -- ^ How often this loop runs.
-  -> NominalDiffTime
-  -- ^ Abort any single statement that exceeds this.
-  -> m ()
-reaperLoop logCfg report interval stmtTimeout = do
-  let reaped op n = runHook logCfg "onMaintenance" $ report op n
-      intervalSecs = ceiling interval
-      queues = registryTableNames (Proxy @(RegistryOf m))
-      pruneInterval = interval * 12
-      hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
-      hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
-  schemaName <- Arb.getSchema
-  let
-    -- Reports the rows the op touched.
-    gatedCount :: MaintenanceOp -> NominalDiffTime -> m Int64 -> m ()
-    gatedCount op every work =
-      runReaperOp logCfg schemaName stmtTimeout (maintenanceOpName op) every work
-        >>= traverse_ (reaped op)
-    reportFailed :: MaintenanceOp -> [Text] -> m ()
-    reportFailed op =
-      traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName op <> " failed for queue: " <> queue)
-    -- Reports what a per-queue sweep touched, whichever gate ran it.
-    reportSwept :: MaintenanceOp -> (Int64 -> m ()) -> Maybe (Int64, [Text]) -> m ()
-    reportSwept op done =
-      traverse_ (\(n, failed) -> reaped op n >> reportFailed op failed >> when (n > 0) (done n))
-    sweep
-      :: MaintenanceOp
-      -> NominalDiffTime
-      -> (Int64 -> m ())
-      -> m (Int64, [Text])
-      -> m ()
-    sweep op every done work =
-      runReaperOp logCfg schemaName stmtTimeout (maintenanceOpName op) every work
-        >>= reportSwept op done
-    -- The cursors ride in the gate row, so every pool resumes from one set of them.
-    refreshGroups =
-      runReaperStateOp
-        logCfg
-        schemaName
-        stmtTimeout
-        (maintenanceOpName RefreshGroups)
-        interval
-        (Ops.refreshAllGroups schemaName queues . fold)
-        >>= reportSwept RefreshGroups (const (pure ()))
-  forever $ do
-    refreshGroups
-    gatedCount SweepStaleWorkers interval $ Ops.sweepStaleWorkers schemaName
-    sweep
-      SweepExhaustedJobs
-      interval
-      (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
-      $ Ops.sweepExhaustedJobs schemaName queues
-    sweep
-      SweepCancelledJobs
-      interval
-      (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
-      $ Ops.sweepCancelledJobs schemaName queues
-    when hasRateLimit $
-      gatedCount PruneRateLimitBuckets pruneInterval $
-        Arb.pruneRateLimitBuckets @m interval
-    when hasConcurrency $ do
-      gatedCount ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
-      gatedCount ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m
-    sweep
-      PurgeArchives
-      interval
-      (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
-      $ Ops.purgeArchives schemaName queues
-    threadDelay (intervalSecs * 1_000_000)
-
--- | Run one gated reaper op, logging and swallowing failures so the loop survives.
--- statement_timeout bounds each statement (aborting a stuck one at the DB), while a
--- legitimately long multi-statement op still runs to completion.
-runReaperOp
-  :: (MonadArbiter m)
-  => LogConfig
-  -> SchemaName
-  -> NominalDiffTime
-  -> Text
-  -> NominalDiffTime
-  -> m a
-  -> m (Maybe a)
-runReaperOp logCfg schemaName stmtTimeout task every work =
-  reaperGate logCfg task $
-    Ops.runGatedBounded schemaName task every stmtTimeout work
-
--- | 'runReaperOp' for an op that resumes from where its last run left off.
-runReaperStateOp
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => LogConfig
-  -> SchemaName
-  -> NominalDiffTime
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
-runReaperStateOp logCfg schemaName stmtTimeout task every work =
-  reaperGate logCfg task $
-    Ops.runGatedStateBounded schemaName task every stmtTimeout work
-
--- | Swallow a reaper op's failure, so one bad tick does not end the loop.
-reaperGate :: (MonadArbiter m) => LogConfig -> Text -> m (Maybe a) -> m (Maybe a)
-reaperGate logCfg task = tryWarnWith logCfg ("Reaper op failed: " <> task) Nothing

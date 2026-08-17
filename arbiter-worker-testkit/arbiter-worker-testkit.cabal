@@ -7,11 +7,12 @@ description:
   MonadArbiter backend, instantiated by each backend's own test suite.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Testing
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+extra-doc-files: CHANGELOG.md, README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -37,7 +38,7 @@ library
     , aeson              >=2.0  && <2.3
     , arbiter-core       <0.2
     , arbiter-worker     <0.2
-    , base               >=4.14 && <5
+    , base               >=4.20 && <5
     , bytestring         >=0.10 && <0.13
     , hspec              >=2.0  && <2.12
     , postgresql-simple  >=0.6  && <0.8

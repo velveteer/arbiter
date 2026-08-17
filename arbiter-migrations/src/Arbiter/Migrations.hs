@@ -19,6 +19,7 @@ module Arbiter.Migrations
     -- * Configuration
   , MigrationConfig (..)
   , defaultMigrationConfig
+  , validateRegistryNames
 
     -- * Tracked Migrations
   , runMigrationsForRegistry
@@ -60,6 +61,7 @@ import Arbiter.Core.Job.Schema
   , TableName
   , addClaimSeqColumnSQL
   , addTraceContextColumnSQL
+  , cancelNotifyChannel
   , createArchiveCompletedAtIndexSQL
   , createArchiveExpiresAtIndexSQL
   , createArchiveGroupKeyIndexSQL
@@ -88,9 +90,14 @@ import Arbiter.Core.Job.Schema
   , dropEventStreamingTriggersSQL
   , dropNotifyFunctionSQL
   , dropNotifyTriggerSQL
+  , eventStreamingDLQTriggerName
+  , eventStreamingTriggerName
   , jobQueueTable
   , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
+  , notifyTriggerName
+  , pauseNotifyChannel
+  , queueTableNames
   , setMaxAttemptsDefaultSQL
   )
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
@@ -122,8 +129,9 @@ import Arbiter.Core.Worker
   , createWorkersTableSQL
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Foldable (find, traverse_)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
@@ -147,7 +155,7 @@ import Database.PostgreSQL.Simple.Types (Query (..))
 
 -- | Configuration for job queue migrations
 --
--- Controls which optional features are enabled when creating job queue tables.
+-- Controls the desired state reconciled after tracked migrations.
 data MigrationConfig = MigrationConfig
   { enableNotifications :: Bool
   -- ^ Whether LISTEN/NOTIFY triggers for reactive job claiming should be
@@ -254,6 +262,40 @@ data TableAdmission = TableAdmission
 allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission True True
 
+-- | Validate identifiers before PostgreSQL can truncate generated object or
+-- channel names. The 35-byte queue limit accommodates the longest generated
+-- index suffix.
+validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
+validateRegistryNames schemaName tables
+  | T.null schemaName = Left "Arbiter schema name must not be empty"
+  | byteLength schemaName > 63 = Left "Arbiter schema name exceeds PostgreSQL's 63-byte identifier limit"
+  | any T.null tables = Left "Arbiter queue name must not be empty"
+  | Just table <- find ((> 35) . byteLength) tables =
+      Left ("Arbiter queue name exceeds the 35-byte generated-identifier limit: " <> table)
+  | Just generated <- generatedCollision =
+      Left ("Arbiter queue names generate the same PostgreSQL object: " <> generated)
+  | Just channel <- channelCollision =
+      Left ("Arbiter queue names generate the same notification channel: " <> channel)
+  | otherwise = Right ()
+  where
+    byteLength = BS.length . encodeUtf8
+    generatedOwners =
+      Map.fromListWith
+        Set.union
+        [ (generated, Set.singleton table)
+        | table <- tables
+        , generated <- queueTableNames table
+        ]
+    generatedCollision = fst <$> find ((> 1) . Set.size . snd) (Map.toList generatedOwners)
+    channelOwners =
+      Map.fromListWith
+        Set.union
+        [ (channel schemaName table, Set.singleton table)
+        | table <- tables
+        , channel <- [pauseNotifyChannel, cancelNotifyChannel]
+        ]
+    channelCollision = fst <$> find ((> 1) . Set.size . snd) (Map.toList channelOwners)
+
 -- | Run migrations for multiple tables within a single schema, seeding the given
 -- rate-limit policies. On migration success, reconciles the policy and bucket
 -- tables on the same connection.
@@ -265,69 +307,71 @@ runMigrationsTrackedForTables
   -> AdmissionSeeds
   -> IO (MigrationResult String)
 runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSeeds policyRows concRows durability) =
-  bracket (connectPostgreSQL connStr) close $ \conn -> do
-    -- Disable NOTICE messages on the underlying LibPQ connection
-    withConnection conn $ \libpqConn ->
-      LibPQ.disableNoticeReporting libpqConn
+  case validateRegistryNames schemaName (map fst tableNames) of
+    Left err -> pure (MigrationError (T.unpack err))
+    Right () -> bracket (connectPostgreSQL connStr) close $ \conn -> do
+      -- Disable NOTICE messages on the underlying LibPQ connection
+      withConnection conn $ \libpqConn ->
+        LibPQ.disableNoticeReporting libpqConn
 
-    -- Create the schema. If CREATE SCHEMA fails (e.g. insufficient privileges),
-    -- check whether the schema already exists (manual creation) and proceed.
-    let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
-    result <- try $ execute_ conn schemaSQL
-    case result of
-      Right _ -> pure ()
-      Left (e :: PG.SqlError) -> do
-        -- Check if the schema exists despite the CREATE failure
-        exists <- schemaExists conn schemaName
-        when (not exists) $
-          ioError
-            ( userError $
-                "Failed to create schema "
-                  <> T.unpack schemaName
-                  <> " and it does not exist. Either grant CREATE privilege on the database"
-                  <> " or create the schema manually: CREATE SCHEMA "
-                  <> T.unpack schemaName
-                  <> ";"
-                  <> "\nOriginal error: "
-                  <> show e
-            )
+      -- Create the schema. If CREATE SCHEMA fails (e.g. insufficient privileges),
+      -- check whether the schema already exists (manual creation) and proceed.
+      let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
+      result <- try $ execute_ conn schemaSQL
+      case result of
+        Right _ -> pure ()
+        Left (e :: PG.SqlError) -> do
+          -- Check if the schema exists despite the CREATE failure
+          exists <- schemaExists conn schemaName
+          when (not exists) $
+            ioError
+              ( userError $
+                  "Failed to create schema "
+                    <> T.unpack schemaName
+                    <> " and it does not exist. Either grant CREATE privilege on the database"
+                    <> " or create the schema manually: CREATE SCHEMA "
+                    <> T.unpack schemaName
+                    <> ";"
+                    <> "\nOriginal error: "
+                    <> show e
+              )
 
-    -- Re-enable notice reporting for the migrations
-    withConnection conn $ \libpqConn ->
-      LibPQ.enableNoticeReporting libpqConn
+      -- Re-enable notice reporting for the migrations
+      withConnection conn $ \libpqConn ->
+        LibPQ.enableNoticeReporting libpqConn
 
-    -- Build migrations: schema-level (once) + per-table migrations
-    let schemaMigrations = schemaLevelMigrations config schemaName
-        tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName config adm) tableNames
-        migrations = schemaMigrations <> tableMigrations
-        migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
-        options =
-          defaultOptions
-            { optVerbose = Quiet
-            , optTableName = migrationTableName
-            }
+      -- Build migrations: schema-level (once) + per-table migrations
+      let schemaMigrations = schemaLevelMigrations config schemaName
+          tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName config adm) tableNames
+          migrations = schemaMigrations <> tableMigrations
+          migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
+          options =
+            defaultOptions
+              { optVerbose = Quiet
+              , optTableName = migrationTableName
+              }
 
-    -- Initialize the migration system
-    _ <- runMigrations conn options [MigrationInitialization]
+      -- Initialize the migration system
+      _ <- runMigrations conn options [MigrationInitialization]
 
-    -- Run the actual migrations
-    migrationResult <- runMigrations conn options migrations
-    -- Reconciliation can throw (conflicting prefix, ALTER failure). Surface as MigrationError.
-    case migrationResult of
-      MigrationSuccess -> do
-        reconciled <-
-          try $ do
-            reconcileRateLimitPolicies conn schemaName policyRows
-            reconcileConcurrencyPolicies conn schemaName concRows
-            reconcileRateLimitDurability conn schemaName durability
-            reconcileOptionalTriggers conn schemaName (map fst tableNames) config
-        case reconciled of
-          Right () -> pure MigrationSuccess
-          -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
-          Left (e :: SomeException)
-            | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
-            | otherwise -> pure (MigrationError (displayException e))
-      other -> pure other
+      -- Run the actual migrations
+      migrationResult <- runMigrations conn options migrations
+      -- Reconciliation can throw (conflicting prefix, ALTER failure). Surface as MigrationError.
+      case migrationResult of
+        MigrationSuccess -> do
+          reconciled <-
+            try $ do
+              reconcileRateLimitPolicies conn schemaName policyRows
+              reconcileConcurrencyPolicies conn schemaName concRows
+              reconcileRateLimitDurability conn schemaName durability
+              reconcileOptionalTriggers conn schemaName (map fst tableNames) config
+          case reconciled of
+            Right () -> pure MigrationSuccess
+            -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
+            Left (e :: SomeException)
+              | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+              | otherwise -> pure (MigrationError (displayException e))
+        other -> pure other
 
 -- | Upsert each policy's @default_*@ params into the policies table (created
 -- unconditionally by the schema migrations), leaving operator @override_*@
@@ -414,10 +458,8 @@ reconcileRateLimitDurability conn schemaName durability = do
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
     _ -> pure ()
 
--- | Reconcile optional trigger features after tracked migrations. This is
--- desired-state reconciliation rather than another tracked migration: a
--- true/false/true sequence must work even though the original create migration
--- remains recorded in @schema_migrations@.
+-- | Converge optional triggers after tracked migrations. This restores objects
+-- removed by an earlier disabled configuration without changing migration history.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
@@ -425,18 +467,64 @@ reconcileOptionalTriggers conn schemaName tables config =
     if enableEventStreaming config
       then do
         executeSQL (createEventStreamingFunctionSQL schemaName)
-        traverse_ (executeSQL . createEventStreamingTriggersSQL schemaName) tables
+        traverse_ reconcileEventStream tables
       else do
-        traverse_ (executeSQL . dropEventStreamingTriggersSQL schemaName) tables
-        executeSQL (dropEventStreamingFunctionSQL schemaName)
+        traverse_ dropKnownEventTriggers tables
+        functionInstalled <- eventFunctionExists
+        -- CASCADE also removes triggers on queue tables retained from an older
+        -- registry, which are no longer present in @tables@.
+        when functionInstalled $ executeSQL (dropEventStreamingFunctionSQL schemaName)
   where
-    reconcileNotify table
-      | enableNotifications config = do
+    reconcileNotify table = do
+      installed <- triggerExists table (notifyTriggerName table)
+      case (enableNotifications config, installed) of
+        (True, False) -> do
           executeSQL (createNotifyFunctionSQL schemaName table)
           executeSQL (createNotifyTriggerSQL schemaName table)
-      | otherwise = do
+        (False, True) -> do
           executeSQL (dropNotifyTriggerSQL schemaName table)
           executeSQL (dropNotifyFunctionSQL schemaName table)
+        _ -> pure ()
+
+    reconcileEventStream table = do
+      mainInstalled <- triggerExists table (eventStreamingTriggerName table)
+      dlqInstalled <- triggerExists (table <> "_dlq") (eventStreamingDLQTriggerName table)
+      unless (mainInstalled && dlqInstalled) $
+        executeSQL (createEventStreamingTriggersSQL schemaName table)
+
+    dropKnownEventTriggers table = do
+      installed <-
+        or
+          <$> traverse
+            (uncurry triggerExists)
+            [ (table, eventStreamingTriggerName table)
+            , (table <> "_dlq", eventStreamingDLQTriggerName table)
+            , (table, "notify_job_insert")
+            , (table, "notify_job_update")
+            , (table, "notify_job_delete")
+            , (table <> "_dlq", "notify_dlq_insert")
+            ]
+      when installed $ executeSQL (dropEventStreamingTriggersSQL schemaName table)
+
+    eventFunctionExists = do
+      rows <-
+        query
+          conn
+          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0)"
+          (Only schemaName)
+      pure $ case rows of
+        Only exists : _ -> exists
+        _ -> False
+
+    triggerExists table trigger = do
+      rows <-
+        query
+          conn
+          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal)"
+          (schemaName, table, trigger)
+      pure $ case rows of
+        Only exists : _ -> exists
+        _ -> False
 
     executeSQL = void . execute_ conn . Query . encodeUtf8
 
@@ -458,7 +546,7 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
   , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
   ]
-    <> [ MigrationScript "create-event-streaming-function" (encodeUtf8 $ createEventStreamingFunctionSQL schemaName)
+    <> [ MigrationScript "create-event-streaming-function-v2" (encodeUtf8 $ createEventStreamingFunctionSQL schemaName)
        | enableEventStreaming config
        ]
 
@@ -538,7 +626,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
         | otherwise = []
       eventStreamingTriggers
         | enableEventStreaming config =
-            [ script "create-event-streaming-triggers" $ createEventStreamingTriggersSQL schemaName tableName
+            [ script "create-event-streaming-triggers-v2" $ createEventStreamingTriggersSQL schemaName tableName
             ]
         | otherwise = []
    in coreMigrations <> concurrencyTriggers <> rateLimitTriggers <> notifyTriggers <> eventStreamingTriggers

@@ -54,11 +54,6 @@ import Arbiter.Worker.Cron
   )
 import Arbiter.Worker.Logger
 import Arbiter.Worker.MultiQueue
-import Arbiter.Worker.Pool
-  ( childResults
-  , mergeChildResults
-  , mergedChildResults
-  , runReaperOp
-  , runWorkerPool
-  )
+import Arbiter.Worker.Pool (runReaperOp, runWorkerPool)
+import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults)
 import Arbiter.Worker.WorkerState

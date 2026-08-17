@@ -6,11 +6,12 @@ description:
   Core job and dead-letter queue types, SQL templates, and monadic operations for arbiter.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+extra-doc-files: CHANGELOG.md, README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -88,9 +89,14 @@ library
     Arbiter.Core.Worker
     Arbiter.RateLimit
 
+  other-modules:
+    Arbiter.Core.HighLevel.Runtime
+    Arbiter.Core.Operations.Gates
+    Arbiter.Core.Operations.Workers
+
   build-depends:
     , aeson                            >=2.0  && <2.3
-    , base                             >=4.14 && <5
+    , base                             >=4.20 && <5
     , bytestring                       >=0.10 && <0.13
     , containers                       >=0.6  && <0.9
     , free                             >=5.1  && <5.3
@@ -115,6 +121,6 @@ test-suite arbiter-core-tests
   main-is:        Spec.hs
   build-depends:
     , arbiter-core
-    , base          >=4.14 && <5
+    , base          >=4.20 && <5
     , hspec         >=2.0  && <2.12
     , text          >=1.2  && <2.2

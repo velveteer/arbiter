@@ -28,6 +28,7 @@ import Data.Int (Int64)
 import Data.Maybe (listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import Data.Text qualified as T
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
 import GHC.Generics (Generic)
@@ -46,6 +47,7 @@ import Arbiter.Migrations
   , jobQueueMigrationsForTable
   , runMigrationsForRegistry
   , schemaLevelMigrations
+  , validateRegistryNames
   )
 
 main :: IO ()
@@ -56,6 +58,7 @@ main = do
       "arbiter-migrations"
       [ testGroup "migration checksums" (map migrationGolden shippedMigrations)
       , testGroup "policy conflict detection" conflictTests
+      , testGroup "registry name validation" registryNameTests
       , migrationReconciliationTests connStr
       ]
 
@@ -72,11 +75,32 @@ conflictTests =
   where
     row p mx rf iv = PolicyRow {prefixId = p, maxTokens = mx, refillAmt = rf, interval = iv}
 
+registryNameTests :: [TestTree]
+registryNameTests =
+  [ testCase "accepts distinct generated names" $
+      validateRegistryNames "arbiter" ["jobs", "other_jobs"] @?= Right ()
+  , testCase "rejects generated table collisions" $
+      validateRegistryNames "arbiter" ["jobs", "jobs_dlq"]
+        @?= Left "Arbiter queue names generate the same PostgreSQL object: jobs_dlq"
+  , testCase "rejects queue names too long for generated identifiers" $
+      validateRegistryNames "arbiter" ["abcdefghijklmnopqrstuvwxyz0123456789"]
+        @?= Left "Arbiter queue name exceeds the 35-byte generated-identifier limit: abcdefghijklmnopqrstuvwxyz0123456789"
+  ]
+
 newtype MigrationPayload = MigrationPayload Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+newtype RemovedQueuePayload = RemovedQueuePayload Int
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
 type MigrationRegistry = '[Queue "migration_reconciliation_q" MigrationPayload]
+type ExpandedMigrationRegistry =
+  '[ Queue "migration_reconciliation_q" MigrationPayload
+   , Queue "removed_reconciliation_q" RemovedQueuePayload
+   ]
+type DLQSuffixRegistry = '[Queue "events_dlq" MigrationPayload]
 
 reconciliationSchema :: Text
 reconciliationSchema = "arbiter_migration_reconciliation_test"
@@ -100,6 +124,10 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
+          triggerOids <- optionalTriggerOids conn
+
+          migrate triggerOn
+          optionalTriggerOids conn >>= (@?= triggerOids)
 
           migrate triggerOff
           optionalTriggerCount conn >>= (@?= 0)
@@ -110,6 +138,20 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
+    , testCase "drops streaming triggers for queues removed from the registry" $
+        withFreshSchema connStr $ \conn -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
+          removedQueueTriggerCount conn >>= (@?= 2)
+
+          migrate triggerOff
+          removedQueueTriggerCount conn >>= (@?= 0)
+          optionalFunctionCount conn >>= (@?= 0)
+    , testCase "preserves queue names ending in the DLQ suffix" $
+        withFreshSchema connStr $ \conn -> do
+          runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
+          definitions <- eventTriggerDefinitions conn
+          length (filter (T.isInfixOf "('events_dlq', 'false')") definitions) @?= 1
+          length (filter (T.isInfixOf "('events_dlq', 'true')") definitions) @?= 1
     ]
   where
     durableConfig = defaultMigrationConfig {rateLimitDurability = Durable}
@@ -128,12 +170,36 @@ shouldMigrate :: MigrationResult String -> IO ()
 shouldMigrate MigrationSuccess = pure ()
 shouldMigrate (MigrationError err) = fail ("migration failed: " <> err)
 
+optionalTriggerOids :: PG.Connection -> IO [Int64]
+optionalTriggerOids conn =
+  map PG.fromOnly
+    <$> PG.query
+      conn
+      "SELECT t.oid::bigint FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('migration_reconciliation_q_notify_trigger', 'notify_job_event_migration_reconciliation_q', 'notify_job_event_migration_reconciliation_q_dlq') ORDER BY t.tgname"
+      (PG.Only reconciliationSchema)
+
 optionalTriggerCount :: PG.Connection -> IO Int64
 optionalTriggerCount conn =
   fromOnlyOne
     <$> PG.query
       conn
       "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('migration_reconciliation_q_notify_trigger', 'notify_job_event_migration_reconciliation_q', 'notify_job_event_migration_reconciliation_q_dlq')"
+      (PG.Only reconciliationSchema)
+
+eventTriggerDefinitions :: PG.Connection -> IO [Text]
+eventTriggerDefinitions conn =
+  map PG.fromOnly
+    <$> PG.query
+      conn
+      "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('notify_job_event_events_dlq', 'notify_job_event_events_dlq_dlq') ORDER BY t.tgname"
+      (PG.Only reconciliationSchema)
+
+removedQueueTriggerCount :: PG.Connection -> IO Int64
+removedQueueTriggerCount conn =
+  fromOnlyOne
+    <$> PG.query
+      conn
+      "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND t.tgname IN ('notify_job_event_removed_reconciliation_q', 'notify_job_event_removed_reconciliation_q_dlq')"
       (PG.Only reconciliationSchema)
 
 optionalFunctionCount :: PG.Connection -> IO Int64

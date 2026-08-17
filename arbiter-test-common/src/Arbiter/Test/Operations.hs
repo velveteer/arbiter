@@ -2457,6 +2457,21 @@ operationsSpec mkMessage mkResult runM = do
       claimedPayloads `shouldContain` [mkMessage "FanOutChild1"]
       claimedPayloads `shouldContain` [mkMessage "FanOutChild2"]
 
+    it "returns mixed nested trees in pre-order" $ \env -> do
+      let job label = defaultJob (mkMessage label)
+          tree =
+            JT.rollup
+              (job "OrderRoot")
+              ( JT.leaf (job "OrderLeaf1")
+                  :| [ JT.rollup (job "OrderNested") (JT.leaf (job "OrderGrandchild") :| [])
+                     , JT.leaf (job "OrderLeaf2")
+                     ]
+              )
+
+      Right inserted <- runM env (HL.insertJobTree tree)
+      map payload (NE.toList inserted)
+        `shouldBe` map mkMessage ["OrderRoot", "OrderLeaf1", "OrderNested", "OrderGrandchild", "OrderLeaf2"]
+
     it "rollup: acking all children resumes parent for completion round" $ \env -> do
       let parentJob = defaultJob (mkMessage "FanOutAckParent")
           childJobs =

@@ -245,7 +245,7 @@ data DedupKey
   = -- | Skip if a job with this key exists (@DO NOTHING@).
     IgnoreDuplicate Text
   | -- | Replace the existing job with this key (@DO UPDATE@), unless it is
-    -- actively claimed or has children.
+    -- actively claimed, force-cancel flagged, or has children.
     ReplaceDuplicate Text
   deriving stock (Eq, Generic, Show)
 

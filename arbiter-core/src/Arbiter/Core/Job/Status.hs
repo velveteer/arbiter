@@ -12,7 +12,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 
--- | Effective job status. Status is derived rather than stored; the status SQL
+-- | Effective job status. Status is derived rather than stored. The status SQL
 -- in "Arbiter.Core.Sql.Jobs" is its source of truth.
 data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled | Cancelled
   deriving stock (Bounded, Enum, Eq, Generic, Show)

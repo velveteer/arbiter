@@ -6,10 +6,12 @@ description:
   Common test fixtures, setup utilities, and helper functions shared across arbiter test suites.
 
 license:       MIT
+license-file:    LICENSE
 author:        Joshua Miller
 maintainer:    joshua.ian.miller@pm.me
 category:      Testing
 build-type:    Simple
+extra-doc-files: README.md
 homepage:      https://github.com/velveteer/arbiter
 bug-reports:   https://github.com/velveteer/arbiter/issues
 
@@ -47,7 +49,7 @@ library
     , arbiter-core
     , arbiter-migrations
     , barbies
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , containers            >=0.6  && <0.9
     , hedgehog

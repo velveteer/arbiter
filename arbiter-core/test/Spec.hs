@@ -15,6 +15,7 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
 import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
 import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
+import Arbiter.Core.Worker (WorkerHealth (Live), workerHealthFromText)
 
 -- | A short tag per parameter, so tests can assert the encoders and their order.
 paramTags :: [SomeParam] -> [Text]
@@ -53,6 +54,13 @@ main = hspec $ do
 
     it "rejects an unknown SQL status" $
       jobStatusFromText "new_status" `shouldBe` Left "unknown job status: new_status"
+
+  describe "worker health decoding" $ do
+    it "accepts known health text" $
+      workerHealthFromText "live" `shouldBe` Right Live
+
+    it "rejects unknown health text" $
+      workerHealthFromText "new_health" `shouldBe` Left "unknown worker health: new_health"
 
   describe "sql quasiquoter" $ do
     it "emits one placeholder per input hole, in order" $ do

@@ -184,17 +184,15 @@ module Arbiter.Core.Operations
   , mergeRawChildResults
   ) where
 
-import Control.Exception qualified as E
 import Control.Monad (foldM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
-import Data.Aeson.Types (parseEither, parseMaybe)
-import Data.Bifunctor (bimap, first, second)
+import Data.Bifunctor (bimap, first)
 import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.IntMap qualified as IntMap
-import Data.List (groupBy, sort, sortOn)
+import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -209,8 +207,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, tryAny, withRunInIO)
-import UnliftIO.Timeout qualified as UIO
+import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
@@ -251,6 +248,25 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
+import Arbiter.Core.Operations.Gates
+  ( Shared (..)
+  , gateNameFor
+  , runGated
+  , runGatedBounded
+  , runGatedShared
+  , runGatedState
+  , runGatedStateBounded
+  , setLocalStatementTimeout
+  )
+import Arbiter.Core.Operations.Workers
+  ( deregisterWorker
+  , heartbeatWorker
+  , listWorkers
+  , markWorkerShuttingDown
+  , registerWorker
+  , setWorkerPaused
+  , sweepStaleWorkers
+  )
 import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.RateLimit.Spec
   ( HasRateLimit
@@ -267,7 +283,6 @@ import Arbiter.Core.Sql.Claim qualified as Claim
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Arbiter.Core.Sql.Cron qualified as Tmpl
 import Arbiter.Core.Sql.DLQ qualified as Tmpl
-import Arbiter.Core.Sql.Gates qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as Tmpl
 import Arbiter.Core.Sql.Insert (batchFrag, insertFrag)
 import Arbiter.Core.Sql.Jobs qualified as Tmpl
@@ -278,9 +293,7 @@ import Arbiter.Core.Sql.Queues qualified as Tmpl
 import Arbiter.Core.Sql.RateLimit qualified as Tmpl
 import Arbiter.Core.Sql.Stats qualified as Tmpl
 import Arbiter.Core.Sql.Tree qualified as Tmpl
-import Arbiter.Core.Sql.Workers qualified as Tmpl
 import Arbiter.Core.Trace (currentTraceContext, stampTraceContext)
-import Arbiter.Core.Worker (WorkerRow)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
 decodePayload job = case fromJSON (payload job) of
@@ -2621,103 +2634,6 @@ pendingCronRuns schemaName names =
   MA.executeQuery (Tmpl.pendingCronRunsSQL schemaName names)
 
 -- ---------------------------------------------------------------------------
--- Worker Registry Operations
--- ---------------------------------------------------------------------------
-
--- | Register a worker pool in the @arbiter_workers@ table, or refresh its metadata
--- if already registered. Bumps @last_heartbeat@ and clears @shutting_down@
--- either way. Returns the worker's effective paused state so callers can seed
--- local state without a second round-trip.
-registerWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -- ^ Worker pool UUID
-  -> Text
-  -- ^ Queue name
-  -> Maybe Text
-  -- ^ Host name
-  -> Maybe Int32
-  -- ^ Worker thread count
-  -> NominalDiffTime
-  -- ^ Stale threshold in seconds (recorded on the row so the UI can compute liveness).
-  -> Maybe Value
-  -- ^ Extra JSONB metadata
-  -> m (Maybe Bool)
-registerWorker schemaName workerId queue host threads staleThreshold metadata = do
-  rows <-
-    MA.executeQuery
-      (Tmpl.upsertWorkerSQL schemaName workerId queue host threads (realToFrac staleThreshold) metadata)
-  pure $ listToMaybe rows
-
--- | Bump @last_heartbeat@ for a registered worker and return the effective
--- paused state (per-worker OR per-queue). 'Nothing' if no row exists for the
--- given UUID.
-heartbeatWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -- ^ Worker pool UUID
-  -> m (Maybe Bool)
-heartbeatWorker schemaName workerId = do
-  rows <- MA.executeQuery (Tmpl.heartbeatWorkerSQL schemaName workerId)
-  pure $ listToMaybe rows
-
--- | Set the @paused@ flag for a registered worker.
-setWorkerPaused
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> Bool
-  -> m Int64
-setWorkerPaused schemaName workerId p =
-  countOr0 (Tmpl.setWorkerPausedSQL schemaName p workerId)
-
--- | Mark a worker as gracefully draining. The row is left in place so the UI
--- can distinguish drained workers from ones that vanished.
-markWorkerShuttingDown
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> m Int64
-markWorkerShuttingDown schemaName workerId =
-  MA.executeStatement
-    (Tmpl.markWorkerShuttingDownSQL schemaName workerId)
-
--- | Remove a worker row outright.
-deregisterWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> m Int64
-deregisterWorker schemaName workerId =
-  MA.executeStatement
-    (Tmpl.deleteWorkerSQL schemaName workerId)
-
--- | List workers with optional filters: scope to a single queue, restrict to
--- recent heartbeats, both, or neither.
-listWorkers
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Maybe Text
-  -- ^ Queue name. 'Nothing' returns workers from all queues.
-  -> Maybe NominalDiffTime
-  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
-  -> m [WorkerRow]
-listWorkers schemaName mQueue mLiveSecs =
-  MA.executeQuery
-    (Tmpl.listWorkersSQL schemaName mQueue (realToFrac <$> mLiveSecs))
-
--- | Delete worker rows (including paused ones) whose @last_heartbeat@ is older
--- than each row's own @stale_threshold_secs@.
-sweepStaleWorkers
-  :: (MonadArbiter m)
-  => SchemaName
-  -> m Int64
-sweepStaleWorkers schemaName =
-  MA.executeStatement (Tmpl.deleteStaleWorkersSQL schemaName)
-
--- ---------------------------------------------------------------------------
 -- Queue Operations
 -- ---------------------------------------------------------------------------
 
@@ -2761,158 +2677,6 @@ listQueues
   -> m [QueueRow]
 listQueues schemaName =
   MA.executeQuery (Tmpl.listQueuesSQL schemaName)
-
--- ---------------------------------------------------------------------------
--- Global Gate Operations
--- ---------------------------------------------------------------------------
-
--- | Bound the current transaction's statements to a wall-clock limit, so a stuck op aborts at the DB rather than hanging the caller.
-setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
-setLocalStatementTimeout limit =
-  let ms = ceiling (realToFrac limit * 1000 :: Double) :: Int
-      msTxt = T.pack (show ms)
-   in void $
-        MA.executeQuery
-          [QQ.sql|SELECT set_config('statement_timeout', '${msTxt}', true) AS @{set_config :: CText}|]
-
--- | 'runGated' with each statement of @work@ bounded by @limit@. The bound is
--- transaction-local, which the gate transaction 'work' runs in makes effective.
-runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> NominalDiffTime -> m a -> m (Maybe a)
-runGatedBounded schemaName task interval limit work =
-  runGated schemaName task interval (setLocalStatementTimeout limit >> work)
-
--- | Run @work@ at most once per @interval@ across every worker pool sharing
--- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@
--- claimed via @SELECT FOR UPDATE SKIP LOCKED@, so the interval check and the
--- mutual exclusion happen in one statement. Returns @Just@ the work's result
--- if it ran, @Nothing@ if either the gate said "too recent" or another pool
--- was already running the task.
-runGated
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Text
-  -- ^ Task identifier (used as the gate row key).
-  -> NominalDiffTime
-  -- ^ Minimum interval between runs, in seconds.
-  -> m a
-  -- ^ Work to perform when this caller wins the gate.
-  -> m (Maybe a)
-runGated schemaName task interval work =
-  runGatedInner schemaName task interval (const ((,Nothing) <$> work))
-
--- | 'runGated' where the task resumes from the state its last run left in the gate row,
--- read under the claim and written with the watermark. A payload that no longer parses
--- reads as no state.
-runGatedState
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
-runGatedState schemaName task interval work =
-  runGatedInner schemaName task interval (fmap (second (Just . toJSON)) . work . (>>= parseMaybe parseJSON))
-
--- | 'runGatedState' with each statement of @work@ bounded by @limit@, as
--- 'runGatedBounded' bounds 'runGated'.
-runGatedStateBounded
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
-runGatedStateBounded schemaName task interval limit work =
-  runGatedState schemaName task interval (\state -> setLocalStatementTimeout limit >> work state)
-
--- | The gate body both forms share. 'Nothing' back from @work@ leaves the row's state
--- as it was.
-runGatedInner
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe Value -> m (a, Maybe Value))
-  -> m (Maybe a)
-runGatedInner schemaName task interval work = do
-  _ <-
-    MA.executeStatement
-      (Tmpl.ensureGateRowSQL schemaName task)
-  gateOpen <- checkGateOuter
-  if not gateOpen
-    then pure Nothing
-    else withDbTransaction $ tryClaimGate >>= traverse ran
-  where
-    intervalSecs = realToFrac interval :: Double
-
-    checkGateOuter = do
-      rows <- MA.executeQuery (Tmpl.checkGateSQL schemaName intervalSecs task)
-      pure $ fromMaybe True (listToMaybe rows)
-
-    tryClaimGate = listToMaybe <$> MA.executeQuery (Tmpl.tryClaimGateSQL schemaName task intervalSecs)
-
-    ran state = do
-      (r, next) <- work state
-      r <$ MA.executeStatement (maybe (Tmpl.bumpGateSQL schemaName task) (Tmpl.bumpGateStateSQL schemaName task) next)
-
--- | A gate name for a set of parts: the sorted set itself while it fits the gate's
--- key, an md5 digest of it beyond that.
-gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
-gateNameFor prefix parts
-  | T.length joined <= maxGateNameLength = pure (prefix <> ":" <> joined)
-  | otherwise = do
-      rows <- MA.executeQuery (Tmpl.gateNameDigestSQL joined)
-      pure (prefix <> ":#" <> fromMaybe joined (listToMaybe rows))
-  where
-    joined = T.intercalate "," (sort parts)
-
--- | Well under the btree index-row limit the gates table's primary key sits on.
-maxGateNameLength :: Int
-maxGateNameLength = 200
-
--- | Where a shared result came from.
-data Shared a
-  = -- | This caller won the gate and ran the work itself.
-    Ran a
-  | -- | Read from the gate, with its age in seconds.
-    Published Double a
-  | -- | A published result this caller could not decode, with the parse error.
-    Unreadable Text
-  deriving stock (Eq, Functor, Show)
-
--- | 'runGated' where the callers that lost the gate read the winner's published
--- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
--- after the gate transaction commits, so a slow scan holds neither the gate row
--- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
--- restarts from the publish. A run or publish that throws puts the watermark back, so a
--- winner that keeps failing does not keep every other caller from running. That
--- compensation is bounded by @interval@.
-runGatedShared
-  :: (FromJSON a, MonadArbiter m, ToJSON a)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -- ^ Minimum interval between runs.
-  -> NominalDiffTime
-  -- ^ How long a published result stands.
-  -> m a
-  -> m (Maybe (Shared a))
-runGatedShared schemaName task interval maxAge work =
-  MA.executeQuery claimOrRead >>= maybe (pure Nothing) shared . listToMaybe
-  where
-    claimOrRead =
-      Tmpl.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
-    shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
-      (Just at, Just previous) -> Just . Ran <$> publish at previous
-      _ -> pure (decoded <$> mPayload <*> mAge)
-    -- Base onException: UnliftIO's masks the handler uninterruptibly.
-    publish at previous = withRunInIO $ \run ->
-      run (work >>= \a -> a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task))
-        `E.onException` run (reopen at previous)
-    reopen at previous =
-      void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
-    decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)
 
 -- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
 -- for a rollup finalizer in a single query.

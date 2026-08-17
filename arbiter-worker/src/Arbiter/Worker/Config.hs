@@ -103,7 +103,6 @@ data WorkerConfig m payload = WorkerConfig
   -- Reaper work is schema-wide, so it carries no queue. Default: no-op.
   , workerStateVar :: TVar WorkerState
   -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
-  -- Shared across pools in multi-pool setups.
   , pauseVar :: TVar Bool
   -- ^ Per-pool pause flag.
   , livenessFile :: Maybe FilePath

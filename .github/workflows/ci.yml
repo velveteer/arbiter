@@ -8,7 +8,12 @@ on:
 
 jobs:
   build:
+    name: GHC ${{ matrix.ghc }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ['9.10', '9.12']
 
     services:
       postgres:
@@ -29,8 +34,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.14'
-          cabal-version: '3.14'
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: '3.12'
 
       - name: Configure
         run: |
