@@ -3,12 +3,16 @@
 
 module Main (main) where
 
+import Control.Exception (SomeException, someExceptionContext, try)
+import Control.Exception.Context (displayExceptionContext)
 import Data.Int (Int32, Int64)
+import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
+import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.QQ (sql)
@@ -54,6 +58,16 @@ main = hspec $ do
 
     it "rejects an unknown SQL status" $
       jobStatusFromText "new_status" `shouldBe` Left "unknown job status: new_status"
+
+  describe "exception rendering" $ do
+    it "renders a caught exception without the backtrace base attaches" $ do
+      caught <- try (throwInternal "arbiter listener: consumeInput failed") :: IO (Either SomeException ())
+      either displayEx (const "") caught `shouldBe` "arbiter listener: consumeInput failed"
+
+    it "collects no backtrace for a control-flow exception" $ do
+      caught <- try throwNack :: IO (Either SomeException ())
+      either (displayExceptionContext . someExceptionContext) (const "") caught
+        `shouldSatisfy` (not . isInfixOf "backtrace")
 
   describe "worker health decoding" $ do
     it "accepts known health text" $

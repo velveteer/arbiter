@@ -46,6 +46,7 @@ module Arbiter.Worker.Cron
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
@@ -53,7 +54,6 @@ import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, setDedupKey
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
-import Control.Exception (displayException)
 import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Either (isRight)
@@ -344,7 +344,7 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
             pure Ran
       case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> T.pack (displayException e)
+          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> displayEx e
         Right NotLeader ->
           logCron logCfg Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
         Right Ran -> pure ()
@@ -456,7 +456,7 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
     void $ Ops.touchCronChecked schemaName tick [name cj]
   case result of
     Left e -> do
-      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> T.pack (displayException e)
+      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> displayEx e
       pure False
     Right () -> do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
@@ -476,7 +476,7 @@ processRunRequests
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
   case scan of
-    Left e -> logCron logCfg Error $ "Cron run-request scan failed: " <> T.pack (displayException e)
+    Left e -> logCron logCfg Error $ "Cron run-request scan failed: " <> displayEx e
     Right pending -> do
       let requested = Set.fromList pending
       forM_ (filter (\cj -> Set.member (name cj) requested) jobs) (claimAndFire (truncateToMinute now))
@@ -487,7 +487,7 @@ processRunRequests logCfg schemaName jobs now = do
         maybe (pure NotRequested) (fireClaimed tick cj) claimed
       case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> T.pack (displayException e)
+          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> displayEx e
         Right NotRequested -> pure ()
         Right Fired ->
           logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick

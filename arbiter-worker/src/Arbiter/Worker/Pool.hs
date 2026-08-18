@@ -20,6 +20,7 @@ import Arbiter.Core.Exceptions
   , JobRetryableException (..)
   , ParsingException (..)
   , TreeCancelException (..)
+  , displayEx
   , namedJobIds
   , throwJobGoneIds
   )
@@ -43,7 +44,7 @@ import Arbiter.Core.Trace
   , resolveTracer
   , withConsumeSpan
   )
-import Control.Exception (SomeException, displayException, fromException, toException)
+import Control.Exception (SomeException, fromException, toException)
 import Control.Exception qualified as E
 import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -218,7 +219,7 @@ runWorkerPool config = do
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
     case res of
       Left e ->
-        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> T.pack (displayException e)
+        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx e
       Right _ -> pure ()
 
     lift $ shutdownPool config schemaName workQueue busyWorkerCount
@@ -437,7 +438,7 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
                 finalizeForceCancelled config jobBatch cancelledIds reclaimedIds handoff
           | Just Async.AsyncCancelled <- fromException e -> liftIO (E.throwIO e)
           | otherwise -> do
-              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> T.pack (displayException e)
+              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx e
               threadDelay 2_000_000
 
 processJobsWithRetry

@@ -55,6 +55,7 @@ import Arbiter.Core.CronSchedule
   , addTimezoneColumnSQL
   , createCronSchedulesTableSQL
   )
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Gates (addGateMetadataColumnSQL, createGatesTableSQL)
 import Arbiter.Core.Job.Schema
   ( SchemaName

@@ -439,7 +439,7 @@ spec connStr = do
                 "bad-1"
                 "* * * * *"
                 AllowOverlap
-                (\_ _ -> error "intentional builder failure")
+                (\_ _ -> errorWithoutStackTrace "intentional builder failure")
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [good, bad] testLogConfig
@@ -488,7 +488,7 @@ spec connStr = do
                 "run-atomic"
                 "0 3 * * *"
                 AllowOverlap
-                (\_ _ -> error "intentional builder failure")
+                (\_ _ -> errorWithoutStackTrace "intentional builder failure")
             Right working = cronJob "run-atomic" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "manual"))
             now = mkTime 2025 6 15 12 30 0
         runSimpleDb env $ do

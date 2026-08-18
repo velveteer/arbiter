@@ -11,9 +11,10 @@ module Arbiter.Otel.Telemetry
   , telemetryLogConfig
   ) where
 
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Trace (resolveTracer)
 import Arbiter.Worker.Logger (LogConfig, LogDestination)
-import Control.Exception (SomeException, bracket, displayException)
+import Control.Exception (SomeException, bracket)
 import Control.Monad (void)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Bifunctor (first)
@@ -181,7 +182,7 @@ detectResources = fromRight emptyMaterializedResources <$> tryAny detect
 
 -- | The note a signal that could not start leaves in the summary.
 signalFailed :: Text -> SomeException -> Text
-signalFailed signal e = signal <> " exporter did not start: " <> T.pack (displayException e)
+signalFailed signal e = signal <> " exporter did not start: " <> displayEx e
 
 -- | Why a signal is off, for the ones that are.
 noteOf :: Either Text r -> Maybe Text

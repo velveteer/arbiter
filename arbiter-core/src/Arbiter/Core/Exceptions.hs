@@ -38,9 +38,10 @@ module Arbiter.Core.Exceptions
   , throwJobGone
   , throwJobGoneIds
   , namedJobIds
+  , displayEx
   ) where
 
-import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException)
+import Control.Exception (Exception (..), SomeException (..), asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -60,6 +61,7 @@ data JobException
   deriving stock (Show)
 
 instance Exception JobException where
+  backtraceDesired _ = False
   displayException = \case
     Retryable e -> displayException e
     Permanent e -> displayException e
@@ -103,6 +105,7 @@ data JobNackException = JobNackException
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobNackException where
+  backtraceDesired _ = False
   displayException JobNackException = "job nacked for reprocessing"
 
 -- | Row decoding failure (engine-internal). Classified as a permanent failure
@@ -128,6 +131,7 @@ data JobGoneException = JobGoneException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobGoneException where
+  backtraceDesired _ = False
   displayException (JobGoneException msg ids) = T.unpack (msg <> namedJobIds ids)
 
 -- | Async exception for user-initiated force-cancel, naming the jobs it cancels
@@ -136,6 +140,7 @@ data JobForceCancelled = JobForceCancelled [Int64] [Int64]
   deriving stock (Show)
 
 instance Exception JobForceCancelled where
+  backtraceDesired _ = False
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
@@ -179,3 +184,8 @@ throwJobGone msg = throwJobGoneIds msg []
 namedJobIds :: [Int64] -> Text
 namedJobIds [] = ""
 namedJobIds ids = ": " <> T.intercalate ", " (map (T.pack . show) ids)
+
+-- | An exception's message. Unwraps first, so the reported text carries none of
+-- the backtrace base attaches to 'SomeException'.
+displayEx :: SomeException -> Text
+displayEx (SomeException e) = T.pack (displayException e)

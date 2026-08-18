@@ -8,9 +8,8 @@ module Arbiter.Worker.Retry
   , spawnRetried
   ) where
 
-import Arbiter.Core.Exceptions (JobException, JobGoneException)
+import Arbiter.Core.Exceptions (JobException, JobGoneException, displayEx)
 import Arbiter.Core.Threads (labelArbiterThread)
-import Control.Exception (displayException)
 import Control.Monad (forever)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Maybe (isJust)
@@ -50,7 +49,7 @@ retryOnException stateVar logCfg label action = loop
             ShuttingDown -> pure ()
             _ -> do
               tryLog logCfg Error $
-                label <> " error (retrying): " <> T.pack (displayException e)
+                label <> " error (retrying): " <> displayEx e
               sleepResult <-
                 race
                   ( liftIO . atomically $
@@ -87,7 +86,7 @@ retryOnExceptionForever logCfg label delay action = forever $ do
       | isJobSignal e -> throwIO e
       | otherwise -> do
           tryLog logCfg Error $
-            label <> " error (retrying): " <> T.pack (displayException e)
+            label <> " error (retrying): " <> displayEx e
           liftIO $ threadDelay (ceiling (delay * 1_000_000))
 
 isJobSignal :: SomeException -> Bool
