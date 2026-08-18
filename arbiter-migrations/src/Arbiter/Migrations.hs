@@ -349,7 +349,7 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
 
       -- Build migrations: schema-level (once) + per-table migrations
       let schemaMigrations = schemaLevelMigrations schemaName
-          tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName adm) tableNames
+          tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
           migrations = schemaMigrations <> tableMigrations
           migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
           options =
@@ -486,7 +486,9 @@ reconcileOptionalTriggers conn schemaName tables config =
       else do
         dropEventTriggersExcept []
         ours <- eventFunctionIsMarked
-        when ours $ executeSQL (dropEventStreamingFunctionSQL schemaName)
+        -- Triggers left after the sweep are not ours, so the function they depend on stays.
+        depended <- eventFunctionHasTriggers
+        when (ours && not depended) $ executeSQL (dropEventStreamingFunctionSQL schemaName)
   where
     -- Functions are replaced in place, which takes no lock on the queue table. Triggers
     -- are rebuilt only when their marker is off the current version, so an unchanged
@@ -502,30 +504,34 @@ reconcileOptionalTriggers conn schemaName tables config =
       unless (mainCurrent && dlqCurrent) $
         executeSQL (createEventStreamingTriggersSQL schemaName table)
 
-    triggerIsCurrent table trigger marker = do
-      rows <-
-        query
-          conn
-          ( "SELECT EXISTS (SELECT 1 "
-              <> triggerJoins
-              <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? \
-                 \AND obj_description(t.oid, 'pg_trigger') = ?)"
-          )
-          (schemaName, table, trigger, marker)
-      pure $ case rows of
-        Only current : _ -> current
-        _ -> False
+    triggerIsCurrent table trigger marker =
+      exists
+        ( "SELECT EXISTS (SELECT 1 "
+            <> triggerJoins
+            <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? \
+               \AND obj_description(t.oid, 'pg_trigger') = ?)"
+        )
+        (schemaName, table, trigger, marker)
 
-    eventFunctionIsMarked = do
-      rows <-
-        query
-          conn
-          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-          \WHERE n.nspname = ? AND p.proname = ? AND p.pronargs = 0 \
-          \AND obj_description(p.oid, 'pg_proc') LIKE ?)"
-          (schemaName, eventStreamingFunctionName, eventStreamingObjectCommentPrefix <> "%")
+    eventFunctionIsMarked =
+      exists
+        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+        \WHERE n.nspname = ? AND p.proname = ? AND p.pronargs = 0 \
+        \AND obj_description(p.oid, 'pg_proc') LIKE ?)"
+        (schemaName, eventStreamingFunctionName, eventStreamingObjectCommentPrefix <> "%")
+
+    eventFunctionHasTriggers =
+      exists
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid \
+        \JOIN pg_namespace n ON n.oid = p.pronamespace \
+        \WHERE n.nspname = ? AND p.proname = ? AND NOT t.tgisinternal)"
+        (schemaName, eventStreamingFunctionName)
+
+    exists :: (PG.ToRow params) => Query -> params -> IO Bool
+    exists sql params = do
+      rows <- query conn sql params
       pure $ case rows of
-        Only marked : _ -> marked
+        Only present : _ -> present
         _ -> False
 
     dropEventTriggersExcept keep = do

@@ -234,6 +234,30 @@ migrationReconciliationTests connStr =
               \RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql"
           migrate triggerOff
           functionCountNamed conn "notify_job_event" >>= (@?= 1)
+    , testCase "disables streaming with a leftover unmarked event trigger" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "CREATE TABLE arbiter_migration_reconciliation_test.legacy_q (id bigint); \
+              \CREATE TRIGGER notify_job_event_legacy_q \
+              \AFTER INSERT ON arbiter_migration_reconciliation_test.legacy_q \
+              \FOR EACH ROW EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_job_event('legacy_q', 'false')"
+          migrate triggerOff
+          optionalTriggerCount conn >>= (@?= 0)
+    , -- Installs predating the marker have an unmarked function with an older body, so
+      -- enabling streaming has to replace and stamp it rather than treat it as foreign.
+      testCase "adopts an unmarked event function" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOff
+          _ <-
+            PG.execute_
+              conn
+              "CREATE FUNCTION arbiter_migration_reconciliation_test.notify_job_event() \
+              \RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql"
+          migrate triggerOn
+          eventFunctionIsCurrent conn >>= (@?= True)
     , testCase "repairs a stale event function body" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn
