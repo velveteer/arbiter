@@ -276,9 +276,10 @@ runDemo tel = do
   -- instead of sitting flat. Either value at 0 disables it.
   burstSec <- maybe 10 read <$> lookupEnv "BURST_INTERVAL_SECONDS"
   burstSize <- maybe 1000 read <$> lookupEnv "BURST_SIZE"
+  burstGroups <- maybe 8 read <$> lookupEnv "BURST_GROUPS"
   when (burstSec > 0 && burstSize > 0) $ do
     putStrLn $ "Burst load: ~" <> show burstSize <> " jobs every ~" <> show burstSec <> "s into bulk_queue"
-    void $ forkIO $ burstPulse producerEnv burstSec burstSize
+    void $ forkIO $ burstPulse producerEnv burstSec burstSize burstGroups
 
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
@@ -539,16 +540,21 @@ loadPulse env sec = go 0
 
 -- | Burst load: every @sec@ seconds (jittered by half), insert @size@ jobs as
 -- back-to-back multi-row inserts, with a four-times spike every fifth round.
-burstPulse :: SimpleEnv DemoRegistry -> Int -> Int -> IO ()
-burstPulse env sec size = go 0
+-- Half of each burst joins one of @groups@ group keys, so the queue's group
+-- summary takes the update volume while the rest drives the ungrouped path.
+burstPulse :: SimpleEnv DemoRegistry -> Int -> Int -> Int -> IO ()
+burstPulse env sec size groups = go 0
   where
     perStatement = 250
+    grouped i
+      | groups <= 0 || odd i = id
+      | otherwise = setGroupKey (Just ("bulk-" <> tshow ((i `div` 2) `mod` groups)))
     go :: Int -> IO ()
     go n = do
       gap <- randomRIO (0.5, 1.5 :: Double)
       threadDelay (round (fromIntegral sec * gap * 1e6))
       let total = if n `mod` 5 == 4 then size * 4 else size
-          jobs = [defaultJob (BulkTask ("burst " <> tshow n <> " #" <> tshow i)) | i <- [1 .. total]]
+          jobs = [grouped i (defaultJob (BulkTask ("burst " <> tshow n <> " #" <> tshow i))) | i <- [1 .. total]]
       runSimpleDb env $ traverse_ (void . HL.insertJobsBatch_) (chunksOf perStatement jobs)
       go (n + 1)
 

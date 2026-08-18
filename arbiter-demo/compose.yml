@@ -42,6 +42,7 @@ services:
       # interval to push harder on vacuum pressure.
       BURST_INTERVAL_SECONDS: "10"
       BURST_SIZE: "1000"
+      BURST_GROUPS: "8"
       BURST_WORKERS: "6"
       BURST_BATCH: "25"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://lgtm:4318"
