@@ -129,6 +129,7 @@ migrationReconciliationTests connStr =
           triggerOids <- optionalTriggerOids conn
           functionOids <- optionalFunctionOids conn
 
+          -- A second run rebuilds nothing, so no queue table is locked.
           migrate triggerOn
           optionalTriggerOids conn >>= (@?= triggerOids)
           optionalFunctionOids conn >>= (@?= functionOids)
@@ -169,12 +170,9 @@ migrationReconciliationTests connStr =
           _ <-
             PG.execute_
               conn
-              "DROP TABLE arbiter_migration_reconciliation_test.removed_reconciliation_q CASCADE; \
-              \CREATE FUNCTION arbiter_migration_reconciliation_test.notifyxycreated() \
-              \RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql"
+              "DROP TABLE arbiter_migration_reconciliation_test.removed_reconciliation_q CASCADE"
           migrate triggerOn
           removedNotifyObjectCount conn >>= (@?= 0)
-          functionCountNamed conn "notifyxycreated" >>= (@?= 1)
     , testCase "repairs stale notification objects" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn
@@ -191,6 +189,51 @@ migrationReconciliationTests connStr =
           notificationObjectsAreCurrent conn >>= (@?= False)
           migrate triggerOn
           notificationObjectsAreCurrent conn >>= (@?= True)
+    , testCase "repairs a notify trigger missing its transition table" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "DROP TRIGGER migration_reconciliation_q_notify_trigger \
+              \ON arbiter_migration_reconciliation_test.migration_reconciliation_q; \
+              \CREATE TRIGGER migration_reconciliation_q_notify_trigger \
+              \AFTER INSERT ON arbiter_migration_reconciliation_test.migration_reconciliation_q \
+              \FOR EACH STATEMENT \
+              \EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_migration_reconciliation_q_created()"
+          notificationObjectsAreCurrent conn >>= (@?= False)
+          migrate triggerOn
+          notificationObjectsAreCurrent conn >>= (@?= True)
+    , testCase "leaves unmarked notify lookalikes alone" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOn
+          _ <-
+            PG.execute_
+              conn
+              "CREATE TABLE arbiter_migration_reconciliation_test.orders (id bigint); \
+              \CREATE FUNCTION arbiter_migration_reconciliation_test.notify_orders_created() \
+              \RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql; \
+              \CREATE TRIGGER orders_notify_trigger \
+              \AFTER INSERT ON arbiter_migration_reconciliation_test.orders \
+              \REFERENCING NEW TABLE AS new_table FOR EACH STATEMENT \
+              \EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_orders_created()"
+          migrate triggerOn
+          functionCountNamed conn "notify_orders_created" >>= (@?= 1)
+          triggerCountNamed conn "orders_notify_trigger" >>= (@?= 1)
+
+          migrate triggerOff
+          functionCountNamed conn "notify_orders_created" >>= (@?= 1)
+          triggerCountNamed conn "orders_notify_trigger" >>= (@?= 1)
+    , testCase "leaves an unmarked event function alone" $
+        withFreshSchema connStr $ \conn -> do
+          migrate triggerOff
+          _ <-
+            PG.execute_
+              conn
+              "CREATE FUNCTION arbiter_migration_reconciliation_test.notify_job_event() \
+              \RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql"
+          migrate triggerOff
+          functionCountNamed conn "notify_job_event" >>= (@?= 1)
     , testCase "repairs a stale event function body" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn
@@ -274,12 +317,15 @@ optionalTriggerCount conn =
       ("SELECT count(*) " <> triggerJoins <> "WHERE n.nspname = ? AND t.tgname IN " <> optionalTriggerNames)
       (PG.Only reconciliationSchema)
 
+-- | Compares the installed objects against the rendered trigger definition rather
+-- than a hand-listed set of catalog attributes, so a clause the reconciler forgot
+-- to emit still fails.
 notificationObjectsAreCurrent :: PG.Connection -> IO Bool
-notificationObjectsAreCurrent conn =
-  any PG.fromOnly
-    <$> PG.query
+notificationObjectsAreCurrent conn = do
+  rows <-
+    PG.query
       conn
-      "SELECT p.prosrc LIKE '%pg_notify(''migration_reconciliation_q_created'', '''')%' AND t.tgtype = 4 \
+      "SELECT pg_get_triggerdef(t.oid), p.prosrc \
       \FROM pg_trigger t \
       \JOIN pg_proc p ON p.oid = t.tgfoid \
       \JOIN pg_class c ON c.oid = t.tgrelid \
@@ -287,6 +333,11 @@ notificationObjectsAreCurrent conn =
       \WHERE n.nspname = ? AND c.relname = 'migration_reconciliation_q' \
       \AND t.tgname = 'migration_reconciliation_q_notify_trigger'"
       (PG.Only reconciliationSchema)
+  pure $ case rows of
+    [(definition, body)] ->
+      all (`T.isInfixOf` definition) ["AFTER INSERT", "REFERENCING NEW TABLE AS new_table", "FOR EACH STATEMENT"]
+        && T.isInfixOf "pg_notify('migration_reconciliation_q_created', '')" body
+    _ -> False
 
 eventFunctionIsCurrent :: PG.Connection -> IO Bool
 eventFunctionIsCurrent conn =
@@ -347,6 +398,14 @@ removedNotifyObjectCount conn = do
         )
         (PG.Only reconciliationSchema)
   pure (triggerCount + functionCount)
+
+triggerCountNamed :: PG.Connection -> Text -> IO Int64
+triggerCountNamed conn name =
+  fromOnlyOne
+    <$> PG.query
+      conn
+      ("SELECT count(*) " <> triggerJoins <> "WHERE n.nspname = ? AND t.tgname = ?")
+      (reconciliationSchema, name)
 
 functionCountNamed :: PG.Connection -> Text -> IO Int64
 functionCountNamed conn name =

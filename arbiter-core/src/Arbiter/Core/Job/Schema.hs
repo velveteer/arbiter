@@ -63,6 +63,10 @@ module Arbiter.Core.Job.Schema
   , eventStreamingFunctionName
   , eventStreamingTriggerName
   , eventStreamingDLQTriggerName
+  , notifyObjectComment
+  , notifyObjectCommentPrefix
+  , eventStreamingObjectComment
+  , eventStreamingObjectCommentPrefix
 
     -- * Table Name Helpers
   , qualifiedTable
@@ -166,6 +170,26 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 -- | Per-table DLQ event streaming trigger name.
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
+
+-- | Ownership marker stamped on every notify function and trigger arbiter installs.
+-- Sweeps match 'notifyObjectCommentPrefix', so an unmarked object is never dropped.
+-- A trigger is current when its comment equals this exact value, so bump the version
+-- whenever 'createNotifyTriggerSQL' changes.
+notifyObjectComment :: Text
+notifyObjectComment = notifyObjectCommentPrefix <> "v1"
+
+-- | The marker prefix identifying a notify object as arbiter's, across versions.
+notifyObjectCommentPrefix :: Text
+notifyObjectCommentPrefix = "arbiter:notify:"
+
+-- | Ownership marker stamped on every event-streaming function and trigger arbiter
+-- installs. Bump the version whenever 'createEventStreamingTriggersSQL' changes.
+eventStreamingObjectComment :: Text
+eventStreamingObjectComment = eventStreamingObjectCommentPrefix <> "v1"
+
+-- | The marker prefix identifying an event-streaming object as arbiter's, across versions.
+eventStreamingObjectCommentPrefix :: Text
+eventStreamingObjectCommentPrefix = "arbiter:event-stream:"
 
 -- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
 qualifiedTable :: SchemaName -> TableName -> Text
@@ -924,6 +948,13 @@ createNotifyFunctionSQL schemaName tableName =
         , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
+        , "COMMENT ON FUNCTION "
+            <> quoteIdentifier schemaName
+            <> "."
+            <> quoteIdentifier functionName
+            <> "() IS '"
+            <> notifyObjectComment
+            <> "';"
         ]
 
 -- | SQL to create the NOTIFY trigger for a specific table
@@ -941,6 +972,7 @@ createNotifyTriggerSQL schemaName tableName =
         , "REFERENCING NEW TABLE AS new_table"
         , "FOR EACH STATEMENT"
         , "EXECUTE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "();"
+        , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS '" <> notifyObjectComment <> "';"
         ]
 
 -- | SQL to drop the NOTIFY trigger
@@ -997,6 +1029,7 @@ createEventStreamingFunctionSQL schemaName =
         , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
+        , "COMMENT ON FUNCTION " <> funcName <> "() IS '" <> eventStreamingObjectComment <> "';"
         ]
 
 -- | Install event-streaming triggers with explicit logical queue metadata.
@@ -1013,15 +1046,25 @@ createEventStreamingTriggersSQL schemaName tableName =
           <> ", "
           <> quoteLiteral isDLQ
           <> ");"
+      triggerComment trigger tableRef =
+        "COMMENT ON TRIGGER "
+          <> quoteIdentifier trigger
+          <> " ON "
+          <> tableRef
+          <> " IS "
+          <> quoteLiteral eventStreamingObjectComment
+          <> ";"
    in dropEventStreamingTriggersSQL schemaName tableName
         <> T.unlines
           [ "CREATE TRIGGER " <> quoteIdentifier (eventStreamingTriggerName tableName)
           , "AFTER INSERT OR UPDATE OR DELETE ON " <> tbl
           , triggerCall "false"
+          , triggerComment (eventStreamingTriggerName tableName) tbl
           , ""
           , "CREATE TRIGGER " <> quoteIdentifier (eventStreamingDLQTriggerName tableName)
           , "AFTER INSERT ON " <> dlqTbl
           , triggerCall "true"
+          , triggerComment (eventStreamingDLQTriggerName tableName) dlqTbl
           ]
   where
     quoteLiteral = ("'" <>) . (<> "'") . T.replace "'" "''"
