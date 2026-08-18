@@ -126,7 +126,7 @@ import Arbiter.Core.Worker
   , addClaimedByColumnSQL
   , createWorkersTableSQL
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, fromException, throwIO, try)
+import Control.Exception (SomeAsyncException, SomeException, bracket, fromException, throwIO, try)
 import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -342,8 +342,8 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
         LibPQ.enableNoticeReporting libpqConn
 
       -- Build migrations: schema-level (once) + per-table migrations
-      let schemaMigrations = schemaLevelMigrations config schemaName
-          tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName config adm) tableNames
+      let schemaMigrations = schemaLevelMigrations schemaName
+          tableMigrations = concatMap (\(tableName, adm) -> jobQueueMigrationsForTable schemaName tableName adm) tableNames
           migrations = schemaMigrations <> tableMigrations
           migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
           options =
@@ -371,7 +371,7 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
             -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
             Left (e :: SomeException)
               | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
-              | otherwise -> pure (MigrationError (displayException e))
+              | otherwise -> pure (MigrationError (T.unpack (displayEx e)))
         other -> pure other
 
 -- | Upsert each policy's @default_*@ params into the policies table (created
@@ -499,7 +499,7 @@ reconcileOptionalTriggers conn schemaName tables config =
           ( "SELECT EXISTS (SELECT 1 "
               <> triggerJoins
               <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal \
-                 \AND t.tgtype = 5 AND t.tgnargs = 0 AND pn.nspname = ? AND p.proname = ? \
+                 \AND t.tgtype = 4 AND t.tgnargs = 0 AND pn.nspname = ? AND p.proname = ? \
                  \AND p.pronargs = 0 AND p.prosrc = ?)"
           )
           (schemaName, table, notifyTriggerName table, schemaName, notifyFunctionName table, desiredBody)
@@ -576,8 +576,8 @@ reconcileOptionalTriggers conn schemaName tables config =
           "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \
           \FROM pg_proc p \
           \JOIN pg_namespace n ON n.oid = p.pronamespace \
-          \WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0 \
-          \AND NOT (substring(p.proname FROM 8 FOR char_length(p.proname) - 15) = ANY(?::text[]))"
+          \WHERE n.nspname = ? AND p.proname LIKE 'notify\\_%\\_created' AND char_length(p.proname) > 15 \
+          \AND p.pronargs = 0 AND NOT (substring(p.proname FROM 8 FOR char_length(p.proname) - 15) = ANY(?::text[]))"
           (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) functionCommands
 
@@ -608,9 +608,10 @@ dropTriggerSelect :: Query
 dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) "
 
 -- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
--- the golden suite can pin every shipped migration body.
-schemaLevelMigrations :: MigrationConfig -> SchemaName -> [MigrationCommand]
-schemaLevelMigrations config schemaName =
+-- the golden suite can pin every shipped migration body. Optional notification and
+-- event-streaming objects are not tracked here, 'reconcileOptionalTriggers' owns them.
+schemaLevelMigrations :: SchemaName -> [MigrationCommand]
+schemaLevelMigrations schemaName =
   [ MigrationScript "create-cron-schedules" (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
   , MigrationScript "cron-schedules-add-timezone" (encodeUtf8 $ addTimezoneColumnSQL schemaName)
   , MigrationScript "cron-schedules-add-queue-name" (encodeUtf8 $ addQueueNameColumnSQL schemaName)
@@ -625,26 +626,23 @@ schemaLevelMigrations config schemaName =
   , MigrationScript "create-arbiter-concurrency-policies" (encodeUtf8 $ createConcurrencyPoliciesTableSQL schemaName)
   , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
   ]
-    <> [ MigrationScript "create-event-streaming-function-v2" (encodeUtf8 $ createEventStreamingFunctionSQL schemaName)
-       | enableEventStreaming config
-       ]
 
 -- | All job queue migrations for a single table
 --
 -- This creates migrations for one table and its DLQ within a schema.
 -- Each table gets its own set of migrations with unique version identifiers.
+-- Optional notification and event-streaming objects are not tracked here,
+-- 'reconcileOptionalTriggers' owns them.
 jobQueueMigrationsForTable
   :: SchemaName
   -- ^ Schema name
   -> TableName
   -- ^ Table name
-  -> MigrationConfig
-  -- ^ Migration configuration
   -> TableAdmission
   -- ^ Which admission trigger kinds to install
   -> [MigrationCommand]
   -- ^ List of migration commands
-jobQueueMigrationsForTable schemaName tableName config adm =
+jobQueueMigrationsForTable schemaName tableName adm =
   let prefix = T.unpack tableName <> "-"
       script name sql = MigrationScript (prefix <> name) (encodeUtf8 sql)
 
@@ -697,18 +695,7 @@ jobQueueMigrationsForTable schemaName tableName config adm =
             , script "create-rate-limit-bucket-triggers" $ createRateLimitBucketTriggersSQL schemaName tableName
             ]
         | otherwise = []
-      notifyTriggers
-        | enableNotifications config =
-            [ script "create-notify-function" $ createNotifyFunctionSQL schemaName tableName
-            , script "create-notify-trigger" $ createNotifyTriggerSQL schemaName tableName
-            ]
-        | otherwise = []
-      eventStreamingTriggers
-        | enableEventStreaming config =
-            [ script "create-event-streaming-triggers-v2" $ createEventStreamingTriggersSQL schemaName tableName
-            ]
-        | otherwise = []
-   in coreMigrations <> concurrencyTriggers <> rateLimitTriggers <> notifyTriggers <> eventStreamingTriggers
+   in coreMigrations <> concurrencyTriggers <> rateLimitTriggers
 
 -- | Check whether a schema exists in the database.
 schemaExists :: PG.Connection -> Text -> IO Bool

@@ -906,8 +906,9 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
     ]
     <> "\n"
 
--- | SQL for the per-table NOTIFY function (fires after INSERT).
--- Channel name is quoted as a string literal, not an identifier.
+-- | SQL for the per-table NOTIFY function, fired once per insert statement.
+-- A statement that inserted nothing notifies nothing. Channel name is quoted as
+-- a string literal, not an identifier.
 createNotifyFunctionSQL :: Text -> Text -> Text
 createNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -917,15 +918,17 @@ createNotifyFunctionSQL schemaName tableName =
         [ "CREATE OR REPLACE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "()"
         , "RETURNS TRIGGER AS $$"
         , "BEGIN"
-        , "  PERFORM pg_notify('" <> quotedChannel <> "', '');"
-        , "  RETURN NEW;"
+        , "  IF EXISTS (SELECT 1 FROM new_table) THEN"
+        , "    PERFORM pg_notify('" <> quotedChannel <> "', '');"
+        , "  END IF;"
+        , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
         ]
 
 -- | SQL to create the NOTIFY trigger for a specific table
 --
--- This trigger fires AFTER INSERT on the job queue table and calls the table-specific notify function.
+-- Statement-level AFTER INSERT, so a batch insert notifies once rather than per row.
 createNotifyTriggerSQL :: Text -> Text -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -935,7 +938,8 @@ createNotifyTriggerSQL schemaName tableName =
         [ "DROP TRIGGER IF EXISTS " <> trigName <> " ON " <> tbl <> ";"
         , "CREATE TRIGGER " <> trigName
         , "AFTER INSERT ON " <> tbl
-        , "FOR EACH ROW"
+        , "REFERENCING NEW TABLE AS new_table"
+        , "FOR EACH STATEMENT"
         , "EXECUTE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "();"
         ]
 

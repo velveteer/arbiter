@@ -29,15 +29,13 @@ import Arbiter.Core.RateLimit.Schema qualified as RL
 import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Migrations
-  ( MigrationConfig (..)
-  , allTableAdmission
-  , defaultMigrationConfig
+  ( allTableAdmission
   , jobQueueMigrationsForTable
   , schemaLevelMigrations
   )
 import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO, try)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
 import Data.Int (Int32, Int64)
@@ -84,14 +82,10 @@ setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ "DROP SCHEMA IF EXISTS " <> schemaName <> " CASCADE"
   void $ execute_ conn $ Schema.createSchemaSQL schemaName
   traverse_ runScript $
-    schemaLevelMigrations migrationConfig schemaName
-      <> jobQueueMigrationsForTable schemaName tableName migrationConfig allTableAdmission
+    schemaLevelMigrations schemaName
+      <> jobQueueMigrationsForTable schemaName tableName allTableAdmission
+  createNotifyObjects (setupEnableNotifications config) schemaName tableName conn
   where
-    migrationConfig =
-      defaultMigrationConfig
-        { enableNotifications = setupEnableNotifications config
-        , enableEventStreaming = False
-        }
     skipped
       | setupEnableRankingIndexes config = []
       | otherwise = map ((T.unpack tableName <> "-") <>) ["create-group-key-index", "migrate-ungrouped-ready-split-indexes"]
@@ -154,16 +148,19 @@ addQueueTable :: ByteString -> Text -> Text -> Bool -> IO ()
 addQueueTable connStr schemaName tableName withNotify = do
   conn <- connectPostgreSQL connStr
   disableNoticeReporting conn
-  let config =
-        defaultMigrationConfig
-          { enableNotifications = withNotify
-          , enableEventStreaming = False
-          }
-  traverse_ (runScript conn) (jobQueueMigrationsForTable schemaName tableName config allTableAdmission)
+  traverse_ (runScript conn) (jobQueueMigrationsForTable schemaName tableName allTableAdmission)
+  createNotifyObjects withNotify schemaName tableName conn
   close conn
   where
     runScript conn (MigrationScript _ sql) = void $ execute conn (Query sql) ()
     runScript _ _ = pure ()
+
+-- | Install the notification function and trigger the reconciler would.
+createNotifyObjects :: Bool -> Text -> Text -> Connection -> IO ()
+createNotifyObjects withNotify schemaName tableName conn =
+  when withNotify $ do
+    execute_ conn (Schema.createNotifyFunctionSQL schemaName tableName)
+    execute_ conn (Schema.createNotifyTriggerSQL schemaName tableName)
 
 -- | Silence libpq notice output for the connection.
 disableNoticeReporting :: Connection -> IO ()

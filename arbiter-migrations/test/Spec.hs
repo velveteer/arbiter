@@ -169,9 +169,12 @@ migrationReconciliationTests connStr =
           _ <-
             PG.execute_
               conn
-              "DROP TABLE arbiter_migration_reconciliation_test.removed_reconciliation_q CASCADE"
+              "DROP TABLE arbiter_migration_reconciliation_test.removed_reconciliation_q CASCADE; \
+              \CREATE FUNCTION arbiter_migration_reconciliation_test.notifyxycreated() \
+              \RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql"
           migrate triggerOn
           removedNotifyObjectCount conn >>= (@?= 0)
+          functionCountNamed conn "notifyxycreated" >>= (@?= 1)
     , testCase "repairs stale notification objects" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn
@@ -276,7 +279,7 @@ notificationObjectsAreCurrent conn =
   any PG.fromOnly
     <$> PG.query
       conn
-      "SELECT p.prosrc LIKE '%pg_notify(''migration_reconciliation_q_created'', '''')%' AND t.tgtype = 5 \
+      "SELECT p.prosrc LIKE '%pg_notify(''migration_reconciliation_q_created'', '''')%' AND t.tgtype = 4 \
       \FROM pg_trigger t \
       \JOIN pg_proc p ON p.oid = t.tgfoid \
       \JOIN pg_class c ON c.oid = t.tgrelid \
@@ -345,6 +348,14 @@ removedNotifyObjectCount conn = do
         (PG.Only reconciliationSchema)
   pure (triggerCount + functionCount)
 
+functionCountNamed :: PG.Connection -> Text -> IO Int64
+functionCountNamed conn name =
+  fromOnlyOne
+    <$> PG.query
+      conn
+      ("SELECT count(*) " <> functionJoins <> "WHERE n.nspname = ? AND p.proname = ?")
+      (reconciliationSchema, name)
+
 optionalFunctionCount :: PG.Connection -> IO Int64
 optionalFunctionCount conn =
   fromOnlyOne
@@ -389,19 +400,15 @@ getTestConnectionString = do
   configured <- lookupEnv "ARBITER_TEST_CONN_STRING"
   pure $ maybe "host=localhost port=5432 user=postgres password=master dbname=postgres" BS8.pack configured
 
--- | Every shipped migration as @(name, SQL body)@, with all features on so the
--- notify and event-streaming triggers are pinned alongside the core migrations.
--- Covers both the schema-level migrations and the per-table migrations.
+-- | Every shipped migration as @(name, SQL body)@, covering both the schema-level
+-- migrations and the per-table migrations.
 shippedMigrations :: [(String, BS.ByteString)]
 shippedMigrations =
   [ (name, body)
   | MigrationScript name body <-
-      schemaLevelMigrations allFeaturesConfig "arbiter"
-        <> jobQueueMigrationsForTable "arbiter" "golden_jobs" allFeaturesConfig allTableAdmission
+      schemaLevelMigrations "arbiter"
+        <> jobQueueMigrationsForTable "arbiter" "golden_jobs" allTableAdmission
   ]
-
-allFeaturesConfig :: MigrationConfig
-allFeaturesConfig = defaultMigrationConfig {enableEventStreaming = True}
 
 -- | Pin one migration's body to @test/golden/<name>.sql@.
 migrationGolden :: (String, BS.ByteString) -> TestTree
