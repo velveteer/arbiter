@@ -1983,8 +1983,8 @@ operationsSpec mkMessage mkResult runM = do
       -- Parent should be resumed (not suspended)
       Just parentResumed <- runM env (HL.getJobById @payload (primaryKey parent))
       suspended parentResumed `shouldBe` False
-      (_, dlqFailures, _) <- runM env (HL.readChildResultsRaw @payload (primaryKey parent))
-      Map.keys dlqFailures `shouldBe` [primaryKey (head claimedChild)]
+      (_, childFailures, _, _) <- runM env (HL.readChildResultsRaw @payload (primaryKey parent))
+      Map.keys childFailures `shouldBe` [primaryKey (head claimedChild)]
 
     it "moveToDLQ snapshots the rollup's own child results before the cascade" $ \env -> do
       Right (parent :| _) <-
@@ -2003,7 +2003,7 @@ operationsSpec mkMessage mkResult runM = do
 
       [dlq] <- dlqAll env
       Just requeued <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlq))
-      (results, failures, snapshot) <- runM env (HL.readChildResultsRaw @payload (primaryKey requeued))
+      (results, failures, snapshot, _) <- runM env (HL.readChildResultsRaw @payload (primaryKey requeued))
       Map.keys results `shouldBe` []
       Map.keys (HL.mergeRawChildResults results failures snapshot) `shouldBe` [primaryKey child]
 

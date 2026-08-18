@@ -238,7 +238,7 @@ fieldInvariants config =
     <*> waived (workerStateVar config)
     <*> waived (pauseVar config)
     <*> waived (livenessFile config)
-    <*> traverse (positive "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
+    <*> traverse (nonNegative "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
     <*> waived (logConfig config)
     <*> waived (cronJobs config)
     <*> positive "reaperInterval" (reaperInterval config)
@@ -279,6 +279,11 @@ waived = pure
 -- | Reject a non-positive field, passing it through unchanged.
 positive :: (Num a, Ord a) => Text -> a -> Validation a
 positive label value = value <$ require (value > 0) (label <> " must be greater than zero")
+
+-- | Reject a negative field, passing it through unchanged. Zero opts out of a
+-- wait rather than misconfiguring one.
+nonNegative :: (Num a, Ord a) => Text -> a -> Validation a
+nonNegative label value = value <$ require (value >= 0) (label <> " must not be negative")
 
 require :: Bool -> Text -> Validation ()
 require condition message = Validation (if condition then Right () else Left (message :| []))

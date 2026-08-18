@@ -1262,13 +1262,13 @@ getDLQChildErrorsByParent parentJobId = do
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
--- @(childId->result, childId->error, parentStateSnapshot)@.
+-- @(childId->result, childId->error, parentStateSnapshot, dlqRowId->error)@.
 readChildResultsRaw
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
   -- ^ Parent job ID
-  -> m (Map Int64 Value, Map Int64 Text, Maybe Value)
+  -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
 readChildResultsRaw parentJobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m

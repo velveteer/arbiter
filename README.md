@@ -356,7 +356,8 @@ myTree = JT.rollup (Arb.defaultJob Aggregate)
 
 A parent fetches its children's results on demand with
 `Worker.mergedChildResults`, which returns the monoidal merge of its immediate
-children's results plus a map of any DLQ'd immediate children. Intermediate
+children's results plus a map of any DLQ'd immediate children, keyed by DLQ
+row id so the entries can be passed to `retryFromDLQ`. Intermediate
 results are cleaned up automatically when the parent is acked.
 
 ```haskell

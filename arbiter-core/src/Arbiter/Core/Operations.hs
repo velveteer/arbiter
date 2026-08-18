@@ -1286,7 +1286,7 @@ snapshotTreeRollups
 snapshotTreeRollups schemaName tableName parentJobId = do
   rollupIds <- MA.executeQuery (Tmpl.treeRollupIdsSQL schemaName tableName parentJobId)
   for_ rollupIds $ \rid -> do
-    (results, errors, snap) <- readChildResultsRaw schemaName tableName rid
+    (results, errors, snap, _) <- readChildResultsRaw schemaName tableName rid
     let merged = mergeRawChildResults results errors snap
     when (not $ Map.null merged)
       $ void
@@ -2737,20 +2737,20 @@ readChildResultsRaw
   -- ^ Table name
   -> Int64
   -- ^ Parent job ID
-  -> m (Map.Map Int64 Value, Map.Map Int64 Text, Maybe Value)
+  -> m (Map.Map Int64 Value, Map.Map Int64 Text, Maybe Value, Map.Map Int64 Text)
 readChildResultsRaw schemaName tableName parentJobId = do
   rows <- MA.executeQuery (Tmpl.readChildResultsSQL schemaName tableName parentJobId)
-  foldM parseRow (Map.empty, Map.empty, Nothing) rows
+  foldM parseRow (Map.empty, Map.empty, Nothing, Map.empty) rows
   where
-    parseRow (!results, !errors, !snap) row = case row of
+    parseRow (!results, !errors, !snap, !dlqFailures) row = case row of
       ("r", Just cid, Just val, _, _) ->
-        pure (Map.insert cid val results, errors, snap)
-      ("e", Just jid, _, Just err, Just _) ->
-        pure (results, Map.insert jid err errors, snap)
-      ("e", Just jid, _, Nothing, Just _) ->
-        pure (results, Map.insert jid "" errors, snap)
+        pure (Map.insert cid val results, errors, snap, dlqFailures)
+      ("e", Just jid, _, Just err, Just dlqPk) ->
+        pure (results, Map.insert jid err errors, snap, Map.insert dlqPk err dlqFailures)
+      ("e", Just jid, _, Nothing, Just dlqPk) ->
+        pure (results, Map.insert jid "" errors, snap, Map.insert dlqPk "" dlqFailures)
       ("s", _, Just val, _, _) ->
-        pure (results, errors, Just val)
+        pure (results, errors, Just val, dlqFailures)
       _ -> throwParsing $ "readChildResultsRaw: unexpected row: " <> T.pack (show row)
 
 -- | Read the raw @parent_state@ snapshot from the DB.

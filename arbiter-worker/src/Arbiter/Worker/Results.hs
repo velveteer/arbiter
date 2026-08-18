@@ -18,18 +18,19 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 
--- | A rollup parent's immediate child results and DLQ errors, both keyed by
--- child ID. A decode failure is returned as 'Left'.
+-- | A rollup parent's immediate child results, keyed by child ID, and its DLQ
+-- errors, keyed by DLQ row ID for 'Arbiter.Core.HighLevel.retryFromDLQ'. A
+-- decode failure is returned as 'Left'.
 childResults
   :: (FromJSON (ResultOf m payload), MonadArbiter m)
   => JobRead payload
   -> m (Map Int64 (Either Text (ResultOf m payload)), Map Int64 Text)
 childResults job = do
   schema <- getSchema
-  (results, failures, snapshot) <-
+  (results, failures, snapshot, dlqFailures) <-
     Ops.readChildResultsRaw schema (queueName job) (primaryKey job)
   let raw = Ops.mergeRawChildResults results failures snapshot
-  pure (Map.map (>>= decodeJobResult) raw, failures)
+  pure (Map.map (>>= decodeJobResult) raw, dlqFailures)
 
 -- | 'childResults' with successfully decoded values combined through 'Monoid'.
 mergedChildResults
