@@ -161,6 +161,17 @@ migrationReconciliationTests connStr =
           removedNotifyObjectCount conn >>= (@?= 0)
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
+    , testCase "drops the notify function of a removed queue whose table is gone" $
+        withFreshSchema connStr $ \conn -> do
+          runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
+          removedNotifyObjectCount conn >>= (@?= 2)
+
+          _ <-
+            PG.execute_
+              conn
+              "DROP TABLE arbiter_migration_reconciliation_test.removed_reconciliation_q CASCADE"
+          migrate triggerOn
+          removedNotifyObjectCount conn >>= (@?= 0)
     , testCase "repairs stale notification objects" $
         withFreshSchema connStr $ \conn -> do
           migrate triggerOn
