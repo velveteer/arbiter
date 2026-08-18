@@ -84,10 +84,12 @@ import UnliftIO.Async (mapConcurrently)
 
 import Arbiter.Test.Setup (drainWith, execStatement, execute_)
 
+-- | A payload keyed by tenant, with a per-job token cost.
 data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | A one-queue registry over 'RLPayload'.
 type RLReg = '[Queue "arbiter_ratelimit_test" RLPayload]
 
 -- 3 tokens, burst 3, refilling 3 every 2 seconds (1.5 tokens/sec).
@@ -119,6 +121,7 @@ costJob tenant cost = defaultJob (RLPayload tenant cost)
 groupedJob :: Text -> Text -> JobWrite RLPayload
 groupedJob gk tenant = defaultGroupedJob gk (RLPayload tenant 1)
 
+-- | The rate-limit suite, run against any backend.
 rateLimitSpec
   :: forall env m
    . (HasRegistry m RLReg)

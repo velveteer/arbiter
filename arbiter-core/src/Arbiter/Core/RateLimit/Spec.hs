@@ -71,6 +71,7 @@ instance ToJSON RateLimitKey where
 instance FromJSON RateLimitKey where
   parseJSON = prefixedKeyParseJSON "RateLimitKey" RateLimitKey
 
+-- | The bucket key as stored, prefix and suffix joined.
 rateLimitKeyText :: RateLimitKey -> Text
 rateLimitKeyText (RateLimitKey p s) = prefixedKeyText p s
 
@@ -139,6 +140,7 @@ instance (HasRateLimit payload) => CollectFor payload Policy where
 -- inspecting each payload's 'rateLimitFor'. The migration seeds these.
 type RegistryRateLimitPolicies registry = RegistryPolicies registry Policy
 
+-- | Every distinct policy declared across the registry's payloads.
 registryRateLimitPolicies :: forall registry. (RegistryRateLimitPolicies registry) => Set Policy
 registryRateLimitPolicies = registryPolicies @registry @Policy
 

@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Parameterized worker-pool test suite, instantiated for each 'MonadArbiter' backend.
+-- | Parameterized worker-pool test suite, instantiated for each 'Arbiter.Core.MonadArbiter.MonadArbiter' backend.
 module Arbiter.Worker.TestKit
   ( workerSpec
   , listenerSpec
@@ -81,7 +81,7 @@ import Test.Hspec
 import UnliftIO (atomically, bracket)
 import UnliftIO.Async (withAsync)
 
--- | Build a worker-pool test suite for the given 'MonadArbiter' runner.
+-- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
 --
 -- @mkSimple@/@mkFailing@ construct the backend's payload, @mkHandler@ adapts a
 -- plain job action into the backend's 'JobHandler' shape (some backends pass a

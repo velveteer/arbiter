@@ -47,7 +47,7 @@ setLocalStatementTimeout limit =
           [QQ.sql|SELECT set_config('statement_timeout', '${msTxt}', true) AS @{set_config :: CText}|]
 
 -- | 'runGated' with each statement of @work@ bounded by @limit@. The bound is
--- transaction-local, which the gate transaction 'work' runs in makes effective.
+-- transaction-local, which the gate transaction @work@ runs in makes effective.
 runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> NominalDiffTime -> m a -> m (Maybe a)
 runGatedBounded schemaName task interval limit work =
   runGated schemaName task interval (setLocalStatementTimeout limit >> work)

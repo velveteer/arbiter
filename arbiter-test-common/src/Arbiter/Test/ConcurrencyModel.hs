@@ -67,6 +67,7 @@ limitOf k = fromMaybe 1 (lookup k modelPools)
 claimBatch :: Int
 claimBatch = 500
 
+-- | The concurrency state-machine properties, run against any backend.
 concurrencyModelSpec
   :: forall sm
    . (HasRegistry sm CLReg)

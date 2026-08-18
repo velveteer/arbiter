@@ -339,7 +339,7 @@ createArchiveExpiresAtIndexSQL schemaName tableName =
     , "ON " <> jobQueueArchiveTable schemaName tableName <> " (archive_expires_at);"
     ]
 
--- | Index on archive @job_id@ for by-id lookups ('getArchivedJobById').
+-- | Index on archive @job_id@ for by-id lookups (@getArchivedJobById@).
 createArchiveJobIdIndexSQL :: Text -> Text -> Text
 createArchiveJobIdIndexSQL schemaName tableName =
   T.unlines

@@ -22,6 +22,7 @@ import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.Sql.Health qualified as Sql
 import Arbiter.Core.Sql.Query (rows)
 
+-- | Database-wide cache, transaction, connection, and age counters.
 data PgDbHealth = PgDbHealth
   { blksHit :: Double
   , blksRead :: Double
@@ -42,6 +43,7 @@ data PgDbHealth = PgDbHealth
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | Per-table tuple counts, size, and scan counters.
 data PgTableHealth = PgTableHealth
   { table :: Text
   , liveTup :: Int64

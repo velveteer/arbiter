@@ -35,7 +35,7 @@ import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
-import Data.Foldable (traverse_)
+import Data.Foldable (toList)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
@@ -117,7 +117,7 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Per-pool pause flag.
   , livenessFile :: Maybe FilePath
   -- ^ When set, the heartbeat loop touches this file at the
-  -- 'workerHeartbeatInterval` cadence. Useful for file-based liveness probes.
+  -- 'workerHeartbeatInterval' cadence. Useful for file-based liveness probes.
   -- Default: @\/tmp\/arbiter-worker-\<workerId\>@.
   , gracefulShutdownTimeout :: Maybe NominalDiffTime
   -- ^ Maximum time in __seconds__ to wait for in-flight jobs during graceful
@@ -161,7 +161,7 @@ data WorkerConfig m payload = WorkerConfig
 -- or its archive entry.
 --
 -- Each callback runs in its own transaction and commits on return. Call them at
--- the top level of the handler. Wrapping one in your own 'withDbTransaction'
+-- the top level of the handler. Wrapping one in your own 'Arbiter.Core.MonadArbiter.withDbTransaction'
 -- enlists the ack into that transaction as a savepoint, committing atomically
 -- with your writes. The success hook then fires at savepoint release, not at
 -- your outer commit, so an outer rollback reprocesses the job after the
@@ -212,29 +212,76 @@ handlerBatchSize config = case handlerMode config of
   SingleJobMode _ -> 1
   BatchedJobsMode n _ -> n
 
--- | Validate invariants required for safe worker execution.
+-- | Validate invariants required for safe worker execution. Reports every
+-- violation, not just the first.
 validateWorkerConfig :: WorkerConfig m payload -> Either Text ()
-validateWorkerConfig config = do
-  positive "workerCount" (workerCount config)
-  positive "handler batch size" (handlerBatchSize config)
-  positiveDuration "pollInterval" (pollInterval config)
-  positiveDuration "visibilityTimeout" (visibilityTimeout config)
-  positiveDuration "jobHeartbeatInterval" (jobHeartbeatInterval config)
-  positiveDuration "workerHeartbeatInterval" (workerHeartbeatInterval config)
-  positiveDuration "reaperInterval" (reaperInterval config)
-  positiveDuration "reaperTimeout" (reaperTimeout config)
-  positiveDuration "workerStaleThreshold" (workerStaleThreshold config)
-  traverse_ (positiveDuration "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
+validateWorkerConfig config =
+  case fieldInvariants config *> crossFieldInvariants config of
+    Validation (Left messages) -> Left (T.intercalate "; " (toList messages))
+    Validation (Right ()) -> Right ()
+
+-- | Rebuilds the config so every field is either checked or waived. A field added
+-- to 'WorkerConfig' is a type error here until it is classified.
+fieldInvariants :: WorkerConfig m payload -> Validation (WorkerConfig m payload)
+fieldInvariants config =
+  WorkerConfig
+    <$> positive "workerCount" (workerCount config)
+    <*> (handlerMode config <$ positive "handler batch size" (handlerBatchSize config))
+    <*> positive "pollInterval" (pollInterval config)
+    <*> positive "visibilityTimeout" (visibilityTimeout config)
+    <*> positive "jobHeartbeatInterval" (jobHeartbeatInterval config)
+    <*> positive "workerHeartbeatInterval" (workerHeartbeatInterval config)
+    <*> waived (backoffStrategy config)
+    <*> waived (jitter config)
+    <*> waived (observabilityHooks config)
+    <*> waived (onMaintenance config)
+    <*> waived (workerStateVar config)
+    <*> waived (pauseVar config)
+    <*> waived (livenessFile config)
+    <*> traverse (positive "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
+    <*> waived (logConfig config)
+    <*> waived (cronJobs config)
+    <*> positive "reaperInterval" (reaperInterval config)
+    <*> positive "reaperTimeout" (reaperTimeout config)
+    <*> waived (workerId config)
+    <*> waived (workerHost config)
+    <*> waived (workerMetadata config)
+    <*> positive "workerStaleThreshold" (workerStaleThreshold config)
+    <*> waived (heartbeatSignal config)
+    <*> waived (listenerReadyVar config)
+
+-- | Invariants spanning more than one field.
+crossFieldInvariants :: WorkerConfig m payload -> Validation ()
+crossFieldInvariants config =
   require
     (jobHeartbeatInterval config < visibilityTimeout config)
     "jobHeartbeatInterval must be less than visibilityTimeout"
-  require
-    (workerHeartbeatInterval config < workerStaleThreshold config)
-    "workerHeartbeatInterval must be less than workerStaleThreshold"
-  where
-    positive label value = require (value > 0) (label <> " must be greater than zero")
-    positiveDuration label value = require (value > 0) (label <> " must be greater than zero")
-    require condition message = if condition then Right () else Left message
+    *> require
+      (workerHeartbeatInterval config < workerStaleThreshold config)
+      "workerHeartbeatInterval must be less than workerStaleThreshold"
+
+newtype Validation a = Validation (Either (NonEmpty Text) a)
+
+instance Functor Validation where
+  fmap f (Validation result) = Validation (fmap f result)
+
+instance Applicative Validation where
+  pure = Validation . Right
+  Validation (Left left) <*> Validation (Left right) = Validation (Left (left <> right))
+  Validation (Left left) <*> Validation (Right _) = Validation (Left left)
+  Validation (Right _) <*> Validation (Left right) = Validation (Left right)
+  Validation (Right f) <*> Validation (Right a) = Validation (Right (f a))
+
+-- | A field carrying no invariant of its own.
+waived :: a -> Validation a
+waived = pure
+
+-- | Reject a non-positive field, passing it through unchanged.
+positive :: (Num a, Ord a) => Text -> a -> Validation a
+positive label value = value <$ require (value > 0) (label <> " must be greater than zero")
+
+require :: Bool -> Text -> Validation ()
+require condition message = Validation (if condition then Right () else Left (message :| []))
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
@@ -345,6 +392,7 @@ withWorkerIdContext workerId lc =
 shutdownWorker :: (MonadIO m) => WorkerConfig n payload -> m ()
 shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
+-- | The pool's state, with a pause reported as paused.
 getWorkerState :: (MonadIO m) => WorkerConfig n payload -> m WorkerState
 getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
 
@@ -352,6 +400,7 @@ getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
 getListenerReady :: (MonadIO m) => WorkerConfig n payload -> m Bool
 getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
 
+-- | 'getWorkerState' inside 'STM.STM'.
 readEffectiveState :: WorkerConfig n payload -> STM.STM WorkerState
 readEffectiveState config = do
   st <- STM.readTVar (workerStateVar config)

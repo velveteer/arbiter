@@ -34,6 +34,7 @@ import UnliftIO.STM qualified as STM
 import Arbiter.Worker.Config (WorkerConfig (..))
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
+-- | The handler threads in flight, by job id.
 type RunningJobs = TVar (Map.Map Int64 (Async.Async ()))
 
 -- | Decode the pause payload and, if it addresses this worker, write 'pauseVar'.

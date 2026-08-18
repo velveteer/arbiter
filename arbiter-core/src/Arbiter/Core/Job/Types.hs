@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Job records, the enqueue setters, and the lifecycle hook types.
 module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job
@@ -217,27 +218,35 @@ defaultJob value =
 defaultGroupedJob :: Text -> payload -> JobWrite payload
 defaultGroupedJob key = setGroupKey (Just key) . defaultJob
 
+-- | Replace the payload.
 setPayload :: payload' -> JobWrite payload -> JobWrite payload'
 setPayload value job = job {payload = value}
 
+-- | Set the group key.
 setGroupKey :: Maybe Text -> JobWrite payload -> JobWrite payload
 setGroupKey value job = job {groupKey = value}
 
+-- | Set the claim priority. Lower numbers claim first.
 setPriority :: Int32 -> JobWrite payload -> JobWrite payload
 setPriority value job = job {priority = value}
 
+-- | Delay the job's first visibility.
 setNotVisibleUntil :: Maybe UTCTime -> JobWrite payload -> JobWrite payload
 setNotVisibleUntil value job = job {notVisibleUntil = value}
 
+-- | Set the dedup key.
 setDedupKey :: Maybe DedupKey -> JobWrite payload -> JobWrite payload
 setDedupKey value job = job {dedupKey = value}
 
+-- | Override the queue's attempt limit.
 setMaxAttempts :: Maybe Int32 -> JobWrite payload -> JobWrite payload
 setMaxAttempts value job = job {maxAttempts = value}
 
+-- | Attach a trace context.
 setTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
 setTraceContext value job = job {traceContext = value}
 
+-- | Set the archive retention, in seconds.
 setArchiveFor :: Maybe Int32 -> JobWrite payload -> JobWrite payload
 setArchiveFor value job = job {archiveFor = value}
 
@@ -256,13 +265,28 @@ type JobPayload payload =
 type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
 
+-- | A job's primary key.
 type JobId = Int64
+
+-- | The token identifying one claim of a job.
 type ClaimSeq = Int64
+
+-- | When a claim was taken.
 type ClaimTime = UTCTime
+
+-- | The transaction's clock reading.
 type CurrentTime = UTCTime
+
+-- | When a handler began.
 type StartTime = UTCTime
+
+-- | When a handler finished.
 type EndTime = UTCTime
+
+-- | A failure message.
 type ErrorMsg = Text
+
+-- | How long to wait before the next attempt.
 type BackoffDelay = NominalDiffTime
 
 -- | A set of callbacks invoked at key points in the job lifecycle.

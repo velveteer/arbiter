@@ -72,6 +72,7 @@ data WorkerRow = WorkerRow
 arbiterWorkersTable :: SchemaName -> Text
 arbiterWorkersTable schemaName = quoteIdentifier schemaName <> "." <> arbiterWorkersTableName
 
+-- | Bare name of the workers table, for catalog lookups by relname.
 arbiterWorkersTableName :: Text
 arbiterWorkersTableName = "arbiter_workers"
 

@@ -21,6 +21,7 @@ import Arbiter.Core.SqlLiterals (quoteIdentifier)
 arbiterGatesTable :: SchemaName -> Text
 arbiterGatesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterGatesTableName
 
+-- | Bare name of the gates table, for catalog lookups by relname.
 arbiterGatesTableName :: Text
 arbiterGatesTableName = "arbiter_gates"
 

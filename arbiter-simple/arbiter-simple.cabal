@@ -1,9 +1,16 @@
 cabal-version:   2.2
 name:            arbiter-simple
 version:         0.1.0.0
-synopsis:        PostgreSQL-simple implementation of arbiter
+synopsis:        PostgreSQL-simple backend for arbiter
 description:
-  PostgreSQL-simple backend for arbiter with connection pooling and savepoint-based nested transactions.
+  A postgresql-simple backend for Arbiter, an opinionated PostgreSQL job queue
+  for Haskell.
+  Provides a @MonadArbiter@ instance over a postgresql-simple connection pool,
+  with savepoint-based nested transactions so a handler's own database work
+  commits together with the job's completion. Handlers receive the connection the
+  job was claimed on.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE
@@ -11,6 +18,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md

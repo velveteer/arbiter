@@ -139,24 +139,31 @@ instance Exception JobForceCancelled where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
+-- | Fail the job and let it retry.
 throwRetryable :: (MonadIO m) => Text -> m a
 throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
 
+-- | Fail the job straight to the DLQ.
 throwPermanent :: (MonadIO m) => Text -> m a
 throwPermanent msg = UE.throwIO (Permanent (JobPermanentException msg))
 
+-- | Cancel the whole job tree.
 throwTreeCancel :: (MonadIO m) => Text -> m a
 throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
 
+-- | Cancel this job and its descendants.
 throwBranchCancel :: (MonadIO m) => Text -> m a
 throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
 
+-- | Return the job to the queue without consuming an attempt.
 throwNack :: (MonadIO m) => m a
 throwNack = UE.throwIO JobNackException
 
+-- | Fail on an undecodable payload.
 throwParsing :: (MonadIO m) => Text -> m a
 throwParsing msg = UE.throwIO (ParsingException msg)
 
+-- | Fail on an arbiter-internal error.
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
@@ -164,6 +171,7 @@ throwInternal msg = UE.throwIO (InternalException msg)
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 
+-- | Signal that the claim is no longer valid, naming no ids.
 throwJobGone :: (MonadIO m) => Text -> m a
 throwJobGone msg = throwJobGoneIds msg []
 

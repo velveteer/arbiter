@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | 'Arbiter.Core.MonadArbiter.MonadArbiter' primitives backed by postgresql-simple.
 module Arbiter.Simple.MonadArbiter
   ( HasSimplePool (..)
   , SimpleConnectionPool (..)
@@ -29,16 +30,19 @@ import Database.PostgreSQL.Simple.ToField (Action, ToField (..), toField, toJSON
 import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
 import UnliftIO (MonadUnliftIO, mask, onException, withRunInIO)
 
+-- | Pool, pinned connection, and savepoint depth.
 data SimpleConnectionPool = SimpleConnectionPool
   { connectionPool :: Maybe (Pool Connection)
   , activeConn :: Maybe Connection
   , transactionDepth :: Int
   }
 
+-- | Ambient access to the connection pool.
 class (Monad m) => HasSimplePool m where
   getSimplePool :: m SimpleConnectionPool
   localSimplePool :: (SimpleConnectionPool -> SimpleConnectionPool) -> m a -> m a
 
+-- | Run a query, decoding rows.
 simpleExecuteQuery
   :: (HasSimplePool m, MonadUnliftIO m)
   => MA.Query a
@@ -50,6 +54,7 @@ simpleExecuteQuery (MA.Query sqlTemplate params codec) = do
     [] -> PG.queryWith_ parser conn sql
     _ -> PG.queryWith parser conn sql (map someParamToAction params)
 
+-- | Run a statement, returning rows affected.
 simpleExecuteStatement
   :: (HasSimplePool m, MonadUnliftIO m)
   => MA.Query a
@@ -84,6 +89,7 @@ colFieldNullable CJsonb = field
 colFieldNullable CFloat8 = field
 colFieldNullable CUuid = field
 
+-- | Transaction bracket. Nests via savepoints.
 simpleWithDbTransaction
   :: (HasSimplePool m, MonadUnliftIO m)
   => m a
@@ -112,6 +118,7 @@ simpleWithDbTransaction action = do
       void . liftIO $ PG.execute_ conn $ "RELEASE SAVEPOINT " <> spName
       pure a
 
+-- | Pin one pooled connection for the action.
 simpleWithConnection
   :: (HasSimplePool m, MonadUnliftIO m)
   => m a
@@ -125,6 +132,7 @@ simpleWithConnection action = do
         run $ localSimplePool (\sp -> sp {activeConn = Just conn}) action
     (Nothing, Nothing) -> throwInternal "No active connection and no connection pool available"
 
+-- | Run a handler on the pinned connection.
 simpleRunHandlerWithConnection
   :: (HasSimplePool m, MonadUnliftIO m)
   => (Connection -> job -> m result)

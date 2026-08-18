@@ -45,6 +45,7 @@ arbiterConcurrencyTable :: SchemaName -> Text
 arbiterConcurrencyTable schemaName =
   quoteIdentifier schemaName <> "." <> arbiterConcurrencyTableName
 
+-- | Bare name of the in-flight count table, for catalog lookups by relname.
 arbiterConcurrencyTableName :: Text
 arbiterConcurrencyTableName = "arbiter_concurrency"
 
@@ -53,6 +54,7 @@ arbiterConcurrencyPoliciesTable :: SchemaName -> Text
 arbiterConcurrencyPoliciesTable schemaName =
   quoteIdentifier schemaName <> "." <> arbiterConcurrencyPoliciesTableName
 
+-- | Bare name of the pool policies table, for catalog lookups by relname.
 arbiterConcurrencyPoliciesTableName :: Text
 arbiterConcurrencyPoliciesTableName = "arbiter_concurrency_policies"
 

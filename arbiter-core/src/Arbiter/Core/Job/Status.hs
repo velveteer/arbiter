@@ -17,6 +17,7 @@ import GHC.Generics (Generic)
 data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled | Cancelled
   deriving stock (Bounded, Enum, Eq, Generic, Show)
 
+-- | The wire name for a status.
 jobStatusToText :: JobStatus -> Text
 jobStatusToText Ready = "ready"
 jobStatusToText InFlight = "in_flight"

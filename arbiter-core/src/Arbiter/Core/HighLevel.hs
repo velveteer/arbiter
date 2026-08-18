@@ -224,7 +224,7 @@ publishSpan
 publishSpan = withPublishSpan (queueTable @payload @m)
 
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
--- ('IgnoreDuplicate').
+-- ('Arbiter.Core.Job.Dedup.IgnoreDuplicate').
 insertJob
   :: forall payload m
    . (QueueOperation m payload)

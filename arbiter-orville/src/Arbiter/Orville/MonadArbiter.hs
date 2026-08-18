@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | 'Arbiter.Core.MonadArbiter.MonadArbiter' primitives backed by Orville.
 module Arbiter.Orville.MonadArbiter
   ( orvilleExecuteQuery
   , orvilleExecuteStatement
@@ -31,6 +32,7 @@ import Orville.PostgreSQL.Raw.PgTextFormatValue qualified as PgText
 import Orville.PostgreSQL.Raw.SqlValue (SqlValue)
 import Orville.PostgreSQL.Raw.SqlValue qualified as SqlValue
 
+-- | Run a query, decoding rows.
 orvilleExecuteQuery
   :: (O.MonadOrville m)
   => Query a
@@ -44,6 +46,7 @@ orvilleExecuteQuery (Query sql params codec) = O.withConnection $ \conn -> do
     Right rows -> pure rows
     Left err -> throwInternal $ "orville decode error: " <> T.pack (show err)
 
+-- | Run a statement, returning rows affected.
 orvilleExecuteStatement
   :: (O.MonadOrville m)
   => Query a
@@ -53,9 +56,11 @@ orvilleExecuteStatement (Query sql params _) = O.withConnection $ \conn -> do
   result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (numberPlaceholders sql)) pgParams
   liftIO $ readRowCount result
 
+-- | Transaction bracket. Nests via savepoints.
 orvilleWithDbTransaction :: (O.MonadOrville m) => m a -> m a
 orvilleWithDbTransaction = O.withTransaction
 
+-- | Run a handler. Orville manages its own connection.
 orvilleRunHandlerWithConnection :: (job -> m result) -> job -> m result
 orvilleRunHandlerWithConnection handler job = handler job
 

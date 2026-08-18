@@ -1,3 +1,4 @@
+-- | Backend-neutral 'RowCodec' as a Hasql result decoder.
 module Arbiter.Hasql.Decode
   ( hasqlRowDecoder
   ) where
@@ -5,6 +6,7 @@ module Arbiter.Hasql.Decode
 import Arbiter.Core.Codec (Col (..), NullCol (..), RowCodec, runCodec)
 import Hasql.Decoders qualified as D
 
+-- | Decode all rows through the codec.
 hasqlRowDecoder :: RowCodec a -> D.Result [a]
 hasqlRowDecoder codec = D.rowList (runCodec interpretCol codec)
 

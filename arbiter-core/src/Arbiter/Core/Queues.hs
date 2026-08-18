@@ -19,6 +19,7 @@ import GHC.Generics (Generic)
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
+-- | A row of the @arbiter_queues@ pause/resume table.
 data QueueRow = QueueRow
   { queueName :: Text
   , paused :: Bool
@@ -34,6 +35,7 @@ data QueueRow = QueueRow
 arbiterQueuesTable :: SchemaName -> Text
 arbiterQueuesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterQueuesTableName
 
+-- | Bare name of the queues table, for catalog lookups by relname.
 arbiterQueuesTableName :: Text
 arbiterQueuesTableName = "arbiter_queues"
 

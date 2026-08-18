@@ -1,9 +1,18 @@
 cabal-version:   2.2
 name:            arbiter-test-common
 version:         0.1.0.0
-synopsis:        Shared test utilities for arbiter test suites
+synopsis:
+  Shared fixtures and backend-parameterized suites for arbiter
+
 description:
-  Common test fixtures, setup utilities, and helper functions shared across arbiter test suites.
+  Shared test support for Arbiter, an opinionated PostgreSQL job queue for
+  Haskell.
+  Schema setup and teardown against a live PostgreSQL database, shared payload
+  fixtures, and the backend-parameterized rate-limit, concurrency, and
+  state-machine suites. Useful when implementing a @MonadArbiter@ backend of your
+  own.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE
@@ -11,6 +20,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Testing
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files: README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues

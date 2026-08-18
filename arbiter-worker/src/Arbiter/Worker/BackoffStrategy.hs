@@ -15,6 +15,7 @@ import Data.Int (Int32)
 import Data.Time (NominalDiffTime)
 import System.Random (randomRIO)
 
+-- | Multiplier and ceiling for exponential backoff.
 data ExponentialConfig = ExponentialConfig
   { exponentialBase :: Double
   -- ^ Multiplier per attempt (e.g., 2.0 for doubling)
@@ -23,6 +24,7 @@ data ExponentialConfig = ExponentialConfig
   }
   deriving stock (Eq, Show)
 
+-- | Step and ceiling for linear backoff.
 data LinearConfig = LinearConfig
   { linearIncrement :: NominalDiffTime
   -- ^ Delay added per attempt in seconds

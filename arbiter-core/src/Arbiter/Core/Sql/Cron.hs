@@ -28,6 +28,7 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.SqlLiterals (textLiteral)
 
+-- | The @cron_schedules@ read columns, comma separated.
 allCronColumns :: Text
 allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
 
@@ -81,7 +82,7 @@ touchCronLastFiredSQL schemaName name =
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
 -- schedule names. The watermark must be the minute boundary the scheduler
 -- finished evaluating (not DB @NOW()@) so a slow iteration cannot leapfrog
--- @last_checked_at@ past minutes it never tested. 'GREATEST' guards against
+-- @last_checked_at@ past minutes it never tested. @GREATEST@ guards against
 -- backward motion under concurrent worker pools with skewed clocks.
 touchCronCheckedSQL :: Text -> UTCTime -> [Text] -> Query ()
 touchCronCheckedSQL schemaName watermark names =

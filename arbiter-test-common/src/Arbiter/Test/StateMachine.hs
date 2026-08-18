@@ -148,6 +148,7 @@ initialModel = Model Map.empty Map.empty
 -- Raw SQL string builders (schema/table threaded in)
 -- ---------------------------------------------------------------------------
 
+-- | Names of the head-of-line detector's table, function, and trigger.
 holViolTbl, holFn, holTrigger :: Text -> Text -> Text
 holViolTbl schema table = schema <> "." <> table <> "_hol_violations"
 holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
@@ -431,7 +432,7 @@ exactViolations schema table withConn = withConn $ \conn -> do
 
 -- | A live child whose parent has left the main queue. Single-threaded this
 -- never happens (a finalizer completes only after its children, a DLQ'd parent
--- cascades them, and 'retryFromDLQ' refuses to restore a child whose root parent
+-- cascades them, and 'Arbiter.Core.HighLevel.retryFromDLQ' refuses to restore a child whose root parent
 -- is gone), so it is a per-step check for the sequential property. Under
 -- concurrency a parent can be acked between that refuse-check and a child's
 -- re-insert, leaving a benign orphan that just processes as a plain job, so the
@@ -481,6 +482,7 @@ genExtras = Extras <$> Gen.maybe (Gen.element (map fst smConcSlots)) <*> Gen.may
 applyExtras :: Extras -> JobWrite SMPayload -> JobWrite SMPayload
 applyExtras (Extras mc mr) j = setPayload ((Job.payload j) {smConcSlot = mc, smRateKey = mr}) j
 
+-- | A payload carrying optional concurrency and rate-limit keys.
 data SMPayload = SMPayload
   { smMessage :: Text
   , smConcSlot :: Maybe Text
@@ -1073,7 +1075,7 @@ cRefresh run schema table withConn =
 -- ---------------------------------------------------------------------------
 
 -- | Groups and dedup keys for the concurrency churn. More groups widens the set
--- of summary rows updated at once. Fewer than 'nWorkers', so contention per
+-- of summary rows updated at once. Fewer than @nWorkers@, so contention per
 -- group stays high.
 concGroups, concDedupKeys :: [Text]
 concGroups = ["g" <> T.pack (show i) | i <- [1 .. 3 :: Int]]

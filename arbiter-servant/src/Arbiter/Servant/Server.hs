@@ -1087,7 +1087,7 @@ newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newTVarIO Set.empty
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
 cachedFor ttl cell = cachedForKey ttl cell ""
 
--- | Serve one key. Concurrent misses on a key collapse onto one 'produce', whose
+-- | Serve one key. Concurrent misses on a key collapse onto one @produce@, whose
 -- write is skipped if 'invalidate' bumped the epoch meanwhile.
 cachedForKey :: NominalDiffTime -> CacheCell a -> Text -> IO a -> IO a
 cachedForKey ttl cell key produce

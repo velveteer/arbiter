@@ -50,6 +50,7 @@ import Data.Map.Strict (Map)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
+-- | A job in its JSON wire shape.
 newtype ApiJob payload = ApiJob {unApiJob :: JobRead payload}
   deriving stock (Eq, Show)
 
@@ -142,6 +143,7 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
       $ Arb.setGroupKey group
       $ Arb.defaultJob payload
 
+-- | A DLQ entry in its JSON wire shape.
 newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
   deriving stock (Eq, Show)
 
@@ -163,6 +165,7 @@ instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
         <*> pure (unApiJob apiJob)
     pure $ ApiDLQJob dlq
 
+-- | An archived job in its JSON wire shape.
 newtype ApiArchiveJob payload = ApiArchiveJob {unApiArchiveJob :: Archive.ArchiveJob payload}
   deriving stock (Eq, Show)
 

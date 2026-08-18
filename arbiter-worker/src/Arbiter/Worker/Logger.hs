@@ -9,7 +9,7 @@
 -- * Provide a 'LogCallback' to receive pre-rendered JSON log lines
 -- * Inject additional context (e.g., trace IDs) into every log message
 --
--- For application-level job logging, use 'ObservabilityHooks' instead.
+-- For application-level job logging, use 'Arbiter.Core.Job.Types.ObservabilityHooks' instead.
 module Arbiter.Worker.Logger
   ( -- * Log Configuration
     LogConfig (..)

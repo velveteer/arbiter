@@ -74,6 +74,7 @@ import Arbiter.Core.Job.Types (JobRead, JobStatus)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 
+-- | A narrowing predicate on a job listing.
 data JobFilter
   = FilterGroupKey Text
   | FilterParentId Int64
@@ -122,6 +123,7 @@ data DLQSortColumn
   | DlqLastAttemptedAt
   deriving stock (Bounded, Enum, Eq, Show)
 
+-- | The DLQ column a sort key names.
 dlqSortColumnName :: DLQSortColumn -> Text
 dlqSortColumnName = \case
   DlqId -> "id"
@@ -146,6 +148,7 @@ data ArchiveSortColumn
   | ArchiveParentId
   deriving stock (Bounded, Enum, Eq, Show)
 
+-- | The archive column a sort key names.
 archiveSortColumnName :: ArchiveSortColumn -> Text
 archiveSortColumnName = \case
   ArchiveId -> "id"
@@ -160,6 +163,7 @@ archiveSortColumnName = \case
 data SortDir = SortAsc | SortDesc
   deriving stock (Bounded, Enum, Eq, Show)
 
+-- | A sort direction as SQL.
 sortDirSql :: SortDir -> Text
 sortDirSql SortAsc = "ASC"
 sortDirSql SortDesc = "DESC"
@@ -170,7 +174,7 @@ throttledPredicateSQL :: Text
 throttledPredicateSQL =
   "throttled_until > NOW() AND not_visible_until > NOW()"
 
--- | Sole definition of the derived job status. Its string values must match 'jobStatusToText'.
+-- | Sole definition of the derived job status. Its string values must match 'Arbiter.Core.Job.Status.jobStatusToText'.
 jobStatusCaseSQL :: Text
 jobStatusCaseSQL =
   [text|
@@ -257,12 +261,14 @@ data NullsBehavior
     -- means never attempted = earliest). NULLS FIRST when ASC, NULLS LAST when DESC.
     NullsAsMinimum
 
+-- | The @NULLS@ placement for a column's null semantics and direction.
 nullsClause :: NullsBehavior -> SortDir -> Text
 nullsClause NullsNotApplicable _ = ""
 nullsClause NullsAsAbsent _ = " NULLS LAST"
 nullsClause NullsAsMinimum SortAsc = " NULLS FIRST"
 nullsClause NullsAsMinimum SortDesc = " NULLS LAST"
 
+-- | How nulls sort for a job column.
 jobColumnNulls :: JobSortColumn -> NullsBehavior
 jobColumnNulls = \case
   JsId -> NullsNotApplicable
@@ -274,6 +280,7 @@ jobColumnNulls = \case
   JsParentId -> NullsAsAbsent
   JsLastAttemptedAt -> NullsAsMinimum
 
+-- | How nulls sort for a DLQ column.
 dlqColumnNulls :: DLQSortColumn -> NullsBehavior
 dlqColumnNulls = \case
   DlqId -> NullsNotApplicable
@@ -325,6 +332,7 @@ countDLQFilteredSQL schema tableName whereFrag =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${dlqTbl} ${whereFrag}|]
 
+-- | Every job read column, in codec order.
 allJobColumns :: [Text]
 allJobColumns = codecColumns (jobRowCodec "")
 
@@ -471,10 +479,12 @@ insertJobsBatchSQL schema tableName batchSrc =
   rows (jobRowCodec tableName) $
     insertJobsBatchBase schema tableName batchSrc ("RETURNING " <> jobColumns Nothing)
 
+-- | 'insertJobsBatchBase' with no @RETURNING@.
 insertJobsBatchSQL_ :: SchemaName -> TableName -> Query () -> Query ()
 insertJobsBatchSQL_ schema tableName batchSrc =
   insertJobsBatchBase schema tableName batchSrc ""
 
+-- | Batch insert with dedup and replaceable-job handling, plus a caller's @RETURNING@.
 insertJobsBatchBase :: SchemaName -> TableName -> Query () -> Text -> Query ()
 insertJobsBatchBase schema tableName batchSrc returning =
   let tbl = jobQueueTable schema tableName
@@ -528,7 +538,7 @@ getJobByDedupKeySQL schema tableName key =
 
 -- | SQL template for canceling (deleting) a job by ID.
 --
--- Refuses to delete a job that has children - use 'cancelJobCascadeSQL' instead.
+-- Refuses to delete a job that has children - use @cancelJobCascadeSQL@ instead.
 --
 -- If the deleted job was a child and no siblings remain in the queue,
 -- resumes the parent for its completion round.

@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
+-- | The job queue operations, over any 'MonadArbiter' backend.
 module Arbiter.Core.Operations
   ( -- * Job Insertion
     insertJob
@@ -342,7 +343,7 @@ filterToClause (Tmpl.FilterStatus s) = [QQ.sql|status = #{st :: CText}|]
 filterToClause (Tmpl.FilterId i) = [QQ.sql|id = #{i :: CInt8}|]
 filterToClause (Tmpl.FilterJobId i) = [QQ.sql|job_id = #{i :: CInt8}|]
 
--- | Run a single-row count 'Query', throwing a parse error on unexpected results.
+-- | Run a single-row count @Query@, throwing a parse error on unexpected results.
 countStrict :: (MonadArbiter m) => Text -> Q.Query Int64 -> m Int64
 countStrict label q = do
   rows <- MA.executeQuery q
@@ -350,7 +351,7 @@ countStrict label q = do
     [n] -> pure n
     _ -> throwParsing $ label <> ": unexpected result"
 
--- | Run a single-row count 'Query', returning 0 on an empty or unexpected result.
+-- | Run a single-row count @Query@, returning 0 on an empty or unexpected result.
 countOr0 :: (MonadArbiter m) => Q.Query Int64 -> m Int64
 countOr0 q = do
   rows <- MA.executeQuery q
@@ -698,6 +699,7 @@ insertJobsBatchStamped schemaName tableName stamp jobs = do
     rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
     traverse decodePayload rawJobs
 
+-- | 'insertJobsBatch' discarding the rows, returning the count inserted.
 insertJobsBatch_
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -745,7 +747,7 @@ insertResultsBatch schemaName tableName rows =
 
 -- | Get all child results for a parent from the results table.
 --
--- Returns a 'Map' from child ID to the result 'Value'.
+-- Returns a @Map@ from child ID to the result 'Value'.
 getResultsByParent
   :: (MonadArbiter m)
   => SchemaName
@@ -761,7 +763,7 @@ getResultsByParent schemaName tableName parentJobId = do
 
 -- | Get DLQ child errors for a parent.
 --
--- Returns a 'Map' from child job ID to the last error message.
+-- Returns a @Map@ from child job ID to the last error message.
 getDLQChildErrorsByParent
   :: (MonadArbiter m)
   => SchemaName
@@ -795,7 +797,7 @@ persistParentState schemaName tableName jobId state =
 --
 -- A single fold over the input list. Non-keyed jobs are appended. Keyed jobs
 -- occupy the slot of their first occurrence, with an O(log n) positional update
--- via 'Seq' when a later 'ReplaceDuplicate' overwrites an earlier entry.
+-- via @Seq@ when a later 'ReplaceDuplicate' overwrites an earlier entry.
 --
 -- Dedup semantics (matching sequential 'insertJob' behaviour):
 --

@@ -162,8 +162,6 @@ ArbS.runSimpleDb env $ do
 Start from `defaultJob`/`defaultGroupedJob` and apply setters:
 
 ```haskell
-import Data.Function ((&))
-
 job =
   Arb.defaultJob (SendWelcome "alice@example.com" "Alice")
     & Arb.setPriority 10
@@ -260,8 +258,6 @@ A group key runs a group **one job (or batch) at a time** - serial within the gr
 Jobs carry an integer `priority` (default `0`), and lower numbers are claimed first. Since every job defaults to `0`, give background work a higher number to defer it behind normal jobs.
 
 ```haskell
-import Data.Function ((&))
-
 -- runs behind default-priority work
 job = Arb.defaultJob payload & Arb.setPriority 10
 ```
@@ -271,8 +267,6 @@ job = Arb.defaultJob payload & Arb.setPriority 10
 Control duplicate job insertion with dedup keys:
 
 ```haskell
-import Data.Function ((&))
-
 -- IgnoreDuplicate: silently skip if key exists
 job1 = Arb.defaultJob payload & Arb.setDedupKey (Just $ IgnoreDuplicate "order-123")
 
@@ -325,7 +319,6 @@ Children run in parallel. Parents run when all of their children are acked or DL
 
 ```haskell
 import Arbiter.Core.JobTree ((<~~))
-import Arbiter.Core.JobTree qualified as JT
 import Data.List.NonEmpty (NonEmpty ((:|)))
 
 data PipelinePayload
@@ -429,7 +422,6 @@ handler conn job = case Arb.payload job of
 
 ```haskell
 import Arbiter.Worker.Cron qualified as Cron
-import Data.Function ((&))
 
 Right healthCheck = Cron.cronJob
   "health-check"        -- unique name
@@ -635,8 +627,6 @@ Completed jobs are deleted on ack by default. Set `archiveFor` to keep a copy in
 a per-queue archive for that many seconds after completion.
 
 ```haskell
-import Data.Function ((&))
-
 job1 = Arb.defaultJob payload & Arb.setArchiveFor (Just Arb.dayRetention)       -- 24h
 job2 = Arb.defaultJob payload & Arb.setArchiveFor (Just $ Arb.dayRetention * 7) -- 1 week
 ```

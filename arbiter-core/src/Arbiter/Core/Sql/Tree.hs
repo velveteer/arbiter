@@ -451,8 +451,8 @@ getParentStateSnapshotSQL schema tableName jobId =
 -- | Read all child result data for a rollup finalizer in a single query.
 --
 -- Combines results table, DLQ child errors, and parent_state snapshot
--- into a tagged UNION ALL. Tags: @'r'@ = result, @'e'@ = DLQ error,
--- @'s'@ = parent_state snapshot.
+-- into a tagged UNION ALL. Tags: @r@ = result, @e@ = DLQ error,
+-- @s@ = parent_state snapshot.
 readChildResultsSQL :: Text -> Text -> Int64 -> Query (Text, Maybe Int64, Maybe Value, Maybe Text, Maybe Int64)
 readChildResultsSQL schema tableName parentId =
   let resultsTbl = jobQueueResultsTable schema tableName

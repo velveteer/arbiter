@@ -46,6 +46,7 @@ data MetricName
   | GaugesAge
   deriving stock (Bounded, Enum, Eq, Show)
 
+-- | The exported name of a metric.
 metricName :: MetricName -> Text
 metricName = \case
   JobsClaimed -> "arbiter.jobs.claimed"
@@ -78,5 +79,6 @@ metricName = \case
   PgDeadlocks -> "arbiter.pg.deadlocks"
   GaugesAge -> "arbiter.gauges.age"
 
+-- | Every metric name arbiter exports.
 arbiterMetricNames :: [Text]
 arbiterMetricNames = map metricName [minBound .. maxBound]

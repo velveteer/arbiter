@@ -21,6 +21,7 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
+-- | The @arbiter_queues@ read columns, comma separated.
 queueColumnList :: Text
 queueColumnList = T.intercalate ", " (codecColumns queueRowCodec)
 

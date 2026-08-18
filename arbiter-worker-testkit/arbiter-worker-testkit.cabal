@@ -3,8 +3,15 @@ name:            arbiter-worker-testkit
 version:         0.1.0.0
 synopsis:        Backend-parameterized worker-pool test suite for arbiter
 description:
-  Reusable hspec specs that exercise the arbiter worker pool against any
-  MonadArbiter backend, instantiated by each backend's own test suite.
+  Worker conformance tests for Arbiter, an opinionated PostgreSQL job queue for
+  Haskell.
+
+  A worker-pool test suite parameterized over a @MonadArbiter@ runner, so a new
+  backend can be checked against the same behavior the shipped backends are held
+  to. Requires a live PostgreSQL database.
+
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE
@@ -12,6 +19,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Testing
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md

@@ -73,6 +73,7 @@ import UnliftIO (liftIO, tryAny)
 import Arbiter.Otel.Logs (loggerDestination, otelLogs)
 import Arbiter.Otel.Metrics (ArbiterMeters, newArbiterMeters)
 
+-- | A running telemetry handle: instruments, provider, and resolved settings.
 data Telemetry = Telemetry
   { meters :: Maybe ArbiterMeters
   -- ^ 'Nothing' when nothing is exporting metrics: no job instruments, no gauge scan.

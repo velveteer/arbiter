@@ -1,3 +1,4 @@
+-- | Backend-neutral parameters as Hasql encoders.
 module Arbiter.Hasql.Encode
   ( buildEncoder
   , buildStatementRowCount
@@ -14,13 +15,16 @@ import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Statement qualified as S
 
+-- | Unprepared statement over numbered placeholders, returning rows affected.
 buildStatementRowCount :: Text -> Params -> S.Statement () Int64
 buildStatementRowCount sql ps =
   S.unpreparable (numberPlaceholders sql) (buildEncoder ps) D.rowsAffected
 
+-- | A parameter list as one positional encoder.
 buildEncoder :: Params -> E.Params ()
 buildEncoder = mconcat . map encodeSomeParam
 
+-- | Encode one parameter at its declared nullability.
 encodeSomeParam :: SomeParam -> E.Params ()
 encodeSomeParam (SomeParam pt v) = case pt of
   PScalar c -> contramap (const v) $ E.param (E.nonNullable (colEncoder c))
@@ -29,6 +33,7 @@ encodeSomeParam (SomeParam pt v) = case pt of
     contramap (const v) $ E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable (colEncoder c))))))
   PNullArray c -> contramap (const v) $ E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nullable (colEncoder c))))))
 
+-- | Encoder for a column type.
 colEncoder :: Col a -> E.Value a
 colEncoder CInt4 = E.int4
 colEncoder CInt8 = E.int8

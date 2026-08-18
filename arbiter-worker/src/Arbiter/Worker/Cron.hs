@@ -2,7 +2,8 @@
 
 -- | Cron scheduler for the Arbiter worker pool.
 --
--- When 'cronJobs' is non-empty in 'WorkerConfig', 'runWorkerPool' spawns a
+-- When 'Arbiter.Worker.Config.cronJobs' is non-empty in 'Arbiter.Worker.Config.WorkerConfig',
+-- 'Arbiter.Worker.Pool.runWorkerPool' spawns a
 -- scheduler thread that inserts jobs on 5-field cron expressions.
 -- Dedup keys prevent duplicate insertion across multiple worker instances.
 --

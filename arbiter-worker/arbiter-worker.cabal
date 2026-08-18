@@ -3,7 +3,16 @@ name:            arbiter-worker
 version:         0.1.0.0
 synopsis:        Worker framework for arbiter
 description:
-  Concurrent worker framework for processing jobs from arbiter queues.
+  Worker pools for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+
+  Runs concurrent pools that claim jobs under a visibility timeout, heartbeat
+  long-running work, retry with a configurable backoff strategy, and move
+  exhausted jobs to the dead-letter queue. Includes cron scheduling, background
+  maintenance, graceful drain, observability callbacks, structured logging, and
+  file-based liveness probes.
+
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE
@@ -11,6 +20,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md

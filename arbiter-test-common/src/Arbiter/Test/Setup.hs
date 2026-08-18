@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Schema setup, teardown, and connection helpers for the arbiter test suites.
 module Arbiter.Test.Setup
   ( SetupConfig (..)
   , defaultSetupConfig
@@ -68,9 +69,11 @@ defaultSetupConfig =
     , setupEnableRankingIndexes = True
     }
 
+-- | Rebuild the schema without notification triggers.
 setupDDL :: Text -> Text -> Connection -> IO ()
 setupDDL = setupDDLWithConfig defaultSetupConfig {setupEnableNotifications = False}
 
+-- | Rebuild the schema with notification triggers.
 setupDDLWithNotify :: Text -> Text -> Connection -> IO ()
 setupDDLWithNotify = setupDDLWithConfig defaultSetupConfig
 
@@ -97,6 +100,7 @@ setupDDLWithConfig config schemaName tableName conn = do
       | otherwise = void $ execute conn (Query sql) ()
     runScript _ = pure ()
 
+-- | Truncate the queue's tables between tests.
 cleanupData :: Text -> Text -> Connection -> IO ()
 cleanupData schemaName tableName conn = do
   execute_ conn "SET client_min_messages = WARNING"
@@ -123,6 +127,7 @@ cleanupData schemaName tableName conn = do
   execute_ conn "RESET lock_timeout"
   execute_ conn "SET client_min_messages = NOTICE"
 
+-- | Run a statement with no parameters (test setup only).
 execute_ :: Connection -> Text -> IO ()
 execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
 
@@ -134,6 +139,7 @@ execStatement sql params = MA.executeStatement (MA.Query sql params (pure ()))
 execQuery :: (MonadArbiter m) => Text -> Params -> RowCodec a -> m [a]
 execQuery sql params codec = MA.executeQuery (MA.Query sql params codec)
 
+-- | Connect and rebuild the schema once, for a suite's outer bracket.
 setupOnce :: ByteString -> Text -> Text -> Bool -> IO ()
 setupOnce connStr schemaName tableName withNotify = do
   conn <- connectPostgreSQL connStr
@@ -159,6 +165,7 @@ addQueueTable connStr schemaName tableName withNotify = do
     runScript conn (MigrationScript _ sql) = void $ execute conn (Query sql) ()
     runScript _ _ = pure ()
 
+-- | Silence libpq notice output for the connection.
 disableNoticeReporting :: Connection -> IO ()
 disableNoticeReporting conn =
   PGS.withConnection conn LibPQ.disableNoticeReporting

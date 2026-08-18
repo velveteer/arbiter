@@ -1,3 +1,4 @@
+-- | The worker pool's run state and its shutdown signal.
 module Arbiter.Worker.WorkerState
   ( WorkerState (..)
   , newWorkerState

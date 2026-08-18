@@ -144,15 +144,19 @@ data SomeParam where
 -- | Positional query parameters.
 type Params = [SomeParam]
 
+-- | A non-null scalar parameter.
 pval :: Col a -> a -> SomeParam
 pval c v = SomeParam (PScalar c) v
 
+-- | A nullable scalar parameter.
 pnul :: Col a -> Maybe a -> SomeParam
 pnul c v = SomeParam (PNullable c) v
 
+-- | A non-null array parameter.
 parr :: Col a -> [a] -> SomeParam
 parr c v = SomeParam (PArray c) v
 
+-- | An array parameter with nullable elements.
 pnarr :: Col a -> [Maybe a] -> SomeParam
 pnarr c v = SomeParam (PNullArray c) v
 
@@ -163,6 +167,7 @@ pnarr c v = SomeParam (PNullArray c) v
 -- | A profunctor codec: write source @s@ to INSERT columns/params, decoded value @a@ back.
 data Codec s a = Codec
   { cDecode :: RowCodec a
+  -- ^ The read side.
   , cWrite :: [WriteCol s]
   }
 
@@ -351,6 +356,7 @@ jobEnvelopeCodec tsColumn queueName =
     <*> col tsColumn CTimestamptz
     <*> cDecode (jobCodecWith "job_id" queueName :: JobCodec (JobRead Value))
 
+-- | DLQ envelope: the shared job snapshot plus its DLQ id and failure time.
 dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
 dlqRowCodec = jobEnvelopeCodec "failed_at"
 
@@ -377,6 +383,7 @@ rateLimitPolicyViewCodec =
     <*> ncol "min_tokens" CFloat8
     <*> ncol "avg_tokens" CFloat8
 
+-- | A token-bucket row as the admin API reports it.
 rateLimitBucketCodec :: RowCodec RateLimitBucketView
 rateLimitBucketCodec =
   RateLimitBucketView
@@ -387,6 +394,7 @@ rateLimitBucketCodec =
     <*> ncol "fill_fraction" CFloat8
     <*> col "last_refill" CTimestamptz
 
+-- | A pool policy row as the admin API reports it.
 concurrencyPolicyViewCodec :: RowCodec ConcurrencyPolicyView
 concurrencyPolicyViewCodec =
   ConcurrencyPolicyView
@@ -397,6 +405,7 @@ concurrencyPolicyViewCodec =
     <*> col "total_in_flight" CInt8
     <*> ncol "max_in_flight" CInt4
 
+-- | A per-key in-flight count as the admin API reports it.
 concurrencyKeyViewCodec :: RowCodec ConcurrencyKeyView
 concurrencyKeyViewCodec =
   ConcurrencyKeyView
@@ -410,6 +419,7 @@ concurrencyKeyViewCodec =
 -- Cron codecs
 -- ---------------------------------------------------------------------------
 
+-- | A @cron_schedules@ row.
 cronScheduleRowCodec :: RowCodec CronScheduleRow
 cronScheduleRowCodec =
   CronScheduleRow
@@ -459,6 +469,7 @@ workerRowWithHealthCodec =
 -- Queue codecs
 -- ---------------------------------------------------------------------------
 
+-- | An @arbiter_queues@ row.
 queueRowCodec :: RowCodec QueueRow
 queueRowCodec =
   QueueRow

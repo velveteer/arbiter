@@ -89,10 +89,12 @@ hasqlSettings :: ByteString -> HasqlSettings
 hasqlSettings = hasqlSettingsFromConnStr
 
 #if MIN_VERSION_hasql(1,10,0)
+-- | Connection settings, whose representation follows the hasql version.
 type HasqlSettings = Settings.Settings
 hasqlSettingsFromConnStr :: ByteString -> Settings.Settings
 hasqlSettingsFromConnStr = Settings.connectionString . TE.decodeUtf8With TE.lenientDecode
 #else
+-- | Connection settings, whose representation follows the hasql version.
 type HasqlSettings = [Setting.Setting]
 hasqlSettingsFromConnStr :: ByteString -> [Setting.Setting]
 hasqlSettingsFromConnStr connStr = [Setting.connection (ConnSetting.string (TE.decodeUtf8With TE.lenientDecode connStr))]
