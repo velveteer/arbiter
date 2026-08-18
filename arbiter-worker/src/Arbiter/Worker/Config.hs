@@ -28,11 +28,14 @@ module Arbiter.Worker.Config
   , getWorkerState
   , getListenerReady
   , readEffectiveState
+  , writePause
+  , writePauseIfCurrent
   ) where
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Exception (Exception)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.Foldable (toList)
@@ -43,6 +46,7 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import Data.UUID (UUID, toString)
 import Data.UUID.V4 qualified as UUID
+import Data.Word (Word64)
 import Network.HostName (getHostName)
 import System.Directory (getTemporaryDirectory)
 import UnliftIO (MonadUnliftIO)
@@ -114,7 +118,10 @@ data WorkerConfig m payload = WorkerConfig
   , workerStateVar :: TVar WorkerState
   -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
   , pauseVar :: TVar Bool
-  -- ^ Per-pool pause flag.
+  -- ^ Per-pool pause flag. Write it through 'writePause'.
+  , pauseEpoch :: TVar Word64
+  -- ^ Bumped by every 'pauseVar' write, so a reading taken before one lands is
+  -- discarded rather than applied on top of it.
   , livenessFile :: Maybe FilePath
   -- ^ When set, the heartbeat loop touches this file at the
   -- 'workerHeartbeatInterval' cadence. Useful for file-based liveness probes.
@@ -237,6 +244,7 @@ fieldInvariants config =
     <*> waived (onMaintenance config)
     <*> waived (workerStateVar config)
     <*> waived (pauseVar config)
+    <*> waived (pauseEpoch config)
     <*> waived (livenessFile config)
     <*> traverse (nonNegative "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
     <*> waived (logConfig config)
@@ -354,6 +362,7 @@ mkDefaultConfig workerCnt mode = do
   heartbeatTMVar <- liftIO newEmptyTMVarIO
   shutdownTVar <- newTVarIO Running
   pauseTVar <- newTVarIO False
+  pauseEpochTVar <- newTVarIO 0
   listenerReadyTVar <- newTVarIO False
   uuid <- liftIO UUID.nextRandom
   tmpDir <- liftIO getTemporaryDirectory
@@ -373,6 +382,7 @@ mkDefaultConfig workerCnt mode = do
       , onMaintenance = \_ _ -> pure ()
       , workerStateVar = shutdownTVar
       , pauseVar = pauseTVar
+      , pauseEpoch = pauseEpochTVar
       , livenessFile = Just livenessPath
       , gracefulShutdownTimeout = Just 30
       , logConfig = withWorkerIdContext uuid defaultLogConfig
@@ -404,6 +414,20 @@ getWorkerState config = liftIO . STM.atomically $ readEffectiveState config
 -- | Whether this pool's LISTEN channels are subscribed (or there is no listener).
 getListenerReady :: (MonadIO m) => WorkerConfig n payload -> m Bool
 getListenerReady config = liftIO . STM.atomically $ STM.readTVar (listenerReadyVar config)
+
+-- | Set the pause flag, superseding any reading a caller has in flight.
+writePause :: WorkerConfig n payload -> Bool -> STM.STM ()
+writePause config p = do
+  STM.writeTVar (pauseVar config) p
+  STM.modifyTVar' (pauseEpoch config) (+ 1)
+
+-- | Apply a pause reading taken at @epoch@, unless a newer write has landed since.
+-- A queue pause arrives by notification while a heartbeat's reading is in flight,
+-- and that reading predates it.
+writePauseIfCurrent :: WorkerConfig n payload -> Word64 -> Bool -> STM.STM ()
+writePauseIfCurrent config epoch p = do
+  current <- STM.readTVar (pauseEpoch config)
+  when (current == epoch) $ writePause config p
 
 -- | 'getWorkerState' inside 'STM.STM'.
 readEffectiveState :: WorkerConfig n payload -> STM.STM WorkerState

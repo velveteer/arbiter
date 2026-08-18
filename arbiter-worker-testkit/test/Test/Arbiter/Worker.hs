@@ -25,7 +25,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
-import Arbiter.Core.MonadArbiter (JobHandler, executeStatement)
+import Arbiter.Core.MonadArbiter (JobHandler, executeStatement, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Queues qualified as Q
@@ -944,6 +944,32 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           timed False
           timed True
           timed False
+
+      it "keeps a pause NOTIFY that lands while a heartbeat reading is in flight" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
+        let config = baseConfig {workerCount = 1, pollInterval = 5.0, workerHeartbeatInterval = 1.0}
+
+        withAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 10_000 $ (== Running) <$> getWorkerState config
+          waitUntil 10_000 $ getListenerReady config
+
+          -- Holding the worker's registry row blocks the pool's next heartbeat,
+          -- whose reading of the queue's pause state predates the pause below.
+          released <- newEmptyMVar
+          let holdRow = runSimpleDb env $ withDbTransaction $ do
+                void $ Ops.heartbeatWorker testSchema (workerId config)
+                liftIO $ takeMVar released
+          withAsync holdRow $ \_ -> do
+            threadDelay 1_500_000
+            void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+            waitUntil 5_000 $ (== Paused) <$> getWorkerState config
+            putMVar released ()
+            -- The blocked heartbeat completes here, one interval before the next.
+            threadDelay 500_000
+            getWorkerState config `shouldReturn` Paused
 
       it "claims immediately on unpause without waiting another poll cycle" $ \env -> do
         processedRef <- newIORef (0 :: Int)

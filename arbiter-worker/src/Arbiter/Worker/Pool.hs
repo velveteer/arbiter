@@ -162,7 +162,7 @@ runWorkerPool config = do
   case registerResult of
     Left e -> warnEx (logConfig config) "Worker registry insert failed" e
     Right mPaused ->
-      traverse_ (atomically . writeTVar (pauseVar config)) mPaused
+      traverse_ (atomically . writePause config) mPaused
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
   cronRunVar <- STM.newTVarIO False
@@ -343,20 +343,21 @@ heartbeatLoop config schemaName queueName = do
       traverse_
         (\path -> tryWarn logCfg "Liveness probe write failed" (liftIO $ writeFile path ""))
         (livenessFile config)
+      epoch <- STM.atomically $ STM.readTVar (pauseEpoch config)
       result <- tryAny $ Ops.heartbeatWorker schemaName (workerId config)
       case result of
         Left e -> warnEx logCfg "Worker registry heartbeat failed" e
         Right Nothing -> reregister
-        Right (Just rp) -> reconcile rp
+        Right (Just rp) -> reconcile epoch rp
     reregister = do
       shutting <- STM.atomically readShuttingDown
       unless shutting $ do
         tryLog logCfg Warning "Worker registry row missing, re-registering"
         tryWarn logCfg "Worker re-registration failed" (registerSelf config schemaName queueName)
-    reconcile rp =
+    reconcile epoch rp =
       STM.atomically $ do
         shutting <- readShuttingDown
-        unless shutting $ STM.writeTVar (pauseVar config) rp
+        unless shutting $ writePauseIfCurrent config epoch rp
 
 -- | @[]@ when the list is empty, else a singleton holding @act@'s result.
 unlessNull :: (Applicative f) => [a] -> f b -> f [b]
