@@ -1,20 +1,23 @@
-cabal-version:   2.2
-name:            arbiter-migrations
-version:         0.1.0.0
-synopsis:        SQL schema migrations for arbiter
+cabal-version:      2.2
+name:               arbiter-migrations
+version:            0.1.0.0
+synopsis:           SQL schema migrations for arbiter
 description:
   Tracked DDL migrations for arbiter job queue tables via postgresql-migration.
 
-license:         MIT
-license-file:    LICENSE
-author:          Joshua Miller
-maintainer:      joshua.ian.miller@pm.me
-category:        Database
-build-type:      Simple
-extra-doc-files:    CHANGELOG.md, README.md
+license:            MIT
+license-file:       LICENSE
+author:             Joshua Miller
+maintainer:         joshua.ian.miller@pm.me
+category:           Database
+build-type:         Simple
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 extra-source-files: test/golden/*.sql
-homepage:        https://github.com/velveteer/arbiter
-bug-reports:     https://github.com/velveteer/arbiter/issues
+homepage:           https://github.com/velveteer/arbiter
+bug-reports:        https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git
@@ -50,8 +53,8 @@ test-suite arbiter-migrations-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
-    , arbiter-core
     , aeson                 >=2.0  && <2.3
+    , arbiter-core
     , arbiter-migrations
     , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13

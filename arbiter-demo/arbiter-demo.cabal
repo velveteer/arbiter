@@ -1,16 +1,16 @@
-cabal-version: 2.2
-name:          arbiter-demo
-version:       0.1.0.0
-synopsis:      Demo application for arbiter-servant with admin UI
-license:       MIT
+cabal-version:   2.2
+name:            arbiter-demo
+version:         0.1.0.0
+synopsis:        Demo application for arbiter-servant with admin UI
+license:         MIT
 license-file:    LICENSE
-author:        Joshua Miller
-maintainer:    joshua.ian.miller@pm.me
-category:      Web
-build-type:    Simple
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Web
+build-type:      Simple
 extra-doc-files: README.md
-homepage:      https://github.com/velveteer/arbiter
-bug-reports:   https://github.com/velveteer/arbiter/issues
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git

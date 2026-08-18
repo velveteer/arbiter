@@ -1,19 +1,19 @@
-cabal-version: 2.2
-name:          arbiter-bench
-version:       0.1.0.0
-synopsis:      Benchmarks for arbiter job queue
+cabal-version:   2.2
+name:            arbiter-bench
+version:         0.1.0.0
+synopsis:        Benchmarks for arbiter job queue
 description:
   Performance benchmarks for the arbiter PostgreSQL job queue library.
 
-license:       MIT
+license:         MIT
 license-file:    LICENSE
-author:        Joshua Miller
-maintainer:    joshua.ian.miller@pm.me
-category:      Database
-build-type:    Simple
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Database
+build-type:      Simple
 extra-doc-files: README.md
-homepage:      https://github.com/velveteer/arbiter
-bug-reports:   https://github.com/velveteer/arbiter/issues
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git

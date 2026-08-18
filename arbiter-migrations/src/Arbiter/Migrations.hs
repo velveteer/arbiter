@@ -496,7 +496,12 @@ reconcileOptionalTriggers conn schemaName tables config =
       rows <-
         query
           conn
-          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND t.tgtype = 5 AND t.tgnargs = 0 AND pn.nspname = ? AND p.proname = ? AND p.pronargs = 0 AND p.prosrc = ?)"
+          ( "SELECT EXISTS (SELECT 1 "
+              <> triggerJoins
+              <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal \
+                 \AND t.tgtype = 5 AND t.tgnargs = 0 AND pn.nspname = ? AND p.proname = ? \
+                 \AND p.pronargs = 0 AND p.prosrc = ?)"
+          )
           (schemaName, table, notifyTriggerName table, schemaName, notifyFunctionName table, desiredBody)
       pure $ case rows of
         Only current : _ -> current
@@ -515,7 +520,8 @@ reconcileOptionalTriggers conn schemaName tables config =
       rows <-
         query
           conn
-          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND p.prosrc = ?)"
+          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          \WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND p.prosrc = ?)"
           (schemaName, desiredBody)
       pure $ case rows of
         Only current : _ -> current
@@ -527,7 +533,12 @@ reconcileOptionalTriggers conn schemaName tables config =
       rows <-
         query
           conn
-          "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal AND pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND t.tgtype = ? AND t.tgnargs = 2 AND t.tgargs = ?)"
+          ( "SELECT EXISTS (SELECT 1 "
+              <> triggerJoins
+              <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND NOT t.tgisinternal \
+                 \AND pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 \
+                 \AND t.tgtype = ? AND t.tgnargs = 2 AND t.tgargs = ?)"
+          )
           (schemaName, table, trigger, schemaName, triggerType :: Int, Binary args)
       pure $ case rows of
         Only current : _ -> current
@@ -539,7 +550,11 @@ reconcileOptionalTriggers conn schemaName tables config =
       commands <-
         query
           conn
-          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          ( dropTriggerSelect
+              <> triggerJoins
+              <> "WHERE pn.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0 \
+                 \AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          )
           (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) commands
 
@@ -547,13 +562,24 @@ reconcileOptionalTriggers conn schemaName tables config =
       triggerCommands <-
         query
           conn
-          "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE n.nspname = ? AND pn.nspname = ? AND t.tgname = c.relname || '_notify_trigger' AND p.proname = 'notify_' || c.relname || '_created' AND p.pronargs = 0 AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          ( dropTriggerSelect
+              <> triggerJoins
+              <> "WHERE n.nspname = ? AND pn.nspname = ? AND t.tgname = c.relname || '_notify_trigger' \
+                 \AND p.proname = 'notify_' || c.relname || '_created' AND p.pronargs = 0 \
+                 \AND NOT t.tgisinternal AND NOT (c.relname::text = ANY(?::text[]))"
+          )
           (schemaName, schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) triggerCommands
       functionCommands <-
         query
           conn
-          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_class c ON c.relname = substring(p.proname FROM 8 FOR char_length(p.proname) - 15) JOIN pg_namespace cn ON cn.oid = c.relnamespace AND cn.oid = n.oid WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0 AND NOT (c.relname::text = ANY(?::text[]))"
+          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \
+          \FROM pg_proc p \
+          \JOIN pg_namespace n ON n.oid = p.pronamespace \
+          \JOIN pg_class c ON c.relname = substring(p.proname FROM 8 FOR char_length(p.proname) - 15) \
+          \JOIN pg_namespace cn ON cn.oid = c.relnamespace AND cn.oid = n.oid \
+          \WHERE n.nspname = ? AND p.proname LIKE 'notify_%_created' AND p.pronargs = 0 \
+          \AND NOT (c.relname::text = ANY(?::text[]))"
           (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) functionCommands
 
@@ -561,13 +587,27 @@ reconcileOptionalTriggers conn schemaName tables config =
       rows <-
         query
           conn
-          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0)"
+          "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          \WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0)"
           (Only schemaName)
       pure $ case rows of
         Only exists : _ -> exists
         _ -> False
 
     executeSQL = void . execute_ conn . Query . encodeUtf8
+
+-- | The catalog joins every trigger probe above shares.
+triggerJoins :: Query
+triggerJoins =
+  "FROM pg_trigger t \
+  \JOIN pg_class c ON c.oid = t.tgrelid \
+  \JOIN pg_namespace n ON n.oid = c.relnamespace \
+  \JOIN pg_proc p ON p.oid = t.tgfoid \
+  \JOIN pg_namespace pn ON pn.oid = p.pronamespace "
+
+-- | Renders a @DROP TRIGGER@ statement per matched row.
+dropTriggerSelect :: Query
+dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) "
 
 -- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
 -- the golden suite can pin every shipped migration body.

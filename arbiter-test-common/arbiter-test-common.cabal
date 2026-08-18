@@ -1,19 +1,19 @@
-cabal-version: 2.2
-name:          arbiter-test-common
-version:       0.1.0.0
-synopsis:      Shared test utilities for arbiter test suites
+cabal-version:   2.2
+name:            arbiter-test-common
+version:         0.1.0.0
+synopsis:        Shared test utilities for arbiter test suites
 description:
   Common test fixtures, setup utilities, and helper functions shared across arbiter test suites.
 
-license:       MIT
+license:         MIT
 license-file:    LICENSE
-author:        Joshua Miller
-maintainer:    joshua.ian.miller@pm.me
-category:      Testing
-build-type:    Simple
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Testing
+build-type:      Simple
 extra-doc-files: README.md
-homepage:      https://github.com/velveteer/arbiter
-bug-reports:   https://github.com/velveteer/arbiter/issues
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git

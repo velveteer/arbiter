@@ -39,8 +39,9 @@ type MyRegistry = '[Queue "email_jobs" EmailJob]
 
 main :: IO ()
 main = do
-  -- First run Arbiter migrations with enableEventStreaming = True. connStr is
-  -- your libpq connection string and "public" is the migrated schema.
+  -- Run Arbiter migrations first. connStr is your libpq connection string and
+  -- "public" is the migrated schema. Live SSE updates also need
+  -- enableEventStreaming = True.
   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
   runArbiterAPI 8080 config
 ```
