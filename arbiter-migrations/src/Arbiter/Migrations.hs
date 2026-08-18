@@ -578,7 +578,8 @@ reconcileOptionalTriggers conn schemaName tables config =
           \FROM pg_proc p \
           \JOIN pg_namespace n ON n.oid = p.pronamespace \
           \WHERE n.nspname = ? AND p.proname LIKE 'notify\\_%\\_created' AND char_length(p.proname) > 15 \
-          \AND p.pronargs = 0 AND NOT (substring(p.proname FROM 8 FOR char_length(p.proname) - 15) = ANY(?::text[]))"
+          \AND p.pronargs = 0 AND p.prorettype = 'pg_catalog.trigger'::regtype \
+          \AND NOT (substring(p.proname FROM 8 FOR char_length(p.proname) - 15) = ANY(?::text[]))"
           (schemaName, PGArray keep)
       traverse_ (\(Only command) -> executeSQL command) functionCommands
 

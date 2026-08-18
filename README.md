@@ -318,7 +318,7 @@ syncHandler _conn job = do
 Children run in parallel. Parents run when all of their children are acked or DLQ'd.
 
 ```haskell
-import Arbiter.Core.JobTree ((<~~))
+import Arbiter.Core.JobTree (leaf, rollup, (<~~))
 import Data.List.NonEmpty (NonEmpty ((:|)))
 
 data PipelinePayload
@@ -343,15 +343,15 @@ Right _ <- Arb.insertJobTree myTree
 Multi-level trees use `rollup` and `leaf`:
 
 ```haskell
-myTree = JT.rollup (Arb.defaultJob Aggregate)
-  [ JT.rollup (Arb.defaultJob (AggregateSection "section-1"))
-      [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1a"))
-      , JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1b"))
-      ]
-  , JT.rollup (Arb.defaultJob (AggregateSection "section-2"))
-      [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-2a"))
-      ]
-  ]
+myTree = rollup (Arb.defaultJob Aggregate)
+  ( rollup (Arb.defaultJob (AggregateSection "section-1"))
+      ( leaf (Arb.defaultJob (ProcessChunk "leaf-1a"))
+          :| [leaf (Arb.defaultJob (ProcessChunk "leaf-1b"))]
+      )
+      :| [ rollup (Arb.defaultJob (AggregateSection "section-2"))
+             (leaf (Arb.defaultJob (ProcessChunk "leaf-2a")) :| [])
+         ]
+  )
 ```
 
 A parent fetches its children's results on demand with
