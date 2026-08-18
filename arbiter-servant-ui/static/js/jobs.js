@@ -64,10 +64,19 @@ document.addEventListener('alpine:init', () => {
     get displayJobs() {
       const result = [];
       const treeHideChildren = this.effectiveViewMode === 'tree';
+      const rootKeys = new Set(this.jobs.map((j) => String(j.primaryKey)));
+      // Rows an open expansion already renders. A truncated expansion lists only what
+      // it shows, so a child past the cut still needs its own row.
+      const nestedKeys = new Set();
+      for (const expansion of Object.values(this.expandedParents)) {
+        for (const child of expansion?.jobs || []) nestedKeys.add(String(child.primaryKey));
+      }
       const flatten = (jobs, depth, parentCounts) => {
         for (const job of jobs) {
-          if (depth === 0 && treeHideChildren && job.parentId && !this._appliedParentId) {
-            continue;
+          if (depth === 0 && !this._appliedParentId && job.parentId) {
+            // In tree view a child is reached by expanding its parent.
+            const reachable = treeHideChildren && rootKeys.has(String(job.parentId));
+            if (reachable || nestedKeys.has(String(job.primaryKey))) continue;
           }
           const key = job.primaryKey;
           const cc = parentCounts?.childCounts || this.childCounts;
