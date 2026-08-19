@@ -1,6 +1,7 @@
 -- | The tables an arbiter schema contains that no single queue owns.
 module Arbiter.Core.SchemaTables
   ( allSchemaTables
+  , sharedArbiterTables
   ) where
 
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTableName, arbiterConcurrencyTableName)

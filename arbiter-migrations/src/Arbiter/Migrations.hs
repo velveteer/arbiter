@@ -111,6 +111,7 @@ import Arbiter.Core.Job.Schema
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
+import Arbiter.Core.SchemaTables (sharedArbiterTables)
 import Arbiter.Core.RateLimit.Schema
   ( PolicyRow (..)
   , addRateLimitColumnsSQL
@@ -297,9 +298,9 @@ renderedIdentifiers table =
     everyOther (_ : name : rest) = name : everyOther rest
     everyOther _ = []
 
--- | Validate identifiers before PostgreSQL can truncate generated object or channel
--- names into each other. Truncation itself is harmless, so the limit is the length at
--- which two of a queue's generated names truncate to the same identifier.
+-- | Reject queue names that generate a schema-wide arbiter table, or that generate
+-- object or channel names PostgreSQL truncates into each other. Truncation itself is
+-- harmless, so the length limit is where two of a queue's generated names collide.
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
@@ -312,6 +313,8 @@ validateRegistryNames schemaName tables
             <> "-byte generated-identifier limit: "
             <> table
         )
+  | Just reserved <- reservedCollision =
+      Left ("Arbiter queue name generates a reserved arbiter table: " <> reserved)
   | Just generated <- generatedCollision =
       Left ("Arbiter queue names generate the same PostgreSQL object: " <> generated)
   | Just channel <- channelCollision =
@@ -327,6 +330,7 @@ validateRegistryNames schemaName tables
         , generated <- queueTableNames table
         ]
     generatedCollision = fst <$> find ((> 1) . Set.size . snd) (Map.toList generatedOwners)
+    reservedCollision = find (`Set.member` Map.keysSet generatedOwners) sharedArbiterTables
     channelOwners =
       Map.fromListWith
         Set.union

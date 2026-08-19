@@ -87,6 +87,12 @@ registryNameTests =
         @?= Left "Arbiter queue name exceeds the 35-byte generated-identifier limit: abcdefghijklmnopqrstuvwxyz0123456789"
   , testCase "accepts a queue name at the limit" $
       validateRegistryNames "arbiter" ["abcdefghijklmnopqrstuvwxyz012345678"] @?= Right ()
+  , testCase "rejects a queue name owned by a schema-wide table" $
+      validateRegistryNames "arbiter" ["arbiter_gates"]
+        @?= Left "Arbiter queue name generates a reserved arbiter table: arbiter_gates"
+  , testCase "rejects a queue named after the cron table" $
+      validateRegistryNames "arbiter" ["cron_schedules"]
+        @?= Left "Arbiter queue name generates a reserved arbiter table: cron_schedules"
   ]
 
 newtype MigrationPayload = MigrationPayload Int
