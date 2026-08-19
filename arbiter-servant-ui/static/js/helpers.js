@@ -457,7 +457,7 @@ function tableTab(loadMethod, refreshStorageKey) {
         if (this.active) this._resetView();
       };
       this._onSseReconnect = () => {
-        if (this.active && !this.loading) this[loadMethod]();
+        if (this.active) this[loadMethod]();
       };
       this._onSseEvent = (e) => {
         const count = opts.relevant(e.detail);

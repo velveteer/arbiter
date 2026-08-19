@@ -63,10 +63,13 @@ module Arbiter.Core.Job.Schema
   , eventStreamingFunctionName
   , eventStreamingTriggerName
   , eventStreamingDLQTriggerName
+  , legacyEventStreamingTriggers
   , notifyObjectComment
   , notifyObjectCommentPrefix
+  , notifyAdoptedObjectComment
   , eventStreamingObjectComment
   , eventStreamingObjectCommentPrefix
+  , eventStreamingAdoptedObjectComment
 
     -- * Table Name Helpers
   , qualifiedTable
@@ -94,6 +97,7 @@ module Arbiter.Core.Job.Schema
   , groupAggregates
   ) where
 
+import Data.Bool (bool)
 import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
@@ -171,6 +175,16 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
 
+-- | Event-streaming trigger names arbiter generated before the per-queue names, each
+-- paired with whether it sits on the DLQ table.
+legacyEventStreamingTriggers :: [(Text, Bool)]
+legacyEventStreamingTriggers =
+  [ ("notify_job_insert", False)
+  , ("notify_job_update", False)
+  , ("notify_job_delete", False)
+  , ("notify_dlq_insert", True)
+  ]
+
 -- | Ownership marker stamped on every notify function and trigger arbiter installs.
 -- Sweeps match 'notifyObjectCommentPrefix', so an unmarked object is never dropped.
 -- A trigger is current when its comment equals this exact value, so bump the version
@@ -182,6 +196,11 @@ notifyObjectComment = notifyObjectCommentPrefix <> "v1"
 notifyObjectCommentPrefix :: Text
 notifyObjectCommentPrefix = "arbiter:notify:"
 
+-- | Marker stamped on notify objects installed before arbiter marked them. Sweeps
+-- match it and no trigger body is ever built with it, so an adopted trigger is rebuilt.
+notifyAdoptedObjectComment :: Text
+notifyAdoptedObjectComment = notifyObjectCommentPrefix <> "adopted"
+
 -- | Ownership marker stamped on every event-streaming function and trigger arbiter
 -- installs. Bump the version whenever 'createEventStreamingTriggersSQL' changes.
 eventStreamingObjectComment :: Text
@@ -190,6 +209,11 @@ eventStreamingObjectComment = eventStreamingObjectCommentPrefix <> "v1"
 -- | The marker prefix identifying an event-streaming object as arbiter's, across versions.
 eventStreamingObjectCommentPrefix :: Text
 eventStreamingObjectCommentPrefix = "arbiter:event-stream:"
+
+-- | Marker stamped on event-streaming objects installed before arbiter marked them.
+-- See 'notifyAdoptedObjectComment'.
+eventStreamingAdoptedObjectComment :: Text
+eventStreamingAdoptedObjectComment = eventStreamingObjectCommentPrefix <> "adopted"
 
 -- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
 qualifiedTable :: SchemaName -> TableName -> Text
@@ -1075,14 +1099,12 @@ dropEventStreamingTriggersSQL :: Text -> Text -> Text
 dropEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName
-   in T.unlines
-        [ "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_insert" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_update" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_delete" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_dlq_insert" <> " ON " <> dlqTbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingTriggerName tableName) <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier (eventStreamingDLQTriggerName tableName) <> " ON " <> dlqTbl <> ";"
-        ]
+      dropTrigger name tableRef = "DROP TRIGGER IF EXISTS " <> quoteIdentifier name <> " ON " <> tableRef <> ";"
+   in T.unlines $
+        map (\(name, isDLQ) -> dropTrigger name (bool tbl dlqTbl isDLQ)) legacyEventStreamingTriggers
+          <> [ dropTrigger (eventStreamingTriggerName tableName) tbl
+             , dropTrigger (eventStreamingDLQTriggerName tableName) dlqTbl
+             ]
 
 -- | Drop the schema-wide event-streaming function after its triggers are detached.
 dropEventStreamingFunctionSQL :: SchemaName -> Text

@@ -20,6 +20,7 @@ module Arbiter.Migrations
   , MigrationConfig (..)
   , defaultMigrationConfig
   , validateRegistryNames
+  , maxQueueNameBytes
 
     -- * Tracked Migrations
   , runMigrationsForRegistry
@@ -88,14 +89,17 @@ import Arbiter.Core.Job.Schema
   , createResultsTableSQL
   , createSchemaSQL
   , dropEventStreamingFunctionSQL
+  , eventStreamingAdoptedObjectComment
   , eventStreamingDLQTriggerName
   , eventStreamingFunctionName
   , eventStreamingObjectComment
   , eventStreamingObjectCommentPrefix
   , eventStreamingTriggerName
   , jobQueueTable
+  , legacyEventStreamingTriggers
   , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
+  , notifyAdoptedObjectComment
   , notifyFunctionName
   , notifyObjectComment
   , notifyObjectCommentPrefix
@@ -142,7 +146,7 @@ import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute_, query)
 import Database.PostgreSQL.Simple qualified as PG
@@ -266,17 +270,48 @@ data TableAdmission = TableAdmission
 allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission True True
 
--- | Validate identifiers before PostgreSQL can truncate generated object or
--- channel names into another queue's. The 35-byte queue limit leaves generated
--- indexes and channels untruncated. Rate-limit bucket triggers do truncate past
--- 30 bytes and stay distinct.
+-- | The longest queue name whose generated identifiers survive PostgreSQL's 63-byte
+-- truncation distinct. Derived by rendering a probe queue's own DDL at each length, so
+-- an object added with a name that truncates into a sibling's lowers this on its own.
+maxQueueNameBytes :: Int
+maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. 63])
+  where
+    identifiersDistinct n =
+      let rendered = renderedIdentifiers (T.replicate n "q")
+          owners = Map.fromListWith Set.union [(T.take 63 name, Set.singleton name) | name <- rendered]
+       in all ((== 1) . Set.size) (Map.elems owners)
+
+-- | Every identifier a queue's DDL names, read back off the rendered SQL rather than
+-- a hand-listed set, so nothing has to be remembered when an object is added.
+renderedIdentifiers :: TableName -> [Text]
+renderedIdentifiers table =
+  concatMap quoted $
+    [decodeUtf8 body | MigrationScript _ body <- jobQueueMigrationsForTable probeSchema table allTableAdmission]
+      <> [ createNotifyFunctionSQL probeSchema table
+         , createNotifyTriggerSQL probeSchema table
+         , createEventStreamingTriggersSQL probeSchema table
+         ]
+  where
+    probeSchema = "arbiter"
+    quoted = everyOther . T.splitOn "\""
+    everyOther (_ : name : rest) = name : everyOther rest
+    everyOther _ = []
+
+-- | Validate identifiers before PostgreSQL can truncate generated object or channel
+-- names into each other. Truncation itself is harmless, so the limit is the length at
+-- which two of a queue's generated names truncate to the same identifier.
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
   | byteLength schemaName > 63 = Left "Arbiter schema name exceeds PostgreSQL's 63-byte identifier limit"
   | any T.null tables = Left "Arbiter queue name must not be empty"
-  | Just table <- find ((> 35) . byteLength) tables =
-      Left ("Arbiter queue name exceeds the 35-byte generated-identifier limit: " <> table)
+  | Just table <- find ((> maxQueueNameBytes) . byteLength) tables =
+      Left
+        ( "Arbiter queue name exceeds the "
+            <> T.pack (show maxQueueNameBytes)
+            <> "-byte generated-identifier limit: "
+            <> table
+        )
   | Just generated <- generatedCollision =
       Left ("Arbiter queue names generate the same PostgreSQL object: " <> generated)
   | Just channel <- channelCollision =
@@ -473,6 +508,7 @@ reconcileRateLimitDurability conn schemaName durability = do
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
+    adoptUnmarkedObjects
     if enableNotifications config
       then do
         dropNotifyObjectsExcept tables
@@ -481,7 +517,7 @@ reconcileOptionalTriggers conn schemaName tables config =
     if enableEventStreaming config
       then do
         executeSQL (createEventStreamingFunctionSQL schemaName)
-        dropEventTriggersExcept (concatMap (\table -> [table, table <> "_dlq"]) tables)
+        dropEventTriggersExcept eventTables
         traverse_ installEventStream tables
       else do
         dropEventTriggersExcept []
@@ -534,39 +570,81 @@ reconcileOptionalTriggers conn schemaName tables config =
         Only present : _ -> present
         _ -> False
 
-    dropEventTriggersExcept keep = do
-      commands <-
-        query
-          conn
-          ( dropTriggerSelect
-              <> triggerJoins
-              <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
-                 \AND NOT (c.relname::text = ANY(?::text[]))"
-          )
-          (schemaName, eventStreamingObjectCommentPrefix <> "%", PGArray keep)
-      traverse_ (\(Only command) -> executeSQL command) commands
+    dropEventTriggersExcept keep =
+      executeRendered
+        ( dropTriggerSelect
+            <> triggerJoins
+            <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
+               \AND NOT (c.relname::text = ANY(?::text[]))"
+        )
+        (schemaName, eventStreamingObjectCommentPrefix <> "%", PGArray keep)
 
     dropNotifyObjectsExcept keep = do
-      triggerCommands <-
-        query
-          conn
-          ( dropTriggerSelect
-              <> triggerJoins
-              <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
-                 \AND NOT (c.relname::text = ANY(?::text[]))"
-          )
-          (schemaName, notifyObjectCommentPrefix <> "%", PGArray keep)
-      traverse_ (\(Only command) -> executeSQL command) triggerCommands
-      functionCommands <-
-        query
-          conn
-          "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \
-          \FROM pg_proc p \
-          \JOIN pg_namespace n ON n.oid = p.pronamespace \
-          \WHERE n.nspname = ? AND obj_description(p.oid, 'pg_proc') LIKE ? AND p.pronargs = 0 \
-          \AND NOT (p.proname::text = ANY(?::text[]))"
-          (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
-      traverse_ (\(Only command) -> executeSQL command) functionCommands
+      executeRendered
+        ( dropTriggerSelect
+            <> triggerJoins
+            <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
+               \AND NOT (c.relname::text = ANY(?::text[]))"
+        )
+        (schemaName, notifyObjectCommentPrefix <> "%", PGArray keep)
+      -- A function still carrying a trigger is one the sweep spared, so it stays.
+      executeRendered
+        "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \
+        \FROM pg_proc p \
+        \JOIN pg_namespace n ON n.oid = p.pronamespace \
+        \WHERE n.nspname = ? AND obj_description(p.oid, 'pg_proc') LIKE ? AND p.pronargs = 0 \
+        \AND NOT (p.proname::text = ANY(?::text[])) \
+        \AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid AND NOT t.tgisinternal)"
+        (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
+
+    -- Objects installed before arbiter stamped markers carry no comment, so both
+    -- sweeps miss them. Adoption stamps a marker no install ever writes, which the
+    -- sweeps match and the currency probe never accepts. Only the names this registry
+    -- generates are adopted, so an unmarked lookalike stays foreign.
+    adoptUnmarkedObjects = do
+      executeRendered
+        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', n.nspname, p.proname, ?::text) \
+        \FROM pg_proc p \
+        \JOIN pg_namespace n ON n.oid = p.pronamespace \
+        \WHERE n.nspname = ? AND p.proname = ANY(?::text[]) AND p.pronargs = 0 \
+        \AND obj_description(p.oid, 'pg_proc') IS NULL"
+        (notifyAdoptedObjectComment, schemaName, PGArray (map notifyFunctionName tables))
+      adoptTriggers notifyAdoptedObjectComment (map notifyTriggerName tables) tables
+      adoptTriggers eventStreamingAdoptedObjectComment eventTriggerNames eventTables
+      -- The shared function is ours only once one of its triggers is.
+      executeRendered
+        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', n.nspname, p.proname, ?::text) \
+        \FROM pg_proc p \
+        \JOIN pg_namespace n ON n.oid = p.pronamespace \
+        \WHERE n.nspname = ? AND p.proname = ? AND p.pronargs = 0 \
+        \AND obj_description(p.oid, 'pg_proc') IS NULL \
+        \AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid AND NOT t.tgisinternal \
+        \AND obj_description(t.oid, 'pg_trigger') LIKE ?)"
+        ( eventStreamingAdoptedObjectComment
+        , schemaName
+        , eventStreamingFunctionName
+        , eventStreamingObjectCommentPrefix <> "%"
+        )
+
+    adoptTriggers marker triggerNames relNames =
+      executeRendered
+        ( commentTriggerSelect
+            <> triggerJoins
+            <> "WHERE n.nspname = ? AND NOT t.tgisinternal AND t.tgname = ANY(?::text[]) \
+               \AND c.relname = ANY(?::text[]) AND obj_description(t.oid, 'pg_trigger') IS NULL"
+        )
+        (marker, schemaName, PGArray triggerNames, PGArray relNames)
+
+    eventTables = concatMap (\table -> [table, table <> "_dlq"]) tables
+
+    eventTriggerNames =
+      map fst legacyEventStreamingTriggers
+        <> concatMap (\table -> [eventStreamingTriggerName table, eventStreamingDLQTriggerName table]) tables
+
+    executeRendered :: (PG.ToRow params) => Query -> params -> IO ()
+    executeRendered sql params = do
+      commands <- query conn sql params
+      traverse_ (\(Only command) -> executeSQL command) commands
 
     executeSQL = void . execute_ conn . Query . encodeUtf8
 
@@ -580,6 +658,10 @@ triggerJoins =
 -- | Renders a @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query
 dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) "
+
+-- | Renders a @COMMENT ON TRIGGER@ statement per matched row, stamping the first parameter.
+commentTriggerSelect :: Query
+commentTriggerSelect = "SELECT format('COMMENT ON TRIGGER %I ON %I.%I IS %L;', t.tgname, n.nspname, c.relname, ?::text) "
 
 -- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
 -- the golden suite can pin every shipped migration body. Optional notification and
