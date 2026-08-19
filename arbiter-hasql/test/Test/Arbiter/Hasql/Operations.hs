@@ -76,8 +76,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         length claimed `shouldBe` 0
 
       it "shares transaction with user's database operations" $ \env -> do
-        let job1 = (defaultJob (TestMessage "SharedTx")) {groupKey = Just "g1"}
-        let job2 = (defaultJob (TestMessage "SharedTx2")) {groupKey = Just "g2"}
+        let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
+        let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SharedTx2")
 
         runHasqlDb env $ do
           withDbTransaction $ do
@@ -90,8 +90,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "SharedTx2"]
 
       it "rolls back both user operations and job when transaction fails" $ \env -> do
-        let job1 = (defaultJob (TestMessage "FirstJob")) {groupKey = Just "g1"}
-        let job2 = (defaultJob (TestMessage "SecondJob")) {groupKey = Just "g2"}
+        let job1 = setGroupKey (Just "g1") $ defaultJob (TestMessage "FirstJob")
+        let job2 = setGroupKey (Just "g2") $ defaultJob (TestMessage "SecondJob")
 
         result <-
           ( runHasqlDb env $ do

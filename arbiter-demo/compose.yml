@@ -37,6 +37,14 @@ services:
       # Self-restart cadence: the watchdog raises SIGTERM after this many
       # minutes, the process exits, and restart:always reseeds a clean demo.
       RESET_INTERVAL_MINUTES: "20"
+      # Bursty batch inserts into bulk_queue, drained by BURST_WORKERS threads
+      # claiming BURST_BATCH jobs at a time. Raise the size or shorten the
+      # interval to push harder on vacuum pressure.
+      BURST_INTERVAL_SECONDS: "10"
+      BURST_SIZE: "1000"
+      BURST_GROUPS: "8"
+      BURST_WORKERS: "6"
+      BURST_BATCH: "25"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://lgtm:4318"
       OTEL_SERVICE_NAME: arbiter-demo
       # The dashboard's rate panels use a 1m window, which needs samples well

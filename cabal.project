@@ -13,8 +13,6 @@ packages:
   arbiter-test-common
   arbiter-bench
 
-with-compiler: ghc-9.14.1
-
 -- GHC 9.14 ships base 4.22 and template-haskell 2.24, ahead of the upper
 -- bounds some deps (postgresql-simple) still declare.
 allow-newer:

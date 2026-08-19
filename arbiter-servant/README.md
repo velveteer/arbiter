@@ -39,11 +39,14 @@ type MyRegistry = '[Queue "email_jobs" EmailJob]
 
 main :: IO ()
 main = do
-  -- connStr is your libpq connection string, "public" the schema
+  -- Run Arbiter migrations first. connStr is your libpq connection string and
+  -- "public" is the migrated schema. Live SSE updates also need
+  -- enableEventStreaming = True.
   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
   runArbiterAPI 8080 config
 ```
 
 A queue that stores a handler result uses `QueueWithResult "email_jobs" EmailJob
 Report` in place of `Queue`, importing `QueueSpec (..)` for the constructor. See
-the [main README](../README.md) for the worker side and the full feature set.
+the [project documentation](https://github.com/velveteer/arbiter#readme) for
+the worker side and the full feature set.

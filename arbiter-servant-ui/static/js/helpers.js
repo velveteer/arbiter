@@ -245,6 +245,7 @@ async function guardedLoad(self, errorLabel, body, opts) {
     store.beginInitialLoad();
   }
   self.loading = true;
+  self._loadsInFlight = (self._loadsInFlight || 0) + 1;
   self._loadSeq = (self._loadSeq || 0) + 1;
   const seq = self._loadSeq;
   const isStale = () => seq !== self._loadSeq;
@@ -258,11 +259,13 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (opts && opts.suppressToast && opts.suppressToast()) return;
     if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
   } finally {
+    // The winner owns the flag. An abandoned load clears it once nothing is outstanding.
+    self._loadsInFlight--;
+    if (seq === self._loadSeq || self._loadsInFlight === 0) self.loading = false;
     // Only the winning load releases the loader, so a superseded first load
     // can't drop it while the view is still empty. Teardown and an onHide seq
     // bump release the claim themselves.
     if (seq === self._loadSeq) {
-      self.loading = false;
       self.loaded = true;
       releaseInitialLoad(self);
     }

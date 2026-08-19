@@ -45,6 +45,8 @@ module Arbiter.Core.Job.Schema
     -- * Event Streaming Trigger SQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
+  , dropEventStreamingFunctionSQL
+  , dropEventStreamingTriggersSQL
 
     -- * Notification Channel Helpers
   , notificationChannelForTable
@@ -61,6 +63,13 @@ module Arbiter.Core.Job.Schema
   , eventStreamingFunctionName
   , eventStreamingTriggerName
   , eventStreamingDLQTriggerName
+  , legacyEventStreamingTriggers
+  , notifyObjectComment
+  , notifyObjectCommentPrefix
+  , notifyAdoptedObjectComment
+  , eventStreamingObjectComment
+  , eventStreamingObjectCommentPrefix
+  , eventStreamingAdoptedObjectComment
 
     -- * Table Name Helpers
   , qualifiedTable
@@ -88,6 +97,7 @@ module Arbiter.Core.Job.Schema
   , groupAggregates
   ) where
 
+import Data.Bool (bool)
 import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
@@ -164,6 +174,46 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 -- | Per-table DLQ event streaming trigger name.
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
+
+-- | Event-streaming trigger names arbiter generated before the per-queue names, each
+-- paired with whether it sits on the DLQ table.
+legacyEventStreamingTriggers :: [(Text, Bool)]
+legacyEventStreamingTriggers =
+  [ ("notify_job_insert", False)
+  , ("notify_job_update", False)
+  , ("notify_job_delete", False)
+  , ("notify_dlq_insert", True)
+  ]
+
+-- | Ownership marker stamped on every notify function and trigger arbiter installs.
+-- Sweeps match 'notifyObjectCommentPrefix', so an unmarked object is never dropped.
+-- A trigger is current when its comment equals this exact value, so bump the version
+-- whenever 'createNotifyTriggerSQL' changes.
+notifyObjectComment :: Text
+notifyObjectComment = notifyObjectCommentPrefix <> "v1"
+
+-- | The marker prefix identifying a notify object as arbiter's, across versions.
+notifyObjectCommentPrefix :: Text
+notifyObjectCommentPrefix = "arbiter:notify:"
+
+-- | Marker stamped on notify objects installed before arbiter marked them. Sweeps
+-- match it and no trigger body is ever built with it, so an adopted trigger is rebuilt.
+notifyAdoptedObjectComment :: Text
+notifyAdoptedObjectComment = notifyObjectCommentPrefix <> "adopted"
+
+-- | Ownership marker stamped on every event-streaming function and trigger arbiter
+-- installs. Bump the version whenever 'createEventStreamingTriggersSQL' changes.
+eventStreamingObjectComment :: Text
+eventStreamingObjectComment = eventStreamingObjectCommentPrefix <> "v1"
+
+-- | The marker prefix identifying an event-streaming object as arbiter's, across versions.
+eventStreamingObjectCommentPrefix :: Text
+eventStreamingObjectCommentPrefix = "arbiter:event-stream:"
+
+-- | Marker stamped on event-streaming objects installed before arbiter marked them.
+-- See 'notifyAdoptedObjectComment'.
+eventStreamingAdoptedObjectComment :: Text
+eventStreamingAdoptedObjectComment = eventStreamingObjectCommentPrefix <> "adopted"
 
 -- | Any schema-qualified table: @qualifiedTable "arbiter" "arbiter_workers"@ -> @"arbiter"."arbiter_workers"@
 qualifiedTable :: SchemaName -> TableName -> Text
@@ -337,7 +387,7 @@ createArchiveExpiresAtIndexSQL schemaName tableName =
     , "ON " <> jobQueueArchiveTable schemaName tableName <> " (archive_expires_at);"
     ]
 
--- | Index on archive @job_id@ for by-id lookups ('getArchivedJobById').
+-- | Index on archive @job_id@ for by-id lookups (@getArchivedJobById@).
 createArchiveJobIdIndexSQL :: Text -> Text -> Text
 createArchiveJobIdIndexSQL schemaName tableName =
   T.unlines
@@ -904,8 +954,9 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
     ]
     <> "\n"
 
--- | SQL for the per-table NOTIFY function (fires after INSERT).
--- Channel name is quoted as a string literal, not an identifier.
+-- | SQL for the per-table NOTIFY function, fired once per insert statement.
+-- A statement that inserted nothing notifies nothing. Channel name is quoted as
+-- a string literal, not an identifier.
 createNotifyFunctionSQL :: Text -> Text -> Text
 createNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -915,15 +966,24 @@ createNotifyFunctionSQL schemaName tableName =
         [ "CREATE OR REPLACE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "()"
         , "RETURNS TRIGGER AS $$"
         , "BEGIN"
-        , "  PERFORM pg_notify('" <> quotedChannel <> "', '');"
-        , "  RETURN NEW;"
+        , "  IF EXISTS (SELECT 1 FROM new_table) THEN"
+        , "    PERFORM pg_notify('" <> quotedChannel <> "', '');"
+        , "  END IF;"
+        , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
+        , "COMMENT ON FUNCTION "
+            <> quoteIdentifier schemaName
+            <> "."
+            <> quoteIdentifier functionName
+            <> "() IS '"
+            <> notifyObjectComment
+            <> "';"
         ]
 
 -- | SQL to create the NOTIFY trigger for a specific table
 --
--- This trigger fires AFTER INSERT on the job queue table and calls the table-specific notify function.
+-- Statement-level AFTER INSERT, so a batch insert notifies once rather than per row.
 createNotifyTriggerSQL :: Text -> Text -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -933,8 +993,10 @@ createNotifyTriggerSQL schemaName tableName =
         [ "DROP TRIGGER IF EXISTS " <> trigName <> " ON " <> tbl <> ";"
         , "CREATE TRIGGER " <> trigName
         , "AFTER INSERT ON " <> tbl
-        , "FOR EACH ROW"
+        , "REFERENCING NEW TABLE AS new_table"
+        , "FOR EACH STATEMENT"
         , "EXECUTE FUNCTION " <> quoteIdentifier schemaName <> "." <> quoteIdentifier functionName <> "();"
+        , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS '" <> notifyObjectComment <> "';"
         ]
 
 -- | SQL to drop the NOTIFY trigger
@@ -956,10 +1018,9 @@ dropNotifyFunctionSQL schemaName tableName =
 -- Event Streaming Triggers (for admin UI / SSE)
 -- ---------------------------------------------------------------------------
 
--- | Shared event streaming function (one per schema). Fires on
--- INSERT\/UPDATE\/DELETE of job tables and INSERT on DLQ tables. Sends a JSON
--- event via @pg_notify@ on the @arbiter_job_events@ channel. Uses
--- @TG_TABLE_NAME@ and @TG_OP@ so a single function covers all tables.
+-- | Event-streaming function that receives the logical queue name and DLQ flag
+-- from each trigger. Trigger arguments avoid inferring either value from table
+-- suffixes, so queue names ending in @_dlq@ remain unambiguous.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
@@ -968,13 +1029,12 @@ createEventStreamingFunctionSQL schemaName =
         , "DECLARE"
         , "  event_type text;"
         , "  job_id bigint;"
+        , "  queue_name text := TG_ARGV[0];"
+        , "  is_dlq boolean := TG_ARGV[1]::boolean;"
         , "BEGIN"
         , "  CASE TG_OP"
         , "    WHEN 'INSERT' THEN"
-        , "      event_type := CASE"
-        , "        WHEN TG_TABLE_NAME LIKE '%_dlq' THEN 'job_dlq'"
-        , "        ELSE 'job_inserted'"
-        , "      END;"
+        , "      event_type := CASE WHEN is_dlq THEN 'job_dlq' ELSE 'job_inserted' END;"
         , "      job_id := NEW.id;"
         , "    WHEN 'UPDATE' THEN"
         , "      event_type := 'job_updated';"
@@ -987,42 +1047,70 @@ createEventStreamingFunctionSQL schemaName =
         , "  PERFORM pg_notify('" <> eventStreamingChannel <> "',"
         , "    json_build_object("
         , "      'event', event_type,"
-        , "      'table', regexp_replace(TG_TABLE_NAME, '_dlq$', ''),"
+        , "      'table', queue_name,"
         , "      'job_id', job_id"
         , "    )::text);"
         , "  RETURN NULL;"
         , "END;"
         , "$$ LANGUAGE plpgsql;"
+        , "COMMENT ON FUNCTION " <> funcName <> "() IS '" <> eventStreamingObjectComment <> "';"
         ]
 
--- | SQL to create event streaming triggers for a table and its DLQ
---
--- Creates a combined INSERT/UPDATE/DELETE trigger on the main table and an
--- INSERT trigger on the DLQ table, both calling the shared @notify_job_event@
--- function. Also drops any legacy per-operation triggers left by older versions
--- of @setupEventTriggers@.
-createEventStreamingTriggersSQL :: Text -> Text -> Text
+-- | Install event-streaming triggers with explicit logical queue metadata.
+createEventStreamingTriggersSQL :: SchemaName -> TableName -> Text
 createEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName
       funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
-      trigName = eventStreamingTriggerName tableName
-      dlqTrigName = eventStreamingDLQTriggerName tableName
-   in T.unlines
-        [ -- Drop legacy per-operation triggers (from setupEventTriggers)
-          "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_insert" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_update" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_job_delete" <> " ON " <> tbl <> ";"
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier "notify_dlq_insert" <> " ON " <> dlqTbl <> ";"
-        , ""
-        , -- Create combined triggers (drop first for idempotency)
-          "DROP TRIGGER IF EXISTS " <> quoteIdentifier trigName <> " ON " <> tbl <> ";"
-        , "CREATE TRIGGER " <> quoteIdentifier trigName
-        , "AFTER INSERT OR UPDATE OR DELETE ON " <> tbl
-        , "FOR EACH ROW EXECUTE FUNCTION " <> funcName <> "();"
-        , ""
-        , "DROP TRIGGER IF EXISTS " <> quoteIdentifier dlqTrigName <> " ON " <> dlqTbl <> ";"
-        , "CREATE TRIGGER " <> quoteIdentifier dlqTrigName
-        , "AFTER INSERT ON " <> dlqTbl
-        , "FOR EACH ROW EXECUTE FUNCTION " <> funcName <> "();"
-        ]
+      triggerCall isDLQ =
+        "FOR EACH ROW EXECUTE FUNCTION "
+          <> funcName
+          <> "("
+          <> quoteLiteral tableName
+          <> ", "
+          <> quoteLiteral isDLQ
+          <> ");"
+      triggerComment trigger tableRef =
+        "COMMENT ON TRIGGER "
+          <> quoteIdentifier trigger
+          <> " ON "
+          <> tableRef
+          <> " IS "
+          <> quoteLiteral eventStreamingObjectComment
+          <> ";"
+   in dropEventStreamingTriggersSQL schemaName tableName
+        <> T.unlines
+          [ "CREATE TRIGGER " <> quoteIdentifier (eventStreamingTriggerName tableName)
+          , "AFTER INSERT OR UPDATE OR DELETE ON " <> tbl
+          , triggerCall "false"
+          , triggerComment (eventStreamingTriggerName tableName) tbl
+          , ""
+          , "CREATE TRIGGER " <> quoteIdentifier (eventStreamingDLQTriggerName tableName)
+          , "AFTER INSERT ON " <> dlqTbl
+          , triggerCall "true"
+          , triggerComment (eventStreamingDLQTriggerName tableName) dlqTbl
+          ]
+  where
+    quoteLiteral = ("'" <>) . (<> "'") . T.replace "'" "''"
+
+-- | Drop current and legacy event-streaming triggers for a queue and its DLQ.
+-- The shared function is dropped separately after every queue is detached.
+dropEventStreamingTriggersSQL :: Text -> Text -> Text
+dropEventStreamingTriggersSQL schemaName tableName =
+  let tbl = jobQueueTable schemaName tableName
+      dlqTbl = jobQueueDLQTable schemaName tableName
+      dropTrigger name tableRef = "DROP TRIGGER IF EXISTS " <> quoteIdentifier name <> " ON " <> tableRef <> ";"
+   in T.unlines $
+        map (\(name, isDLQ) -> dropTrigger name (bool tbl dlqTbl isDLQ)) legacyEventStreamingTriggers
+          <> [ dropTrigger (eventStreamingTriggerName tableName) tbl
+             , dropTrigger (eventStreamingDLQTriggerName tableName) dlqTbl
+             ]
+
+-- | Drop the schema-wide event-streaming function after its triggers are detached.
+dropEventStreamingFunctionSQL :: SchemaName -> Text
+dropEventStreamingFunctionSQL schemaName =
+  "DROP FUNCTION IF EXISTS "
+    <> quoteIdentifier schemaName
+    <> "."
+    <> quoteIdentifier eventStreamingFunctionName
+    <> "();"

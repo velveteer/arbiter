@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | @hasql@ implementation helpers for 'MonadArbiter'.
+-- | @hasql@ implementation helpers for 'Arbiter.Core.MonadArbiter.MonadArbiter'.
 --
 -- Handlers receive a @Hasql.Connection.Connection@ for running typed hasql
 -- queries inside the worker transaction:
@@ -21,7 +21,7 @@
 -- @
 --
 -- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
--- 'Handler' at that queue's job and declared result types.
+-- 'Arbiter.Core.MonadArbiter.Handler' at that queue's job and declared result types.
 module Arbiter.Hasql.MonadArbiter
   ( -- * MonadArbiter implementation
     hasqlExecuteQuery
@@ -63,7 +63,7 @@ import Arbiter.Hasql.Encode qualified as Encode
 data HasqlConnectionPool = HasqlConnectionPool
   { connectionPool :: Maybe (Pool.Pool Hasql.Connection)
   -- ^ The underlying resource pool. 'Nothing' when using connection-only mode
-  -- via 'inTransaction'.
+  -- via 'Arbiter.Hasql.HasqlDb.inTransaction'.
   , activeConn :: Maybe Hasql.Connection
   -- ^ Pinned connection when inside a transaction
   , transactionDepth :: Int
@@ -84,6 +84,7 @@ class (Monad m) => HasHasqlPool m where
 localHasqlConnection :: (HasHasqlPool m) => Hasql.Connection -> m a -> m a
 localHasqlConnection conn = localHasqlPool (\pool -> pool {activeConn = Just conn, transactionDepth = 1})
 
+-- | Run a query unprepared, decoding rows.
 hasqlExecuteQuery
   :: (HasHasqlPool m, MonadIO m)
   => Query a
@@ -110,6 +111,7 @@ runQueryStatement prepare conn sql params codec = do
     Right rows -> pure rows
     Left err -> throwInternal $ "hasql query error: " <> T.pack (show err)
 
+-- | Run a statement unprepared, returning rows affected.
 hasqlExecuteStatement
   :: (HasHasqlPool m, MonadIO m)
   => Query a

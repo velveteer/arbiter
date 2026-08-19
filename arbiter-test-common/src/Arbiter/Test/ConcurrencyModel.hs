@@ -16,7 +16,14 @@ import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
 import Arbiter.Core.Concurrency.Stats (ConcurrencyPolicyUpdate (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (jobQueueTable)
-import Arbiter.Core.Job.Types (DedupKey (..), JobRead, dedupKey, defaultJob, maxAttempts, payload)
+import Arbiter.Core.Job.Types
+  ( DedupKey (..)
+  , JobRead
+  , defaultJob
+  , payload
+  , setDedupKey
+  , setMaxAttempts
+  )
 import Arbiter.Core.MonadArbiter (HasRegistry)
 import Control.Monad (foldM_, void)
 import Data.Foldable (for_, traverse_)
@@ -60,6 +67,7 @@ limitOf k = fromMaybe 1 (lookup k modelPools)
 claimBatch :: Int
 claimBatch = 500
 
+-- | The concurrency state-machine properties, run against any backend.
 concurrencyModelSpec
   :: forall sm
    . (HasRegistry sm CLReg)
@@ -176,7 +184,7 @@ step run withConn schema (m, ov, held) op = do
   let done held' = let (m2, ov2) = applyModel op (m, ov) in pure (m2, ov2, held')
   (m', ov', held') <- case op of
     OInsert k n -> do
-      let j = (defaultJob (CLPayload k)) {maxAttempts = Just 1000}
+      let j = setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
       evalIO (void (run (HL.insertJobsBatch (replicate n j)) :: IO [JobRead CLPayload]))
       done held
     OClaim -> do
@@ -212,7 +220,7 @@ step run withConn schema (m, ov, held) op = do
       evalIO (void (run HL.reconcileConcurrencyCounts))
       done held
     OMove k1 k2 d -> do
-      let mk k = (defaultJob (CLPayload k)) {maxAttempts = Just 1000, dedupKey = Just (ReplaceDuplicate d)}
+      let mk k = setDedupKey (Just (ReplaceDuplicate d)) $ setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
       -- Seed the source key, then dedup-replace onto the destination, moving the row.
       evalIO (void (run (HL.insertJobsBatch [mk k1]) :: IO [JobRead CLPayload]))
       evalIO (void (run (HL.insertJobsBatch [mk k2]) :: IO [JobRead CLPayload]))
@@ -240,7 +248,7 @@ prop_concurrent run withConn schema = withTests 30 $ property $ do
   evalIO (resetState withConn schema)
   let k = "mx"
       n = lim + extra
-      j = (defaultJob (CLPayload k)) {maxAttempts = Just 1000}
+      j = setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
   evalIO (withConn $ \c -> seedPool c schema k lim)
   evalIO (void (run (HL.insertJobsBatch (replicate n j)) :: IO [JobRead CLPayload]))
   results <-

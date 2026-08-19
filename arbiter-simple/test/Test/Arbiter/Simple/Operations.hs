@@ -50,7 +50,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
     describe "Transaction Participation (localConnection)" $ do
       it "commits job insertion within user transaction" $ \env -> do
-        let job = (defaultJob (TestMessage "InTx")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "InTx")
 
         -- Start a user transaction and insert a job with localConnection
         let connPool = fromJust (connectionPool (simplePool env))
@@ -67,7 +67,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         payload (head claimed) `shouldBe` TestMessage "InTx"
 
       it "rolls back job insertion when user transaction fails" $ \env -> do
-        let job = (defaultJob (TestMessage "RollbackTest")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "RollbackTest")
 
         -- Start a user transaction and intentionally fail it
         let connPool = fromJust (connectionPool (simplePool env))
@@ -88,7 +88,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         length claimed `shouldBe` 0
 
       it "shares transaction with user's database operations" $ \env -> do
-        let job = (defaultJob (TestMessage "SharedTx")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "SharedTx")
 
         -- Use the same connection for creating table, transaction, and verification
         let connPool = fromJust (connectionPool (simplePool env))
@@ -114,7 +114,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         length claimed `shouldBe` 1
 
       it "rolls back both user operations and job when transaction fails" $ \env -> do
-        let job = (defaultJob (TestMessage "BothRollback")) {groupKey = Just "g1"}
+        let job = setGroupKey (Just "g1") $ defaultJob (TestMessage "BothRollback")
 
         -- Use the same connection for creating table, transaction, and verification
         let connPool = fromJust (connectionPool (simplePool env))
@@ -156,15 +156,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         -- A starts transaction and inserts (holds lock on groups table row)
         _ <- PG.execute_ connA "BEGIN"
         Just _ <-
-          inTransaction @SimpleOpsTestRegistry connA testSchema $
-            HL.insertJob (defaultJob (TestMessage "JobA")) {groupKey = Just "g1"}
+          inTransaction @SimpleOpsTestRegistry connA testSchema
+            $ HL.insertJob
+            $ setGroupKey (Just "g1")
+            $ defaultJob (TestMessage "JobA")
 
         -- B tries to insert same group - BLOCKS on groups table upsert until A commits
         asyncB <- async $ do
           _ <- PG.execute_ connB "BEGIN"
           Just job <-
-            inTransaction @SimpleOpsTestRegistry connB testSchema $
-              HL.insertJob (defaultJob (TestMessage "JobB")) {groupKey = Just "g1"}
+            inTransaction @SimpleOpsTestRegistry connB testSchema
+              $ HL.insertJob
+              $ setGroupKey (Just "g1")
+              $ defaultJob (TestMessage "JobB")
           _ <- PG.execute_ connB "COMMIT"
           pure job
 

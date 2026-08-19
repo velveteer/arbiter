@@ -2,7 +2,8 @@
 
 -- | Cron scheduler for the Arbiter worker pool.
 --
--- When 'cronJobs' is non-empty in 'WorkerConfig', 'runWorkerPool' spawns a
+-- When 'Arbiter.Worker.Config.cronJobs' is non-empty in 'Arbiter.Worker.Config.WorkerConfig',
+-- 'Arbiter.Worker.Pool.runWorkerPool' spawns a
 -- scheduler thread that inserts jobs on 5-field cron expressions.
 -- Dedup keys prevent duplicate insertion across multiple worker instances.
 --
@@ -45,14 +46,14 @@ module Arbiter.Worker.Cron
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, dedupKey, parentId)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, setDedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
-import Control.Exception (displayException)
 import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Either (isRight)
@@ -343,7 +344,7 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
             pure Ran
       case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> T.pack (displayException e)
+          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> displayEx e
         Right NotLeader ->
           logCron logCfg Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
         Right Ran -> pure ()
@@ -368,9 +369,9 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
         let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
             ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
             replayCount = length (filter (/= currentTick) ticksToFire)
-        when (replayCount > 0) $
-          logCron logCfg Info $
-            "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
+        when (replayCount > 0)
+          $ logCron logCfg Info
+          $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
         forM_ ticksToFire $ \t ->
           void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
 
@@ -450,18 +451,18 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
     fired <- Ops.tryFireCronGate schemaName (name cj) tick
     when fired $ do
       let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
-          jobWrite = (builder cj kind tick) {dedupKey = Just (IgnoreDuplicate key)}
+          jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cj kind tick
       void $ HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cj]
   case result of
     Left e -> do
-      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> T.pack (displayException e)
+      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> displayEx e
       pure False
     Right () -> do
       logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
       pure True
 
-data RunNowOutcome = Fired | Skipped | Dropped | NotRequested
+data RunNowOutcome = Fired | Skipped | NotRequested
 
 -- | Claim and fire every schedule with a pending run request. A 'SkipOverlap'
 -- schedule reuses its constant dedup key, so a manual run is skipped while one
@@ -475,7 +476,7 @@ processRunRequests
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
   case scan of
-    Left e -> logCron logCfg Error $ "Cron run-request scan failed: " <> T.pack (displayException e)
+    Left e -> logCron logCfg Error $ "Cron run-request scan failed: " <> displayEx e
     Right pending -> do
       let requested = Set.fromList pending
       forM_ (filter (\cj -> Set.member (name cj) requested) jobs) (claimAndFire (truncateToMinute now))
@@ -486,31 +487,23 @@ processRunRequests logCfg schemaName jobs now = do
         maybe (pure NotRequested) (fireClaimed tick cj) claimed
       case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> T.pack (displayException e)
+          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> displayEx e
         Right NotRequested -> pure ()
         Right Fired ->
           logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
         Right Skipped ->
           logCron logCfg Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
-        Right Dropped ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now inserted no job, the parent job it references is gone"
     fireClaimed tick cj row = do
       let key = case effectiveOverlapFor cj row of
             SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cj)))
             AllowOverlap -> Nothing
-          jobWrite = (builder cj Live tick) {dedupKey = key}
+          jobWrite = setDedupKey key $ builder cj Live tick
       inserted <- HL.insertJob jobWrite
       case inserted of
         Just _ -> do
           void $ Ops.touchCronManualRun schemaName tick (name cj)
           pure Fired
-        -- An absent job is either the dedup key or a missing parent, and only
-        -- the parent it names can tell the two apart.
-        Nothing -> do
-          parentGone <- case parentId jobWrite of
-            Nothing -> pure False
-            Just pid -> not <$> HL.jobExists @payload pid
-          pure $ if parentGone then Dropped else Skipped
+        Nothing -> pure Skipped
 
 -- | Log a cron message, swallowing logger failures.
 logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()

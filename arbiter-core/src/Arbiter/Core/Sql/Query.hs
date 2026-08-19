@@ -4,7 +4,7 @@
 -- | A SQL query bundling its text, its positional parameters, and its row
 -- decoder in one value, so the three cannot drift. Built by the @sql@
 -- quasiquoter in "Arbiter.Core.Sql.QQ". The parameters and decoder use the
--- same 'Col'-driven vocabulary as the profunctor codec in
+-- same 'Arbiter.Core.Codec.Col'-driven vocabulary as the profunctor codec in
 -- "Arbiter.Core.Codec".
 module Arbiter.Core.Sql.Query
   ( Query (..)

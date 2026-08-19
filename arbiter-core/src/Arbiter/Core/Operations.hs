@@ -4,11 +4,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
+-- | The job queue operations, over any 'MonadArbiter' backend.
 module Arbiter.Core.Operations
   ( -- * Job Insertion
     insertJob
-  , insertJobUnsafe
-  , insertJobUnsafeStamped
+  , insertJobStamped
+  , insertJobTreeNodeStamped
+  , insertJobTreeLeavesStamped
   , insertJobsBatch
   , insertJobsBatchStamped
   , insertJobsBatch_
@@ -184,18 +186,15 @@ module Arbiter.Core.Operations
   , mergeRawChildResults
   ) where
 
-import Control.Exception qualified as E
 import Control.Monad (foldM, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.=))
-import Data.Aeson.Types (parseEither, parseMaybe)
-import Data.Bifunctor (bimap, first, second)
-import Data.Bitraversable (bitraverse)
+import Data.Bifunctor (bimap, first)
 import Data.Either (fromRight, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.IntMap qualified as IntMap
-import Data.List (groupBy, sort, sortOn)
+import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -210,11 +209,11 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
-import UnliftIO (MonadUnliftIO, tryAny, withRunInIO)
-import UnliftIO.Timeout qualified as UIO
+import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
+  , JobWriteSource
   , RowCodec
   , col
   , jobCodec
@@ -239,19 +238,47 @@ import Arbiter.Core.Job.Types
   ( AdmissionColumns (..)
   , ClaimSeq
   , DedupKey (IgnoreDuplicate, ReplaceDuplicate)
-  , Job (..)
   , JobId
   , JobPayload
   , JobRead
   , JobStatus (..)
   , JobWrite
+  , archiveFor
+  , attempts
+  , claimSeq
+  , claimedBy
   , dedupParts
+  , groupKey
   , isRollup
   , jobStatusFromText
   , jobStatusToText
+  , mapPayload
+  , parentId
+  , payload
+  , primaryKey
   )
+import Arbiter.Core.Job.Types qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
+import Arbiter.Core.Operations.Gates
+  ( Shared (..)
+  , gateNameFor
+  , runGated
+  , runGatedBounded
+  , runGatedShared
+  , runGatedState
+  , runGatedStateBounded
+  , setLocalStatementTimeout
+  )
+import Arbiter.Core.Operations.Workers
+  ( deregisterWorker
+  , heartbeatWorker
+  , listWorkers
+  , markWorkerShuttingDown
+  , registerWorker
+  , setWorkerPaused
+  , sweepStaleWorkers
+  )
 import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.RateLimit.Spec
   ( HasRateLimit
@@ -268,7 +295,6 @@ import Arbiter.Core.Sql.Claim qualified as Claim
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Arbiter.Core.Sql.Cron qualified as Tmpl
 import Arbiter.Core.Sql.DLQ qualified as Tmpl
-import Arbiter.Core.Sql.Gates qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as Tmpl
 import Arbiter.Core.Sql.Insert (batchFrag, insertFrag)
 import Arbiter.Core.Sql.Jobs qualified as Tmpl
@@ -279,13 +305,11 @@ import Arbiter.Core.Sql.Queues qualified as Tmpl
 import Arbiter.Core.Sql.RateLimit qualified as Tmpl
 import Arbiter.Core.Sql.Stats qualified as Tmpl
 import Arbiter.Core.Sql.Tree qualified as Tmpl
-import Arbiter.Core.Sql.Workers qualified as Tmpl
 import Arbiter.Core.Trace (currentTraceContext, stampTraceContext)
-import Arbiter.Core.Worker (WorkerRow)
 
 decodePayload :: (JobPayload payload, MonadArbiter m) => JobRead Value -> m (JobRead payload)
 decodePayload job = case fromJSON (payload job) of
-  Success p -> pure $ job {payload = p}
+  Success p -> pure $ mapPayload (const p) job
   Error e -> throwParsing $ "Failed to decode job payload: " <> T.pack e
 
 visibilityUpdateCodec :: RowCodec VisibilityUpdateInfo
@@ -319,7 +343,7 @@ filterToClause (Tmpl.FilterStatus s) = [QQ.sql|status = #{st :: CText}|]
 filterToClause (Tmpl.FilterId i) = [QQ.sql|id = #{i :: CInt8}|]
 filterToClause (Tmpl.FilterJobId i) = [QQ.sql|job_id = #{i :: CInt8}|]
 
--- | Run a single-row count 'Query', throwing a parse error on unexpected results.
+-- | Run a single-row count @Query@, throwing a parse error on unexpected results.
 countStrict :: (MonadArbiter m) => Text -> Q.Query Int64 -> m Int64
 countStrict label q = do
   rows <- MA.executeQuery q
@@ -327,7 +351,7 @@ countStrict label q = do
     [n] -> pure n
     _ -> throwParsing $ label <> ": unexpected result"
 
--- | Run a single-row count 'Query', returning 0 on an empty or unexpected result.
+-- | Run a single-row count @Query@, returning 0 on an empty or unexpected result.
 countOr0 :: (MonadArbiter m) => Q.Query Int64 -> m Int64
 countOr0 q = do
   rows <- MA.executeQuery q
@@ -374,28 +398,23 @@ stampedRow
   :: (JobPayload payload)
   => TraceStamp payload
   -> JobWrite payload
-  -> (JobWrite payload, AdmissionColumns)
-stampedRow stamp job = (stamp job, admissionColumns (payload job))
+  -> JobWriteSource payload
+stampedRow stamp job = internalStampedRow stamp Nothing Nothing False job
 
--- | Insert a job without validating that the parent exists.
---
--- This is an internal fast path for callers that already guarantee the parent
--- is present (e.g. 'insertJobTree'). External callers
--- should use 'insertJob' which validates the parent first.
-insertJobUnsafe
-  :: forall m payload
-   . (JobPayload payload, MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
-  -> TableName
-  -- ^ Table name
+internalStampedRow
+  :: (JobPayload payload)
+  => TraceStamp payload
+  -> Maybe Int64
+  -> Maybe Value
+  -> Bool
   -> JobWrite payload
-  -> m (Maybe (JobRead payload))
-insertJobUnsafe schemaName tableName job =
-  traceStamp >>= \stamp -> insertJobUnsafeStamped schemaName tableName stamp job
+  -> JobWriteSource payload
+internalStampedRow stamp parent state suspended job =
+  let stamped = stamp job
+   in (stamped, admissionColumns (JT.payload stamped), parent, state, suspended)
 
--- | 'insertJobUnsafe' over a stamp the caller shares across its inserts.
-insertJobUnsafeStamped
+-- | 'insertJob' over a stamp the caller shares across its inserts.
+insertJobStamped
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
   => SchemaName
@@ -403,20 +422,67 @@ insertJobUnsafeStamped
   -> TraceStamp payload
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJobUnsafeStamped schemaName tableName stamp job = do
-  let valuesFrag = insertFrag (jobCodec tableName) (stampedRow stamp job)
-      query = case dedupKey job of
+insertJobStamped schemaName tableName stamp job =
+  insertJobSource schemaName tableName job (stampedRow stamp job)
+
+-- | Internal tree insertion path for engine-owned parent and suspension state.
+insertJobTreeNodeStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> Maybe Int64
+  -> Maybe Value
+  -> Bool
+  -> JobWrite payload
+  -> m (Maybe (JobRead payload))
+insertJobTreeNodeStamped schemaName tableName stamp parent state suspended job =
+  insertJobSource schemaName tableName job (internalStampedRow stamp parent state suspended job)
+
+insertJobSource
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> JobWrite payload
+  -> JobWriteSource payload
+  -> m (Maybe (JobRead payload))
+insertJobSource schemaName tableName job source = do
+  let valuesFrag = insertFrag (jobCodec tableName) source
+      query = case JT.dedupKey job of
         Just (ReplaceDuplicate _) -> Tmpl.insertJobReplaceSQL schemaName tableName valuesFrag
         _ -> Tmpl.insertJobSQL schemaName tableName valuesFrag
 
   withDbTransaction $ do
     rawJobs <- MA.executeQuery query
     case rawJobs of
-      [] -> case dedupKey job of
+      [] -> case JT.dedupKey job of
         Just (IgnoreDuplicate _) -> pure Nothing
         Just (ReplaceDuplicate _) -> pure Nothing
         Nothing -> throwParsing "insertJob: No rows returned from INSERT"
       (raw : _) -> Just <$> decodePayload raw
+
+-- | Batch-insert direct tree leaves under one parent.
+insertJobTreeLeavesStamped
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> TraceStamp payload
+  -> Int64
+  -> [JobWrite payload]
+  -> m [JobRead payload]
+insertJobTreeLeavesStamped _ _ _ _ [] = pure []
+insertJobTreeLeavesStamped schemaName tableName stamp parent jobs = do
+  let rows =
+        [ internalStampedRow stamp (Just parent) Nothing False job
+        | job <- dedupBatch jobs
+        ]
+      batchSrc = batchFrag (jobCodec tableName) rows
+  withDbTransaction $ do
+    rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
+    traverse decodePayload rawJobs
 
 -- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
 -- manually-refilled policies.
@@ -573,17 +639,13 @@ reconcileAndPruneConcurrency schemaName tableNames = do
 --
 -- * @Nothing@: Always insert (dedup_key is NULL)
 -- * @Just (IgnoreDuplicate k)@: Skip if dedup_key exists, return Nothing
--- * @Just (ReplaceDuplicate k)@: Replace existing job unless actively in-flight on its
---   first attempt. Returns Nothing only when @attempts > 0@,
---   @not_visible_until > NOW()@, and @last_error IS NULL@ (i.e., the job is
---   being processed for the first time). Jobs that have previously failed
---   (@last_error IS NOT NULL@) can always be replaced, even if currently
---   in-flight on a retry attempt - this is by design, so that a fresh
---   replacement takes priority over a failing job.
+-- * @Just (ReplaceDuplicate k)@: Replace the existing job unless it is actively
+--   claimed, force-cancel flagged, or has children. An active claim has
+--   @attempts > 0@, @not_visible_until > NOW()@, and @last_error IS NULL@.
+--   A job waiting in retry backoff has @last_error IS NOT NULL@ and is safe to
+--   replace because no handler owns it.
 --
--- @parentId@ is validated: if set to a non-existent job ID, returns @Nothing@.
--- For building parent-child trees, prefer @insertJobTree@ which handles
--- @parentId@, @isRollup@, and @suspended@ atomically.
+-- Parent and rollup state can only be created through @insertJobTree@.
 insertJob
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -593,11 +655,8 @@ insertJob
   -- ^ Table name
   -> JobWrite payload
   -> m (Maybe (JobRead payload))
-insertJob schemaName tableName job = do
-  parentOk <- maybe (pure True) (jobExists schemaName tableName) (parentId job)
-  if not parentOk
-    then pure Nothing
-    else insertJobUnsafe schemaName tableName job
+insertJob schemaName tableName job =
+  traceStamp >>= \stamp -> insertJobStamped schemaName tableName stamp job
 
 -- | Insert multiple jobs in a single batch operation.
 --
@@ -609,8 +668,7 @@ insertJob schemaName tableName job = do
 -- occurrence is kept (last writer wins), consistent with sequential
 -- 'insertJob' calls.
 --
--- Does not validate @parentId@ - callers must ensure referenced parents
--- exist. For parent-child trees, use @insertJobTree@ instead.
+-- Parent-child relationships must be inserted with @insertJobTree@.
 insertJobsBatch
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -641,6 +699,7 @@ insertJobsBatchStamped schemaName tableName stamp jobs = do
     rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
     traverse decodePayload rawJobs
 
+-- | 'insertJobsBatch' discarding the rows, returning the count inserted.
 insertJobsBatch_
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -688,7 +747,7 @@ insertResultsBatch schemaName tableName rows =
 
 -- | Get all child results for a parent from the results table.
 --
--- Returns a 'Map' from child ID to the result 'Value'.
+-- Returns a @Map@ from child ID to the result 'Value'.
 getResultsByParent
   :: (MonadArbiter m)
   => SchemaName
@@ -704,7 +763,7 @@ getResultsByParent schemaName tableName parentJobId = do
 
 -- | Get DLQ child errors for a parent.
 --
--- Returns a 'Map' from child job ID to the last error message.
+-- Returns a @Map@ from child job ID to the last error message.
 getDLQChildErrorsByParent
   :: (MonadArbiter m)
   => SchemaName
@@ -738,7 +797,7 @@ persistParentState schemaName tableName jobId state =
 --
 -- A single fold over the input list. Non-keyed jobs are appended. Keyed jobs
 -- occupy the slot of their first occurrence, with an O(log n) positional update
--- via 'Seq' when a later 'ReplaceDuplicate' overwrites an earlier entry.
+-- via @Seq@ when a later 'ReplaceDuplicate' overwrites an earlier entry.
 --
 -- Dedup semantics (matching sequential 'insertJob' behaviour):
 --
@@ -748,7 +807,7 @@ persistParentState schemaName tableName jobId state =
 dedupBatch :: [JobWrite payload] -> [JobWrite payload]
 dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
   where
-    step (!seen, !rows) job = case dedupKeyText (dedupKey job) of
+    step (!seen, !rows) job = case dedupKeyText (JT.dedupKey job) of
       Nothing -> (seen, rows |> job)
       Just k -> case Map.lookup k seen of
         Nothing -> (Map.insert k (Seq.length rows) seen, rows |> job)
@@ -756,7 +815,7 @@ dedupBatch = toList . snd . foldl' step (Map.empty, Seq.empty)
           | isReplace job -> (seen, Seq.update idx job rows)
           | otherwise -> (seen, rows)
 
-    isReplace job = case dedupKey job of
+    isReplace job = case JT.dedupKey job of
       Just (ReplaceDuplicate _) -> True
       _ -> False
 
@@ -944,9 +1003,9 @@ ackJobInner schemaName tableName job = do
 -- row lock the caller goes on to take.
 lockJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
 lockJobParents schemaName tableName parents =
-  unless (null pids) $
-    void $
-      MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
+  unless (null pids)
+    $ void
+    $ MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
   where
     pids = Set.toAscList (Set.fromList (catMaybes parents))
 
@@ -979,10 +1038,10 @@ lockJobTreesFromRoot schemaName tableName ids =
 -- | Wake a suspended parent if all children are done.
 tryResumeParent :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> Int64 -> m ()
 tryResumeParent locks schemaName tableName pid = do
-  when (locks == TakeLocks) $
-    void $
-      MA.executeQuery
-        (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+  when (locks == TakeLocks)
+    $ void
+    $ MA.executeQuery
+      (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
   void $
     MA.executeStatement
       (Tmpl.tryWakeAncestorSQL schemaName tableName pid)
@@ -1068,9 +1127,9 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
           , let holder = claimedBy job
           ]
 
-  MA.executeQuery $
-    Q.rows visibilityUpdateCodec $
-      Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
+  MA.executeQuery
+    $ Q.rows visibilityUpdateCodec
+    $ Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
 
 -- | Update a job for retry with backoff and error tracking
 --
@@ -1229,9 +1288,9 @@ snapshotTreeRollups schemaName tableName parentJobId = do
   for_ rollupIds $ \rid -> do
     (results, errors, snap, _) <- readChildResultsRaw schemaName tableName rid
     let merged = mergeRawChildResults results errors snap
-    when (not $ Map.null merged) $
-      void $
-        persistParentState schemaName tableName rid (toJSON merged)
+    when (not $ Map.null merged)
+      $ void
+      $ persistParentState schemaName tableName rid (toJSON merged)
 
 -- | Moves multiple jobs from the main queue to the dead-letter queue.
 --
@@ -1264,9 +1323,9 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
   moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
   let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
   for_ movedJobs $ \(job, _) ->
-    when (isRollup job) $
-      void $
-        cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
+    when (isRollup job)
+      $ void
+      $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
   resumeJobParents LocksHeld schemaName tableName (map (parentId . fst) movedJobs)
   pure (fromIntegral (Set.size moved))
 
@@ -1348,10 +1407,12 @@ isStatusFilter :: Tmpl.JobFilter -> Bool
 isStatusFilter (Tmpl.FilterStatus _) = True
 isStatusFilter _ = False
 
--- | Decode a job row plus its derived @status@ trailing column.
-jobRowWithStatusCodec :: TableName -> RowCodec (JobRead Value, JobStatus)
+-- | Decode a job row plus its raw derived @status@ trailing column. Status is
+-- validated after the backend codec runs so an unknown SQL value is a parsing
+-- failure rather than silently becoming another status.
+jobRowWithStatusCodec :: TableName -> RowCodec (JobRead Value, Text)
 jobRowWithStatusCodec tableName =
-  (,) <$> jobRowCodec tableName <*> (jobStatusFromText <$> col "status" CText)
+  (,) <$> jobRowCodec tableName <*> col "status" CText
 
 -- | 'listJobsFilteredOrdered' that also returns each job's derived status.
 listJobsWithStatus
@@ -1376,7 +1437,17 @@ listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset = 
           (fromIntegral limit)
           (fromIntegral offset)
   rows <- MA.executeQuery (Q.rows (jobRowWithStatusCodec tableName) query)
-  traverse (bitraverse decodePayload pure) rows
+  traverse decodeJobStatusRow rows
+
+-- | Decode the payload and strictly validate the SQL-derived status.
+decodeJobStatusRow
+  :: (JobPayload payload, MonadArbiter m)
+  => (JobRead Value, Text)
+  -> m (JobRead payload, JobStatus)
+decodeJobStatusRow (job, rawStatus) = do
+  decodedJob <- decodePayload job
+  status <- either throwParsing pure (jobStatusFromText rawStatus)
+  pure (decodedJob, status)
 
 -- | List jobs with composable filters.
 --
@@ -1590,8 +1661,8 @@ listArchivedJobsByGroupKey
   -> Int
   -> Int
   -> m [Archive.ArchiveJob payload]
-listArchivedJobsByGroupKey schemaName tableName groupKey =
-  listArchiveFiltered schemaName tableName [Tmpl.FilterGroupKey groupKey] Nothing Nothing
+listArchivedJobsByGroupKey schemaName tableName key =
+  listArchiveFiltered schemaName tableName [Tmpl.FilterGroupKey key] Nothing Nothing
 
 -- | Count archived jobs with composable filters.
 countArchiveFiltered
@@ -1787,7 +1858,7 @@ getJobByIdWithStatus schemaName tableName jobId = do
   rows <-
     MA.executeQuery $
       Q.rows (jobRowWithStatusCodec tableName) (Tmpl.getJobByIdWithStatusSQL schemaName tableName jobId)
-  traverse (bitraverse decodePayload pure) (listToMaybe rows)
+  traverse decodeJobStatusRow (listToMaybe rows)
 
 -- | Get a single job by its dedup key.
 getJobByDedupKey
@@ -2162,9 +2233,9 @@ cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
   rootParentId <- lockParentOf schemaName tableName jobId
   deleted <- countOr0 (mkSql schemaName tableName jobId)
 
-  when (deleted > 0) $
-    for_ rootParentId $
-      tryResumeParent LocksHeld schemaName tableName
+  when (deleted > 0)
+    $ for_ rootParentId
+    $ tryResumeParent LocksHeld schemaName tableName
 
   pure deleted
 
@@ -2612,103 +2683,6 @@ pendingCronRuns schemaName names =
   MA.executeQuery (Tmpl.pendingCronRunsSQL schemaName names)
 
 -- ---------------------------------------------------------------------------
--- Worker Registry Operations
--- ---------------------------------------------------------------------------
-
--- | Register a worker pool in the @arbiter_workers@ table, or refresh its metadata
--- if already registered. Bumps @last_heartbeat@ and clears @shutting_down@
--- either way. Returns the worker's effective paused state so callers can seed
--- local state without a second round-trip.
-registerWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -- ^ Worker pool UUID
-  -> Text
-  -- ^ Queue name
-  -> Maybe Text
-  -- ^ Host name
-  -> Maybe Int32
-  -- ^ Worker thread count
-  -> NominalDiffTime
-  -- ^ Stale threshold in seconds (recorded on the row so the UI can compute liveness).
-  -> Maybe Value
-  -- ^ Extra JSONB metadata
-  -> m (Maybe Bool)
-registerWorker schemaName workerId queue host threads staleThreshold metadata = do
-  rows <-
-    MA.executeQuery
-      (Tmpl.upsertWorkerSQL schemaName workerId queue host threads (realToFrac staleThreshold) metadata)
-  pure $ listToMaybe rows
-
--- | Bump @last_heartbeat@ for a registered worker and return the effective
--- paused state (per-worker OR per-queue). 'Nothing' if no row exists for the
--- given UUID.
-heartbeatWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -- ^ Worker pool UUID
-  -> m (Maybe Bool)
-heartbeatWorker schemaName workerId = do
-  rows <- MA.executeQuery (Tmpl.heartbeatWorkerSQL schemaName workerId)
-  pure $ listToMaybe rows
-
--- | Set the @paused@ flag for a registered worker.
-setWorkerPaused
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> Bool
-  -> m Int64
-setWorkerPaused schemaName workerId p =
-  countOr0 (Tmpl.setWorkerPausedSQL schemaName p workerId)
-
--- | Mark a worker as gracefully draining. The row is left in place so the UI
--- can distinguish drained workers from ones that vanished.
-markWorkerShuttingDown
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> m Int64
-markWorkerShuttingDown schemaName workerId =
-  MA.executeStatement
-    (Tmpl.markWorkerShuttingDownSQL schemaName workerId)
-
--- | Remove a worker row outright.
-deregisterWorker
-  :: (MonadArbiter m)
-  => SchemaName
-  -> UUID
-  -> m Int64
-deregisterWorker schemaName workerId =
-  MA.executeStatement
-    (Tmpl.deleteWorkerSQL schemaName workerId)
-
--- | List workers with optional filters: scope to a single queue, restrict to
--- recent heartbeats, both, or neither.
-listWorkers
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Maybe Text
-  -- ^ Queue name. 'Nothing' returns workers from all queues.
-  -> Maybe NominalDiffTime
-  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
-  -> m [WorkerRow]
-listWorkers schemaName mQueue mLiveSecs =
-  MA.executeQuery
-    (Tmpl.listWorkersSQL schemaName mQueue (realToFrac <$> mLiveSecs))
-
--- | Delete worker rows (including paused ones) whose @last_heartbeat@ is older
--- than each row's own @stale_threshold_secs@.
-sweepStaleWorkers
-  :: (MonadArbiter m)
-  => SchemaName
-  -> m Int64
-sweepStaleWorkers schemaName =
-  MA.executeStatement (Tmpl.deleteStaleWorkersSQL schemaName)
-
--- ---------------------------------------------------------------------------
 -- Queue Operations
 -- ---------------------------------------------------------------------------
 
@@ -2753,160 +2727,8 @@ listQueues
 listQueues schemaName =
   MA.executeQuery (Tmpl.listQueuesSQL schemaName)
 
--- ---------------------------------------------------------------------------
--- Global Gate Operations
--- ---------------------------------------------------------------------------
-
--- | Bound the current transaction's statements to a wall-clock limit, so a stuck op aborts at the DB rather than hanging the caller.
-setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
-setLocalStatementTimeout limit =
-  let ms = ceiling (realToFrac limit * 1000 :: Double) :: Int
-      msTxt = T.pack (show ms)
-   in void $
-        MA.executeQuery
-          [QQ.sql|SELECT set_config('statement_timeout', '${msTxt}', true) AS @{set_config :: CText}|]
-
--- | 'runGated' with each statement of @work@ bounded by @limit@. The bound is
--- transaction-local, which the gate transaction 'work' runs in makes effective.
-runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> NominalDiffTime -> m a -> m (Maybe a)
-runGatedBounded schemaName task interval limit work =
-  runGated schemaName task interval (setLocalStatementTimeout limit >> work)
-
--- | Run @work@ at most once per @interval@ across every worker pool sharing
--- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@
--- claimed via @SELECT FOR UPDATE SKIP LOCKED@, so the interval check and the
--- mutual exclusion happen in one statement. Returns @Just@ the work's result
--- if it ran, @Nothing@ if either the gate said "too recent" or another pool
--- was already running the task.
-runGated
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Text
-  -- ^ Task identifier (used as the gate row key).
-  -> NominalDiffTime
-  -- ^ Minimum interval between runs, in seconds.
-  -> m a
-  -- ^ Work to perform when this caller wins the gate.
-  -> m (Maybe a)
-runGated schemaName task interval work =
-  runGatedInner schemaName task interval (const ((,Nothing) <$> work))
-
--- | 'runGated' where the task resumes from the state its last run left in the gate row,
--- read under the claim and written with the watermark. A payload that no longer parses
--- reads as no state.
-runGatedState
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
-runGatedState schemaName task interval work =
-  runGatedInner schemaName task interval (fmap (second (Just . toJSON)) . work . (>>= parseMaybe parseJSON))
-
--- | 'runGatedState' with each statement of @work@ bounded by @limit@, as
--- 'runGatedBounded' bounds 'runGated'.
-runGatedStateBounded
-  :: (FromJSON s, MonadArbiter m, ToJSON s)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> NominalDiffTime
-  -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
-runGatedStateBounded schemaName task interval limit work =
-  runGatedState schemaName task interval (\state -> setLocalStatementTimeout limit >> work state)
-
--- | The gate body both forms share. 'Nothing' back from @work@ leaves the row's state
--- as it was.
-runGatedInner
-  :: (MonadArbiter m)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -> (Maybe Value -> m (a, Maybe Value))
-  -> m (Maybe a)
-runGatedInner schemaName task interval work = do
-  _ <-
-    MA.executeStatement
-      (Tmpl.ensureGateRowSQL schemaName task)
-  gateOpen <- checkGateOuter
-  if not gateOpen
-    then pure Nothing
-    else withDbTransaction $ tryClaimGate >>= traverse ran
-  where
-    intervalSecs = realToFrac interval :: Double
-
-    checkGateOuter = do
-      rows <- MA.executeQuery (Tmpl.checkGateSQL schemaName intervalSecs task)
-      pure $ fromMaybe True (listToMaybe rows)
-
-    tryClaimGate = listToMaybe <$> MA.executeQuery (Tmpl.tryClaimGateSQL schemaName task intervalSecs)
-
-    ran state = do
-      (r, next) <- work state
-      r <$ MA.executeStatement (maybe (Tmpl.bumpGateSQL schemaName task) (Tmpl.bumpGateStateSQL schemaName task) next)
-
--- | A gate name for a set of parts: the sorted set itself while it fits the gate's
--- key, an md5 digest of it beyond that.
-gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
-gateNameFor prefix parts
-  | T.length joined <= maxGateNameLength = pure (prefix <> ":" <> joined)
-  | otherwise = do
-      rows <- MA.executeQuery (Tmpl.gateNameDigestSQL joined)
-      pure (prefix <> ":#" <> fromMaybe joined (listToMaybe rows))
-  where
-    joined = T.intercalate "," (sort parts)
-
--- | Well under the btree index-row limit the gates table's primary key sits on.
-maxGateNameLength :: Int
-maxGateNameLength = 200
-
--- | Where a shared result came from.
-data Shared a
-  = -- | This caller won the gate and ran the work itself.
-    Ran a
-  | -- | Read from the gate, with its age in seconds.
-    Published Double a
-  | -- | A published result this caller could not decode, with the parse error.
-    Unreadable Text
-  deriving stock (Eq, Functor, Show)
-
--- | 'runGated' where the callers that lost the gate read the winner's published
--- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
--- after the gate transaction commits, so a slow scan holds neither the gate row
--- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
--- restarts from the publish. A run or publish that throws puts the watermark back, so a
--- winner that keeps failing does not keep every other caller from running. That
--- compensation is bounded by @interval@.
-runGatedShared
-  :: (FromJSON a, MonadArbiter m, ToJSON a)
-  => SchemaName
-  -> Text
-  -> NominalDiffTime
-  -- ^ Minimum interval between runs.
-  -> NominalDiffTime
-  -- ^ How long a published result stands.
-  -> m a
-  -> m (Maybe (Shared a))
-runGatedShared schemaName task interval maxAge work =
-  MA.executeQuery claimOrRead >>= maybe (pure Nothing) shared . listToMaybe
-  where
-    claimOrRead =
-      Tmpl.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
-    shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
-      (Just at, Just previous) -> Just . Ran <$> publish at previous
-      _ -> pure (decoded <$> mPayload <*> mAge)
-    -- Base onException: UnliftIO's masks the handler uninterruptibly.
-    publish at previous = withRunInIO $ \run ->
-      run (work >>= \a -> a <$ MA.executeStatement (Tmpl.setGateMetadataSQL schemaName (toJSON a) at task))
-        `E.onException` run (reopen at previous)
-    reopen at previous =
-      void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Tmpl.releaseGateSQL schemaName task at previous))))
-    decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)
-
--- | Read child results, DLQ errors, parent_state snapshot, and DLQ failures
--- for a rollup finalizer in a single query.
+-- | Read child results, DLQ errors, and the parent_state snapshot for a rollup
+-- finalizer in a single query.
 readChildResultsRaw
   :: (MonadArbiter m)
   => SchemaName

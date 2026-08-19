@@ -3,15 +3,25 @@ name:            arbiter-servant
 version:         0.1.0.0
 synopsis:        Servant REST API for arbiter job queue
 description:
-  Servant-based REST API for managing and monitoring arbiter job queues.
-  Endpoints for job CRUD, DLQ operations, cron schedules, statistics, and SSE.
+  REST API for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Serves job, dead-letter, archive, cron, rate-limit, concurrency, queue, worker,
+  and statistics endpoints over a typed queue registry, plus a Server-Sent Events
+  stream for live updates. Ships no authentication of its own: it exposes a WAI
+  @Application@, so wrap it in your own middleware or put it behind a gateway.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -44,7 +54,7 @@ library
     , arbiter-simple     <0.2
     , arbiter-worker     <0.2
     , async              >=2.2  && <2.3
-    , base               >=4.14 && <5
+    , base               >=4.20 && <5
     , bytestring         >=0.10 && <0.13
     , containers         >=0.6  && <0.9
     , http-types         >=0.12 && <0.13

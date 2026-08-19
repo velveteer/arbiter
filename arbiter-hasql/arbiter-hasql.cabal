@@ -2,13 +2,27 @@ cabal-version:   3.0
 name:            arbiter-hasql
 version:         0.1.0.0
 synopsis:        Hasql backend for arbiter
-description:     Hasql backend for arbiter.
+description:
+  A hasql backend for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+
+  Provides a @MonadArbiter@ instance over a hasql connection pool, with
+  savepoint-based nested transactions and optional prepared statements for the
+  claim path. Handlers receive the connection the job was claimed on.
+
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
+
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -39,7 +53,7 @@ library
 
   build-depends:
     , arbiter-core      <0.2
-    , base              >=4.14 && <5
+    , base              >=4.20 && <5
     , bytestring        >=0.10 && <0.13
     , exceptions        >=0.10 && <0.11
     , hasql             >=1.9  && <1.11

@@ -11,7 +11,8 @@
 --
 -- main :: IO ()
 -- main = do
---   -- Create server config (creates its own pool and registers event triggers)
+--   -- Run migrations with event streaming enabled before starting the server.
+--   -- The server config creates its own connection pool.
 --   config <- initArbiterServer (Proxy @MyRegistry) connStr "public"
 --
 --   -- Start API server on port 8080
@@ -35,29 +36,20 @@ module Arbiter.Servant
   , ArbiterAPI
   , RegistryToAPI
   , TableAPI (..)
+  , SharedAPI
   , EventsAPI
   , QueuesAPI (..)
   , JobsAPI (..)
   , DLQAPI (..)
+  , ArchiveAPI (..)
   , StatsAPI (..)
   , CronAPI (..)
   , WorkersAPI (..)
+  , RateLimitsAPI (..)
+  , ConcurrencyAPI (..)
 
-    -- * Request Types
-  , ApiJobWrite (..)
-
-    -- * Response Types
-  , QueuesResponse (..)
-  , QueueRow (..)
-  , WorkersResponse (..)
-  , WorkerRow (..)
-  , JobResponse (..)
-  , JobsResponse (..)
-  , DLQResponse (..)
-  , StatsResponse (..)
-  , CronSchedulesResponse (..)
-  , CronScheduleRow (..)
-  , CronScheduleUpdate (..)
+    -- * Request and response types
+  , module Arbiter.Servant.Types
   ) where
 
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))

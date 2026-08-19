@@ -196,18 +196,18 @@ createHasqlEnvWithConfig
   -> m (HasqlEnv registry)
 createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
   connPool <-
-    newPool $
-      setNumStripes (poolStripes config) $
-        defaultPoolConfig
-          ( do
-              result <- Hasql.acquire (hasqlSettings connStr)
-              case result of
-                Right conn -> pure conn
-                Left err -> throwIO $ HasqlConnectionError (show err)
-          )
-          Hasql.release
-          (fromIntegral $ poolIdleTimeout config)
-          (poolSize config)
+    newPool
+      $ setNumStripes (poolStripes config)
+      $ defaultPoolConfig
+        ( do
+            result <- Hasql.acquire (hasqlSettings connStr)
+            case result of
+              Right conn -> pure conn
+              Left err -> throwIO $ HasqlConnectionError (show err)
+        )
+        Hasql.release
+        (fromIntegral $ poolIdleTimeout config)
+        (poolSize config)
   lstn <- poolListener connPool
   pure
     HasqlEnv

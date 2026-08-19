@@ -115,6 +115,7 @@ instance FromJSON CronScheduleUpdate where
 cronSchedulesTable :: Text -> Text
 cronSchedulesTable schemaName = quoteIdentifier schemaName <> "." <> cronSchedulesTableName
 
+-- | Bare name of the cron table, for catalog lookups by relname.
 cronSchedulesTableName :: Text
 cronSchedulesTableName = "cron_schedules"
 
@@ -144,6 +145,7 @@ addTimezoneColumnSQL schemaName =
     , "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS override_timezone TEXT;"
     ]
 
+-- | Migration adding the queue name column.
 addQueueNameColumnSQL :: Text -> Text
 addQueueNameColumnSQL schemaName =
   "ALTER TABLE "

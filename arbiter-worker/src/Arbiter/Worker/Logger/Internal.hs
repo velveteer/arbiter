@@ -10,13 +10,12 @@ module Arbiter.Worker.Logger.Internal
   , runHook
   ) where
 
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Job.Types qualified as Job
-import Control.Exception (displayException)
 import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.Types (Pair)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
-import Data.Text qualified as T
 import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), tryLog)
@@ -71,5 +70,5 @@ runHook
 runHook cfg hookName action = do
   result <- tryAny action
   case result of
-    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> T.pack (displayException e)
+    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx e
     Right _ -> pure ()

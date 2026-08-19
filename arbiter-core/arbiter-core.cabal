@@ -1,16 +1,30 @@
 cabal-version:   2.2
 name:            arbiter-core
 version:         0.1.0.0
-synopsis:        Core types and logic for PostgreSQL-backed job queue
+synopsis:
+  Core types, queue registry, and SQL for a PostgreSQL job queue
+
 description:
-  Core job and dead-letter queue types, SQL templates, and monadic operations for arbiter.
+  Core of Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  This package holds the job and dead-letter queue types, the type-level queue
+  registry, the SQL the queue runs on, and the @MonadArbiter@ backend interface
+  the postgresql-simple, hasql, and Orville packages are built against.
+  Application code normally reaches these through "Arbiter.Core.HighLevel", which
+  resolves a queue's table name from the registry at compile time.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -46,8 +60,11 @@ library
     Arbiter.Core.Health
     Arbiter.Core.HighLevel
     Arbiter.Core.Job.Archive
+    Arbiter.Core.Job.Dedup
     Arbiter.Core.Job.DLQ
     Arbiter.Core.Job.Schema
+    Arbiter.Core.Job.Status
+    Arbiter.Core.Job.TraceContext
     Arbiter.Core.Job.Types
     Arbiter.Core.JobResult
     Arbiter.Core.JobTree
@@ -87,9 +104,15 @@ library
     Arbiter.Core.Worker
     Arbiter.RateLimit
 
+  other-modules:
+    Arbiter.Core.HighLevel.Runtime
+    Arbiter.Core.Job.Types.Internal
+    Arbiter.Core.Operations.Gates
+    Arbiter.Core.Operations.Workers
+
   build-depends:
     , aeson                            >=2.0  && <2.3
-    , base                             >=4.14 && <5
+    , base                             >=4.20 && <5
     , bytestring                       >=0.10 && <0.13
     , containers                       >=0.6  && <0.9
     , free                             >=5.1  && <5.3
@@ -114,6 +137,6 @@ test-suite arbiter-core-tests
   main-is:        Spec.hs
   build-depends:
     , arbiter-core
-    , base          >=4.14 && <5
+    , base          >=4.20 && <5
     , hspec         >=2.0  && <2.12
     , text          >=1.2  && <2.2

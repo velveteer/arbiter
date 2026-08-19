@@ -11,7 +11,16 @@ module Main (main) where
 
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (Job (..), defaultJob)
+import Arbiter.Core.Job.Types
+  ( defaultJob
+  , payload
+  , primaryKey
+  , setArchiveFor
+  , setGroupKey
+  , setMaxAttempts
+  , setNotVisibleUntil
+  , setPriority
+  )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
@@ -21,7 +30,9 @@ import Arbiter.Servant (initArbiterServer)
 import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
 import Arbiter.Simple
 import Arbiter.Worker
-  ( WorkerConfig (..)
+  ( BatchCallbacks (..)
+  , WorkerConfig (..)
+  , defaultBatchedWorkerConfig
   , defaultLogConfig
   , mergedChildResults
   , namedWorkerPool
@@ -38,6 +49,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 qualified as BS
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict qualified as HM
+import Data.List (unfoldr)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe)
@@ -82,6 +94,11 @@ data NotificationPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | Cheap throwaway work the burst generator floods its queue with.
+newtype BulkPayload = BulkTask Text
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
 -- | Pipeline payload for the rollup demo.
 --
 -- Leaf jobs carry a chunk name and produce @[Text]@ results.
@@ -97,6 +114,7 @@ type DemoRegistry =
   '[ Queue "demo_queue" DemoPayload
    , Queue "email_queue" EmailPayload
    , Queue "notifications" NotificationPayload
+   , Queue "bulk_queue" BulkPayload
    , QueueWithResult "pipeline" PipelinePayload [Text]
    ]
 
@@ -192,6 +210,7 @@ runDemo tel = do
   demoWorkerCfg <- mkDemoWorker
   emailWorkerCfg <- mkEmailWorker
   notifWorkerCfg <- mkNotifWorker
+  bulkWorkerCfg <- mkBulkWorker
   pipelineWorkerCfg <- mkPipelineWorker
   putStrLn "Workers configured"
 
@@ -226,6 +245,7 @@ runDemo tel = do
         [ namedWorkerPool demoWorkerCfg
         , namedWorkerPool emailWorkerCfg
         , namedWorkerPool notifWorkerCfg
+        , namedWorkerPool bulkWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
   let handler = Signals.Catch $ shutdownPools workers
@@ -250,6 +270,16 @@ runDemo tel = do
   -- in the archive with visible results. A value of 0 disables it.
   pipeSec <- maybe 2 read <$> lookupEnv "PIPELINE_PULSE_SECONDS"
   when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv schema pipeSec
+
+  -- Bursty batch inserts into bulk_queue: a spike of multi-row inserts on a
+  -- jittered interval, so queue depth, claim rate, and vacuum pressure sawtooth
+  -- instead of sitting flat. Either value at 0 disables it.
+  burstSec <- maybe 10 read <$> lookupEnv "BURST_INTERVAL_SECONDS"
+  burstSize <- maybe 1000 read <$> lookupEnv "BURST_SIZE"
+  burstGroups <- maybe 8 read <$> lookupEnv "BURST_GROUPS"
+  when (burstSec > 0 && burstSize > 0) $ do
+    putStrLn $ "Burst load: ~" <> show burstSize <> " jobs every ~" <> show burstSec <> "s into bulk_queue"
+    void $ forkIO $ burstPulse producerEnv burstSec burstSize burstGroups
 
   poolCfg <- poolConfigForWorkers workers
   workerEnv <- createSimpleEnvWithConfig (Proxy @DemoRegistry) connStr schema poolCfg
@@ -330,6 +360,22 @@ mkNotifWorker = do
             (\_ t -> defaultJob (PushNotification $ "broadcast:" <> tshow t))
       ]
 
+-- | Drains the burst queue: many workers claiming large batches with a near-zero
+-- handler, so the spikes clear and the churn shows up as vacuum pressure rather
+-- than an ever-growing backlog. Sized by BURST_WORKERS and BURST_BATCH.
+mkBulkWorker :: IO (WorkerConfig DemoM BulkPayload)
+mkBulkWorker = do
+  count <- maybe 6 read <$> lookupEnv "BURST_WORKERS"
+  batch <- maybe 25 read <$> lookupEnv "BURST_BATCH"
+  cfg <- defaultBatchedWorkerConfig count batch handler
+  pure cfg {pollInterval = 1, livenessFile = Nothing}
+  where
+    -- Roughly 300 jobs a second across the pool: several times the average
+    -- insert rate, so a burst drains, but slowly enough to be sampled.
+    handler jobs cbs = do
+      liftIO $ simulateWork 0.5
+      ackAll cbs (NE.toList jobs)
+
 -- ---------------------------------------------------------------------------
 -- Pipeline worker - rollup demo
 -- ---------------------------------------------------------------------------
@@ -374,7 +420,7 @@ seedDemoData env schemaName = runSimpleDb env $ do
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: Text -> DemoM ()
 seedPipeline schemaName = do
-  let bg p = (defaultJob p) {priority = 10}
+  let bg p = setPriority 10 $ defaultJob p
       chunk = JT.leaf . bg . ProcessChunk
       agg name = JT.rollup (bg (AggregateResults name))
   tracer <- demoTracer
@@ -383,12 +429,12 @@ seedPipeline schemaName = do
       JT.insertJobTree schemaName "pipeline" $
         agg
           "final-report"
-          ( NE.fromList $
-              NE.take 300 $
-                NE.cycle
-                  [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
-                  , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
-                  ]
+          ( NE.fromList
+              $ NE.take 300
+              $ NE.cycle
+                [ agg "financials" [chunk "revenue-data", chunk "expense-data", chunk "forecast-data"]
+                , agg "operations" [chunk "inventory-data", chunk "shipping-data", chunk "support-data"]
+                ]
           )
     traverse_
       ( \(root :| rest) ->
@@ -411,55 +457,46 @@ seedQueues :: DemoM ()
 seedQueues = do
   now <- liftIO getCurrentTime
 
+  -- Backoff and DLQ examples are produced through the normal lifecycle.
+  void $
+    HL.insertJob
+      (setGroupKey (Just "integrations") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "flaky-webhook"))
+  [flaky1] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.updateJobForRetry 0 "connection reset by upstream" flaky1
+  [flaky2] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.updateJobForRetry 180 "connection reset by upstream" flaky2
+
+  void $
+    HL.insertJob
+      (setGroupKey (Just "ingest") $ setMaxAttempts (Just 5) $ defaultJob (TestMessage "corrupt-record"))
+  forM_ ([1 .. 4] :: [Int]) $ \_ -> do
+    [failed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+    void $ HL.updateJobForRetry 0 "unparseable payload" failed
+  [doomed] <- HL.claimNextVisibleJobs @DemoPayload 1 60
+  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+
   -- demo_queue: ready jobs with varied priority and group keys
   forM_ (zip [0 :: Int ..] demoTasks) $ \(i, (grp, msg)) ->
-    void $ HL.insertJob ((defaultJob (TestMessage msg)) {priority = fromIntegral (i `mod` 5), groupKey = Just grp})
+    void $ HL.insertJob (setGroupKey (Just grp) $ setPriority (fromIntegral (i `mod` 5)) $ defaultJob (TestMessage msg))
   -- scheduled (not visible yet) and suspended (paused)
   void $
     HL.insertJob
-      ( (defaultJob (TestMessage "nightly-reindex"))
-          { notVisibleUntil = Just (addUTCTime 3600 now)
-          , groupKey = Just "maintenance"
-          }
+      ( setGroupKey (Just "maintenance")
+          $ setNotVisibleUntil (Just (addUTCTime 3600 now))
+          $ defaultJob (TestMessage "nightly-reindex")
       )
-  void $ HL.insertJob ((defaultJob (TestMessage "paused-migration")) {suspended = True, groupKey = Just "maintenance"})
-  -- backoff: failed twice, waiting to retry
-  void $
-    HL.insertJob
-      ( (defaultJob (TestMessage "flaky-webhook"))
-          { attempts = 2
-          , lastError = Just "connection reset by upstream"
-          , notVisibleUntil = Just (addUTCTime 180 now)
-          , groupKey = Just "integrations"
-          }
-      )
-  -- dead-letter: exhausted its retries
-  doomed <-
-    need
-      =<< HL.insertJob
-        ( (defaultJob (TestMessage "corrupt-record"))
-            { attempts = 5
-            , maxAttempts = Just 5
-            , lastError = Just "unparseable payload"
-            , groupKey = Just "integrations"
-            }
-        )
-  void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
+  paused <- need =<< HL.insertJob (setGroupKey (Just "maintenance") $ defaultJob (TestMessage "paused-migration"))
+  void $ HL.suspendJob @DemoPayload (primaryKey paused)
 
   -- email_queue: a few ready, one scheduled, one bounced to the DLQ
+  void $ HL.insertJob (setMaxAttempts (Just 2) $ defaultJob (SendEmail "nobody@invalid.test"))
+  [rejected] <- HL.claimNextVisibleJobs @EmailPayload 1 60
+  void $ HL.updateJobForRetry 0 "recipient rejected (550)" rejected
+  [bounced] <- HL.claimNextVisibleJobs @EmailPayload 1 60
+  void $ HL.moveToDLQ "recipient rejected (550) after 2 attempts" bounced
   forM_ (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text]) $ \addr ->
     void $ HL.insertJob (defaultJob (SendEmail addr))
-  void $ HL.insertJob ((defaultJob (SendEmail "weekly-digest")) {notVisibleUntil = Just (addUTCTime 1800 now)})
-  bounced <-
-    need
-      =<< HL.insertJob
-        ( (defaultJob (SendEmail "nobody@invalid.test"))
-            { attempts = 3
-            , maxAttempts = Just 3
-            , lastError = Just "recipient rejected (550)"
-            }
-        )
-  void $ HL.moveToDLQ "recipient rejected (550)" bounced
+  void $ HL.insertJob (setNotVisibleUntil (Just (addUTCTime 1800 now)) $ defaultJob (SendEmail "weekly-digest"))
 
   -- notifications: a few ready
   forM_ (["deploy finished", "build green", "nightly backup ok"] :: [Text]) $ \msg ->
@@ -494,12 +531,36 @@ loadPulse env sec = go 0
       runSimpleDb env $ do
         void $
           HL.insertJob
-            ((defaultJob (TestMessage ("pulse #" <> tshow n))) {priority = fromIntegral (n `mod` 5), archiveFor = keepEvery 4 n})
-        when (even n) $ void $ HL.insertJob ((defaultJob (SendEmail ("digest #" <> tshow n))) {archiveFor = keepEvery 6 n})
-        when (n `mod` 3 == 0) $
-          void $
-            HL.insertJob ((defaultJob (PushNotification ("alert #" <> tshow n))) {archiveFor = keepEvery 9 n})
+            (setArchiveFor (keepEvery 4 n) $ setPriority (fromIntegral (n `mod` 5)) $ defaultJob (TestMessage ("pulse #" <> tshow n)))
+        when (even n) $ void $ HL.insertJob (setArchiveFor (keepEvery 6 n) $ defaultJob (SendEmail ("digest #" <> tshow n)))
+        when (n `mod` 3 == 0)
+          $ void
+          $ HL.insertJob (setArchiveFor (keepEvery 9 n) $ defaultJob (PushNotification ("alert #" <> tshow n)))
       go (n + 1)
+
+-- | Burst load: every @sec@ seconds (jittered by half), insert @size@ jobs as
+-- back-to-back multi-row inserts, with a four-times spike every fifth round.
+-- Half of each burst joins one of @groups@ group keys, so the queue's group
+-- summary takes the update volume while the rest drives the ungrouped path.
+burstPulse :: SimpleEnv DemoRegistry -> Int -> Int -> Int -> IO ()
+burstPulse env sec size groups = go 0
+  where
+    perStatement = 250
+    grouped i
+      | groups <= 0 || odd i = id
+      | otherwise = setGroupKey (Just ("bulk-" <> tshow ((i `div` 2) `mod` groups)))
+    go :: Int -> IO ()
+    go n = do
+      gap <- randomRIO (0.5, 1.5 :: Double)
+      threadDelay (round (fromIntegral sec * gap * 1e6))
+      let total = if n `mod` 5 == 4 then size * 4 else size
+          jobs = [grouped i (defaultJob (BulkTask ("burst " <> tshow n <> " #" <> tshow i))) | i <- [1 .. total]]
+      runSimpleDb env $ traverse_ (void . HL.insertJobsBatch_) (chunksOf perStatement jobs)
+      go (n + 1)
+
+-- | Split into chunks of at most @k@.
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf k = unfoldr (\xs -> if null xs then Nothing else Just (splitAt k xs))
 
 -- | Chunk sets a quick pipeline picks from, for variety across runs.
 quickChunkSets :: [[Text]]
@@ -521,7 +582,7 @@ pipelinePulse env schemaName sec = go 0
       t <- getCurrentTime
       let seed = fromInteger (diffTimeToPicoseconds (utctDayTime t)) :: Int
           chosen = quickChunkSets !! (seed `mod` length quickChunkSets)
-          root = (defaultJob (AggregateResults ("quick-report-" <> tshow n))) {archiveFor = Just 3600}
+          root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow n))
           leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
       runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
       go (n + 1)

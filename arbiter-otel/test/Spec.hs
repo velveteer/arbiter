@@ -10,11 +10,15 @@ import Arbiter.Concurrency (HasConcurrency)
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ (DLQJob (dlqPrimaryKey))
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , ObservabilityHooks (..)
+  ( ObservabilityHooks (..)
   , TraceContext (..)
   , defaultJob
   , defaultObservabilityHooks
+  , payload
+  , primaryKey
+  , setArchiveFor
+  , setTraceContext
+  , traceContext
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
@@ -228,12 +232,12 @@ spec = do
       traceContext stored `shouldBe` Nothing
 
     it "does not overwrite a trace context the caller set" $ do
-      let job = (defaultJob (Greeting "preset")) {traceContext = Just (TraceContext "caller-set" Nothing)}
+      let job = setTraceContext (Just (TraceContext "caller-set" Nothing)) $ defaultJob (Greeting "preset")
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
       fmap traceparent (traceContext stored) `shouldBe` Just "caller-set"
 
     it "survives the queue-to-archive copy" $ do
-      let job = (defaultJob (Greeting "archived")) {archiveFor = Just 3600}
+      let job = setArchiveFor (Just 3600) $ defaultJob (Greeting "archived")
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
       void $ runSimpleDb plainEnv (Ops.ackJob schema queue stored)
       archived <- runSimpleDb plainEnv (Ops.getArchivedJobById @_ @Greeting schema queue (primaryKey stored))

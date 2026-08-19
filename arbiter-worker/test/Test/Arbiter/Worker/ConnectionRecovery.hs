@@ -9,7 +9,13 @@
 module Test.Arbiter.Worker.ConnectionRecovery (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types
+  ( JobRead
+  , defaultJob
+  , payload
+  , setGroupKey
+  , setMaxAttempts
+  )
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnvWithPool, inTransaction, runSimpleDb)
@@ -62,9 +68,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         -- Insert 3 jobs before the kill
         forM_ [1 :: Int .. 3] $ \i ->
-          runSimpleDb env $
-            void $
-              HL.insertJob (defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))) {groupKey = Just "g1"}
+          runSimpleDb env
+            $ void
+            $ HL.insertJob
+            $ setGroupKey (Just "g1")
+            $ defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -124,9 +132,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
 
         -- Insert the slow job that will get its connection killed
-        runSimpleDb env $
-          void $
-            HL.insertJob (defaultJob (SlowTask 1)) {groupKey = Just "g1", maxAttempts = Just 3}
+        runSimpleDb env
+          $ void
+          $ HL.insertJob
+          $ setMaxAttempts (Just 3)
+          $ setGroupKey (Just "g1")
+          $ defaultJob (SlowTask 1)
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -177,7 +188,9 @@ insertJobsDirect _env connStr payloads = do
   conn <- connectPostgreSQL connStr
   PG.withTransaction conn $
     forM_ payloads $ \p ->
-      inTransaction @WorkerTestRegistry conn testSchema $
-        void $
-          HL.insertJob (defaultJob p) {groupKey = Just "g1"}
+      inTransaction @WorkerTestRegistry conn testSchema
+        $ void
+        $ HL.insertJob
+        $ setGroupKey (Just "g1")
+        $ defaultJob p
   close conn

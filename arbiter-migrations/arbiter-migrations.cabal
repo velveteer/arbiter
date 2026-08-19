@@ -1,18 +1,31 @@
-cabal-version:   2.2
-name:            arbiter-migrations
-version:         0.1.0.0
-synopsis:        SQL schema migrations for arbiter
+cabal-version:      2.2
+name:               arbiter-migrations
+version:            0.1.0.0
+synopsis:           Schema migrations and trigger reconciliation for arbiter
 description:
-  Tracked DDL migrations for arbiter job queue tables via postgresql-migration.
+  Schema migrations for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Derives the DDL for a type-level queue registry and applies it as tracked,
+  checksummed migrations. Optional notification and event-streaming triggers are
+  reconciled to the declared configuration on every run, so enabling or disabling
+  them, or removing a queue from the registry, converges without editing
+  migration history.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
-license:         MIT
-author:          Joshua Miller
-maintainer:      joshua.ian.miller@pm.me
-category:        Database
-build-type:      Simple
-extra-doc-files: CHANGELOG.md
-homepage:        https://github.com/velveteer/arbiter
-bug-reports:     https://github.com/velveteer/arbiter/issues
+license:            MIT
+license-file:       LICENSE
+author:             Joshua Miller
+maintainer:         joshua.ian.miller@pm.me
+category:           Database
+build-type:         Simple
+tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
+extra-source-files: test/golden/*.sql
+homepage:           https://github.com/velveteer/arbiter
+bug-reports:        https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git
@@ -34,7 +47,7 @@ library
   exposed-modules: Arbiter.Migrations
   build-depends:
     , arbiter-core          <0.2
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , containers            >=0.6  && <0.9
     , postgresql-libpq      >=0.10 && <0.12
@@ -48,12 +61,15 @@ test-suite arbiter-migrations-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
+    , aeson                 >=2.0  && <2.3
     , arbiter-core
     , arbiter-migrations
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , filepath              >=1.4  && <1.6
     , postgresql-migration  >=0.2  && <0.3
+    , postgresql-simple     >=0.6  && <0.8
     , tasty                 >=1.4  && <1.6
     , tasty-golden          >=2.3  && <2.4
     , tasty-hunit           >=0.10 && <0.11
+    , text                  >=1.2  && <2.2

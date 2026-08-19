@@ -10,7 +10,22 @@ module Test.Arbiter.Servant.API (spec) where
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobRead, JobStatus (..), defaultGroupedJob, defaultJob)
+import Arbiter.Core.Job.Types
+  ( DedupKey (..)
+  , JobRead
+  , JobStatus (..)
+  , claimSeq
+  , dedupKey
+  , defaultGroupedJob
+  , defaultJob
+  , groupKey
+  , notVisibleUntil
+  , payload
+  , primaryKey
+  , setDedupKey
+  , setNotVisibleUntil
+  , suspended
+  )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
@@ -270,7 +285,7 @@ spec connStr = do
                 [ ApiJobWrite
                     (defaultJob (TestMessage "new job"))
                 , ApiJobWrite
-                    ((defaultJob (TestMessage "duplicate")) {dedupKey = Just (IgnoreDuplicate "batch-dedup")})
+                    (setDedupKey (Just (IgnoreDuplicate "batch-dedup")) $ defaultJob (TestMessage "duplicate"))
                 ]
           )
 
@@ -351,13 +366,13 @@ spec connStr = do
     it "GET /api/v1/arbiter_servant_test/jobs roots_only and parent_id filter the tree" $ do
       (parentId, childIds) <- liftIO $ do
         Right (parent :| children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "tree-parent" (TestMessage "parent"))
-                ( JT.leaf (defaultJob (TestMessage "child-a"))
-                    :| [JT.leaf (defaultJob (TestMessage "child-b"))]
-                )
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "tree-parent" (TestMessage "parent"))
+              ( JT.leaf (defaultJob (TestMessage "child-a"))
+                  :| [JT.leaf (defaultJob (TestMessage "child-b"))]
+              )
         pure (primaryKey parent, map primaryKey children)
 
       -- roots_only excludes children, keeping only the root parent
@@ -396,11 +411,11 @@ spec connStr = do
       -- Insert parent + child
       parentId <- liftIO $ do
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "dlq-count-parent" (TestMessage "parent"))
-                (JT.leaf (defaultJob (TestMessage "dlq-count-child")) :| [])
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "dlq-count-parent" (TestMessage "parent"))
+              (JT.leaf (defaultJob (TestMessage "dlq-count-child")) :| [])
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
@@ -444,7 +459,7 @@ spec connStr = do
         -- ready
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "ready-job"))
         -- scheduled: future visibility, never attempted
-        _ <- runSimpleDb mkEnv $ HL.insertJob ((defaultJob (TestMessage "scheduled-job")) {notVisibleUntil = Just future})
+        _ <- runSimpleDb mkEnv $ HL.insertJob (setNotVisibleUntil (Just future) $ defaultJob (TestMessage "scheduled-job"))
         -- suspended
         Just sj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "suspended-job"))
         _ <- runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable (primaryKey sj)
@@ -505,13 +520,13 @@ spec connStr = do
       -- Plain cancel refuses a parent with children. force-cancel cascade-deletes the tree.
       (parentId, childId) <- liftIO $ do
         Right (parent :| (child1 : _)) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "force-cancel-tree" (TestMessage "parent"))
-                ( JT.leaf (defaultJob (TestMessage "fc-child-a"))
-                    :| [JT.leaf (defaultJob (TestMessage "fc-child-b"))]
-                )
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "force-cancel-tree" (TestMessage "parent"))
+              ( JT.leaf (defaultJob (TestMessage "fc-child-a"))
+                  :| [JT.leaf (defaultJob (TestMessage "fc-child-b"))]
+              )
         pure (primaryKey parent, primaryKey child1)
 
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show parentId) <> "/force-cancel") ""
@@ -554,11 +569,11 @@ spec connStr = do
       -- Insert a finalizer tree - parent suspended, children unsuspended
       parentId <- liftIO $ do
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            JT.insertJobTree testSchema testTable $
-              JT.rollup
-                (defaultGroupedJob "pause-parent" (TestMessage "parent"))
-                (JT.leaf (defaultGroupedJob "pause-child" (TestMessage "child")) :| [])
+          runSimpleDb mkEnv
+            $ JT.insertJobTree testSchema testTable
+            $ JT.rollup
+              (defaultGroupedJob "pause-parent" (TestMessage "parent"))
+              (JT.leaf (defaultGroupedJob "pause-child" (TestMessage "child")) :| [])
         pure $ primaryKey parent
 
       -- Pause children (they start unsuspended in finalizer pattern)
@@ -583,11 +598,11 @@ spec connStr = do
       -- Insert a finalizer tree, then pause the children
       parentId <- liftIO $ do
         Right (parent :| _) <-
-          runSimpleDb mkEnv $
-            JT.insertJobTree testSchema testTable $
-              JT.rollup
-                (defaultGroupedJob "resume-parent" (TestMessage "parent"))
-                (JT.leaf (defaultGroupedJob "resume-child" (TestMessage "child")) :| [])
+          runSimpleDb mkEnv
+            $ JT.insertJobTree testSchema testTable
+            $ JT.rollup
+              (defaultGroupedJob "resume-parent" (TestMessage "parent"))
+              (JT.leaf (defaultGroupedJob "resume-child" (TestMessage "child")) :| [])
         _ <- runSimpleDb mkEnv $ Ops.pauseChildren testSchema testTable (primaryKey parent)
         pure $ primaryKey parent
 
@@ -723,11 +738,11 @@ spec connStr = do
       dlqId <- liftIO $ do
         -- Insert parent with one child
         Right (parent :| _children) <-
-          runSimpleDb mkEnv $
-            HL.insertJobTree $
-              JT.rollup
-                (defaultGroupedJob "orphan-parent" (TestMessage "parent"))
-                (JT.leaf (defaultJob (TestMessage "orphan-child")) :| [])
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "orphan-parent" (TestMessage "parent"))
+              (JT.leaf (defaultJob (TestMessage "orphan-child")) :| [])
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
@@ -813,7 +828,7 @@ spec connStr = do
     it "POST /:id/promote makes a delayed job immediately visible" $ do
       futureTime <- liftIO $ truncateToMicros . addUTCTime 3600 <$> getCurrentTime
       jobId <- liftIO $ do
-        let job = (defaultJob (TestMessage "promote delayed")) {notVisibleUntil = Just futureTime}
+        let job = setNotVisibleUntil (Just futureTime) $ defaultJob (TestMessage "promote delayed")
         Just inserted <- runSimpleDb mkEnv $ HL.insertJob job
         pure $ primaryKey inserted
 

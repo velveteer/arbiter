@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Parameterized worker-pool test suite, instantiated for each 'MonadArbiter' backend.
+-- | Parameterized worker-pool test suite, instantiated for each 'Arbiter.Core.MonadArbiter.MonadArbiter' backend.
 module Arbiter.Worker.TestKit
   ( workerSpec
   , listenerSpec
@@ -24,12 +24,19 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , JobRead
+  ( JobRead
   , ObservabilityHooks (..)
+  , attempts
   , dayRetention
   , defaultJob
   , defaultObservabilityHooks
+  , groupKey
+  , parentId
+  , payload
+  , primaryKey
+  , setArchiveFor
+  , setGroupKey
+  , setMaxAttempts
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
@@ -74,7 +81,7 @@ import Test.Hspec
 import UnliftIO (atomically, bracket)
 import UnliftIO.Async (withAsync)
 
--- | Build a worker-pool test suite for the given 'MonadArbiter' runner.
+-- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
 --
 -- @mkSimple@/@mkFailing@ construct the backend's payload, @mkHandler@ adapts a
 -- plain job action into the backend's 'JobHandler' shape (some backends pass a
@@ -106,9 +113,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \job ->
         liftIO $ atomicModifyIORef' completedRef $ \jobs -> (payload job : jobs, ())
       let jobs =
-            [ (defaultJob (mkSimple "Job 1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "Job 2")) {groupKey = Just "g2"}
-            , (defaultJob (mkSimple "Job 3")) {groupKey = Just "g3"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "Job 1")
+            , setGroupKey (Just "g2") $ defaultJob (mkSimple "Job 2")
+            , setGroupKey (Just "g3") $ defaultJob (mkSimple "Job 3")
             ]
 
       runM env $ traverse_ HL.insertJob jobs
@@ -131,7 +138,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
       let jobs =
             map
-              (\i -> (defaultJob (mkSimple (T.pack $ "Job " <> show @Int i))) {groupKey = Just (T.pack $ "g" <> show i)})
+              (\i -> setGroupKey (Just (T.pack $ "g" <> show i)) $ defaultJob (mkSimple (T.pack $ "Job " <> show @Int i)))
               [1 .. 10]
 
       runM env $ traverse_ HL.insertJob jobs
@@ -150,7 +157,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> do
         n <- liftIO $ atomicModifyIORef' attemptsRef $ \k -> (k + 1, k + 1)
         when (n < 3) $ throwRetryable "Not yet!"
-      let job = (defaultJob (mkFailing 3)) {groupKey = Just "g1", maxAttempts = Just 5}
+      let job = setMaxAttempts (Just 5) $ setGroupKey (Just "g1") $ defaultJob (mkFailing 3)
 
       void $ runM env $ HL.insertJob job
 
@@ -161,7 +168,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "moves jobs to DLQ after max attempts" $ \env -> do
       config <- mkConfig $ \_job -> throwRetryable "Always fails"
-      let job = (defaultJob (mkSimple "Doomed")) {groupKey = Just "g1", maxAttempts = Just 1}
+      let job = setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "Doomed")
 
       void $ runM env $ HL.insertJob job
 
@@ -177,9 +184,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "archives a completed job when archiveFor is set" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkSimple "arch-done")) {groupKey = Just "g1", archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "arch-done"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -190,9 +197,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "fetches an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkSimple "arch-byid")) {groupKey = Just "gk", archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "gk") $ defaultJob (mkSimple "arch-byid"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -208,9 +215,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "lists archived jobs by group key" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
       let jobs =
-            [ (defaultJob (mkSimple "g-a")) {groupKey = Just "ga", archiveFor = Just dayRetention}
-            , (defaultJob (mkSimple "g-b")) {groupKey = Just "ga", archiveFor = Just dayRetention}
-            , (defaultJob (mkSimple "other")) {groupKey = Just "gb", archiveFor = Just dayRetention}
+            [ setArchiveFor (Just dayRetention) $ setGroupKey (Just "ga") $ defaultJob (mkSimple "g-a")
+            , setArchiveFor (Just dayRetention) $ setGroupKey (Just "ga") $ defaultJob (mkSimple "g-b")
+            , setArchiveFor (Just dayRetention) $ setGroupKey (Just "gb") $ defaultJob (mkSimple "other")
             ]
       runM env $ traverse_ HL.insertJob jobs
 
@@ -224,7 +231,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "does not archive a job whose archiveFor is Nothing" $ \env -> do
       doneRef <- newIORef False
       config <- mkConfig $ \_job -> liftIO $ writeIORef doneRef True
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "no-arch")) {groupKey = Just "g1", archiveFor = Nothing})
+      void $ runM env $ HL.insertJob (setArchiveFor Nothing $ setGroupKey (Just "g1") $ defaultJob (mkSimple "no-arch"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ readIORef doneRef
@@ -234,7 +241,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "reaper purges archived jobs past their archiveFor window" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "arch-purge")) {groupKey = Just "g1", archiveFor = Just 1})
+      void $ runM env $ HL.insertJob (setArchiveFor (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "arch-purge"))
 
       withAsync
         (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, reaperInterval = 0.5})
@@ -249,9 +256,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "re-enqueues an archived job, keeping the archive row" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkSimple "re-job")) {groupKey = Just "rg", archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "rg") $ defaultJob (mkSimple "re-job"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         let countReJob arch = length (filter ((== mkSimple "re-job") . payload . Archive.jobSnapshot) arch)
@@ -269,9 +276,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "purges an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkSimple "purge-one")) {groupKey = Just "pg", archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "pg") $ defaultJob (mkSimple "purge-one"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -287,8 +294,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "bulk-purges archived jobs" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
       let jobs =
-            [ (defaultJob (mkSimple "bp-1")) {groupKey = Just "b1", archiveFor = Just dayRetention}
-            , (defaultJob (mkSimple "bp-2")) {groupKey = Just "b2", archiveFor = Just dayRetention}
+            [ setArchiveFor (Just dayRetention) $ setGroupKey (Just "b1") $ defaultJob (mkSimple "bp-1")
+            , setArchiveFor (Just dayRetention) $ setGroupKey (Just "b2") $ defaultJob (mkSimple "bp-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
 
@@ -308,10 +315,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> do
         n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
         when (n == 1) $ throwPermanent "fail first time"
-      void $
-        runM env $
-          HL.insertJob
-            ((defaultJob (mkSimple "dlq-arch")) {groupKey = Just "da", maxAttempts = Just 1, archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob
+          (setArchiveFor (Just dayRetention) $ setMaxAttempts (Just 1) $ setGroupKey (Just "da") $ defaultJob (mkSimple "dlq-arch"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -328,7 +335,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "archives the row but stores no result for a Nothing result" $ \env -> do
       cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Nothing :: Maybe [Text])))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "null-result")) {archiveFor = Just dayRetention})
+      void $ runM env $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "null-result"))
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -341,7 +348,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "stores the wrapped value for a Just result" $ \env -> do
       cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["kept"] :: Maybe [Text])))
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "just-result")) {archiveFor = Just dayRetention})
+      void $ runM env $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "just-result"))
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
@@ -368,7 +375,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "stores a child's result in the tree, not on its archive row" $ \env -> do
       cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["child-result"] :: Maybe [Text])))
-      let child = (defaultJob (mkSimple "arch-child")) {archiveFor = Just dayRetention}
+      let child = setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "arch-child")
       void $ runM env $ HL.insertJobTree $ defaultJob (mkSimple "arch-root") <~~ (child :| [])
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
@@ -384,10 +391,14 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> do
         n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
         when (n == 1) $ throwRetryable "fail once"
-      void $
-        runM env $
-          HL.insertJob
-            ((defaultJob (mkSimple "arch-attempts")) {groupKey = Just "aa", maxAttempts = Just 5, archiveFor = Just dayRetention})
+      void
+        $ runM env
+        $ HL.insertJob
+          ( setArchiveFor (Just dayRetention)
+              $ setMaxAttempts (Just 5)
+              $ setGroupKey (Just "aa")
+              $ defaultJob (mkSimple "arch-attempts")
+          )
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, jitter = NoJitter}) $ \_ -> do
         waitUntil 15_000 $ do
@@ -402,8 +413,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "preserves a child's parent linkage on its archived row" $ \env -> do
       cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["ok"] :: Maybe [Text])))
-      let child = (defaultJob (mkSimple "pl-child")) {archiveFor = Just dayRetention}
-          root = (defaultJob (mkSimple "pl-root")) {archiveFor = Just dayRetention}
+      let child = setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "pl-child")
+          root = setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "pl-root")
       void $ runM env $ HL.insertJobTree $ root <~~ (child :| [])
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
@@ -420,8 +431,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       runM env $
         traverse_
           HL.insertJob
-          [ (defaultJob (mkSimple "purge-expired")) {groupKey = Just "pe1", archiveFor = Just 1}
-          , (defaultJob (mkSimple "purge-kept")) {groupKey = Just "pe2", archiveFor = Just dayRetention}
+          [ setArchiveFor (Just 1) $ setGroupKey (Just "pe1") $ defaultJob (mkSimple "purge-expired")
+          , setArchiveFor (Just dayRetention) $ setGroupKey (Just "pe2") $ defaultJob (mkSimple "purge-kept")
           ]
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, reaperInterval = 0.5}) $ \_ -> do
@@ -438,7 +449,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "does not archive a job whose archiveFor is zero" $ \env -> do
       doneRef <- newIORef False
       config <- mkConfig $ \_job -> liftIO $ writeIORef doneRef True
-      void $ runM env $ HL.insertJob ((defaultJob (mkSimple "zero-arch")) {groupKey = Just "z1", archiveFor = Just 0})
+      void $ runM env $ HL.insertJob (setArchiveFor (Just 0) $ setGroupKey (Just "z1") $ defaultJob (mkSimple "zero-arch"))
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ readIORef doneRef
@@ -452,9 +463,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         liftIO $ atomicModifyIORef' processingRef $ \groups -> (groupKey job : groups, ())
         liftIO $ threadDelay 1_000_000
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G2-1")) {groupKey = Just "g2"}
-            , (defaultJob (mkSimple "G3-1")) {groupKey = Just "g3"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g2") $ defaultJob (mkSimple "G2-1")
+            , setGroupKey (Just "g3") $ defaultJob (mkSimple "G3-1")
             ]
 
       runM env $ traverse_ HL.insertJob jobs
@@ -478,7 +489,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         liftIO $ atomicModifyIORef' attemptsRef (\n -> (n + 1, ()))
         throwRetryable "always fails"
 
-      let job = (defaultJob (mkSimple "Boundary")) {groupKey = Just "g1", maxAttempts = Just 2}
+      let job = setMaxAttempts (Just 2) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "Boundary")
       void $ runM env $ HL.insertJob job
 
       withAsync
@@ -587,7 +598,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             ackAllWith cbs (map (\j -> (j, Just ["rest"])) batch)
       runM env $
         traverse_
-          (\n -> void $ HL.insertJob ((defaultJob (mkSimple n)) {groupKey = Just "aw", archiveFor = Just dayRetention}))
+          (\n -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "aw") $ defaultJob (mkSimple n)))
           ["aw-1", "aw-2", "aw-3"]
       config <- mkBatchedConfig 1 3 handler
 
@@ -612,9 +623,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         liftIO $ atomicModifyIORef' orderRef $ \order -> (payload job : order, ())
         liftIO $ atomicModifyIORef' activeRef $ \n -> (n - 1, ())
       let jobs =
-            [ (defaultJob (mkSimple "First")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "Second")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "Third")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "First")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "Second")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "Third")
             ]
 
       runM env $ traverse_ HL.insertJob jobs
@@ -639,7 +650,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> pure ()
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-      let job = (defaultJob (mkSimple "Test")) {groupKey = Just "g1"}
+      let job = setGroupKey (Just "g1") $ defaultJob (mkSimple "Test")
       Just inserted <- runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -663,7 +674,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> liftIO $ threadDelay 200_000
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-      let job = (defaultJob (mkSimple "Test")) {groupKey = Just "g1"}
+      let job = setGroupKey (Just "g1") $ defaultJob (mkSimple "Test")
       void $ runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -687,7 +698,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         throwRetryable "Test failure"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-      let job = (defaultJob (mkSimple "Test")) {groupKey = Just "g1", maxAttempts = Just 1}
+      let job = setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "Test")
       void $ runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -715,7 +726,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
               , jobHeartbeatInterval = 1
               }
 
-      let job = (defaultJob (mkSimple "LongRunning")) {groupKey = Just "g1"}
+      let job = setGroupKey (Just "g1") $ defaultJob (mkSimple "LongRunning")
       void $ runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -733,7 +744,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> throwRetryable "retry me"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-      let job = (defaultJob (mkSimple "RetryHook")) {groupKey = Just "g1", maxAttempts = Just 3}
+      let job = setMaxAttempts (Just 3) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "RetryHook")
       void $ runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -752,7 +763,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       config <- mkConfig $ \_job -> throwRetryable "always fails"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
 
-      let job = (defaultJob (mkSimple "DLQHook")) {groupKey = Just "g1", maxAttempts = Just 1}
+      let job = setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "DLQHook")
       void $ runM env $ HL.insertJob job
 
       withAsync (runM env $ runWorkerPool configWithHooks) $ \_ -> do
@@ -766,13 +777,13 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "processes a batch of jobs from the same group together" $ \env -> do
       batchesRef <- newIORef []
       let batchHandler jobs cbs = do
-            let jobPayloads = map payload (toList jobs)
-            liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
+            let payloads = map payload (toList jobs)
+            liftIO $ atomicModifyIORef' batchesRef $ \batches -> (payloads : batches, ())
             traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-3")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-3")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -789,14 +800,14 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "processes multiple groups as separate batches" $ \env -> do
       batchesRef <- newIORef []
       let batchHandler jobs cbs = do
-            let jobPayloads = map payload (toList jobs)
-            liftIO $ atomicModifyIORef' batchesRef $ \batches -> (jobPayloads : batches, ())
+            let payloads = map payload (toList jobs)
+            liftIO $ atomicModifyIORef' batchesRef $ \batches -> (payloads : batches, ())
             traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G2-1")) {groupKey = Just "g2"}
-            , (defaultJob (mkSimple "G2-2")) {groupKey = Just "g2"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g2") $ defaultJob (mkSimple "G2-1")
+            , setGroupKey (Just "g2") $ defaultJob (mkSimple "G2-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 2 10 batchHandler
@@ -815,11 +826,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' batchSizesRef $ \sizes -> (batchSize : sizes, ())
             traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-3")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-4")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-5")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-3")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-4")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-5")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 2 batchHandler
@@ -837,8 +848,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             atts <- liftIO $ atomicModifyIORef' attemptsRef $ \n -> (n + 1, n + 1)
             if atts < 2 then throwRetryable "Batch failed!" else traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1", maxAttempts = Just 3}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1", maxAttempts = Just 3}
+            [ setMaxAttempts (Just 3) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setMaxAttempts (Just 3) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -853,8 +864,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "moves entire batch to DLQ on max failures" $ \env -> do
       let batchHandler _jobs _cbs = throwRetryable "Always fails"
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1", maxAttempts = Just 1}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1", maxAttempts = Just 1}
+            [ setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -872,8 +883,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "uses each job's own maxAttempts in a batch" $ \env -> do
       let batchHandler _jobs _cbs = throwRetryable "Always fails"
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1", maxAttempts = Just 2}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1", maxAttempts = Just 3}
+            [ setMaxAttempts (Just 2) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setMaxAttempts (Just 3) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -906,9 +917,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
                 throwNack
               else traverse_ finish jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-3")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-3")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -951,8 +962,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ threadDelay 6_000_000
             traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       insertedJobs <- runM env $ HL.insertJobsBatch jobs
       let jobIds = map primaryKey insertedJobs
@@ -988,9 +999,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             traverse_ (ack cbs) (take 2 (toList jobs))
             throwRetryable "Third job failed"
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-3")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-3")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1010,8 +1021,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             traverse_ (ack cbs) jobs
             liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1033,9 +1044,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
               }
       let batchHandler jobs cbs = ackAll cbs (toList jobs)
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-3")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-3")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1059,9 +1070,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
               (\j -> if payload j == mkSimple "fp-bad" then failPermanent cbs j "bad input" else ack cbs j)
               (toList jobs)
       let jobs =
-            [ (defaultJob (mkSimple "fp-good1")) {groupKey = Just "fp"}
-            , (defaultJob (mkSimple "fp-bad")) {groupKey = Just "fp"}
-            , (defaultJob (mkSimple "fp-good2")) {groupKey = Just "fp"}
+            [ setGroupKey (Just "fp") $ defaultJob (mkSimple "fp-good1")
+            , setGroupKey (Just "fp") $ defaultJob (mkSimple "fp-bad")
+            , setGroupKey (Just "fp") $ defaultJob (mkSimple "fp-good2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1078,7 +1089,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let batchHandler jobs cbs = do
             liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
             traverse_ (\j -> failRetry cbs j "transient") (toList jobs)
-      let jobs = [(defaultJob (mkSimple "fr-job")) {groupKey = Just "fr", maxAttempts = Just 2}]
+      let jobs = [setMaxAttempts (Just 2) $ setGroupKey (Just "fr") $ defaultJob (mkSimple "fr-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1097,7 +1108,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let batchHandler jobs cbs = do
             n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
             if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "nk-job")) {groupKey = Just "nk"}]
+      let jobs = [setGroupKey (Just "nk") $ defaultJob (mkSimple "nk-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1119,7 +1130,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
               else do
                 liftIO $ writeIORef seenAttemptsRef (Just (fromIntegral (attempts j)))
                 traverse_ (ack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "nk-attempts")) {groupKey = Just "nka"}]
+      let jobs = [setGroupKey (Just "nka") $ defaultJob (mkSimple "nk-attempts")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1142,7 +1153,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let batchHandler jobs cbs = do
             n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
             if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "nk-success")) {groupKey = Just "nks"}]
+      let jobs = [setGroupKey (Just "nks") $ defaultJob (mkSimple "nk-success")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1172,9 +1183,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ threadDelay 1_500_000
             traverse_ (ack cbs) (filter (not . isNacked) (toList jobs))
       let jobs =
-            [ (defaultJob (mkSimple "hb-nacked")) {groupKey = Just "hb"}
-            , (defaultJob (mkSimple "hb-kept1")) {groupKey = Just "hb"}
-            , (defaultJob (mkSimple "hb-kept2")) {groupKey = Just "hb"}
+            [ setGroupKey (Just "hb") $ defaultJob (mkSimple "hb-nacked")
+            , setGroupKey (Just "hb") $ defaultJob (mkSimple "hb-kept1")
+            , setGroupKey (Just "hb") $ defaultJob (mkSimple "hb-kept2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1208,9 +1219,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
               }
           batchHandler jobs cbs = ackAll cbs (toList jobs)
       let jobs =
-            [ (defaultJob (mkSimple "hbg-1")) {groupKey = Just "hbg"}
-            , (defaultJob (mkSimple "hbg-2")) {groupKey = Just "hbg"}
-            , (defaultJob (mkSimple "hbg-3")) {groupKey = Just "hbg"}
+            [ setGroupKey (Just "hbg") $ defaultJob (mkSimple "hbg-1")
+            , setGroupKey (Just "hbg") $ defaultJob (mkSimple "hbg-2")
+            , setGroupKey (Just "hbg") $ defaultJob (mkSimple "hbg-3")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1251,8 +1262,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' ackedRef (const (True, ()))
             liftIO $ threadDelay 10_000_000
       let jobs =
-            [ (defaultJob (mkSimple "fca-done")) {groupKey = Just "fca"}
-            , (defaultJob (mkSimple "fca-cancelled")) {groupKey = Just "fca"}
+            [ setGroupKey (Just "fca") $ defaultJob (mkSimple "fca-done")
+            , setGroupKey (Just "fca") $ defaultJob (mkSimple "fca-cancelled")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1301,8 +1312,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' failedRef (const (True, ()))
             liftIO $ threadDelay 10_000_000
       let jobs =
-            [ (defaultJob (mkSimple "fcr-retried")) {groupKey = Just "fcr"}
-            , (defaultJob (mkSimple "fcr-cancelled")) {groupKey = Just "fcr"}
+            [ setGroupKey (Just "fcr") $ defaultJob (mkSimple "fcr-retried")
+            , setGroupKey (Just "fcr") $ defaultJob (mkSimple "fcr-cancelled")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1346,12 +1357,14 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             traverse_ (void . HL.setVisibilityTimeout 0) (toList jobs)
             void (HL.claimNextVisibleJobs @payload 10 60)
             traverse_ (nack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "nk-gone")) {groupKey = Just "nkg"}]
+      let jobs = [setGroupKey (Just "nkg") $ defaultJob (mkSimple "nk-gone")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
       withAsync
-        (runM env $ runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 10, observabilityHooks = hooks})
+        ( runM env $
+            runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 10, jobHeartbeatInterval = 1, observabilityHooks = hooks}
+        )
         $ \_ ->
           waitUntil 15_000 $ (mkSimple "nk-gone" `elem`) <$> readIORef unavailableRef
 
@@ -1362,7 +1375,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             if n == 1
               then throwJobGone "stolen mid-batch"
               else traverse_ (ack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "stolen-job")) {groupKey = Just "st"}]
+      let jobs = [setGroupKey (Just "st") $ defaultJob (mkSimple "stolen-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1385,7 +1398,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
                 traverse_ (ack cbs) (toList jobs)
                 throwRetryable "rolling back the ack"
               else traverse_ (ack cbs) (toList jobs)
-      let jobs = [(defaultJob (mkSimple "sp-job")) {groupKey = Just "sp", maxAttempts = Just 5}]
+      let jobs = [setMaxAttempts (Just 5) $ setGroupKey (Just "sp") $ defaultJob (mkSimple "sp-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
 
@@ -1397,10 +1410,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "cancelTree callback deletes the entire tree" $ \env -> do
       Right (root :| _) <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkSimple "ct-root")
-              <~~ (defaultJob (mkSimple "ct-c1") :| [defaultJob (mkSimple "ct-c2")])
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "ct-root")
+            <~~ (defaultJob (mkSimple "ct-c1") :| [defaultJob (mkSimple "ct-c2")])
       let rootId = primaryKey root
       let batchHandler jobs cbs = traverse_ (\j -> cancelTree cbs j "abort") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1412,10 +1425,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "cancelBranch callback deletes the job's branch" $ \env -> do
       Right (root :| _) <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkSimple "cb-root")
-              <~~ (defaultJob (mkSimple "cb-c1") :| [defaultJob (mkSimple "cb-c2")])
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "cb-root")
+            <~~ (defaultJob (mkSimple "cb-c1") :| [defaultJob (mkSimple "cb-c2")])
       let rootId = primaryKey root
       let batchHandler jobs cbs = traverse_ (\j -> cancelBranch cbs j "branch failed") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1431,8 +1444,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             ack cbs (head (toList jobs))
             liftIO $ atomicModifyIORef' processedRef $ \_ -> (True, ())
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1474,11 +1487,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' batchPayloadsRef $ \batches -> (payloads : batches, ())
             traverse_ (ack cbs) jobs
       let jobs =
-            [ (defaultJob (mkSimple "G1-1")) {groupKey = Just "g1"}
-            , (defaultJob (mkSimple "G1-2")) {groupKey = Just "g1"}
+            [ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
+            , setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-2")
             , defaultJob (mkSimple "Ungrouped-1")
             , defaultJob (mkSimple "Ungrouped-2")
-            , (defaultJob (mkSimple "G2-1")) {groupKey = Just "g2"}
+            , setGroupKey (Just "g2") $ defaultJob (mkSimple "G2-1")
             ]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 4 10 batchHandler
@@ -1497,16 +1510,16 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
   describe "Tree and Branch Cancel" $ do
     it "throwTreeCancel deletes the entire tree (not DLQ'd)" $ \env -> do
-      runM env $
-        void $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "tc-root"))
-              ( JT.rollup
-                  (defaultJob (mkSimple "tc-mid"))
-                  (JT.leaf (defaultJob (mkSimple "tc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "tc-leaf2"))])
-                  :| []
-              )
+      runM env
+        $ void
+        $ HL.insertJobTree
+        $ JT.rollup
+          (defaultJob (mkSimple "tc-root"))
+          ( JT.rollup
+              (defaultJob (mkSimple "tc-mid"))
+              (JT.leaf (defaultJob (mkSimple "tc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "tc-leaf2"))])
+              :| []
+          )
       config <- mkConfig $ \job ->
         when (payload job == mkSimple "tc-leaf1") $ liftIO (throwTreeCancel "abort everything")
 
@@ -1537,11 +1550,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
             liftIO $ threadDelay 10_000_000
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "fc-parent"))
-              (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkSimple "fc-parent"))
+            (JT.leaf (defaultJob (mkSimple "fc-1")) :| [JT.leaf (defaultJob (mkSimple "fc-2"))])
       config <- mkBatchedConfig 1 10 handler
 
       withAsync
@@ -1557,16 +1570,16 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
     it "throwBranchCancel deletes branch but resumes grandparent" $ \env -> do
       rootProcessedRef <- newIORef False
-      runM env $
-        void $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkSimple "bc-root"))
-              ( JT.rollup
-                  (defaultJob (mkSimple "bc-mid"))
-                  (JT.leaf (defaultJob (mkSimple "bc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "bc-leaf2"))])
-                  :| []
-              )
+      runM env
+        $ void
+        $ HL.insertJobTree
+        $ JT.rollup
+          (defaultJob (mkSimple "bc-root"))
+          ( JT.rollup
+              (defaultJob (mkSimple "bc-mid"))
+              (JT.leaf (defaultJob (mkSimple "bc-leaf1")) :| [JT.leaf (defaultJob (mkSimple "bc-leaf2"))])
+              :| []
+          )
       config <- mkConfig $ \job ->
         if payload job == mkSimple "bc-leaf1"
           then liftIO (throwBranchCancel "abort this branch")
@@ -1628,7 +1641,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
         let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
           threadDelay 1_000_000
-          runM env $ void $ HL.insertJob (defaultJob (mkPayload "notify")) {groupKey = Just "g1"}
+          runM env $ void $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (mkPayload "notify")
           waitUntil 5_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
 
@@ -1640,7 +1653,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
           threadDelay 1_000_000
           killListener connStr schema
           threadDelay 3_000_000
-          runM env $ void $ HL.insertJob (defaultJob (mkPayload "after-reconnect")) {groupKey = Just "g1"}
+          runM env $ void $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (mkPayload "after-reconnect")
           waitUntil 8_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
 
@@ -1696,7 +1709,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
         config :: WorkerConfig m payload <- runM env $ transactionalWorkerConfig 1 (mkHandler (counting ref))
         let workerConfig = config {workerCount = 1, pollInterval = 0.2, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool workerConfig) $ \_ -> do
-          runM env $ void $ HL.insertJob (defaultJob (mkPayload "poll")) {groupKey = Just "g1"}
+          runM env $ void $ HL.insertJob $ setGroupKey (Just "g1") $ defaultJob (mkPayload "poll")
           waitUntil 10_000 $ (== 1) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 1)
   where

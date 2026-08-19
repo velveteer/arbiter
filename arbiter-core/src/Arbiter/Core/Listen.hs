@@ -36,7 +36,7 @@ import Control.Concurrent.STM
   , readTVarIO
   , writeTVar
   )
-import Control.Exception (bracket, displayException, onException, uninterruptibleMask_)
+import Control.Exception (bracket, onException, uninterruptibleMask_)
 import Control.Monad (unless, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
@@ -58,7 +58,7 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async qualified as Async
 import UnliftIO.Exception (tryAny)
 
-import Arbiter.Core.Exceptions (throwInternal)
+import Arbiter.Core.Exceptions (displayEx, throwInternal)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 import Arbiter.Core.Threads (labelArbiterThread)
 
@@ -210,7 +210,7 @@ hubLoop listener hub = go baseBackoff
             go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2))
       case result of
         Right () -> restart "arbiter listener: connection loop exited unexpectedly"
-        Left e -> restart (T.pack (displayException e))
+        Left e -> restart (displayEx e)
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
 connectionLoop :: RunningHub -> PQ.Connection -> IO ()
@@ -259,12 +259,12 @@ reconcile hub conn = do
               <> " returned no result"
         Just res -> do
           st <- PQ.resultStatus res
-          when (st /= PQ.CommandOk) $
-            throwInternal $
-              "arbiter listener: "
-                <> T.pack (BSC.unpack verb)
-                <> " failed with "
-                <> T.pack (show st)
+          when (st /= PQ.CommandOk)
+            $ throwInternal
+            $ "arbiter listener: "
+              <> T.pack (BSC.unpack verb)
+              <> " failed with "
+              <> T.pack (show st)
     escapeChannel chan =
       fromMaybe (quoteChannel chan) <$> PQ.escapeIdentifier conn chan
 
@@ -275,7 +275,7 @@ dispatch hub n = do
     result <- tryAny (h n)
     case result of
       Right () -> pure ()
-      Left e -> hubWarn lg ("channel handler exception: " <> T.pack (displayException e))
+      Left e -> hubWarn lg ("channel handler exception: " <> displayEx e)
 
 -- | Report a connection failure to every registered pool.
 logErrorAll :: RunningHub -> Text -> IO ()

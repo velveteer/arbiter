@@ -1,5 +1,6 @@
 {-# LANGUAGE TypeFamilies #-}
 
+-- | The database primitives every backend implements.
 module Arbiter.Core.MonadArbiter
   ( MonadArbiter (..)
   , JobHandler

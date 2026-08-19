@@ -31,9 +31,10 @@ import UnliftIO.Exception (finally, throwTo)
 import UnliftIO.STM (TVar, readTVar)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (WorkerConfig (..))
+import Arbiter.Worker.Config (WorkerConfig (..), writePause)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
+-- | The handler threads in flight, by job id.
 type RunningJobs = TVar (Map.Map Int64 (Async.Async ()))
 
 -- | Decode the pause payload and, if it addresses this worker, write 'pauseVar'.
@@ -46,7 +47,7 @@ handlePauseNotif config notif =
   case Aeson.decodeStrict (notificationData notif) :: Maybe PausePayload of
     Just (PausePayload wid p) | wid == workerId config -> atomically $ do
       st <- STM.readTVar (workerStateVar config)
-      unless (st == ShuttingDown) $ STM.writeTVar (pauseVar config) p
+      unless (st == ShuttingDown) $ writePause config p
     _ -> pure ()
 
 -- | If the cancel payload targets a job on this worker, 'throwTo'
@@ -79,9 +80,9 @@ handleCronRunNotif
   -> Notification
   -> m ()
 handleCronRunNotif ownNames runNowVar notif =
-  when (Set.member (decodeUtf8Lenient (notificationData notif)) ownNames) $
-    atomically $
-      STM.writeTVar runNowVar True
+  when (Set.member (decodeUtf8Lenient (notificationData notif)) ownNames)
+    $ atomically
+    $ STM.writeTVar runNowVar True
 
 -- | Run @work@ as an async registered in 'RunningJobs' for its lifetime, dropping
 -- only the entries this call made.

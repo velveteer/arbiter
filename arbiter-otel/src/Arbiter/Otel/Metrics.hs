@@ -14,7 +14,7 @@ module Arbiter.Otel.Metrics
   ) where
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
-import Arbiter.Core.Job.Types (AdmissionKeys (..), Job (..), ObservabilityHooks (..), defaultObservabilityHooks)
+import Arbiter.Core.Job.Types (AdmissionKeys (..), ObservabilityHooks (..), admission, defaultObservabilityHooks)
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -40,6 +40,7 @@ import OpenTelemetry.Metric.Core
 
 import Arbiter.Otel.MetricNames qualified as Name
 
+-- | The job-lifecycle instruments.
 data ArbiterMeters = ArbiterMeters
   { claimed :: Counter Int64
   , processed :: Counter Int64
@@ -53,6 +54,7 @@ data ArbiterMeters = ArbiterMeters
 arbiterMeter :: MeterProvider -> IO Meter
 arbiterMeter mp = getMeter mp "arbiter"
 
+-- | Create the instruments on a meter provider.
 newArbiterMeters :: MeterProvider -> IO ArbiterMeters
 newArbiterMeters mp = do
   meter <- arbiterMeter mp
@@ -78,6 +80,7 @@ durationBuckets =
     { advisoryExplicitBucketBoundaries = Just [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]
     }
 
+-- | Observability hooks recording one queue's jobs to the instruments.
 otelHooks :: (MonadIO m) => ArbiterMeters -> Text -> ObservabilityHooks m payload
 otelHooks ms queue =
   defaultObservabilityHooks

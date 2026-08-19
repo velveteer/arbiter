@@ -52,6 +52,7 @@ data PolicyRow = PolicyRow
   }
   deriving stock (Eq, Show)
 
+-- | A policy in its stored form.
 toPolicyRow :: Policy -> PolicyRow
 toPolicyRow (Policy prefix mx rf iv) =
   PolicyRow {prefixId = prefix, maxTokens = mx, refillAmt = rf, interval = realToFrac iv}
@@ -61,6 +62,7 @@ arbiterRateLimitPoliciesTable :: SchemaName -> Text
 arbiterRateLimitPoliciesTable schemaName =
   quoteIdentifier schemaName <> "." <> arbiterRateLimitPoliciesTableName
 
+-- | Bare name of the policies table, for catalog lookups by relname.
 arbiterRateLimitPoliciesTableName :: Text
 arbiterRateLimitPoliciesTableName = "arbiter_rate_limit_policies"
 

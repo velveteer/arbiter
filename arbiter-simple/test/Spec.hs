@@ -5,7 +5,6 @@ import Test.Hspec
 
 import Test.Arbiter.Simple.Concurrency qualified as Concurrency
 import Test.Arbiter.Simple.ConcurrencyLimit qualified as ConcurrencyLimit
-import Test.Arbiter.Simple.MigrationDurability qualified as MigrationDurability
 import Test.Arbiter.Simple.Operations qualified as Operations
 import Test.Arbiter.Simple.RateLimit qualified as RateLimit
 import Test.Arbiter.Simple.StateMachine qualified as StateMachine
@@ -28,6 +27,3 @@ main = do
 
     describe "Arbiter.Simple.ConcurrencyLimit" $
       ConcurrencyLimit.spec connStr
-
-    describe "Arbiter.Simple.MigrationDurability" $
-      MigrationDurability.spec connStr

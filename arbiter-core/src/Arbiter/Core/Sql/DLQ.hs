@@ -70,7 +70,7 @@ moveToDLQSQL move schema tableName jobId cseq errorMsg =
 
 -- | Select up to @limit@ claimable jobs whose attempts reached their limit,
 -- with the scalar fields the tree-aware DLQ move needs. Each row is then moved
--- via 'moveToDLQFields'. The cap drains a large backlog over several passes
+-- via @moveToDLQFields@. The cap drains a large backlog over several passes
 -- rather than fetching an unbounded set at once.
 selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =

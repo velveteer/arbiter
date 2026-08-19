@@ -3,14 +3,26 @@ name:               arbiter-servant-ui
 version:            0.1.0.0
 synopsis:           Embedded admin dashboard for arbiter job queue
 description:
-  Bootstrap 5 + Alpine.js admin dashboard served from embedded static files.
+  Admin dashboard for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  A browser interface over the arbiter-servant API for inspecting and operating
+  queues: job, dead-letter, and archive browsing, retries and cancellation, cron
+  schedules, rate-limit and concurrency policies, queue pausing, and worker
+  health. Assets are embedded in the binary, so there are no runtime file
+  dependencies.
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:            MIT
+license-file:       LICENSE
 author:             Joshua Miller
 maintainer:         joshua.ian.miller@pm.me
 category:           Web
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
+tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 extra-source-files:
   static/css/*.css
   static/favicon.ico
@@ -44,7 +56,7 @@ library
   exposed-modules: Arbiter.Servant.UI
   build-depends:
     , arbiter-servant  <0.2
-    , base             >=4.14   && <5
+    , base             >=4.20   && <5
     , bytestring       >=0.10   && <0.13
     , file-embed       >=0.0.10 && <0.1
     , filepath         >=1.4    && <1.6

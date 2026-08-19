@@ -66,7 +66,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           -- Pod 1: insert within slow transaction (groups trigger holds row lock)
           Just jobA <-
             inTransaction @SimpleConcurrencyTestRegistry connSlow testSchema $
-              HL.insertJob ((defaultJob (TestMessage "SlowPod")) {groupKey = Just "serialize"})
+              HL.insertJob (setGroupKey (Just "serialize") $ defaultJob (TestMessage "SlowPod"))
 
           -- Pod 2 insert + concurrent claims + Pod 1 commit - all concurrent.
           -- Without groups trigger serialization, Pod 2 could commit first and
@@ -76,9 +76,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
               id
               $ replicate 10 (runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload])
                 <> [ do
-                       void $
-                         runSimpleDb env $
-                           HL.insertJob ((defaultJob (TestMessage "FastPod")) {groupKey = Just "serialize"})
+                       void
+                         $ runSimpleDb env
+                         $ HL.insertJob (setGroupKey (Just "serialize") $ defaultJob (TestMessage "FastPod"))
                        pure []
                    , do
                        _ <- PG.execute_ connSlow "COMMIT"
@@ -112,10 +112,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         doneRef <- newIORef False
         let inserter = do
-              replicateM_ 200 $
-                void $
-                  runSimpleDb env $
-                    HL.insertJob (defaultJob (TestMessage "ooo")) {groupKey = Just "ooo-race"}
+              replicateM_ 200
+                $ void
+                $ runSimpleDb env
+                $ HL.insertJob
+                $ setGroupKey (Just "ooo-race")
+                $ defaultJob (TestMessage "ooo")
               atomicModifyIORef' doneRef (const (True, ()))
 
             claimer = do

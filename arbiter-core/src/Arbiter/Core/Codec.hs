@@ -36,6 +36,7 @@ module Arbiter.Core.Codec
   , cScalar
   , cArray
   , jobCodec
+  , JobWriteSource
   , writeColumnNames
 
     -- * Job codecs
@@ -51,7 +52,7 @@ module Arbiter.Core.Codec
   , cronScheduleRowCodec
 
     -- * Worker codecs
-  , workerRowCodec
+  , workerRowWithHealthCodec
 
     -- * Queue codecs
   , queueRowCodec
@@ -73,7 +74,6 @@ import Arbiter.Core.Job.Types
   ( AdmissionColumns (..)
   , AdmissionKeys (..)
   , DedupKey (..)
-  , Job (..)
   , JobRead
   , JobWrite
   , TraceContext (..)
@@ -81,10 +81,12 @@ import Arbiter.Core.Job.Types
   , defaultMaxAttempts
   , toTraceContext
   )
+import Arbiter.Core.Job.Types qualified as JT
+import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView (..), RateLimitPolicyView (..))
-import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
+import Arbiter.Core.Worker (WorkerHealth (Live), WorkerRow (..))
 
 -- | Scalar PostgreSQL column type. The GADT tag recovers the Haskell type.
 data Col a where
@@ -142,15 +144,19 @@ data SomeParam where
 -- | Positional query parameters.
 type Params = [SomeParam]
 
+-- | A non-null scalar parameter.
 pval :: Col a -> a -> SomeParam
 pval c v = SomeParam (PScalar c) v
 
+-- | A nullable scalar parameter.
 pnul :: Col a -> Maybe a -> SomeParam
 pnul c v = SomeParam (PNullable c) v
 
+-- | A non-null array parameter.
 parr :: Col a -> [a] -> SomeParam
 parr c v = SomeParam (PArray c) v
 
+-- | An array parameter with nullable elements.
 pnarr :: Col a -> [Maybe a] -> SomeParam
 pnarr c v = SomeParam (PNullArray c) v
 
@@ -161,6 +167,7 @@ pnarr c v = SomeParam (PNullArray c) v
 -- | A profunctor codec: write source @s@ to INSERT columns/params, decoded value @a@ back.
 data Codec s a = Codec
   { cDecode :: RowCodec a
+  -- ^ The read side.
   , cWrite :: [WriteCol s]
   }
 
@@ -238,56 +245,77 @@ pgType = \case
 
 -- | A job codec pinned to a @Value@ payload, for the decode and column-list
 -- projections that ignore the write source.
-type JobCodec a = Codec (JobWrite Value, AdmissionColumns) a
+type JobWriteSource payload =
+  ( JobWrite payload
+  , AdmissionColumns
+  , Maybe Int64
+  , Maybe Value
+  , Bool
+  )
 
--- | The bidirectional main-table job codec. 'cDecode' is 'jobRowCodec'. The write
--- side turns a 'JobWrite' and its resolved 'AdmissionColumns' into the INSERT
--- column list and parameters.
-jobCodec :: (ToJSON payload) => Text -> Codec (JobWrite payload, AdmissionColumns) (JobRead Value)
+type JobCodec a = Codec (JobWriteSource Value) a
+
+-- | Main-table codec. The write source contains public enqueue fields,
+-- admission columns, parent ID, rollup state, and suspension state.
+jobCodec :: (ToJSON payload) => Text -> Codec (JobWriteSource payload) (JobRead Value)
 jobCodec = jobCodecWith "id"
 
--- | 'jobCodec' with the primary-key column named explicitly. The main table uses
--- @id@. The DLQ and archive snapshots store it as @job_id@.
-jobCodecWith :: (ToJSON payload) => Text -> Text -> Codec (JobWrite payload, AdmissionColumns) (JobRead Value)
+-- | 'jobCodec' with an explicit primary-key column.
+jobCodecWith :: (ToJSON payload) => Text -> Text -> Codec (JobWriteSource payload) (JobRead Value)
 jobCodecWith idColumn queueName =
   Job
     <$> ro (col idColumn CInt8)
-    <*> lmap (toJSON . payload . fst) (rw "payload" CJsonb)
+    <*> lmap (toJSON . JT.payload . sourceJob) (rw "payload" CJsonb)
     <*> pure queueName
-    <*> lmap (groupKey . fst) (rwN "group_key" CText)
+    <*> lmap (JT.groupKey . sourceJob) (rwN "group_key" CText)
     <*> ro (col "inserted_at" CTimestamptz)
     <*> ro (ncol "updated_at" CTimestamptz)
-    <*> lmap (attempts . fst) (rw "attempts" CInt4)
-    <*> lmap (lastError . fst) (rwN "last_error" CText)
-    <*> lmap (priority . fst) (rw "priority" CInt4)
+    <*> lmap (const 0) (rw "attempts" CInt4)
+    <*> lmap (const Nothing) (rwN "last_error" CText)
+    <*> lmap (JT.priority . sourceJob) (rw "priority" CInt4)
     <*> ro (ncol "last_attempted_at" CTimestamptz)
-    <*> lmap (notVisibleUntil . fst) (rwN "not_visible_until" CTimestamptz)
+    <*> lmap (JT.notVisibleUntil . sourceJob) (rwN "not_visible_until" CTimestamptz)
     <*> dedupCodec
-    <*> lmap (Just . fromMaybe defaultMaxAttempts . maxAttempts . fst) (rwN "max_attempts" CInt4)
-    <*> lmap (parentId . fst) (rwN "parent_id" CInt8)
-    <*> lmap (parentState . fst) (rwN "parent_state" CJsonb)
+    <*> lmap (Just . fromMaybe defaultMaxAttempts . JT.maxAttempts . sourceJob) (rwN "max_attempts" CInt4)
+    <*> lmap sourceParentId (rwN "parent_id" CInt8)
+    <*> lmap sourceParentState (rwN "parent_state" CJsonb)
     <*> traceCodec
-    <*> lmap (suspended . fst) (rw "suspended" CBool)
+    <*> lmap sourceSuspended (rw "suspended" CBool)
     <*> ro (ncol "claimed_by" CUuid)
     <*> ro (col "claim_seq" CInt8)
-    <*> lmap (archiveFor . fst) (rwN "archive_for" CInt4)
-    <*> lmap snd admissionCodec
+    <*> lmap (JT.archiveFor . sourceJob) (rwN "archive_for" CInt4)
+    <*> lmap sourceAdmission admissionCodec
 
 -- | Decoder for a main-table job row.
 jobRowCodec :: Text -> RowCodec (JobRead Value)
 jobRowCodec queueName = cDecode (jobCodec queueName :: JobCodec (JobRead Value))
 
-traceCodec :: Codec (JobWrite payload, AdmissionColumns) (Maybe TraceContext)
+sourceJob :: JobWriteSource payload -> JobWrite payload
+sourceJob (job, _, _, _, _) = job
+
+sourceAdmission :: JobWriteSource payload -> AdmissionColumns
+sourceAdmission (_, admission, _, _, _) = admission
+
+sourceParentId :: JobWriteSource payload -> Maybe Int64
+sourceParentId (_, _, parent, _, _) = parent
+
+sourceParentState :: JobWriteSource payload -> Maybe Value
+sourceParentState (_, _, _, state, _) = state
+
+sourceSuspended :: JobWriteSource payload -> Bool
+sourceSuspended (_, _, _, _, suspended) = suspended
+
+traceCodec :: Codec (JobWriteSource payload) (Maybe TraceContext)
 traceCodec =
   toTraceContext
-    <$> lmap (fmap traceparent . traceContext . fst) (rwN "traceparent" CText)
-    <*> lmap ((tracestate =<<) . traceContext . fst) (rwN "tracestate" CText)
+    <$> lmap (fmap JT.traceparent . JT.traceContext . sourceJob) (rwN "traceparent" CText)
+    <*> lmap ((JT.tracestate =<<) . JT.traceContext . sourceJob) (rwN "tracestate" CText)
 
-dedupCodec :: Codec (JobWrite payload, AdmissionColumns) (Maybe DedupKey)
+dedupCodec :: Codec (JobWriteSource payload) (Maybe DedupKey)
 dedupCodec =
   toDedupKey
-    <$> lmap (fst . dedupParts . dedupKey . fst) (rwN "dedup_key" CText)
-    <*> lmap (snd . dedupParts . dedupKey . fst) (rwN "dedup_strategy" CText)
+    <$> lmap (fst . dedupParts . JT.dedupKey . sourceJob) (rwN "dedup_key" CText)
+    <*> lmap (snd . dedupParts . JT.dedupKey . sourceJob) (rwN "dedup_strategy" CText)
   where
     toDedupKey Nothing _ = Nothing
     toDedupKey (Just k) (Just "replace") = Just (ReplaceDuplicate k)
@@ -296,9 +324,9 @@ dedupCodec =
 admissionCodec :: Codec AdmissionColumns AdmissionKeys
 admissionCodec =
   AdmissionKeys
-    <$> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey acRateLimitKey acRateLimitPrefix
-    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey acConcurrencyKey acConcurrencyPrefix
-    <* wo "rate_limit_cost" CFloat8 acRateLimitCost
+    <$> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey JT.acRateLimitKey JT.acRateLimitPrefix
+    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey JT.acConcurrencyKey JT.acConcurrencyPrefix
+    <* wo "rate_limit_cost" CFloat8 JT.acRateLimitCost
 
 -- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
 -- prefix columns, recovering the suffix by dropping the @prefix:@ part (so suffixes
@@ -328,6 +356,7 @@ jobEnvelopeCodec tsColumn queueName =
     <*> col tsColumn CTimestamptz
     <*> cDecode (jobCodecWith "job_id" queueName :: JobCodec (JobRead Value))
 
+-- | DLQ envelope: the shared job snapshot plus its DLQ id and failure time.
 dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
 dlqRowCodec = jobEnvelopeCodec "failed_at"
 
@@ -354,6 +383,7 @@ rateLimitPolicyViewCodec =
     <*> ncol "min_tokens" CFloat8
     <*> ncol "avg_tokens" CFloat8
 
+-- | A token-bucket row as the admin API reports it.
 rateLimitBucketCodec :: RowCodec RateLimitBucketView
 rateLimitBucketCodec =
   RateLimitBucketView
@@ -364,6 +394,7 @@ rateLimitBucketCodec =
     <*> ncol "fill_fraction" CFloat8
     <*> col "last_refill" CTimestamptz
 
+-- | A pool policy row as the admin API reports it.
 concurrencyPolicyViewCodec :: RowCodec ConcurrencyPolicyView
 concurrencyPolicyViewCodec =
   ConcurrencyPolicyView
@@ -374,6 +405,7 @@ concurrencyPolicyViewCodec =
     <*> col "total_in_flight" CInt8
     <*> ncol "max_in_flight" CInt4
 
+-- | A per-key in-flight count as the admin API reports it.
 concurrencyKeyViewCodec :: RowCodec ConcurrencyKeyView
 concurrencyKeyViewCodec =
   ConcurrencyKeyView
@@ -387,6 +419,7 @@ concurrencyKeyViewCodec =
 -- Cron codecs
 -- ---------------------------------------------------------------------------
 
+-- | A @cron_schedules@ row.
 cronScheduleRowCodec :: RowCodec CronScheduleRow
 cronScheduleRowCodec =
   CronScheduleRow
@@ -410,9 +443,11 @@ cronScheduleRowCodec =
 -- Worker codecs
 -- ---------------------------------------------------------------------------
 
-workerRowCodec :: RowCodec WorkerRow
-workerRowCodec =
-  WorkerRow
+-- | Worker columns plus the raw derived health token. The operation layer
+-- validates the token before returning a 'WorkerRow'.
+workerRowWithHealthCodec :: RowCodec (WorkerRow, Text)
+workerRowWithHealthCodec =
+  toRow
     <$> col "worker_id" CUuid
     <*> col "queue_name" CText
     <*> ncol "host_name" CText
@@ -423,12 +458,18 @@ workerRowCodec =
     <*> col "paused" CBool
     <*> col "stale_threshold_secs" CFloat8
     <*> ncol "metadata" CJsonb
-    <*> (workerHealthFromText <$> col "health" CText)
+    <*> col "health" CText
+  where
+    toRow wid queue host count started heartbeat shuttingDown paused stale metadata rawHealth =
+      ( WorkerRow wid queue host count started heartbeat shuttingDown paused stale metadata Live
+      , rawHealth
+      )
 
 -- ---------------------------------------------------------------------------
 -- Queue codecs
 -- ---------------------------------------------------------------------------
 
+-- | An @arbiter_queues@ row.
 queueRowCodec :: RowCodec QueueRow
 queueRowCodec =
   QueueRow

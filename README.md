@@ -132,6 +132,11 @@ CREATE SCHEMA IF NOT EXISTS arbiter;
 GRANT USAGE, CREATE ON SCHEMA arbiter TO your_app_user;
 ```
 
+`enableNotifications` and `enableEventStreaming` are reconciled settings.
+Re-running migrations after changing either option installs or removes its
+triggers, so these features can be enabled and disabled without editing
+migration history.
+
 ### Inserting Jobs
 
 ```haskell
@@ -151,6 +156,18 @@ ArbS.runSimpleDb env $ do
 ```
 
 `insertJob` returns `Maybe (JobRead payload)` - `Nothing` when a dedup key causes the insert to be skipped.
+
+### Configuring a Job
+
+Start from `defaultJob`/`defaultGroupedJob` and apply setters:
+
+```haskell
+job =
+  Arb.defaultJob (SendWelcome "alice@example.com" "Alice")
+    & Arb.setPriority 10
+    & Arb.setMaxAttempts (Just 3)
+    & Arb.setArchiveFor (Just Arb.dayRetention)
+```
 
 ### Processing Jobs
 
@@ -242,7 +259,7 @@ Jobs carry an integer `priority` (default `0`), and lower numbers are claimed fi
 
 ```haskell
 -- runs behind default-priority work
-job = (Arb.defaultJob payload) { Arb.priority = 10 }
+job = Arb.defaultJob payload & Arb.setPriority 10
 ```
 
 ### Deduplication
@@ -251,10 +268,10 @@ Control duplicate job insertion with dedup keys:
 
 ```haskell
 -- IgnoreDuplicate: silently skip if key exists
-job1 = (Arb.defaultJob payload) { Arb.dedupKey = Just (IgnoreDuplicate "order-123") }
+job1 = Arb.defaultJob payload & Arb.setDedupKey (Just $ IgnoreDuplicate "order-123")
 
 -- ReplaceDuplicate: update existing job's payload and reset attempts
-job2 = (Arb.defaultJob payload) { Arb.dedupKey = Just (ReplaceDuplicate "order-123") }
+job2 = Arb.defaultJob payload & Arb.setDedupKey (Just $ ReplaceDuplicate "order-123")
 ```
 
 ### Job Results
@@ -301,8 +318,8 @@ syncHandler _conn job = do
 Children run in parallel. Parents run when all of their children are acked or DLQ'd.
 
 ```haskell
-import Arbiter.Core.JobTree ((<~~))
-import Arbiter.Core.JobTree qualified as JT
+import Arbiter.Core.JobTree (leaf, rollup, (<~~))
+import Data.List.NonEmpty (NonEmpty ((:|)))
 
 data PipelinePayload
   = ProcessChunk Text
@@ -315,30 +332,32 @@ data PipelinePayload
 type PipelineRegistry = '[ QueueWithResult "pipeline_queue" PipelinePayload [Text] ]
 
 myTree = Arb.defaultJob Aggregate <~~
-  [ Arb.defaultJob (ProcessChunk "chunk-1")
-  , Arb.defaultJob (ProcessChunk "chunk-2")
-  , Arb.defaultJob (ProcessChunk "chunk-3")
-  ]
+  ( Arb.defaultJob (ProcessChunk "chunk-1")
+      :| [ Arb.defaultJob (ProcessChunk "chunk-2")
+         , Arb.defaultJob (ProcessChunk "chunk-3")
+         ]
+  )
 Right _ <- Arb.insertJobTree myTree
 ```
 
 Multi-level trees use `rollup` and `leaf`:
 
 ```haskell
-myTree = JT.rollup (Arb.defaultJob Aggregate)
-  [ JT.rollup (Arb.defaultJob (AggregateSection "section-1"))
-      [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1a"))
-      , JT.leaf (Arb.defaultJob (ProcessChunk "leaf-1b"))
-      ]
-  , JT.rollup (Arb.defaultJob (AggregateSection "section-2"))
-      [ JT.leaf (Arb.defaultJob (ProcessChunk "leaf-2a"))
-      ]
-  ]
+myTree = rollup (Arb.defaultJob Aggregate)
+  ( rollup (Arb.defaultJob (AggregateSection "section-1"))
+      ( leaf (Arb.defaultJob (ProcessChunk "leaf-1a"))
+          :| [leaf (Arb.defaultJob (ProcessChunk "leaf-1b"))]
+      )
+      :| [ rollup (Arb.defaultJob (AggregateSection "section-2"))
+             (leaf (Arb.defaultJob (ProcessChunk "leaf-2a")) :| [])
+         ]
+  )
 ```
 
 A parent fetches its children's results on demand with
 `Worker.mergedChildResults`, which returns the monoidal merge of its immediate
-children's results plus a map of any DLQ'd immediate children. Intermediate
+children's results plus a map of any DLQ'd immediate children, keyed by DLQ
+row id so the entries can be passed to `retryFromDLQ`. Intermediate
 results are cleaned up automatically when the parent is acked.
 
 ```haskell
@@ -369,7 +388,7 @@ Tree-scoped cancellation:
 Use a job tree to replace a staging table. Each child job carries its chunk of row IDs - the tree tracks completion and the finalizer runs when all chunks are processed:
 
 ```haskell
-{-# LANGUAGE OverloadedLists #-}
+import Data.List.NonEmpty qualified as NE
 
 data MigrationJob
   = MigrateChunk [Int64]
@@ -379,10 +398,13 @@ type MigrationRegistry =
   '[ QueueWithResult "migration_queue" MigrationJob (Sum Int) ]
 
 rowIds <- findRowsToMigrate  -- SELECT id FROM orders WHERE needs_migration
-let chunks = chunksOf 1000 rowIds  -- from the split package
-    tree = Arb.defaultJob MigrationComplete
-      <~~ [Arb.defaultJob (MigrateChunk ids) | ids <- chunks]
-Right _ <- Arb.insertJobTree tree
+case NE.nonEmpty (chunksOf 1000 rowIds) of  -- chunksOf is from the split package
+  Nothing -> reportComplete 0
+  Just chunks -> do
+    let tree = Arb.defaultJob MigrationComplete
+          <~~ fmap (Arb.defaultJob . MigrateChunk) chunks
+    Right _ <- Arb.insertJobTree tree
+    pure ()
 ```
 
 ```haskell
@@ -412,9 +434,11 @@ Right healthCheck = Cron.cronJob
 Right nightlyReport = Cron.cronJob
   "nightly-report"
   "0 3 * * *"           -- 03:00 UTC daily
-  Cron.AllowOverlap     -- each tick produces its own job
-  (\kind tick -> (Arb.defaultJob (GenerateReport tick))
-    { Arb.priority = case kind of Cron.Replay -> 10; Cron.Live -> 0 })
+  Cron.AllowOverlap $ \kind tick -> -- each tick produces its own job
+    let jobPriority = case kind of
+          Cron.Replay -> 10
+          Cron.Live -> 0
+     in Arb.defaultJob (GenerateReport tick) & Arb.setPriority jobPriority
 let nightlyWithBackfill = nightlyReport { Cron.backfill = Cron.Backfill 86400 }
 
 -- in a specific timezone (validated at construction)
@@ -604,8 +628,8 @@ Completed jobs are deleted on ack by default. Set `archiveFor` to keep a copy in
 a per-queue archive for that many seconds after completion.
 
 ```haskell
-job1 = (Arb.defaultJob payload) { Arb.archiveFor = Just Arb.dayRetention }       -- 24h
-job2 = (Arb.defaultJob payload) { Arb.archiveFor = Just (Arb.dayRetention * 7) } -- 1 week
+job1 = Arb.defaultJob payload & Arb.setArchiveFor (Just Arb.dayRetention)       -- 24h
+job2 = Arb.defaultJob payload & Arb.setArchiveFor (Just $ Arb.dayRetention * 7) -- 1 week
 ```
 
 Archiving is opt-in per job (`archiveFor = Nothing` deletes as before), and
@@ -690,9 +714,8 @@ record.
 
 ### Graceful Shutdown
 
-Install signal handlers through the setup callback, which receives the shared
-shutdown state. One pool or several, it's the same shape - add entries to the
-list:
+Install signal handlers after constructing the worker configs. One pool or
+several, use `shutdownPools` with the same list passed to `runWorkerPools`:
 
 ```haskell
 import System.Posix.Signals qualified as Signals
@@ -761,7 +784,7 @@ env <- ArbS.disableListener <$> ArbS.createSimpleEnv (Proxy @AppRegistry) connSt
 
 ### Other Options
 
-- **Logging** - structured JSON to stderr, fast-logger, or a custom callback
+- **Logging** - structured JSON to stdout by default, with stderr, fast-logger, and custom callback destinations available
 - **Liveness probes** - file-based health check. Kubernetes example:
   ```yaml
   livenessProbe:

@@ -59,17 +59,20 @@ import Arbiter.Core.Job.Types
   , JobRead
   , JobWrite
   , attempts
-  , dedupKey
   , defaultGroupedJob
   , defaultJob
   , defaultMaxAttempts
-  , maxAttempts
   , notVisibleUntil
-  , payload
   , primaryKey
   , priority
+  , setDedupKey
+  , setMaxAttempts
+  , setNotVisibleUntil
+  , setPayload
+  , setPriority
   , suspended
   )
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
 import Arbiter.Core.Operations qualified as Ops
@@ -145,6 +148,7 @@ initialModel = Model Map.empty Map.empty
 -- Raw SQL string builders (schema/table threaded in)
 -- ---------------------------------------------------------------------------
 
+-- | Names of the head-of-line detector's table, function, and trigger.
 holViolTbl, holFn, holTrigger :: Text -> Text -> Text
 holViolTbl schema table = schema <> "." <> table <> "_hol_violations"
 holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
@@ -428,7 +432,7 @@ exactViolations schema table withConn = withConn $ \conn -> do
 
 -- | A live child whose parent has left the main queue. Single-threaded this
 -- never happens (a finalizer completes only after its children, a DLQ'd parent
--- cascades them, and 'retryFromDLQ' refuses to restore a child whose root parent
+-- cascades them, and 'Arbiter.Core.HighLevel.retryFromDLQ' refuses to restore a child whose root parent
 -- is gone), so it is a per-step check for the sequential property. Under
 -- concurrency a parent can be acked between that refuse-check and a child's
 -- re-insert, leaving a benign orphan that just processes as a plain job, so the
@@ -476,8 +480,9 @@ genExtras :: (MonadGen g) => g Extras
 genExtras = Extras <$> Gen.maybe (Gen.element (map fst smConcSlots)) <*> Gen.maybe (Gen.element smRateKeys)
 
 applyExtras :: Extras -> JobWrite SMPayload -> JobWrite SMPayload
-applyExtras (Extras mc mr) j = j {payload = (payload j) {smConcSlot = mc, smRateKey = mr}}
+applyExtras (Extras mc mr) j = setPayload ((Job.payload j) {smConcSlot = mc, smRateKey = mr}) j
 
+-- | A payload carrying optional concurrency and rate-limit keys.
 data SMPayload = SMPayload
   { smMessage :: Text
   , smConcSlot :: Maybe Text
@@ -589,11 +594,10 @@ mkInsert
 mkInsert deco g d p ma = do
   nvu <- traverse (\s -> liftIO (addUTCTime (fromIntegral s) <$> getCurrentTime)) d
   let job =
-        (maybe (defaultJob payload) (`defaultGroupedJob` payload) g)
-          { notVisibleUntil = nvu
-          , priority = fromIntegral p
-          , maxAttempts = fromIntegral <$> ma
-          }
+        setMaxAttempts (fromIntegral <$> ma)
+          $ setPriority (fromIntegral p)
+          $ setNotVisibleUntil nvu
+          $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
   mj <- HL.insertJob (deco job)
   pure (primaryKey (fromJust mj))
   where
@@ -914,7 +918,7 @@ mkBatchInsert
 mkBatchInsert specs = void (HL.insertJobsBatch_ (map toJob specs))
   where
     toJob (g, p) =
-      (maybe (defaultJob payload) (`defaultGroupedJob` payload) g) {priority = fromIntegral p}
+      setPriority (fromIntegral p) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
     payload = smPayload "sm batch"
 
 cInsertTree
@@ -1029,10 +1033,7 @@ mkDedup key replace g p = void (HL.insertJob job)
   where
     dk = if replace then ReplaceDuplicate key else IgnoreDuplicate key
     job =
-      (maybe (defaultJob payload) (`defaultGroupedJob` payload) g)
-        { dedupKey = Just dk
-        , priority = fromIntegral p
-        }
+      setPriority (fromIntegral p) $ setDedupKey (Just dk) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
     payload = smPayload "sm dedup"
 
 -- | Run the reaper. Drift-correcting, so it must never break an invariant.
@@ -1074,7 +1075,7 @@ cRefresh run schema table withConn =
 -- ---------------------------------------------------------------------------
 
 -- | Groups and dedup keys for the concurrency churn. More groups widens the set
--- of summary rows updated at once. Fewer than 'nWorkers', so contention per
+-- of summary rows updated at once. Fewer than @nWorkers@, so contention per
 -- group stays high.
 concGroups, concDedupKeys :: [Text]
 concGroups = ["g" <> T.pack (show i) | i <- [1 .. 3 :: Int]]
@@ -1681,7 +1682,7 @@ dedupReplaceStaleLeaseGuard
   -> IO ()
 dedupReplaceStaleLeaseGuard run schema table withConn reset = do
   reset
-  let job = (defaultGroupedJob "drslg" (smPayload "drsl")) {dedupKey = Just (ReplaceDuplicate "drsl-key")}
+  let job = setDedupKey (Just (ReplaceDuplicate "drsl-key")) $ defaultGroupedJob "drslg" (smPayload "drsl")
   void (run (HL.insertJob job))
   _ <- run (HL.claimNextVisibleJobsAs 1 1 (UUID.fromWords 0 0 0 1) :: sm [JobRead SMPayload])
   threadDelay 2_000_000

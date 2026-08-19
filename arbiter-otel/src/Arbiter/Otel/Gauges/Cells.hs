@@ -27,6 +27,7 @@ import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
+-- | One gauge scan's readings.
 data Snapshot = Snapshot
   { queues :: [QueueOverview]
   , db :: Maybe Health.PgDbHealth

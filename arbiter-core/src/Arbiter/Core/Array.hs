@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | PostgreSQL array literal formatting for the text wire format.
 module Arbiter.Core.Array
   ( -- * Array Formatting
     fmtArray

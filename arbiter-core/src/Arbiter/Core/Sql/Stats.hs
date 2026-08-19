@@ -22,8 +22,8 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 -- | Per-status queue counts plus the age of the oldest @ready@ and @in_flight@ job.
 --
 -- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
--- UI can distinguish actively-leased ('in_flight') jobs from merely delayed
--- ('scheduled'/'backoff'/'throttled') or 'suspended' ones. The status counts
+-- UI can distinguish actively-leased (@in_flight@) jobs from merely delayed
+-- (@scheduled@/@backoff@/@throttled@) or @suspended@ ones. The status counts
 -- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
 -- far-future scheduled job no longer skews the queue's backlog latency.
 -- @oldest_in_flight_age_seconds@ measures from the claim that leased each row, so a

@@ -107,13 +107,9 @@ operationsSpec mkMessage mkResult runM = do
     it "claims jobs in priority order" $ \env -> do
       -- Insert jobs with different priorities
       let highPriority =
-            (defaultGroupedJob "claim-priority-test" (mkMessage "High"))
-              { priority = 0
-              }
+            setPriority 0 $ defaultGroupedJob "claim-priority-test" (mkMessage "High")
           lowPriority =
-            (defaultGroupedJob "claim-priority-test" (mkMessage "Low"))
-              { priority = 10
-              }
+            setPriority 10 $ defaultGroupedJob "claim-priority-test" (mkMessage "Low")
 
       void $ runM env (HL.insertJob lowPriority)
       void $ runM env (HL.insertJob highPriority)
@@ -130,14 +126,9 @@ operationsSpec mkMessage mkResult runM = do
       -- is the older job (lower id) and would be the group head by id alone.
       let future = truncateToMicros (addUTCTime 3600 now)
           deprioritizedScheduled =
-            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Scheduled"))
-              { priority = 10
-              , notVisibleUntil = Just future
-              }
+            setNotVisibleUntil (Just future) $ setPriority 10 $ defaultGroupedJob "claim-priority-scheduled" (mkMessage "Scheduled")
           topPriority =
-            (defaultGroupedJob "claim-priority-scheduled" (mkMessage "Top"))
-              { priority = 0
-              }
+            setPriority 0 $ defaultGroupedJob "claim-priority-scheduled" (mkMessage "Top")
 
       void $ runM env (HL.insertJob deprioritizedScheduled)
       void $ runM env (HL.insertJob topPriority)
@@ -151,8 +142,8 @@ operationsSpec mkMessage mkResult runM = do
       priority (head claimed) `shouldBe` 0
 
     it "claims jobs from different groups" $ \env -> do
-      let job1 = (defaultJob (mkMessage "G1")) {groupKey = Just "group1"}
-          job2 = (defaultJob (mkMessage "G2")) {groupKey = Just "group2"}
+      let job1 = setGroupKey (Just "group1") $ defaultJob (mkMessage "G1")
+          job2 = setGroupKey (Just "group2") $ defaultJob (mkMessage "G2")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -164,8 +155,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "respects per-group ordering" $ \env -> do
       -- Insert two jobs in the same group
-      let job1 = (defaultJob (mkMessage "First")) {groupKey = Just "claim-hol-test"}
-          job2 = (defaultJob (mkMessage "Second")) {groupKey = Just "claim-hol-test"}
+      let job1 = setGroupKey (Just "claim-hol-test") $ defaultJob (mkMessage "First")
+          job2 = setGroupKey (Just "claim-hol-test") $ defaultJob (mkMessage "Second")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -215,7 +206,7 @@ operationsSpec mkMessage mkResult runM = do
       map payload claimed `shouldBe` [mkMessage "U1", mkMessage "G1", mkMessage "U2"]
 
     it "increments attempts on claim" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "claim-attempts-test"}
+      let job = setGroupKey (Just "claim-attempts-test") $ defaultJob (mkMessage "Test")
 
       Just inserted <- runM env (HL.insertJob job)
       attempts inserted `shouldBe` 0
@@ -224,7 +215,7 @@ operationsSpec mkMessage mkResult runM = do
       attempts (head claimed) `shouldBe` 1
 
     it "claimed jobs are not re-claimable" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "claim-visibility-test"}
+      let job = setGroupKey (Just "claim-visibility-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
 
@@ -238,7 +229,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "ackJob" $ do
     it "removes a job from the queue" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "ack-remove-test"}
+      let job = setGroupKey (Just "ack-remove-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -253,8 +244,8 @@ operationsSpec mkMessage mkResult runM = do
       length claimed2 `shouldBe` 0
 
     it "allows next job in group to be claimed after ack" $ \env -> do
-      let job1 = (defaultJob (mkMessage "First")) {groupKey = Just "ack-next-test"}
-          job2 = (defaultJob (mkMessage "Second")) {groupKey = Just "ack-next-test"}
+      let job1 = setGroupKey (Just "ack-next-test") $ defaultJob (mkMessage "First")
+          job2 = setGroupKey (Just "ack-next-test") $ defaultJob (mkMessage "Second")
 
       void $ runM env (HL.insertJob job1)
       void $ runM env (HL.insertJob job2)
@@ -427,7 +418,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "setVisibilityTimeout" $ do
     it "extends visibility timeout for retry" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "visibility-extend-test"}
+      let job = setGroupKey (Just "visibility-extend-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -488,12 +479,12 @@ operationsSpec mkMessage mkResult runM = do
 
     it "allows next jobs in groups to be claimed after batch ack" $ \env -> do
       let batch1 =
-            [ (defaultJob (mkMessage "First-A")) {groupKey = Just "batch-ack-test-1"}
-            , (defaultJob (mkMessage "First-B")) {groupKey = Just "batch-ack-test-2"}
+            [ setGroupKey (Just "batch-ack-test-1") $ defaultJob (mkMessage "First-A")
+            , setGroupKey (Just "batch-ack-test-2") $ defaultJob (mkMessage "First-B")
             ]
           batch2 =
-            [ (defaultJob (mkMessage "Second-A")) {groupKey = Just "batch-ack-test-1"}
-            , (defaultJob (mkMessage "Second-B")) {groupKey = Just "batch-ack-test-2"}
+            [ setGroupKey (Just "batch-ack-test-1") $ defaultJob (mkMessage "Second-A")
+            , setGroupKey (Just "batch-ack-test-2") $ defaultJob (mkMessage "Second-B")
             ]
 
       void $ runM env (HL.insertJobsBatch (batch1 <> batch2))
@@ -563,24 +554,33 @@ operationsSpec mkMessage mkResult runM = do
       sort goneJobs `shouldBe` sort (map primaryKey toAck)
       sort successJobs `shouldBe` sort (map primaryKey stillProcessing)
 
-    it "leaves a finalizer the ack suspended out of the beat" $ \env -> do
-      -- Window 1. Spawning a child turns the job into a finalizer at ack.
-      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "SuspendedFinalizer")))
-      [claimedParent] <- claimJobs env 1
-      void $
-        runM env $
-          HL.insertJob ((defaultJob (mkMessage "SuspendedFinalizerChild")) {parentId = Just (primaryKey parent)})
-      void $ runM env (HL.ackJob claimedParent)
+    it "leaves a finalizer a DLQ retry re-suspended out of the beat" $ \env -> do
+      -- Window 1. A woken finalizer whose child comes back from the DLQ is
+      -- re-suspended under the claim it still holds.
+      Right (parent :| [child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SuspendedFinalizer"))
+            (JT.leaf (defaultJob (mkMessage "SuspendedFinalizerChild")) :| [])
       assertSuspended env (primaryKey parent)
 
-      results <- runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
-      results `shouldBe` [JobSuspended (primaryKey parent)]
+      -- The child dies to the DLQ, which wakes the finalizer for its round.
+      [claimedChild] <- claimJobs env 1
+      primaryKey claimedChild `shouldBe` primaryKey child
+      runM env (HL.moveToDLQ "boom" claimedChild) `shouldReturn` 1
+      assertNotSuspended env (primaryKey parent)
 
-      -- Completing the child leaves the finalizer claimable at once.
-      [child] <- claimJobs env 1
-      void $ runM env (HL.ackJob child)
-      woken <- claimJobs env 1
-      map primaryKey woken `shouldBe` [primaryKey parent]
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+      void $ runM env (HL.setVisibilityTimeout 0 claimedParent)
+
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+      assertSuspended env (primaryKey parent)
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
+        >>= (`shouldBe` [JobSuspended (primaryKey parent)])
 
     it "refuses a flagged job to a lapsed claim carrying the same worker id" $ \env -> do
       let owner = UUID.nil
@@ -658,9 +658,12 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "Tree locks" $
     it "locks an orphaned job's own subtree when its parent row is gone" $ \env -> do
-      Just root <- runM env (HL.insertJob (defaultJob (mkMessage "orphan-root")))
-      Just mid <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-mid")) {parentId = Just (primaryKey root)}))
-      Just leaf <- runM env (HL.insertJob ((defaultJob (mkMessage "orphan-leaf")) {parentId = Just (primaryKey mid)}))
+      Right (root :| [mid, leaf]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "orphan-root"))
+            (JT.rollup (defaultJob (mkMessage "orphan-mid")) (JT.leaf (defaultJob (mkMessage "orphan-leaf")) :| []) :| [])
 
       lockedFromRoot env [primaryKey leaf] `shouldReturn` 3
       deleteRowDirectly env (primaryKey root)
@@ -669,13 +672,9 @@ operationsSpec mkMessage mkResult runM = do
   describe "Job Deduplication" $ do
     it "No dedup key allows multiple jobs with same payload" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-always-test" (mkMessage "Same"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-always-test" (mkMessage "Same")
           job2 =
-            (defaultGroupedJob "dedup-always-test" (mkMessage "Same"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-always-test" (mkMessage "Same")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -689,13 +688,9 @@ operationsSpec mkMessage mkResult runM = do
       -- groupKey does not participate in dedup: the same key conflicts whether
       -- the jobs are grouped or ungrouped.
       let job1 =
-            (defaultGroupedJob "dedup-ignore-test-1" (mkMessage "First"))
-              { dedupKey = Just (IgnoreDuplicate "unique-key-1")
-              }
+            setDedupKey (Just (IgnoreDuplicate "unique-key-1")) $ defaultGroupedJob "dedup-ignore-test-1" (mkMessage "First")
           job2 =
-            (defaultGroupedJob "dedup-ignore-test-2" (mkMessage "Second"))
-              { dedupKey = Just (IgnoreDuplicate "unique-key-1") -- Same dedup key, different group
-              }
+            setDedupKey (Just (IgnoreDuplicate "unique-key-1")) $ defaultGroupedJob "dedup-ignore-test-2" (mkMessage "Second")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       inserted2 <- runM env (HL.insertJob job2)
@@ -706,13 +701,9 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Same conflict holds for ungrouped jobs sharing a dedup key.
       let ungrouped1 =
-            (defaultJob (mkMessage "Ungrouped1"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ungrouped-key")) $ defaultJob (mkMessage "Ungrouped1")
           ungrouped2 =
-            (defaultJob (mkMessage "Ungrouped2"))
-              { dedupKey = Just (IgnoreDuplicate "ungrouped-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ungrouped-key")) $ defaultJob (mkMessage "Ungrouped2")
 
       Just insertedU1 <- runM env (HL.insertJob ungrouped1)
       insertedU2 <- runM env (HL.insertJob ungrouped2)
@@ -720,13 +711,9 @@ operationsSpec mkMessage mkResult runM = do
       payload insertedU1 `shouldBe` mkMessage "Ungrouped1"
     it "IgnoreDuplicate with different keys creates separate jobs" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-diffkey-test-1" (mkMessage "Job1"))
-              { dedupKey = Just (IgnoreDuplicate "key-1")
-              }
+            setDedupKey (Just (IgnoreDuplicate "key-1")) $ defaultGroupedJob "dedup-diffkey-test-1" (mkMessage "Job1")
           job2 =
-            (defaultGroupedJob "dedup-diffkey-test-2" (mkMessage "Job2"))
-              { dedupKey = Just (IgnoreDuplicate "key-2") -- Different dedup key
-              }
+            setDedupKey (Just (IgnoreDuplicate "key-2")) $ defaultGroupedJob "dedup-diffkey-test-2" (mkMessage "Job2")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -738,15 +725,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate replaces existing job completely" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-replace-test-1" (mkMessage "Original"))
-              { priority = 10
-              , dedupKey = Just (ReplaceDuplicate "replace-key-1")
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key-1"))
+              $ setPriority 10
+              $ defaultGroupedJob "dedup-replace-test-1" (mkMessage "Original")
           job2 =
-            (defaultGroupedJob "dedup-replace-test-2" (mkMessage "Replacement"))
-              { priority = 5
-              , dedupKey = Just (ReplaceDuplicate "replace-key-1") -- Same dedup key
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key-1"))
+              $ setPriority 5
+              $ defaultGroupedJob "dedup-replace-test-2" (mkMessage "Replacement")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -764,9 +749,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate resets job state (attempts, errors)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-reset-test-1" (mkMessage "First"))
-              { dedupKey = Just (ReplaceDuplicate "reset-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "reset-key")) $ defaultGroupedJob "dedup-reset-test-1" (mkMessage "First")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -782,9 +765,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Now insert replacement job
       let job2 =
-            (defaultGroupedJob "dedup-reset-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "reset-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "reset-key")) $ defaultGroupedJob "dedup-reset-test-2" (mkMessage "Replacement")
 
       Just inserted2 <- runM env (HL.insertJob job2)
 
@@ -794,15 +775,14 @@ operationsSpec mkMessage mkResult runM = do
       lastError inserted2 `shouldBe` Nothing
       payload inserted2 `shouldBe` mkMessage "Replacement"
 
-    it "ReplaceDuplicate returns Nothing when job is actively in-flight (first attempt)" $ \env -> do
+    it "ReplaceDuplicate returns Nothing when the existing job is actively claimed" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-inflight-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "inflight-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "inflight-test-key")) $
+              defaultGroupedJob "dedup-inflight-test-1" (mkMessage "Original")
 
       Just _inserted1 <- runM env (HL.insertJob job1)
 
-      -- Claim the job (now in first attempt: attempts=1, last_error=NULL, not_visible_until > NOW)
+      -- Claim the job (attempts=1, last_error=NULL, not_visible_until > NOW).
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
       let claimedJob = head claimed
@@ -811,9 +791,8 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Try to replace while actively in-flight - should return Nothing (unsafe to replace)
       let job2 =
-            (defaultGroupedJob "dedup-inflight-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "inflight-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "inflight-test-key")) $
+              defaultGroupedJob "dedup-inflight-test-2" (mkMessage "Replacement")
 
       replaced <- runM env (HL.insertJob job2)
       replaced `shouldBe` Nothing
@@ -827,9 +806,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate returns Nothing for a force-cancel-flagged job" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-flagged-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "flagged-test-key")) $
+              defaultGroupedJob "dedup-flagged-test-1" (mkMessage "Original")
       Just inserted1 <- runM env (HL.insertJob job1)
       let jobId = primaryKey inserted1
       claimed <- claimJobsAs env 1 UUID.nil
@@ -841,9 +819,8 @@ operationsSpec mkMessage mkResult runM = do
       void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
 
       let job2 =
-            (defaultGroupedJob "dedup-flagged-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "flagged-test-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "flagged-test-key")) $
+              defaultGroupedJob "dedup-flagged-test-2" (mkMessage "Replacement")
       runM env (HL.insertJob job2) >>= (`shouldBe` Nothing)
 
       Just untouched <- getJob env jobId
@@ -856,9 +833,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ReplaceDuplicate succeeds when job is in retry backoff (has last_error)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-backoff-test-1" (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "retry-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "retry-backoff-key")) $
+              defaultGroupedJob "dedup-backoff-test-1" (mkMessage "Original")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -873,9 +849,8 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Now try to replace - should succeed because last_error IS NOT NULL (safe to replace)
       let job2 =
-            (defaultGroupedJob "dedup-backoff-test-2" (mkMessage "Replacement"))
-              { dedupKey = Just (ReplaceDuplicate "retry-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "retry-backoff-key")) $
+              defaultGroupedJob "dedup-backoff-test-2" (mkMessage "Replacement")
 
       Just replaced <- runM env (HL.insertJob job2)
 
@@ -887,9 +862,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "Dedup key only applies to jobs in queue (not after ack)" $ \env -> do
       let job1 =
-            (defaultGroupedJob "dedup-ack-test-1" (mkMessage "First"))
-              { dedupKey = Just (IgnoreDuplicate "ack-test-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-1" (mkMessage "First")
 
       Just inserted1 <- runM env (HL.insertJob job1)
 
@@ -900,9 +873,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Insert another job with same dedup key
       let job2 =
-            (defaultGroupedJob "dedup-ack-test-2" (mkMessage "Second"))
-              { dedupKey = Just (IgnoreDuplicate "ack-test-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-2" (mkMessage "Second")
 
       Just inserted2 <- runM env (HL.insertJob job2)
 
@@ -912,25 +883,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "Mixed dedup strategies work independently" $ \env -> do
       let noDedupJob =
-            (defaultGroupedJob "dedup-mixed-test-1" (mkMessage "NoDedupe"))
-              { dedupKey = Nothing
-              }
+            setDedupKey Nothing $ defaultGroupedJob "dedup-mixed-test-1" (mkMessage "NoDedupe")
           ignoreJob1 =
-            (defaultGroupedJob "dedup-mixed-test-2" (mkMessage "Ignore1"))
-              { dedupKey = Just (IgnoreDuplicate "ignore-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "ignore-key")) $ defaultGroupedJob "dedup-mixed-test-2" (mkMessage "Ignore1")
           ignoreJob2 =
-            (defaultGroupedJob "dedup-mixed-test-3" (mkMessage "Ignore2"))
-              { dedupKey = Just (IgnoreDuplicate "ignore-key") -- Duplicate
-              }
+            setDedupKey (Just (IgnoreDuplicate "ignore-key")) $ defaultGroupedJob "dedup-mixed-test-3" (mkMessage "Ignore2")
           replaceJob1 =
-            (defaultGroupedJob "dedup-mixed-test-4" (mkMessage "Replace1"))
-              { dedupKey = Just (ReplaceDuplicate "replace-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key")) $ defaultGroupedJob "dedup-mixed-test-4" (mkMessage "Replace1")
           replaceJob2 =
-            (defaultGroupedJob "dedup-mixed-test-5" (mkMessage "Replace2"))
-              { dedupKey = Just (ReplaceDuplicate "replace-key") -- Duplicate
-              }
+            setDedupKey (Just (ReplaceDuplicate "replace-key")) $ defaultGroupedJob "dedup-mixed-test-5" (mkMessage "Replace2")
 
       Just noDedup <- runM env (HL.insertJob noDedupJob)
       Just ignore1 <- runM env (HL.insertJob ignoreJob1)
@@ -951,13 +912,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "IgnoreDuplicate and ReplaceDuplicate with same key conflict" $ \env -> do
       let job1 =
-            (defaultJob (mkMessage "IgnoreFirst"))
-              { dedupKey = Just (IgnoreDuplicate "cross-strategy-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "cross-strategy-key")) $ defaultJob (mkMessage "IgnoreFirst")
           job2 =
-            (defaultJob (mkMessage "ReplaceSecond"))
-              { dedupKey = Just (ReplaceDuplicate "cross-strategy-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "cross-strategy-key")) $ defaultJob (mkMessage "ReplaceSecond")
 
       Just inserted1 <- runM env (HL.insertJob job1)
       Just inserted2 <- runM env (HL.insertJob job2)
@@ -979,16 +936,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with IgnoreDuplicate skips conflicts" $ \env -> do
       -- Pre-insert a job with a dedup key
       let existingJob =
-            (defaultJob (mkMessage "Existing"))
-              { dedupKey = Just (IgnoreDuplicate "batch-ignore-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-ignore-key")) $ defaultJob (mkMessage "Existing")
       Just _ <- runM env (HL.insertJob existingJob)
 
       -- Batch insert: one conflicting, two new
       let batchJobs =
-            [ (defaultJob (mkMessage "Conflict"))
-                { dedupKey = Just (IgnoreDuplicate "batch-ignore-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "batch-ignore-key")) $ defaultJob (mkMessage "Conflict")
             , defaultJob (mkMessage "New1")
             , defaultJob (mkMessage "New2")
             ]
@@ -1001,18 +954,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with ReplaceDuplicate replaces existing job" $ \env -> do
       -- Pre-insert a job with a dedup key
       let existingJob =
-            (defaultJob (mkMessage "Original"))
-              { dedupKey = Just (ReplaceDuplicate "batch-replace-key")
-              , priority = 10
-              }
+            setPriority 10 $ setDedupKey (Just (ReplaceDuplicate "batch-replace-key")) $ defaultJob (mkMessage "Original")
       Just original <- runM env (HL.insertJob existingJob)
 
       -- Batch insert with a replacement
       let batchJobs =
-            [ (defaultJob (mkMessage "Replacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-replace-key")
-                , priority = 5
-                }
+            [ setPriority 5 $ setDedupKey (Just (ReplaceDuplicate "batch-replace-key")) $ defaultJob (mkMessage "Replacement")
             , defaultJob (mkMessage "Other")
             ]
 
@@ -1028,25 +975,17 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert with mixed strategies" $ \env -> do
       -- Pre-insert two jobs
       let ignoreExisting =
-            (defaultJob (mkMessage "IgnoreExisting"))
-              { dedupKey = Just (IgnoreDuplicate "batch-mixed-ignore")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-mixed-ignore")) $ defaultJob (mkMessage "IgnoreExisting")
           replaceExisting =
-            (defaultJob (mkMessage "ReplaceExisting"))
-              { dedupKey = Just (ReplaceDuplicate "batch-mixed-replace")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-mixed-replace")) $ defaultJob (mkMessage "ReplaceExisting")
       Just _ <- runM env (HL.insertJob ignoreExisting)
       Just origReplace <- runM env (HL.insertJob replaceExisting)
 
       -- Batch: conflict on ignore (skipped), conflict on replace (updated),
       -- plus one job with no dedup key (always inserted)
       let batchJobs =
-            [ (defaultJob (mkMessage "IgnoreConflict"))
-                { dedupKey = Just (IgnoreDuplicate "batch-mixed-ignore")
-                }
-            , (defaultJob (mkMessage "ReplaceConflict"))
-                { dedupKey = Just (ReplaceDuplicate "batch-mixed-replace")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "batch-mixed-ignore")) $ defaultJob (mkMessage "IgnoreConflict")
+            , setDedupKey (Just (ReplaceDuplicate "batch-mixed-replace")) $ defaultJob (mkMessage "ReplaceConflict")
             , defaultJob (mkMessage "NoDedupJob")
             ]
 
@@ -1063,16 +1002,12 @@ operationsSpec mkMessage mkResult runM = do
     it "batch insert cross-strategy conflict (IgnoreDuplicate then ReplaceDuplicate)" $ \env -> do
       -- Pre-insert with IgnoreDuplicate
       let existingJob =
-            (defaultJob (mkMessage "IgnoreFirst"))
-              { dedupKey = Just (IgnoreDuplicate "batch-cross-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "batch-cross-key")) $ defaultJob (mkMessage "IgnoreFirst")
       Just original <- runM env (HL.insertJob existingJob)
 
       -- Batch insert with ReplaceDuplicate on the same key
       let batchJobs =
-            [ (defaultJob (mkMessage "ReplaceSecond"))
-                { dedupKey = Just (ReplaceDuplicate "batch-cross-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-cross-key")) $ defaultJob (mkMessage "ReplaceSecond")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1082,11 +1017,9 @@ operationsSpec mkMessage mkResult runM = do
       payload (head inserted) `shouldBe` mkMessage "ReplaceSecond"
 
     it "batch ReplaceDuplicate does not replace in-flight job" $ \env -> do
-      -- Insert and claim a job (making it in-flight on first attempt)
+      -- Insert and claim a job, making it actively owned by a worker.
       let existingJob =
-            (defaultJob (mkMessage "InFlight"))
-              { dedupKey = Just (ReplaceDuplicate "batch-inflight-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-inflight-key")) $ defaultJob (mkMessage "InFlight")
       Just _ <- runM env (HL.insertJob existingJob)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed `shouldBe` 1
@@ -1094,9 +1027,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Batch insert with ReplaceDuplicate on the same key
       let batchJobs =
-            [ (defaultJob (mkMessage "Replacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-inflight-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-inflight-key")) $ defaultJob (mkMessage "Replacement")
             , defaultJob (mkMessage "Other")
             ]
 
@@ -1107,12 +1038,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "duplicate IgnoreDuplicate keys within batch: first wins" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (IgnoreDuplicate "ign-ign-key")
-                }
-            , (defaultJob (mkMessage "Second"))
-                { dedupKey = Just (IgnoreDuplicate "ign-ign-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "ign-ign-key")) $ defaultJob (mkMessage "First")
+            , setDedupKey (Just (IgnoreDuplicate "ign-ign-key")) $ defaultJob (mkMessage "Second")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1121,12 +1048,8 @@ operationsSpec mkMessage mkResult runM = do
 
     it "duplicate ReplaceDuplicate keys within batch: last wins" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (ReplaceDuplicate "rep-rep-key")
-                }
-            , (defaultJob (mkMessage "Second"))
-                { dedupKey = Just (ReplaceDuplicate "rep-rep-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "rep-rep-key")) $ defaultJob (mkMessage "First")
+            , setDedupKey (Just (ReplaceDuplicate "rep-rep-key")) $ defaultJob (mkMessage "Second")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1135,13 +1058,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "mixed strategies within batch: ReplaceDuplicate takes precedence" $ \env -> do
       let batchJobs =
-            [ (defaultJob (mkMessage "First"))
-                { dedupKey = Just (IgnoreDuplicate "mixed-key")
-                }
+            [ setDedupKey (Just (IgnoreDuplicate "mixed-key")) $ defaultJob (mkMessage "First")
             , defaultJob (mkMessage "Middle")
-            , (defaultJob (mkMessage "Last"))
-                { dedupKey = Just (ReplaceDuplicate "mixed-key")
-                }
+            , setDedupKey (Just (ReplaceDuplicate "mixed-key")) $ defaultJob (mkMessage "Last")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1157,18 +1076,14 @@ operationsSpec mkMessage mkResult runM = do
     it "batch ReplaceDuplicate succeeds when job is in retry backoff" $ \env -> do
       -- Insert, claim, then fail the job (putting it in retry backoff)
       let existingJob =
-            (defaultJob (mkMessage "WillFail"))
-              { dedupKey = Just (ReplaceDuplicate "batch-backoff-key")
-              }
+            setDedupKey (Just (ReplaceDuplicate "batch-backoff-key")) $ defaultJob (mkMessage "WillFail")
       Just original <- runM env (HL.insertJob existingJob)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.updateJobForRetry 5 "Simulated failure" (head claimed))
 
       -- Batch insert with ReplaceDuplicate - should succeed because last_error IS NOT NULL
       let batchJobs =
-            [ (defaultJob (mkMessage "FreshReplacement"))
-                { dedupKey = Just (ReplaceDuplicate "batch-backoff-key")
-                }
+            [ setDedupKey (Just (ReplaceDuplicate "batch-backoff-key")) $ defaultJob (mkMessage "FreshReplacement")
             ]
 
       inserted <- runM env (HL.insertJobsBatch batchJobs)
@@ -1180,7 +1095,7 @@ operationsSpec mkMessage mkResult runM = do
 
   describe "updateJobForRetry" $ do
     it "updates job with error message and visibility timeout" $ \env -> do
-      let job = (defaultJob (mkMessage "Test")) {groupKey = Just "retry-update-test"}
+      let job = setGroupKey (Just "retry-update-test") $ defaultJob (mkMessage "Test")
 
       void $ runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1227,7 +1142,7 @@ operationsSpec mkMessage mkResult runM = do
       getJob env (primaryKey inserted) >>= (`shouldSatisfy` isJust)
   describe "Dead Letter Queue Operations" $ do
     it "moveToDLQ moves failed job to DLQ and removes from main queue" $ \env -> do
-      let job = (defaultJob (mkMessage "Failed")) {groupKey = Just "dlq-move-test"}
+      let job = setGroupKey (Just "dlq-move-test") $ defaultJob (mkMessage "Failed")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1259,7 +1174,7 @@ operationsSpec mkMessage mkResult runM = do
       attempts dlqJobSnapshot `shouldBe` 2
 
     it "retryFromDLQ moves job back to main queue with attempts reset" $ \env -> do
-      let job = (defaultJob (mkMessage "Retry")) {groupKey = Just "dlq-retry-test"}
+      let job = setGroupKey (Just "dlq-retry-test") $ defaultJob (mkMessage "Retry")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1302,7 +1217,7 @@ operationsSpec mkMessage mkResult runM = do
       getJob env (primaryKey retried) >>= (`shouldSatisfy` isJust)
 
     it "an exhausted-sweep move refuses a job whose nack restored the attempt" $ \env -> do
-      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "sweep-nack")) {maxAttempts = Just 1})
+      Just inserted <- runM env (HL.insertJob $ setMaxAttempts (Just 1) $ defaultJob (mkMessage "sweep-nack"))
       claimed <- claimJobsAs env 1 UUID.nil
       map attempts claimed `shouldBe` [1]
       runM env (HL.nackJob (head claimed)) `shouldReturn` 1
@@ -1329,7 +1244,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ returns Nothing for non-existent DLQ job" $ \env -> do
       -- Fabricate a DLQ job with a bogus ID
-      let job = (defaultJob (mkMessage "Phantom")) {groupKey = Just "dlq-phantom"}
+      let job = setGroupKey (Just "dlq-phantom") $ defaultJob (mkMessage "Phantom")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "err" (head claimed))
@@ -1340,7 +1255,7 @@ operationsSpec mkMessage mkResult runM = do
       result `shouldBe` Nothing
 
     it "deleteDLQJob returns 0 for non-existent DLQ job" $ \env -> do
-      let job = (defaultJob (mkMessage "Ghost")) {groupKey = Just "dlq-ghost"}
+      let job = setGroupKey (Just "dlq-ghost") $ defaultJob (mkMessage "Ghost")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "err" (head claimed))
@@ -1351,7 +1266,7 @@ operationsSpec mkMessage mkResult runM = do
       n `shouldBe` 0
 
     it "deleteDLQJob permanently removes job from DLQ" $ \env -> do
-      let job = (defaultJob (mkMessage "Delete")) {groupKey = Just "dlq-delete-test"}
+      let job = setGroupKey (Just "dlq-delete-test") $ defaultJob (mkMessage "Delete")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1376,9 +1291,7 @@ operationsSpec mkMessage mkResult runM = do
     it "listDLQJobs supports pagination" $ \env -> do
       -- Insert and move 5 jobs to DLQ
       let jobs =
-            [ (defaultJob (mkMessage ("Job" <> T.pack (show i))))
-                { groupKey = Just ("dlq-pagination-test-" <> T.pack (show i))
-                }
+            [ setGroupKey (Just ("dlq-pagination-test-" <> T.pack (show i))) $ defaultJob (mkMessage ("Job" <> T.pack (show i)))
             | i <- [1 .. 5 :: Int]
             ]
 
@@ -1406,7 +1319,7 @@ operationsSpec mkMessage mkResult runM = do
       length allDlqIds `shouldBe` length (nub allDlqIds)
 
     it "moveToDLQ returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-move-test"}
+      let job = setGroupKey (Just "dlq-race-move-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1423,7 +1336,7 @@ operationsSpec mkMessage mkResult runM = do
       rowsAffected `shouldBe` 0
 
     it "updateJobForRetry returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-retry-test"}
+      let job = setGroupKey (Just "dlq-race-retry-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1440,7 +1353,7 @@ operationsSpec mkMessage mkResult runM = do
       rowsAffected `shouldBe` 0
 
     it "ackJob returns 0 when job already claimed by another worker" $ \env -> do
-      let job = (defaultJob (mkMessage "Race")) {groupKey = Just "dlq-race-ack-test"}
+      let job = setGroupKey (Just "dlq-race-ack-test") $ defaultJob (mkMessage "Race")
 
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -1458,10 +1371,7 @@ operationsSpec mkMessage mkResult runM = do
 
     it "maxAttempts=2 retries once then moves to DLQ on the second attempt" $ \env -> do
       let job =
-            (defaultJob (mkMessage "MaxAtt2"))
-              { groupKey = Just "max-attempts-2-test"
-              , maxAttempts = Just 2
-              }
+            setMaxAttempts (Just 2) $ setGroupKey (Just "max-attempts-2-test") $ defaultJob (mkMessage "MaxAtt2")
       Just _inserted <- runM env (HL.insertJob job)
 
       -- First attempt: claim brings attempts to 1, below maxAttempts, so retry.
@@ -1493,9 +1403,7 @@ operationsSpec mkMessage mkResult runM = do
     it "retryFromDLQ drops dedup_key so the same key no longer dedups" $ \env -> do
       -- A DLQ'd job carrying an IgnoreDuplicate key.
       let job =
-            (defaultJob (mkMessage "RetryDropKey"))
-              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "retry-drop-key")) $ defaultJob (mkMessage "RetryDropKey")
       Just _inserted <- runM env (HL.insertJob job)
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       void $ runM env (HL.moveToDLQ "boom" (head claimed))
@@ -1509,9 +1417,7 @@ operationsSpec mkMessage mkResult runM = do
 
       -- A fresh insert with the original key is therefore NOT deduped.
       let again =
-            (defaultJob (mkMessage "RetryDropKeyAgain"))
-              { dedupKey = Just (IgnoreDuplicate "retry-drop-key")
-              }
+            setDedupKey (Just (IgnoreDuplicate "retry-drop-key")) $ defaultJob (mkMessage "RetryDropKeyAgain")
       Just insertedAgain <- runM env (HL.insertJob again)
       primaryKey insertedAgain `shouldNotBe` primaryKey retried
       payload insertedAgain `shouldBe` mkMessage "RetryDropKeyAgain"
@@ -1621,9 +1527,9 @@ operationsSpec mkMessage mkResult runM = do
 
     it "respects priority within batches" $ \env -> do
       -- Insert jobs with different priorities in same group
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "Low")) {priority = 10}))
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "High")) {priority = 0}))
-      void $ runM env (HL.insertJob ((defaultGroupedJob "batch-priority-test" (mkMessage "Med")) {priority = 5}))
+      void $ runM env (HL.insertJob (setPriority 10 $ defaultGroupedJob "batch-priority-test" (mkMessage "Low")))
+      void $ runM env (HL.insertJob (setPriority 0 $ defaultGroupedJob "batch-priority-test" (mkMessage "High")))
+      void $ runM env (HL.insertJob (setPriority 5 $ defaultGroupedJob "batch-priority-test" (mkMessage "Med")))
 
       -- Claim batch of 3
       batches <- claimBatched env 3 10 :: IO [NonEmpty (JobRead payload)]
@@ -1722,13 +1628,13 @@ operationsSpec mkMessage mkResult runM = do
     it "batched mode claims children but not suspended finalizers" $ \env -> do
       -- Insert a rollup tree: finalizer + 2 children
       Right (_parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "BatchExclParent"))
-              ( JT.leaf (defaultJob (mkMessage "BatchExclChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "BatchExclChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "BatchExclParent"))
+            ( JT.leaf (defaultJob (mkMessage "BatchExclChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "BatchExclChild2"))]
+            )
 
       -- Insert a regular (non-tree) job
       void $ runM env (HL.insertJob (defaultJob (mkMessage "BatchExclRegular")))
@@ -1988,11 +1894,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "pause/resume children" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "PauseParent"))
-              (JT.leaf (defaultJob (mkMessage "PauseChild1")) :| [JT.leaf (defaultJob (mkMessage "PauseChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "PauseParent"))
+            (JT.leaf (defaultJob (mkMessage "PauseChild1")) :| [JT.leaf (defaultJob (mkMessage "PauseChild2"))])
 
       -- Children start unsuspended - pause them
       paused <- runM env (HL.pauseChildren @payload (primaryKey parent))
@@ -2019,15 +1925,15 @@ operationsSpec mkMessage mkResult runM = do
       -- resumeChildren(GP) should resume Leaf1, Leaf2 only -- not Parent, because
       -- Parent still has children in main queue and would run prematurely.
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "NestedGP"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "NestedParent"))
-                  (JT.leaf (defaultJob (mkMessage "NestedLeaf1")) :| [JT.leaf (defaultJob (mkMessage "NestedLeaf2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "NestedGP"))
+            ( JT.rollup
+                (defaultJob (mkMessage "NestedParent"))
+                (JT.leaf (defaultJob (mkMessage "NestedLeaf1")) :| [JT.leaf (defaultJob (mkMessage "NestedLeaf2"))])
+                :| []
+            )
 
       let parent = head rest
 
@@ -2061,11 +1967,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "moveToDLQ on only child wakes parent" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQChild")) :| [])
 
       -- Claim the child
       claimedChild <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -2077,14 +1983,16 @@ operationsSpec mkMessage mkResult runM = do
       -- Parent should be resumed (not suspended)
       Just parentResumed <- runM env (HL.getJobById @payload (primaryKey parent))
       suspended parentResumed `shouldBe` False
+      (_, childFailures, _, _) <- runM env (HL.readChildResultsRaw @payload (primaryKey parent))
+      Map.keys childFailures `shouldBe` [primaryKey (head claimedChild)]
 
     it "moveToDLQ snapshots the rollup's own child results before the cascade" $ \env -> do
       Right (parent :| _) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "SnapshotParent"))
-              (JT.leaf (defaultJob (mkMessage "SnapshotChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SnapshotParent"))
+            (JT.leaf (defaultJob (mkMessage "SnapshotChild")) :| [])
       [child] <- claimJobs env 1
       void $ runM env (HL.insertResult @payload (primaryKey parent) (primaryKey child) (mkResult "child-done"))
       void $ runM env (HL.ackJob child)
@@ -2102,15 +2010,15 @@ operationsSpec mkMessage mkResult runM = do
     it "multi-level: grandparent wakes when all descendants complete" $ \env -> do
       -- Build: Grandparent → Parent → [Child1, Child2] using nested finalizers
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "Grandparent"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "Parent"))
-                  (JT.leaf (defaultJob (mkMessage "MLChild1")) :| [JT.leaf (defaultJob (mkMessage "MLChild2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "Grandparent"))
+            ( JT.rollup
+                (defaultJob (mkMessage "Parent"))
+                (JT.leaf (defaultJob (mkMessage "MLChild1")) :| [JT.leaf (defaultJob (mkMessage "MLChild2"))])
+                :| []
+            )
 
       let parent = head rest
 
@@ -2153,18 +2061,18 @@ operationsSpec mkMessage mkResult runM = do
     it "multi-level: partial completion doesn't wake ancestors" $ \env -> do
       -- Build: Grandparent finalizer → [Parent1 finalizer → [C1a], Parent2 finalizer → [C2a]]
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "GPPartial"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "P1Partial"))
-                  (JT.leaf (defaultJob (mkMessage "C1aPartial")) :| [])
-                  :| [ JT.rollup
-                         (defaultJob (mkMessage "P2Partial"))
-                         (JT.leaf (defaultJob (mkMessage "C2aPartial")) :| [])
-                     ]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "GPPartial"))
+            ( JT.rollup
+                (defaultJob (mkMessage "P1Partial"))
+                (JT.leaf (defaultJob (mkMessage "C1aPartial")) :| [])
+                :| [ JT.rollup
+                       (defaultJob (mkMessage "P2Partial"))
+                       (JT.leaf (defaultJob (mkMessage "C2aPartial")) :| [])
+                   ]
+            )
 
       let parent1 = head rest
           parent2 = rest !! 2 -- parent2 is after parent1 and its child
@@ -2209,15 +2117,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "multi-level: cancel cascade deletes all descendants" $ \env -> do
       Right (grandparent :| _rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascadeGP"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "CascadeMLParent"))
-                  (JT.leaf (defaultJob (mkMessage "CascadeMLChild1")) :| [JT.leaf (defaultJob (mkMessage "CascadeMLChild2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascadeGP"))
+            ( JT.rollup
+                (defaultJob (mkMessage "CascadeMLParent"))
+                (JT.leaf (defaultJob (mkMessage "CascadeMLChild1")) :| [JT.leaf (defaultJob (mkMessage "CascadeMLChild2"))])
+                :| []
+            )
 
       -- Cancel cascade from grandparent
       deleted <- runM env (HL.cancelJobCascade @payload (primaryKey grandparent))
@@ -2229,15 +2137,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "multi-level: DLQ at leaf wakes parent but not grandparent" $ \env -> do
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQGrandparent"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "DLQMLParent"))
-                  (JT.leaf (defaultJob (mkMessage "DLQMLChild")) :| [])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQGrandparent"))
+            ( JT.rollup
+                (defaultJob (mkMessage "DLQMLParent"))
+                (JT.leaf (defaultJob (mkMessage "DLQMLChild")) :| [])
+                :| []
+            )
 
       let parent = head rest
 
@@ -2303,34 +2211,10 @@ operationsSpec mkMessage mkResult runM = do
       n <- runM env (HL.resumeJob @payload (primaryKey inserted))
       n `shouldBe` 0
 
-    it "phantom parent: insert child with non-existent parentId returns Nothing" $ \env -> do
-      let child = (defaultJob (mkMessage "Orphan")) {parentId = Just 999999, suspended = True}
-      result <- runM env (HL.insertJob child)
-      result `shouldBe` Nothing
-
-    it "insertJob respects explicit suspended = True" $ \env -> do
-      -- User explicitly creates a pre-suspended job
-      let job = (defaultJob (mkMessage "PreSuspended")) {suspended = True}
-      Just inserted <- runM env (HL.insertJob job)
-      suspended inserted `shouldBe` True
-
-      -- Job should not be claimable
-      claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
-      length claimed `shouldBe` 0
-
-      -- Resume it
-      n <- runM env (HL.resumeJob @payload (primaryKey inserted))
-      n `shouldBe` 1
-
-      -- Now it should be claimable
-      claimed2 <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
-      length claimed2 `shouldBe` 1
-      payload (head claimed2) `shouldBe` mkMessage "PreSuspended"
-
     it "insertJob respects notVisibleUntil (delayed job)" $ \env -> do
       now <- getCurrentTime
       let futureTime = truncateToMicros (addUTCTime 3600 now)
-          job = (defaultJob (mkMessage "Delayed")) {notVisibleUntil = Just futureTime}
+          job = setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "Delayed")
       Just inserted <- runM env (HL.insertJob job)
       notVisibleUntil inserted `shouldBe` Just futureTime
 
@@ -2342,7 +2226,7 @@ operationsSpec mkMessage mkResult runM = do
       now <- getCurrentTime
       let futureTime = addUTCTime 3600 now
           jobs =
-            [ (defaultJob (mkMessage "BatchDelayed1")) {notVisibleUntil = Just futureTime}
+            [ setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "BatchDelayed1")
             , defaultJob (mkMessage "BatchImmediate")
             ]
       inserted <- runM env (HL.insertJobsBatch jobs)
@@ -2355,11 +2239,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ preserves parent_id and clears DLQ" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQRetryParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQRetryChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQRetryParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQRetryChild")) :| [])
 
       -- Claim and move child to DLQ
       claimedChild <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -2380,11 +2264,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJobCascade on suspended parent with paused children" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascadeSuspParent"))
-              (JT.leaf (defaultJob (mkMessage "CascadeSuspChild1")) :| [JT.leaf (defaultJob (mkMessage "CascadeSuspChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascadeSuspParent"))
+            (JT.leaf (defaultJob (mkMessage "CascadeSuspChild1")) :| [JT.leaf (defaultJob (mkMessage "CascadeSuspChild2"))])
 
       -- Pause children (makes them suspended)
       _ <- runM env (HL.pauseChildren @payload (primaryKey parent))
@@ -2399,11 +2283,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJob on last child wakes suspended parent" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CancelWakeParent"))
-              (JT.leaf (defaultJob (mkMessage "CancelWakeChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CancelWakeParent"))
+            (JT.leaf (defaultJob (mkMessage "CancelWakeChild")) :| [])
 
       let child = head children
 
@@ -2417,11 +2301,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJob on parent with children returns 0 (guard)" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CancelGuardParent"))
-              (JT.leaf (defaultJob (mkMessage "CancelGuardChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CancelGuardParent"))
+            (JT.leaf (defaultJob (mkMessage "CancelGuardChild")) :| [])
 
       -- cancelJob (non-cascade) should refuse to delete a parent with children
       deleted <- runM env (HL.cancelJob @payload (primaryKey parent))
@@ -2456,6 +2340,21 @@ operationsSpec mkMessage mkResult runM = do
       claimedPayloads `shouldNotContain` [mkMessage "FanOutParent"]
       claimedPayloads `shouldContain` [mkMessage "FanOutChild1"]
       claimedPayloads `shouldContain` [mkMessage "FanOutChild2"]
+
+    it "returns mixed nested trees in pre-order" $ \env -> do
+      let job label = defaultJob (mkMessage label)
+          tree =
+            JT.rollup
+              (job "OrderRoot")
+              ( JT.leaf (job "OrderLeaf1")
+                  :| [ JT.rollup (job "OrderNested") (JT.leaf (job "OrderGrandchild") :| [])
+                     , JT.leaf (job "OrderLeaf2")
+                     ]
+              )
+
+      Right inserted <- runM env (HL.insertJobTree tree)
+      map payload (NE.toList inserted)
+        `shouldBe` map mkMessage ["OrderRoot", "OrderLeaf1", "OrderNested", "OrderGrandchild", "OrderLeaf2"]
 
     it "rollup: acking all children resumes parent for completion round" $ \env -> do
       let parentJob = defaultJob (mkMessage "FanOutAckParent")
@@ -2511,11 +2410,11 @@ operationsSpec mkMessage mkResult runM = do
   describe "DLQ Child Counts" $ do
     it "countDLQChildrenBatch returns counts for DLQ'd children" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQCountParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQCountChild1")) :| [JT.leaf (defaultJob (mkMessage "DLQCountChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQCountParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQCountChild1")) :| [JT.leaf (defaultJob (mkMessage "DLQCountChild2"))])
 
       -- Claim and DLQ both children
       claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
@@ -2550,11 +2449,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ refuses when parent no longer exists" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "OrphanRetryParent"))
-              (JT.leaf (defaultJob (mkMessage "OrphanRetryChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "OrphanRetryParent"))
+            (JT.leaf (defaultJob (mkMessage "OrphanRetryChild")) :| [])
 
       -- Claim and DLQ the child
       claimedC <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -2576,11 +2475,11 @@ operationsSpec mkMessage mkResult runM = do
   describe "Dependency Bug Fixes" $ do
     it "cancelJobsBatch wakes parent when last child is batch-cancelled" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "TreeCancelParent"))
-              (JT.leaf (defaultJob (mkMessage "TreeCancelChild1")) :| [JT.leaf (defaultJob (mkMessage "TreeCancelChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "TreeCancelParent"))
+            (JT.leaf (defaultJob (mkMessage "TreeCancelChild1")) :| [JT.leaf (defaultJob (mkMessage "TreeCancelChild2"))])
 
       -- Batch-cancel both children
       let childIds = map primaryKey children
@@ -2593,15 +2492,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJobCascade on mid-level node wakes grandparent" $ \env -> do
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascadeWakeGP"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "CascadeWakeMid"))
-                  (JT.leaf (defaultJob (mkMessage "CascadeWakeC1")) :| [JT.leaf (defaultJob (mkMessage "CascadeWakeC2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascadeWakeGP"))
+            ( JT.rollup
+                (defaultJob (mkMessage "CascadeWakeMid"))
+                (JT.leaf (defaultJob (mkMessage "CascadeWakeC1")) :| [JT.leaf (defaultJob (mkMessage "CascadeWakeC2"))])
+                :| []
+            )
 
       let parent = head rest
 
@@ -2610,29 +2509,13 @@ operationsSpec mkMessage mkResult runM = do
       deleted `shouldBe` 3 -- parent + 2 children
       assertNotSuspended env (primaryKey grandparent)
 
-    it "insertJobsBatch skips jobs with invalid parentId" $ \env -> do
-      -- Insert one job with a valid parentId and one with a phantom parentId
-      Just parent <- runM env (HL.insertJob (defaultJob (mkMessage "BatchValidParent")))
-      let validChild = (defaultJob (mkMessage "BatchValidChild")) {parentId = Just (primaryKey parent), suspended = True}
-          phantomChild = (defaultJob (mkMessage "BatchPhantomChild")) {parentId = Just 999999, suspended = True}
-          standaloneJob = defaultJob (mkMessage "BatchStandalone")
-
-      inserted <- runM env (HL.insertJobsBatch [validChild, phantomChild, standaloneJob])
-
-      -- Only the valid child and standalone should be inserted (phantom skipped)
-      length inserted `shouldBe` 2
-      let payloads = map payload inserted
-      payloads `shouldContain` [mkMessage "BatchValidChild"]
-      payloads `shouldContain` [mkMessage "BatchStandalone"]
-      payloads `shouldNotContain` [mkMessage "BatchPhantomChild"]
-
     it "retryFromDLQ then ack wakes parent (end-to-end DLQ recovery)" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQRecoveryParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQRecoveryChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQRecoveryParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQRecoveryChild")) :| [])
 
       -- Claim and DLQ the child - parent wakes (no children in main queue)
       [c] <- claimJobs env 1
@@ -2666,13 +2549,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ auto-retries parent from DLQ when retrying child" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "AutoRetryParent"))
-              ( JT.leaf (defaultJob (mkMessage "AutoRetryChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "AutoRetryChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "AutoRetryParent"))
+            ( JT.leaf (defaultJob (mkMessage "AutoRetryChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "AutoRetryChild2"))]
+            )
 
       -- Claim child1, DLQ it
       [c1] <- claimJobs env 1
@@ -2708,13 +2591,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ auto-retries DLQ'd children when retrying rollup finalizer" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "SuspFinParent"))
-              ( JT.leaf (defaultJob (mkMessage "SuspFinChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "SuspFinChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SuspFinParent"))
+            ( JT.leaf (defaultJob (mkMessage "SuspFinChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "SuspFinChild2"))]
+            )
 
       -- Claim both children, DLQ both → parent wakes
       claimed <- claimJobs env 2
@@ -2747,13 +2630,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ auto-retries parent and all siblings when retrying child" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "SibRetryParent"))
-              ( JT.leaf (defaultJob (mkMessage "SibRetryChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "SibRetryChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SibRetryParent"))
+            ( JT.leaf (defaultJob (mkMessage "SibRetryChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "SibRetryChild2"))]
+            )
 
       -- Claim both children, DLQ both → parent wakes
       claimed <- claimJobs env 2
@@ -2786,11 +2669,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "retryFromDLQ does not suspend finalizer without DLQ'd children" $ \env -> do
       Right (_parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "NoSuspFinParent"))
-              (JT.leaf (defaultJob (mkMessage "NoSuspFinChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "NoSuspFinParent"))
+            (JT.leaf (defaultJob (mkMessage "NoSuspFinChild")) :| [])
 
       -- Claim child, ack it → parent wakes
       [c] <- claimJobs env 1
@@ -2812,11 +2695,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ackJobsBatch with finalizer and children" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "AckBatchParent"))
-              (JT.leaf (defaultJob (mkMessage "AckBatchChild1")) NE.:| [JT.leaf (defaultJob (mkMessage "AckBatchChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "AckBatchParent"))
+            (JT.leaf (defaultJob (mkMessage "AckBatchChild1")) NE.:| [JT.leaf (defaultJob (mkMessage "AckBatchChild2"))])
 
       claimedChildren <- claimJobs env 10
       length claimedChildren `shouldBe` 2
@@ -2828,11 +2711,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "ackJobsBatch partial ack leaves the parent suspended" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "PartialAckParent"))
-              (JT.leaf (defaultJob (mkMessage "PartialChild1")) NE.:| [JT.leaf (defaultJob (mkMessage "PartialChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "PartialAckParent"))
+            (JT.leaf (defaultJob (mkMessage "PartialChild1")) NE.:| [JT.leaf (defaultJob (mkMessage "PartialChild2"))])
 
       claimedChildren <- claimJobs env 10
       length claimedChildren `shouldBe` 2
@@ -2876,15 +2759,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJobsBatch partial cancel does not wake parent" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "PartialCancelParent"))
-              ( JT.leaf (defaultJob (mkMessage "PartialCancelC1"))
-                  :| [ JT.leaf (defaultJob (mkMessage "PartialCancelC2"))
-                     , JT.leaf (defaultJob (mkMessage "PartialCancelC3"))
-                     ]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "PartialCancelParent"))
+            ( JT.leaf (defaultJob (mkMessage "PartialCancelC1"))
+                :| [ JT.leaf (defaultJob (mkMessage "PartialCancelC2"))
+                   , JT.leaf (defaultJob (mkMessage "PartialCancelC3"))
+                   ]
+            )
 
       length children `shouldBe` 3
       let [c1, c2, c3] = children
@@ -2901,11 +2784,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "moveToDLQ on last main-queue child wakes parent" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQDelWakeParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQDelWakeChild1")) :| [JT.leaf (defaultJob (mkMessage "DLQDelWakeChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQDelWakeParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQDelWakeChild1")) :| [JT.leaf (defaultJob (mkMessage "DLQDelWakeChild2"))])
 
       claimedChildren <- claimJobs env 2
       length claimedChildren `shouldBe` 2
@@ -2917,15 +2800,15 @@ operationsSpec mkMessage mkResult runM = do
 
     it "delete DLQ'd child when main-queue siblings still exist - parent stays suspended" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQDelNoWakeParent"))
-              ( JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC1"))
-                  :| [ JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC2"))
-                     , JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC3"))
-                     ]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQDelNoWakeParent"))
+            ( JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC1"))
+                :| [ JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC2"))
+                   , JT.leaf (defaultJob (mkMessage "DLQDelNoWakeC3"))
+                   ]
+            )
 
       [c1] <- claimJobs env 1
       void $ runM env (HL.moveToDLQ "child1 failed" c1)
@@ -2939,11 +2822,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "moveToDLQ on both children wakes parent after last one" $ \env -> do
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQBatchWakeParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQBatchWakeC1")) :| [JT.leaf (defaultJob (mkMessage "DLQBatchWakeC2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQBatchWakeParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQBatchWakeC1")) :| [JT.leaf (defaultJob (mkMessage "DLQBatchWakeC2"))])
 
       claimedC <- claimJobs env 2
       length claimedC `shouldBe` 2
@@ -2958,11 +2841,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "cancelJob on non-last child does NOT wake parent" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CancelNonLastParent"))
-              (JT.leaf (defaultJob (mkMessage "CancelNonLastC1")) :| [JT.leaf (defaultJob (mkMessage "CancelNonLastC2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CancelNonLastParent"))
+            (JT.leaf (defaultJob (mkMessage "CancelNonLastC1")) :| [JT.leaf (defaultJob (mkMessage "CancelNonLastC2"))])
 
       -- Cancel first child only
       deleted <- runM env (HL.cancelJob @payload (primaryKey (head children)))
@@ -3019,12 +2902,12 @@ operationsSpec mkMessage mkResult runM = do
         runM env $
           HL.insertJobTree
             ( JT.rollup
-                ((defaultJob (mkMessage "DedupParentOrig")) {dedupKey = Just (ReplaceDuplicate "parent-dedup-key")})
+                (setDedupKey (Just (ReplaceDuplicate "parent-dedup-key")) $ defaultJob (mkMessage "DedupParentOrig"))
                 (JT.leaf (defaultJob (mkMessage "DedupParentChild")) NE.:| [])
             )
 
       -- Try to replace - blocked because child rows exist
-      let replacement = (defaultJob (mkMessage "DedupParentReplacement")) {dedupKey = Just (ReplaceDuplicate "parent-dedup-key")}
+      let replacement = setDedupKey (Just (ReplaceDuplicate "parent-dedup-key")) $ defaultJob (mkMessage "DedupParentReplacement")
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
 
@@ -3038,7 +2921,7 @@ operationsSpec mkMessage mkResult runM = do
         runM env $
           HL.insertJobTree
             ( JT.rollup
-                ((defaultJob (mkMessage "DedupDLQParentOrig")) {dedupKey = Just (ReplaceDuplicate "dlq-dedup-key")})
+                (setDedupKey (Just (ReplaceDuplicate "dlq-dedup-key")) $ defaultJob (mkMessage "DedupDLQParentOrig"))
                 (JT.leaf (defaultJob (mkMessage "DedupDLQChild")) NE.:| [])
             )
 
@@ -3047,7 +2930,7 @@ operationsSpec mkMessage mkResult runM = do
       void $ runM env (HL.moveToDLQ "child failed" c)
 
       -- Try to replace parent - blocked because DLQ child row exists
-      let replacement = (defaultJob (mkMessage "DedupDLQParentRepl")) {dedupKey = Just (ReplaceDuplicate "dlq-dedup-key")}
+      let replacement = setDedupKey (Just (ReplaceDuplicate "dlq-dedup-key")) $ defaultJob (mkMessage "DedupDLQParentRepl")
       result <- runM env (HL.insertJob replacement)
       result `shouldBe` Nothing
 
@@ -3057,12 +2940,12 @@ operationsSpec mkMessage mkResult runM = do
       Just _existing <-
         runM
           env
-          (HL.insertJob (defaultJob (mkMessage "TreeDedupExisting")) {dedupKey = Just (IgnoreDuplicate "tree-dedup-root")})
+          (HL.insertJob $ setDedupKey (Just (IgnoreDuplicate "tree-dedup-root")) $ defaultJob (mkMessage "TreeDedupExisting"))
 
       -- Try to insert a tree whose root has the same dedup key
       let tree =
             JT.rollup
-              ((defaultJob (mkMessage "TreeDedupConflict")) {dedupKey = Just (IgnoreDuplicate "tree-dedup-root")})
+              (setDedupKey (Just (IgnoreDuplicate "tree-dedup-root")) $ defaultJob (mkMessage "TreeDedupConflict"))
               (JT.leaf (defaultJob (mkMessage "TreeDedupChild")) NE.:| [])
       result <- runM env (HL.insertJobTree tree)
       case result of
@@ -3078,13 +2961,13 @@ operationsSpec mkMessage mkResult runM = do
     it "insertResult writes single and multiple child results to results table" $ \env -> do
       -- Insert a tree using rollup (sets isRollup = True)
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "AggParent1"))
-              ( JT.leaf (defaultJob (mkMessage "AggChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "AggChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "AggParent1"))
+            ( JT.leaf (defaultJob (mkMessage "AggChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "AggChild2"))]
+            )
       let [child1, child2] = children
 
       -- Verify parent is a rollup
@@ -3114,13 +2997,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "getDLQChildErrorsByParent returns errors for DLQ'd children" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQErrParent"))
-              ( JT.leaf (defaultJob (mkMessage "DLQErrChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "DLQErrChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQErrParent"))
+            ( JT.leaf (defaultJob (mkMessage "DLQErrChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "DLQErrChild2"))]
+            )
       let [child1, child2] = children
 
       -- Claim and DLQ both children with different error messages
@@ -3139,13 +3022,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "getDLQChildErrorsByParent maps only DLQ'd children, ignoring live siblings" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQErrMixParent"))
-              ( JT.leaf (defaultJob (mkMessage "DLQErrMixChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "DLQErrMixChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQErrMixParent"))
+            ( JT.leaf (defaultJob (mkMessage "DLQErrMixChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "DLQErrMixChild2"))]
+            )
       let [child1, child2] = children
 
       -- Before any failure the map is empty.
@@ -3165,20 +3048,20 @@ operationsSpec mkMessage mkResult runM = do
 
     it "results table and DLQ errors coexist for mixed outcomes" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "MixedParent"))
-              ( JT.leaf (defaultJob (mkMessage "MixedChild1"))
-                  :| [ JT.leaf (defaultJob (mkMessage "MixedChild2"))
-                     , JT.leaf (defaultJob (mkMessage "MixedChild3"))
-                     ]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "MixedParent"))
+            ( JT.leaf (defaultJob (mkMessage "MixedChild1"))
+                :| [ JT.leaf (defaultJob (mkMessage "MixedChild2"))
+                   , JT.leaf (defaultJob (mkMessage "MixedChild3"))
+                   ]
+            )
       let [child1, _child2, child3] = children
 
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "ok-1")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "ok-1")
 
       claimed <- claimJobs env 10
       let c3 = head $ filter (\j -> primaryKey j == primaryKey child3) claimed
@@ -3192,18 +3075,18 @@ operationsSpec mkMessage mkResult runM = do
 
     it "results table stores only successful child results" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "MergeMixParent"))
-              ( JT.leaf (defaultJob (mkMessage "MergeMixChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "MergeMixChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "MergeMixParent"))
+            ( JT.leaf (defaultJob (mkMessage "MergeMixChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "MergeMixChild2"))]
+            )
       let [child1, _child2] = children
 
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.toJSON (["hello"] :: [Text]))
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.toJSON (["hello"] :: [Text]))
 
       results <- runM env $ HL.getResultsByParent @payload (primaryKey parent)
       Map.size results `shouldBe` 1
@@ -3211,13 +3094,13 @@ operationsSpec mkMessage mkResult runM = do
 
     it "countDLQChildren returns count for parent with DLQ'd children" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CountDLQParent"))
-              ( JT.leaf (defaultJob (mkMessage "CountDLQChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "CountDLQChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CountDLQParent"))
+            ( JT.leaf (defaultJob (mkMessage "CountDLQChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "CountDLQChild2"))]
+            )
       length children `shouldBe` 2
       -- Claim and DLQ both children
       claimed <- claimJobs env 10
@@ -3227,31 +3110,31 @@ operationsSpec mkMessage mkResult runM = do
 
     it "countDLQChildren returns 0 for parent with no DLQ'd children" $ \env -> do
       Right (parent :| _) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CountDLQ0Parent"))
-              (JT.leaf (defaultJob (mkMessage "CountDLQ0Child")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CountDLQ0Parent"))
+            (JT.leaf (defaultJob (mkMessage "CountDLQ0Child")) :| [])
       count <- runM env $ HL.countDLQChildren @payload (primaryKey parent)
       count `shouldBe` 0
 
     it "double DLQ round-trip preserves snapshot" $ \env -> do
       -- Insert tree, store results, ack children, claim parent
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DblDLQParent"))
-              ( JT.leaf (defaultJob (mkMessage "DblDLQChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "DblDLQChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DblDLQParent"))
+            ( JT.leaf (defaultJob (mkMessage "DblDLQChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "DblDLQChild2"))]
+            )
       let [child1, child2] = children
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
       claimed <- claimJobs env 10
       forM_ claimed $ \j -> void $ runM env (HL.ackJob j)
       [parentJob] <- claimJobs env 1
@@ -3301,16 +3184,16 @@ operationsSpec mkMessage mkResult runM = do
       --  │   └── mapper-2b  (leaf)
       --  └── mapper-solo    (leaf - direct child of root)
       Right allJobs <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup (defaultJob (mkMessage "root: compile report")) $
-              ( defaultJob (mkMessage "section-1: charts")
-                  <~~ (defaultJob (mkMessage "mapper-1a") :| [defaultJob (mkMessage "mapper-1b")])
-              )
-                :| [ defaultJob (mkMessage "section-2: tables")
-                       <~~ (defaultJob (mkMessage "mapper-2a") :| [defaultJob (mkMessage "mapper-2b")])
-                   , JT.leaf (defaultJob (mkMessage "mapper-solo"))
-                   ]
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup (defaultJob (mkMessage "root: compile report"))
+          $ ( defaultJob (mkMessage "section-1: charts")
+                <~~ (defaultJob (mkMessage "mapper-1a") :| [defaultJob (mkMessage "mapper-1b")])
+            )
+            :| [ defaultJob (mkMessage "section-2: tables")
+                   <~~ (defaultJob (mkMessage "mapper-2a") :| [defaultJob (mkMessage "mapper-2b")])
+               , JT.leaf (defaultJob (mkMessage "mapper-solo"))
+               ]
 
       -- Pre-order: root, section-1, mapper-1a, mapper-1b, section-2, mapper-2a, mapper-2b, mapper-solo
       let jobs = NE.toList allJobs
@@ -3355,14 +3238,14 @@ operationsSpec mkMessage mkResult runM = do
     it "rollup aggregates child results in results table" $ \env -> do
       -- Rollup: 3 children produce partial word lists stored in results table.
       Right allJobs <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkMessage "reducer")
-              <~~ ( defaultJob (mkMessage "mapper-a")
-                      :| [ defaultJob (mkMessage "mapper-b")
-                         , defaultJob (mkMessage "mapper-c")
-                         ]
-                  )
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkMessage "reducer")
+            <~~ ( defaultJob (mkMessage "mapper-a")
+                    :| [ defaultJob (mkMessage "mapper-b")
+                       , defaultJob (mkMessage "mapper-c")
+                       ]
+                )
       let [reducer, mapperA, mapperB, mapperC] = NE.toList allJobs
 
       -- Claim all 3 mappers
@@ -3407,15 +3290,15 @@ operationsSpec mkMessage mkResult runM = do
       --       ├── mapper-2a  → ["forecast"]
       --       └── mapper-2b  → ["trend", "outlook"]
       Right allJobs <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup (defaultJob (mkMessage "root")) $
-              ( defaultJob (mkMessage "section-1")
-                  <~~ (defaultJob (mkMessage "mapper-1a") :| [defaultJob (mkMessage "mapper-1b")])
-              )
-                :| [ defaultJob (mkMessage "section-2")
-                       <~~ (defaultJob (mkMessage "mapper-2a") :| [defaultJob (mkMessage "mapper-2b")])
-                   ]
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup (defaultJob (mkMessage "root"))
+          $ ( defaultJob (mkMessage "section-1")
+                <~~ (defaultJob (mkMessage "mapper-1a") :| [defaultJob (mkMessage "mapper-1b")])
+            )
+            :| [ defaultJob (mkMessage "section-2")
+                   <~~ (defaultJob (mkMessage "mapper-2a") :| [defaultJob (mkMessage "mapper-2b")])
+               ]
       -- Pre-order: root, section-1, mapper-1a, mapper-1b, section-2, mapper-2a, mapper-2b
       let [root, sec1, m1a, m1b, sec2, m2a, m2b] = NE.toList allJobs
 
@@ -3470,11 +3353,11 @@ operationsSpec mkMessage mkResult runM = do
   describe "Results Table" $ do
     it "insertResult encodes the queue's declared result type" $ \env -> do
       Right (parent :| [child]) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "TypedResultParent"))
-              (JT.leaf (defaultJob (mkMessage "TypedResultChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "TypedResultParent"))
+            (JT.leaf (defaultJob (mkMessage "TypedResultChild")) :| [])
 
       rowsInserted <-
         runM env $
@@ -3487,22 +3370,22 @@ operationsSpec mkMessage mkResult runM = do
     it "CASCADE cleanup: acking parent deletes results rows" $ \env -> do
       -- Insert a rollup tree with 2 children
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascParent"))
-              ( JT.leaf (defaultJob (mkMessage "CascChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "CascChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascParent"))
+            ( JT.leaf (defaultJob (mkMessage "CascChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "CascChild2"))]
+            )
       let [child1, child2] = children
 
       -- Insert results for both children
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "r1")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "r2")
 
       -- Verify results exist
       results <- runM env $ HL.getResultsByParent @payload (primaryKey parent)
@@ -3522,11 +3405,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "CASCADE cleanup: cancelJobCascade deletes results rows" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascCancelParent"))
-              (JT.leaf (defaultJob (mkMessage "CascCancelChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascCancelParent"))
+            (JT.leaf (defaultJob (mkMessage "CascCancelChild")) :| [])
       let [child] = children
 
       -- Insert a result
@@ -3545,11 +3428,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "idempotent upsert: duplicate insertResult overwrites" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "UpsertParent"))
-              (JT.leaf (defaultJob (mkMessage "UpsertChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "UpsertParent"))
+            (JT.leaf (defaultJob (mkMessage "UpsertChild")) :| [])
       let [child] = children
 
       -- Insert result
@@ -3564,10 +3447,10 @@ operationsSpec mkMessage mkResult runM = do
 
     it "rollup finalizer: isRollup is set, results table starts empty" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            defaultJob (mkMessage "PlainFinParent")
-              <~~ (defaultJob (mkMessage "PlainFinChild") :| [])
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkMessage "PlainFinParent")
+            <~~ (defaultJob (mkMessage "PlainFinChild") :| [])
       let [child] = children
 
       isRollup parent `shouldBe` True
@@ -3577,30 +3460,30 @@ operationsSpec mkMessage mkResult runM = do
       Map.size results `shouldBe` 0
 
       -- Manually inserting works
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child) (Aeson.String "manual")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child) (Aeson.String "manual")
       results2 <- runM env $ HL.getResultsByParent @payload (primaryKey parent)
       Map.size results2 `shouldBe` 1
 
     it "DLQ preserves accumulated results via parent_state snapshot" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQSnapParent"))
-              ( JT.leaf (defaultJob (mkMessage "DLQSnapChild1"))
-                  :| [JT.leaf (defaultJob (mkMessage "DLQSnapChild2"))]
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQSnapParent"))
+            ( JT.leaf (defaultJob (mkMessage "DLQSnapChild1"))
+                :| [JT.leaf (defaultJob (mkMessage "DLQSnapChild2"))]
+            )
       let [child1, child2] = children
 
       -- Insert results for both children
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "snap-r1")
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "snap-r2")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child1) (Aeson.String "snap-r1")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child2) (Aeson.String "snap-r2")
 
       -- Ack children to wake the parent
       claimed <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
@@ -3629,17 +3512,17 @@ operationsSpec mkMessage mkResult runM = do
 
     it "DLQ retry preserves parent_state snapshot" $ \env -> do
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "DLQRetryParent"))
-              (JT.leaf (defaultJob (mkMessage "DLQRetryChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "DLQRetryParent"))
+            (JT.leaf (defaultJob (mkMessage "DLQRetryChild")) :| [])
       let [child] = children
 
       -- Insert result, ack child, claim parent
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child) (Aeson.String "retry-val")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey parent) (primaryKey child) (Aeson.String "retry-val")
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       forM_ claimed $ \j -> void $ runM env (HL.ackJob j)
       [parentJob] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
@@ -3662,11 +3545,11 @@ operationsSpec mkMessage mkResult runM = do
     it "moveToDLQ on rollup parent cascades children to DLQ" $ \env -> do
       -- Insert rollup tree: parent + 2 children
       Right (parent :| children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascDLQParent"))
-              (JT.leaf (defaultJob (mkMessage "CascDLQChild1")) :| [JT.leaf (defaultJob (mkMessage "CascDLQChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascDLQParent"))
+            (JT.leaf (defaultJob (mkMessage "CascDLQChild1")) :| [JT.leaf (defaultJob (mkMessage "CascDLQChild2"))])
 
       -- Parent is suspended (rollup), children are claimable
       assertSuspended env (primaryKey parent)
@@ -3697,11 +3580,11 @@ operationsSpec mkMessage mkResult runM = do
     it "moveToDLQ cascade + retryFromDLQ recovers full tree" $ \env -> do
       -- Insert rollup tree: parent + 2 children
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascRetryParent"))
-              (JT.leaf (defaultJob (mkMessage "CascRetryChild1")) :| [JT.leaf (defaultJob (mkMessage "CascRetryChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascRetryParent"))
+            (JT.leaf (defaultJob (mkMessage "CascRetryChild1")) :| [JT.leaf (defaultJob (mkMessage "CascRetryChild2"))])
 
       -- moveToDLQ on parent → all 3 in DLQ
       void $ runM env (HL.moveToDLQ "Admin DLQ" parent)
@@ -3734,15 +3617,15 @@ operationsSpec mkMessage mkResult runM = do
     it "moveToDLQ cascade handles multi-level nesting" $ \env -> do
       -- Build 3-level tree: grandparent → parent → [child1, child2]
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "CascGrandparent"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "CascMidParent"))
-                  (JT.leaf (defaultJob (mkMessage "CascGrandChild1")) :| [JT.leaf (defaultJob (mkMessage "CascGrandChild2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "CascGrandparent"))
+            ( JT.rollup
+                (defaultJob (mkMessage "CascMidParent"))
+                (JT.leaf (defaultJob (mkMessage "CascGrandChild1")) :| [JT.leaf (defaultJob (mkMessage "CascGrandChild2"))])
+                :| []
+            )
 
       -- grandparent is suspended, mid-parent is suspended, children are claimable
       let midParent = head rest
@@ -3763,11 +3646,11 @@ operationsSpec mkMessage mkResult runM = do
     it "moveToDLQ on non-rollup job does not cascade" $ \env -> do
       -- Insert a rollup tree, then moveToDLQ a child (non-rollup)
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "NoCascParent"))
-              (JT.leaf (defaultJob (mkMessage "NoCascChild1")) :| [JT.leaf (defaultJob (mkMessage "NoCascChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "NoCascParent"))
+            (JT.leaf (defaultJob (mkMessage "NoCascChild1")) :| [JT.leaf (defaultJob (mkMessage "NoCascChild2"))])
 
       -- Claim children
       claimed <- runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload]
@@ -3790,23 +3673,23 @@ operationsSpec mkMessage mkResult runM = do
   describe "moveToDLQBatch cascades for rollup parents" $ do
     it "moveToDLQBatch snapshots a rollup it names alongside its parent" $ \env -> do
       Right tree <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "BatchSnapRoot"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "BatchSnapMid"))
-                  (JT.leaf (defaultJob (mkMessage "BatchSnapLeaf")) :| [])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "BatchSnapRoot"))
+            ( JT.rollup
+                (defaultJob (mkMessage "BatchSnapMid"))
+                (JT.leaf (defaultJob (mkMessage "BatchSnapLeaf")) :| [])
+                :| []
+            )
       let nodeNamed n = find ((== mkMessage n) . payload) (NE.toList tree)
       Just root <- pure (nodeNamed "BatchSnapRoot")
       Just mid <- pure (nodeNamed "BatchSnapMid")
       Just leaf <- pure (nodeNamed "BatchSnapLeaf")
 
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey mid) (primaryKey leaf) (Aeson.String "batch-snap")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey mid) (primaryKey leaf) (Aeson.String "batch-snap")
       resultMap <- runM env $ HL.getResultsByParent @payload (primaryKey mid)
       Map.size resultMap `shouldBe` 1
 
@@ -3821,11 +3704,11 @@ operationsSpec mkMessage mkResult runM = do
     it "moveToDLQBatch on rollup parent cascades children to DLQ" $ \env -> do
       -- Insert rollup tree: parent + 2 children (parent is suspended with attempts=0)
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "BatchCascParent"))
-              (JT.leaf (defaultJob (mkMessage "BatchCascChild1")) :| [JT.leaf (defaultJob (mkMessage "BatchCascChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "BatchCascParent"))
+            (JT.leaf (defaultJob (mkMessage "BatchCascChild1")) :| [JT.leaf (defaultJob (mkMessage "BatchCascChild2"))])
 
       -- moveToDLQBatch on the parent
       moved <- runM env (HL.moveToDLQBatch [(parent, "Batch admin DLQ")])
@@ -3849,15 +3732,15 @@ operationsSpec mkMessage mkResult runM = do
     it "3-level tree: mid-level rollup snapshot preserved after cascade" $ \env -> do
       -- Build 3-level tree: grandparent → mid-parent (rollup) → [child1, child2]
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "SnapGrandparent"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "SnapMidParent"))
-                  (JT.leaf (defaultJob (mkMessage "SnapChild1")) :| [JT.leaf (defaultJob (mkMessage "SnapChild2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SnapGrandparent"))
+            ( JT.rollup
+                (defaultJob (mkMessage "SnapMidParent"))
+                (JT.leaf (defaultJob (mkMessage "SnapChild1")) :| [JT.leaf (defaultJob (mkMessage "SnapChild2"))])
+                :| []
+            )
 
       let midParent = head rest
 
@@ -3866,9 +3749,9 @@ operationsSpec mkMessage mkResult runM = do
       length claimed `shouldBe` 2
       let child1 = head claimed
       -- Insert a result for child1 under mid-parent, then ack child1
-      void $
-        runM env $
-          HL.insertResultUnsafe @payload (primaryKey midParent) (primaryKey child1) (Aeson.String "child1-result")
+      void
+        $ runM env
+        $ HL.insertResultUnsafe @payload (primaryKey midParent) (primaryKey child1) (Aeson.String "child1-result")
       void $ runM env (HL.ackJob child1)
 
       -- Mid-parent still suspended (one child remains)
@@ -3901,11 +3784,11 @@ operationsSpec mkMessage mkResult runM = do
     it "retryFromDLQ from a child retries the entire tree" $ \env -> do
       -- Build 2-level tree: parent → [child1, child2]
       Right (_parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "NLevelRetryParent"))
-              (JT.leaf (defaultJob (mkMessage "NLevelRetryChild1")) :| [JT.leaf (defaultJob (mkMessage "NLevelRetryChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "NLevelRetryParent"))
+            (JT.leaf (defaultJob (mkMessage "NLevelRetryChild1")) :| [JT.leaf (defaultJob (mkMessage "NLevelRetryChild2"))])
 
       -- DLQ the parent (cascades children)
       Just parent' <- runM env $ HL.getJobById @payload (primaryKey _parent)
@@ -3937,15 +3820,15 @@ operationsSpec mkMessage mkResult runM = do
     it "retryFromDLQ from a grandchild retries the entire 3-level tree" $ \env -> do
       -- Build 3-level tree
       Right (grandparent :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "3LRetryGP"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "3LRetryMid"))
-                  (JT.leaf (defaultJob (mkMessage "3LRetryLeaf1")) :| [JT.leaf (defaultJob (mkMessage "3LRetryLeaf2"))])
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "3LRetryGP"))
+            ( JT.rollup
+                (defaultJob (mkMessage "3LRetryMid"))
+                (JT.leaf (defaultJob (mkMessage "3LRetryLeaf1")) :| [JT.leaf (defaultJob (mkMessage "3LRetryLeaf2"))])
+                :| []
+            )
 
       let midParent = head rest
 
@@ -3991,11 +3874,11 @@ operationsSpec mkMessage mkResult runM = do
 
     it "single child: moveToDLQ cascades and retries correctly" $ \env -> do
       Right (parent :| _) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "SingleDLQParent"))
-              (JT.leaf (defaultJob (mkMessage "SingleDLQChild")) :| [])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "SingleDLQParent"))
+            (JT.leaf (defaultJob (mkMessage "SingleDLQChild")) :| [])
 
       -- Cascade DLQ the parent
       void $ runM env (HL.moveToDLQ "admin" parent)
@@ -4037,11 +3920,11 @@ operationsSpec mkMessage mkResult runM = do
       -- Tree: parent + 2 children. DLQ one child while parent is alive.
       -- retryFromDLQ should retry just that child without touching the parent.
       Right (parent :| _children) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "LiveParent"))
-              (JT.leaf (defaultJob (mkMessage "LiveChild1")) :| [JT.leaf (defaultJob (mkMessage "LiveChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "LiveParent"))
+            (JT.leaf (defaultJob (mkMessage "LiveChild1")) :| [JT.leaf (defaultJob (mkMessage "LiveChild2"))])
 
       -- Claim only 1 child and DLQ it (leave the other unclaimed)
       [child1] <- claimJobs env 1
@@ -4078,11 +3961,11 @@ operationsSpec mkMessage mkResult runM = do
 
       -- Now insert the rollup tree
       Right (parent :| _) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "MixBatchParent"))
-              (JT.leaf (defaultJob (mkMessage "MixBatchChild1")) :| [JT.leaf (defaultJob (mkMessage "MixBatchChild2"))])
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "MixBatchParent"))
+            (JT.leaf (defaultJob (mkMessage "MixBatchChild1")) :| [JT.leaf (defaultJob (mkMessage "MixBatchChild2"))])
 
       -- moveToDLQBatch with both the rollup parent and the standalone job
       moved <- runM env (HL.moveToDLQBatch [(parent, "rollup error"), (standaloneClaimed, "standalone error")])
@@ -4111,19 +3994,19 @@ operationsSpec mkMessage mkResult runM = do
     it "4-level tree: full lifecycle (insert, ack bottom-up, completion cascade)" $ \env -> do
       -- L1 (root) → L2 (rollup) → L3 (rollup) → [L4a, L4b]
       Right (l1 :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "L1Root"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "L2Mid"))
-                  ( JT.rollup
-                      (defaultJob (mkMessage "L3Inner"))
-                      (JT.leaf (defaultJob (mkMessage "L4LeafA")) :| [JT.leaf (defaultJob (mkMessage "L4LeafB"))])
-                      :| []
-                  )
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "L1Root"))
+            ( JT.rollup
+                (defaultJob (mkMessage "L2Mid"))
+                ( JT.rollup
+                    (defaultJob (mkMessage "L3Inner"))
+                    (JT.leaf (defaultJob (mkMessage "L4LeafA")) :| [JT.leaf (defaultJob (mkMessage "L4LeafB"))])
+                    :| []
+                )
+                :| []
+            )
 
       -- 5 jobs total: L1, L2, L3, L4a, L4b
       length rest `shouldBe` 4
@@ -4168,19 +4051,19 @@ operationsSpec mkMessage mkResult runM = do
 
     it "4-level tree: cascade DLQ from root and retry from deepest leaf" $ \env -> do
       Right (l1 :| rest) <-
-        runM env $
-          HL.insertJobTree $
-            JT.rollup
-              (defaultJob (mkMessage "4LDLQRoot"))
-              ( JT.rollup
-                  (defaultJob (mkMessage "4LDLQMid"))
-                  ( JT.rollup
-                      (defaultJob (mkMessage "4LDLQInner"))
-                      (JT.leaf (defaultJob (mkMessage "4LDLQLeafA")) :| [JT.leaf (defaultJob (mkMessage "4LDLQLeafB"))])
-                      :| []
-                  )
-                  :| []
-              )
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "4LDLQRoot"))
+            ( JT.rollup
+                (defaultJob (mkMessage "4LDLQMid"))
+                ( JT.rollup
+                    (defaultJob (mkMessage "4LDLQInner"))
+                    (JT.leaf (defaultJob (mkMessage "4LDLQLeafA")) :| [JT.leaf (defaultJob (mkMessage "4LDLQLeafB"))])
+                    :| []
+                )
+                :| []
+            )
 
       let l2 = head rest
           l3 = rest !! 1

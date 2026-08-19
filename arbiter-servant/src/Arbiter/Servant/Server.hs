@@ -23,7 +23,8 @@ module Arbiter.Servant.Server
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (DedupKey (..), Job (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
@@ -225,7 +226,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
     -- Only query child/DLQ counts if any returned job could be a parent.
     -- All parents are rollup finalizers (isRollup = True), so we
     -- skip the extra queries for queues that don't use job trees.
-    let jobIds = map (primaryKey . fst) j
+    let jobIds = map (Job.primaryKey . fst) j
         hasParents = any (isRollup . fst) j
     if null j || not hasParents
       then pure (j, c, Map.empty, Map.empty)
@@ -262,13 +263,14 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
 
   mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
-    case (inserted, dedupKey jobWrite) of
+    case (inserted, Job.dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
       (Nothing, Just (IgnoreDuplicate k)) -> Ops.getJobByDedupKey schemaName tableName k
       _ -> pure Nothing
   case mJob of
     Just j -> pure $ JobResponse (ApiJob j)
-    Nothing -> throwError err409 {errBody = "Replace blocked: existing job is in-flight on first attempt or has children"}
+    Nothing ->
+      throwError err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
 
 -- | Insert multiple jobs in a single batch operation
 insertJobsBatchHandler
@@ -284,10 +286,10 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
       writes = map unApiJobWrite jobWrites
 
   inserted <-
-    liftIO $
-      runSimpleDb env $
-        withPublishSpan tableName writes $
-          Ops.insertJobsBatch schemaName tableName writes
+    liftIO
+      $ runSimpleDb env
+      $ withPublishSpan tableName writes
+      $ Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 
@@ -361,7 +363,7 @@ promoteJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | suspended job ->
+            | Job.suspended job ->
                 pure (Left err409 {errBody = "Job is suspended - use resume endpoint"})
             | otherwise ->
                 pure (Left err409 {errBody = "Job is already visible"})
@@ -451,7 +453,7 @@ suspendJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | suspended job ->
+            | Job.suspended job ->
                 pure (Left err409 {errBody = "Job is already suspended"})
             | otherwise ->
                 pure (Left err409 {errBody = "Job is in-flight - cannot suspend"})
@@ -484,7 +486,7 @@ resumeJobHandler tableName config jobId = do
         case mJob of
           Nothing -> pure (Left err404 {errBody = "Job not found"})
           Just job
-            | not (suspended job) ->
+            | not (Job.suspended job) ->
                 pure (Left err409 {errBody = "Job is not suspended"})
             | isRollup job ->
                 pure (Left err409 {errBody = "Cannot resume a rollup finalizer with active children"})
@@ -1085,7 +1087,7 @@ newCacheCell = CacheCell <$> newTVarIO (0, Map.empty) <*> newTVarIO Set.empty
 cachedFor :: NominalDiffTime -> CacheCell a -> IO a -> IO a
 cachedFor ttl cell = cachedForKey ttl cell ""
 
--- | Serve one key. Concurrent misses on a key collapse onto one 'produce', whose
+-- | Serve one key. Concurrent misses on a key collapse onto one @produce@, whose
 -- write is skipped if 'invalidate' bumped the epoch meanwhile.
 cachedForKey :: NominalDiffTime -> CacheCell a -> Text -> IO a -> IO a
 cachedForKey ttl cell key produce

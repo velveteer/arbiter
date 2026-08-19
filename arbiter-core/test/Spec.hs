@@ -3,17 +3,23 @@
 
 module Main (main) where
 
+import Control.Exception (SomeException, someExceptionContext, try)
+import Control.Exception.Context (displayExceptionContext)
 import Data.Int (Int32, Int64)
+import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
+import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
+import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
 import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
 import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
+import Arbiter.Core.Worker (WorkerHealth (Live), workerHealthFromText)
 
 -- | A short tag per parameter, so tests can assert the encoders and their order.
 paramTags :: [SomeParam] -> [Text]
@@ -46,6 +52,30 @@ squish = T.unwords . T.words
 
 main :: IO ()
 main = hspec $ do
+  describe "job status decoding" $ do
+    it "accepts a known status" $
+      jobStatusFromText "ready" `shouldBe` Right Ready
+
+    it "rejects an unknown SQL status" $
+      jobStatusFromText "new_status" `shouldBe` Left "unknown job status: new_status"
+
+  describe "exception rendering" $ do
+    it "renders a caught exception without the backtrace base attaches" $ do
+      caught <- try (throwInternal "arbiter listener: consumeInput failed") :: IO (Either SomeException ())
+      either displayEx (const "") caught `shouldBe` "arbiter listener: consumeInput failed"
+
+    it "collects no backtrace for a control-flow exception" $ do
+      caught <- try throwNack :: IO (Either SomeException ())
+      either (displayExceptionContext . someExceptionContext) (const "") caught
+        `shouldSatisfy` (not . isInfixOf "backtrace")
+
+  describe "worker health decoding" $ do
+    it "accepts known health text" $
+      workerHealthFromText "live" `shouldBe` Right Live
+
+    it "rejects unknown health text" $
+      workerHealthFromText "new_health" `shouldBe` Left "unknown worker health: new_health"
+
   describe "sql quasiquoter" $ do
     it "emits one placeholder per input hole, in order" $ do
       let jobId = 7 :: Int64

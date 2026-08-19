@@ -35,7 +35,7 @@ import Arbiter.Core.Sql.Jobs (unionAllOverQueueTables)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
--- | Set a pool's operator override limit. @Nothing@ leaves it untouched;
+-- | Set a pool's operator override limit. @Nothing@ leaves it untouched.
 -- @Just v@ writes @v@ (a null clears the override back to the default).
 updateConcurrencyPolicyOverrideSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
 updateConcurrencyPolicyOverrideSQL schema mLimit prefix =

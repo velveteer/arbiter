@@ -77,10 +77,10 @@ installHolDetector conn schemaName tableName =
 countHolViolations :: PG.Connection -> Text -> Text -> IO Int64
 countHolViolations conn schemaName tableName = do
   [PG.Only count] <-
-    PG.query_ conn $
-      fromString $
-        T.unpack $
-          "SELECT count(*)::bigint FROM " <> holViolTbl schemaName tableName
+    PG.query_ conn
+      $ fromString
+      $ T.unpack
+      $ "SELECT count(*)::bigint FROM " <> holViolTbl schemaName tableName
   pure count
 
 -- | Remove the HOL detector trigger, function, and violations table.
@@ -109,7 +109,7 @@ concurrencySpec mkMessage runM = do
   describe "Heartbeat Visibility Across Connections" $ do
     it "setVisibilityTimeout updates are immediately visible to concurrent workers" $ \env -> do
       -- Insert a job
-      void $ runM env $ HL.insertJob ((defaultJob (mkMessage "Heartbeat")) {groupKey = Just "heartbeat-visibility-test"})
+      void $ runM env $ HL.insertJob (setGroupKey (Just "heartbeat-visibility-test") $ defaultJob (mkMessage "Heartbeat"))
 
       -- Worker A claims the job with 5 second visibility
       claimed1 <- runM env (HL.claimNextVisibleJobs 1 5) :: IO [JobRead payload]
@@ -129,7 +129,7 @@ concurrencySpec mkMessage runM = do
 
     it "heartbeat prevents reclaim after original visibility timeout expires" $ \env -> do
       -- Insert a job
-      void $ runM env $ HL.insertJob ((defaultJob (mkMessage "Timeout")) {groupKey = Just "heartbeat-timeout-test"})
+      void $ runM env $ HL.insertJob (setGroupKey (Just "heartbeat-timeout-test") $ defaultJob (mkMessage "Timeout"))
 
       -- Claim with SHORT visibility (2 seconds)
       claimed1 <- runM env (HL.claimNextVisibleJobs 1 2) :: IO [JobRead payload]
@@ -149,7 +149,7 @@ concurrencySpec mkMessage runM = do
 
     it "visibility timeout of 0 makes job immediately claimable" $ \env -> do
       -- Insert and claim job
-      void $ runM env $ HL.insertJob ((defaultJob (mkMessage "Zero")) {groupKey = Just "visibility-zero-test"})
+      void $ runM env $ HL.insertJob (setGroupKey (Just "visibility-zero-test") $ defaultJob (mkMessage "Zero"))
       claimed1 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed1 `shouldBe` 1
       let job = head claimed1
@@ -200,9 +200,9 @@ concurrencySpec mkMessage runM = do
 
       forM_ [(1 :: Int) .. numIterations] $ \_ -> do
         -- Insert 5 jobs in one group
-        void $
-          runM env $
-            HL.insertJobsBatch (replicate seedPerRound $ (defaultJob (mkMessage "Grouped")) {groupKey = Just "hol-stress"})
+        void
+          $ runM env
+          $ HL.insertJobsBatch (replicate seedPerRound $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "Grouped"))
         atomicModifyIORef' insertedRef (\n -> (n + seedPerRound + insertersPerRound, ()))
 
         -- Race N workers to claim + 2 concurrent inserters to the same group.
@@ -216,7 +216,7 @@ concurrencySpec mkMessage runM = do
               [(1 :: Int) .. numWorkers]
               <> replicate
                 insertersPerRound
-                (void (runM env $ HL.insertJob (defaultJob (mkMessage "concurrent")) {groupKey = Just "hol-stress"}) >> pure [])
+                (void (runM env $ HL.insertJob $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "concurrent")) >> pure [])
 
         -- Ordering invariant: at most 1 claim per group. totalClaimed == 0 is
         -- normal when the INSERT trigger's groups row lock causes claims to
@@ -242,7 +242,7 @@ concurrencySpec mkMessage runM = do
 
     it "FOR UPDATE SKIP LOCKED prevents concurrent claims of same job" $ \env -> do
       -- Insert a single job
-      void $ runM env $ HL.insertJob ((defaultJob (mkMessage "Single")) {groupKey = Just "skip-locked-test"})
+      void $ runM env $ HL.insertJob (setGroupKey (Just "skip-locked-test") $ defaultJob (mkMessage "Single"))
 
       -- Three workers racing to claim the same job CONCURRENTLY
       -- This tests that SKIP LOCKED allows workers to skip locked rows without blocking
@@ -301,10 +301,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "stress-group-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ (defaultJob (mkMessage "grouped")) {groupKey = Just groupName})
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "grouped"))
 
         claimedRef <- newIORef ([] :: [Int64])
 
@@ -420,10 +420,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "batch-stress-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ (defaultJob (mkMessage "batched")) {groupKey = Just groupName})
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "batched"))
 
         claimedRef <- newIORef ([] :: [Int64])
 
@@ -447,10 +447,10 @@ raceConditionSpec mkMessage runM = do
 
         replicateM_ numRounds $ do
           forM_ [1 .. numGroups] $ \(g :: Int) ->
-            void $
-              runM env $
-                HL.insertJobsBatch
-                  (replicate jobsPerGroup $ (defaultJob (mkMessage "split")) {groupKey = Just ("split-" <> T.pack (show g))})
+            void
+              $ runM env
+              $ HL.insertJobsBatch
+                (replicate jobsPerGroup $ setGroupKey (Just ("split-" <> T.pack (show g))) $ defaultJob (mkMessage "split"))
 
           resultsRef <- newIORef ([] :: [(Int, [(Maybe Text, Int64)])])
           _ <-
@@ -497,10 +497,10 @@ raceConditionSpec mkMessage runM = do
 
         forM_ [1 .. numGroups] $ \(g :: Int) -> do
           let groupName = "mixed-mode-" <> T.pack (show g)
-          void $
-            runM env $
-              HL.insertJobsBatch
-                (replicate jobsPerGroup $ (defaultJob (mkMessage "mixed")) {groupKey = Just groupName})
+          void
+            $ runM env
+            $ HL.insertJobsBatch
+              (replicate jobsPerGroup $ setGroupKey (Just groupName) $ defaultJob (mkMessage "mixed"))
 
         claimedRef <- newIORef ([] :: [Int64])
 

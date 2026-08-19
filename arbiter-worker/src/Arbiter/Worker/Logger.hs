@@ -9,7 +9,7 @@
 -- * Provide a 'LogCallback' to receive pre-rendered JSON log lines
 -- * Inject additional context (e.g., trace IDs) into every log message
 --
--- For application-level job logging, use 'ObservabilityHooks' instead.
+-- For application-level job logging, use 'Arbiter.Core.Job.Types.ObservabilityHooks' instead.
 module Arbiter.Worker.Logger
   ( -- * Log Configuration
     LogConfig (..)
@@ -29,7 +29,8 @@ module Arbiter.Worker.Logger
   , (.=)
   ) where
 
-import Control.Exception (displayException, finally)
+import Arbiter.Core.Exceptions (displayEx)
+import Control.Exception (finally)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Logger qualified as ML
@@ -38,7 +39,6 @@ import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
 import Data.Text (Text)
-import Data.Text qualified as T
 import System.Log.FastLogger (LoggerSet)
 import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 
@@ -108,7 +108,7 @@ tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
 
 -- | 'tryLog' an exception at 'Warning' under @label@.
 warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
-warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> T.pack (displayException e)
+warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> displayEx e
 
 -- | Log a message using the given config.
 logMessage :: LogConfig -> LogLevel -> Text -> IO ()

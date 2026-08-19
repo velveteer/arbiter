@@ -3,17 +3,27 @@ name:            arbiter-otel
 version:         0.1.0.0
 synopsis:        OpenTelemetry traces, metrics, and logs for arbiter
 description:
-  Instruments arbiter with the three OpenTelemetry signals, all pushed
-  over OTLP: consumer spans linked to the enqueue that produced them,
-  job-lifecycle metrics, queue-depth and Postgres-health gauges, and
-  Arbiter's structured logs as OTel log records.
+  OpenTelemetry for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+
+  Exports job, worker, queue-depth, admission, and database-health instruments
+  over OTLP, tees structured logs to the OpenTelemetry log pipeline, and resolves
+  the tracer that arbiter-core's built-in job spans emit through. Configuration
+  comes from the standard @OTEL_@ environment variables.
+
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
 
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -48,7 +58,7 @@ library
     , aeson                 >=2.0  && <2.3
     , arbiter-core          <0.2
     , arbiter-worker        <0.2
-    , base                  >=4.14 && <5
+    , base                  >=4.20 && <5
     , hs-opentelemetry-api  >=1.0  && <1.1
     , hs-opentelemetry-sdk  >=1.0  && <1.1
     , scientific            >=0.3  && <0.4

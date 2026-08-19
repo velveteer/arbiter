@@ -7,7 +7,7 @@ module Test.Arbiter.Worker.Cron (spec) where
 import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), Job (..), JobRead, defaultJob)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
@@ -439,7 +439,7 @@ spec connStr = do
                 "bad-1"
                 "* * * * *"
                 AllowOverlap
-                (\_ _ -> error "intentional builder failure")
+                (\_ _ -> errorWithoutStackTrace "intentional builder failure")
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [good, bad] testLogConfig
@@ -488,7 +488,7 @@ spec connStr = do
                 "run-atomic"
                 "0 3 * * *"
                 AllowOverlap
-                (\_ _ -> error "intentional builder failure")
+                (\_ _ -> errorWithoutStackTrace "intentional builder failure")
             Right working = cronJob "run-atomic" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "manual"))
             now = mkTime 2025 6 15 12 30 0
         runSimpleDb env $ do

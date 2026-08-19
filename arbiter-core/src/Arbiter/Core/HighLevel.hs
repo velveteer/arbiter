@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
 -- | High-level API for job queue operations.
 --
@@ -146,7 +145,7 @@ module Arbiter.Core.HighLevel
 
 import Control.Monad (void, when)
 import Data.Aeson (Value)
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -161,9 +160,33 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
+import Arbiter.Core.HighLevel.Runtime
+  ( deregisterWorker
+  , ensureQueue
+  , getQueue
+  , heartbeatWorker
+  , listQueues
+  , listWorkers
+  , markWorkerShuttingDown
+  , registerWorker
+  , setQueuePaused
+  , setWorkerPaused
+  , sweepStaleWorkers
+  )
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
-import Arbiter.Core.Job.Types (ClaimSeq, Job (..), JobId, JobPayload, JobRead, JobWrite, RegistryAdmissionPolicies)
+import Arbiter.Core.Job.Types
+  ( ClaimSeq
+  , JobId
+  , JobPayload
+  , JobRead
+  , JobWrite
+  , RegistryAdmissionPolicies
+  , claimSeq
+  , claimedBy
+  , primaryKey
+  )
+import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
@@ -201,7 +224,7 @@ publishSpan
 publishSpan = withPublishSpan (queueTable @payload @m)
 
 -- | Insert a job. Returns the inserted job, or @Nothing@ if skipped by dedup
--- ('IgnoreDuplicate') or if @parentId@ references a non-existent job.
+-- ('Arbiter.Core.Job.Dedup.IgnoreDuplicate').
 insertJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -213,8 +236,8 @@ insertJob job = publishSpan @payload [job] $ do
   Ops.insertJob schemaName tableName job
 
 -- | Insert multiple jobs in one round-trip. Returns only the jobs that were
--- actually inserted (dedup'd jobs are excluded). Does not validate @parentId@ -
--- use 'insertJobTree' for parent-child relationships.
+-- actually inserted (dedup'd jobs are excluded). Use 'insertJobTree' for
+-- parent-child relationships.
 insertJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -495,7 +518,7 @@ ackJob
   -> m Int64
 ackJob job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.ackJob schemaName tableName job
 
 -- | Acknowledges multiple jobs as complete in one statement (parent-aware:
@@ -509,7 +532,7 @@ ackJobsBatch
 ackJobsBatch [] = pure []
 ackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   Ops.ackJobsBatch schemaName tableName jobs
 
 -- | Marks a failed job for retry at a later time.
@@ -526,7 +549,7 @@ updateJobForRetry
   -> m Int64
 updateJobForRetry delay errorMsg job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.updateJobForRetry schemaName tableName delay errorMsg job
 
 -- | Soft-nack a job so it is reprocessed after its visibility timeout without
@@ -540,7 +563,7 @@ nackJob
   -> m Int64
 nackJob job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.nackJob schemaName tableName job
 
 -- | 'nackJob' over a batch from one queue in a single statement.
@@ -554,7 +577,7 @@ nackJobsBatch
 nackJobsBatch [] = pure []
 nackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
-  Ops.nackJobsBatch schemaName firstJob.queueName jobs
+  Ops.nackJobsBatch schemaName (Job.queueName firstJob) jobs
 
 -- | Manually extends a job's visibility timeout, useful for long-running jobs.
 --
@@ -569,7 +592,7 @@ setVisibilityTimeout
   -> m Int64
 setVisibilityTimeout timeout job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.setVisibilityTimeout schemaName tableName timeout job
 
 -- | Result of setting visibility timeout for a single job in a batch.
@@ -602,13 +625,13 @@ setVisibilityTimeoutBatch
 setVisibilityTimeoutBatch _ [] = pure []
 setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   infos <- Ops.setVisibilityTimeoutBatch schemaName tableName timeout jobs
   let jobMap = Map.fromList [(primaryKey j, j) | j <- jobs]
       toResult (Ops.VisibilityUpdateInfo jobId heartbeated mActual cancelled suspended holder) =
         let mJob = Map.lookup jobId jobMap
             expected = maybe 0 claimSeq mJob
-            heldHere = maybe False (\j -> j.claimedBy == holder) mJob
+            heldHere = maybe False (\j -> claimedBy j == holder) mJob
          in case mActual of
               Nothing -> JobGone jobId
               Just actual
@@ -629,7 +652,7 @@ moveToDLQ
   -> m Int64
 moveToDLQ errorMsg job = do
   schemaName <- getSchema
-  let tableName = job.queueName
+  let tableName = Job.queueName job
   Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
 
 -- | Lists jobs in the dead-letter queue with pagination.
@@ -774,7 +797,7 @@ moveToDLQBatch
 moveToDLQBatch [] = pure 0
 moveToDLQBatch jobsWithErrors@((firstJob, _) : _) = do
   schemaName <- getSchema
-  let tableName = firstJob.queueName
+  let tableName = Job.queueName firstJob
   Ops.moveToDLQBatch schemaName tableName jobsWithErrors
 
 -- | Permanently deletes multiple jobs from the dead-letter queue.
@@ -1239,7 +1262,7 @@ getDLQChildErrorsByParent parentJobId = do
   Ops.getDLQChildErrorsByParent schemaName tableName parentJobId
 
 -- | Read all child data for a rollup finalizer. Returns
--- @(childId->result, childId->error, parentStateSnapshot, dlqPK->error)@.
+-- @(childId->result, childId->error, parentStateSnapshot, dlqRowId->error)@.
 readChildResultsRaw
   :: forall payload m
    . (QueueOperation m payload)
@@ -1293,141 +1316,6 @@ refreshAllGroupsFully
 refreshAllGroupsFully = do
   schemaName <- getSchema
   Ops.refreshAllGroupsFully schemaName (registryTableNames (Proxy @(RegistryOf m)))
-
--- ---------------------------------------------------------------------------
--- Worker Registry Operations
--- ---------------------------------------------------------------------------
-
--- | Register a worker pool. See 'Ops.registerWorker'.
-registerWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> Text
-  -- ^ Queue name
-  -> Maybe Text
-  -- ^ Host name
-  -> Maybe Int32
-  -- ^ Worker thread count
-  -> NominalDiffTime
-  -- ^ Stale threshold seconds
-  -> Maybe Value
-  -- ^ Extra JSONB metadata
-  -> m (Maybe Bool)
-registerWorker workerId queue host threads staleThreshold metadata = do
-  schemaName <- getSchema
-  Ops.registerWorker schemaName workerId queue host threads staleThreshold metadata
-
--- | Bump a worker's heartbeat. See 'Ops.heartbeatWorker'.
-heartbeatWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m (Maybe Bool)
-heartbeatWorker workerId = do
-  schemaName <- getSchema
-  Ops.heartbeatWorker schemaName workerId
-
--- | Set the @paused@ flag for a registered worker.
-setWorkerPaused
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> Bool
-  -> m Int64
-setWorkerPaused workerId p = do
-  schemaName <- getSchema
-  Ops.setWorkerPaused schemaName workerId p
-
--- | Mark a worker as gracefully draining.
-markWorkerShuttingDown
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m Int64
-markWorkerShuttingDown workerId = do
-  schemaName <- getSchema
-  Ops.markWorkerShuttingDown schemaName workerId
-
--- | Remove a worker row.
-deregisterWorker
-  :: forall m
-   . (MonadArbiter m)
-  => UUID
-  -> m Int64
-deregisterWorker workerId = do
-  schemaName <- getSchema
-  Ops.deregisterWorker schemaName workerId
-
--- | List workers, optionally scoped to a queue and a heartbeat-age threshold.
-listWorkers
-  :: forall m
-   . (MonadArbiter m)
-  => Maybe Text
-  -- ^ Queue name. 'Nothing' returns workers from all queues.
-  -> Maybe NominalDiffTime
-  -- ^ Liveness threshold in seconds. 'Nothing' returns workers regardless of heartbeat age.
-  -> m [WorkerRow]
-listWorkers mQueue mLiveSecs = do
-  schemaName <- getSchema
-  Ops.listWorkers schemaName mQueue mLiveSecs
-
--- | Delete worker rows older than each row's own @stale_threshold_secs@.
-sweepStaleWorkers
-  :: forall m
-   . (MonadArbiter m)
-  => m Int64
-sweepStaleWorkers = do
-  schemaName <- getSchema
-  Ops.sweepStaleWorkers schemaName
-
--- ---------------------------------------------------------------------------
--- Queue Operations
--- ---------------------------------------------------------------------------
-
--- | Insert an @arbiter_queues@ row with defaults if one doesn't already exist.
-ensureQueue
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> m Int64
-ensureQueue queue = do
-  schemaName <- getSchema
-  Ops.ensureQueue schemaName queue
-
--- | Set the queue's @paused@ flag. Fans out a NOTIFY to each registered worker
--- on the queue.
-setQueuePaused
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> Bool
-  -> m Int64
-setQueuePaused queue p = do
-  schemaName <- getSchema
-  Ops.setQueuePaused schemaName queue p
-
--- | Get the queue's row. 'Nothing' if absent.
-getQueue
-  :: forall m
-   . (MonadArbiter m)
-  => Text
-  -- ^ Queue name
-  -> m (Maybe QueueRow)
-getQueue queue = do
-  schemaName <- getSchema
-  Ops.getQueue schemaName queue
-
--- | List all queues registered in this schema.
-listQueues
-  :: forall m
-   . (MonadArbiter m)
-  => m [QueueRow]
-listQueues = do
-  schemaName <- getSchema
-  Ops.listQueues schemaName
 
 -- ---------------------------------------------------------------------------
 -- Cron Schedules

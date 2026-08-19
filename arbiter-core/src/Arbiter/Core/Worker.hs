@@ -41,18 +41,15 @@ instance ToJSON WorkerHealth where
     Draining -> Aeson.String "draining"
 
 instance FromJSON WorkerHealth where
-  parseJSON = withText "WorkerHealth" $ \t -> case t of
-    "live" -> pure Live
-    "stale" -> pure Stale
-    "draining" -> pure Draining
-    other -> fail $ "unknown worker health: " <> T.unpack other
+  parseJSON = withText "WorkerHealth" $ either (fail . T.unpack) pure . workerHealthFromText
 
 -- | Decode the @health@ SQL token into a 'WorkerHealth'.
-workerHealthFromText :: Text -> WorkerHealth
+workerHealthFromText :: Text -> Either Text WorkerHealth
 workerHealthFromText = \case
-  "stale" -> Stale
-  "draining" -> Draining
-  _ -> Live
+  "live" -> Right Live
+  "stale" -> Right Stale
+  "draining" -> Right Draining
+  other -> Left ("unknown worker health: " <> other)
 
 -- | A row in the worker registry. One row per running worker pool.
 data WorkerRow = WorkerRow
@@ -75,6 +72,7 @@ data WorkerRow = WorkerRow
 arbiterWorkersTable :: SchemaName -> Text
 arbiterWorkersTable schemaName = quoteIdentifier schemaName <> "." <> arbiterWorkersTableName
 
+-- | Bare name of the workers table, for catalog lookups by relname.
 arbiterWorkersTableName :: Text
 arbiterWorkersTableName = "arbiter_workers"
 

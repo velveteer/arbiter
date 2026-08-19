@@ -40,9 +40,9 @@ import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
   , JobWrite
-  , dedupKey
   , defaultGroupedJob
   , defaultJob
+  , setDedupKey
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
@@ -68,6 +68,7 @@ import UnliftIO.Async (async, mapConcurrently, wait)
 
 import Arbiter.Test.Setup (drainWith, execQuery, execStatement, seedConcurrencyPoolSQL)
 
+-- | A payload declaring one concurrency pool.
 newtype CLPayload = CLPayload Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -89,6 +90,7 @@ instance HasConcurrency CLPayload where
       sel CLMy = concurrencyBy (concurrencyPool "my" 2) (const "k")
       sel CLMz = concurrencyBy (concurrencyPool "mz" 3) (const "k")
 
+-- | A one-queue registry over 'CLPayload'.
 type CLReg = '[Queue "arbiter_concurrency_test" CLPayload]
 
 -- | A second payload declaring a different pool, with a two-payload registry, so the
@@ -115,6 +117,7 @@ job pool suffix = defaultJob (CLPayload (pool <> ":" <> suffix))
 groupedJob :: Text -> Text -> Text -> JobWrite CLPayload
 groupedJob gk pool suffix = defaultGroupedJob gk (CLPayload (pool <> ":" <> suffix))
 
+-- | The concurrency-limit suite, run against any backend.
 concurrencyLimitSpec
   :: forall env m
    . (HasRegistry m CLReg)
@@ -510,7 +513,7 @@ concurrencyLimitSpec runM = do
 
   it "moves the count row when a dedup replace changes the concurrency key" $ \env -> do
     seed env 1
-    let mk suffix = (job "ck" suffix) {dedupKey = Just (ReplaceDuplicate "movekey")}
+    let mk suffix = setDedupKey (Just (ReplaceDuplicate "movekey")) $ job "ck" suffix
     enqueue env [mk "old"]
     enqueue env [mk "new"]
     inFlight env (fullKey "ck" "old") `shouldReturn` Just 0

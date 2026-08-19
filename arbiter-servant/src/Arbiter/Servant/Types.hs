@@ -27,12 +27,10 @@ import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types
-  ( Job (..)
-  , JobRead
+  ( JobRead
   , JobStatus
   , JobWrite
   , isRollup
-  , toTraceContext
   , traceparent
   , tracestate
   )
@@ -52,6 +50,7 @@ import Data.Map.Strict (Map)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
+-- | A job in its JSON wire shape.
 newtype ApiJob payload = ApiJob {unApiJob :: JobRead payload}
   deriving stock (Eq, Show)
 
@@ -73,28 +72,28 @@ newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
 -- | Shared JSON field list for a job row. 'ApiJobWithStatus' appends @status@.
 apiJobPairs :: (ToJSON payload) => JobRead payload -> [Pair]
 apiJobPairs job =
-  [ "primaryKey" .= primaryKey job
-  , "payload" .= payload job
+  [ "primaryKey" .= Arb.primaryKey job
+  , "payload" .= Arb.payload job
   , "queueName" .= Arb.queueName job
-  , "groupKey" .= groupKey job
-  , "insertedAt" .= insertedAt job
+  , "groupKey" .= Arb.groupKey job
+  , "insertedAt" .= Arb.insertedAt job
   , "updatedAt" .= Arb.updatedAt job
-  , "attempts" .= attempts job
-  , "lastError" .= lastError job
-  , "priority" .= priority job
-  , "lastAttemptedAt" .= lastAttemptedAt job
-  , "notVisibleUntil" .= notVisibleUntil job
-  , "dedupKey" .= dedupKey job
-  , "maxAttempts" .= maxAttempts job
-  , "parentId" .= parentId job
-  , "parentState" .= parentState job
+  , "attempts" .= Arb.attempts job
+  , "lastError" .= Arb.lastError job
+  , "priority" .= Arb.priority job
+  , "lastAttemptedAt" .= Arb.lastAttemptedAt job
+  , "notVisibleUntil" .= Arb.notVisibleUntil job
+  , "dedupKey" .= Arb.dedupKey job
+  , "maxAttempts" .= Arb.maxAttempts job
+  , "parentId" .= Arb.parentId job
+  , "parentState" .= Arb.parentState job
   , "isRollup" .= isRollup job
-  , "traceparent" .= (traceparent <$> traceContext job)
-  , "tracestate" .= (tracestate =<< traceContext job)
-  , "suspended" .= suspended job
+  , "traceparent" .= (traceparent <$> Arb.traceContext job)
+  , "tracestate" .= (tracestate =<< Arb.traceContext job)
+  , "suspended" .= Arb.suspended job
   , "claimedBy" .= Arb.claimedBy job
   , "claimSeq" .= Arb.claimSeq job
-  , "archiveFor" .= archiveFor job
+  , "archiveFor" .= Arb.archiveFor job
   , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
   , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
   ]
@@ -106,31 +105,7 @@ instance (ToJSON payload) => ToJSON (ApiJobWithStatus payload) where
   toJSON (ApiJobWithStatus job status) = object (apiJobPairs job <> ["status" .= status])
 
 instance (FromJSON payload) => FromJSON (ApiJob payload) where
-  parseJSON = withObject "Job" $ \v -> do
-    job <-
-      Job
-        <$> v .: "primaryKey"
-        <*> v .: "payload"
-        <*> v .: "queueName"
-        <*> v .: "groupKey"
-        <*> v .: "insertedAt"
-        <*> v .: "updatedAt"
-        <*> v .: "attempts"
-        <*> v .: "lastError"
-        <*> v .: "priority"
-        <*> v .: "lastAttemptedAt"
-        <*> v .: "notVisibleUntil"
-        <*> v .: "dedupKey"
-        <*> v .: "maxAttempts"
-        <*> v .:? "parentId"
-        <*> v .:? "parentState"
-        <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
-        <*> v .:? "suspended" .!= False
-        <*> v .:? "claimedBy"
-        <*> v .:? "claimSeq" .!= 0
-        <*> v .:? "archiveFor"
-        <*> (Arb.AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
-    pure $ ApiJob job
+  parseJSON value = ApiJob <$> parseJSON value
 
 instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
   parseJSON v = do
@@ -141,42 +116,34 @@ instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
 instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
   toJSON (ApiJobWrite job) =
     object
-      [ "payload" .= payload job
-      , "groupKey" .= groupKey job
-      , "priority" .= priority job
-      , "notVisibleUntil" .= notVisibleUntil job
-      , "dedupKey" .= dedupKey job
-      , "maxAttempts" .= maxAttempts job
-      , "archiveFor" .= archiveFor job
+      [ "payload" .= Arb.payload job
+      , "groupKey" .= Arb.groupKey job
+      , "priority" .= Arb.priority job
+      , "notVisibleUntil" .= Arb.notVisibleUntil job
+      , "dedupKey" .= Arb.dedupKey job
+      , "maxAttempts" .= Arb.maxAttempts job
+      , "archiveFor" .= Arb.archiveFor job
       ]
 
 instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
-  parseJSON = withObject "JobWrite" $ \v ->
-    fmap ApiJobWrite $
-      Job
-        <$> pure ()
-        <*> v .: "payload"
-        <*> pure ()
-        <*> v .:? "groupKey"
-        <*> pure ()
-        <*> pure Nothing
-        <*> pure 0
-        <*> pure Nothing
-        <*> v .:? "priority" .!= 0
-        <*> pure Nothing
-        <*> v .:? "notVisibleUntil"
-        <*> v .:? "dedupKey"
-        <*> v .:? "maxAttempts"
-        <*> pure Nothing -- parentId: managed internally
-        <*> pure Nothing -- parentState: managed internally
-        <*> pure Nothing -- traceContext: stamped at enqueue
-        <*> pure False -- suspended: managed internally
-        <*> pure Nothing -- claimedBy: managed internally
-        <*> pure 0 -- claimSeq: stamped by the claim
-        -- Absent or explicit null -> Nothing (do not archive). A number -> that retention in seconds.
-        <*> v .:! "archiveFor" .!= Nothing
-        <*> pure () -- admission: server attaches from the payload's selectors
+  parseJSON = withObject "JobWrite" $ \v -> do
+    payload <- v .: "payload"
+    group <- v .:? "groupKey"
+    priority <- v .:? "priority" .!= 0
+    visibleAt <- v .:? "notVisibleUntil"
+    dedup <- v .:? "dedupKey"
+    attempts <- v .:? "maxAttempts"
+    retention <- v .:! "archiveFor" .!= Nothing
+    pure . ApiJobWrite
+      $ Arb.setArchiveFor retention
+      $ Arb.setMaxAttempts attempts
+      $ Arb.setDedupKey dedup
+      $ Arb.setNotVisibleUntil visibleAt
+      $ Arb.setPriority priority
+      $ Arb.setGroupKey group
+      $ Arb.defaultJob payload
 
+-- | A DLQ entry in its JSON wire shape.
 newtype ApiDLQJob payload = ApiDLQJob {unApiDLQJob :: DLQ.DLQJob payload}
   deriving stock (Eq, Show)
 
@@ -198,6 +165,7 @@ instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
         <*> pure (unApiJob apiJob)
     pure $ ApiDLQJob dlq
 
+-- | An archived job in its JSON wire shape.
 newtype ApiArchiveJob payload = ApiArchiveJob {unApiArchiveJob :: Archive.ArchiveJob payload}
   deriving stock (Eq, Show)
 

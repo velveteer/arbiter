@@ -1,14 +1,31 @@
 cabal-version:   3.0
 name:            arbiter-orville
 version:         0.1.0.0
-synopsis:        Orville implementation of arbiter
-description:     Orville-postgresql backend for arbiter.
+synopsis:        Orville backend integration for arbiter
+description:
+  An Orville backend for Arbiter, an opinionated PostgreSQL job queue for
+  Haskell.
+
+  Supplies the query, statement, transaction, and handler primitives implemented
+  against @MonadOrville@, so an application with its own Orville monad can define
+  a @MonadArbiter@ instance that shares the transaction Orville is already
+  managing. Unlike arbiter-simple and arbiter-hasql, this package ships no
+  instance of its own.
+
+  See the project documentation at <https://github.com/velveteer/arbiter#readme>
+  for setup and examples.
+
 license:         MIT
+license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-extra-doc-files: CHANGELOG.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -36,7 +53,7 @@ library
   build-depends:
     , aeson               >=2.0  && <2.3
     , arbiter-core        <0.2
-    , base                >=4.14 && <5
+    , base                >=4.20 && <5
     , bytestring          >=0.10 && <0.13
     , orville-postgresql  >=1.0  && <1.2
     , postgresql-libpq    >=0.9  && <0.12

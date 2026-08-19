@@ -126,6 +126,7 @@ instance (HasConcurrency payload) => CollectFor payload ConcurrencyPolicy where
 -- inspecting each payload's 'concurrencyFor'. The migration seeds these.
 type RegistryConcurrencyPolicies registry = RegistryPolicies registry ConcurrencyPolicy
 
+-- | Every distinct pool declared across the registry's payloads.
 registryConcurrencyPolicies :: forall registry. (RegistryConcurrencyPolicies registry) => Set ConcurrencyPolicy
 registryConcurrencyPolicies = registryPolicies @registry @ConcurrencyPolicy
 
