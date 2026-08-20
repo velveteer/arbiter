@@ -40,10 +40,11 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.Clock (getMonotonicTime)
 import OpenTelemetry.Metric.Core
-  ( Meter
-  , ObservableResult
+  ( Counter
+  , Meter
+  , counterAdd
   , defaultAdvisoryParameters
-  , meterCreateObservableCounterDouble
+  , meterCreateCounterDouble
   , meterCreateObservableGaugeDouble
   , observe
   )
@@ -118,13 +119,21 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
   | isNothing (Tel.meters tel) = pure (pure (), pure ())
   | otherwise = do
       cells <- newGaugeCells =<< getMonotonicTime
-      arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
+      advance <- arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
       loop <-
-        gaugeRefreshLoop (Tel.telemetryLogConfig tel baseLog) runDb schema queueTables (max 1 refreshInterval) cells
+        gaugeRefreshLoop
+          (Tel.telemetryLogConfig tel baseLog)
+          runDb
+          schema
+          queueTables
+          (max 1 refreshInterval)
+          cells
+          advance
       pure (loop, atomically (modifyTVar' (cache cells) retire))
 
--- | Register the observable instruments, each reading whatever the loop last cached.
-registerInstruments :: Meter -> GaugeCells -> IO ()
+-- | Register the instruments, each reading whatever the loop last cached, and return the
+-- action that carries a freshly published reading onto the counters.
+registerInstruments :: Meter -> GaugeCells -> IO (Cached -> IO ())
 registerInstruments meter cells = do
   let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
@@ -140,17 +149,18 @@ registerInstruments meter cells = do
             defaultAdvisoryParameters
             cbs
       reg name unit desc emit = regGauge name unit (shared desc) (callback emit)
-      regCounter name unit desc series =
-        let emit res c =
-              traverse_ (observeRise (counterBaselines cells) (Name.metricName name) res (takenAt c)) (series (reading c))
-         in void $
-              meterCreateObservableCounterDouble
-                meter
-                (Name.metricName name)
-                (Just unit)
-                (Just (shared desc))
-                defaultAdvisoryParameters
-                (withCached emit)
+      regCounter name unit desc series = do
+        counter <-
+          meterCreateCounterDouble
+            meter
+            (Name.metricName name)
+            (Just unit)
+            (Just (shared desc))
+            defaultAdvisoryParameters
+        pure $ \c ->
+          traverse_
+            (addRise (counterBaselines cells) (Name.metricName name) counter (takenAt c))
+            (series (reading c))
 
   reg Name.QueueDepth "{job}" "Jobs in a queue by status" $
     observed $
@@ -192,23 +202,24 @@ registerInstruments meter cells = do
   reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum, absent until one runs" $
     perTableMaybe Health.autovacuumAge
   reg Name.PgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
-  reg Name.PgConnections "{connection}" "Backends by state" $
+  reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table (wraparound headroom)" $
+    perTableMaybe (fmap fromIntegral . Health.xidAge)
+  reg Name.PgDbConnections "{connection}" "Backends by state, across the whole database" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)
-  reg Name.PgOldestTransactionAge "s" "Age of the oldest open transaction" $
+  reg Name.PgDbOldestTransactionAge "s" "Age of the oldest open transaction, across the whole database" $
     perDb Health.oldestTxnAge
-  reg Name.PgOldestQueryAge "s" "Age of the oldest running query" $ perDb Health.oldestQueryAge
-  reg Name.PgXidAge "{transaction}" "Transaction-id age (wraparound headroom)" $
-    perDb (fromIntegral . Health.xidAge)
-  reg Name.PgBackends "{backend}" "Backends currently connected" $
+  reg Name.PgDbOldestQueryAge "s" "Age of the oldest running query, across the whole database" $
+    perDb Health.oldestQueryAge
+  reg Name.PgDbBackends "{backend}" "Backends connected to the database" $
     perDb (fromIntegral . Health.numBackends)
 
-  regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
-    perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
-  regCounter Name.PgBlocks "{block}" "Shared-buffer reads, by whether they hit the cache" $
-    perDbTotals "source" (\h -> [("hit", Health.blksHit h), ("disk", Health.blksRead h)])
-  regCounter Name.PgTransactions "{transaction}" "Transactions by outcome" $
-    perDbTotals "outcome" (\h -> [("commit", Health.xactCommit h), ("rollback", Health.xactRollback h)])
-  regCounter Name.PgDeadlocks "{deadlock}" "Deadlocks detected" $ dbTotal Health.deadlocks
+  advances <-
+    sequence
+      [ regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
+          perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
+      , regCounter Name.PgTableBlocks "{block}" "Block reads for the table, by whether they hit the cache" $
+          perTableTotals "source" (\t -> [("hit", Health.blksHit t), ("disk", Health.blksRead t)])
+      ]
 
   -- How far behind the exported readings have fallen, from registration until the
   -- first. A stopped loop leaves the other gauges holding their last reading, which
@@ -222,6 +233,8 @@ registerInstruments meter cells = do
         scanned <- lastScan <$> readTVarIO (cache cells)
         observe res (now - fromMaybe (registeredAt cells) scanned) (attrs [])
     ]
+
+  pure (\c -> traverse_ ($ c) advances)
   where
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
     effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
@@ -265,8 +278,10 @@ gaugeRefreshLoop
   -> [TableName]
   -> NominalDiffTime
   -> GaugeCells
+  -> (Cached -> IO ())
+  -- ^ Carries a published reading onto the counters.
   -> IO (IO ())
-gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
+gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance = do
   gateRef <- newIORef Nothing
   pure $ forever $ do
     started <- getMonotonicTime
@@ -274,13 +289,14 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
     now <- getMonotonicTime
     either
       (warn "Gauge refresh failed, keeping the last reading")
-      (traverse_ (atomically . writeTVar (cache cells) . Live) . (>>= stamp started now))
+      (traverse_ publish . (>>= stamp started now))
       refreshed
     let elapsed = now - started
     -- The gate reopens gateInterval after the publish, so a scan slower than the
     -- slack would otherwise lose the gate on the very next tick.
     threadDelay (max (micros gateInterval) (micros refreshInterval - round (elapsed * 1_000_000)))
   where
+    publish c = atomically (writeTVar (cache cells) (Live c)) >> advance c
     refresh gateRef = tryAny (resolveGate gateRef) >>= either (pure . Left) sharedScan
     sharedScan gate =
       bounded (gatedScan gate) >>= \case
@@ -337,15 +353,15 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells = do
           }
     warn = warnEx logCfg
 
--- | Export an absolute total as its rise since the scan it was last counted from.
-observeRise
+-- | Count an absolute total's rise since the scan it was last counted from.
+addRise
   :: IORef (HashMap SeriesKey Baseline)
   -> Text
-  -> ObservableResult Double
+  -> Counter Double
   -> Double
   -- ^ Monotonic time the reading was scanned at.
   -> ([(Text, Text)], Double)
   -> IO ()
-observeRise baselines name res scannedAt (kvs, total) = do
+addRise baselines name counter scannedAt (kvs, total) = do
   rise <- atomicModifyIORef' baselines (riseSince (name, kvs) scannedAt total)
-  observe res rise (attrs kvs)
+  counterAdd counter rise (attrs kvs)

@@ -919,7 +919,8 @@ and wrapping an enqueue made outside a handler.
 | Queues | Depth by status |
 | Admission | What each policy admitted, keys governed, slots in use against the cap, tokens left - keyed by policy, never by the admission key |
 | Reaper | Rows each op touched |
-| Postgres | Connections, dead tuples, transaction age, cache hits |
+| Postgres tables | Dead tuples, live tuples, size, vacuum age, scans by access path, cache hits, freeze age - arbiter's own tables only |
+| Postgres database | Connections by state, backend count, oldest open transaction and query - shared with every other client of the database |
 
 Grant `pg_read_all_stats` for Postgres health beyond arbiter's own role. One replica
 scans per interval and the rest export its reading, so aggregate queue depth and Postgres

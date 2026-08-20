@@ -192,7 +192,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Postgres connections by state",
+      "title": "Database connections by state (all clients)",
       "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Other counts backends reporting no state, which is mostly Postgres's own background processes. The total across states is on Backends connected. Needs pg_read_all_stats to see connections outside arbiter's own role.",
       "datasource": {
         "type": "prometheus",
@@ -218,7 +218,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (state) (arbiter_pg_connections)",
+          "expr": "max by (state) (arbiter_pg_database_connections)",
           "legendFormat": "{{state}}"
         }
       ]
@@ -391,7 +391,7 @@
     {
       "id": 7,
       "type": "stat",
-      "title": "Cache hit ratio (5m)",
+      "title": "Cache hit ratio, arbiter tables (5m)",
       "description": "Windowed, not lifetime: the raw counters are cumulative, so a lifetime average would barely move during a miss storm.",
       "datasource": {
         "type": "prometheus",
@@ -413,14 +413,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(rate(arbiter_pg_blocks_total{source=\"hit\"}[5m])) / sum(max by (source) (rate(arbiter_pg_blocks_total[5m])))"
+          "expr": "sum(max by (table) (rate(arbiter_pg_table_blocks_total{source=\"hit\"}[5m]))) / sum(max by (table, source) (rate(arbiter_pg_table_blocks_total[5m])))"
         }
       ]
     },
     {
       "id": 8,
       "type": "stat",
-      "title": "Oldest open transaction",
+      "title": "Oldest open transaction (all clients)",
       "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. A transaction left open holds back vacuum for every table, so this climbing is what makes dead tuples accumulate.",
       "datasource": {
         "type": "prometheus",
@@ -440,14 +440,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_oldest_transaction_age_seconds)"
+          "expr": "max(arbiter_pg_database_oldest_transaction_age_seconds)"
         }
       ]
     },
     {
       "id": 9,
       "type": "stat",
-      "title": "Transaction-id age (wraparound headroom)",
+      "title": "Table transaction-id age (wraparound headroom)",
       "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. How far transaction ids have advanced since the oldest unfrozen row. Postgres stops accepting writes near 2.1 billion, so orange marks the point to look into autovacuum and red the point to act.",
       "datasource": {
         "type": "prometheus",
@@ -462,7 +462,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_xid_age)"
+          "expr": "max(arbiter_pg_table_xid_age)"
         }
       ],
       "fieldConfig": {
@@ -668,34 +668,6 @@
       ]
     },
     {
-      "id": 21,
-      "type": "timeseries",
-      "title": "Transactions /s by outcome",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 62
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (outcome) (rate(arbiter_pg_transactions_total[5m]))",
-          "legendFormat": "{{outcome}}"
-        }
-      ]
-    },
-    {
       "id": 22,
       "type": "timeseries",
       "title": "Total relation size by table",
@@ -707,7 +679,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 62
       },
       "fieldConfig": {
@@ -735,8 +707,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 70
+        "x": 12,
+        "y": 62
       },
       "fieldConfig": {
         "defaults": {
@@ -763,8 +735,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 24,
+        "x": 0,
         "y": 70
       },
       "fieldConfig": {
@@ -783,7 +755,7 @@
     {
       "id": 25,
       "type": "stat",
-      "title": "Oldest running query",
+      "title": "Oldest running query (all clients)",
       "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum.",
       "datasource": {
         "type": "prometheus",
@@ -791,7 +763,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
+        "w": 12,
         "x": 0,
         "y": 78
       },
@@ -803,14 +775,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_oldest_query_age_seconds)"
+          "expr": "max(arbiter_pg_database_oldest_query_age_seconds)"
         }
       ]
     },
     {
       "id": 26,
       "type": "stat",
-      "title": "Backends connected",
+      "title": "Backends connected (all clients)",
       "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum. Excludes the backend taking the reading.",
       "datasource": {
         "type": "prometheus",
@@ -818,8 +790,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
-        "x": 8,
+        "w": 12,
+        "x": 12,
         "y": 78
       },
       "fieldConfig": {
@@ -832,34 +804,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(arbiter_pg_backends)"
-        }
-      ]
-    },
-    {
-      "id": 27,
-      "type": "stat",
-      "title": "Deadlocks /s (5m)",
-      "description": "Shared reading: one replica scans and every replica exports it, so this aggregates with max, never sum.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 78
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(rate(arbiter_pg_deadlocks_total[5m]))"
+          "expr": "max(arbiter_pg_database_backends)"
         }
       ]
     },

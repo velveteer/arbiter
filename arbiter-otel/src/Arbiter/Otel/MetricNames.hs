@@ -35,14 +35,12 @@ data MetricName
   | PgTableAutovacuumAge
   | PgTableSizeBytes
   | PgTableScans
-  | PgConnections
-  | PgBackends
-  | PgOldestTransactionAge
-  | PgOldestQueryAge
-  | PgXidAge
-  | PgBlocks
-  | PgTransactions
-  | PgDeadlocks
+  | PgTableBlocks
+  | PgTableXidAge
+  | PgDbConnections
+  | PgDbBackends
+  | PgDbOldestTransactionAge
+  | PgDbOldestQueryAge
   | GaugesAge
   deriving stock (Bounded, Enum, Eq, Show)
 
@@ -69,14 +67,12 @@ metricName = \case
   PgTableAutovacuumAge -> "arbiter.pg.table.autovacuum_age"
   PgTableSizeBytes -> "arbiter.pg.table.size_bytes"
   PgTableScans -> "arbiter.pg.table.scans"
-  PgConnections -> "arbiter.pg.connections"
-  PgBackends -> "arbiter.pg.backends"
-  PgOldestTransactionAge -> "arbiter.pg.oldest_transaction_age"
-  PgOldestQueryAge -> "arbiter.pg.oldest_query_age"
-  PgXidAge -> "arbiter.pg.xid_age"
-  PgBlocks -> "arbiter.pg.blocks"
-  PgTransactions -> "arbiter.pg.transactions"
-  PgDeadlocks -> "arbiter.pg.deadlocks"
+  PgTableBlocks -> "arbiter.pg.table.blocks"
+  PgTableXidAge -> "arbiter.pg.table.xid_age"
+  PgDbConnections -> "arbiter.pg.database.connections"
+  PgDbBackends -> "arbiter.pg.database.backends"
+  PgDbOldestTransactionAge -> "arbiter.pg.database.oldest_transaction_age"
+  PgDbOldestQueryAge -> "arbiter.pg.database.oldest_query_age"
   GaugesAge -> "arbiter.gauges.age"
 
 -- | Every metric name arbiter exports.
