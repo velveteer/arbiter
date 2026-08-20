@@ -10,8 +10,7 @@ module Test.Arbiter.Worker.ConnectionRecovery (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-  ( JobRead
-  , defaultJob
+  ( defaultJob
   , payload
   , setGroupKey
   , setMaxAttempts
@@ -155,9 +154,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           -- second attempt (succeeds normally)
           completed `shouldBe` 2
 
-          -- Verify job was eventually acked and removed from queue
-          remainingJobs <- runSimpleDb env $ HL.listJobs @WorkerTestPayload 10 0
-          length (remainingJobs :: [JobRead WorkerTestPayload]) `shouldBe` 0
+          -- Verify job was eventually acked and removed from queue.
+          -- The handler increments before its transaction commits, so poll
+          -- rather than reading the queue immediately.
+          let remainingCount =
+                length <$> runSimpleDb env (HL.listJobs @WorkerTestPayload 10 0)
+          waitUntil 10_000 $ (== 0) <$> remainingCount
+
+          remaining <- remainingCount
+          remaining `shouldBe` 0
 
 -- | Kill active connections that reference our test schema.
 killSchemaConnections :: ByteString -> Text -> IO ()
