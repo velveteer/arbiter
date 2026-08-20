@@ -22,14 +22,9 @@ import Arbiter.Core.SchemaTables (allSchemaTables)
 import Arbiter.Core.Sql.Health qualified as Sql
 import Arbiter.Core.Sql.Query (rows)
 
--- | Database-wide cache, transaction, connection, and age counters.
+-- | Connection and age counters for the current database, shared with its other clients.
 data PgDbHealth = PgDbHealth
-  { blksHit :: Double
-  , blksRead :: Double
-  , xactCommit :: Double
-  , xactRollback :: Double
-  , deadlocks :: Double
-  , numBackends :: Int64
+  { numBackends :: Int64
   , connActive :: Int64
   , connIdle :: Int64
   , connIdleInTxn :: Int64
@@ -38,12 +33,11 @@ data PgDbHealth = PgDbHealth
   , connOther :: Int64
   , oldestTxnAge :: Double
   , oldestQueryAge :: Double
-  , xidAge :: Int64
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Per-table tuple counts, size, and scan counters.
+-- | Per-table tuple counts, size, scan counters, block traffic, and freeze age.
 data PgTableHealth = PgTableHealth
   { table :: Text
   , liveTup :: Int64
@@ -53,6 +47,10 @@ data PgTableHealth = PgTableHealth
   , totalBytes :: Int64
   , seqScan :: Double
   , idxScan :: Double
+  , blksHit :: Double
+  , blksRead :: Double
+  , xidAge :: Maybe Int64
+  -- ^ Nothing for a relation with no frozen transaction id of its own.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -61,12 +59,7 @@ data PgTableHealth = PgTableHealth
 pgDbHealthCodec :: RowCodec PgDbHealth
 pgDbHealthCodec =
   PgDbHealth
-    <$> col "blks_hit" CFloat8
-    <*> col "blks_read" CFloat8
-    <*> col "xact_commit" CFloat8
-    <*> col "xact_rollback" CFloat8
-    <*> col "deadlocks" CFloat8
-    <*> col "numbackends" CInt8
+    <$> col "numbackends" CInt8
     <*> col "active" CInt8
     <*> col "idle" CInt8
     <*> col "idle_in_txn" CInt8
@@ -75,7 +68,6 @@ pgDbHealthCodec =
     <*> col "other" CInt8
     <*> col "oldest_txn_age" CFloat8
     <*> col "oldest_query_age" CFloat8
-    <*> col "xid_age" CInt8
 
 pgTableHealthCodec :: RowCodec PgTableHealth
 pgTableHealthCodec =
@@ -87,6 +79,9 @@ pgTableHealthCodec =
     <*> col "total_bytes" CInt8
     <*> col "seq_scan" CFloat8
     <*> col "idx_scan" CFloat8
+    <*> col "blks_hit" CFloat8
+    <*> col "blks_read" CFloat8
+    <*> ncol "xid_age" CInt8
 
 -- | Database-wide health and per-table churn for the given queues' tables and the schema's
 -- shared arbiter tables. Backends owned by another role report their state as unknown,

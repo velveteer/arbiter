@@ -174,7 +174,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: The database is over 1.5B transactions from wraparound.
+          summary: An arbiter table is over 1.5B transactions from wraparound.
           description: Autovacuum is not keeping up. Postgres refuses writes at 2B.
         noDataState: OK
         execErrState: Error
@@ -187,7 +187,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: max(arbiter_pg_xid_age)
+              expr: max(arbiter_pg_table_xid_age)
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -294,35 +294,3 @@ groups:
                 - evaluator:
                     type: gt
                     params: [0.2]
-
-      - uid: arbiter-pg-deadlocks
-        title: Deadlocks in the database
-        condition: threshold
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: Postgres is reporting deadlocks.
-          description: Arbiter's own statements take their locks in a fixed order, so deadlocks usually come from application transactions that touch the queue tables alongside their own.
-        noDataState: OK
-        execErrState: Error
-        data:
-          - refId: query
-            datasourceUid: prometheus
-            relativeTimeRange:
-              from: 600
-              to: 0
-            model:
-              refId: query
-              instant: true
-              expr: max(rate(arbiter_pg_deadlocks_total[5m]))
-          - refId: threshold
-            datasourceUid: __expr__
-            model:
-              refId: threshold
-              type: threshold
-              expression: query
-              conditions:
-                - evaluator:
-                    type: gt
-                    params: [0]

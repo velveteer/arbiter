@@ -48,7 +48,7 @@ import Arbiter.Worker
   , transactionalWorkerConfig
   )
 import Control.Exception (bracket)
-import Control.Monad (join, void)
+import Control.Monad (foldM, join, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -72,15 +72,23 @@ import OpenTelemetry.Context (empty, insertSpan)
 import OpenTelemetry.Context.ThreadLocal (attachContext, detachContext)
 import OpenTelemetry.Exporter.Metric
   ( MetricExport (..)
+  , NumberValue (..)
   , ResourceMetricsExport (..)
   , ScopeMetricsExport (..)
   , exponentialHistogramDataPointAttributes
   , gaugeDataPointAttributes
   , histogramDataPointAttributes
   , sumDataPointAttributes
+  , sumDataPointValue
   )
 import OpenTelemetry.MeterProvider (collectResourceMetrics)
 import OpenTelemetry.Metric (SdkMeterEnv, createMeterProvider, defaultSdkMeterProviderOptions)
+import OpenTelemetry.Metric.Core
+  ( counterAdd
+  , defaultAdvisoryParameters
+  , getMeter
+  , meterCreateCounterDouble
+  )
 import OpenTelemetry.Processor.Span (SpanProcessor (..))
 import OpenTelemetry.Propagator.W3CTraceContext (decodeSpanContext)
 import OpenTelemetry.Resource (materializeResources, mkResource)
@@ -107,6 +115,7 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel qualified as Otel
 import Arbiter.Otel.Gauges.Cells qualified as Cells
+import Arbiter.Otel.Metrics qualified as Metrics
 
 newtype Greeting = Greeting Text
   deriving stock (Eq, Generic, Show)
@@ -207,6 +216,20 @@ collected env = concatMap resourcePoints <$> collectResourceMetrics env
         withName meehName exponentialHistogramDataPointAttributes meehPoints
     withName name pointAttrs = foldMap (\p -> [(name, pointAttrs p)])
 
+-- | The monotonic sums a collection produced, as metric name and point value.
+collectedSums :: SdkMeterEnv -> IO [(Text, Double)]
+collectedSums env = concatMap resourceSums <$> collectResourceMetrics env
+  where
+    resourceSums = foldMap scopeSums . resourceMetricsScopes
+    scopeSums = foldMap metricSums . scopeMetricsExports
+    metricSums = \case
+      MetricExportSum {mesName, mesMonotonic = True, mesSumPoints} ->
+        foldMap (\p -> [(mesName, asDouble (sumDataPointValue p))]) mesSumPoints
+      _ -> []
+    asDouble = \case
+      DoubleNumber d -> d
+      IntNumber n -> fromIntegral n
+
 -- | Whether a metric was recorded carrying every one of @kvs@ on one point.
 recordedWith :: Text -> [(Text, Text)] -> [(Text, Attributes)] -> Bool
 recordedWith name kvs = any (\(n, as) -> n == name && all (carries as) kvs)
@@ -278,7 +301,9 @@ spec = do
             , ("arbiter.jobs.processed", [("outcome", "unavailable")])
             , ("arbiter.maintenance.rows", [("op", "sweep-exhausted-jobs")])
             , ("arbiter.queue.depth", [("queue", queue)])
-            , ("arbiter.pg.backends", [])
+            , ("arbiter.pg.database.backends", [])
+            , ("arbiter.pg.table.blocks", [("table", queue), ("source", "hit")])
+            , ("arbiter.pg.table.xid_age", [("table", queue)])
             ]
 
   -- The one series that tells a stopped refresh loop from a fresh reading.
@@ -312,6 +337,29 @@ spec = do
 
     it "counts nothing from a scan already counted" $
       snd (rise 10 9 (counted 10 7)) `shouldBe` 0
+
+  describe "counter export" $ do
+    let name = "arbiter.test.total"
+        key = (name, [])
+        scans totals = do
+          (mp, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+          meter <- getMeter mp "arbiter-otel-test"
+          counter <- meterCreateCounterDouble meter name Nothing Nothing defaultAdvisoryParameters
+          let count seen (at, total) = do
+                let (seen', rise) = Cells.riseSince key at total seen
+                counterAdd counter rise (Metrics.attrs [])
+                pure seen'
+          void (foldM count mempty totals)
+          lookup name <$> collectedSums env
+
+    it "sums the rises across three scans" $
+      scans [(10, 100), (20, 130), (30, 190)] `shouldReturn` Just 90
+
+    it "counts nothing from a single scan" $
+      scans [(10, 100)] `shouldReturn` Just 0
+
+    it "counts the whole total across a reset" $
+      scans [(10, 100), (20, 130), (30, 5)] `shouldReturn` Just 35
 
   -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
   describe "provisioned dashboard" $ withProvisioned dashboardPath $ \referenced -> do
