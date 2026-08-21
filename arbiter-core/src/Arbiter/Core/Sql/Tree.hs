@@ -46,14 +46,9 @@ import Arbiter.Core.Job.Schema
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 
--- | Pause all claimable jobs in a parent's subtree (set suspended = TRUE).
---
--- Walks the descendant tree and pauses every job that is currently
--- claimable (not in-flight, not already suspended). Naturally-suspended
--- rollup finalizers in the tree are left alone (they're already suspended
--- waiting for their own children). In-flight children are left alone so
--- their visibility timeout can expire normally if the worker crashes -
--- pausing them would break crash recovery.
+-- | Suspend every claimable job in a parent's subtree. A finalizer already waiting on
+-- its own children is left as it stands, and so is an in-flight job, whose visibility
+-- timeout has to lapse normally for crash recovery to reach it.
 pauseChildrenSQL :: Text -> Text -> Int64 -> Query ()
 pauseChildrenSQL schema tableName parentId =
   let tbl = jobQueueTable schema tableName
@@ -69,14 +64,9 @@ pauseChildrenSQL schema tableName parentId =
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       |]
 
--- | Resume user-paused jobs in a parent's subtree (set suspended = FALSE).
---
--- Walks the descendant tree and resumes every suspended job that is NOT a
--- naturally-suspended rollup finalizer. A rollup is "naturally suspended"
--- when it has children still in the main queue - it should stay suspended
--- until those children complete, otherwise its handler would run with an
--- incomplete view of child results. Resuming the rollup's children directly
--- is correct: the rollup will wake itself when they finish.
+-- | Resume the suspended jobs in a parent's subtree, other than a finalizer with
+-- children still in the queue: it stays suspended, or its handler would run on an
+-- incomplete set of child results, and it wakes itself once they finish.
 resumeChildrenSQL :: Text -> Text -> Int64 -> Query ()
 resumeChildrenSQL schema tableName parentId =
   let tbl = jobQueueTable schema tableName
@@ -306,11 +296,8 @@ cancelJobTreeSQL schema tableName jobId =
         SELECT count(*) AS @{count :: CInt8} FROM deleted
       |]
 
--- | Try to wake a suspended ancestor when all its children are gone.
---
--- Resumes the parent for a completion round (sets suspended = FALSE).
--- Only wakes if the parent is suspended and has no remaining children
--- in the main queue.
+-- | Resume a suspended parent for its completion round, once no child of it is left in
+-- the main queue.
 tryWakeAncestorSQL :: Text -> Text -> Int64 -> Query ()
 tryWakeAncestorSQL schema tableName ancestorId =
   let tbl = jobQueueTable schema tableName
@@ -322,10 +309,8 @@ tryWakeAncestorSQL schema tableName ancestorId =
           AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = #{ancestorId :: CInt8})
       |]
 
--- | Rollup finalizer ids in a job's tree, the job itself included.
---
--- Used before a DLQ move to identify the rollup nodes whose results need
--- persisting into @parent_state@ before deletion takes them.
+-- | Rollup finalizer ids in a job's tree, the job itself included. Read before a DLQ
+-- move, whose delete would otherwise take their child results with it.
 treeRollupIdsSQL :: Text -> Text -> Int64 -> Query Int64
 treeRollupIdsSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -338,11 +323,7 @@ treeRollupIdsSQL schema tableName jobId =
         SELECT id AS @{result :: CInt8} FROM descendants WHERE parent_state IS NOT NULL
       |]
 
--- | Suspend a job (make it unclaimable).
---
--- Only suspends non-in-flight jobs (not currently being processed by workers).
---
--- Returns: number of rows updated (0 if job doesn't exist, is in-flight, or already suspended)
+-- | Suspend a job, making it unclaimable. Refuses an in-flight job.
 suspendJobSQL :: Text -> Text -> Int64 -> Query ()
 suspendJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -354,15 +335,9 @@ suspendJobSQL schema tableName jobId =
           AND NOT (attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
       |]
 
--- | Resume a suspended job (make it claimable again).
---
--- Refuses to resume a rollup finalizer that still has children in the main
--- queue, preventing premature handler execution. Children in the DLQ are
--- considered terminal - the finalizer's handler receives DLQ errors via
--- 'readChildResultsSQL' and can decide how to handle them.
---
--- Returns: number of rows updated (0 if job doesn't exist, isn't suspended,
---          or is a finalizer with remaining children in the main queue)
+-- | Resume a suspended job. Refuses a finalizer with children still in the main queue,
+-- so its handler cannot run early. A child in the DLQ is terminal: the finalizer reads
+-- its error through 'readChildResultsSQL' and decides for itself.
 resumeJobSQL :: Text -> Text -> Int64 -> Query ()
 resumeJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -382,9 +357,7 @@ jobExistsSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE id = #{jobId :: CInt8}) AS @{result :: CBool}|]
 
--- | Fetch just the parent_id for a given job.
---
--- Returns: single row with parent_id (NULL if no parent or job doesn't exist)
+-- | Fetch a job's parent id.
 getParentIdSQL :: Text -> Text -> Int64 -> Query (Maybe Int64)
 getParentIdSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -434,7 +407,7 @@ getDLQChildErrorsByParentSQL schema tableName parentId =
         SELECT @{job_id :: CInt8}, @{last_error :: Maybe CText} FROM ${dlqTbl} WHERE parent_id = #{parentId :: CInt8}
       |]
 
--- | Snapshot results into parent_state before DLQ move.
+-- | Snapshot child results into @parent_state@ before a DLQ move.
 persistParentStateSQL :: Text -> Text -> Value -> Int64 -> Query ()
 persistParentStateSQL schema tableName parentState jobId =
   let tbl = jobQueueTable schema tableName
@@ -442,17 +415,14 @@ persistParentStateSQL schema tableName parentState jobId =
         UPDATE ${tbl} SET parent_state = #{parentState :: CJsonb}, updated_at = NOW() WHERE id = #{jobId :: CInt8}
       |]
 
--- | Read the raw parent_state snapshot from the DB (jsonb, may be NULL).
+-- | Read a job's raw @parent_state@ snapshot.
 getParentStateSnapshotSQL :: Text -> Text -> Int64 -> Query (Maybe Value)
 getParentStateSnapshotSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|SELECT @{parent_state :: Maybe CJsonb} FROM ${tbl} WHERE id = #{jobId :: CInt8}|]
 
--- | Read all child result data for a rollup finalizer in a single query.
---
--- Combines results table, DLQ child errors, and parent_state snapshot
--- into a tagged UNION ALL. Tags: @r@ = result, @e@ = DLQ error,
--- @s@ = parent_state snapshot.
+-- | A rollup finalizer's child results, DLQ child errors, and @parent_state@ snapshot in
+-- one query, tagged @r@, @e@ and @s@ respectively.
 readChildResultsSQL :: Text -> Text -> Int64 -> Query (Text, Maybe Int64, Maybe Value, Maybe Text, Maybe Int64)
 readChildResultsSQL schema tableName parentId =
   let resultsTbl = jobQueueResultsTable schema tableName

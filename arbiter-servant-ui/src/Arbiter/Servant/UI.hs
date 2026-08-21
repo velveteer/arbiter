@@ -57,14 +57,14 @@ import Network.Wai (pathInfo, rawPathInfo, responseLBS)
 import Servant
 import System.FilePath ((</>))
 
--- | All static files embedded at compile time
+-- | The dashboard's static files, embedded at compile time.
 staticFiles :: [(FilePath, ByteString)]
 staticFiles = $(embedDir "static")
 
--- | Servant API type for the admin UI (catch-all behind API routes)
+-- | The admin UI route, a catch-all sitting behind the API routes.
 type AdminUI = Raw
 
--- | Servant server for 'AdminUI'
+-- | Serve 'AdminUI' from the embedded files.
 adminUIServer :: Server AdminUI
 adminUIServer = Tagged adminApplication
 
@@ -72,27 +72,19 @@ adminUIServer = Tagged adminApplication
 adminUIServerHoisted :: forall m. (forall x. Handler x -> m x) -> ServerT AdminUI m
 adminUIServerHoisted nt = hoistServer (Proxy @AdminUI) nt adminUIServer
 
--- | Standalone WAI Application serving embedded static files.
---
--- Serves @index.html@ for @\/@ and other files by relative path.
+-- | The dashboard as a standalone WAI application over the embedded files.
 adminApplication :: Application
 adminApplication = serveStaticApp $ \fp -> pure (lookup fp staticFiles)
 
--- | Dev-mode WAI Application serving static files from disk.
---
--- Reads files on every request - no recompile needed for HTML\/JS\/CSS changes.
+-- | The dashboard served from disk, read per request, so an edit needs no rebuild.
 devAdminApplication :: FilePath -> Application
 devAdminApplication dir = serveStaticApp $ \fp ->
   (Just <$> BS.readFile (dir </> fp)) `catch` (\(_ :: IOException) -> pure Nothing)
 
--- | Shared implementation for both embedded and dev-mode applications.
---
--- Takes a file resolver and returns a WAI 'Application' that serves
--- @index.html@ for @\/@ and looks up other files by relative path.
---
--- When the root is requested without a trailing slash, sends a 301 redirect
--- to add one. This ensures relative asset paths (e.g. @css\/dashboard.css@)
--- resolve correctly when the UI is mounted under a prefix like @\/arbiter@.
+-- | The application both forms share, over a resolver for the files: @index.html@ at the
+-- root, everything else by relative path. A root request without its trailing slash is
+-- redirected to one, so the page's relative asset paths still resolve when the UI is
+-- mounted under a prefix.
 serveStaticApp :: (FilePath -> IO (Maybe ByteString)) -> Application
 serveStaticApp resolveFile req sendResponse = do
   let segments = filter (not . T.null) (pathInfo req)
@@ -120,7 +112,7 @@ securityHeaders =
   , ("X-Frame-Options", "DENY")
   ]
 
--- | Infer Content-Type from file extension
+-- | A file's content type, from its extension.
 contentTypeHeader :: FilePath -> (HeaderName, ByteString)
 contentTypeHeader path
   | ".html" `isSuffixOf` path = ("Content-Type", "text/html; charset=utf-8")
@@ -132,7 +124,7 @@ contentTypeHeader path
   | ".ico" `isSuffixOf` path = ("Content-Type", "image/x-icon")
   | otherwise = ("Content-Type", "application/octet-stream")
 
--- | Dev-mode Servant server for 'AdminUI' - serves from disk.
+-- | Serve 'AdminUI' from disk.
 adminUIServerDev :: FilePath -> Server AdminUI
 adminUIServerDev dir = Tagged (devAdminApplication dir)
 
@@ -141,9 +133,7 @@ adminUIServerDevHoisted
   :: forall m. (forall x. Handler x -> m x) -> FilePath -> ServerT AdminUI m
 adminUIServerDevHoisted nt dir = hoistServer (Proxy @AdminUI) nt (adminUIServerDev dir)
 
--- | Combine arbiterApp with admin UI
---
--- Serves the API at @\/api\/v1\/...@ and admin UI at @\/@
+-- | The API at @\/api\/v1@ and the admin UI at the root, in one application.
 arbiterAppWithAdmin
   :: forall registry
    . ( BuildServer registry registry
@@ -156,7 +146,7 @@ arbiterAppWithAdmin config =
     (Proxy @(ArbiterAPI registry :<|> AdminUI))
     (arbiterServer config :<|> adminUIServer)
 
--- | Like 'arbiterAppWithAdmin' but serves static files from disk for development.
+-- | 'arbiterAppWithAdmin' serving the UI from disk.
 arbiterAppWithAdminDev
   :: forall registry
    . ( BuildServer registry registry

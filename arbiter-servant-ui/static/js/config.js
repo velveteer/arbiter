@@ -1,6 +1,8 @@
 // Timing/config constants, gathered so cadence is tunable in one place.
 const ARB_TIMING = {
   sseHandshakeMs: 3000,
+  sseRetryMs: 3000,
+  sseRetryMaxMs: 60000,
   pollMs: 5000,
   refreshMs: 30000,
   fetchTimeoutMs: 30000,
@@ -8,7 +10,6 @@ const ARB_TIMING = {
   loaderDelayMs: 180,
   // One turn of the .spin animation in dashboard.css. Keep the two in step.
   spinPeriodMs: 800,
-  statsDebounceMs: 500,
   armWindowMs: 5000,
   cronPollMs: 60000,
   workerPollMs: 30000,
@@ -18,9 +19,12 @@ const ARB_TIMING = {
   bulkConcurrency: 5,
   childPageLimit: 50,
   pageLimit: 50,
+  pageSizes: [25, 50, 100, 200],
+  // Above this many queues the landing page opens as a list rather than cards.
+  queueListThreshold: 12,
   toastMaxVisible: 5,
   toastDelays: { danger: 8000, warning: 6000, success: 4000, info: 4000 },
-  refreshModes: { '1s': 1000, '5s': 5000, '10s': 10000, '30s': 30000 },
+  refreshModes: { '1s': 1000, '5s': 5000, '10s': 10000, '30s': 30000, '1m': 60000 },
 };
 
 // Behavioral config. pauseConfirm gates how a queue is paused (resume always uses

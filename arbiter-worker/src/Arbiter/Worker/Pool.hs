@@ -134,7 +134,7 @@ import Arbiter.Worker.Settle
 -- Worker Pool
 -- ---------------------------------------------------------------------------
 
--- | Starts a worker pool with a dispatcher and N worker threads.
+-- | Run a worker pool: a dispatcher and its worker threads.
 runWorkerPool
   :: forall payload m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
@@ -242,8 +242,8 @@ withLivenessFile config = case livenessFile config of
       (\_ -> void . tryAny . liftIO . removeFile $ path)
       (\_ -> k ())
 
--- | Re-insert the worker's registry row from the config + schema/queue.
--- Returns the effective paused state so the caller can seed 'pauseVar'.
+-- | Re-insert the worker's registry row, returning the effective paused state for the
+-- caller to seed 'pauseVar' with.
 registerSelf :: (MonadArbiter m) => WorkerConfig n payload -> SchemaName -> Text -> m (Maybe Bool)
 registerSelf config schemaName queueName =
   Ops.registerWorker
@@ -255,8 +255,8 @@ registerSelf config schemaName queueName =
     (workerStaleThreshold config)
     (workerMetadata config)
 
--- | Mark shutting-down, drain, then deregister. All DB
--- writes are best-effort and logged on failure.
+-- | Mark shutting-down, drain, then deregister. Every write is best-effort and logged
+-- when it fails.
 shutdownPool
   :: (MonadArbiter m)
   => WorkerConfig n payload

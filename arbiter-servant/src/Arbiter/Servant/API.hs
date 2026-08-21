@@ -3,9 +3,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
--- | Servant API type definitions for Arbiter job queue admin interface.
---
--- The API is generated from the registry, creating separate endpoints for each table.
+-- | The admin API's route types, generated from the registry so each queue gets its own
+-- endpoints.
 module Arbiter.Servant.API
   ( ArbiterAPI
   , RegistryToAPI
@@ -84,7 +83,7 @@ instance FromHttpApiData JobStatus where
 instance ToHttpApiData JobStatus where
   toUrlPiece = jobStatusToText
 
--- | Jobs API routes - manage jobs in a specific table
+-- | One queue's job routes.
 data JobsAPI payload mode = JobsAPI
   { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&sort_by=...&sort_dir=...
     listJobs
@@ -165,7 +164,7 @@ data JobsAPI payload mode = JobsAPI
   }
   deriving stock (Generic)
 
--- | DLQ API routes - manage failed jobs in a specific table
+-- | One queue's DLQ routes.
 data DLQAPI payload mode = DLQAPI
   { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
     listDLQ
@@ -198,7 +197,7 @@ data DLQAPI payload mode = DLQAPI
   }
   deriving stock (Generic)
 
--- | Archive API routes - browse and manage completed jobs for a specific table
+-- | One queue's archive routes.
 data ArchiveAPI payload mode = ArchiveAPI
   { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
     listArchive
@@ -231,7 +230,7 @@ data ArchiveAPI payload mode = ArchiveAPI
   }
   deriving stock (Generic)
 
--- | Stats API routes - queue statistics for a specific table
+-- | One queue's stats route.
 data StatsAPI mode = StatsAPI
   { -- GET /:table/stats
     getStats
@@ -240,7 +239,7 @@ data StatsAPI mode = StatsAPI
   }
   deriving stock (Generic)
 
--- | API routes for a specific table
+-- | One queue's routes.
 data TableAPI payload mode = TableAPI
   { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload)
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
@@ -249,7 +248,7 @@ data TableAPI payload mode = TableAPI
   }
   deriving stock (Generic)
 
--- | Queues API routes - list available queues
+-- | The queue registry routes.
 data QueuesAPI mode = QueuesAPI
   { -- GET /queues
     listQueues
@@ -281,10 +280,10 @@ data QueuesAPI mode = QueuesAPI
   }
   deriving stock (Generic)
 
--- | Events API type - raw WAI handler for SSE streaming
+-- | The SSE stream, served by a raw WAI handler.
 type EventsAPI = "stream" :> Raw
 
--- | Cron API routes - manage cron schedules
+-- | The cron schedule routes.
 data CronAPI mode = CronAPI
   { -- GET /cron/schedules
     --
@@ -311,7 +310,7 @@ data CronAPI mode = CronAPI
   }
   deriving stock (Generic)
 
--- | Workers API routes - view the registry and pause/resume individual workers
+-- | The worker registry routes.
 data WorkersAPI mode = WorkersAPI
   { -- GET /workers
     --
@@ -398,7 +397,7 @@ type SharedAPI =
     :<|> "rate-limits" :> NamedRoutes RateLimitsAPI
     :<|> "concurrency" :> NamedRoutes ConcurrencyAPI
 
--- | Generates a 'TableAPI' route per registry entry, followed by the shared
+-- | A 'TableAPI' route per registry entry, followed by the shared
 -- top-level routes.
 type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
   RegistryToAPI '[] = SharedAPI

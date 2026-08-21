@@ -55,6 +55,7 @@ import Control.Monad (forever, guard, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
@@ -77,7 +78,7 @@ import Network.Wai (responseStream)
 import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort, setTimeout)
 import Servant
 import Servant.Server.Generic (AsServerT)
-import System.IO (hPutStrLn, stderr)
+import System.IO (stderr)
 import System.Timeout (timeout)
 
 import Arbiter.Servant.API
@@ -97,7 +98,7 @@ import Arbiter.Servant.API
   )
 import Arbiter.Servant.Types
 
--- | Configuration for the API server
+-- | Configuration for the API server.
 data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverEnv :: SimpleEnv registry
   -- ^ The SimpleEnv containing schema and connection pool
@@ -139,10 +140,9 @@ serverPoolConfig =
     , poolStripes = Just 1
     }
 
--- | Create an 'ArbiterServerConfig' with its own internal connection pool.
---
--- __Note__: Use 'Arbiter.Migrations.runMigrationsForRegistry' with
--- @enableEventStreaming = True@ to set up the database triggers for SSE.
+-- | Create an 'ArbiterServerConfig' with a connection pool of its own. SSE needs the
+-- event-streaming triggers, which 'Arbiter.Migrations.runMigrationsForRegistry' installs
+-- when @enableEventStreaming@ is set.
 initArbiterServer
   :: forall registry
    . Proxy registry
@@ -168,7 +168,7 @@ initArbiterServer _proxy connStr schemaName = do
       , queueStatsCacheTtl = defaultQueueStatsCacheTtl
       }
 
--- | Jobs API handlers for a specific table
+-- | Jobs API handlers for a specific table.
 jobsServer
   :: forall registry payload
    . (JobPayload payload)
@@ -191,7 +191,7 @@ jobsServer table config =
     , resumeJob = resumeJobHandler @registry @payload table config
     }
 
--- | List jobs with pagination and composable filters
+-- | List jobs with pagination and composable filters.
 listJobsHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -223,9 +223,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
   (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do
     j <- Ops.listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countJobsFiltered schemaName tableName filters
-    -- Only query child/DLQ counts if any returned job could be a parent.
-    -- All parents are rollup finalizers (isRollup = True), so we
-    -- skip the extra queries for queues that don't use job trees.
+    -- Every parent is a rollup finalizer, so a page without one needs no count queries.
     let jobIds = map (Job.primaryKey . fst) j
         hasParents = any (isRollup . fst) j
     if null j || not hasParents
@@ -249,7 +247,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
       , dlqChildCounts = dlqCounts
       }
 
--- | Insert a new job into the queue
+-- | Insert a new job into the queue.
 insertJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -272,7 +270,7 @@ insertJobHandler tableName config (ApiJobWrite jobWrite) = do
     Nothing ->
       throwError err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
 
--- | Insert multiple jobs in a single batch operation
+-- | Insert multiple jobs in a single batch operation.
 insertJobsBatchHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -293,7 +291,7 @@ insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
   let apiJobs = map ApiJob inserted
   pure $ BatchInsertResponse {inserted = apiJobs, insertedCount = length apiJobs}
 
--- | Get a specific job by ID
+-- | Fetch a job by id.
 getJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -310,7 +308,7 @@ getJobHandler tableName config jobId = do
     Nothing -> throwError err404 {errBody = "Job not found"}
     Just (j, s) -> pure $ JobResponse {job = ApiJobWithStatus j s}
 
--- | Cancel a job (delete it from the queue)
+-- | Cancel a job (delete it from the queue).
 cancelJobHandler
   :: forall registry
    . Text
@@ -342,7 +340,7 @@ forceCancelJobHandler tableName config jobId = do
     then pure NoContent
     else throwError err404 {errBody = "Job not found"}
 
--- | Promote a job (make it immediately visible)
+-- | Promote a job (make it immediately visible).
 promoteJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -372,7 +370,7 @@ promoteJobHandler tableName config jobId = do
     Left err -> throwError err
     Right () -> pure NoContent
 
--- | Move a job to the dead letter queue
+-- | Move a job to the dead letter queue.
 moveToDLQHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -396,7 +394,7 @@ moveToDLQHandler tableName config jobId = do
     Just 0 -> throwError err409 {errBody = "Job was concurrently modified"}
     Just _ -> pure NoContent
 
--- | Pause all children of a parent job
+-- | Pause all children of a parent job.
 pauseChildrenHandler
   :: forall registry
    . Text
@@ -410,8 +408,7 @@ pauseChildrenHandler tableName config jobId = do
   void . liftIO . runSimpleDb env $
     Ops.pauseChildren schemaName tableName jobId
 
-  -- Returns NoContent even if no children were paused (they may all be
-  -- in-flight, already suspended, or completed). This is not an error.
+  -- Pausing nothing is not an error: the children may be in-flight, suspended or done.
   pure NoContent
 
 -- | Resume all suspended children of a parent job.
@@ -428,11 +425,10 @@ resumeChildrenHandler tableName config jobId = do
   void . liftIO . runSimpleDb env $
     Ops.resumeChildren schemaName tableName jobId
 
-  -- Returns NoContent even if no children were resumed (they may not be
-  -- suspended, or may have already completed). This is not an error.
+  -- Resuming nothing is not an error: the children may be unsuspended or done.
   pure NoContent
 
--- | Suspend a job (make it unclaimable)
+-- | Suspend a job (make it unclaimable).
 suspendJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -462,10 +458,8 @@ suspendJobHandler tableName config jobId = do
     Left err -> throwError err
     Right () -> pure NoContent
 
--- | Resume a suspended job, making it claimable again.
---
--- Refuses to resume a rollup finalizer that still has children, preventing
--- premature handler execution.
+-- | Resume a suspended job, making it claimable again. Refuses a finalizer with children
+-- still running, so its handler cannot start early.
 resumeJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -497,7 +491,7 @@ resumeJobHandler tableName config jobId = do
     Left err -> throwError err
     Right () -> pure NoContent
 
--- | DLQ API handlers for a specific table
+-- | DLQ API handlers for a specific table.
 dlqServer
   :: forall registry payload
    . (JobPayload payload)
@@ -512,7 +506,7 @@ dlqServer table config =
     , deleteDLQBatch = deleteDLQBatchHandler @registry table config
     }
 
--- | List DLQ jobs with pagination and composable filters
+-- | List DLQ jobs with pagination and composable filters.
 listDLQHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -551,9 +545,8 @@ listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortB
       , dlqLimit = limit
       }
 
--- | Retry a job from DLQ (move back to main queue)
---
--- Returns 409 if the job has a parent_id that no longer exists (orphaned child).
+-- | Retry a DLQ job back into the main queue. 409 when its parent is gone, which would
+-- orphan it.
 retryFromDLQHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -576,7 +569,7 @@ retryFromDLQHandler tableName config dlqId = do
     Left True -> throwError err409 {errBody = "Cannot retry: parent job no longer exists (not in queue or DLQ)"}
     Left False -> throwError err404 {errBody = "DLQ job not found"}
 
--- | Delete a job from DLQ permanently
+-- | Delete a job from DLQ permanently.
 deleteDLQHandler
   :: forall registry
    . Text
@@ -592,7 +585,7 @@ deleteDLQHandler tableName config dlqId = do
     then pure NoContent
     else throwError err404 {errBody = "DLQ job not found"}
 
--- | Batch delete jobs from DLQ permanently
+-- | Batch delete jobs from DLQ permanently.
 deleteDLQBatchHandler
   :: forall registry
    . Text
@@ -605,7 +598,7 @@ deleteDLQBatchHandler tableName config (BatchDeleteRequest dlqIds) = do
   rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteDLQJobsBatch schemaName tableName dlqIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
--- | Archive API handler for a specific table
+-- | Archive API handler for a specific table.
 archiveServer
   :: forall registry payload
    . (JobPayload payload)
@@ -620,7 +613,7 @@ archiveServer table config =
     , deleteArchiveBatch = deleteArchiveBatchHandler @registry table config
     }
 
--- | List archived jobs with pagination and composable filters
+-- | List archived jobs with pagination and composable filters.
 listArchiveHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -702,7 +695,7 @@ deleteArchiveBatchHandler tableName config (BatchDeleteRequest archiveIds) = do
   rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
--- | Stats API handler for a specific table
+-- | Stats API handler for a specific table.
 statsServer
   :: forall registry
    . Text
@@ -713,7 +706,7 @@ statsServer tableName config =
     { getStats = getStatsHandler @registry tableName config
     }
 
--- | Get queue statistics
+-- | Get queue statistics.
 getStatsHandler
   :: forall registry
    . Text
@@ -742,7 +735,7 @@ getAllStatsHandler config tables =
         schemaName = schema env
     AllStatsResponse <$> runSimpleDb env (Ops.getAllQueueStats schemaName tables)
 
--- | Table API handlers for a specific table
+-- | Table API handlers for a specific table.
 tableServer
   :: forall registry payload
    . (JobPayload payload)
@@ -757,7 +750,7 @@ tableServer table config =
     , stats = statsServer @registry table config
     }
 
--- | Queues API handler
+-- | Queues API handler.
 queuesServer
   :: forall registry
    . (RegistryTables registry)
@@ -805,17 +798,12 @@ setQueuePausedHandler config knownQueues p queue = do
   invalidate (queueStatsCache config)
   pure NoContent
 
--- | Events server - raw WAI application for SSE streaming.
---
--- Uses WAI 'responseStream' with explicit flush after every event so the
--- browser receives data immediately.  Sends a @: keepalive@ comment every
--- 15 seconds to keep the connection alive through reverse proxies.
---
--- All clients share one broadcast hub (see 'subscribeSSE'): each client is a
--- Warp thread reading a duplicated 'TChan', not a held Postgres connection, so
--- viewer count scales without exhausting the pool. When 'enableSSE' is 'False',
--- sends a single @disabled@ event and closes immediately. The admin UI detects
--- this and skips reconnection.
+-- | The SSE stream, as a raw WAI application. Flushes after every event so the browser
+-- sees it at once, and sends a keepalive comment every 15 seconds to hold the connection
+-- open through a reverse proxy. Every client reads its own duplicate of the shared
+-- broadcast hub rather than holding a Postgres connection, so viewers cost Warp threads
+-- and not pool slots. With 'enableSSE' off it sends one @disabled@ event and closes,
+-- which the admin UI reads as a signal to stop reconnecting.
 eventsServer
   :: forall registry
    . ArbiterServerConfig registry
@@ -937,15 +925,16 @@ sseListenerLoop pool broadcast refs = do
       Just (_ :: SomeAsyncException) -> throwIO e
       Nothing -> do
         delay <- readIORef backoff
-        hPutStrLn stderr $
+        BS8.hPutStr stderr . encodeUtf8 $
           "[arbiter:sse] listener error, retrying in "
-            <> show (delay `div` 1_000_000)
+            <> T.pack (show (delay `div` 1_000_000))
             <> "s: "
-            <> show e
+            <> T.pack (show e)
+            <> "\n"
         threadDelay delay
         writeIORef backoff (min maxBackoff (delay * 2))
 
--- | Cron API handlers
+-- | Cron API handlers.
 cronServer
   :: forall registry
    . ArbiterServerConfig registry
@@ -969,7 +958,7 @@ listCronSchedulesHandler config mQueue = do
   rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName mQueue
   pure $ CronSchedulesResponse {cronSchedules = rows}
 
--- | Update a cron schedule
+-- | Update a cron schedule.
 updateCronScheduleHandler
   :: forall registry
    . ArbiterServerConfig registry
@@ -1007,7 +996,7 @@ runCronScheduleHandler config name = do
     Ops.RunReqPending -> throwError err409 {errBody = "Cron schedule already has a run pending"}
     Ops.RunReqStamped -> pure NoContent
 
--- | Workers API handlers
+-- | Workers API handlers.
 workersServer
   :: forall registry
    . ArbiterServerConfig registry
@@ -1275,18 +1264,18 @@ sharedServer config =
     :<|> rateLimitsServer config
     :<|> concurrencyServer config
 
--- | Type class to build server implementations for registry entries
+-- | Builds a registry's per-queue server implementations.
 class BuildServer registry (reg :: JobPayloadRegistry) where
   buildServer :: ArbiterServerConfig registry -> ServerT (RegistryToAPI reg) Handler
 
--- Base case: empty registry, just the shared top-level routes
+-- Empty registry: the shared top-level routes alone.
 instance
   (RegistryTables registry)
   => BuildServer registry '[]
   where
   buildServer = sharedServer
 
--- Single table case: table endpoints :<|> shared top-level routes
+-- One table: its endpoints, then the shared top-level routes.
 instance
   ( JobPayload (SpecPayload spec)
   , KnownSymbol (SpecName spec)
@@ -1299,7 +1288,7 @@ instance
      in tableServer @registry @(SpecPayload spec) tableName config
           :<|> sharedServer config
 
--- Recursive case: table endpoints :<|> rest of tables (at least 2 tables total)
+-- Two or more: this table's endpoints, then the rest.
 instance
   ( BuildServer registry (nextSpec ': moreRest)
   , JobPayload (SpecPayload spec)
@@ -1332,7 +1321,7 @@ arbiterServerHoisted
 arbiterServerHoisted nt config =
   hoistServer (Proxy @(ArbiterAPI registry)) nt (arbiterServer config)
 
--- | Convert to WAI Application
+-- | Convert to WAI Application.
 arbiterApp
   :: forall registry
    . ( BuildServer registry registry
@@ -1343,10 +1332,8 @@ arbiterApp
 arbiterApp config =
   serve (Proxy @(ArbiterAPI registry)) (arbiterServer config)
 
--- | Run the API server on a specific port.
---
--- Uses @setTimeout 0@ (no idle timeout) so that SSE streaming connections
--- are not killed by Warp.
+-- | Run the API server on a port, with Warp's idle timeout off so it cannot kill an SSE
+-- stream.
 runArbiterAPI
   :: forall registry
    . ( BuildServer registry registry
@@ -1360,9 +1347,9 @@ runArbiterAPI port config = do
   let settings = setPort port $ setTimeout 0 defaultSettings
   runSettings settings (arbiterApp config)
 
--- | Validate and sanitize pagination parameters
+-- | Clamp pagination parameters to a limit of 1 to 1000 and a non-negative offset.
 validatePagination :: Int -> Maybe Int -> Maybe Int -> (Int, Int)
 validatePagination defLimit mLimit mOffset =
-  let limit = max 1 $ min 1000 $ fromMaybe defLimit mLimit -- Clamp between 1 and 1000
-      offset = max 0 $ fromMaybe 0 mOffset -- Must be non-negative
+  let limit = max 1 $ min 1000 $ fromMaybe defLimit mLimit
+      offset = max 0 $ fromMaybe 0 mOffset
    in (limit, offset)

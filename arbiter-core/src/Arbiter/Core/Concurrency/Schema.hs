@@ -274,7 +274,7 @@ concurrencyUpdateFunction funcName concTbl dd =
     ${dd} LANGUAGE plpgsql;
   |]
 
--- | SQL to create the 3 statement-level AFTER triggers on a queue's job table.
+-- | The three statement-level AFTER triggers on a queue's job table.
 createConcurrencyTriggersSQL :: SchemaName -> TableName -> Text
 createConcurrencyTriggersSQL schemaName tableName =
   createMaintenanceTriggersSQL

@@ -3,17 +3,10 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
--- | Type-level utilities for job queue registry validation.
---
--- The registry enforces at compile-time that:
---
---   1. Each payload type maps to exactly one queue name (via 'TableForPayload')
---   2. Queue names and payload types are unique. 'SpecForPayload' checks the
---      entry it resolves against the whole registry, so any lookup rejects a
---      duplicate. 'AllQueuesUnique' checks the whole registry up front, for
---      'RegistryTables'.
---   3. Workers can only claim jobs for payloads they're registered to handle
---   4. Each queue has one handler result type (via 'ResultFor')
+-- | The type-level registry and the lookups over it, which resolve a payload's queue
+-- name and handler result type at compile time. Queue names and payload types must be
+-- unique: 'SpecForPayload' checks the entry it resolves against the whole registry, so
+-- any lookup rejects a duplicate, and 'AllQueuesUnique' checks the registry up front.
 module Arbiter.Core.QueueRegistry
   ( -- * Registry type
     JobPayloadRegistry

@@ -11,10 +11,7 @@ data PoolConfig = PoolConfig
   , poolIdleTimeout :: Int
   -- ^ Idle timeout (seconds)
   , poolStripes :: Maybe Int
-  -- ^ Number of stripes (sub-pools). Reduces lock contention on connection checkout.
-  --
-  -- * @Nothing@: Auto-detect based on CPU count
-  -- * @Just n@: Use n stripes
+  -- ^ Sub-pools, which spread checkout contention. 'Nothing' picks one per CPU.
   }
   deriving stock (Eq, Show)
 

@@ -18,8 +18,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 
--- | A rollup parent's immediate child results, keyed by child ID, and its DLQ
--- errors, keyed by DLQ row ID for 'Arbiter.Core.HighLevel.retryFromDLQ'. A
+-- | A rollup parent's immediate child results, keyed by child id, and its DLQ
+-- errors, keyed by DLQ row id for 'Arbiter.Core.HighLevel.retryFromDLQ'. A
 -- decode failure is returned as 'Left'.
 childResults
   :: (FromJSON (ResultOf m payload), MonadArbiter m)

@@ -4,6 +4,7 @@
 -- | Groups SQL templates.
 module Arbiter.Core.Sql.Groups
   ( groupsWindowSQL
+  , emptiedWindowSQL
   , lockGroupsSQL
   , refreshGroupsSQL
   , insertMissingGroupsSQL
@@ -25,21 +26,27 @@ groupsWindowSQL schema tableName limit cursor =
       after = foldMap (\k -> [sql|WHERE group_key > #{k :: CText}|]) cursor
    in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} ${after} ORDER BY group_key LIMIT #{lim :: CInt8}|]
 
--- | @FOR UPDATE SKIP LOCKED@ over the window 'groupsWindowSQL' returned plus at most
--- @limit@ rows the maintenance triggers emptied in place, one ascending pass in the key
--- order those triggers use. Returns the keys this transaction holds.
-lockGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Query Text
-lockGroupsSQL schema tableName limit cursor upper =
+-- | At most @limit@ keys past @cursor@ the maintenance triggers emptied in place, in the
+-- database's key order. Its last key is the caller's resume cursor, so a prefix that
+-- empties again every pass cannot starve the keys above it.
+emptiedWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
+emptiedWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
       after = foldMap (\k -> [sql|AND group_key > #{k :: CText}|]) cursor
+   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} WHERE job_count = 0 ${after} ORDER BY group_key LIMIT #{lim :: CInt8}|]
+
+-- | @FOR UPDATE SKIP LOCKED@ over the window 'groupsWindowSQL' returned plus the keys
+-- 'emptiedWindowSQL' returned, one ascending pass in the key order the maintenance
+-- triggers use. Returns the keys this transaction holds.
+lockGroupsSQL :: Text -> Text -> Maybe Text -> Maybe Text -> [Text] -> Query Text
+lockGroupsSQL schema tableName cursor upper emptied =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+      after = foldMap (\k -> [sql|AND group_key > #{k :: CText}|]) cursor
       window = foldMap (\hi -> [sql|SELECT group_key FROM ${groupsTbl} WHERE group_key <= #{hi :: CText} ${after} UNION |]) upper
    in [sql|
-        WITH emptied AS (
-          SELECT group_key FROM ${groupsTbl} WHERE job_count = 0 ORDER BY group_key LIMIT #{lim :: CInt8}
-        ),
-        targets AS (
-          ${window}SELECT group_key FROM emptied
+        WITH targets AS (
+          ${window}SELECT unnest(#{emptied :: [CText]}::text[]) AS group_key
         )
         SELECT @{group_key :: CText} FROM ${groupsTbl}
         WHERE group_key IN (SELECT group_key FROM targets)

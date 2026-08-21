@@ -15,7 +15,7 @@ import Arbiter.Core.Job.DLQ (JobSnapshot)
 -- | A completed job in the archive.
 data ArchiveJob payload = ArchiveJob
   { archivePrimaryKey :: Int64
-  -- ^ Archive table primary key (distinct from the original job ID in the snapshot)
+  -- ^ Archive table primary key, distinct from the snapshot's own job id
   , completedAt :: UTCTime
   -- ^ When the job was acked and archived
   , jobSnapshot :: JobSnapshot payload

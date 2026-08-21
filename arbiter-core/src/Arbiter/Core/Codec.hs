@@ -256,7 +256,7 @@ type JobWriteSource payload =
 type JobCodec a = Codec (JobWriteSource Value) a
 
 -- | Main-table codec. The write source contains public enqueue fields,
--- admission columns, parent ID, rollup state, and suspension state.
+-- admission columns, parent id, rollup state, and suspension state.
 jobCodec :: (ToJSON payload) => Text -> Codec (JobWriteSource payload) (JobRead Value)
 jobCodec = jobCodecWith "id"
 

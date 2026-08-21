@@ -1,9 +1,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Hasql database monad for Arbiter.
---
--- 'HasqlDb' has a built-in 'MonadArbiter' instance, so you can use it directly:
+-- | The hasql database monad. Its 'MonadArbiter' instance is built in, so it is usable
+-- directly:
 --
 -- @
 -- import Arbiter.Core
@@ -79,7 +78,7 @@ data HasqlEnv (registry :: JobPayloadRegistry) = HasqlEnv
   -- ^ Resolved LISTEN source. 'Nothing' runs poll-only.
   }
 
--- | Hasql database monad for Arbiter.
+-- | The hasql database monad.
 newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb {unHasqlDb :: ReaderT (HasqlEnv registry) m a}
   deriving newtype
     ( Applicative
@@ -129,15 +128,13 @@ useDedicatedListener connStr env = do
 poolListener :: Pool Hasql.Connection -> IO Listener
 poolListener pool = newPoolListener (\action -> withResource pool (`Compat.withHasqlLibPQConnection` action))
 
--- | Run a HasqlDb action with a HasqlEnv.
+-- | Run a 'HasqlDb' action in its env.
 runHasqlDb :: HasqlEnv registry -> HasqlDb registry m a -> m a
 runHasqlDb env action = runReaderT (unHasqlDb action) env
 
--- | Run a HasqlDb action using a single hasql connection.
---
--- No pool is needed. The connection is pinned with @transactionDepth = 1@,
--- so arbiter's 'withDbTransaction' uses savepoints instead of issuing @BEGIN@.
--- The caller is responsible for transaction lifecycle on the connection.
+-- | Run a 'HasqlDb' action on one connection, no pool involved. It is pinned as though a
+-- transaction were already open, so 'Arbiter.Core.MonadArbiter.withDbTransaction' nests
+-- through savepoints and the caller keeps ownership of the transaction itself.
 --
 -- @
 -- _ <- Hasql.use conn (Session.script "BEGIN")
@@ -167,10 +164,8 @@ inTransaction conn schemaName action =
           }
    in runHasqlDb env action
 
--- | Create a HasqlEnv with conservative defaults.
---
--- For worker pools, use 'createHasqlEnvWithConfig' with @poolConfigForWorkers@
--- to size the pool based on worker count.
+-- | Create a 'HasqlEnv' with conservative pool defaults. For worker pools, size it with
+-- 'createHasqlEnvWithConfig' and @poolConfigForWorkers@ instead.
 createHasqlEnv
   :: forall registry m
    . (MonadIO m)
@@ -183,7 +178,7 @@ createHasqlEnv
 createHasqlEnv proxy connStr schemaName =
   createHasqlEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
 
--- | Create a HasqlEnv with custom pool configuration.
+-- | Create a 'HasqlEnv' with custom pool settings.
 createHasqlEnvWithConfig
   :: forall registry m
    . (MonadIO m)
@@ -222,7 +217,7 @@ createHasqlEnvWithConfig _proxy connStr schemaName config = liftIO $ do
       , listener = Just lstn
       }
 
--- | Create a HasqlEnv with a user-provided connection pool. The shared
+-- | Create a 'HasqlEnv' over a caller's own connection pool. The shared
 -- listener borrows one connection from that pool and holds it for the env's
 -- lifetime, so size the pool for the worker load plus one. Use 'disableListener'
 -- to run poll-only and reclaim that slot, or 'useDedicatedListener' to give the

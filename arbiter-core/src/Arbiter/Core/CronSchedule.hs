@@ -4,9 +4,8 @@
 
 -- | Types for the @cron_schedules@ table.
 --
--- The table stores both the code-defined defaults and user overrides separately.
--- On worker init, only the @default_*@ columns are upserted -- user overrides
--- (@override_*@, @enabled@) are preserved.
+-- Code-defined defaults and user overrides sit in separate columns. Worker startup
+-- upserts only the defaults, so an override survives every deploy.
 module Arbiter.Core.CronSchedule
   ( -- * Types
     CronScheduleRow (..)
@@ -83,13 +82,8 @@ effectiveOverlap CronScheduleRow {defaultOverlap = def, overrideOverlap = mOvr} 
 effectiveTimezone :: CronScheduleRow -> Maybe Text
 effectiveTimezone CronScheduleRow {defaultTimezone = mDef, overrideTimezone = mOvr} = mOvr <|> mDef
 
--- | Patch update for a cron schedule.
---
--- Each field uses @Maybe (Maybe a)@:
---
---   * @Nothing@ = don't change
---   * @Just Nothing@ = reset to default (set column to NULL)
---   * @Just (Just x)@ = set to @x@
+-- | A patch over a cron schedule's overrides. 'Nothing' leaves a field unchanged, @Just
+-- Nothing@ clears the override back to the default, @Just (Just v)@ sets it.
 data CronScheduleUpdate = CronScheduleUpdate
   { overrideExpression :: Maybe (Maybe Text)
   , overrideOverlap :: Maybe (Maybe Text)

@@ -1,55 +1,39 @@
 /**
- * Alpine component: stat cards (total/ready/in-flight/scheduled/backoff/suspended/oldest-ready)
+ * Alpine component: the per-queue stat cards.
  *
- * Refreshes on SSE events matching the selected queue instead of polling.
- * The 30s sse-refresh timer keeps time-dependent values (like oldest job age) fresh.
+ * The stats query aggregates over the whole queue table, so the refresh interval
+ * is the only thing that schedules it, as it is for the job tables. A queue's
+ * event stream does not reload it: at a busy queue's event rate that outpaced any
+ * interval the reader picked.
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('statsTab', () => ({
     ...eventBusTab(),
     ...tabActive(),
+    ...pollSpinner(),
+    ...refreshControl('loadStats', 'arb.statsRefresh', '30s'),
     stats: null,
-    loading: false,
+    ...loadState(),
     active: false,
-    _statsDebounce: null,
-    _statsPending: false,
-    _loadErrored: false,
 
     init() {
+      this._watchPolling();
       trackTabActive(this, '#tab-stats', {
-        onShow: () => this.loadStats(),
+        onShow: () => { this.loadStats(); this._startTimer(); },
+        onHide: () => this._stopTimer(),
       });
-      const refreshTick = () => { if (this.active && !this.loading) this.loadStats(); };
       this._bindBus({
         queueChanged: () => { this.stats = null; if (this.active) this.loadStats(); },
-        sseEvent: (e) => {
-          if (!this.active) return;
-          const queue = Alpine.store('app').selectedQueue;
-          if (e.detail.some(evt => evt.table === queue)) this._debouncedLoadStats();
-        },
         sseReconnect: () => { if (this.active) this.loadStats(); },
-        sseRefresh: refreshTick,
-        pollTick: refreshTick,
       });
     },
 
     destroy() {
       untrackTabActive(this);
-      if (this._statsDebounce) { clearTimeout(this._statsDebounce); this._statsDebounce = null; }
-      this._statsPending = false;
+      this._stopTimer();
+      this._stopWatchPolling();
       this._unbindBus();
       releaseInitialLoad(this);
-    },
-
-    _debouncedLoadStats() {
-      if (this._statsDebounce) { this._statsPending = true; return; }
-      this._statsDebounce = setTimeout(() => {
-        this._statsPending = false;
-        this.loadStats().finally(() => {
-          this._statsDebounce = null;
-          if (this._statsPending) this._debouncedLoadStats();
-        });
-      }, ARB_TIMING.statsDebounceMs);
     },
 
     // Card link href: this queue's Jobs tab filtered by status (empty = all).
@@ -60,6 +44,17 @@ document.addEventListener('alpine:init', () => {
     goToJobs(e, status) {
       if (!plainNavClick(e)) return;
       window.dispatchEvent(new CustomEvent(ARB_EVENTS.filterJobs, { detail: status }));
+    },
+
+    goToDLQ() {
+      const btn = document.querySelector('[data-bs-target="#tab-dlq"]');
+      if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
+    },
+
+    fmtAge: formatDurationSecs,
+
+    zeroClass(n) {
+      return n ? '' : 'is-zero';
     },
 
     async loadStats() {

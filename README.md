@@ -1,13 +1,17 @@
-<h1 align="left">
-    <img src="./arbiter.png" height=40 width=40 />
-    Arbiter
+<div align="center">
+
+<h1>
+<img src="./arbiter.png" width="120" height="120" alt="" /><br />
+Arbiter
 </h1>
 
 An opinionated, production-ready PostgreSQL job queue for Haskell applications.
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-0e7490?style=for-the-badge&logo=rocket&logoColor=white)](https://demo.arbiterq.dev/)
-[![API Docs](https://img.shields.io/badge/API_Docs-5e5086?style=for-the-badge&logo=haskell&logoColor=white)](https://velveteer.github.io/arbiter/)
-[![CI](https://img.shields.io/github/actions/workflow/status/velveteer/arbiter/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/velveteer/arbiter/actions/workflows/ci.yml)
+<a href="https://demo.arbiterq.dev/"><img src="https://img.shields.io/badge/Live_Demo-0e7490?style=for-the-badge&amp;logo=rocket&amp;logoColor=white" alt="Live Demo" /></a>
+<a href="https://arbiterq.dev/packages.html"><img src="https://img.shields.io/badge/API_Docs-5e5086?style=for-the-badge&amp;logo=haskell&amp;logoColor=white" alt="API Docs" /></a>
+<a href="https://github.com/velveteer/arbiter/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/velveteer/arbiter/ci.yml?branch=main&amp;style=for-the-badge&amp;label=CI" alt="CI" /></a>
+
+</div>
 
 - Transactional job processing - jobs and database operations commit together
 - At-least-once delivery with visibility timeouts and heartbeats
@@ -640,7 +644,7 @@ re-enqueued as fresh jobs, or deleted from the REST API and admin UI.
 
 ## Worker Configuration
 
-See the [WorkerConfig haddocks](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html) for all options.
+See the [WorkerConfig haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html) for all options.
 
 ### Batched Handlers
 
@@ -683,7 +687,7 @@ not - it can fire for a job that is later reprocessed. Keep effects that must
 happen exactly once in the transaction next to the ack, not in the hook.
 
 Each job is finalized on its own via the
-[`BatchCallbacks`](https://velveteer.github.io/arbiter/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
+[`BatchCallbacks`](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
 record - `ack`/`ackAll` or `ackWith`/`ackAllWith` (per-job or bulk ack), `failRetry`/`failPermanent`,
 `cancelBranch`/`cancelTree`, or `nack`. Dispositions are per job, so a failure,
 cancel, or nack affects only that job - completed jobs stay done, an untouched
@@ -820,7 +824,7 @@ type MyAPI =
     :<|> "arbiter" :> (Arb.ArbiterAPI AppRegistry :<|> ArbUI.AdminUI)
 ```
 
-See the [arbiter-servant-ui haddocks](https://velveteer.github.io/arbiter/arbiter-servant-ui/Arbiter-Servant-UI.html)
+See the [arbiter-servant-ui haddocks](https://arbiterq.dev/arbiter-servant-ui/Arbiter-Servant-UI.html)
 
 ### Endpoints
 
@@ -1004,7 +1008,7 @@ PG.withTransaction conn $ do
     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 ```
 
-See the [arbiter-simple haddocks](https://velveteer.github.io/arbiter/arbiter-simple/Arbiter-Simple.html)
+See the [arbiter-simple haddocks](https://arbiterq.dev/arbiter-simple/Arbiter-Simple.html)
 
 ### arbiter-orville (orville-postgresql)
 
@@ -1061,7 +1065,7 @@ instance MonadArbiter AppM where
   getListener = asks (Just . dedicatedListener . appListen)
 ```
 
-See the [arbiter-orville haddocks](https://velveteer.github.io/arbiter/arbiter-orville/Arbiter-Orville.html)
+See the [arbiter-orville haddocks](https://arbiterq.dev/arbiter-orville/Arbiter-Orville.html)
 
 ### arbiter-hasql (hasql)
 
@@ -1082,4 +1086,4 @@ ArbH.inTransaction @AppRegistry conn "arbiter" $
 _ <- Hasql.use conn (Session.script "COMMIT")
 ```
 
-See the [arbiter-hasql haddocks](https://velveteer.github.io/arbiter/arbiter-hasql/Arbiter-Hasql.html)
+See the [arbiter-hasql haddocks](https://arbiterq.dev/arbiter-hasql/Arbiter-Hasql.html)

@@ -1,16 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Versioned, tracked migrations for job queue schemas.
---
--- Uses the @postgresql-migration@ library to:
---
---   * Track which migrations have been run in a database table
---   * Run migrations in order
---   * Prevent re-running completed migrations
---   * Support incremental schema changes
---
--- Migration history is stored in a @schema_migrations@ table inside the
--- target schema (e.g., @arbiter.schema_migrations@).
+-- | Versioned, tracked migrations for job queue schemas, run in order and never rerun.
+-- History lives in a @schema_migrations@ table inside the target schema.
 module Arbiter.Migrations
   ( -- * Registry
     QueueSpec (..)
@@ -111,7 +102,6 @@ import Arbiter.Core.Job.Schema
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
 import Arbiter.Core.Queues (createQueuesTableSQL)
-import Arbiter.Core.SchemaTables (sharedArbiterTables)
 import Arbiter.Core.RateLimit.Schema
   ( PolicyRow (..)
   , addRateLimitColumnsSQL
@@ -131,6 +121,7 @@ import Arbiter.Core.RateLimit.Spec
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
+import Arbiter.Core.SchemaTables (sharedArbiterTables)
 import Arbiter.Core.Worker
   ( addArchiveForColumnSQL
   , addCancelRequestedAtColumnSQL
@@ -162,9 +153,7 @@ import Database.PostgreSQL.Simple.Migration
   )
 import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
 
--- | Configuration for job queue migrations
---
--- Controls the desired state reconciled after tracked migrations.
+-- | The desired state reconciled after a schema's tracked migrations run.
 data MigrationConfig = MigrationConfig
   { enableNotifications :: Bool
   -- ^ Whether LISTEN/NOTIFY triggers for reactive job claiming should be
@@ -182,7 +171,7 @@ data MigrationConfig = MigrationConfig
   }
   deriving stock (Eq, Show)
 
--- | Default migration configuration
+-- | Notify triggers on, event streaming off, unlogged rate-limit buckets.
 defaultMigrationConfig :: MigrationConfig
 defaultMigrationConfig =
   MigrationConfig
@@ -191,13 +180,8 @@ defaultMigrationConfig =
     , rateLimitDurability = Unlogged
     }
 
--- | Run migrations for all tables in a queue registry.
---
--- Creates tables for each payload type in the registry (main + DLQ) within
--- a single PostgreSQL schema. The schema itself is created first, outside of
--- migration tracking. PostgreSQL notices are suppressed during migration.
---
--- Example:
+-- | Migrate every queue in a registry into one schema. The schema itself is created
+-- first, outside migration tracking.
 --
 -- @
 -- type AppRegistry =
@@ -356,18 +340,15 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
   case validateRegistryNames schemaName (map fst tableNames) of
     Left err -> pure (MigrationError (T.unpack err))
     Right () -> bracket (connectPostgreSQL connStr) close $ \conn -> do
-      -- Disable NOTICE messages on the underlying LibPQ connection
       withConnection conn $ \libpqConn ->
         LibPQ.disableNoticeReporting libpqConn
 
-      -- Create the schema. If CREATE SCHEMA fails (e.g. insufficient privileges),
-      -- check whether the schema already exists (manual creation) and proceed.
+      -- A CREATE that fails for want of privilege is fine if someone made the schema by hand.
       let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
       result <- try $ execute_ conn schemaSQL
       case result of
         Right _ -> pure ()
         Left (e :: PG.SqlError) -> do
-          -- Check if the schema exists despite the CREATE failure
           exists <- schemaExists conn schemaName
           when (not exists) $
             ioError
@@ -382,11 +363,9 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
                     <> show e
               )
 
-      -- Re-enable notice reporting for the migrations
       withConnection conn $ \libpqConn ->
         LibPQ.enableNoticeReporting libpqConn
 
-      -- Build migrations: schema-level (once) + per-table migrations
       let schemaMigrations = schemaLevelMigrations schemaName
           tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
           migrations = schemaMigrations <> tableMigrations
@@ -397,12 +376,8 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
               , optTableName = migrationTableName
               }
 
-      -- Initialize the migration system
       _ <- runMigrations conn options [MigrationInitialization]
-
-      -- Run the actual migrations
       migrationResult <- runMigrations conn options migrations
-      -- Reconciliation can throw (conflicting prefix, ALTER failure). Surface as MigrationError.
       case migrationResult of
         MigrationSuccess -> do
           reconciled <-
@@ -413,7 +388,7 @@ runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSee
               reconcileOptionalTriggers conn schemaName (map fst tableNames) config
           case reconciled of
             Right () -> pure MigrationSuccess
-            -- Convert synchronous failures to a result. Async exceptions (cancellation) propagate.
+            -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
             Left (e :: SomeException)
               | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
               | otherwise -> pure (MigrationError (T.unpack (displayEx e)))
@@ -504,11 +479,11 @@ reconcileRateLimitDurability conn schemaName durability = do
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
     _ -> pure ()
 
--- | Converge optional triggers after tracked migrations. This restores objects
--- removed by an earlier disabled configuration without changing migration history.
--- The sweep is schema-wide by design: the table list is the schema's whole queue
--- set, so objects belonging to a queue outside it are left over from a registry
--- that shrank and are dropped.
+-- | Converge the optional triggers after the tracked migrations, restoring what an
+-- earlier disabled configuration removed without touching migration history. The sweep is
+-- schema-wide by design: the table list is the schema's whole queue set, so an object
+-- belonging to a queue outside it is left over from a registry that shrank, and is
+-- dropped.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
@@ -659,11 +634,11 @@ triggerJoins =
   \JOIN pg_class c ON c.oid = t.tgrelid \
   \JOIN pg_namespace n ON n.oid = c.relnamespace "
 
--- | Renders a @DROP TRIGGER@ statement per matched row.
+-- | A @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query
 dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) "
 
--- | Renders a @COMMENT ON TRIGGER@ statement per matched row, stamping the first parameter.
+-- | A @COMMENT ON TRIGGER@ statement per matched row, stamping the first parameter.
 commentTriggerSelect :: Query
 commentTriggerSelect = "SELECT format('COMMENT ON TRIGGER %I ON %I.%I IS %L;', t.tgname, n.nspname, c.relname, ?::text) "
 
@@ -687,12 +662,9 @@ schemaLevelMigrations schemaName =
   , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
   ]
 
--- | All job queue migrations for a single table
---
--- This creates migrations for one table and its DLQ within a schema.
--- Each table gets its own set of migrations with unique version identifiers.
--- Optional notification and event-streaming objects are not tracked here,
--- 'reconcileOptionalTriggers' owns them.
+-- | One queue's tracked migrations, each under its own version identifier. The optional
+-- notify and event-streaming objects are not tracked here, 'reconcileOptionalTriggers'
+-- owns them.
 jobQueueMigrationsForTable
   :: SchemaName
   -- ^ Schema name
@@ -722,7 +694,7 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
         , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
         , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v8" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v9" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
         , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName
@@ -757,7 +729,7 @@ jobQueueMigrationsForTable schemaName tableName adm =
         | otherwise = []
    in coreMigrations <> concurrencyTriggers <> rateLimitTriggers
 
--- | Check whether a schema exists in the database.
+-- | Whether a schema exists.
 schemaExists :: PG.Connection -> Text -> IO Bool
 schemaExists conn schemaName = do
   rows <- query conn "SELECT 1 FROM pg_namespace WHERE nspname = ?" (Only schemaName) :: IO [Only Int]

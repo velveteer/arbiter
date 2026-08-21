@@ -24,7 +24,7 @@ import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Simple (SimpleDb, createSimpleEnv, destroySimpleEnv, runSimpleDb)
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (addQueueTable, cleanupData, setupOnce)
 import Arbiter.Worker (mergedChildResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -50,7 +50,6 @@ import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll, describe, it, shouldBe, shouldMatchList, shouldReturn)
 import UnliftIO (bracket)
-import UnliftIO.Async (withAsync)
 
 newtype NoResultPayload = NoResultTask Text
   deriving stock (Eq, Generic, Show)
@@ -104,7 +103,7 @@ spec connStr =
             traverse_
               (\i -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (NoResultTask i)))
               ["a", "b", "c"]
-          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+          withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ (== 3) <$> readIORef ackedRef
           readIORef ackedRef >>= (`shouldBe` 3)
           runSimpleDb env (HL.countJobs @NoResultPayload) `shouldReturn` 0
@@ -140,7 +139,7 @@ spec connStr =
           void
             $ runSimpleDb env
             $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (PlainResultTask "archived"))
-          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+          withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ do
               arch <- runSimpleDb env $ HL.listArchiveJobs @PlainResultPayload 100 0
               pure (any ((== PlainResultTask "archived") . payload . Archive.jobSnapshot) arch)
@@ -177,7 +176,7 @@ spec connStr =
             $ HL.insertJobTree
             $ defaultJob (PlainResultTask "parent")
               <~~ (defaultJob (PlainResultTask "kid1") :| [defaultJob (PlainResultTask "kid2")])
-          withAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+          withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ isJust <$> readIORef mergedRef
           readIORef mergedRef >>= (`shouldBe` Just ["from-kid1", "from-kid2"])
   where

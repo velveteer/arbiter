@@ -24,8 +24,11 @@ extra-doc-files:
   README.md
 
 extra-source-files:
+  static/apple-touch-icon.png
+  static/arbiter-mark.svg
   static/css/*.css
   static/favicon.ico
+  static/favicon.svg
   static/index.html
   static/js/*.js
   static/vendor/*.css

@@ -322,7 +322,7 @@ mkDemoWorker = do
 
 mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload)
 mkEmailWorker = do
-  cfg <- transactionalWorkerConfig 1 handler
+  cfg <- transactionalWorkerConfig 3 handler
   pure
     cfg
       { cronJobs = emailCrons
@@ -492,8 +492,6 @@ seedQueues = do
   void $ HL.insertJob (setMaxAttempts (Just 2) $ defaultJob (SendEmail "nobody@invalid.test"))
   [rejected] <- HL.claimNextVisibleJobs @EmailPayload 1 60
   void $ HL.updateJobForRetry 0 "recipient rejected (550)" rejected
-  [bounced] <- HL.claimNextVisibleJobs @EmailPayload 1 60
-  void $ HL.moveToDLQ "recipient rejected (550) after 2 attempts" bounced
   forM_ (["welcome@acme.test", "receipt@acme.test", "reset@acme.test"] :: [Text]) $ \addr ->
     void $ HL.insertJob (defaultJob (SendEmail addr))
   void $ HL.insertJob (setNotVisibleUntil (Just (addUTCTime 1800 now)) $ defaultJob (SendEmail "weekly-digest"))

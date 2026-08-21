@@ -18,7 +18,7 @@ import Orville.PostgreSQL qualified as O
 
 import Arbiter.Orville.MonadArbiter
 
--- | Create Orville ConnectionOptions from an Arbiter PoolConfig
+-- | Orville @ConnectionOptions@ from an arbiter 'Arbiter.Core.PoolConfig.PoolConfig'.
 createOrvilleConnectionOptions
   :: ByteString
   -- ^ PostgreSQL connection string

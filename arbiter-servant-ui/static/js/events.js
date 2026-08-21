@@ -11,16 +11,36 @@ document.addEventListener('alpine:init', () => {
       job_dlq: true,
     },
 
+    queueJobUrl,
+
+    navToJob(ev, queue, jobId) {
+      if (!plainNavClick(ev)) return;
+      ev.preventDefault();
+      Alpine.store('app').openQueueJob(queue, jobId);
+    },
+
     get events() {
       return Alpine.store('app').events;
     },
 
+    // A tail of the stream, newest first. Filters narrow it, nothing reorders it.
     get filteredEvents() {
       return this.events.filter((e) => {
         if (this.filterQueue && e.table !== this.filterQueue) return false;
         if (!this.filterTypes[e.event]) return false;
         return true;
       });
+    },
+
+    // The same short wording the filter chips use, which also fits the column.
+    badgeLabel(eventType) {
+      switch (eventType) {
+        case 'job_inserted': return 'Inserted';
+        case 'job_updated': return 'Updated';
+        case 'job_deleted': return 'Deleted';
+        case 'job_dlq': return 'DLQ';
+        default: return eventType;
+      }
     },
 
     badgeClass(eventType) {

@@ -233,9 +233,7 @@ getJobByIdWithStatusSQL schema tableName jobId =
   let sub = jobsWithStatusSubquery schema tableName
    in [sql|SELECT * FROM ${sub} WHERE id = #{jobId :: CInt8}|]
 
--- | Generic SQL for listing DLQ jobs with dynamic WHERE and ORDER BY clauses.
---
--- @orderBy@ must be produced by 'buildDLQOrderBy'.
+-- | List DLQ jobs under a dynamic WHERE and an @orderBy@ from 'buildDLQOrderBy'.
 listDLQFilteredSQL :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead Value)
 listDLQFilteredSQL schema tableName whereFrag orderBy limit offset =
   let dlqTbl = jobQueueDLQTable schema tableName
@@ -326,7 +324,7 @@ buildDLQOrderBy = buildOrderBy dlqSortColumnName dlqColumnNulls DlqFailedAt DlqI
 buildArchiveOrderBy :: Maybe ArchiveSortColumn -> Maybe SortDir -> Text
 buildArchiveOrderBy = buildOrderBy archiveSortColumnName archiveColumnNulls ArchiveCompletedAt ArchiveId
 
--- | Generic SQL for counting DLQ jobs with dynamic WHERE clause.
+-- | Count DLQ jobs under a dynamic WHERE.
 countDLQFilteredSQL :: Text -> Text -> Query () -> Query Int64
 countDLQFilteredSQL schema tableName whereFrag =
   let dlqTbl = jobQueueDLQTable schema tableName
@@ -391,7 +389,7 @@ reArmedColumns =
   , "claim_seq"
   ]
 
--- | Standard job column list (for SELECT and RETURNING)
+-- | The job column list, for SELECT and RETURNING.
 jobColumns :: Maybe Text -> Text
 jobColumns mAlias = aliasedCols mAlias allJobColumns
 
@@ -444,14 +442,10 @@ insertJobSQL schema tableName valuesFrag =
           RETURNING ${columns}
         |]
 
--- | SQL template for replace deduplication strategy
---
--- Replaces existing job unless actively in-flight or has children (in either
--- the main queue or the DLQ). A parent with no children yet can be replaced.
---
--- The groups table is maintained by triggers on the main job table.
--- @ON CONFLICT DO UPDATE@ fires the UPDATE trigger, whose transition tables
--- contain the old and new rows -- handling cross-group moves automatically.
+-- | Insert under the replace dedup strategy, replacing an existing job unless it is
+-- in-flight or has children in the main queue or the DLQ. @ON CONFLICT DO UPDATE@ fires
+-- the groups UPDATE trigger, whose transition tables carry the old and new rows, so a
+-- cross-group move is maintained too.
 insertJobReplaceSQL :: SchemaName -> TableName -> Query () -> Query (JobRead Value)
 insertJobReplaceSQL schema tableName valuesFrag =
   let tbl = jobQueueTable schema tableName
@@ -469,11 +463,8 @@ insertJobReplaceSQL schema tableName valuesFrag =
           RETURNING ${columns}
         |]
 
--- | SQL template for batch inserting jobs using array parameters
---
--- Uses unnest to expand parallel arrays into rows. Supports dedup keys:
--- jobs with @IgnoreDuplicate@ are silently skipped on conflict, jobs with
--- @ReplaceDuplicate@ update the existing row (unless actively in-flight).
+-- | Batch insert over @unnest@ed parallel arrays. An ignore-dedup job is skipped on
+-- conflict, a replace-dedup job updates the existing row unless it is in-flight.
 insertJobsBatchSQL :: SchemaName -> TableName -> Query () -> Query (JobRead Value)
 insertJobsBatchSQL schema tableName batchSrc =
   rows (jobRowCodec tableName) $
@@ -502,13 +493,11 @@ insertJobsBatchBase schema tableName batchSrc returning =
         ${returning}
       |]
 
--- * Admin Operations
+-- ---------------------------------------------------------------------------
+-- Admin Operations
+-- ---------------------------------------------------------------------------
 
--- | SQL template for getting a job by ID
---
--- Parameters: job_id
---
--- Returns: Single job row if found
+-- | Fetch a job by id.
 getJobByIdSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 getJobByIdSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -521,9 +510,7 @@ getJobByIdSQL schema tableName jobId =
           WHERE id = #{jobId :: CInt8}
         |]
 
--- | SQL template for fetching a job by its dedup_key.
---
--- The partial unique index on @dedup_key@ guarantees at most one row.
+-- | Fetch a job by its dedup key. The partial unique index guarantees at most one row.
 getJobByDedupKeySQL :: Text -> Text -> Text -> Query (JobRead Value)
 getJobByDedupKeySQL schema tableName key =
   let tbl = jobQueueTable schema tableName
@@ -536,14 +523,8 @@ getJobByDedupKeySQL schema tableName key =
           WHERE dedup_key = #{key :: CText}
         |]
 
--- | SQL template for canceling (deleting) a job by ID.
---
--- Refuses to delete a job that has children - use @cancelJobCascadeSQL@ instead.
---
--- If the deleted job was a child and no siblings remain in the queue,
--- resumes the parent for its completion round.
---
--- Returns @rows_affected@.
+-- | Delete a job by id, refusing one with children (@cancelJobCascadeSQL@ takes those).
+-- A deleted child with no siblings left resumes its parent for a completion round.
 cancelJobSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName

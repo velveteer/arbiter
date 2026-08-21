@@ -1,8 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
--- | Simple database monad for Arbiter with postgresql-simple backend.
---
--- 'SimpleDb' has a built-in 'MonadArbiter' instance, so you can use it directly:
+-- | The postgresql-simple database monad. Its 'MonadArbiter' instance is built in, so it
+-- is usable directly:
 --
 -- @
 -- import Arbiter.Core
@@ -64,7 +63,7 @@ data SimpleEnv (registry :: JobPayloadRegistry) = SimpleEnv
   -- ^ Resolved LISTEN source. 'Nothing' runs poll-only.
   }
 
--- | Simple database monad using postgresql-simple.
+-- | The postgresql-simple database monad.
 newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: ReaderT (SimpleEnv registry) m a}
   deriving newtype
     ( Applicative
@@ -113,15 +112,13 @@ useDedicatedListener connStr env = do
 poolListener :: Pool Connection -> IO Listener
 poolListener pool = newPoolListener (\action -> withResource pool (`withConnection` action))
 
--- | Run a SimpleDb action with a SimpleEnv.
+-- | Run a 'SimpleDb' action in its env.
 runSimpleDb :: SimpleEnv registry -> SimpleDb registry m a -> m a
 runSimpleDb env action = runReaderT (unSimpleDb action) env
 
--- | Run a SimpleDb action using a single postgresql-simple connection.
---
--- No pool or env is needed. The connection is pinned with @transactionDepth = 1@,
--- so arbiter's 'withDbTransaction' uses savepoints instead of issuing @BEGIN@.
--- The caller is responsible for transaction lifecycle on the connection.
+-- | Run a 'SimpleDb' action on one connection, no pool or env involved. It is pinned as
+-- though a transaction were already open, so 'Arbiter.Core.MonadArbiter.withDbTransaction'
+-- nests through savepoints and the caller keeps ownership of the transaction itself.
 --
 -- @
 -- PG.withTransaction conn $ do
@@ -167,8 +164,6 @@ createSimpleEnv proxy connStr schemaName =
 
 -- | Create a 'SimpleEnv' with custom pool settings.
 --
--- Example:
---
 -- @
 -- let config = PoolConfig
 --       { poolSize = 50
@@ -207,7 +202,7 @@ createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
       , listener = Just lstn
       }
 
--- | Create a SimpleEnv with a user-provided connection pool. The shared
+-- | Create a 'SimpleEnv' over a caller's own connection pool. The shared
 -- listener borrows one connection from that pool and holds it for the env's
 -- lifetime, so size the pool for the worker load plus one. Use 'disableListener'
 -- to run poll-only and reclaim that slot, or 'useDedicatedListener' to give the

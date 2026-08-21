@@ -24,27 +24,9 @@ import System.Environment (lookupEnv)
 enabledQueuesEnvVar :: String
 enabledQueuesEnvVar = "ARBITER_ENABLED_QUEUES"
 
--- | Get enabled queues from an environment variable.
---
--- If the environment variable is set and non-empty, parses it as a
--- comma-separated list of queue names. Each name is validated against the
--- registry - invalid names cause an error. If not set or empty, returns all
--- queue names from the registry.
---
--- Example:
---
--- @
--- -- With ENABLED_QUEUES="email_jobs,notifications"
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
--- -- Returns: ["email_jobs", "notifications"]
---
--- -- With ENABLED_QUEUES unset or empty
--- queues <- getEnabledQueues "ENABLED_QUEUES" (Proxy \@MyRegistry)
--- -- Returns: all queues from registry
---
--- -- With ENABLED_QUEUES="email_jobs,invalid_queue"
--- -- Throws error: "Unknown queue names: invalid_queue"
--- @
+-- | The comma-separated queue names an environment variable asks for, every one of them
+-- checked against the registry. Unset or blank gives the registry's whole queue set, and
+-- a name outside it throws.
 getEnabledQueues
   :: (RegistryTables registry)
   => String

@@ -48,7 +48,7 @@ import Arbiter.Worker
   , transactionalWorkerConfig
   )
 import Control.Exception (bracket)
-import Control.Monad (foldM, join, void)
+import Control.Monad (foldM_, join, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -349,7 +349,7 @@ spec = do
                 let (seen', rise) = Cells.riseSince key at total seen
                 counterAdd counter rise (Metrics.attrs [])
                 pure seen'
-          void (foldM count mempty totals)
+          foldM_ count mempty totals
           lookup name <$> collectedSums env
 
     it "sums the rises across three scans" $

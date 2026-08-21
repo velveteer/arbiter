@@ -9,21 +9,30 @@ const DLQ_COLUMNS = [
   { key: 'parent', label: 'Parent', weight: 7 },
   { key: 'group', label: 'Group', weight: 8 },
   { key: 'payload', label: 'Payload', weight: 13 },
-  { key: 'failed', label: 'Failed At', weight: 12 },
+  { key: 'failed', label: 'Failed', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8 },
   { key: 'error', label: 'Last Error', weight: 13 },
-  { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
-  { key: 'concurrency', label: 'Concurrency', weight: 10 },
-  { key: 'actions', label: 'Actions', weight: 12 },
+  { key: 'gates', label: 'Gates', weight: 13, autoHide: true },
+  { key: 'actions', label: 'Actions', weight: 5 },
 ];
+
+// Row actions, stamped into both the row menu and the drawer header.
+const DLQ_ACTIONS_HTML = `
+<li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job); closeDropdown($el)">Detail</a></li>
+<li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey); closeDropdown($el)">Retry</a></li>
+<li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('del:' + job.dlqPrimaryKey) }" x-text="isArmed('del:' + job.dlqPrimaryKey) ? 'Confirm delete permanently' : 'Delete'"></a></li>`;
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('dlqTab', () => withPagination(withSelection({
-    ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols'),
+    ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols.v2'),
+    ...rowDetail('dlqJobs', 'dlqPrimaryKey', 'selectedDLQJob', { drawer: 'dlqDetailDrawer' }),
     ...tableTab('loadDLQ', 'arb.dlqRefresh'),
     dlqJobs: [],
+    rowNoun: 'DLQ entry',
+    detailActionsHtml: DLQ_ACTIONS_HTML,
+    rowNounPlural: 'DLQ entries',
     total: 0,
-    loading: false,
+    ...loadState(),
     active: false,
     selectedDLQJob: null,
     bulkBusy: false,
@@ -35,7 +44,6 @@ document.addEventListener('alpine:init', () => {
     _appliedJobId: '',
     sortBy: '',
     sortDir: '',
-    _loadErrored: false,
 
     init() {
       this._loadColPrefs();
@@ -55,12 +63,12 @@ document.addEventListener('alpine:init', () => {
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           releaseInitialLoad(this);
-          hideModal('dlqDetailModal');
+          this.closeDetail();
           this._stopTimer();
         },
       });
       this._bindTableEvents({
-        onQueueReset: () => { this.selected = {}; },
+        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           return events.filter(evt => evt.table === queue && evt.event === 'job_dlq').length;
@@ -97,6 +105,12 @@ document.addEventListener('alpine:init', () => {
         this._appliedJobId = jid;
         this.dlqJobs = data.dlqJobs || [];
         this.total = data.dlqTotal || 0;
+        this.resyncDetailSelection();
+        if (this.dlqJobs.length > 0) {
+          this.setAutoEmpty({
+            gates: this.dlqJobs.every((j) => !j.jobSnapshot?.rateLimit && !j.jobSnapshot?.concurrency),
+          });
+        }
         // Drop selections for rows no longer on the current page (deleted, retried, paged away).
         const present = new Set(this.dlqJobs.map(j => String(j.dlqPrimaryKey)));
         const pruned = {};
@@ -169,6 +183,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.retryFromDLQ(queue, id);
+          this.closeDetailIfOpen(id);
           await this.loadDLQ();
         } catch (e) {
           showToast('Failed to retry: ' + e.message);
@@ -184,6 +199,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.deleteDLQ(queue, id);
+          this.closeDetailIfOpen(id);
           await this.loadDLQ();
         } catch (e) {
           showToast('Failed to delete: ' + e.message);
@@ -191,9 +207,22 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    get detailTitle() {
+      return this.selectedDLQJob ? 'DLQ entry ' + this.selectedDLQJob.dlqPrimaryKey : 'DLQ entry';
+    },
+
+    get detailStatus() {
+      return '';
+    },
+
+    get detailRows() {
+      const cur = this.selectedDLQJob;
+      return cur ? [Object.assign({}, cur, { _id: cur.dlqPrimaryKey, _inDrawer: true })] : [];
+    },
+
     viewDetail(job) {
       this.selectedDLQJob = job;
-      showModal('dlqDetailModal');
+      showDrawer('dlqDetailDrawer');
     },
-  }, 'dlqJobs', 'dlqPrimaryKey'), 'loadDLQ'));
+  }, 'dlqJobs', 'dlqPrimaryKey'), 'loadDLQ', 'arb.dlqPageSize'));
 });

@@ -2,16 +2,10 @@
 
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
--- 'JobException' is the user-facing decision sum. A handler throws one of
--- these to signal how a failed job should be processed (retry, DLQ, cancel
--- the tree or branch). A handler can also throw 'JobNackException' (via
--- 'throwNack') to reprocess the job without recording a failure.
---
--- The engine-internal exceptions ('ParsingException', 'InternalException',
--- 'JobGoneException') are thrown directly as
--- their own types, not wrapped in any sum. They are handled by the worker's
--- retry combinators and classifier, and are not part of the surface API
--- that user handlers throw.
+-- 'JobException' is the decision a handler throws to say how its failure should be
+-- settled: retry, DLQ, or cancel the tree or branch. 'JobNackException' asks for a
+-- reprocess with no failure recorded. The engine's own signals are separate types rather
+-- than constructors of that sum, and a user handler never throws them.
 module Arbiter.Core.Exceptions
   ( -- * User-facing job decisions
     JobException (..)
@@ -82,16 +76,14 @@ newtype JobPermanentException = JobPermanentException Text
 instance Exception JobPermanentException where
   displayException (JobPermanentException msg) = T.unpack msg
 
--- | Cancels an entire job tree from root to leaves.
--- Use when a failure invalidates all work in the tree.
+-- | Cancel a whole job tree, root to leaves, for a failure that invalidates all of it.
 newtype TreeCancelException = TreeCancelException Text
   deriving stock (Eq, Generic, Show)
 
 instance Exception TreeCancelException where
   displayException (TreeCancelException msg) = T.unpack msg
 
--- | Cancels the current branch (parent + all siblings).
--- If the parent has a grandparent, the grandparent is resumed.
+-- | Cancel this branch: the parent and every sibling. A grandparent above it is resumed.
 newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show)
 

@@ -1,28 +1,57 @@
 /**
- * Alpine component: job table + pagination + actions + insert form + detail modal
+ * Alpine component: job table + pagination + actions + insert form + detail drawer
  */
 // Ordered column registry. Order must match the table header and cell order.
 // weight is a relative share, renormalized over the visible columns to fill 100%.
+// autoHide columns drop out when no row on the page populates them.
 const JOB_COLUMNS = [
+  { key: 'select', label: '', weight: 3, required: true },
   { key: 'id', label: 'ID', weight: 4, required: true },
-  { key: 'payload', label: 'Payload', weight: 12 },
-  { key: 'group', label: 'Group', weight: 7 },
-  { key: 'parent', label: 'Parent', weight: 7 },
-  { key: 'children', label: 'Children', weight: 9 },
-  { key: 'priority', label: 'Priority', weight: 8 },
-  { key: 'attempts', label: 'Attempts', weight: 8 },
+  { key: 'payload', label: 'Payload', weight: 14 },
+  { key: 'group', label: 'Group', weight: 7, autoHide: true },
+  { key: 'parent', label: 'Parent', weight: 7, autoHide: true },
+  { key: 'children', label: 'Children', weight: 9, autoHide: true },
+  { key: 'priority', label: 'Priority', weight: 8, autoHide: true },
+  { key: 'attempts', label: 'Attempts', weight: 8, autoHide: true },
   { key: 'status', label: 'Status', weight: 7 },
-  { key: 'inserted', label: 'Inserted At', weight: 10 },
-  { key: 'visible', label: 'Visible', weight: 12 },
-  { key: 'ratelimit', label: 'Rate Limit', weight: 9 },
-  { key: 'concurrency', label: 'Concurrency', weight: 10 },
-  { key: 'actions', label: 'Actions', weight: 12 },
+  { key: 'inserted', label: 'Inserted', weight: 8 },
+  { key: 'visible', label: 'Visible', weight: 10, autoHide: true },
+  { key: 'gates', label: 'Gates', weight: 10, autoHide: true },
+  { key: 'actions', label: 'Actions', weight: 4 },
 ];
 
+// Row actions, stamped into both the row menu and the drawer header so the two
+// cannot drift. Binds `job`, which each site supplies.
+const JOB_ACTIONS_HTML = `
+<li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job.primaryKey); closeDropdown($el)">Detail</a></li>
+<li x-show="job.status === 'scheduled' || job.status === 'backoff'">
+  <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey); closeDropdown($el)">Promote</a>
+</li>
+<li x-show="canSuspend(job)">
+  <a class="dropdown-item" href="#" @click.prevent="pauseAction(job); closeDropdown($el)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
+</li>
+<li x-show="canResume(job)">
+  <a class="dropdown-item" href="#" @click.prevent="resumeAction(job); closeDropdown($el)" x-text="job._childCount > 0 ? 'Resume descendants' : 'Resume'"></a>
+</li>
+<li><hr class="dropdown-divider"></li>
+<li>
+  <a class="dropdown-item" href="#" @click.prevent="cancelJob(job.primaryKey, $el)" :class="{ 'text-warning fw-semibold': isArmed('cancel:' + job.primaryKey) }" x-text="isArmed('cancel:' + job.primaryKey) ? ('Confirm cancel' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Cancel'"></a>
+</li>
+<li x-show="job.status === 'in_flight'">
+  <a class="dropdown-item text-danger" href="#" @click.prevent="forceCancelJob(job.primaryKey, $el)" :class="{ 'fw-semibold': isArmed('fcancel:' + job.primaryKey) }" x-text="isArmed('fcancel:' + job.primaryKey) ? 'Confirm force-cancel (interrupts handler)' : 'Force Cancel'"></a>
+</li>
+<li>
+  <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey, $el)" :class="{ 'text-warning fw-semibold': isArmed('movedlq:' + job.primaryKey) }" x-text="isArmed('movedlq:' + job.primaryKey) ? ('Confirm move to DLQ' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Move to DLQ'"></a>
+</li>`;
+
 document.addEventListener('alpine:init', () => {
-  Alpine.data('jobsTab', () => withPagination({
-    ...columnPrefs(JOB_COLUMNS, 'arb.jobCols'),
+  Alpine.data('jobsTab', () => withPagination(withSelection({
+    ...columnPrefs(JOB_COLUMNS, 'arb.jobCols.v2'),
+    ...rowDetail('selectableJobs', 'primaryKey', 'selectedJob', { openWith: (row) => row.primaryKey, drawer: 'jobDetailDrawer' }),
     ...tableTab('loadJobs', 'arb.jobsRefresh'),
+    bulkBusy: false,
+    rowNoun: 'job',
+    rowNounPlural: '',
     jobs: [],
     total: 0,
     groupKeyFilter: '',
@@ -36,13 +65,17 @@ document.addEventListener('alpine:init', () => {
     childCounts: {},
     dlqChildCounts: {},
     expandedParents: {},
+    _expandSeq: {},
     viewMode: 'tree',
-    loading: false,
+    ...loadState(),
     active: false,
     selectedJob: null,
     sortBy: '',
     sortDir: '',
-    _loadErrored: false,
+    detailError: '',
+    detailErrorDetail: '',
+    detailErrorId: null,
+    _detailSeq: 0,
     notVisibleFormat: localStorage.getItem('arb.notVisibleFormat') || 'countdown',
 
     toggleNotVisibleFormat() {
@@ -51,7 +84,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     formatNotVisible(iso) {
-      if (!iso) return '-';
+      if (!iso) return EMPTY;
       return this.notVisibleFormat === 'countdown' ? formatCountdown(iso) : formatTime(iso);
     },
 
@@ -111,12 +144,49 @@ document.addEventListener('alpine:init', () => {
       return result;
     },
 
+    // The open job shaped like a table row, so the shared actions menu binds the
+    // same way it does in the table. Empty when nothing is open.
+    get detailRows() {
+      if (!this.selectedJob) return [];
+      const k = this.selectedJob.primaryKey;
+      return [Object.assign({}, this.selectedJob, {
+        _id: k,
+        _childCount: this.childCounts[k] || 0,
+        _dlqChildCount: this.dlqChildCounts[k] || 0,
+        _inDrawer: true,
+      })];
+    },
+
+    detailActionsHtml: JOB_ACTIONS_HTML,
+
+    async refreshOpenDetail() {
+      if (this._drawerOpen() && this.selectedJob) await this.viewDetail(this.selectedJob.primaryKey);
+    },
+
+    // Real job rows only: the "showing N of M children" markers are not selectable.
+    get selectableJobs() {
+      return this.displayJobs.filter((j) => !j._isMoreRow);
+    },
+
+    // Columns no row on the page fills.
+    _refreshAutoEmpty(jobs) {
+      if (jobs.length === 0) return;
+      this.setAutoEmpty({
+        group: jobs.every((j) => !j.groupKey),
+        parent: jobs.every((j) => !j.parentId),
+        children: jobs.every((j) => !this.childCounts[j.primaryKey] && !this.dlqChildCounts[j.primaryKey]),
+        priority: jobs.every((j) => !j.priority),
+        attempts: jobs.every((j) => !j.attempts),
+        visible: jobs.every((j) => !j.notVisibleUntil),
+        gates: jobs.every((j) => !j.rateLimit && !j.concurrency),
+      });
+    },
+
     isExpanded(id) {
       return !!this.expandedParents[id];
     },
 
     async toggleChildren(id) {
-      this._expandSeq = this._expandSeq || {};
       const seq = (this._expandSeq[id] || 0) + 1;
       this._expandSeq[id] = seq;
       if (this.expandedParents[id]) {
@@ -162,6 +232,7 @@ document.addEventListener('alpine:init', () => {
             await ArbiterAPI.suspendJob(queue, job.primaryKey);
           }
           await this.loadJobs();
+          await this.refreshOpenDetail();
         } catch (e) {
           showToast('Failed: ' + e.message);
         }
@@ -178,6 +249,7 @@ document.addEventListener('alpine:init', () => {
             await ArbiterAPI.resumeJob(queue, job.primaryKey);
           }
           await this.loadJobs();
+          await this.refreshOpenDetail();
         } catch (e) {
           showToast('Failed: ' + e.message);
         }
@@ -233,12 +305,12 @@ document.addEventListener('alpine:init', () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           this._detailSeq = (this._detailSeq || 0) + 1;
           releaseInitialLoad(this);
-          hideModal('jobDetailModal');
+          this.closeDetail();
           this._stopTimer();
         },
       });
       this._bindTableEvents({
-        onQueueReset: () => { this.stateFilter = ''; },
+        onQueueReset: () => { this.stateFilter = ''; this.selected = {}; this.resetAutoEmpty(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           // Inserts land as ready/scheduled (or suspended for rollup parents), but
@@ -264,8 +336,8 @@ document.addEventListener('alpine:init', () => {
       this._stopTimer();
     },
 
-    // Switch to the Jobs tab showing only `status` (clears other filters). The
-    // tab's onShow handler does the load, so this stays a single fetch.
+    // Switch to the Jobs tab showing only `status` (clears other filters).
+    // Exactly one of the two branches loads, so this stays a single fetch.
     showStatus(status) {
       this.disarm();
       this.stateFilter = status;
@@ -278,12 +350,15 @@ document.addEventListener('alpine:init', () => {
       this.offset = 0;
       this.expandedParents = {};
       this._expandSeq = {};
-      if (this.active) {
-        // Already on Jobs (no tab switch to trigger onShow), so reload directly.
+      // Branch on the tab's own class, the same fact Bootstrap checks before
+      // deciding whether to fire shown.bs.tab. Reading the cached `active`
+      // instead can leave a showing tab with no load: show() no-ops and onShow
+      // never runs.
+      const btn = document.querySelector('[data-bs-target="#tab-jobs"]');
+      if (!btn || btn.classList.contains('active')) {
         this._resetView();
       } else {
-        const btn = document.querySelector('[data-bs-target="#tab-jobs"]');
-        if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
+        bootstrap.Tab.getOrCreateInstance(btn).show();
       }
     },
 
@@ -316,8 +391,18 @@ document.addEventListener('alpine:init', () => {
         this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
         this.dlqChildCounts = data.dlqChildCounts || {};
+        this._refreshAutoEmpty(jobs);
+        this.resyncDetailSelection();
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
+        // Drop selections for rows this page no longer carries. Expanded children
+        // are selectable too, so this spans every rendered row, not just the roots.
+        const present = new Set(this.selectableJobs.map((j) => String(j.primaryKey)));
+        const keptSel = {};
+        for (const id of Object.keys(this.selected)) {
+          if (present.has(id)) keptSel[id] = true;
+        }
+        this.selected = keptSel;
 
         if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
           this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
@@ -406,6 +491,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.cancelJob(queue, id);
+          this.closeDetailIfOpen(id);
           if (String(id) === this._appliedParentId) {
             this.parentIdFilter = '';
             this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
@@ -426,6 +512,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.forceCancelJob(queue, id);
+          this.closeDetailIfOpen(id);
           if (String(id) === this._appliedParentId) {
             this.parentIdFilter = '';
             this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
@@ -444,6 +531,7 @@ document.addEventListener('alpine:init', () => {
         try {
           await ArbiterAPI.promoteJob(queue, id);
           await this.loadJobs();
+          await this.refreshOpenDetail();
         } catch (e) {
           showToast('Failed to promote: ' + e.message);
         }
@@ -458,11 +546,76 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.moveToDLQ(queue, id);
+          this.closeDetailIfOpen(id);
           await this.loadJobs();
         } catch (e) {
           showToast('Failed to move to DLQ: ' + e.message);
         }
       });
+    },
+
+    // Bulk actions over the checkbox selection. No batch endpoint exists for
+    // these, so each id goes individually with the shared concurrency cap.
+    async _bulkOver(key, verb, apiCall) {
+      const ids = this.selectedIds;
+      if (ids.length === 0 || this.bulkBusy) return;
+      if (!this.confirmArmed(key)) return;
+      const queue = Alpine.store('app').selectedQueue;
+      this.bulkBusy = true;
+      try {
+        const results = await mapLimit(ids, ARB_TIMING.bulkConcurrency, (id) => apiCall(queue, id));
+        // Bail if the queue switched mid-op. _onQueueChanged already cleared selection.
+        if (Alpine.store('app').selectedQueue !== queue) return;
+        const failed = ids.filter((id, i) => results[i].status === 'rejected');
+        const next = {};
+        for (const id of failed) next[id] = true;
+        this.selected = next;
+        await this.loadJobs();
+        await this.refreshOpenDetail();
+        if (failed.length > 0) showToast(`${failed.length} of ${ids.length} ${verb} failed`);
+        else showToast(`${verb} ${ids.length} ${ids.length === 1 ? 'job' : 'jobs'}`, 'success');
+      } finally {
+        this.bulkBusy = false;
+      }
+    },
+
+    bulkCancel() {
+      return this._bulkOver('bulkCancel', 'Cancelled', (q, id) => ArbiterAPI.cancelJob(q, id));
+    },
+
+    bulkPromote() {
+      return this._bulkOver('bulkPromote', 'Promoted', (q, id) => ArbiterAPI.promoteJob(q, id));
+    },
+
+    bulkMoveToDLQ() {
+      return this._bulkOver('bulkDlq', 'Moved', (q, id) => ArbiterAPI.moveToDLQ(q, id));
+    },
+
+    _drawerOpen() {
+      return !!document.getElementById('jobDetailDrawer')?.classList.contains('show');
+    },
+
+    // A failure while the drawer is open becomes an in-drawer message rather than
+    // an open drawer emptied of its job. Its neighbours are pinned first, so a
+    // job that vanished mid-browse does not strand the reader.
+    _detailFailed(id, headline, detail) {
+      if (!this._drawerOpen()) {
+        this._clearDetailError();
+        showToast(detail ? headline + ' ' + detail : headline);
+        return;
+      }
+      this.captureDetailNeighbours(id);
+      this.selectedJob = null;
+      this.detailErrorId = id;
+      this.detailError = headline;
+      this.detailErrorDetail = detail || '';
+    },
+
+    _clearDetailError() {
+      this.detailError = '';
+      this.detailErrorDetail = '';
+      this.detailErrorId = null;
+      this.clearDetailNeighbours();
     },
 
     async viewDetail(id) {
@@ -472,14 +625,37 @@ document.addEventListener('alpine:init', () => {
       try {
         const data = await ArbiterAPI.getJob(queue, id);
         if (seq !== this._detailSeq) return;
-        if (!data || !data.job) { showToast('Job not found'); return; }
+        if (!data || !data.job) {
+          this._detailFailed(id, 'This job is no longer in the queue.',
+            'It may have completed, been archived, or moved to the DLQ.');
+          return;
+        }
         this.selectedJob = data.job;
-        showModal('jobDetailModal');
+        this._clearDetailError();
+        showDrawer('jobDetailDrawer');
       } catch (e) {
         if (seq !== this._detailSeq) return;
-        this.selectedJob = null;
-        showToast('Failed to load job: ' + e.message);
+        this._detailFailed(id, 'Could not load this job.', e.message);
       }
+    },
+
+    get detailTitle() {
+      return this.selectedJob ? 'Job ' + this.selectedJob.primaryKey
+        : (this.detailErrorId != null ? 'Job ' + this.detailErrorId : 'Job');
+    },
+
+    get detailStatus() {
+      return this.selectedJob?.status || '';
+    },
+
+    retryDetail() {
+      if (this.detailErrorId != null) this.viewDetail(this.detailErrorId);
+    },
+
+    // Overrides the mixin: a "showing N of M children" marker is not a job.
+    rowClick(e, job) {
+      if (job._isMoreRow || !rowDetailClick(e)) return;
+      this.viewDetail(job.primaryKey);
     },
 
     async submitInsert() {
@@ -552,5 +728,5 @@ document.addEventListener('alpine:init', () => {
         this.inserting = false;
       }
     },
-  }, 'loadJobs'));
+  }, 'selectableJobs', 'primaryKey'), 'loadJobs', 'arb.jobsPageSize'));
 });

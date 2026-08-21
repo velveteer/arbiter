@@ -6,6 +6,7 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('queuePauseToggle', () => ({
     paused: false,
+    _refreshSeq: 0,
     pausedAt: null,
     pausedAgeStr: '',
     busy: false,

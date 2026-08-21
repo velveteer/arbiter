@@ -58,8 +58,6 @@ import Arbiter.Hasql.Decode qualified as Decode
 import Arbiter.Hasql.Encode qualified as Encode
 
 -- | Connection pool state for hasql connections.
---
--- Mirrors @SimpleConnectionPool@ from @arbiter-simple@.
 data HasqlConnectionPool = HasqlConnectionPool
   { connectionPool :: Maybe (Pool.Pool Hasql.Connection)
   -- ^ The underlying resource pool. 'Nothing' when using connection-only mode
@@ -77,10 +75,8 @@ class (Monad m) => HasHasqlPool m where
   getHasqlPool :: m HasqlConnectionPool
   localHasqlPool :: (HasqlConnectionPool -> HasqlConnectionPool) -> m a -> m a
 
--- | Pin a hasql connection for transactional work.
---
--- All arbiter operations within the callback will use this connection.
--- The caller must have already issued @BEGIN@ on the connection.
+-- | Pin a hasql connection for the callback, which every arbiter operation inside it
+-- then runs on. The caller has already issued its @BEGIN@.
 localHasqlConnection :: (HasHasqlPool m) => Hasql.Connection -> m a -> m a
 localHasqlConnection conn = localHasqlPool (\pool -> pool {activeConn = Just conn, transactionDepth = 1})
 
@@ -123,9 +119,7 @@ hasqlExecuteStatement (Query sql params _) = withConn $ \conn -> liftIO $ do
     Right n -> pure n
     Left err -> throwInternal $ "hasql statement error: " <> T.pack (show err)
 
--- | Run a block of code within a database transaction.
---
--- Supports nested transactions via savepoints, matching @arbiter-simple@.
+-- | Transaction bracket. Nests via savepoints.
 hasqlWithDbTransaction :: (HasHasqlPool m, MonadUnliftIO m) => m a -> m a
 hasqlWithDbTransaction action = do
   pool <- getHasqlPool
@@ -163,10 +157,8 @@ beginCommitOrRollback conn action = mask $ \restore -> do
         _ <- try (Compat.runSQL conn "ROLLBACK") :: IO (Either SomeException ())
         pure ()
 
--- | Invoke a handler by passing the active hasql connection.
---
--- The handler receives a @Hasql.Connection@ so it can run typed hasql
--- queries within the worker transaction.
+-- | Run a handler on the active connection, so it can issue typed hasql queries inside
+-- the worker transaction.
 hasqlRunHandlerWithConnection
   :: (HasHasqlPool m, MonadIO m)
   => (Hasql.Connection -> job -> m result)
@@ -182,7 +174,7 @@ hasqlRunHandlerWithConnection handler job = do
 -- Internal
 -- ---------------------------------------------------------------------------
 
--- | Get a connection from the pool state or check one out.
+-- | The pinned connection, or one checked out of the pool.
 withConn :: (HasHasqlPool m, MonadIO m) => (Hasql.Connection -> IO a) -> m a
 withConn f = do
   pool <- getHasqlPool

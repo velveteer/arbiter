@@ -24,10 +24,9 @@ import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
--- | Run an action in a retry loop, surviving transient failures.
---
--- On synchronous exceptions, checks the worker state - if 'ShuttingDown',
--- exits cleanly. Otherwise logs the error and retries after a 5-second delay.
+-- | Run an action in a retry loop that survives transient failures, logging each one
+-- and waiting five seconds before the next attempt. Exits cleanly once the pool is
+-- shutting down.
 retryOnException
   :: (MonadUnliftIO m)
   => TVar WorkerState
@@ -63,11 +62,8 @@ retryOnException stateVar logCfg label action = loop
                 Left () -> pure ()
                 Right () -> loop
 
--- | Like 'retryOnException' but never returns on its own, even if the worker
--- is shutting down. Job signals propagate so they reach the worker layer
--- where they have semantic meaning ('JobException' user decisions,
--- 'JobGoneException' reclaim signals).
--- Everything else (including transient DB errors) is retried.
+-- | 'retryOnException' that never returns on its own, not even on shutdown. Job signals
+-- propagate, since only the worker layer can act on them. Everything else is retried.
 retryOnExceptionForever
   :: (MonadUnliftIO m)
   => LogConfig
@@ -94,8 +90,8 @@ isJobSignal e =
   isJust (fromException e :: Maybe JobException)
     || isJust (fromException e :: Maybe JobGoneException)
 
--- | Spawn a thread under 'withAsync', wrapped in 'retryOnException' so
--- transient failures restart the action instead of killing the thread.
+-- | Spawn a thread under 'withAsync' and 'retryOnException', so a transient failure
+-- restarts the action rather than killing the thread.
 spawnRetried
   :: (MonadUnliftIO m)
   => TVar WorkerState

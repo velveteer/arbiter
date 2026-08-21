@@ -1,10 +1,8 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
--- | High-level API for job queue operations.
---
--- Table names are automatically extracted from the payload type using the
--- registry. Compile-time checks ensure payloads are only used with registered tables.
+-- | The job queue operations with their table names resolved from the payload type, so a
+-- payload can only reach the queue its registry entry declares.
 module Arbiter.Core.HighLevel
   ( -- * Constraint Aliases
     QueueOperation
@@ -261,9 +259,9 @@ insertJobsBatch_ jobs = publishSpan @payload jobs $ do
   let tableName = queueTable @payload @m
   Ops.insertJobsBatch_ schemaName tableName jobs
 
--- | Claim visible jobs (at most one per group). May return fewer than the
--- limit if groups are exhausted. Leaves @claimed_by@ NULL, so concurrency limits
--- are not enforced for this path. Use 'claimNextVisibleJobsAs' when capping.
+-- | Claim visible jobs, at most one per group, and fewer than the limit once the groups
+-- run out. Leaves @claimed_by@ NULL, so no concurrency pool caps this path.
+-- 'claimNextVisibleJobsAs' is the capped one.
 claimNextVisibleJobs
   :: forall payload m
    . (QueueOperation m payload)
@@ -476,8 +474,8 @@ mkClaimSql batchSize poolSize timeout mWorkerId = do
   let tableName = queueTable @payload @m
   pure $ Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize poolSize timeout mWorkerId
 
--- | Variant of 'claimNextVisibleJobs' that stamps @claimed_by@ on every claimed
--- row. Used by the worker dispatcher for claim attribution.
+-- | 'claimNextVisibleJobs' stamping @claimed_by@ on every row it claims, which is how
+-- the dispatcher attributes a claim.
 claimNextVisibleJobsAs
   :: forall payload m
    . (QueueOperation m payload)
@@ -491,9 +489,8 @@ claimNextVisibleJobsAs limit timeout workerId = do
   let tableName = queueTable @payload @m
   Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
 
--- | Claims multiple jobs per group. Unlike 'claimNextVisibleJobs', this can
--- claim up to @batchSize@ jobs from each group while still respecting
--- per-group ordering between batches.
+-- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each group, still in
+-- per-group order.
 claimNextVisibleJobsBatched
   :: forall payload m
    . (QueueOperation m payload)
@@ -509,8 +506,8 @@ claimNextVisibleJobsBatched batchSize maxGroups timeout = do
   let tableName = queueTable @payload @m
   Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
 
--- | Acknowledge a job as complete. Deletes it from the queue, or suspends it
--- if it's a parent with unfinished children. Returns 1 on success, 0 if gone.
+-- | Ack a completed job, deleting it or suspending it when its children are still
+-- running. Returns 1, or 0 for a job already gone.
 ackJob
   :: forall payload m
    . (JobOperation m payload)
@@ -521,9 +518,8 @@ ackJob job = do
   let tableName = Job.queueName job
   Ops.ackJob schemaName tableName job
 
--- | Acknowledges multiple jobs as complete in one statement (parent-aware:
--- finalizers suspend, parents wake). All jobs must be from the same queue.
--- Returns the ids actually acked. Reclaimed jobs are absent.
+-- | 'ackJob' over a batch from one queue in one statement, returning the ids acked.
+-- Reclaimed jobs are absent.
 ackJobsBatch
   :: forall payload m
    . (JobOperation m payload)
@@ -535,9 +531,7 @@ ackJobsBatch jobs@(firstJob : _) = do
   let tableName = Job.queueName firstJob
   Ops.ackJobsBatch schemaName tableName jobs
 
--- | Marks a failed job for retry at a later time.
---
--- Returns the number of rows updated (0 if job was already claimed by another worker).
+-- | Park a failed job for its retry backoff. Returns 0 for a job another worker holds.
 updateJobForRetry
   :: forall payload m
    . (JobOperation m payload)
@@ -552,10 +546,8 @@ updateJobForRetry delay errorMsg job = do
   let tableName = Job.queueName job
   Ops.updateJobForRetry schemaName tableName delay errorMsg job
 
--- | Soft-nack a job so it is reprocessed after its visibility timeout without
--- recording a failure or consuming a retry attempt.
---
--- Returns the number of rows updated (0 if job was already claimed by another worker).
+-- | Soft-nack a job so it is reprocessed once its visibility timeout lapses, recording
+-- no failure and consuming no attempt. Returns 0 for a job another worker holds.
 nackJob
   :: forall payload m
    . (JobOperation m payload)
@@ -566,9 +558,8 @@ nackJob job = do
   let tableName = Job.queueName job
   Ops.nackJob schemaName tableName job
 
--- | 'nackJob' over a batch from one queue in a single statement.
---
--- Returns the ids nacked. Jobs another worker holds are absent.
+-- | 'nackJob' over a batch from one queue in one statement, returning the ids nacked.
+-- Jobs another worker holds are absent.
 nackJobsBatch
   :: forall payload m
    . (JobOperation m payload)
@@ -579,10 +570,9 @@ nackJobsBatch jobs@(firstJob : _) = do
   schemaName <- getSchema
   Ops.nackJobsBatch schemaName (Job.queueName firstJob) jobs
 
--- | Manually extends a job's visibility timeout, useful for long-running jobs.
---
--- Returns the number of rows updated. 0 for a job that is gone, reclaimed, or
--- suspended. 'setVisibilityTimeoutBatch' tells those apart.
+-- | Extend a job's visibility timeout by hand, for a long-running job. Returns 0 for a
+-- job that is gone, reclaimed or suspended, which 'setVisibilityTimeoutBatch' tells
+-- apart.
 setVisibilityTimeout
   :: forall payload m
    . (JobOperation m payload)
@@ -612,8 +602,7 @@ data SetVisibilityResult
     VisibilityUnchanged JobId
   deriving stock (Eq, Show)
 
--- | Extends visibility timeout for multiple jobs. All jobs must be from
--- the same queue.
+-- | 'setVisibilityTimeout' over a batch from one queue.
 setVisibilityTimeoutBatch
   :: forall payload m
    . (JobOperation m payload)
@@ -642,7 +631,7 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) = do
                 | otherwise -> VisibilityUnchanged jobId
   pure $ map toResult infos
 
--- | Move a job to the DLQ. Returns 0 if already claimed by another worker.
+-- | Move a job to the DLQ. Returns 0 for a job another worker holds.
 moveToDLQ
   :: forall payload m
    . (JobOperation m payload)
@@ -655,28 +644,28 @@ moveToDLQ errorMsg job = do
   let tableName = Job.queueName job
   Ops.moveToDLQ Ops.TakeLocks schemaName tableName errorMsg job
 
--- | Lists jobs in the dead-letter queue with pagination.
+-- | List DLQ jobs, most recently failed first.
 listDLQJobs
   :: forall payload m
    . (QueueOperation m payload)
   => Int
-  -- ^ The maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ The number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [DLQ.DLQJob payload]
 listDLQJobs limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.listDLQJobs schemaName tableName limit offset
 
--- | Lists completed jobs in the archive with pagination (most recent first).
+-- | List archived jobs, most recently completed first.
 listArchiveJobs
   :: forall payload m
    . (QueueOperation m payload)
   => Int
-  -- ^ The maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ The number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [Archive.ArchiveJob payload]
 listArchiveJobs limit offset = do
   schemaName <- getSchema
@@ -688,7 +677,7 @@ getArchivedJobById
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Original job id.
+  -- ^ Original job id
   -> m (Maybe (Archive.ArchiveJob payload))
 getArchivedJobById jobId = do
   schemaName <- getSchema
@@ -700,11 +689,11 @@ listArchivedJobsByGroupKey
   :: forall payload m
    . (QueueOperation m payload)
   => Text
-  -- ^ Group key.
+  -- ^ Group key
   -> Int
-  -- ^ Limit.
+  -- ^ Limit
   -> Int
-  -- ^ Offset.
+  -- ^ Offset
   -> m [Archive.ArchiveJob payload]
 listArchivedJobsByGroupKey groupKey limit offset = do
   schemaName <- getSchema
@@ -716,7 +705,7 @@ deleteArchiveJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Archive primary key.
+  -- ^ Archive primary key
   -> m Int64
 deleteArchiveJob archiveId = do
   schemaName <- getSchema
@@ -728,7 +717,7 @@ deleteArchiveJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
   => [Int64]
-  -- ^ Archive primary keys.
+  -- ^ Archive primary keys
   -> m Int64
 deleteArchiveJobsBatch archiveIds = do
   schemaName <- getSchema
@@ -741,27 +730,27 @@ reEnqueueFromArchive
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Archive primary key.
+  -- ^ Archive primary key
   -> m (Maybe (JobRead payload))
 reEnqueueFromArchive archiveId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.reEnqueueFromArchive schemaName tableName archiveId
 
--- | Retry a DLQ job (re-insert into main queue with attempts reset).
--- Returns @Nothing@ if the DLQ job no longer exists.
+-- | Retry a DLQ job, re-inserting it into the queue with a fresh attempt count.
+-- 'Nothing' when the DLQ row is gone.
 retryFromDLQ
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ DLQ job ID
+  -- ^ DLQ job id
   -> m (Maybe (JobRead payload))
 retryFromDLQ dlqId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.retryFromDLQ schemaName tableName dlqId
 
--- | Check whether a DLQ job exists by ID.
+-- | Whether a DLQ job with the given id exists.
 dlqJobExists
   :: forall payload m
    . (QueueOperation m payload)
@@ -772,22 +761,20 @@ dlqJobExists dlqId = do
   let tableName = queueTable @payload @m
   Ops.dlqJobExists schemaName tableName dlqId
 
--- | Permanently deletes a job from the dead-letter queue.
---
--- Returns the number of rows deleted (0 if the DLQ job no longer exists).
+-- | Delete a DLQ job. Returns 0 when the row is already gone.
 deleteDLQJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ DLQ job ID
+  -- ^ DLQ job id
   -> m Int64
 deleteDLQJob dlqId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.deleteDLQJob schemaName tableName dlqId
 
--- | Move multiple jobs to the DLQ. Jobs already claimed by another worker are
--- skipped. Returns the count of jobs moved.
+-- | Move a batch of jobs to the DLQ, skipping any another worker holds. Returns the
+-- number moved.
 moveToDLQBatch
   :: forall payload m
    . (JobOperation m payload)
@@ -800,14 +787,12 @@ moveToDLQBatch jobsWithErrors@((firstJob, _) : _) = do
   let tableName = Job.queueName firstJob
   Ops.moveToDLQBatch schemaName tableName jobsWithErrors
 
--- | Permanently deletes multiple jobs from the dead-letter queue.
---
--- Returns the total number of DLQ jobs deleted.
+-- | Delete DLQ jobs by id. Returns the number deleted.
 deleteDLQJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
   => [Int64]
-  -- ^ DLQ job IDs
+  -- ^ DLQ job ids
   -> m Int64
 deleteDLQJobsBatch dlqIds = do
   schemaName <- getSchema
@@ -818,25 +803,23 @@ deleteDLQJobsBatch dlqIds = do
 -- Filtered Query Operations
 -- ---------------------------------------------------------------------------
 
--- | Lists jobs with composable filters.
---
--- Returns jobs ordered by ID (descending, newest first).
+-- | List filtered jobs, newest first.
 listJobsFiltered
   :: forall payload m
    . (QueueOperation m payload)
   => [Ops.JobFilter]
   -- ^ Composable filters
   -> Int
-  -- ^ Maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ Number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [JobRead payload]
 listJobsFiltered filters limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.listJobsFiltered schemaName tableName filters limit offset
 
--- | Counts jobs with composable filters.
+-- | Count filtered jobs.
 countJobsFiltered
   :: forall payload m
    . (QueueOperation m payload)
@@ -848,25 +831,23 @@ countJobsFiltered filters = do
   let tableName = queueTable @payload @m
   Ops.countJobsFiltered schemaName tableName filters
 
--- | Lists DLQ jobs with composable filters.
---
--- Returns jobs ordered by failed_at (most recent first).
+-- | List filtered DLQ jobs, most recently failed first.
 listDLQFiltered
   :: forall payload m
    . (QueueOperation m payload)
   => [Ops.JobFilter]
   -- ^ Composable filters
   -> Int
-  -- ^ Maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ Number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [DLQ.DLQJob payload]
 listDLQFiltered filters limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.listDLQFiltered schemaName tableName filters limit offset
 
--- | Counts DLQ jobs with composable filters.
+-- | Count filtered DLQ jobs.
 countDLQFiltered
   :: forall payload m
    . (QueueOperation m payload)
@@ -882,30 +863,26 @@ countDLQFiltered filters = do
 -- Admin Operations
 -- ---------------------------------------------------------------------------
 
--- | Lists jobs in the queue with pagination.
---
--- Returns jobs ordered by ID (descending, newest first).
+-- | List jobs, newest first.
 listJobs
   :: forall payload m
    . (QueueOperation m payload)
   => Int
-  -- ^ Maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ Number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [JobRead payload]
 listJobs limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.listJobs schemaName tableName limit offset
 
--- | Gets a single job by its ID.
---
--- Returns @Nothing@ if the job doesn't exist.
+-- | Fetch a job by id.
 getJobById
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m (Maybe (JobRead payload))
 getJobById jobId = do
   schemaName <- getSchema
@@ -917,103 +894,96 @@ jobExists
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m Bool
 jobExists jobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.jobExists schemaName tableName jobId
 
--- | Gets all jobs for a specific group key with pagination.
+-- | List a group's jobs.
 getJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
   => Text
-  -- ^ Group key to filter by
+  -- ^ Group key
   -> Int
-  -- ^ Maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ Number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [JobRead payload]
 getJobsByGroup groupKey limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.getJobsByGroup schemaName tableName groupKey limit offset
 
--- | Gets all jobs for a specific parent ID with pagination.
+-- | List a parent's children.
 getJobsByParent
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent ID to filter by
+  -- ^ Parent id
   -> Int
-  -- ^ Maximum number of jobs to return.
+  -- ^ Limit
   -> Int
-  -- ^ Number of jobs to skip (for pagination).
+  -- ^ Offset
   -> m [JobRead payload]
 getJobsByParent pid limit offset = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.getJobsByParent schemaName tableName pid limit offset
 
--- | Cancels (deletes) a job by ID.
---
--- Returns 0 if the job has children - use 'cancelJobCascade' to delete
--- a parent and all its descendants.
+-- | Delete a job by id. Returns 0 for a job with children, which 'cancelJobCascade'
+-- takes instead.
 cancelJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m Int64
 cancelJob jobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.cancelJob schemaName tableName jobId
 
--- | Force-cancel a job and its descendants, also interrupting any handlers
--- currently running the deleted jobs via NOTIFY on the cancel channel.
+-- | Delete a job and its descendants, interrupting any handler running one of them by
+-- NOTIFY on the cancel channel.
 forceCancelJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Root job ID
+  -- ^ Root job id
   -> m Int64
 forceCancelJob jobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.forceCancelJob schemaName tableName jobId
 
--- | Cancels (deletes) multiple jobs by ID.
---
--- Returns the total number of jobs deleted.
+-- | Delete jobs by id. Returns the number deleted.
 cancelJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
   => [Int64]
-  -- ^ Job IDs
+  -- ^ Job ids
   -> m Int64
 cancelJobsBatch jobIds = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.cancelJobsBatch schemaName tableName jobIds
 
--- | Promote a delayed or retrying job to be immediately visible.
---
--- Refuses in-flight jobs (attempts > 0 with no last_error).
--- Returns 1 on success, 0 if not found, already visible, or in-flight.
+-- | Make a delayed or retrying job immediately visible. Refuses an in-flight job.
 promoteJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m Int64
 promoteJob jobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.promoteJob schemaName tableName jobId
 
--- | Gets statistics about the job queue.
+-- | A queue's per-status counts and backlog ages.
 getQueueStats
   :: forall payload m
    . (QueueOperation m payload)
@@ -1027,7 +997,7 @@ getQueueStats = do
 -- Count Operations
 -- ---------------------------------------------------------------------------
 
--- | Counts all jobs in the queue.
+-- | Count every job in the queue.
 countJobs
   :: forall payload m
    . (QueueOperation m payload)
@@ -1037,31 +1007,31 @@ countJobs = do
   let tableName = queueTable @payload @m
   Ops.countJobs schemaName tableName
 
--- | Counts jobs matching a group key.
+-- | Count a group's jobs.
 countJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
   => Text
-  -- ^ Group key to count
+  -- ^ Group key
   -> m Int64
 countJobsByGroup groupKey = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.countJobsByGroup schemaName tableName groupKey
 
--- | Counts jobs matching a parent ID.
+-- | Count a parent's children.
 countJobsByParent
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent ID to count children of
+  -- ^ Parent id
   -> m Int64
 countJobsByParent pid = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.countJobsByParent schemaName tableName pid
 
--- | Counts jobs in the dead-letter queue.
+-- | Count the queue's DLQ jobs.
 countDLQJobs
   :: forall payload m
    . (QueueOperation m payload)
@@ -1071,9 +1041,8 @@ countDLQJobs = do
   let tableName = queueTable @payload @m
   Ops.countDLQJobs schemaName tableName
 
--- | Counts children for a batch of potential parent IDs.
---
--- Returns a Map from parent_id to @(total, paused)@ counts (only non-zero entries).
+-- | Child counts as @(total, paused)@ per parent id, over a batch. Parents with none
+-- are absent.
 countChildrenBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -1084,21 +1053,18 @@ countChildrenBatch ids = do
   let tableName = queueTable @payload @m
   Ops.countChildrenBatch schemaName tableName ids
 
--- | Count how many children of a parent are in the DLQ.
--- Useful inside finalizer handlers to detect failed children.
+-- | Count a parent's DLQ'd children, which a finalizer handler reads to spot failures.
 countDLQChildren
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m Int64
 countDLQChildren parentJobId = do
   m <- countDLQChildrenBatch @payload [parentJobId]
   pure $ fromMaybe 0 (Map.lookup parentJobId m)
 
--- | Counts children in the DLQ for a batch of potential parent IDs.
---
--- Returns a Map from parent_id to DLQ child count (only non-zero entries).
+-- | DLQ child counts per parent id, over a batch. Parents with none are absent.
 countDLQChildrenBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -1113,46 +1079,38 @@ countDLQChildrenBatch ids = do
 -- Job Dependency Operations
 -- ---------------------------------------------------------------------------
 
--- | Pause all visible children of a parent job, making them unclaimable.
---
--- Only affects children that are currently claimable. In-flight children
--- are left alone so their visibility timeout can expire normally if the
--- worker crashes.
---
--- Returns the number of children paused.
+-- | Suspend a parent's claimable children. In-flight ones are left alone, so their
+-- visibility timeout can lapse normally if the worker crashes. Returns the number
+-- suspended.
 pauseChildren
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m Int64
 pauseChildren parentJobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.pauseChildren schemaName tableName parentJobId
 
--- | Resume all suspended children of a parent job.
---
--- Returns the number of children resumed.
+-- | Resume a parent's suspended children. Returns the number resumed.
 resumeChildren
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m Int64
 resumeChildren parentJobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.resumeChildren schemaName tableName parentJobId
 
--- | Cancel a job and all its descendants recursively.
---
--- Returns the total number of jobs deleted (parent + all descendants).
+-- | Delete a job and every descendant under it. Returns the number deleted.
 cancelJobCascade
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Root job ID
+  -- ^ Root job id
   -> m Int64
 cancelJobCascade jobId = do
   schemaName <- getSchema
@@ -1163,16 +1121,12 @@ cancelJobCascade jobId = do
 -- Suspend/Resume Operations
 -- ---------------------------------------------------------------------------
 
--- | Suspend a job, making it unclaimable.
---
--- Only suspends non-in-flight jobs (not currently being processed by workers).
--- Returns the number of rows updated (0 if job doesn't exist, is in-flight,
--- or already suspended).
+-- | Suspend a job, making it unclaimable. Refuses an in-flight job.
 suspendJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m Int64
 suspendJob jobId = do
   schemaName <- getSchema
@@ -1180,13 +1134,11 @@ suspendJob jobId = do
   Ops.suspendJob schemaName tableName jobId
 
 -- | Resume a suspended job, making it claimable again.
---
--- Returns the number of rows updated (0 if job doesn't exist or isn't suspended).
 resumeJob
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Job ID
+  -- ^ Job id
   -> m Int64
 resumeJob jobId = do
   schemaName <- getSchema
@@ -1197,20 +1149,16 @@ resumeJob jobId = do
 -- Results Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Insert a child's result into the results table, encoded as the queue's
--- declared result type.
---
--- Each child gets its own row keyed by @(parent_id, child_id)@.
--- The FK @ON DELETE CASCADE@ ensures cleanup when the parent is acked.
---
--- Returns the number of rows inserted, 0 for a result that stores nothing.
+-- | Insert a child's result, encoded as the queue's declared result type and keyed by
+-- @(parent_id, child_id)@. Its foreign key cascades, so acking the parent clears it.
+-- Returns 0 for a result that stores nothing.
 insertResult
   :: forall payload m
    . (EncodeJobResult (ResultOf m payload), QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> Int64
-  -- ^ Child job ID
+  -- ^ Child job id
   -> ResultOf m payload
   -- ^ Result value
   -> m Int64
@@ -1224,9 +1172,9 @@ insertResultUnsafe
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> Int64
-  -- ^ Child job ID
+  -- ^ Child job id
   -> Value
   -- ^ Encoded result value
   -> m Int64
@@ -1235,26 +1183,24 @@ insertResultUnsafe parentJobId childId result = do
   let tableName = queueTable @payload @m
   Ops.insertResult schemaName tableName parentJobId childId result
 
--- | Get all child results for a parent from the results table.
+-- | A parent's child results, keyed by child id.
 getResultsByParent
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m (Map Int64 Value)
 getResultsByParent parentJobId = do
   schemaName <- getSchema
   let tableName = queueTable @payload @m
   Ops.getResultsByParent schemaName tableName parentJobId
 
--- | Get DLQ child errors for a parent.
---
--- Returns a 'Map' from child job ID to the last error message.
+-- | A parent's DLQ'd children's last errors, keyed by child id.
 getDLQChildErrorsByParent
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m (Map Int64 Text)
 getDLQChildErrorsByParent parentJobId = do
   schemaName <- getSchema
@@ -1267,7 +1213,7 @@ readChildResultsRaw
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
-  -- ^ Parent job ID
+  -- ^ Parent job id
   -> m (Map Int64 Value, Map Int64 Text, Maybe Value, Map Int64 Text)
 readChildResultsRaw parentJobId = do
   schemaName <- getSchema
@@ -1301,14 +1247,10 @@ getParentStateSnapshot jobId = do
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Schema-wide groups-table refresh. Iterates all registered queues and
--- corrects drift in @job_count@, @min_priority@, @min_id@, and
--- @in_flight_until@ for each. Returns the rows rewritten and the queue names
--- that failed.
---
--- Walks every queue's groups table to the end, one bounded batch and one transaction
--- at a time. A deliberate repair, not a hot path: the reaper runs
--- 'Ops.refreshAllGroups' for a single batch per tick instead.
+-- | Schema-wide groups-table refresh, correcting every registered queue's summary drift.
+-- Walks each groups table to the end, one bounded batch and one transaction at a time.
+-- A deliberate repair rather than a hot path: the reaper runs 'Ops.refreshAllGroups' for
+-- a single batch per tick. Returns the rows rewritten and the queue names that failed.
 refreshAllGroupsFully
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -1343,11 +1285,9 @@ getCronScheduleByName scheduleName = do
   schemaName <- getSchema
   Ops.getCronScheduleByName schemaName scheduleName
 
--- | Update a cron schedule (patch semantics). Returns rows affected
--- (0 = not found, 1 = updated).
---
--- Writes the overrides as given. @Arbiter.Worker.updateCronScheduleChecked@
--- rejects ones the scheduler cannot parse.
+-- | Patch a cron schedule, writing the overrides as given. Returns rows affected, 0 for
+-- a name that is not there. @Arbiter.Worker.updateCronScheduleChecked@ rejects overrides
+-- the scheduler cannot parse.
 updateCronScheduleUnchecked
   :: forall m
    . (MonadArbiter m)

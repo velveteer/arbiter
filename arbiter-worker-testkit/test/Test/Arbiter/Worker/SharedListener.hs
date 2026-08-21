@@ -19,7 +19,7 @@ import Arbiter.Simple
   , useDedicatedListener
   )
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (cleanupData, setupOnce)
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -34,7 +34,6 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Test.Hspec (Spec, beforeAll, describe, it, shouldBe)
-import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker.TestKit (listenerSpec)
 
@@ -75,7 +74,7 @@ dedicatedListenerSpec connStr =
           handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
       config <- transactionalWorkerConfig 1 handler
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
-      withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+      withLinkedAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
         threadDelay 1_000_000
         runSimpleDb env
           $ void

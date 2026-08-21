@@ -111,16 +111,11 @@ type SchemaName = Text
 -- | Unqualified table name within a schema, e.g. @"email_jobs"@.
 type TableName = Text
 
--- | Default PostgreSQL schema name for Arbiter tables
---
--- Using a dedicated schema prevents namespace pollution in the user's public schema.
+-- | The schema arbiter's tables live in by default, keeping them out of @public@.
 defaultSchemaName :: SchemaName
 defaultSchemaName = "arbiter"
 
--- | Generate notification channel name for a table
---
--- Each table gets its own NOTIFY channel for job insertions.
--- Example: notificationChannelForTable "email_jobs" -> "email_jobs_created"
+-- | A table's own job-arrival NOTIFY channel: @\"email_jobs\"@ -> @\"email_jobs_created\"@.
 notificationChannelForTable :: TableName -> Text
 notificationChannelForTable tableName = tableName <> "_created"
 
@@ -261,16 +256,13 @@ groupsSuffix = "_groups"
 queueTableNames :: TableName -> [TableName]
 queueTableNames tableName = tableName : map (tableName <>) [dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix]
 
--- | SQL to create the schema for Arbiter tables
+-- | Create the schema arbiter's tables live in.
 createSchemaSQL :: SchemaName -> Text
 createSchemaSQL schemaName =
   "CREATE SCHEMA IF NOT EXISTS " <> quoteIdentifier schemaName <> ";"
 
--- | Common job column definitions (matches the Job type structure)
---
--- These columns are shared between job_queue and dead_letter_queue tables.
---
--- Checksummed by the create-table migration: a new column ships as its own ALTER script.
+-- | The job columns the queue and DLQ tables share. Checksummed by the create-table
+-- migration, so a new column ships as its own ALTER script.
 jobColumns :: [Text]
 jobColumns =
   [ "  id BIGSERIAL PRIMARY KEY,"
@@ -309,7 +301,7 @@ addClaimSeqColumnSQL :: Text -> Text -> Text
 addClaimSeqColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["claim_seq BIGINT NOT NULL DEFAULT 0"]
 
--- | Job column definitions for DLQ table (with job_id instead of id)
+-- | 'jobColumns' for the DLQ table, with @job_id@ in place of @id@.
 jobColumnsForDLQ :: Text
 jobColumnsForDLQ =
   T.unlines
@@ -319,9 +311,7 @@ jobColumnsForDLQ =
     ]
     <> T.unlines (drop 1 jobColumns)
 
--- | SQL to create the main job queue table within a schema
---
--- This table stores pending and in-progress jobs.
+-- | Create a queue's main job table, holding its pending and in-progress jobs.
 createJobQueueTableSQL :: Text -> Text -> Text
 createJobQueueTableSQL schemaName tableName =
   T.unlines
@@ -330,10 +320,8 @@ createJobQueueTableSQL schemaName tableName =
     , ") WITH (fillfactor = 70);"
     ]
 
--- | SQL to create the dead letter queue table within a schema
---
--- Jobs that fail repeatedly (exceed max attempts) are moved here for inspection.
--- This table contains ALL the Job fields (complete snapshot) plus DLQ-specific metadata.
+-- | Create a queue's DLQ table, where a job that runs out of attempts lands as a full
+-- snapshot plus its failure metadata.
 createJobQueueDLQTableSQL :: Text -> Text -> Text
 createJobQueueDLQTableSQL schemaName tableName =
   T.unlines
@@ -412,11 +400,9 @@ createArchiveGroupKeyIndexSQL schemaName tableName =
     , "ON " <> jobQueueArchiveTable schemaName tableName <> " (group_key);"
     ]
 
--- | SQL to create a partial index on group_key for efficient per-group lookups.
---
--- Used by claim queries' LATERAL subqueries and by the DELETE/UPDATE triggers
--- when recomputing @in_flight_until@. Composite @(group_key, priority, id)@
--- so the DELETE trigger can recompute min values via index-only lookup.
+-- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
+-- subqueries and by the maintenance triggers recomputing a group's minima and
+-- @in_flight_until@ without leaving the index.
 createJobQueueGroupKeyIndexSQL :: Text -> Text -> Text
 createJobQueueGroupKeyIndexSQL schemaName tableName =
   T.unlines
@@ -463,7 +449,7 @@ migrateUngroupedReadySplitIndexesSQL schemaName tableName =
     , createJobQueueUngroupedDueIndexSQL schemaName tableName
     ]
 
--- | SQL to create index on DLQ group_key for querying failed jobs by group
+-- | Index on DLQ @group_key@, for per-group failure listings.
 createDLQGroupKeyIndexSQL :: Text -> Text -> Text
 createDLQGroupKeyIndexSQL schemaName tableName =
   T.unlines
@@ -471,7 +457,7 @@ createDLQGroupKeyIndexSQL schemaName tableName =
     , "ON " <> jobQueueDLQTable schemaName tableName <> " (group_key);"
     ]
 
--- | SQL to create index on DLQ failed_at for time-based queries
+-- | Index on DLQ @failed_at@, for the most-recent-first listing.
 createDLQFailedAtIndexSQL :: Text -> Text -> Text
 createDLQFailedAtIndexSQL schemaName tableName =
   T.unlines
@@ -479,7 +465,7 @@ createDLQFailedAtIndexSQL schemaName tableName =
     , "ON " <> jobQueueDLQTable schemaName tableName <> " (failed_at DESC);"
     ]
 
--- | SQL to create index on DLQ parent_id for efficient child lookups (DLQ child counts)
+-- | Index on DLQ @parent_id@, for per-parent child lookups and counts.
 createDLQParentIdIndexSQL :: Text -> Text -> Text
 createDLQParentIdIndexSQL schemaName tableName =
   T.unlines
@@ -488,7 +474,7 @@ createDLQParentIdIndexSQL schemaName tableName =
     , "WHERE parent_id IS NOT NULL;"
     ]
 
--- | SQL to create unique index on dedup_key for job deduplication
+-- | Unique index on @dedup_key@, which the dedup @ON CONFLICT@ resolves against.
 createDedupKeyIndexSQL :: Text -> Text -> Text
 createDedupKeyIndexSQL schemaName tableName =
   T.unlines
@@ -497,7 +483,7 @@ createDedupKeyIndexSQL schemaName tableName =
     , "WHERE dedup_key IS NOT NULL;"
     ]
 
--- | SQL to create a partial index on parent_id for efficient child lookups.
+-- | Partial index on @parent_id@, for per-parent child lookups.
 createParentIdIndexSQL :: Text -> Text -> Text
 createParentIdIndexSQL schemaName tableName =
   T.unlines
@@ -506,11 +492,8 @@ createParentIdIndexSQL schemaName tableName =
     , "WHERE parent_id IS NOT NULL;"
     ]
 
--- | SQL to create the results table for storing child job results.
---
--- Child results are stored as individual rows (one per child), keyed by
--- @(parent_id, child_id)@. The @ON DELETE CASCADE@ foreign key ensures
--- cleanup when the parent is acked (deleted).
+-- | Create a queue's results table, one row per child keyed by @(parent_id, child_id)@.
+-- Its foreign key cascades, so acking the parent clears them.
 createResultsTableSQL :: Text -> Text -> Text
 createResultsTableSQL schemaName tableName =
   let resultsTbl = jobQueueResultsTable schemaName tableName
@@ -524,11 +507,9 @@ createResultsTableSQL schemaName tableName =
         , ");"
         ]
 
--- | SQL to create the groups table for fast grouped claims.
---
--- Stores one row per distinct @group_key@ with pre-computed @min_priority@,
--- @min_id@, @job_count@, and @in_flight_until@. Maintained by statement-level
--- AFTER triggers on the main job table (see 'createGroupsTriggerFunctionsSQL').
+-- | Create a queue's groups table, one summary row per @group_key@ carrying the group's
+-- precomputed minima, counts and @in_flight_until@. Maintained by the statement-level
+-- AFTER triggers in 'createGroupsTriggerFunctionsSQL'.
 createGroupsTableSQL :: Text -> Text -> Text
 createGroupsTableSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
@@ -588,8 +569,8 @@ createGroupsEmptiedIndexSQL schemaName tableName =
 -- Groups Maintenance Triggers
 -- ---------------------------------------------------------------------------
 
--- | Three trigger functions maintaining the groups table via statement-level
--- AFTER triggers. Uses incremental operations where possible.
+-- | The three trigger functions maintaining a queue's groups table, incrementally where
+-- the transition tables allow it.
 createGroupsTriggerFunctionsSQL :: Text -> Text -> Text
 createGroupsTriggerFunctionsSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
@@ -798,7 +779,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ORDER BY g.group_key
       FOR UPDATE;
 
-      -- Step 1: Full rescan - recompute in_flight_until when not_visible_until decreases or suspended changes
+      -- Full rescan: recompute in_flight_until when not_visible_until moves back or suspended changes.
       UPDATE ${groupsTbl} g
       SET in_flight_until = sub.new_ift
       FROM (
@@ -830,10 +811,10 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
         WHERE o.group_key IS DISTINCT FROM n.group_key
         LIMIT 1
       ) THEN
-        -- Step 2: group_key change (dedup replace) - remove from old group
+        -- A dedup replace moved the key, so drop the rows from their old group.
         ${removeUpdate}
 
-        -- Step 3: group_key change - add to new group
+        -- And add them to the new one.
         INSERT INTO ${groupsTbl} (group_key, min_priority, min_id, job_count, ready_count, next_due)
         SELECT n.group_key, ${aggsN}
         FROM new_table n
@@ -846,7 +827,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           ${mergeSet};
       END IF;
 
-      -- Step 4: same-group ordering and visibility recompute, in-flight extend and ready delta in one write.
+      -- Same-group ordering and visibility recompute, in-flight extend and ready delta in one write.
       UPDATE ${groupsTbl} g
       SET min_priority = CASE WHEN m.recompute THEN m.new_min_priority ELSE g.min_priority END,
           min_id = CASE WHEN m.recompute THEN m.new_min_id ELSE g.min_id END,
@@ -918,11 +899,8 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
     ${dd} LANGUAGE plpgsql;
   |]
 
--- | SQL to create 3 statement-level AFTER triggers on the main job table
--- that call the groups maintenance functions.
---
--- Uses @REFERENCING NEW\/OLD TABLE AS@ for efficient batch access to
--- affected rows via transition tables.
+-- | The three statement-level AFTER triggers calling a queue's groups maintenance
+-- functions, each handed its affected rows through a transition table.
 createGroupsTriggersSQL :: Text -> Text -> Text
 createGroupsTriggersSQL schemaName tableName =
   createMaintenanceTriggersSQL schemaName (jobQueueTable schemaName tableName) ("maintain_" <> tableName <> "_groups")
@@ -981,9 +959,8 @@ createNotifyFunctionSQL schemaName tableName =
             <> "';"
         ]
 
--- | SQL to create the NOTIFY trigger for a specific table
---
--- Statement-level AFTER INSERT, so a batch insert notifies once rather than per row.
+-- | A table's job-arrival NOTIFY trigger. Statement-level, so a batch insert notifies
+-- once rather than per row.
 createNotifyTriggerSQL :: Text -> Text -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -999,7 +976,7 @@ createNotifyTriggerSQL schemaName tableName =
         , "COMMENT ON TRIGGER " <> trigName <> " ON " <> tbl <> " IS '" <> notifyObjectComment <> "';"
         ]
 
--- | SQL to drop the NOTIFY trigger
+-- | Drop a table's job-arrival NOTIFY trigger.
 dropNotifyTriggerSQL :: Text -> Text -> Text
 dropNotifyTriggerSQL schemaName tableName =
   "DROP TRIGGER IF EXISTS "
@@ -1008,7 +985,7 @@ dropNotifyTriggerSQL schemaName tableName =
     <> jobQueueTable schemaName tableName
     <> ";"
 
--- | SQL to drop the NOTIFY function for a specific table
+-- | Drop a table's job-arrival NOTIFY function.
 dropNotifyFunctionSQL :: Text -> Text -> Text
 dropNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName

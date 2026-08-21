@@ -103,7 +103,7 @@ BEGIN
   ORDER BY g.group_key
   FOR UPDATE;
 
-  -- Step 1: Full rescan - recompute in_flight_until when not_visible_until decreases or suspended changes
+  -- Full rescan: recompute in_flight_until when not_visible_until moves back or suspended changes.
   UPDATE "arbiter"."golden_jobs_groups" g
   SET in_flight_until = sub.new_ift
   FROM (
@@ -135,7 +135,7 @@ BEGIN
     WHERE o.group_key IS DISTINCT FROM n.group_key
     LIMIT 1
   ) THEN
-    -- Step 2: group_key change (dedup replace) - remove from old group
+    -- A dedup replace moved the key, so drop the rows from their old group.
     UPDATE "arbiter"."golden_jobs_groups" g
     SET job_count = CASE WHEN sub.new_min_id IS NULL THEN 0
           ELSE GREATEST(0, g.job_count - sub.removed_count) END,
@@ -173,7 +173,7 @@ BEGIN
     ) sub
     WHERE g.group_key = sub.group_key;
 
-    -- Step 3: group_key change - add to new group
+    -- And add them to the new one.
     INSERT INTO "arbiter"."golden_jobs_groups" (group_key, min_priority, min_id, job_count, ready_count, next_due)
     SELECT n.group_key, MIN(n.priority) AS min_priority, MIN(n.id) AS min_id, COUNT(*) AS job_count, COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended) AS ready_count, MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended) AS next_due
     FROM new_table n
@@ -192,7 +192,7 @@ BEGIN
       next_due = LEAST("arbiter"."golden_jobs_groups".next_due, EXCLUDED.next_due);
   END IF;
 
-  -- Step 4: same-group ordering and visibility recompute, in-flight extend and ready delta in one write.
+  -- Same-group ordering and visibility recompute, in-flight extend and ready delta in one write.
   UPDATE "arbiter"."golden_jobs_groups" g
   SET min_priority = CASE WHEN m.recompute THEN m.new_min_priority ELSE g.min_priority END,
       min_id = CASE WHEN m.recompute THEN m.new_min_id ELSE g.min_id END,

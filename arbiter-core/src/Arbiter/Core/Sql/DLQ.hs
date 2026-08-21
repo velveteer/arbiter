@@ -39,12 +39,8 @@ sweepableGuard =
     <> T.pack (show defaultMaxAttempts)
     <> ") AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
 
--- | SQL template for moving job to DLQ atomically
---
--- This preserves ALL job fields (complete snapshot) plus DLQ metadata.
--- The operation is atomic: the job is deleted from the main queue and
--- inserted into the DLQ in a single statement. The final error message
--- is passed as a parameter to capture the error that caused the DLQ move.
+-- | Move a job to the DLQ in one statement, carrying every job column plus the
+-- failure that sent it there.
 moveToDLQSQL :: DLQMove -> Text -> Text -> Int64 -> Int64 -> Text -> Query Int64
 moveToDLQSQL move schema tableName jobId cseq errorMsg =
   let tbl = jobQueueTable schema tableName
@@ -84,26 +80,11 @@ selectExhaustedJobsSQL schema tableName limit =
         LIMIT ${lim}
       |]
 
--- | SQL template for retrying a job from DLQ (tree-aware)
---
--- Tree-aware retry behavior - retrying any member of a DLQ'd tree recovers
--- the entire tree in a single operation:
---
--- 1. If the target is a child whose parent is in the DLQ (not in main queue),
---    the parent is auto-retried as @suspended = TRUE@, and ALL DLQ'd siblings
---    are auto-retried too. The parent waits for children to complete.
---
--- 2. If the target is a rollup finalizer with DLQ'd children, ALL children
---    are auto-retried and the finalizer comes back as @suspended = TRUE@
---    (waits for children to complete). If no DLQ'd children exist, it comes
---    back as @suspended = FALSE@ (runs immediately with snapshot data).
---
--- 3. Refuses to retry if the tree root's parent_id references a job that no
---    longer exists in the main queue - prevents creating orphaned children.
---
--- Retried rollup finalizers get @suspended = TRUE@ when they have children
--- being retried alongside them. @dedup_key@ and @dedup_strategy@ are
--- intentionally dropped on retry (columns omitted → NULL defaults).
+-- | Retry a DLQ job with its whole DLQ'd tree: naming any member recovers the root,
+-- every DLQ'd descendant, and the finalizers above them in one statement. A finalizer
+-- comes back suspended when children come back with it, unsuspended when none do, so
+-- it runs on its snapshot. A root whose parent left the main queue is refused, which
+-- keeps the retry from orphaning children. The dedup key is dropped on retry.
 retryFromDLQSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 retryFromDLQSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
@@ -196,22 +177,20 @@ retryFromDLQSQL schema tableName dlqId =
         SELECT ${columns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
 
--- | Check whether a DLQ job exists by ID.
+-- | Whether a DLQ job with the given id exists.
 dlqJobExistsSQL :: Text -> Text -> Int64 -> Query Bool
 dlqJobExistsSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}) AS @{result :: CBool}|]
 
--- | SQL template for deleting a DLQ job. Returns the deleted job's parent_id (NULL if no parent).
+-- | Delete a DLQ job, returning its parent id.
 deleteDLQJobSQL :: Text -> Text -> Int64 -> Query (Maybe Int64)
 deleteDLQJobSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|DELETE FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8} RETURNING @{parent_id :: Maybe CInt8}|]
 
--- | SQL template for moving multiple jobs to DLQ in a single operation
---
--- Uses unnest to process multiple (id, claim_seq, error_msg) tuples, locking
--- descending to match ack. Returns the id of each job moved.
+-- | 'moveToDLQSQL' over @unnest@ed @(id, claim_seq, error_msg)@ arrays, locking
+-- descending to match ack. Returns the ids moved.
 moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Text] -> Query Int64
 moveToDLQBatchSQL schema tableName ids cseqs errs =
   let tbl = jobQueueTable schema tableName
@@ -240,20 +219,14 @@ moveToDLQBatchSQL schema tableName ids cseqs errs =
         SELECT id AS @{result :: CInt8} FROM deleted_jobs
       |]
 
--- | SQL template for deleting multiple DLQ jobs by ID
---
--- | Delete multiple DLQ jobs by id, returning each deleted job's parent_id (NULL if no parent).
+-- | Delete DLQ jobs by id, returning each one's parent id.
 deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Maybe Int64)
 deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]}) RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}|]
 
--- | Cascade all descendants of a rollup parent to the DLQ.
---
--- Recursively finds all descendants and moves them from the main queue
--- to the DLQ in a single operation. Used when a rollup parent is moved
--- to DLQ to prevent orphaned children from hitting FK violations on
--- the results table.
+-- | Move every descendant of a rollup parent to the DLQ alongside it, so none is left
+-- behind to hit a results-table foreign key.
 cascadeChildrenToDLQSQL :: Text -> Text -> Int64 -> Text -> Query Int64
 cascadeChildrenToDLQSQL schema tableName parentId errorMsg =
   let tbl = jobQueueTable schema tableName
@@ -278,7 +251,7 @@ cascadeChildrenToDLQSQL schema tableName parentId errorMsg =
         SELECT count(*) AS @{count :: CInt8} FROM deleted
       |]
 
--- | Batch DLQ child count: returns (parent_id, count) for a set of job IDs.
+-- | DLQ child count per parent, over a set of job ids.
 countDLQChildrenBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Int64)
 countDLQChildrenBatchSQL schema tableName jobIds =
   let dlqTbl = jobQueueDLQTable schema tableName

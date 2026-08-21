@@ -4,12 +4,15 @@
 -- the condition is met, falling back to a timeout.
 module Arbiter.Test.Poll
   ( waitUntil
+  , withLinkedAsync
   ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import GHC.Stack (HasCallStack)
 import Test.Hspec (expectationFailure)
+import UnliftIO (MonadUnliftIO)
+import UnliftIO.Async (Async, link, withAsync)
 
 -- | Poll every 100 ms until the predicate returns 'True'.
 -- Fails with 'expectationFailure' after @timeoutMs@ milliseconds.
@@ -23,3 +26,8 @@ waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
       unless ok $ do
         threadDelay 100_000
         go (n - 1)
+
+-- | 'withAsync' with the handle linked, so a thread that dies raises here instead of
+-- leaving a 'waitUntil' polling for something that can no longer happen.
+withLinkedAsync :: (MonadUnliftIO m) => m a -> (Async a -> m b) -> m b
+withLinkedAsync run body = withAsync run $ \handle -> link handle >> body handle

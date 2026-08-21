@@ -9,20 +9,30 @@ const ARCHIVE_COLUMNS = [
   { key: 'parent', label: 'Parent', weight: 6 },
   { key: 'group', label: 'Group', weight: 8 },
   { key: 'payload', label: 'Payload', weight: 18 },
-  { key: 'hasresult', label: 'Results?', weight: 7 },
-  { key: 'inserted', label: 'Inserted At', weight: 12 },
-  { key: 'completed', label: 'Completed At', weight: 12 },
+  { key: 'hasresult', label: 'Result', weight: 7 },
+  { key: 'inserted', label: 'Inserted', weight: 12 },
+  { key: 'completed', label: 'Completed', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8 },
-  { key: 'actions', label: 'Actions', weight: 14 },
+  { key: 'actions', label: 'Actions', weight: 5 },
 ];
+
+// Row actions, stamped into both the row menu and the drawer header.
+const ARCHIVE_ACTIONS_HTML = `
+<li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job); closeDropdown($el)">Detail</a></li>
+<li><a class="dropdown-item" href="#" @click.prevent="reEnqueueJob(job.archivePrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('reenq:' + job.archivePrimaryKey) }" x-text="isArmed('reenq:' + job.archivePrimaryKey) ? 'Confirm re-enqueue' : 'Re-enqueue'"></a></li>
+<li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.archivePrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('del:' + job.archivePrimaryKey) }" x-text="isArmed('del:' + job.archivePrimaryKey) ? 'Confirm purge' : 'Purge'"></a></li>`;
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('archiveTab', () => withPagination(withSelection({
     ...columnPrefs(ARCHIVE_COLUMNS, 'arb.archiveCols'),
+    ...rowDetail('archiveJobs', 'archivePrimaryKey', 'selectedArchiveJob', { drawer: 'archiveDetailDrawer' }),
     ...tableTab('loadArchive', 'arb.archiveRefresh'),
     archiveJobs: [],
+    rowNoun: 'archived job',
+    detailActionsHtml: ARCHIVE_ACTIONS_HTML,
+    rowNounPlural: '',
     total: 0,
-    loading: false,
+    ...loadState(),
     active: false,
     selectedArchiveJob: null,
     bulkBusy: false,
@@ -34,7 +44,6 @@ document.addEventListener('alpine:init', () => {
     _appliedJobId: '',
     sortBy: '',
     sortDir: '',
-    _loadErrored: false,
 
     init() {
       this._loadColPrefs();
@@ -54,7 +63,7 @@ document.addEventListener('alpine:init', () => {
         onHide: () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           releaseInitialLoad(this);
-          hideModal('archiveDetailModal');
+          this.closeDetail();
           this._stopTimer();
         },
       });
@@ -93,6 +102,7 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = pid;
         this._appliedJobId = jid;
         this.archiveJobs = data.archiveJobs || [];
+        this.resyncDetailSelection();
         this.total = data.archiveTotal || 0;
         // Drop selections for rows no longer on the current page.
         const present = new Set(this.archiveJobs.map(j => String(j.archivePrimaryKey)));
@@ -160,6 +170,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.reEnqueueArchive(queue, id);
+          this.closeDetailIfOpen(id);
           showToast('Re-enqueued', 'success');
         } catch (e) {
           showToast('Failed to re-enqueue: ' + e.message);
@@ -175,6 +186,7 @@ document.addEventListener('alpine:init', () => {
         const queue = Alpine.store('app').selectedQueue;
         try {
           await ArbiterAPI.deleteArchive(queue, id);
+          this.closeDetailIfOpen(id);
           await this.loadArchive();
         } catch (e) {
           showToast('Failed to purge: ' + e.message);
@@ -182,9 +194,22 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    get detailTitle() {
+      return this.selectedArchiveJob ? 'Archived job ' + this.selectedArchiveJob.archivePrimaryKey : 'Archived job';
+    },
+
+    get detailStatus() {
+      return '';
+    },
+
+    get detailRows() {
+      const cur = this.selectedArchiveJob;
+      return cur ? [Object.assign({}, cur, { _id: cur.archivePrimaryKey, _inDrawer: true })] : [];
+    },
+
     viewDetail(job) {
       this.selectedArchiveJob = job;
-      showModal('archiveDetailModal');
+      showDrawer('archiveDetailDrawer');
     },
-  }, 'archiveJobs', 'archivePrimaryKey'), 'loadArchive'));
+  }, 'archiveJobs', 'archivePrimaryKey'), 'loadArchive', 'arb.archivePageSize'));
 });

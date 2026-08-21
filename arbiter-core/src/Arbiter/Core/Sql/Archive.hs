@@ -90,7 +90,7 @@ purgeArchiveSQL schema tableName =
         )
       |]
 
--- | Generic SQL for listing archived jobs with a dynamic WHERE clause.
+-- | List archived jobs under a dynamic WHERE.
 listArchiveFilteredSQL
   :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead Value, Maybe Value)
 listArchiveFilteredSQL schema tableName whereFrag orderBy limit offset =
@@ -106,7 +106,7 @@ listArchiveFilteredSQL schema tableName whereFrag orderBy limit offset =
           LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
         |]
 
--- | Generic SQL for counting archived jobs with a dynamic WHERE clause.
+-- | Count archived jobs under a dynamic WHERE.
 countArchiveFilteredSQL :: Text -> Text -> Query () -> Query Int64
 countArchiveFilteredSQL schema tableName whereFrag =
   let archiveTbl = jobQueueArchiveTable schema tableName
@@ -128,7 +128,6 @@ deleteArchiveJobsBatchSQL schema tableName archiveIds =
 -- row. Carries payload, group, priority, max_attempts, admission keys/cost,
 -- archive_for, and the trace context it was enqueued with. Resets everything
 -- else (attempts, error, parent, dedup) to column defaults.
--- Parameters: id (archive primary key)
 reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 reEnqueueFromArchiveSQL schema tableName archiveId =
   let archiveTbl = jobQueueArchiveTable schema tableName

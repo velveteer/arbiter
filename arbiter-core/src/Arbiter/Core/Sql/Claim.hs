@@ -514,10 +514,8 @@ claimedCte admission tbl timeout claimedBy
         )
       |]
 
--- | Batched single-CTE claim. Also serves the single-job claim at batch size 1.
---
--- Claims any unsuspended visible job, including rollup children and woken
--- rollup parents.
+-- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
+-- any unsuspended visible job, rollup children and woken rollup parents included.
 claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
 claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds mWorkerId =
   let tbl = jobQueueTable schema tableName

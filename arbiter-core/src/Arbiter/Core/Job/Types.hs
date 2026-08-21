@@ -289,11 +289,9 @@ type ErrorMsg = Text
 -- | How long to wait before the next attempt.
 type BackoffDelay = NominalDiffTime
 
--- | A set of callbacks invoked at key points in the job lifecycle.
---
--- Use these hooks to integrate with metrics, logging, or tracing systems.
--- Hooks are exception-safe. Any exception thrown within a hook is caught
--- and ignored to prevent crashing the worker.
+-- | Callbacks fired at each point of a job's lifecycle, for metrics, logging or tracing.
+-- An exception thrown inside one is caught and dropped, so a hook cannot take the worker
+-- down with it.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed
       :: (JobPayload payload)
@@ -307,8 +305,7 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> StartTime
       -> EndTime
       -> m ()
-  -- ^ Called after a job handler succeeds. Use @diffUTCTime@ on the timestamps
-  -- to calculate job duration.
+  -- ^ Called after a job handler succeeds.
   , onJobFailure
       :: (JobPayload payload)
       => JobRead payload
@@ -317,8 +314,7 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> EndTime
       -> m ()
   -- ^ Called after a job handler fails and the job was retried or dead-lettered.
-  -- A deliberate cancel reports through 'onJobCancelled' instead. Use @diffUTCTime@
-  -- on the timestamps to calculate job duration.
+  -- A deliberate cancel reports through 'onJobCancelled' instead.
   , onJobRetry
       :: (JobPayload payload)
       => JobRead payload
@@ -374,7 +370,7 @@ defaultObservabilityHooks =
     , onJobHeartbeat = \_ _ _ -> pure ()
     }
 
--- | Runs both hooks at each lifecycle point, left before right. The right one runs
+-- | Run both hooks at each lifecycle point, left before right. The right one runs
 -- however the left ended, and when both throw the right's failure propagates.
 instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
   a <> b =

@@ -18,7 +18,7 @@ import System.Random (randomRIO)
 -- | Multiplier and ceiling for exponential backoff.
 data ExponentialConfig = ExponentialConfig
   { exponentialBase :: Double
-  -- ^ Multiplier per attempt (e.g., 2.0 for doubling)
+  -- ^ Multiplier per attempt, 2.0 to double
   , exponentialCap :: NominalDiffTime
   -- ^ Maximum delay in seconds
   }
@@ -27,7 +27,7 @@ data ExponentialConfig = ExponentialConfig
 -- | Step and ceiling for linear backoff.
 data LinearConfig = LinearConfig
   { linearIncrement :: NominalDiffTime
-  -- ^ Delay added per attempt in seconds
+  -- ^ Seconds added per attempt
   , linearCap :: NominalDiffTime
   -- ^ Maximum delay in seconds
   }
@@ -54,7 +54,7 @@ data Jitter
     EqualJitter
   deriving stock (Eq, Show)
 
--- | Calculate backoff delay for given attempt count (1-indexed).
+-- | The delay for a 1-indexed attempt count.
 calculateBackoff :: BackoffStrategy -> Int32 -> NominalDiffTime
 calculateBackoff strategy attempts = case strategy of
   Exponential (ExponentialConfig base cap) ->
@@ -72,22 +72,20 @@ applyJitter :: Jitter -> NominalDiffTime -> IO NominalDiffTime
 applyJitter jitter delay = case jitter of
   NoJitter -> pure delay
   FullJitter -> do
-    -- random(0, delay) - convert to Double for randomness
     let delayD = realToFrac delay :: Double
     jitteredD <- randomRIO (0, delayD)
     pure (realToFrac jitteredD)
   EqualJitter -> do
-    -- delay/2 + random(0, delay/2)
     let half = delay / 2
         halfD = realToFrac half :: Double
     jitterAmountD <- randomRIO (0, halfD)
     pure (half + realToFrac jitterAmountD)
 
--- | @exponentialBackoff 2 300@ - doubles each attempt, capped at 5 minutes.
+-- | @exponentialBackoff 2 300@ doubles each attempt, capped at 5 minutes.
 exponentialBackoff :: Double -> NominalDiffTime -> BackoffStrategy
 exponentialBackoff base cap = Exponential (ExponentialConfig base cap)
 
--- | @linearBackoff 30 300@ - adds 30s per attempt, capped at 5 minutes.
+-- | @linearBackoff 30 300@ adds 30s per attempt, capped at 5 minutes.
 linearBackoff :: NominalDiffTime -> NominalDiffTime -> BackoffStrategy
 linearBackoff increment cap = Linear (LinearConfig increment cap)
 

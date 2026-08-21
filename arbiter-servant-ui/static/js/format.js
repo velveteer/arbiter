@@ -16,10 +16,19 @@ function formatJson(obj) {
   }
 }
 
-// Compact count: exact below 1000, then 1.2K / 15.2K / 1.5M. Null renders as an em dash.
+// The placeholder for a value that is absent. Every table cell, tile and
+// drawer field renders this rather than its own dash.
+const EMPTY = '\u2014';
+
+// Compact count: exact below 1000, then 1.2K / 15.2K / 1.5M.
 const _compactNumFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 function formatCompact(n) {
-  return n == null ? '—' : _compactNumFmt.format(n);
+  return n == null ? EMPTY : _compactNumFmt.format(n);
+}
+
+// Count noun for a total. Pass an explicit plural where adding "s" is wrong.
+function pluralize(n, one, many) {
+  return n === 1 ? one : (many || one + 's');
 }
 
 function formatTime(iso, fallback = '') {
@@ -34,7 +43,18 @@ function formatTime(iso, fallback = '') {
   }
 }
 
-function formatAge(iso, fallback = '-') {
+// Wall-clock time, for a live log where every row arrived seconds ago and a
+// relative age would read the same on all of them.
+function formatClock(iso, fallback = '') {
+  if (!iso) return fallback;
+  try {
+    return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return iso;
+  }
+}
+
+function formatAge(iso, fallback = EMPTY) {
   if (!iso) return fallback;
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return iso;
@@ -43,6 +63,22 @@ function formatAge(iso, fallback = '-') {
   if (ageSecs < 3600) return `${Math.round(ageSecs / 60)}m ago`;
   if (ageSecs < 86400) return `${Math.round(ageSecs / 3600)}h ago`;
   return `${Math.round(ageSecs / 86400)}d ago`;
+}
+
+// Humanized duration from a second count: 45s / 12m / 3h 20m / 2d 4h.
+function formatDurationSecs(secs, fallback = EMPTY) {
+  if (secs == null || Number.isNaN(secs)) return fallback;
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  const d = Math.floor(s / 86400);
+  const h = Math.round((s % 86400) / 3600);
+  return h ? `${d}d ${h}h` : `${d}d`;
 }
 
 function formatCountdown(iso, fallback = '') {

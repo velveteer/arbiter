@@ -2,7 +2,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Response types for the Arbiter REST API
+-- | Response types for the Arbiter REST API.
 module Arbiter.Servant.Types
   ( module Arbiter.Servant.Types
   , CronScheduleRow (..)
@@ -189,7 +189,7 @@ instance (FromJSON payload) => FromJSON (ApiArchiveJob payload) where
         <*> v .:? "result"
     pure $ ApiArchiveJob a
 
--- | Response wrapper for archived jobs
+-- | Response wrapper for archived jobs.
 data ArchiveResponse payload = ArchiveResponse
   { archiveJobs :: [ApiArchiveJob payload]
   , archiveTotal :: Int
@@ -207,7 +207,7 @@ newtype JobResponse a = JobResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response wrapper for multiple jobs
+-- | Response wrapper for multiple jobs.
 data JobsResponse payload = JobsResponse
   { jobs :: [ApiJobWithStatus payload]
   , jobsTotal :: Int
@@ -220,7 +220,7 @@ data JobsResponse payload = JobsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response wrapper for DLQ jobs
+-- | Response wrapper for DLQ jobs.
 data DLQResponse payload = DLQResponse
   { dlqJobs :: [ApiDLQJob payload]
   , dlqTotal :: Int
@@ -230,7 +230,7 @@ data DLQResponse payload = DLQResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Queue statistics response
+-- | Queue statistics response.
 data StatsResponse = StatsResponse
   { stats :: QueueStats
   , timestamp :: Text
@@ -245,21 +245,21 @@ data AllStatsResponse = AllStatsResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Queues list response
+-- | Queues list response.
 data QueuesResponse = QueuesResponse
   { queues :: [Text]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Request body for batch job insert
+-- | Request body for batch job insert.
 newtype BatchInsertRequest payload = BatchInsertRequest
   { jobWrites :: [ApiJobWrite payload]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response body for batch job insert
+-- | Response body for batch job insert.
 data BatchInsertResponse payload = BatchInsertResponse
   { inserted :: [ApiJob payload]
   , insertedCount :: Int
@@ -267,42 +267,42 @@ data BatchInsertResponse payload = BatchInsertResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Request body for batch DLQ delete
+-- | Request body for batch DLQ delete.
 data BatchDeleteRequest = BatchDeleteRequest
   { ids :: [Int64]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response body for batch DLQ delete
+-- | Response body for batch DLQ delete.
 data BatchDeleteResponse = BatchDeleteResponse
   { deleted :: Int64
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Cron schedules response
+-- | Cron schedules response.
 data CronSchedulesResponse = CronSchedulesResponse
   { cronSchedules :: [CronScheduleRow]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Worker registry response
+-- | Worker registry response.
 data WorkersResponse = WorkersResponse
   { workers :: [WorkerRow]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Rate-limit policies response
+-- | Rate-limit policies response.
 data RateLimitPoliciesResponse = RateLimitPoliciesResponse
   { policies :: [RateLimitPolicyView]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Rate-limit buckets response (one prefix's keys)
+-- | Rate-limit buckets response (one prefix's keys).
 data RateLimitBucketsResponse = RateLimitBucketsResponse
   { buckets :: [RateLimitBucketView]
   }
@@ -316,14 +316,14 @@ data RateLimitResetResponse = RateLimitResetResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Concurrency pools response
+-- | Concurrency pools response.
 data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
   { policies :: [ConcurrencyPolicyView]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Concurrency keys response (one prefix's keys)
+-- | Concurrency keys response (one prefix's keys).
 data ConcurrencyKeysResponse = ConcurrencyKeysResponse
   { keys :: [ConcurrencyKeyView]
   }

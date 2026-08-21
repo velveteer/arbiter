@@ -1,10 +1,8 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Compatibility layer for hasql API differences.
---
--- All version-specific code lives here. The rest of arbiter-hasql
--- imports from this module and never uses CPP directly.
+-- | Every hasql version difference arbiter-hasql depends on, so no other module needs
+-- CPP.
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
@@ -31,7 +29,7 @@ import Hasql.Connection.Setting qualified as Setting
 import Hasql.Connection.Setting.Connection qualified as ConnSetting
 #endif
 
--- | Run a simple SQL command on a hasql connection (e.g., BEGIN, COMMIT).
+-- | Run a bare SQL command, such as @BEGIN@ or @COMMIT@.
 runSQL :: (MonadUnliftIO m) => Hasql.Connection -> ByteString -> m ()
 runSQL conn sql = do
   result <- liftIO $ Hasql.use conn (runScript (TE.decodeUtf8With TE.lenientDecode sql))
@@ -47,9 +45,8 @@ runScript :: T.Text -> Session.Session ()
 runScript = Session.sql
 #endif
 
--- | Returns 'True' if the connection is in a transaction block (valid or
--- aborted) and 'False' if it is idle. Used to skip a redundant @ROLLBACK@
--- when hasql has already cleaned up after an interrupted session.
+-- | Whether the connection is in a transaction block, valid or aborted. An idle one
+-- needs no @ROLLBACK@, hasql having already cleaned up after the interrupted session.
 connectionInTransaction :: Hasql.Connection -> IO Bool
 #if MIN_VERSION_hasql(1,10,0)
 connectionInTransaction conn = do

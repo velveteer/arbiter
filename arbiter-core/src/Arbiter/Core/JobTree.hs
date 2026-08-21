@@ -39,8 +39,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.Trace (markSpanError, withPublishSpan)
 
--- | Internal exception used to abort a tree insertion transaction.
--- Not exported - caught and converted to @Left@ by 'insertJobTree'.
+-- | Aborts a tree insertion transaction. 'insertJobTree' catches it and returns @Left@.
 newtype TreeInsertFailed = TreeInsertFailed Text
   deriving stock (Show)
   deriving anyclass (Exception)
@@ -54,16 +53,13 @@ data JobTree payload
     -- all children complete, then it becomes claimable for a completion round.
     Finalizer (JobWrite payload) (NonEmpty (JobTree payload))
 
--- | A single job (leaf node) - a terminal node with no children.
+-- | A single job with no children.
 leaf :: JobWrite payload -> JobTree payload
 leaf = Leaf
 
--- | Finalizer that runs after all children finish.
---
--- For nested rollups, intermediate finalizers must explicitly return the
--- merged value to propagate results upward. This is not automatic. When no
--- children remain in the main queue (all completed or DLQ'd), the finalizer
--- wakes.
+-- | A finalizer running once no child of it is left in the main queue. Nested rollups
+-- do not merge on their own: an intermediate finalizer has to return the merged value
+-- itself for results to travel upward.
 --
 -- @
 -- rollup (defaultJob root)
@@ -74,10 +70,9 @@ leaf = Leaf
 rollup :: JobWrite payload -> NonEmpty (JobTree payload) -> JobTree payload
 rollup = Finalizer
 
--- | An empty rollup snapshot @{}@. The DB stores this on insert for any
--- rollup finalizer. Presence-of-non-null is the canonical signal of
--- rollup-ness, and the value is overwritten with merged child results
--- before a DLQ move.
+-- | The empty rollup snapshot @{}@ every finalizer is inserted with. A non-null snapshot
+-- is what marks a job as a finalizer, and the value is overwritten with the merged child
+-- results before a DLQ move.
 emptyState :: Value
 emptyState = Object (mempty :: Object)
 
@@ -91,11 +86,8 @@ infixr 6 <~~
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
 parent <~~ children = Finalizer parent (fmap Leaf children)
 
--- | Insert a 'JobTree' atomically in a single transaction.
---
--- Returns a flat 'NonEmpty' list of all inserted jobs (pre-order: root first).
--- Returns @Left errMsg@ if any insertion fails, such as a dedup conflict. The
--- entire transaction is rolled back on failure - no partial trees are committed.
+-- | Insert a 'JobTree' in one transaction, returning every inserted job root-first.
+-- @Left@ on any failure, such as a dedup conflict, with nothing committed.
 insertJobTree
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)

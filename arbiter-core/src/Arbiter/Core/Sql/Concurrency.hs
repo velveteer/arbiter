@@ -106,7 +106,7 @@ lockConcurrencyCountsSQL schema =
 -- has none. Writes only rows the caller locked (or fresh inserts, never updated on
 -- conflict), so a key seeded after the lock pass keeps its trigger-maintained count
 -- and a concurrent claim is never overwritten. Run after 'lockConcurrencyCountsSQL'
--- in one transaction. Returns the number repaired. Parameter: locked keys.
+-- in one transaction. Returns the number repaired.
 reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> [Text] -> Query Int64
 reconcileConcurrencyCountsSQL schema tableNames heldKeys =
   let concTbl = arbiterConcurrencyTable schema

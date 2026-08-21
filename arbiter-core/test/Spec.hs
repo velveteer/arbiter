@@ -14,6 +14,7 @@ import Test.Hspec
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
 import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
+import Arbiter.Core.Operations (statsRowCodec)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
@@ -132,7 +133,15 @@ main = hspec $ do
       rendered `shouldSatisfy` (not . T.isInfixOf "WHEN dc._admit THEN j.claim_seq + 1")
 
     it "measures queue ages from clock_timestamp, so none of them can go negative" $ do
-      let rendered = squish (getQueueStatsSQL "arbiter" "jobs")
+      let rendered = squished (getQueueStatsSQL statsRowCodec "arbiter" "jobs")
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(last_attempted_at)"
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(inserted_at)"
       rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")
+
+    it "selects stats columns in the decoder's own order" $ do
+      let cols = codecColumns statsRowCodec
+          rendered = squished (getQueueStatsSQL statsRowCodec "arbiter" "jobs")
+          aliasAt c = T.length (fst (T.breakOn (" AS " <> c) rendered))
+          positions = map aliasAt cols
+      cols `shouldSatisfy` all (\c -> T.isInfixOf (" AS " <> c) rendered)
+      positions `shouldSatisfy` \ps -> and (zipWith (<) ps (drop 1 ps))

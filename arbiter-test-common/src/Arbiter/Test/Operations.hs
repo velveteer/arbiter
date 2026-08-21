@@ -386,8 +386,43 @@ operationsSpec mkMessage mkResult runM = do
 
       runM env $ do
         schemaName <- getSchema
-        void (Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 (Just "grp-reclaim-b"))
+        void
+          ( Ops.refreshGroupsForQueue
+              schemaName
+              (HL.queueTable @payload @m)
+              2
+              (Just (Ops.GroupsCursor (Just "grp-reclaim-b") Nothing))
+          )
       groupCount env emptied `shouldReturn` Nothing
+
+    it "resumes the emptied scan past the keys a pass already drained" $ \env -> do
+      let live = ["grp-drain-m1", "grp-drain-m2"]
+          low = "grp-drain-a"
+          high = "grp-drain-z"
+          pass cursor =
+            runM env $ do
+              schemaName <- getSchema
+              Ops.passResume <$> Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 1 cursor
+          emptyOut k = do
+            Just j <- runM env (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+            deleteRowDirectly env (primaryKey j)
+      runM env $ forM_ live $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
+      emptyOut low
+      emptyOut high
+      groupCount env low `shouldReturn` Just 0
+      groupCount env high `shouldReturn` Just 0
+
+      -- One emptied key per pass, so the first drains the low one and stops there.
+      afterFirst <- pass Nothing
+      (afterFirst >>= Ops.groupsEmptiedFrom) `shouldBe` Just low
+      groupCount env low `shouldReturn` Nothing
+      groupCount env high `shouldReturn` Just 0
+
+      -- The low key empties again, and the scan resumes above it rather than at it.
+      emptyOut low
+      void (pass afterFirst)
+      groupCount env high `shouldReturn` Nothing
+      groupCount env low `shouldReturn` Just 0
 
     it "repairs a tail group only once the cursor reaches it" $ \env -> do
       let keys = ["grp-pass-1", "grp-pass-2", "grp-pass-3", "grp-pass-4", "grp-pass-5"]
@@ -395,22 +430,22 @@ operationsSpec mkMessage mkResult runM = do
           pass cursor =
             runM env $ do
               schemaName <- getSchema
-              snd <$> Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 cursor
+              Ops.passResume <$> Ops.refreshGroupsForQueue schemaName (HL.queueTable @payload @m) 2 cursor
       runM env $ forM_ keys $ \k -> void (HL.insertJob (defaultGroupedJob k (mkMessage k)))
       driftGroupCount env tailKey 99
       groupCount env tailKey `shouldReturn` Just 99
 
       -- Two keys per pass, so the drifted fifth is out of reach until the third.
       afterFirst <- pass Nothing
-      afterFirst `shouldBe` Just "grp-pass-2"
+      (afterFirst >>= Ops.groupsWindowFrom) `shouldBe` Just "grp-pass-2"
       groupCount env tailKey `shouldReturn` Just 99
 
       afterSecond <- pass afterFirst
-      afterSecond `shouldBe` Just "grp-pass-4"
+      (afterSecond >>= Ops.groupsWindowFrom) `shouldBe` Just "grp-pass-4"
       groupCount env tailKey `shouldReturn` Just 99
 
       afterThird <- pass afterSecond
-      afterThird `shouldBe` Just tailKey
+      (afterThird >>= Ops.groupsWindowFrom) `shouldBe` Just tailKey
       groupCount env tailKey `shouldReturn` Just 1
 
       -- The cycle ends on a pass that finds nothing, not on a short one.

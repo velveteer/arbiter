@@ -140,10 +140,7 @@ updateCronScheduleChecked scheduleName upd =
     Left err -> pure (Left err)
     Right () -> Right <$> HL.updateCronScheduleUnchecked scheduleName upd
 
--- | A cron schedule definition.
---
--- Use 'cronJob' to construct (eagerly parses the cron expression). For a
--- non-UTC timezone, use 'cronJobInTimezone' (also validates the tz name).
+-- | A cron schedule. Built with 'cronJob', or 'cronJobInTimezone' for a non-UTC one.
 data CronJob payload = CronJob
   { name :: Text
   -- ^ Human-readable name for logging and dedup keys
@@ -163,31 +160,14 @@ data CronJob payload = CronJob
   }
   deriving stock (Generic)
 
--- | Smart constructor for 'CronJob'. Parses the cron expression eagerly.
---
--- Returns @Left@ with an error message if the cron expression is invalid.
+-- | Build a 'CronJob', parsing the expression eagerly and returning @Left@ on a bad one.
+-- The expression is evaluated in UTC, whatever the server's own timezone.
+-- 'cronJobInTimezone' is the local-time form, and 'backfill' is set by record update.
 --
 -- @
 -- cronJob "nightly-report" "0 3 * * *" SkipOverlap
 --   (\\_kind _tick -> defaultJob (GenerateReport "nightly"))
 -- @
---
--- The builder receives a 'TickKind' ('Live' for the current minute, 'Replay'
--- for any catch-up tick) and the tick time.
---
--- To enable backfill, set it via record update:
---
--- @
--- let Right cj = cronJob "nightly-report" "0 3 * * *" AllowOverlap
---       (\\kind tick -> (defaultJob (GenerateReport tick))
---          { priority = case kind of
---              Replay -> 10
---              Live -> 0 })
--- in cj { backfill = Backfill 86400 }  -- replay up to 24 hours
--- @
---
--- Note: cron expressions are evaluated in __UTC__. @\"0 3 * * *\"@ fires at
--- 03:00 UTC regardless of the server's local timezone.
 cronJob
   :: Text
   -- ^ Schedule name (used in dedup keys and logging)

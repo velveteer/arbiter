@@ -27,27 +27,12 @@ import Arbiter.Worker.Logger.Internal (runHook, withJobContext, withJobContextOn
 import Arbiter.Worker.Retry (retryOnExceptionForever)
 import Arbiter.Worker.Settle (hasIdIn)
 
--- | Run an action with a heartbeat that extends visibility timeout for all jobs.
---
--- The heartbeat runs in a separate thread spawned via 'race' and extends the
--- visibility timeout at regular intervals, preventing long-running jobs from
--- becoming visible and being claimed by another worker.
---
--- The heartbeat distinguishes between:
---
---   * Job successfully heartbeated - continue normally
---   * Job already completed (acked\/canceled by handler) - ignore, not an error
---   * Job stolen by another worker (claim token changed) - throw to abort
---
--- Every job in a batch shares one visibility deadline (each tick extends them
--- together), so a reclaim means the whole batch's lease has lapsed. The heartbeat
--- throws to abort the action and stop wasting work on jobs it no longer owns.
---
--- Only the jobs still awaiting an outcome are beaten. One the handler already
--- finalized has left this worker's lease, and its row no longer answers to the
--- claim token the claim recorded.
---
--- Calls onJobHeartbeat hook at each interval for monitoring long-running jobs.
+-- | Run an action under a heartbeat thread that extends its jobs' visibility timeout
+-- every interval, so a long-running handler does not have its work claimed out from
+-- under it. A job the handler already finalized is skipped, one that is simply gone is
+-- not an error, and a reclaimed one throws: every job in a batch shares a deadline, so a
+-- reclaim means the whole batch's lease has lapsed and the remaining work is wasted.
+-- Fires the heartbeat hook each tick.
 withJobsHeartbeat
   :: forall payload m a
    . (JobOperation m payload)

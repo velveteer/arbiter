@@ -12,17 +12,12 @@ import Control.Concurrent.STM qualified as STM
 newWorkerState :: IO (TVar WorkerState)
 newWorkerState = STM.newTVarIO Running
 
--- | Signal graceful shutdown on a worker state.
---
--- Workers will stop claiming new jobs, finish in-flight work, then exit.
+-- | Signal graceful shutdown: the pool stops claiming, finishes what it holds, exits.
 signalShutdown :: TVar WorkerState -> IO ()
 signalShutdown st = STM.atomically $ STM.writeTVar st ShuttingDown
 
--- | Effective state of a worker pool. Synthesized from two TVars on the
--- 'Arbiter.Worker.Config.WorkerConfig': 'ShuttingDown' if the (possibly
--- shared) shutdown TVar is set, else 'Paused' if the per-pool pause flag is
--- set, else 'Running'. Returned by 'Arbiter.Worker.Config.getWorkerState' /
--- 'Arbiter.Worker.Config.readEffectiveState'.
+-- | A worker pool's effective state, read off the shutdown and pause flags on its
+-- 'Arbiter.Worker.Config.WorkerConfig': shutdown wins, then pause, else running.
 data WorkerState
   = Running
   | Paused

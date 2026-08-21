@@ -22,18 +22,10 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
--- | Smart ack CTE for job dependencies.
---
--- 1. ack: DELETE the job only if it has no children. Returns deleted row.
--- 2. suspend: If ack returned nothing AND children exist, suspend the job
---    (it becomes a finalizer waiting for children to complete).
--- 3. wake_parent: If ack deleted a child whose parent is suspended with no
---    remaining siblings in the queue, resume the parent for its
---    completion round.
---
--- Returns @rows_affected@ (1 on success, 0 if stolen/gone/cancelled).
---
--- When @archiveEnabled@, the deleted row is teed into the archive per-row on @archive_for@.
+-- | Parent-aware ack: delete a childless job, suspend one whose children are still
+-- running, and wake a suspended parent whose last child just left the queue. Returns 1,
+-- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
+-- is teed into the archive per-row on @archive_for@.
 smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
 smartAckJobSQL archiveEnabled schema tableName jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -122,10 +114,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
         SELECT id FROM suspend
       |]
 
--- | SQL template for setting visibility timeout
---
--- Matches on the claim token, so a job another worker reclaimed after the
--- visibility timeout expired is left alone. Suspended rows hold no lease.
+-- | Extend a job's visibility timeout. Matches on the claim token, so a job another
+-- worker reclaimed is left alone. Suspended rows hold no lease.
 setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -136,13 +126,10 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
--- | Atomically updates the visibility timeout for a batch of jobs and returns
--- the detailed status of each job in a single query.
---
--- This is used for heartbeating. Extends every job still under this claim, held
--- by the same worker and suspended by none, and reports whether the update
--- landed alongside each row's claim token, cancel flag and suspension.
--- @valuesFrag@ is the @(id, claim_seq, claimed_by)@ rows for the input VALUES.
+-- | 'setVisibilityTimeoutSQL' over a batch, for the heartbeat. Extends every job still
+-- under this claim, held by the same worker and unsuspended, and reports per row whether
+-- the update landed alongside its claim token, cancel flag and suspension. @valuesFrag@
+-- carries the input @(id, claim_seq, claimed_by)@ rows.
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
@@ -175,10 +162,8 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
         LEFT JOIN ${tbl} j ON j.id = ij.id
       |]
 
--- | SQL template for updating job for retry
---
--- Matches on the claim token, so a job another worker claimed after this one's
--- visibility timeout expired is left alone.
+-- | Park a failed job for its retry backoff. Matches on the claim token, so a job
+-- another worker reclaimed is left alone.
 updateJobForRetrySQL :: Text -> Text -> Int64 -> Text -> Int64 -> Int64 -> Query ()
 updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -191,15 +176,11 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
--- | SQL template for a soft nack: give back the attempt the claim consumed so
--- the reprocess is free, without recording a failure.
---
--- Leaves not_visible_until untouched so the job becomes visible again when the
--- claim's visibility timeout lapses, matching the documented nack semantics.
--- Matches on the claim token so a job reclaimed by another worker is left alone.
--- @att@ is the claim's own attempt count. The row clamps the result to one
--- refund, so repeated nacks on a claim settle at the same value and a
--- caller-supplied @att@ cannot move attempts further than that.
+-- | Soft nack: hand back the attempt the claim consumed, recording no failure. The
+-- visibility timeout is left as it stands, so the job becomes claimable again when the
+-- claim's own lease lapses. Matches on the claim token, so a job another worker
+-- reclaimed is left alone. @att@ is the claim's attempt count, clamped to the row so
+-- repeated nacks on one claim settle at a single refund.
 nackJobSQL :: Text -> Text -> Int64 -> Int64 -> Int32 -> Query ()
 nackJobSQL schema tableName jobId cseq att =
   let tbl = jobQueueTable schema tableName
@@ -232,10 +213,7 @@ nackJobsBatchSQL schema tableName ids cseqs atts =
         RETURNING @{id :: CInt8}
       |]
 
--- | Promote a delayed or retrying job to be immediately visible.
---
--- Refuses in-flight jobs (attempts > 0 with no last_error).
--- Returns 0 if job doesn't exist, is already visible, or is in-flight.
+-- | Make a delayed or retrying job immediately visible. Refuses an in-flight job.
 promoteJobSQL :: Text -> Text -> Int64 -> Query ()
 promoteJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName

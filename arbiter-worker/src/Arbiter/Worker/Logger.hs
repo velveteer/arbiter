@@ -1,15 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Logging for the Arbiter worker.
---
--- Arbiter handles its own structured JSON logging internally. Users can:
---
--- * Control the minimum log level
--- * Choose the output destination (stdout, stderr, custom LoggerSet, or callback)
--- * Provide a 'LogCallback' to receive pre-rendered JSON log lines
--- * Inject additional context (e.g., trace IDs) into every log message
---
--- For application-level job logging, use 'Arbiter.Core.Job.Types.ObservabilityHooks' instead.
+-- | The worker's own structured JSON logging: its level, its destination, and the
+-- context every message carries. Application-level job logging belongs on
+-- 'Arbiter.Core.Job.Types.ObservabilityHooks' instead.
 module Arbiter.Worker.Logger
   ( -- * Log Configuration
     LogConfig (..)
@@ -73,10 +66,7 @@ data LogDestination
   | -- | Discard all logs (silent mode)
     LogDiscard
 
--- | Configuration for Arbiter's internal logging.
---
--- Arbiter always outputs structured JSON logs. This config controls filtering,
--- destination, and allows injecting additional context.
+-- | How the worker emits its own logs.
 data LogConfig = LogConfig
   { minLogLevel :: LogLevel
   -- ^ Minimum severity to emit. Messages below this level are dropped.
@@ -84,9 +74,8 @@ data LogConfig = LogConfig
   , logDestination :: LogDestination
   -- ^ Where to write logs. Default: 'LogStdout'.
   , additionalContext :: IO [Pair]
-  -- ^ Additional context merged into every log message. This IO action is
-  -- called at log time, allowing you to read thread-local state (e.g., trace
-  -- IDs from an OpenTelemetry context). Default: @pure []@.
+  -- ^ Context merged into every message, read at log time so it can pick up
+  -- thread-local state such as an ambient trace id. Default: @pure []@.
   }
 
 -- | Default log configuration: Info level to stdout, no additional context.

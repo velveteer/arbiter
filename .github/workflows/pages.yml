@@ -52,6 +52,11 @@ jobs:
         run: |
           kedgeree ./haddocks --landing "Arbiter" --landing-description "Distributed job processing in Haskell, backed by your own PostgreSQL database"
 
+      - name: Add the landing page
+        run: |
+          mv haddocks/index.html haddocks/packages.html
+          cp -r site/. haddocks/
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
