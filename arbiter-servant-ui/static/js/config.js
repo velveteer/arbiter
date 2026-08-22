@@ -5,6 +5,7 @@ const ARB_TIMING = {
   sseRetryMaxMs: 60000,
   pollMs: 5000,
   refreshMs: 30000,
+  healthPollMs: 10000,
   fetchTimeoutMs: 30000,
   flushMs: 250,
   loaderDelayMs: 180,

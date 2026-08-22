@@ -18,6 +18,7 @@ module Arbiter.Servant.API
   , EventsAPI
   , CronAPI (..)
   , WorkersAPI (..)
+  , HealthAPI (..)
   , RateLimitsAPI (..)
   , ConcurrencyAPI (..)
   ) where
@@ -388,6 +389,25 @@ data ConcurrencyAPI mode = ConcurrencyAPI
   }
   deriving stock (Generic)
 
+-- | Liveness and readiness.
+data HealthAPI mode = HealthAPI
+  { -- GET /health
+    --
+    -- Readiness. Reaches the database and reports its connection counters.
+    -- 200 when reachable, 503 when not, carrying the same body either way.
+    getHealth
+      :: mode
+        :- Get '[JSON] HealthResponse
+  , -- GET /health/live
+    --
+    -- Liveness. Never touches the database.
+    getLiveness
+      :: mode
+        :- "live"
+          :> Get '[JSON] LivenessResponse
+  }
+  deriving stock (Generic)
+
 -- | Shared top-level routes appended after the per-table routes.
 type SharedAPI =
   "queues" :> NamedRoutes QueuesAPI
@@ -396,6 +416,7 @@ type SharedAPI =
     :<|> "workers" :> NamedRoutes WorkersAPI
     :<|> "rate-limits" :> NamedRoutes RateLimitsAPI
     :<|> "concurrency" :> NamedRoutes ConcurrencyAPI
+    :<|> "health" :> NamedRoutes HealthAPI
 
 -- | A 'TableAPI' route per registry entry, followed by the shared
 -- top-level routes.

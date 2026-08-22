@@ -280,13 +280,15 @@ label.queue-sort-label,
 }
 
 /* SSE status indicator: shape + color distinguish each state */
-.sse-status {
+/* One pip vocabulary, shared by the health indicator and the events stream.
+   Shape carries the state, so neither reads by colour alone. */
+.status-pip {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
 }
 
-.sse-dot {
+.status-dot {
   width: 11px;
   height: 11px;
   display: inline-block;
@@ -296,22 +298,28 @@ label.queue-sort-label,
   background-color: var(--arb-text-muted);
 }
 
-.sse-status.connected .sse-dot {
+/* Filled circle: the stream is live, or the server is healthy. */
+.status-pip.connected .status-dot,
+.status-pip.ok .status-dot {
   background-color: #16a34a;
 }
 
-.sse-status.disconnected .sse-dot {
+/* Pulsing ring: the stream dropped, or the server cannot reach its database. */
+.status-pip.disconnected .status-dot,
+.status-pip.down .status-dot {
   background-color: transparent;
   border: 2px solid #dc2626;
   animation: pulse-dot 1.5s infinite;
 }
 
-.sse-status.polling .sse-dot {
+/* Square: the server serves no stream. */
+.status-pip.polling .status-dot {
   border-radius: 2px;
   background-color: #d97706;
 }
 
-.sse-status.off .sse-dot {
+/* Bar: switched off here. */
+.status-pip.off .status-dot {
   height: 3px;
   border-radius: 1px;
   background-color: var(--arb-text-muted);
@@ -1635,17 +1643,19 @@ tr.policy-bad td:first-child::before {
 }
 
 /* ---- SSE dot glow in dark mode ---- */
-[data-bs-theme="dark"] .sse-status.connected .sse-dot {
+[data-bs-theme="dark"] .status-pip.connected .status-dot,
+[data-bs-theme="dark"] .status-pip.ok .status-dot {
   background-color: #34d399;
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
 }
 
-[data-bs-theme="dark"] .sse-status.disconnected .sse-dot {
+[data-bs-theme="dark"] .status-pip.disconnected .status-dot,
+[data-bs-theme="dark"] .status-pip.down .status-dot {
   border-color: #f87171;
   box-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
 }
 
-[data-bs-theme="dark"] .sse-status.polling .sse-dot {
+[data-bs-theme="dark"] .status-pip.polling .status-dot {
   background-color: #fbbf24;
 }
 
@@ -2303,7 +2313,8 @@ th.sortable:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
-  .sse-status.disconnected .sse-dot {
+  .status-pip.disconnected .status-dot,
+  .status-pip.down .status-dot {
     animation: none;
   }
 }

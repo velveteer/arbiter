@@ -32,6 +32,40 @@ document.addEventListener('alpine:init', () => {
     _sseRetryMs: 0,
     theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
     sseOff: localStorage.getItem('arb.eventsOff') === '1',
+    health: null,
+    _healthInterval: null,
+    _healthInFlight: false,
+
+    // ok / down / unknown, the last only before the first probe answers.
+    get healthState() {
+      return this.health ? this.health.status : 'unknown';
+    },
+
+    get healthTitle() {
+      if (this.health && this.health.reachable === false) return 'Cannot reach the server';
+      return {
+        ok: 'Server healthy',
+        down: 'Server cannot reach its database',
+        unknown: 'Checking server health',
+      }[this.healthState];
+    },
+
+    // Runs on its own timer, so it reports even with live updates switched off.
+    startHealthPolling() {
+      if (this._healthInterval) return;
+      this.loadHealth();
+      this._healthInterval = setInterval(() => this.loadHealth(), ARB_TIMING.healthPollMs);
+    },
+
+    async loadHealth() {
+      if (this._healthInFlight) return;
+      this._healthInFlight = true;
+      try {
+        this.health = await ArbiterAPI.getHealth();
+      } finally {
+        this._healthInFlight = false;
+      }
+    },
 
     // connected / disconnected / polling / off, for the nav indicator.
     get sseState() {
@@ -42,10 +76,20 @@ document.addEventListener('alpine:init', () => {
 
     get sseTitle() {
       return {
-        off: 'Live updates paused \u2014 resume on the Events tab',
+        off: 'Live updates off',
         polling: 'Live updates unavailable on this server',
         connected: 'Live updates connected',
         disconnected: 'Reconnecting to live updates',
+      }[this.sseState];
+    },
+
+    // Why the log is empty, which depends on whether a stream is feeding it.
+    get eventsEmptyText() {
+      return {
+        off: 'Live updates are off. Switch them on to stream events.',
+        polling: 'This server does not stream events.',
+        connected: 'No events yet. They appear here as they happen.',
+        disconnected: 'Reconnecting. Events resume when the stream is back.',
       }[this.sseState];
     },
 
@@ -120,6 +164,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async init() {
+      this.startHealthPolling();
       // Mount the detail one frame after the list unmounts. A same-flush
       // list-unmount plus detail-mount skips the last tab pane's Alpine init.
       Alpine.effect(() => {

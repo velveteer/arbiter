@@ -7,6 +7,7 @@ module Arbiter.Core.Health
   ( PgDbHealth (..)
   , PgTableHealth (..)
   , getPgHealth
+  , getPgDbHealth
   ) where
 
 import Data.Aeson (FromJSON, ToJSON)
@@ -88,8 +89,12 @@ pgTableHealthCodec =
 -- absent @pg_read_all_stats@.
 getPgHealth :: (MonadArbiter m) => SchemaName -> [TableName] -> m (Maybe PgDbHealth, [PgTableHealth])
 getPgHealth schemaName queueTables = do
-  dbRows <- executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)
+  dbHealth <- getPgDbHealth
   tableRows <- executeQuery (rows pgTableHealthCodec (Sql.pgTableHealthSQL schemaName scanned))
-  pure (listToMaybe dbRows, tableRows)
+  pure (dbHealth, tableRows)
   where
     scanned = allSchemaTables queueTables
+
+-- | The database-wide half on its own, for callers with no use for per-table churn.
+getPgDbHealth :: (MonadArbiter m) => m (Maybe PgDbHealth)
+getPgDbHealth = listToMaybe <$> executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)

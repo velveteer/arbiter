@@ -22,7 +22,7 @@ import Arbiter.Core.MonadArbiter (JobHandler)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, createSimpleEnvWithPool, runSimpleDb)
-import Arbiter.Test.Poll (waitUntil)
+import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
 import Control.Concurrent (threadDelay)
 import Control.Monad (void)
@@ -37,7 +37,6 @@ import Data.Text qualified as T
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll, describe, it, runIO, shouldBe, shouldContain)
-import UnliftIO (withAsync)
 
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.Config (WorkerConfig (..), transactionalWorkerConfig)
@@ -109,7 +108,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               }
 
       -- Run worker pool and wait for handler to complete
-      withAsync
+      withLinkedAsync
         (runSimpleDb env $ runWorkerPool configWithHooks)
         $ \_ -> do
           waitUntil 10_000 $ readIORef handlerCompleted
@@ -159,7 +158,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               }
 
       -- Run worker pool until onJobFailure fires
-      withAsync
+      withLinkedAsync
         (runSimpleDb env $ runWorkerPool configWithHooks)
         $ \_ ->
           waitUntil 10_000 $ (== 1) <$> readIORef failureCalls
@@ -198,7 +197,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               , jobHeartbeatInterval = 1
               }
 
-      withAsync
+      withLinkedAsync
         (runSimpleDb env $ runWorkerPool configWithHooks)
         $ \_ ->
           waitUntil 10_000 $ readIORef handlerStarted
@@ -249,7 +248,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               }
 
       -- Run worker pool
-      withAsync
+      withLinkedAsync
         (runSimpleDb env $ runWorkerPool configWithHooks)
         $ \_ ->
           waitUntil 10_000 $ (== 3) <$> readIORef processedCount
@@ -270,3 +269,4 @@ simulateAnotherWorkerClaim connStr jobId = do
       "UPDATE arbiter_worker_concurrency_test.arbiter_worker_concurrency_test SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
       (PG.Only jobId)
   PG.close conn
+

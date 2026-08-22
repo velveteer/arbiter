@@ -71,7 +71,7 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
-import Data.Pool (Pool, withResource)
+import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
@@ -123,7 +123,8 @@ lockJobRow conn jobId = try (PG.query conn lockSql (Only jobId))
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
-  around (withPool sharedPool) $ do
+  sharedEnv <- runIO (createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema)
+  around (withPool sharedEnv) $ do
     workerSpec @WorkerTestPayload
       SimpleTask
       FailingTask
@@ -1539,11 +1540,13 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         map CS.name all_ `shouldSatisfy` (\ns -> "cron-here" `elem` ns && "cron-elsewhere" `elem` ns)
 
 -- Helper to create a connection with data cleanup
--- Create shared pool for all tests (5 connections)
-withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
-withPool sharedPool action = do
-  env <- createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema
-  withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
+-- | Clean the queue for one test. The env is built once for the suite: its LISTEN
+-- hub holds a pool connection for as long as the env lives, and the shared pool
+-- only has five.
+withPool :: SimpleEnv WorkerTestRegistry -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
+withPool env action = do
+  let pool = fromJust (connectionPool (simplePool env))
+  withResource pool $ \conn -> cleanupData testSchema testTable conn
   action env
 
 withTestOpsTable :: SimpleEnv WorkerTestRegistry -> IO a -> IO a

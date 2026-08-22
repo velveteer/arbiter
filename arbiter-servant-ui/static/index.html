@@ -48,10 +48,10 @@
 
     <!-- Controls: SSE status, theme -->
     <div class="nav-controls d-flex align-items-center gap-3 ms-auto">
-      <!-- SSE status. The switch that controls it lives on the Events tab. -->
-      <span class="sse-status" role="status" :class="$store.app.sseState"
-        :title="$store.app.sseTitle" :aria-label="$store.app.sseTitle">
-        <span class="sse-dot" aria-hidden="true"></span>
+      <!-- Server health. The events stream reports itself on the Events tab. -->
+      <span class="status-pip" role="status" :class="$store.app.healthState"
+        :title="$store.app.healthTitle" :aria-label="$store.app.healthTitle">
+        <span class="status-dot" aria-hidden="true"></span>
       </span>
 
       <!-- Theme toggle -->
@@ -1126,6 +1126,10 @@
     <div class="mt-3">
     <div x-data="eventsTab">
           <div class="toolbar">
+            <span class="status-pip" role="status" :class="$store.app.sseState"
+              :title="$store.app.sseTitle" :aria-label="$store.app.sseTitle">
+              <span class="status-dot" aria-hidden="true"></span>
+            </span>
             <div class="form-check form-switch mb-0">
               <input class="form-check-input" type="checkbox" role="switch" id="events-live"
                 :checked="!$store.app.sseOff" :disabled="$store.app.sseDisabled"
@@ -1199,7 +1203,7 @@
                   </tr>
                 </template>
                 <tr x-show="filteredEvents.length === 0">
-                  <td colspan="4" class="text-muted text-center">No events yet. Events appear in real-time via SSE.</td>
+                  <td colspan="4" class="text-muted text-center" x-text="$store.app.eventsEmptyText"></td>
                 </tr>
               </tbody>
             </table>

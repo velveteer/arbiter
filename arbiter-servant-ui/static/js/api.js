@@ -56,6 +56,23 @@ const ArbiterAPI = {
     }
   },
 
+  // Readiness. A 503 carries the same body as a 200, and an unreachable API is
+  // itself the answer, so neither raises.
+  async getHealth() {
+    try {
+      return await this._fetch('/health');
+    } catch (e) {
+      if (e.body) {
+        try {
+          return JSON.parse(e.body);
+        } catch {
+          // Not the health body, so fall through to the unreachable answer.
+        }
+      }
+      return { status: 'down', reachable: false, schemaName: '', checkedAt: null, dbLatencyMs: null, db: null };
+    }
+  },
+
   _pageQuery({ limit, offset } = {}) {
     const qs = [];
     if (limit != null) qs.push(`limit=${encodeURIComponent(limit)}`);

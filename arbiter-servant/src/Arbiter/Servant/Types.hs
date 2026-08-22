@@ -16,6 +16,7 @@ module Arbiter.Servant.Types
   , ConcurrencyPolicyView (..)
   , ConcurrencyKeyView (..)
   , ConcurrencyPolicyUpdate (..)
+  , PgDbHealth (..)
   ) where
 
 import Arbiter.Core.Concurrency.Stats
@@ -24,6 +25,7 @@ import Arbiter.Core.Concurrency.Stats
   , ConcurrencyPolicyView (..)
   )
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
+import Arbiter.Core.Health (PgDbHealth (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types
@@ -43,11 +45,12 @@ import Arbiter.Core.RateLimit.Stats
   , RateLimitPolicyView (..)
   )
 import Arbiter.Core.Worker (WorkerRow (..))
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.!=), (.:), (.:!), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, withText, (.!=), (.:), (.:!), (.:?), (.=))
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 
 -- | A job in its JSON wire shape.
@@ -333,6 +336,44 @@ data ConcurrencyKeysResponse = ConcurrencyKeysResponse
 -- | Number of count rows repaired from live jobs.
 data ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
   { reconciled :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Whether the API can reach its database.
+data HealthStatus = Ok | Down
+  deriving stock (Eq, Generic, Show)
+
+instance ToJSON HealthStatus where
+  toJSON = toJSON . healthStatusToText
+
+instance FromJSON HealthStatus where
+  parseJSON = withText "HealthStatus" $ \t -> case t of
+    "ok" -> pure Ok
+    "down" -> pure Down
+    _ -> fail "expected ok or down"
+
+healthStatusToText :: HealthStatus -> Text
+healthStatusToText = \case
+  Ok -> "ok"
+  Down -> "down"
+
+-- | Readiness of the API and the database behind it.
+data HealthResponse = HealthResponse
+  { status :: HealthStatus
+  , schemaName :: Text
+  , checkedAt :: UTCTime
+  , dbLatencyMs :: Maybe Double
+  -- ^ Nothing when the database could not be reached.
+  , db :: Maybe PgDbHealth
+  -- ^ Connection and age counters, absent when the database is unreachable.
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | The process is running. Answered without touching the database.
+data LivenessResponse = LivenessResponse
+  { alive :: Bool
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

@@ -21,6 +21,7 @@ module Arbiter.Servant.Server
   , BuildServer (..)
   ) where
 
+import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup)
@@ -50,9 +51,10 @@ import Control.Concurrent.STM
   , readTVarIO
   , writeTChan
   )
-import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO)
+import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO, try)
 import Control.Monad (forever, guard, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BS8
@@ -95,6 +97,7 @@ import Arbiter.Servant.API
   , StatsAPI (..)
   , TableAPI (..)
   , WorkersAPI (..)
+  , HealthAPI (..)
   )
 import Arbiter.Servant.Types
 
@@ -122,6 +125,8 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   , queueStatsCacheTtl :: NominalDiffTime
   -- ^ Per-queue stats staleness, or zero to always hit the database.
   -- Default: 'defaultQueueStatsCacheTtl'.
+  , healthCache :: CacheCell HealthResponse
+  -- ^ Short-TTL cache for the readiness probe, collapsing dashboard polls.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -156,6 +161,7 @@ initArbiterServer _proxy connStr schemaName = do
   ccCache <- newCacheCell
   statsCache <- newCacheCell
   perQueueCache <- newCacheCell
+  healthCell <- newCacheCell
   pure
     ArbiterServerConfig
       { serverEnv = env
@@ -166,6 +172,7 @@ initArbiterServer _proxy connStr schemaName = do
       , allQueueStatsCache = statsCache
       , queueStatsCache = perQueueCache
       , queueStatsCacheTtl = defaultQueueStatsCacheTtl
+      , healthCache = healthCell
       }
 
 -- | Jobs API handlers for a specific table.
@@ -1051,6 +1058,79 @@ rateLimitsServer config =
     , resetRateLimitBuckets = resetRateLimitBucketsHandler config
     }
 
+-- | Liveness and readiness handlers.
+healthServer
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> HealthAPI (AsServerT Handler)
+healthServer config =
+  HealthAPI
+    { getHealth = healthHandler config
+    , getLiveness = pure LivenessResponse {alive = True}
+    }
+
+-- | Readiness, answered for probes and for the dashboard at once. An unreachable
+-- database is a 503 so a probe fails on the status line, and the same body rides
+-- along either way so a dashboard can render what went wrong.
+healthHandler
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> Handler HealthResponse
+healthHandler config = do
+  report <- liftIO (probeHealth config)
+  case status report of
+    Ok -> pure report
+    Down ->
+      throwError
+        err503
+          { errBody = encode report
+          , errHeaders = [("Content-Type", "application/json;charset=utf-8")]
+          }
+
+-- | Time a database round-trip and report what it says about itself. Cancellation
+-- still propagates.
+probeHealth
+  :: forall registry
+   . ArbiterServerConfig registry
+  -> IO HealthResponse
+probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
+  let env = serverEnv config
+      schemaName = schema env
+  started <- getCurrentTime
+  probed <- try @SomeException $ timeout healthProbeMicros (runSimpleDb env Health.getPgDbHealth)
+  either swallowSync (const (pure ())) probed
+  finished <- getCurrentTime
+  let elapsedMs = realToFrac (diffUTCTime finished started) * 1000
+  pure $ case join (eitherToMaybe probed) of
+    Nothing ->
+      HealthResponse
+        { status = Down
+        , schemaName = schemaName
+        , checkedAt = finished
+        , dbLatencyMs = Nothing
+        , db = Nothing
+        }
+    Just dbHealth ->
+      HealthResponse
+        { status = Ok
+        , schemaName = schemaName
+        , checkedAt = finished
+        , dbLatencyMs = Just elapsedMs
+        , db = dbHealth
+        }
+  where
+    eitherToMaybe = either (const Nothing) Just
+
+-- | Poll-collapsing TTL for the readiness probe.
+healthCacheTtl :: NominalDiffTime
+healthCacheTtl = 2
+
+-- | Cap on the probe, so a starved pool answers @down@ rather than holding the
+-- request open. A connect already blocked in the driver is not interruptible, so
+-- the connection string still wants its own @connect_timeout@.
+healthProbeMicros :: Int
+healthProbeMicros = 5_000_000
+
 -- | Poll-collapsing TTL for the dashboard list-policy stats.
 policyStatsCacheTtl :: NominalDiffTime
 policyStatsCacheTtl = 10
@@ -1263,6 +1343,7 @@ sharedServer config =
     :<|> workersServer config
     :<|> rateLimitsServer config
     :<|> concurrencyServer config
+    :<|> healthServer config
 
 -- | Builds a registry's per-queue server implementations.
 class BuildServer registry (reg :: JobPayloadRegistry) where
