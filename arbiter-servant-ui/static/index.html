@@ -478,7 +478,7 @@
 
         <!-- View -->
         <button class="btn btn-sm" :class="effectiveViewMode === 'tree' ? 'btn-primary' : 'btn-outline-primary'"
-          @click="toggleViewMode()"
+          @click="toggleViewMode()" :aria-pressed="effectiveViewMode === 'tree'"
           :disabled="!!stateFilter"
           :title="stateFilter ? 'A status filter always renders flat' : effectiveViewMode === 'tree' ? 'Tree view: children hidden until expanded' : 'Flat view: all jobs shown'">
           <span x-text="effectiveViewMode === 'tree' ? 'Tree' : 'Flat'"></span>
@@ -722,7 +722,7 @@
           <p class="drawer-empty-title" x-text="detailError"></p>
           <p class="drawer-empty-note" x-show="detailErrorDetail" x-text="detailErrorDetail"></p>
           <div class="drawer-empty-actions">
-            <button class="btn btn-outline-secondary btn-sm" @click="retryDetail()">Retry</button>
+            <button class="btn btn-outline-secondary btn-sm" x-show="!detailGone" @click="retryDetail()">Retry</button>
             <button class="btn btn-outline-secondary btn-sm" x-show="hasDetailStep(1)" @click="stepDetail(1)">Next job</button>
           </div>
         </div>
@@ -1136,7 +1136,6 @@
                 @change="$store.app.toggleSSE()" :title="$store.app.sseTitle">
               <label class="form-check-label" for="events-live">Live updates</label>
             </div>
-            <span class="text-muted small" x-show="$store.app.sseHint" x-text="$store.app.sseHint"></span>
             <div class="input-group" style="max-width: 200px;">
               <select class="form-select form-select-sm" x-model="filterQueue" aria-label="Filter events by queue">
                 <option value="">All Queues</option>
@@ -1297,25 +1296,20 @@
                   <span x-show="p.bucketCount === 0" class="text-muted">&mdash;</span>
                 </td>
                 <td class="cell-actions">
-                  <button class="btn btn-sm text-nowrap" :class="isArmed('reset:' + p.prefix) ? 'btn-warning' : 'btn-outline-secondary'"
-                    @click="resetPrefix(p)"
-                    x-text="isArmed('reset:' + p.prefix) ? 'Confirm reset' : 'Reset'"></button>
+                  <div class="dropdown">
+                    <button class="btn btn-row-actions btn-sm" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Row actions" aria-label="Row actions">&#8942;</button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                      <li><a class="dropdown-item" href="#" @click.prevent="resetPrefix(p)"
+                        :class="{ 'fw-semibold': isArmed('reset:' + p.prefix) }"
+                        x-text="isArmed('reset:' + p.prefix) ? 'Confirm reset' : 'Reset'"></a></li>
+                    </ul>
+                  </div>
                 </td>
               </tr>
               <template x-if="expandedPrefix === p.prefix">
                 <tr class="drill-row">
                   <td colspan="7" class="p-0">
                     <div class="drill-child">
-                      <h2 class="drill-child-head">
-                        Buckets for <code x-text="expandedPrefix"></code>
-                        <span class="text-muted small fw-normal" x-show="bucketsLoading">
-                          <span class="spin">&#x21bb;</span>
-                        </span>
-                        <span class="text-muted small fw-normal" x-show="!bucketsLoading && !hasMoreItems()"
-                          x-text="`${buckets.length} ${pluralize(buckets.length, 'key')}`"></span>
-                        <span class="text-muted small fw-normal" x-show="!bucketsLoading && hasMoreItems()"
-                          x-text="`showing ${itemCap} of ${itemTotal()}`"></span>
-                      </h2>
                       <div class="inline-edit arb-edit">
                         <div class="inline-edit-fields">
                           <div class="edit-field">
@@ -1368,8 +1362,11 @@
                                 </td>
                               </tr>
                             </template>
-                            <tr x-show="bucketsLoading"><td colspan="3" class="drill-loading text-muted text-center"><span class="skeleton-bar"></span></td></tr>
+                            <template x-for="i in (bucketsLoading ? expectedItems() : 0)" :key="'sk-' + i">
+                              <tr><td colspan="3" class="drill-loading text-muted text-center"><span class="skeleton-bar"></span></td></tr>
+                            </template>
                             <tr x-show="!bucketsLoading && buckets.length === 0"><td colspan="3" class="text-muted text-center">No active buckets for this prefix.</td></tr>
+                            <tr x-show="!bucketsLoading && hasMoreItems()"><td colspan="3" class="text-muted small text-center" x-text="`showing ${itemCap} of ${itemTotal()}`"></td></tr>
                           </tbody>
                         </table>
                       </div>
@@ -1502,16 +1499,6 @@
                 <tr class="drill-row">
                   <td colspan="5" class="p-0">
                     <div class="drill-child">
-                      <h2 class="drill-child-head">
-                        Keys for <code x-text="expandedPrefix"></code>
-                        <span class="text-muted small fw-normal" x-show="keysLoading">
-                          <span class="spin">&#x21bb;</span>
-                        </span>
-                        <span class="text-muted small fw-normal" x-show="!keysLoading && !hasMoreItems()"
-                          x-text="`${keys.length} ${pluralize(keys.length, 'key')}`"></span>
-                        <span class="text-muted small fw-normal" x-show="!keysLoading && hasMoreItems()"
-                          x-text="`showing ${itemCap} of ${itemTotal()}`"></span>
-                      </h2>
                       <div class="inline-edit arb-edit">
                         <div class="inline-edit-fields">
                           <div class="edit-field">
@@ -1548,8 +1535,11 @@
                                 </td>
                               </tr>
                             </template>
-                            <tr x-show="keysLoading"><td colspan="3" class="drill-loading text-muted text-center"><span class="skeleton-bar"></span></td></tr>
+                            <template x-for="i in (keysLoading ? expectedItems() : 0)" :key="'sk-' + i">
+                              <tr><td colspan="3" class="drill-loading text-muted text-center"><span class="skeleton-bar"></span></td></tr>
+                            </template>
                             <tr x-show="!keysLoading && keys.length === 0"><td colspan="3" class="text-muted text-center">No active keys for this prefix.</td></tr>
+                            <tr x-show="!keysLoading && hasMoreItems()"><td colspan="3" class="text-muted small text-center" x-text="`showing ${itemCap} of ${itemTotal()}`"></td></tr>
                           </tbody>
                         </table>
                       </div>

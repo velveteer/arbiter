@@ -127,10 +127,10 @@ const CRON_TABLE_HTML = `
         </tr>
       </template>
       <tr x-show="_loadErrored && schedules.length === 0">
-        <td :colspan="colCount" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
+        <td :colspan="colCount()" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
       </tr>
       <tr x-show="!_loadErrored && loaded && schedules.length === 0">
-        <td :colspan="colCount" class="text-muted text-center">No cron schedules configured.</td>
+        <td :colspan="colCount()" class="text-muted text-center">No cron schedules configured.</td>
       </tr>
     </tbody>
     <tbody x-html="TABLE_SKELETON_HTML"></tbody>
@@ -364,7 +364,7 @@ document.addEventListener('alpine:init', () => {
       return this.sortRows(this.schedules);
     },
 
-    get colCount() {
+    colCount() {
       return this.global ? 9 : 8;
     },
 

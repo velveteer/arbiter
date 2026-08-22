@@ -1,10 +1,7 @@
 // Timing/config constants, gathered so cadence is tunable in one place.
 const ARB_TIMING = {
-  sseHandshakeMs: 3000,
   sseRetryMs: 3000,
   sseRetryMaxMs: 60000,
-  pollMs: 5000,
-  refreshMs: 30000,
   healthPollMs: 10000,
   fetchTimeoutMs: 30000,
   flushMs: 250,
@@ -15,6 +12,7 @@ const ARB_TIMING = {
   cronPollMs: 60000,
   workerPollMs: 30000,
   queueListPollMs: 10000,
+  queuePausePollMs: 15000,
   rateLimitPollMs: 30000,
   concurrencyPollMs: 30000,
   bulkConcurrency: 5,
@@ -43,7 +41,5 @@ const ARB_EVENTS = {
   queueChanged: 'queue-changed',
   sseEvent: 'sse-event',
   sseReconnect: 'sse-reconnect',
-  sseRefresh: 'sse-refresh',
-  pollTick: 'poll-tick',
   filterJobs: 'filter-jobs',
 };

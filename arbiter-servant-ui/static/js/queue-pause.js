@@ -1,12 +1,13 @@
 /**
  * Alpine component: shows the selected queue's pause state and a toggle button.
- * Refreshes off the global event bus (poll-tick / sse-refresh / sse-reconnect),
- * so its cadence tracks whatever the rest of the UI is doing.
+ * A pause is an operator action the stream never reports, so this polls on its
+ * own timer rather than riding the event stream's cadence.
  */
 document.addEventListener('alpine:init', () => {
   Alpine.data('queuePauseToggle', () => ({
     paused: false,
     _refreshSeq: 0,
+    _pollTimer: null,
     pausedAt: null,
     pausedAgeStr: '',
     busy: false,
@@ -21,7 +22,6 @@ document.addEventListener('alpine:init', () => {
     },
 
     init() {
-      const refresh = () => this.refresh();
       this._bindBus({
         queueChanged: () => {
           this.disarm();
@@ -30,15 +30,18 @@ document.addEventListener('alpine:init', () => {
           this.pausedAt = null;
           if (Alpine.store('app').selectedQueue) this.refresh();
         },
-        pollTick: refresh,
-        sseRefresh: refresh,
-        sseReconnect: refresh,
+        // A gap in the stream is a gap in everything, so resync on its return.
+        sseReconnect: () => this.refresh(),
       });
+      this._pollTimer = setInterval(() => {
+        if (!document.hidden) this.refresh();
+      }, ARB_TIMING.queuePausePollMs);
       if (Alpine.store('app').selectedQueue) this.refresh();
     },
 
     destroy() {
       this._unbindBus();
+      if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
     },
 
     async refresh() {

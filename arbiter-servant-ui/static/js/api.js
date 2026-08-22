@@ -57,14 +57,16 @@ const ArbiterAPI = {
   },
 
   // Readiness. A 503 carries the same body as a 200, and an unreachable API is
-  // itself the answer, so neither raises.
+  // itself the answer, so neither raises. Anything else between here and the
+  // server answers with its own JSON, so only a recognised status is a report.
   async getHealth() {
     try {
       return await this._fetch('/health');
     } catch (e) {
       if (e.body) {
         try {
-          return JSON.parse(e.body);
+          const parsed = JSON.parse(e.body);
+          if (parsed && (parsed.status === 'ok' || parsed.status === 'down')) return parsed;
         } catch {
           // Not the health body, so fall through to the unreachable answer.
         }

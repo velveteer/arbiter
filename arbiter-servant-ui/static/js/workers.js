@@ -123,10 +123,10 @@ const WORKERS_TABLE_HTML = `
         </tr>
       </template>
       <tr x-show="_loadErrored && displayWorkers.length === 0">
-        <td :colspan="colCount" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
+        <td :colspan="colCount()" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
       </tr>
       <tr x-show="!_loadErrored && loaded && displayWorkers.length === 0">
-        <td :colspan="colCount" class="text-muted text-center"
+        <td :colspan="colCount()" class="text-muted text-center"
           x-text="liveOnly && workers.length > 0 ? 'No active workers.' : 'No workers registered.'"></td>
       </tr>
     </tbody>
@@ -257,7 +257,7 @@ document.addEventListener('alpine:init', () => {
       return this.displayWorkers.some((w) => w.metadata);
     },
 
-    get colCount() {
+    colCount() {
       return (this.global ? 8 : 7) - (this.anyMetadata ? 0 : 1);
     },
 

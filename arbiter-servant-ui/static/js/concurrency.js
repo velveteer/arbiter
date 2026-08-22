@@ -47,7 +47,7 @@ document.addEventListener('alpine:init', () => {
     fmtCount: formatCompact,
 
     // Static header, so the count is fixed.
-    get colCount() {
+    colCount() {
       return 5;
     },
 

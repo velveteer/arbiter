@@ -877,6 +877,8 @@ Global endpoints under `/api/v1/`:
 | `GET` | `concurrency/:prefix/keys` | List a pool's per-key in-flight counts |
 | `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
 | `POST` | `concurrency/reconcile` | Repair a pool's in-flight counts |
+| `GET` | `health` | Readiness - checks the database, 503 when unreachable |
+| `GET` | `health/live` | Liveness - never touches the database |
 
 ## OpenTelemetry
 

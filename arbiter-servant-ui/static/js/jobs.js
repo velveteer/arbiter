@@ -75,6 +75,7 @@ document.addEventListener('alpine:init', () => {
     detailError: '',
     detailErrorDetail: '',
     detailErrorId: null,
+    detailGone: false,
     _detailSeq: 0,
     notVisibleFormat: localStorage.getItem('arb.notVisibleFormat') || 'countdown',
 
@@ -598,7 +599,7 @@ document.addEventListener('alpine:init', () => {
     // A failure while the drawer is open becomes an in-drawer message rather than
     // an open drawer emptied of its job. Its neighbours are pinned first, so a
     // job that vanished mid-browse does not strand the reader.
-    _detailFailed(id, headline, detail) {
+    _detailFailed(id, headline, detail, { gone = false } = {}) {
       if (!this._drawerOpen()) {
         this._clearDetailError();
         showToast(detail ? headline + ' ' + detail : headline);
@@ -609,12 +610,14 @@ document.addEventListener('alpine:init', () => {
       this.detailErrorId = id;
       this.detailError = headline;
       this.detailErrorDetail = detail || '';
+      this.detailGone = gone;
     },
 
     _clearDetailError() {
       this.detailError = '';
       this.detailErrorDetail = '';
       this.detailErrorId = null;
+      this.detailGone = false;
       this.clearDetailNeighbours();
     },
 
@@ -626,8 +629,7 @@ document.addEventListener('alpine:init', () => {
         const data = await ArbiterAPI.getJob(queue, id);
         if (seq !== this._detailSeq) return;
         if (!data || !data.job) {
-          this._detailFailed(id, 'This job is no longer in the queue.',
-            'It may have completed, been archived, or moved to the DLQ.');
+          this._detailGone(id);
           return;
         }
         this.selectedJob = data.job;
@@ -635,8 +637,15 @@ document.addEventListener('alpine:init', () => {
         showDrawer('jobDetailDrawer');
       } catch (e) {
         if (seq !== this._detailSeq) return;
-        this._detailFailed(id, 'Could not load this job.', e.message);
+        if (e.status === 404) this._detailGone(id);
+        else this._detailFailed(id, 'Could not load this job.', e.message);
       }
+    },
+
+    // The job is not coming back, so the panel says so and offers no retry.
+    _detailGone(id) {
+      this._detailFailed(id, 'This job is no longer in the queue.',
+        'It may have completed, been archived, or moved to the DLQ.', { gone: true });
     },
 
     get detailTitle() {
@@ -645,7 +654,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     get detailStatus() {
-      return this.selectedJob?.status || '';
+      return this.selectedJob?.status || (this.detailGone ? 'gone' : '');
     },
 
     retryDetail() {

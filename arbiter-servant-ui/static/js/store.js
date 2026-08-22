@@ -25,13 +25,12 @@ document.addEventListener('alpine:init', () => {
     _eventBuffer: [],
     _flushScheduled: false,
     _hasConnected: false,
-    _refreshInterval: null,
-    _pollInterval: null,
-    _sseHandshakeTimer: null,
+    _dropped: false,
     _sseRetryTimer: null,
     _sseRetryMs: 0,
     theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
-    sseOff: localStorage.getItem('arb.eventsOff') === '1',
+    // Off unless switched on, so a reader opts into the stream rather than out.
+    sseOff: localStorage.getItem('arb.eventsOff') !== '0',
     health: null,
     _healthInterval: null,
     _healthInFlight: false,
@@ -67,11 +66,14 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    // connected / disconnected / polling / off, for the nav indicator.
+    // connected / connecting / disconnected / polling / off, for the nav indicator.
+    // A stream that has not answered yet is connecting. Only one that was live
+    // and went away is disconnected.
     get sseState() {
       if (this.sseOff) return 'off';
       if (this.sseDisabled) return 'polling';
-      return this.connected ? 'connected' : 'disconnected';
+      if (this.connected) return 'connected';
+      return this._dropped ? 'disconnected' : 'connecting';
     },
 
     get sseTitle() {
@@ -79,6 +81,7 @@ document.addEventListener('alpine:init', () => {
         off: 'Live updates off',
         polling: 'Live updates unavailable on this server',
         connected: 'Live updates connected',
+        connecting: 'Connecting to live updates',
         disconnected: 'Reconnecting to live updates',
       }[this.sseState];
     },
@@ -89,18 +92,8 @@ document.addEventListener('alpine:init', () => {
         off: 'Live updates are off. Switch them on to stream events.',
         polling: 'This server does not stream events.',
         connected: 'No events yet. They appear here as they happen.',
+        connecting: 'Connecting to the event stream.',
         disconnected: 'Reconnecting. Events resume when the stream is back.',
-      }[this.sseState];
-    },
-
-    // Only what the Events switch cannot show for itself. Its own position
-    // already says whether live updates are on.
-    get sseHint() {
-      return {
-        off: '',
-        polling: 'unavailable on this server',
-        connected: '',
-        disconnected: 'reconnecting\u2026',
       }[this.sseState];
     },
 
@@ -119,12 +112,9 @@ document.addEventListener('alpine:init', () => {
     // Tears the stream down without the retry that a dropped connection gets.
     closeSSE() {
       if (this._sseRetryTimer) { clearTimeout(this._sseRetryTimer); this._sseRetryTimer = null; }
-      if (this._sseHandshakeTimer) { clearTimeout(this._sseHandshakeTimer); this._sseHandshakeTimer = null; }
       if (this.eventSource) { this.eventSource.close(); this.eventSource = null; }
       this.connected = false;
-      // Each tab already refreshes on its own interval, so nothing needs the
-      // fallback tick, and starting one would undo the point of turning it off.
-      this._stopPolling();
+      this._dropped = false;
     },
 
     // Names where the reader is, for the page heading and the browser tab. A
@@ -326,41 +316,29 @@ document.addEventListener('alpine:init', () => {
       if (this.eventSource) {
         this.eventSource.close();
       }
-      if (this._sseHandshakeTimer) clearTimeout(this._sseHandshakeTimer);
-      this._sseHandshakeTimer = setTimeout(() => {
-        if (!this._hasConnected && !this.sseDisabled) {
-          this._startPolling();
-          this._startRefreshTimer();
-        }
-      }, ARB_TIMING.sseHandshakeMs);
       this.eventSource = ArbiterAPI.connectSSE(
         (event) => {
           this.connected = true;
           try {
             const data = JSON.parse(event.data);
             if (data.event === 'disabled') {
-              if (this._sseHandshakeTimer) { clearTimeout(this._sseHandshakeTimer); this._sseHandshakeTimer = null; }
               this.eventSource.close();
               this.eventSource = null;
               this.connected = false;
               this.sseDisabled = true;
-              this._startPolling();
-              this._startRefreshTimer();
               this._scheduleSSE();
               return;
             }
             if (data.event === 'connected') {
-              if (this._sseHandshakeTimer) { clearTimeout(this._sseHandshakeTimer); this._sseHandshakeTimer = null; }
               // Reconnect (not first connect) — refetch all tabs
               if (this._hasConnected) {
                 window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseReconnect));
               }
               this._hasConnected = true;
+              this._dropped = false;
               this._sseRetryMs = 0;
               if (this._sseRetryTimer) { clearTimeout(this._sseRetryTimer); this._sseRetryTimer = null; }
               this.sseDisabled = false;
-              this._stopPolling();
-              this._startRefreshTimer();
               return;
             }
             this._eventBuffer.push({
@@ -375,32 +353,10 @@ document.addEventListener('alpine:init', () => {
         },
         () => {
           this.connected = false;
-          this._startPolling();
-          this._startRefreshTimer();
+          this._dropped = true;
           if (!this.eventSource || this.eventSource.readyState === EventSource.CLOSED) this._scheduleSSE();
         }
       );
-    },
-
-    _startPolling() {
-      if (this._pollInterval) return;
-      this._pollInterval = setInterval(() => {
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.pollTick));
-      }, ARB_TIMING.pollMs);
-    },
-
-    _stopPolling() {
-      if (this._pollInterval) {
-        clearInterval(this._pollInterval);
-        this._pollInterval = null;
-      }
-    },
-
-    _startRefreshTimer() {
-      if (this._refreshInterval) return;
-      this._refreshInterval = setInterval(() => {
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseRefresh));
-      }, ARB_TIMING.refreshMs);
     },
 
     _scheduleFlush() {

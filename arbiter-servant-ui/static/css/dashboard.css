@@ -304,6 +304,12 @@ label.queue-sort-label,
   background-color: #16a34a;
 }
 
+/* Hollow ring: a stream attempt is in flight. */
+.status-pip.connecting .status-dot {
+  background-color: transparent;
+  border: 2px solid var(--arb-text-muted);
+}
+
 /* Pulsing ring: the stream dropped, or the server cannot reach its database. */
 .status-pip.disconnected .status-dot,
 .status-pip.down .status-dot {
@@ -563,6 +569,12 @@ label.queue-sort-label,
   text-align: right;
 }
 
+/* The wrapper shrinks to its glyph, so the rest of the cell still belongs to the row. */
+.cell-actions .dropdown {
+  display: inline-block;
+  vertical-align: middle;
+}
+
 @media (max-width: 768px) {
   .cell-actions {
     text-align: left;
@@ -700,7 +712,7 @@ label.queue-sort-label,
   flex-wrap: wrap;
   align-items: center;
   gap: 0.35rem;
-  min-height: 1.15rem;
+  min-height: 1.35rem;
   margin-top: -0.75rem;
   margin-bottom: -0.35rem;
 }
@@ -1630,12 +1642,10 @@ tr.policy-bad td:first-child::before {
   border-bottom: 0;
 }
 
-.drill-child-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.5rem;
-  margin-bottom: 0.6rem;
+/* The other tables carry a row-actions menu, which sets their row height. This one
+   has no actions column, so hold that height rather than sitting shorter. */
+#tab-concurrency .detail-row > td {
+  height: 2.25rem;
 }
 
 .drill-child .table {

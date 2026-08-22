@@ -78,7 +78,7 @@ const COLUMNS_MENU_HTML = `
 const TABLE_SKELETON_HTML = `
   <template x-for="i in (loading && !loaded && slowLoad ? 5 : 0)" :key="'skeleton-' + i">
     <tr class="skeleton-row">
-      <td :colspan="colCount"><span class="skeleton-bar"></span></td>
+      <td :colspan="colCount()"><span class="skeleton-bar"></span></td>
     </tr>
   </template>`;
 
@@ -205,7 +205,9 @@ function showDrawer(id) {
     clearScrollLock();
   }
   el._arbModal = asModal;
-  el._arbReturnFocus = document.activeElement;
+  // Stepping re-enters while the drawer is open, and the stepper itself lives
+  // inside it, so only the opening call names where focus came from.
+  if (!el.classList.contains('show')) el._arbReturnFocus = document.activeElement;
   bootstrap.Offcanvas.getOrCreateInstance(el, { backdrop: asModal, scroll: !asModal }).show();
 }
 
@@ -220,7 +222,11 @@ function hideDrawer(id) {
 // open, give the key a home on the document, and put focus back on close.
 document.addEventListener('shown.bs.offcanvas', (e) => {
   const el = e.target;
-  if (!el.classList.contains('detail-drawer') || el.contains(document.activeElement)) return;
+  if (!el.classList.contains('detail-drawer')) return;
+  // The panel scrolls, so it needs a tab stop of its own. Without one the arrow
+  // keys land on the drawer root, which is not what scrolls.
+  el.querySelectorAll('.offcanvas-body').forEach((b) => { b.tabIndex = 0; });
+  if (el.contains(document.activeElement)) return;
   (el.querySelector('.drawer-close') || el).focus();
 });
 
@@ -318,15 +324,16 @@ document.addEventListener('click', (e) => {
 });
 
 // Step through rows while a drawer is open. Driving the header buttons keeps
-// the disabled-at-the-ends behaviour in one place.
+// the disabled-at-the-ends behaviour in one place. The arrow keys stay with the
+// drawer's own scrolling, which a wide non-modal drawer needs.
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const el = openDrawerEl();
   if (!el) return;
   const target = e.target instanceof Element ? e.target : null;
   if (target?.closest('input, textarea, select, [contenteditable]')) return;
-  const back = e.key === 'ArrowUp' || e.key === 'k';
-  const fwd = e.key === 'ArrowDown' || e.key === 'j';
+  const back = e.key === 'k';
+  const fwd = e.key === 'j';
   if (!back && !fwd) return;
   e.preventDefault();
   el.querySelectorAll('.drawer-nav-btn')[back ? 0 : 1]?.click();
@@ -991,7 +998,10 @@ function rowDetail(rowsProp, idField, selectedProp, opts = {}) {
       const cur = this[selectedProp];
       if (!cur) return;
       const fresh = this[rowsProp].find((r) => String(r[idField]) === String(cur[idField]));
+      // Another page or a filter can drop a row that still exists, so a missing
+      // selection is re-read by id rather than taken as gone.
       if (fresh) this[selectedProp] = fresh;
+      else this.refreshOpenDetail?.();
     },
 
     _detailNeighbour(delta) {
@@ -1053,9 +1063,9 @@ const DETAIL_HEAD_HTML = `
       </template>
       <div class="drawer-nav">
         <button type="button" class="drawer-nav-btn" :disabled="!hasDetailStep(-1)" @click="stepDetail(-1)"
-          title="Previous" aria-label="Previous">&#8593;</button>
+          title="Previous (k)" aria-label="Previous">&#8593;</button>
         <button type="button" class="drawer-nav-btn" :disabled="!hasDetailStep(1)" @click="stepDetail(1)"
-          title="Next" aria-label="Next">&#8595;</button>
+          title="Next (j)" aria-label="Next">&#8595;</button>
       </div>
       <button type="button" class="drawer-close" data-bs-dismiss="offcanvas" aria-label="Close">&#10005;</button>
     </div>
@@ -1131,6 +1141,12 @@ function drillDownTab(cfg) {
     itemCap: cfg.itemLimit,
     hasMoreItems() {
       return this.itemTotal() > cfg.itemLimit;
+    },
+
+    // Placeholder rows to stand in for the ones on the way, so the panel opens at
+    // the height it keeps. The policy row already counted them.
+    expectedItems() {
+      return Math.max(1, Math.min(this.itemTotal(), cfg.itemLimit));
     },
 
     async loadPolicies() {
@@ -1427,8 +1443,10 @@ function columnPrefs(columns, storageKey) {
       this._colSeen = {};
     },
 
-    // The columns actually rendered, for a cell that has to span the table.
-    get colCount() {
+    // The columns actually rendered, for a cell that has to span the table. A
+    // method, not a getter: a spread of this mixin would freeze a getter's first
+    // reading and copy it as a value.
+    colCount() {
       return columns.filter((c) => this.colVisible(c.key)).length;
     },
 
