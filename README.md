@@ -141,6 +141,12 @@ Re-running migrations after changing either option installs or removes its
 triggers, so these features can be enabled and disabled without editing
 migration history.
 
+Migrations are safe to run from more than one replica at the same time. Set
+`migrationLockTimeout` to bound how long a run waits for the others, which
+returns a `MigrationError` if the wait runs out. The default waits. Give
+migrations a direct connection: a pooler in transaction mode lets two replicas
+migrate at the same time.
+
 ### Inserting Jobs
 
 ```haskell
@@ -181,15 +187,17 @@ import Arbiter.Simple qualified as ArbS
 import Arbiter.Worker qualified as Worker
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
+import Data.Proxy (Proxy (..))
 import Database.PostgreSQL.Simple qualified as PG
 
 main :: IO ()
 main = do
   -- 1 pool of 5 concurrent worker threads, using postgresql-simple via arbiter-simple backend
   config <- Worker.transactionalWorkerConfig 5 processEmail
-  poolCfg <- Worker.poolConfigForWorkers [Worker.namedWorkerPool config]
+  let workers = [Worker.namedWorkerPool config]
+  poolCfg <- Worker.poolConfigForWorkers workers
   env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poolCfg
-  ArbS.runSimpleDb env $ Worker.runWorkerPool config
+  ArbS.runSimpleDb env $ Worker.runWorkerPools workers
 
 processEmail :: Arb.JobHandler (ArbS.SimpleDb AppRegistry IO) EmailPayload ()
 processEmail conn job = do

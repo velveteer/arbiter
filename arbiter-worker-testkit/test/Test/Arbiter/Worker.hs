@@ -1540,6 +1540,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         map CS.name all_ `shouldSatisfy` (\ns -> "cron-here" `elem` ns && "cron-elsewhere" `elem` ns)
 
 -- Helper to create a connection with data cleanup
+
 -- | Clean the queue for one test. The env is built once for the suite: its LISTEN
 -- hub holds a pool connection for as long as the env lives, and the shared pool
 -- only has five.

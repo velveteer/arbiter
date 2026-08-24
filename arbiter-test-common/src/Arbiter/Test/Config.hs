@@ -25,4 +25,3 @@ getTestConnectionString = do
   where
     defaultConnString =
       "host=localhost port=5432 user=postgres password=master dbname=postgres connect_timeout=10"
-

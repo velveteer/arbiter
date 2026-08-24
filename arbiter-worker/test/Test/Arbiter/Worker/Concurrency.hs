@@ -269,4 +269,3 @@ simulateAnotherWorkerClaim connStr jobId = do
       "UPDATE arbiter_worker_concurrency_test.arbiter_worker_concurrency_test SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
       (PG.Only jobId)
   PG.close conn
-

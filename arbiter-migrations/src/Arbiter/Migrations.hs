@@ -134,11 +134,13 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (find, traverse_)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.LibPQ qualified as LibPQ
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL, execute_, query)
 import Database.PostgreSQL.Simple qualified as PG
@@ -168,6 +170,9 @@ data MigrationConfig = MigrationConfig
   -- ^ WAL-logging for the rate-limit bucket table in this schema. 'Unlogged'
   -- (default) resets buckets on crash\/failover. 'Durable' preserves them at a
   -- throughput cost.
+  , migrationLockTimeout :: Maybe NominalDiffTime
+  -- ^ How many seconds to wait for the schema's migration lock, which serializes
+  -- replicas that migrate at the same time. 'Nothing' (default) waits indefinitely.
   }
   deriving stock (Eq, Show)
 
@@ -178,6 +183,7 @@ defaultMigrationConfig =
     { enableNotifications = True
     , enableEventStreaming = False
     , rateLimitDurability = Unlogged
+    , migrationLockTimeout = Nothing
     }
 
 -- | Migrate every queue in a registry into one schema. The schema itself is created
@@ -336,63 +342,109 @@ runMigrationsTrackedForTables
   -> MigrationConfig
   -> AdmissionSeeds
   -> IO (MigrationResult String)
-runMigrationsTrackedForTables connStr schemaName tableNames config (AdmissionSeeds policyRows concRows durability) =
+runMigrationsTrackedForTables connStr schemaName tableNames config seeds =
   case validateRegistryNames schemaName (map fst tableNames) of
     Left err -> pure (MigrationError (T.unpack err))
-    Right () -> bracket (connectPostgreSQL connStr) close $ \conn -> do
-      withConnection conn $ \libpqConn ->
-        LibPQ.disableNoticeReporting libpqConn
+    Right () -> bracket (connectPostgreSQL connStr) close $ \conn ->
+      withMigrationLock conn schemaName (migrationLockTimeout config) $
+        migrateSchema conn schemaName tableNames config seeds
 
-      -- A CREATE that fails for want of privilege is fine if someone made the schema by hand.
-      let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
-      result <- try $ execute_ conn schemaSQL
-      case result of
-        Right _ -> pure ()
-        Left (e :: PG.SqlError) -> do
-          exists <- schemaExists conn schemaName
-          when (not exists) $
-            ioError
-              ( userError $
-                  "Failed to create schema "
-                    <> T.unpack schemaName
-                    <> " and it does not exist. Either grant CREATE privilege on the database"
-                    <> " or create the schema manually: CREATE SCHEMA "
-                    <> T.unpack schemaName
-                    <> ";"
-                    <> "\nOriginal error: "
-                    <> show e
-              )
+-- | Hold the schema's migration lock for the whole session, so replicas that migrate
+-- at the same time run one after another. A session lock is what spans the reconciles,
+-- which run after the tracked migrations commit.
+withMigrationLock
+  :: PG.Connection
+  -> SchemaName
+  -> Maybe NominalDiffTime
+  -> IO (MigrationResult String)
+  -> IO (MigrationResult String)
+withMigrationLock conn schemaName timeout act = bracket acquire release run
+  where
+    lockName = Only ("arbiter.migrations:" <> schemaName)
+    acquire =
+      try (PG.withTransaction conn (setTimeouts >> lock)) >>= \case
+        Right () -> pure True
+        Left e
+          | isJust timeout, PG.sqlState e == "55P03" -> pure False
+          | otherwise -> throwIO e
+    lock = void (query conn "SELECT pg_advisory_lock(hashtextextended(?, 0))::text" lockName :: IO [Only (Maybe Text)])
+    -- Pinned for this transaction only, so an inherited timeout cannot cut the wait short.
+    setTimeouts = traverse_ setLocal [("lock_timeout", maybe "0" millis timeout), ("statement_timeout", "0")]
+    setLocal (name, value) =
+      void (query conn "SELECT set_config(?, ?, TRUE)" (name :: Text, value :: Text) :: IO [Only Text])
+    millis t = T.pack (show (max 1 (min maxLockTimeoutMillis (ceiling (t * 1000) :: Int))))
+    maxLockTimeoutMillis = 2147483647
+    release locked =
+      when locked $
+        void (try unlock :: IO (Either PG.SqlError [Only Bool]))
+    unlock = query conn "SELECT pg_advisory_unlock(hashtextextended(?, 0))" lockName :: IO [Only Bool]
+    run locked
+      | locked = act
+      | otherwise =
+          pure (MigrationError ("Timed out waiting on the arbiter migration lock for schema " <> T.unpack schemaName))
 
-      withConnection conn $ \libpqConn ->
-        LibPQ.enableNoticeReporting libpqConn
+-- | Apply a schema's tracked migrations and reconcile it, under the migration lock.
+migrateSchema
+  :: PG.Connection
+  -> SchemaName
+  -> [(TableName, TableAdmission)]
+  -> MigrationConfig
+  -> AdmissionSeeds
+  -> IO (MigrationResult String)
+migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concRows durability) = do
+  withConnection conn $ \libpqConn ->
+    LibPQ.disableNoticeReporting libpqConn
 
-      let schemaMigrations = schemaLevelMigrations schemaName
-          tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
-          migrations = schemaMigrations <> tableMigrations
-          migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
-          options =
-            defaultOptions
-              { optVerbose = Quiet
-              , optTableName = migrationTableName
-              }
+  -- A CREATE that fails for want of privilege is fine if someone made the schema by hand.
+  let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
+  result <- try $ execute_ conn schemaSQL
+  case result of
+    Right _ -> pure ()
+    Left (e :: PG.SqlError) -> do
+      exists <- schemaExists conn schemaName
+      when (not exists) $
+        ioError
+          ( userError $
+              "Failed to create schema "
+                <> T.unpack schemaName
+                <> " and it does not exist. Either grant CREATE privilege on the database"
+                <> " or create the schema manually: CREATE SCHEMA "
+                <> T.unpack schemaName
+                <> ";"
+                <> "\nOriginal error: "
+                <> show e
+          )
 
-      _ <- runMigrations conn options [MigrationInitialization]
-      migrationResult <- runMigrations conn options migrations
-      case migrationResult of
-        MigrationSuccess -> do
-          reconciled <-
-            try $ do
-              reconcileRateLimitPolicies conn schemaName policyRows
-              reconcileConcurrencyPolicies conn schemaName concRows
-              reconcileRateLimitDurability conn schemaName durability
-              reconcileOptionalTriggers conn schemaName (map fst tableNames) config
-          case reconciled of
-            Right () -> pure MigrationSuccess
-            -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
-            Left (e :: SomeException)
-              | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
-              | otherwise -> pure (MigrationError (T.unpack (displayEx e)))
-        other -> pure other
+  withConnection conn $ \libpqConn ->
+    LibPQ.enableNoticeReporting libpqConn
+
+  let schemaMigrations = schemaLevelMigrations schemaName
+      tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
+      migrations = schemaMigrations <> tableMigrations
+      migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
+      options =
+        defaultOptions
+          { optVerbose = Quiet
+          , optTableName = migrationTableName
+          }
+
+  _ <- runMigrations conn options [MigrationInitialization]
+  migrationResult <- runMigrations conn options migrations
+  case migrationResult of
+    MigrationSuccess -> do
+      reconciled <-
+        try $ do
+          reconcileRateLimitPolicies conn schemaName policyRows
+          reconcileConcurrencyPolicies conn schemaName concRows
+          reconcileRateLimitDurability conn schemaName durability
+          reconcileOptionalTriggers conn schemaName (map fst tableNames) config
+      case reconciled of
+        Right () -> pure MigrationSuccess
+        -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
+        Left (e :: SomeException)
+          | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+          | otherwise -> pure (MigrationError (T.unpack (displayEx e)))
+    other -> pure other
 
 -- | Upsert each policy's @default_*@ params into the policies table (created
 -- unconditionally by the schema migrations), leaving operator @override_*@

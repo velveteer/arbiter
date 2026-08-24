@@ -89,6 +89,7 @@ import Arbiter.Servant.API
   , ConcurrencyAPI (..)
   , CronAPI (..)
   , DLQAPI (..)
+  , HealthAPI (..)
   , JobsAPI (..)
   , QueuesAPI (..)
   , RateLimitsAPI (..)
@@ -97,7 +98,6 @@ import Arbiter.Servant.API
   , StatsAPI (..)
   , TableAPI (..)
   , WorkersAPI (..)
-  , HealthAPI (..)
   )
 import Arbiter.Servant.Types
 

@@ -18,25 +18,31 @@ module Main (main) where
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema (PolicyRow (..), arbiterRateLimitsTableName)
 import Arbiter.Core.RateLimit.Spec (Durability (Durable))
-import Control.Exception (bracket)
+import Control.Concurrent.Async (mapConcurrently)
+import Control.Exception (bracket, bracket_)
+import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
+import Data.Foldable (traverse_)
 import Data.Int (Int64)
+import Data.List (isInfixOf)
 import Data.Maybe (listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
+import Database.PostgreSQL.Simple.Types (Query (..))
 import GHC.Generics (Generic)
 import System.Environment (lookupEnv)
 import System.FilePath ((<.>), (</>))
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Golden (goldenVsString)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 import Arbiter.Migrations
   ( MigrationConfig (..)
@@ -45,7 +51,9 @@ import Arbiter.Migrations
   , conflictingPolicyPrefixes
   , defaultMigrationConfig
   , jobQueueMigrationsForTable
+  , noAdmissionSeeds
   , runMigrationsForRegistry
+  , runMigrationsTrackedForTables
   , schemaLevelMigrations
   , validateRegistryNames
   )
@@ -60,6 +68,7 @@ main = do
       , testGroup "policy conflict detection" conflictTests
       , testGroup "registry name validation" registryNameTests
       , migrationReconciliationTests connStr
+      , migrationLockTests connStr
       ]
 
 -- | 'conflictingPolicyPrefixes' flags only a prefix carrying two distinct parameter sets.
@@ -118,13 +127,13 @@ migrationReconciliationTests connStr =
   testGroup
     "migration reconciliation"
     [ testCase "reconciles rate-limit bucket durability" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate durableConfig
           bucketPersistence conn >>= (@?= Just "p")
           migrate defaultMigrationConfig
           bucketPersistence conn >>= (@?= Just "u")
     , testCase "enables, disables, and re-enables optional triggers" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOff
           optionalTriggerCount conn >>= (@?= 0)
           optionalFunctionCount conn >>= (@?= 0)
@@ -150,7 +159,7 @@ migrationReconciliationTests connStr =
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
     , testCase "drops streaming triggers for queues removed from the registry" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
           removedQueueTriggerCount conn >>= (@?= 2)
           removedNotifyObjectCount conn >>= (@?= 2)
@@ -160,7 +169,7 @@ migrationReconciliationTests connStr =
           removedNotifyObjectCount conn >>= (@?= 0)
           optionalFunctionCount conn >>= (@?= 0)
     , testCase "drops notify objects for queues removed from the registry" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
           removedNotifyObjectCount conn >>= (@?= 2)
 
@@ -169,7 +178,7 @@ migrationReconciliationTests connStr =
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
     , testCase "drops the notify function of a removed queue whose table is gone" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @ExpandedMigrationRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
           removedNotifyObjectCount conn >>= (@?= 2)
 
@@ -180,7 +189,7 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           removedNotifyObjectCount conn >>= (@?= 0)
     , testCase "repairs stale notification objects" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -196,7 +205,7 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           notificationObjectsAreCurrent conn >>= (@?= True)
     , testCase "repairs a notify trigger missing its transition table" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -211,7 +220,7 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           notificationObjectsAreCurrent conn >>= (@?= True)
     , testCase "leaves unmarked notify lookalikes alone" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -231,7 +240,7 @@ migrationReconciliationTests connStr =
           functionCountNamed conn "notify_orders_created" >>= (@?= 1)
           triggerCountNamed conn "orders_notify_trigger" >>= (@?= 1)
     , testCase "leaves an unmarked event function alone" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOff
           _ <-
             PG.execute_
@@ -241,7 +250,7 @@ migrationReconciliationTests connStr =
           migrate triggerOff
           functionCountNamed conn "notify_job_event" >>= (@?= 1)
     , testCase "disables streaming with a leftover unmarked event trigger" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -255,7 +264,7 @@ migrationReconciliationTests connStr =
     , -- Installs predating the marker have an unmarked function with an older body, so
       -- enabling streaming has to replace and stamp it rather than treat it as foreign.
       testCase "adopts an unmarked event function" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOff
           _ <-
             PG.execute_
@@ -265,7 +274,7 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           eventFunctionIsCurrent conn >>= (@?= True)
     , testCase "repairs a stale event function body" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -276,7 +285,7 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           eventFunctionIsCurrent conn >>= (@?= True)
     , testCase "repairs an event trigger with stale arguments" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOn
           _ <-
             PG.execute_
@@ -290,7 +299,7 @@ migrationReconciliationTests connStr =
           definitions <- eventTriggerDefinitionsFor conn "notify_job_event_migration_reconciliation_q"
           length (filter (T.isInfixOf "('migration_reconciliation_q', 'false')") definitions) @?= 1
     , testCase "preserves queue names ending in the DLQ suffix" $
-        withFreshSchema connStr $ \conn -> do
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
           definitions <- eventTriggerDefinitions conn
           length (filter (T.isInfixOf "('events_dlq', 'false')") definitions) @?= 1
@@ -302,12 +311,57 @@ migrationReconciliationTests connStr =
     triggerOn = defaultMigrationConfig {enableNotifications = True, enableEventStreaming = True}
     migrate config = runMigrationsForRegistry (Proxy @MigrationRegistry) connStr reconciliationSchema config >>= shouldMigrate
 
-withFreshSchema :: ByteString -> (PG.Connection -> IO a) -> IO a
-withFreshSchema connStr action =
+lockSchema :: Text
+lockSchema = "arbiter_migration_lock_test"
+
+migrationLockTests :: ByteString -> TestTree
+migrationLockTests connStr =
+  testGroup
+    "migration lock"
+    [ testCase "applies each migration once when replicas migrate at the same time" $
+        withFreshSchema connStr lockSchema $ \conn -> do
+          results <- mapConcurrently (\_ -> migrate defaultMigrationConfig) [1 .. 4 :: Int]
+          traverse_ shouldMigrate results
+          appliedTwice conn >>= (@?= Just 0)
+    , testCase "gives up on a lock still held at the timeout, and migrates once it is free" $
+        withFreshSchema connStr lockSchema $ \conn -> do
+          held <- withMigrationLockHeld conn (migrate bounded)
+          assertBool "expected a lock timeout" (timedOut held)
+          migrate bounded >>= shouldMigrate
+    ]
+  where
+    migrate config =
+      runMigrationsTrackedForTables connStr lockSchema [("lock_probe_jobs", allTableAdmission)] config noAdmissionSeeds
+    bounded = defaultMigrationConfig {migrationLockTimeout = Just 0.25}
+
+-- | Take the same lock the migration takes, on a connection of the caller's own.
+withMigrationLockHeld :: PG.Connection -> IO a -> IO a
+withMigrationLockHeld conn = bracket_ (advisory "pg_advisory_lock") (advisory "pg_advisory_unlock")
+  where
+    advisory fn =
+      void
+        (PG.query conn ("SELECT " <> fn <> "(hashtextextended(?, 0))::text") (PG.Only lockName) :: IO [PG.Only (Maybe Text)])
+    lockName = "arbiter.migrations:" <> lockSchema
+
+-- | How many migration names the history records more than once.
+appliedTwice :: PG.Connection -> IO (Maybe Int)
+appliedTwice conn =
+  fmap (fmap PG.fromOnly . listToMaybe) $
+    PG.query_ conn (sql ("SELECT count(*) - count(DISTINCT filename) FROM " <> lockSchema <> ".schema_migrations"))
+
+timedOut :: MigrationResult String -> Bool
+timedOut (MigrationError e) = "Timed out waiting on the arbiter migration lock" `isInfixOf` e
+timedOut MigrationSuccess = False
+
+withFreshSchema :: ByteString -> Text -> (PG.Connection -> IO a) -> IO a
+withFreshSchema connStr schemaName action =
   bracket (PG.connectPostgreSQL connStr) PG.close $ \conn -> do
     _ <- PG.execute_ conn "SET client_min_messages = WARNING"
-    _ <- PG.execute_ conn "DROP SCHEMA IF EXISTS arbiter_migration_reconciliation_test CASCADE"
+    _ <- PG.execute_ conn (sql ("DROP SCHEMA IF EXISTS " <> schemaName <> " CASCADE"))
     action conn
+
+sql :: Text -> Query
+sql = Query . encodeUtf8
 
 shouldMigrate :: MigrationResult String -> IO ()
 shouldMigrate MigrationSuccess = pure ()

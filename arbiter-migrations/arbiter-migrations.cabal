@@ -54,6 +54,7 @@ library
     , postgresql-migration  >=0.2  && <0.3
     , postgresql-simple     >=0.6  && <0.8
     , text                  >=1.2  && <2.2
+    , time                  >=1.12 && <1.15
 
 test-suite arbiter-migrations-tests
   import:         shared-properties
@@ -64,6 +65,7 @@ test-suite arbiter-migrations-tests
     , aeson                 >=2.0  && <2.3
     , arbiter-core
     , arbiter-migrations
+    , async                 >=2.2  && <2.3
     , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , filepath              >=1.4  && <1.6
