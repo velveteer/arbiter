@@ -19,6 +19,7 @@ module Arbiter.RateLimit
     -- * Policies
   , Policy (..)
   , tokenBucket
+  , policyPrefixOf
 
     -- * Bucket durability
   , Durability (..)
@@ -35,14 +36,22 @@ module Arbiter.RateLimit
   , listRateLimitPolicies
   , listRateLimitBuckets
   , updateRateLimitPolicyOverrides
+  , setRateLimit
+  , clearRateLimit
+
+    -- * Keys
+  , RateLimitKey (..)
   ) where
 
+import Arbiter.Core.Admission (AdmissionPolicy (..))
 import Arbiter.Core.HighLevel
   ( addRateLimitTokens
+  , clearRateLimit
   , listRateLimitBuckets
   , listRateLimitPolicies
   , pruneRateLimitBuckets
   , resetRateLimitBuckets
+  , setRateLimit
   , updateRateLimitPolicyOverrides
   )
 import Arbiter.Core.RateLimit.Spec
@@ -50,6 +59,7 @@ import Arbiter.Core.RateLimit.Spec
   , HasRateLimit (..)
   , Policy (..)
   , RateLimitFor
+  , RateLimitKey (..)
   , chooseWhen
   , globalLimit
   , limitBy

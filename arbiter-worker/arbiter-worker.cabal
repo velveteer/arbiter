@@ -11,9 +11,6 @@ description:
   maintenance, graceful drain, observability callbacks, structured logging, and
   file-based liveness probes.
 
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
-
 license:         MIT
 license-file:    LICENSE
 author:          Joshua Miller

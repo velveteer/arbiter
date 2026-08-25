@@ -2,4 +2,4 @@
 
 Shared integration-test support for Arbiter packages.
 
-See the [Arbiter project documentation](https://github.com/velveteer/arbiter#readme) for installation, setup, and examples.
+See the [Arbiter guide](https://arbiterq.dev/docs/) for installation, setup, and examples.

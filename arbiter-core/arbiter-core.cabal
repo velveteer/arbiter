@@ -11,8 +11,6 @@ description:
   the postgresql-simple, hasql, and Orville packages are built against.
   Application code normally reaches these through "Arbiter.Core.HighLevel", which
   resolves a queue's table name from the registry at compile time.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE

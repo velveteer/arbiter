@@ -29,7 +29,11 @@ module Arbiter.Core.HighLevel
   , getConcurrencyPolicy
   , listConcurrencyKeys
   , updateRateLimitPolicyOverrides
+  , setRateLimit
+  , clearRateLimit
   , updateConcurrencyPolicyOverrides
+  , setConcurrencyLimit
+  , clearConcurrencyLimit
   , pruneConcurrencyKeys
   , reconcileConcurrencyCounts
   , reconcileConcurrencyCountsIfStale
@@ -143,7 +147,7 @@ module Arbiter.Core.HighLevel
 
 import Control.Monad (void, when)
 import Data.Aeson (Value)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -156,7 +160,9 @@ import Data.UUID.Types (UUID)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
-import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate, ConcurrencyPolicyView)
+import Arbiter.Core.Admission (AdmissionPolicy (..))
+import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy)
+import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate (..), ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
 import Arbiter.Core.HighLevel.Runtime
   ( deregisterWorker
@@ -191,8 +197,8 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
-import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
-import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate, RateLimitPolicyView)
+import Arbiter.Core.RateLimit.Spec (Policy (..), RateLimitKey (..))
+import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate (..), RateLimitPolicyView)
 import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Core.Worker (WorkerRow (..))
 
@@ -288,6 +294,26 @@ addRateLimitTokens key amount = withDbTransaction $ do
   Ops.addRateLimitTokens schemaName key amount
   let queues = registryTableNames (Proxy @(RegistryOf m))
   void $ Ops.wakeThrottledJobsForKey schemaName queues key
+
+-- | Override a policy with this shape, until it is cleared. Returns rows affected.
+setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => Policy -> m Int64
+setRateLimit policy =
+  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
+    RateLimitPolicyUpdate
+      { overrideMaxTokens = Just (Just (policyMax policy))
+      , overrideRefillAmount = Just (Just (policyRefill policy))
+      , overrideInterval = Just (Just (realToFrac (policyInterval policy)))
+      }
+
+-- | Drop a policy's overrides, so its declared params apply again. Returns rows affected.
+clearRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => Policy -> m Int64
+clearRateLimit policy =
+  updateRateLimitPolicyOverrides (policyPrefixOf policy) $
+    RateLimitPolicyUpdate
+      { overrideMaxTokens = Just Nothing
+      , overrideRefillAmount = Just Nothing
+      , overrideInterval = Just Nothing
+      }
 
 -- | Delete reclaimable idle (full) buckets. Returns the number pruned. The worker
 -- reaper runs this. A full bucket re-seeds at full on next use, so pruning introduces
@@ -421,6 +447,16 @@ updateConcurrencyPolicyOverrides
 updateConcurrencyPolicyOverrides prefix upd = do
   schemaName <- getSchema
   Ops.updateConcurrencyPolicyOverrides schemaName prefix upd
+
+-- | Override a declared pool's limit for every key under it. Returns rows affected.
+setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> Int32 -> m Int64
+setConcurrencyLimit pool limit =
+  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just (Just limit)))
+
+-- | Drop a pool's override, so its declared limit applies again. Returns rows affected.
+clearConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
+clearConcurrencyLimit pool =
+  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just Nothing))
 
 -- | Delete drained concurrency rows with no live job. The reaper runs this.
 pruneConcurrencyKeys

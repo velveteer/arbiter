@@ -45,12 +45,25 @@ import Arbiter.Core.RateLimit.Stats
   , RateLimitPolicyView (..)
   )
 import Arbiter.Core.Worker (WorkerRow (..))
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, withText, (.!=), (.:), (.:!), (.:?), (.=))
+import Data.Aeson
+  ( FromJSON (..)
+  , ToJSON (..)
+  , Value (Object)
+  , object
+  , withObject
+  , withText
+  , (.!=)
+  , (.:)
+  , (.:!)
+  , (.:?)
+  , (.=)
+  )
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
+import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
 -- | A job in its JSON wire shape.
@@ -222,6 +235,92 @@ data JobsResponse payload = JobsResponse
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | A consumer's request to lease visible jobs.
+data ClaimRequest = ClaimRequest
+  { crMaxJobs :: Maybe Int
+  , crLeaseSeconds :: Maybe Double
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON ClaimRequest where
+  parseJSON = withObject "ClaimRequest" $ \o ->
+    ClaimRequest <$> o .:? "maxJobs" <*> o .:? "leaseSeconds"
+
+instance ToJSON ClaimRequest where
+  toJSON req = object ["maxJobs" .= crMaxJobs req, "leaseSeconds" .= crLeaseSeconds req]
+
+-- | The jobs one claim leased, each carrying the lease its finalize must present.
+newtype ClaimResponse payload = ClaimResponse {claimedJobs :: [ApiJob payload]}
+  deriving stock (Eq, Show)
+
+instance (ToJSON payload) => ToJSON (ClaimResponse payload) where
+  toJSON (ClaimResponse js) = object ["jobs" .= js]
+
+instance (FromJSON payload) => FromJSON (ClaimResponse payload) where
+  parseJSON = withObject "ClaimResponse" $ \o -> ClaimResponse <$> o .: "jobs"
+
+-- | Proof that the caller still holds a claimed job.
+data JobLease = JobLease
+  { jlClaimSeq :: Int64
+  , jlClaimedBy :: UUID
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON JobLease where
+  parseJSON = withObject "JobLease" $ \o ->
+    JobLease <$> o .: "claimSeq" <*> o .: "claimedBy"
+
+-- | Shared JSON field list for a lease. The requests that carry one append their own.
+jobLeasePairs :: JobLease -> [Pair]
+jobLeasePairs lease = ["claimSeq" .= jlClaimSeq lease, "claimedBy" .= jlClaimedBy lease]
+
+instance ToJSON JobLease where
+  toJSON = object . jobLeasePairs
+
+-- | A lease plus the result to store, if the queue keeps one. An absent result
+-- stores nothing, which is what a plain ack does.
+data AckRequest result = AckRequest
+  { arLease :: JobLease
+  , arResult :: Maybe result
+  }
+  deriving stock (Eq, Show)
+
+instance (FromJSON result) => FromJSON (AckRequest result) where
+  parseJSON = withObject "AckRequest" $ \o ->
+    AckRequest <$> parseJSON (Object o) <*> o .:? "result"
+
+instance (ToJSON result) => ToJSON (AckRequest result) where
+  toJSON req = object (jobLeasePairs (arLease req) <> foldMap (\r -> ["result" .= r]) (arResult req))
+
+-- | A lease plus the window to hide the job for, counted from now.
+data ExtendRequest = ExtendRequest
+  { erLease :: JobLease
+  , erSeconds :: Double
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON ExtendRequest where
+  parseJSON = withObject "ExtendRequest" $ \o ->
+    ExtendRequest <$> parseJSON (Object o) <*> o .: "seconds"
+
+instance ToJSON ExtendRequest where
+  toJSON req = object (jobLeasePairs (erLease req) <> ["seconds" .= erSeconds req])
+
+-- | Rows each maintenance operation touched, and the operations that raised. An
+-- operation in neither was skipped.
+data MaintenanceResponse = MaintenanceResponse
+  { maintenanceOps :: Map Text Int64
+  , maintenanceFailed :: [Text]
+  }
+  deriving stock (Eq, Show)
+
+instance ToJSON MaintenanceResponse where
+  toJSON (MaintenanceResponse ops failed) = object ["ops" .= ops, "failed" .= failed]
+
+instance FromJSON MaintenanceResponse where
+  parseJSON = withObject "MaintenanceResponse" $ \o ->
+    MaintenanceResponse <$> o .: "ops" <*> o .:? "failed" .!= []
 
 -- | Response wrapper for DLQ jobs.
 data DLQResponse payload = DLQResponse

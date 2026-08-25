@@ -11,8 +11,6 @@ description:
   fixtures, and the backend-parameterized rate-limit, concurrency, and
   state-machine suites. Useful when implementing a @MonadArbiter@ backend of your
   own.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE

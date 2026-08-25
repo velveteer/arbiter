@@ -2,4 +2,4 @@
 
 Core types, typed queue registries, SQL operations, and backend interfaces for Arbiter.
 
-See the [Arbiter project documentation](https://github.com/velveteer/arbiter#readme) for installation, setup, and examples.
+See the [Arbiter guide](https://arbiterq.dev/docs/) for installation, setup, and examples.

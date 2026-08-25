@@ -10,7 +10,6 @@ module Arbiter.Core.Sql.Claim
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import Data.UUID.Types (UUID)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Admission (effectivePolicyCol)
@@ -18,7 +17,7 @@ import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiter
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (defaultMaxAttempts)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
-import Arbiter.Core.Sql.Jobs (jobColumns, uuidLiteral)
+import Arbiter.Core.Sql.Jobs (jobColumns)
 import Arbiter.Core.Sql.Query (mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
 
@@ -223,10 +222,58 @@ rlSpendCtes buckets =
       |]
 
 -- | Candidate stage one: groups with ready or due work, locked and reduced
--- to each head row.
-groupCandidateCtes :: Text -> Text -> Text -> Text -> Text
-groupCandidateCtes groupsTbl tbl overfetch dma =
-  [text|
+-- to each head row. A gated group is judged on the row its next batch would take,
+-- so a full key cannot hold a slot in the bounded window.
+groupCandidateCtes :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Text
+groupCandidateCtes groupsTbl tbl overfetch dma bs mHeadGate =
+  let claimable =
+        [text|
+          WHERE t.group_key = el.group_key
+            AND NOT t.suspended
+            AND t.cancel_requested_at IS NULL
+            AND (t.not_visible_until IS NULL OR t.not_visible_until <= NOW())
+            AND t.attempts < COALESCE(t.max_attempts, ${dma})
+        |]
+      -- One ordered run of the batch. attempts DESC ranks every retried row ahead
+      -- of every unretried one, so the two runs merged are the batch itself, and
+      -- each run comes from an index instead of a sort over the group.
+      batchRun attemptsPred ordering =
+        [text|
+          SELECT t.concurrency_key, t.claimed_by, t.attempts, t.priority, t.id
+          FROM ${tbl} t
+          ${claimable}
+            AND ${attemptsPred}
+          ORDER BY ${ordering}
+          LIMIT ${bs}
+        |]
+      retriedRun = batchRun "t.attempts > 0" "t.attempts DESC, t.priority ASC, t.id ASC"
+      freshRun = batchRun "t.attempts = 0" "t.priority ASC, t.id ASC"
+      -- The batch grouped_candidates would take, reduced to the row the group cut
+      -- ranks first. A batch yields a claim exactly when that row is admissible.
+      gateLateral =
+        foldMap
+          ( \g ->
+              [text|
+                CROSS JOIN LATERAL (
+                  SELECT b.concurrency_key, b.claimed_by
+                  FROM (
+                    SELECT u.concurrency_key, u.claimed_by, u.priority, u.id
+                    FROM (
+                      (${retriedRun})
+                      UNION ALL
+                      (${freshRun})
+                    ) u
+                    ORDER BY u.attempts DESC, u.priority ASC, u.id ASC
+                    LIMIT ${bs}
+                  ) b
+                  ORDER BY b.priority ASC, b.id ASC
+                  LIMIT 1
+                ) hg
+                WHERE ${g}
+              |]
+          )
+          mHeadGate
+   in [text|
     group_candidates AS (
       (
         SELECT group_key FROM ${groupsTbl}
@@ -257,14 +304,11 @@ groupCandidateCtes groupsTbl tbl overfetch dma =
       CROSS JOIN LATERAL (
         SELECT t.priority AS min_priority, t.id AS min_id
         FROM ${tbl} t
-        WHERE t.group_key = el.group_key
-          AND NOT t.suspended
-          AND t.cancel_requested_at IS NULL
-          AND (t.not_visible_until IS NULL OR t.not_visible_until <= NOW())
-          AND t.attempts < COALESCE(t.max_attempts, ${dma})
+        ${claimable}
         ORDER BY t.priority ASC, t.id ASC
         LIMIT 1
       ) h
+      ${gateLateral}
     )
   |]
 
@@ -384,16 +428,16 @@ lockedCandidateCtes tbl bs dma lockedCols ungroupedLimit =
     )
   |]
 
--- | Ungrouped-pool concurrency headroom pre-filter. Keeps a full key off the
--- bounded candidate window.
-ungroupedConcGate :: Text -> Text -> Text
-ungroupedConcGate concTbl concPolicies =
+-- | Concurrency headroom over a candidate row alias. Keeps a full key off the
+-- bounded candidate window, in the ungrouped pool and at each group's head.
+concHeadroomPred :: Text -> Text -> Text -> Text
+concHeadroomPred concTbl concPolicies a =
   let effLimit = effectivePolicyCol "p" "limit"
    in [text|
-        AND (j.claimed_by IS NOT NULL OR j.concurrency_key IS NULL OR EXISTS (
+        (${a}.claimed_by IS NOT NULL OR ${a}.concurrency_key IS NULL OR EXISTS (
           SELECT 1 FROM ${concTbl} c
           LEFT JOIN ${concPolicies} p ON p.prefix_id = c.concurrency_prefix
-          WHERE c.concurrency_key = j.concurrency_key
+          WHERE c.concurrency_key = ${a}.concurrency_key
             AND (${effLimit} IS NULL
                  OR c.in_flight < ${effLimit})
         ))
@@ -467,8 +511,8 @@ decisionCte admission =
 -- | The @claimed@ UPDATE. Rate limiting splits it into an admit/defer decision.
 -- Without it, a straight claim of the admitted ids. A defer clears the holder, so it
 -- moves the token too.
-claimedCte :: ClaimAdmission -> Text -> Text -> Text -> Text
-claimedCte admission tbl timeout claimedBy
+claimedCte :: ClaimAdmission -> Text -> Text -> Text
+claimedCte admission tbl timeout
   | admitRateLimited admission =
       [text|
         claimed AS (
@@ -492,7 +536,7 @@ claimedCte admission tbl timeout claimedBy
                 ELSE dc._defer
               END,
               claimed_by =
-                (CASE WHEN dc._admit THEN ${claimedBy} ELSE NULL END)::uuid
+                (CASE WHEN dc._admit THEN ?::uuid ELSE NULL END)::uuid
           FROM decision dc
           WHERE j.id = dc.id
           RETURNING j.*, dc._admit
@@ -507,7 +551,7 @@ claimedCte admission tbl timeout claimedBy
               claim_seq = j.claim_seq + 1,
               last_attempted_at = NOW(),
               updated_at = NOW(),
-              claimed_by = ${claimedBy}
+              claimed_by = ?::uuid
           FROM admitted a
           WHERE j.id = a.id
           RETURNING j.*
@@ -516,8 +560,8 @@ claimedCte admission tbl timeout claimedBy
 
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
 -- any unsuspended visible job, rollup children and woken rollup parents included.
-claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> Maybe UUID -> Text
-claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds mWorkerId =
+claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> Text
+claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
       buckets = arbiterRateLimitsTable schema
@@ -530,17 +574,18 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       timeout = T.pack (show (realToFrac timeoutSeconds :: Double))
       ungroupedLimit = T.pack (show (maxBatches * batchSize))
       overfetch = T.pack (show (maxBatches * 10))
-      claimedBy = uuidLiteral mWorkerId
       dma = T.pack (show defaultMaxAttempts)
       hasRateLimit = admitRateLimited admission
       hasConcurrency = admitConcurrent admission
-      ccGate = mwhen hasConcurrency (ungroupedConcGate concTbl concPolicies)
+      concHeadroom = concHeadroomPred concTbl concPolicies
+      ccGate = mwhen hasConcurrency ("AND " <> concHeadroom "j")
+      headGate = if hasConcurrency then Just (concHeadroom "hg") else Nothing
       admitFilter = mwhen hasRateLimit " WHERE _admit"
       -- Gate CTEs render only when the payload declares that kind of policy. cteList
       -- stitches the non-empty ones, so no fragment carries a trailing comma.
       withCtes =
         cteList
-          [ groupCandidateCtes groupsTbl tbl overfetch dma
+          [ groupCandidateCtes groupsTbl tbl overfetch dma bs headGate
           , ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate
           , allocatedSlotCtes mb
           , lockedCandidateCtes tbl bs dma (lockedColumns admission) ungroupedLimit
@@ -549,7 +594,7 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
           , admittedCte admission
           , mwhen hasRateLimit (rlSpendCtes buckets)
           , decisionCte admission
-          , claimedCte admission tbl timeout claimedBy
+          , claimedCte admission tbl timeout
           ]
    in [text|
         WITH

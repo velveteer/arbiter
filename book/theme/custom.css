@@ -1,0 +1,356 @@
+/* Arbiter theme: typography and brand for the mdBook guide.
+   Structure applies to every theme, colour only to navy (the default). */
+:root {
+  --content-max-width: 780px;
+  --page-padding: 20px;
+  --code-font-size: 0.86em;
+  --arb-prose: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+}
+
+html {
+  font-family: var(--arb-prose);
+  -webkit-font-smoothing: antialiased;
+}
+
+body { font-size: 1.65rem; }
+
+/* Header: the mark replaces the book title. */
+.menu-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0;
+  line-height: 1;
+  opacity: 1;
+}
+
+.menu-title::before {
+  content: "";
+  width: 30px;
+  height: 30px;
+  background: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%20width=%2232%22%20height=%2232%22%20shape-rendering=%22geometricPrecision%22%20role=%22img%22%20aria-label=%22Arbiter%22%3E%3Cpath%20d=%22M%2016%205.0%20L%2024.0%2010.5%20L%2024.0%2022.5%20L%2016%2027.0%20L%208.0%2022.5%20L%208.0%2010.5%20Z%22%20fill=%22%2312203a%22/%3E%3Cpolygon%20points=%228.00,10.50%2010.04,10.50%2010.04,22.50%208.00,22.50%22%20fill=%22%23a5f3fc%22/%3E%3Cpolygon%20points=%228.00,10.50%2010.04,10.50%2016,5.00%22%20fill=%22%23a5f3fc%22/%3E%3Cpolygon%20points=%228.00,22.50%2010.04,22.50%2016,27.00%22%20fill=%22%236de6fb%22/%3E%3Cpolygon%20points=%2210.54,10.50%2012.32,10.50%2012.32,22.50%2010.54,22.50%22%20fill=%22%236de6fb%22/%3E%3Cpolygon%20points=%2210.54,10.50%2012.32,10.50%2016,5.00%22%20fill=%22%23a5f3fc%22/%3E%3Cpolygon%20points=%2210.54,22.50%2012.32,22.50%2016,27.00%22%20fill=%22%233bd5f4%22/%3E%3Cpolygon%20points=%2212.82,10.50%2014.61,10.50%2014.61,22.50%2012.82,22.50%22%20fill=%22%233bd5f4%22/%3E%3Cpolygon%20points=%2212.82,10.50%2014.61,10.50%2016,5.00%22%20fill=%22%236de6fb%22/%3E%3Cpolygon%20points=%2212.82,22.50%2014.61,22.50%2016,27.00%22%20fill=%22%230cbbdb%22/%3E%3Cpolygon%20points=%2215.11,10.50%2016.89,10.50%2016.89,22.50%2015.11,22.50%22%20fill=%22%230cbbdb%22/%3E%3Cpolygon%20points=%2215.11,10.50%2016.89,10.50%2016,5.00%22%20fill=%22%233bd5f4%22/%3E%3Cpolygon%20points=%2215.11,22.50%2016.89,22.50%2016,27.00%22%20fill=%22%231085a5%22/%3E%3Cpolygon%20points=%2217.39,10.50%2019.18,10.50%2019.18,22.50%2017.39,22.50%22%20fill=%22%230599b2%22/%3E%3Cpolygon%20points=%2217.39,10.50%2019.18,10.50%2016,5.00%22%20fill=%22%2312c9e5%22/%3E%3Cpolygon%20points=%2217.39,22.50%2019.18,22.50%2016,27.00%22%20fill=%22%232a69c2%22/%3E%3Cpolygon%20points=%2219.68,10.50%2021.46,10.50%2021.46,22.50%2019.68,22.50%22%20fill=%22%232a69c2%22/%3E%3Cpolygon%20points=%2219.68,10.50%2021.46,10.50%2016,5.00%22%20fill=%22%230599b2%22/%3E%3Cpolygon%20points=%2219.68,22.50%2021.46,22.50%2016,27.00%22%20fill=%22%235b21b6%22/%3E%3Cpolygon%20points=%2221.96,10.50%2024.00,10.50%2024.00,22.50%2021.96,22.50%22%20fill=%22%235b21b6%22/%3E%3Cpolygon%20points=%2221.96,10.50%2024.00,10.50%2016,5.00%22%20fill=%22%232a69c2%22/%3E%3Cpolygon%20points=%2221.96,22.50%2024.00,22.50%2016,27.00%22%20fill=%22%235b21b6%22/%3E%3C/svg%3E") center / contain no-repeat;
+  filter: drop-shadow(0 0 9px rgba(34, 211, 238, 0.28));
+}
+
+/* Prose rhythm. */
+.content main {
+  padding-top: 3.6rem;
+  padding-bottom: 8rem;
+}
+
+.content p,
+.content li { line-height: 1.72; }
+
+.content p,
+.content ul,
+.content ol { margin: 0 0 1.6rem; }
+
+.content li + li { margin-top: 0.5rem; }
+
+.content h1,
+.content h2,
+.content h3,
+.content h4 { scroll-margin-top: 6rem; }
+
+.content h1 {
+  font-size: 3.1rem;
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
+  margin: 0 0 2.6rem;
+}
+
+.content h2 {
+  font-size: 2.05rem;
+  font-weight: 650;
+  letter-spacing: -0.016em;
+  margin: 4.4rem 0 1.6rem;
+  padding-bottom: 0.7rem;
+}
+
+.content h3 {
+  font-size: 1.7rem;
+  font-weight: 650;
+  letter-spacing: -0.008em;
+  margin: 3.2rem 0 1.2rem;
+}
+
+.content h4 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 2.6rem 0 1rem;
+}
+
+/* Code. */
+.content pre {
+  padding: 1.3rem 1.5rem;
+  border-radius: 8px;
+  line-height: 1.6;
+}
+
+.content pre > code { font-size: 1.36rem; }
+
+.content :not(pre) > code {
+  padding: 0.1em 0.38em;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-size: 0.86em;
+}
+
+/* Links carry the underline, code carries the chip. A link wrapping code reads
+   as one link, not as both. */
+.content a:not(.header) {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.19em;
+}
+
+.content a:not(.header):hover { text-decoration-thickness: 2px; }
+
+.content a:not(.header) > code { padding: 0; }
+
+/* Tables. */
+.content table { margin: 0 0 2rem; }
+
+.content table td,
+.content table th { padding: 0.7rem 1.1rem; }
+
+.content table th {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* Blockquotes and alert callouts. */
+.content blockquote {
+  margin: 2rem 0;
+  padding: 1.2rem 1.6rem;
+  border-radius: 0 6px 6px 0;
+  border-left-width: 3px;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.content blockquote p:last-child { margin-bottom: 0; }
+
+.content blockquote.alert { border-left-color: var(--alert-accent); }
+
+.alert-label {
+  margin: 0 0 0.6rem;
+  font-size: 1.3rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: var(--alert-accent);
+}
+
+.alert-label::before {
+  content: "";
+  display: inline-block;
+  width: 1.4rem;
+  height: 1.4rem;
+  margin-right: 0.7rem;
+  vertical-align: -0.2rem;
+  background-color: var(--alert-accent);
+  -webkit-mask: var(--alert-icon) center / contain no-repeat;
+  mask: var(--alert-icon) center / contain no-repeat;
+}
+
+.content blockquote.alert-note {
+  --alert-accent: #22d3ee;
+  --alert-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 0a8 8 0 100 16A8 8 0 008 0zm.75 4.25a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM7 7h1.75v5.25H7z'/%3E%3C/svg%3E");
+}
+
+.content blockquote.alert-tip {
+  --alert-accent: #34d399;
+  --alert-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 0a5 5 0 00-3 9v2h6V9a5 5 0 00-3-9zM5.5 13h5v1h-5z'/%3E%3C/svg%3E");
+}
+
+.content blockquote.alert-important {
+  --alert-accent: #a78bfa;
+  --alert-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 1h13a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0114.5 12H8l-4 3v-3H1.5A1.5 1.5 0 010 10.5v-8A1.5 1.5 0 011.5 1zM7.25 3v4.5h1.5V3zm0 6v1.5h1.5V9z'/%3E%3C/svg%3E");
+}
+
+.content blockquote.alert-warning {
+  --alert-accent: #fbbf24;
+  --alert-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8.9 1.5a1 1 0 00-1.8 0L.2 14a1 1 0 00.9 1.5h13.8A1 1 0 0015.8 14zM7.25 5.5h1.5V10h-1.5zm0 6h1.5V13h-1.5z'/%3E%3C/svg%3E");
+}
+
+.content blockquote.alert-caution {
+  --alert-accent: #fb7185;
+  --alert-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.7 0h6.6L16 4.7v6.6L11.3 16H4.7L0 11.3V4.7zm2.55 3.5V9h1.5V3.5zm0 7V12h1.5v-1.5z'/%3E%3C/svg%3E");
+}
+
+/* Sidebar. */
+.sidebar { font-size: 1.4rem; }
+
+.sidebar .sidebar-scrollbox { padding: 1.4rem 1rem; }
+
+.chapter li.chapter-item {
+  line-height: 1.5;
+  margin: 0.2rem 0;
+}
+
+.chapter li a {
+  padding: 0.45rem 0.8rem;
+  border-radius: 5px;
+}
+
+.chapter li a strong { display: none; }
+
+.sidebar .part-title {
+  margin: 2.4rem 0 0.6rem;
+  padding: 0 0.8rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+/* Navy palette. */
+.navy {
+  --bg: #0f1320;
+  --fg: #dbe3ee;
+
+  --sidebar-bg: #0b0e18;
+  --sidebar-fg: #93a3b8;
+  --sidebar-non-existant: #475569;
+  --sidebar-active: #22d3ee;
+  --sidebar-spacer: #1b2436;
+
+  --scrollbar: #2b3a55;
+
+  --icons: #64748b;
+  --icons-hover: #22d3ee;
+
+  --links: #22d3ee;
+
+  --inline-code-color: #c4b5fd;
+
+  --theme-popup-bg: #0b0e18;
+  --theme-popup-border: #1e293b;
+  --theme-hover: #182135;
+
+  --quote-bg: #131a2b;
+  --quote-border: #0891b2;
+
+  --table-border-color: #1e293b;
+  --table-header-bg: #182135;
+  --table-alternate-bg: #131a2b;
+
+  --searchbar-border-color: #1e293b;
+  --searchbar-bg: #131a2b;
+  --searchbar-fg: #e2e8f0;
+  --searchbar-shadow-color: #0891b2;
+  --searchresults-header-fg: #94a3b8;
+  --searchresults-border-color: #1e293b;
+  --searchresults-li-hover-bg: #182135;
+  --search-mark-bg: #0891b2;
+}
+
+.navy #menu-bar {
+  border-bottom: 1px solid #1b2436;
+}
+
+.navy .content h1,
+.navy .content h1 .header:link,
+.navy .content h1 .header:visited { color: #f4f8fc; }
+
+.navy .content h2,
+.navy .content h2 .header:link,
+.navy .content h2 .header:visited { color: #e6edf6; }
+
+.navy .content h2 { border-bottom: 1px solid #1b2436; }
+
+.navy .content h3,
+.navy .content h3 .header:link,
+.navy .content h3 .header:visited { color: #c7d2e0; }
+
+.navy .content pre {
+  background: #0b0e18;
+  border: 1px solid #1b2436;
+}
+
+.navy .content pre > code,
+.navy .content pre > code.hljs { background: transparent; }
+
+.navy .content :not(pre) > code {
+  background: rgba(124, 58, 237, 0.16);
+  border-color: rgba(124, 58, 237, 0.42);
+}
+
+.navy .content a:not(.header) > code {
+  color: inherit;
+  background: none;
+  border-color: transparent;
+}
+
+.navy .content a:not(.header) { text-decoration-color: rgba(34, 211, 238, 0.5); }
+
+.navy .content a:not(.header):hover { text-decoration-color: #22d3ee; }
+
+.navy .content table th { color: #cbd5e1; }
+
+.navy .chapter li a:hover { background: #131a2b; }
+
+.navy .chapter li a.active { background: rgba(34, 211, 238, 0.08); }
+
+.navy .sidebar .part-title { color: #5c6b82; }
+
+.navy .nav-chapters { color: #3f4c63; }
+
+.navy .nav-chapters:hover { color: #22d3ee; }
+
+/* Inline diagrams. */
+.arb-diagram {
+  display: block;
+  width: 100%;
+  max-width: 700px;
+  height: auto;
+  margin: 2.4rem auto 3rem;
+  color: var(--fg);
+  font-family: var(--arb-prose);
+}
+
+.arb-diagram .arb-node rect {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  opacity: 0.55;
+}
+
+.arb-diagram .arb-node text {
+  fill: currentColor;
+  font-size: 15px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+.arb-diagram .arb-sub {
+  font-size: 12.5px;
+  font-weight: 400;
+  opacity: 0.66;
+}
+
+.arb-diagram .arb-edge path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  opacity: 0.5;
+}
+
+.arb-diagram .arb-edge text {
+  fill: currentColor;
+  font-size: 12.5px;
+  text-anchor: middle;
+  opacity: 0.75;
+}
+
+.navy .arb-diagram .arb-active rect {
+  stroke: #22d3ee;
+  opacity: 1;
+  fill: rgba(34, 211, 238, 0.07);
+}
+
+.navy .arb-diagram .arb-active text { fill: #e6f9ff; }
+
+.navy .arb-diagram .arb-terminal rect { stroke: #fb7185; opacity: 0.85; }

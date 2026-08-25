@@ -5,6 +5,7 @@ module Arbiter.Core.Operations.Workers
   , setWorkerPaused
   , markWorkerShuttingDown
   , deregisterWorker
+  , workerRegistered
   , listWorkers
   , sweepStaleWorkers
   ) where
@@ -59,6 +60,11 @@ markWorkerShuttingDown schema workerId =
 deregisterWorker :: (MonadArbiter m) => SchemaName -> UUID -> m Int64
 deregisterWorker schema workerId =
   MA.executeStatement (Sql.deleteWorkerSQL schema workerId)
+
+-- | Whether the worker registry holds this identity.
+workerRegistered :: (MonadArbiter m) => SchemaName -> UUID -> m Bool
+workerRegistered schema workerId =
+  or <$> MA.executeQuery (Sql.workerRegisteredSQL schema workerId)
 
 -- | List workers, optionally filtered by queue and heartbeat age.
 listWorkers

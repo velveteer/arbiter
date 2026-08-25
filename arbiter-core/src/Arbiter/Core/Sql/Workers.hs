@@ -10,6 +10,7 @@ module Arbiter.Core.Sql.Workers
   , setWorkerPausedSQL
   , markWorkerShuttingDownSQL
   , deleteWorkerSQL
+  , workerRegisteredSQL
   , listWorkersSQL
   , deleteStaleWorkersSQL
   ) where
@@ -62,6 +63,14 @@ upsertWorkerSQL schemaName workerId queue host threads staleThreshold metadata =
         SELECT u.paused OR COALESCE(qm.paused, FALSE) AS @{effective_paused :: CBool}
         FROM upserted u
         LEFT JOIN ${qmTbl} qm ON qm.queue_name = u.queue_name
+      |]
+
+-- | Whether the worker registry holds this identity.
+workerRegisteredSQL :: SchemaName -> UUID -> Query Bool
+workerRegisteredSQL schemaName workerId =
+  let tbl = arbiterWorkersTable schemaName
+   in [sql|
+        SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE worker_id = #{workerId :: CUuid}) AS @{registered :: CBool}
       |]
 
 -- | Bump last_heartbeat and return the worker's effective paused state (worker OR queue).

@@ -15,6 +15,7 @@ module Arbiter.Servant.API
   , ArchiveAPI (..)
   , StatsAPI (..)
   , QueuesAPI (..)
+  , MaintenanceAPI (..)
   , EventsAPI
   , CronAPI (..)
   , WorkersAPI (..)
@@ -24,7 +25,7 @@ module Arbiter.Servant.API
   ) where
 
 import Arbiter.Core.Job.Types (JobStatus, jobStatusToText)
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload, SpecResult)
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
   , DLQSortColumn
@@ -85,7 +86,7 @@ instance ToHttpApiData JobStatus where
   toUrlPiece = jobStatusToText
 
 -- | One queue's job routes.
-data JobsAPI payload mode = JobsAPI
+data JobsAPI payload result mode = JobsAPI
   { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&sort_by=...&sort_dir=...
     listJobs
       :: mode
@@ -125,6 +126,27 @@ data JobsAPI payload mode = JobsAPI
       :: mode
         :- Capture "id" Int64
           :> "force-cancel"
+          :> PostNoContent
+  , -- POST /:table/jobs/:id/ack (complete a job this caller holds)
+    ackClaimedJob
+      :: mode
+        :- Capture "id" Int64
+          :> "ack"
+          :> ReqBody '[JSON] (AckRequest result)
+          :> PostNoContent
+  , -- POST /:table/jobs/:id/nack (hand back a job this caller holds)
+    nackClaimedJob
+      :: mode
+        :- Capture "id" Int64
+          :> "nack"
+          :> ReqBody '[JSON] JobLease
+          :> PostNoContent
+  , -- POST /:table/jobs/:id/extend (push out the lease this caller holds)
+    extendClaimedJob
+      :: mode
+        :- Capture "id" Int64
+          :> "extend"
+          :> ReqBody '[JSON] ExtendRequest
           :> PostNoContent
   , -- POST /:table/jobs/:id/promote
     promoteJob
@@ -240,9 +262,24 @@ data StatsAPI mode = StatsAPI
   }
   deriving stock (Generic)
 
+-- | Schema-wide maintenance, the work a running worker pool would otherwise do.
+newtype MaintenanceAPI mode = MaintenanceAPI
+  { -- POST /maintenance (run one gated maintenance pass)
+    runMaintenance
+      :: mode
+        :- Post '[JSON] MaintenanceResponse
+  }
+  deriving stock (Generic)
+
 -- | One queue's routes.
-data TableAPI payload mode = TableAPI
-  { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload)
+data TableAPI payload result mode = TableAPI
+  { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload result)
+  , -- POST /:table/claim (lease visible jobs)
+    claimJobs
+      :: mode
+        :- "claim"
+          :> ReqBody '[JSON] ClaimRequest
+          :> Post '[JSON] (ClaimResponse payload)
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
@@ -411,6 +448,7 @@ data HealthAPI mode = HealthAPI
 -- | Shared top-level routes appended after the per-table routes.
 type SharedAPI =
   "queues" :> NamedRoutes QueuesAPI
+    :<|> "maintenance" :> NamedRoutes MaintenanceAPI
     :<|> "events" :> EventsAPI
     :<|> "cron" :> NamedRoutes CronAPI
     :<|> "workers" :> NamedRoutes WorkersAPI
@@ -423,9 +461,10 @@ type SharedAPI =
 type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
   RegistryToAPI '[] = SharedAPI
   RegistryToAPI (spec ': '[]) =
-    SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec)) :<|> SharedAPI
+    SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)) :<|> SharedAPI
   RegistryToAPI (spec ': rest) =
-    (SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec))) :<|> RegistryToAPI rest
+    (SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)))
+      :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
 -- prefix is generated from the registry. See 'RegistryToAPI' for the shape.

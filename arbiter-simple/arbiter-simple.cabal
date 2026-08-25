@@ -9,8 +9,6 @@ description:
   with savepoint-based nested transactions so a handler's own database work
   commits together with the job's completion. Handlers receive the connection the
   job was claimed on.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE

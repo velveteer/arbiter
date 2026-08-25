@@ -10,9 +10,6 @@ description:
   backend can be checked against the same behavior the shipped backends are held
   to. Requires a live PostgreSQL database.
 
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
-
 license:         MIT
 license-file:    LICENSE
 author:          Joshua Miller

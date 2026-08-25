@@ -57,6 +57,12 @@ jobs:
           mv haddocks/index.html haddocks/packages.html
           cp -r site/. haddocks/
 
+      - name: Build the guide
+        run: |
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./mdbook build book
+          cp -r book/book haddocks/docs
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

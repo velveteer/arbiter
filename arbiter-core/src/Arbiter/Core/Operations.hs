@@ -163,6 +163,7 @@ module Arbiter.Core.Operations
   , setWorkerPaused
   , markWorkerShuttingDown
   , deregisterWorker
+  , workerRegistered
   , listWorkers
   , sweepStaleWorkers
 
@@ -223,6 +224,7 @@ import Arbiter.Core.Codec
   , jobCodec
   , jobRowCodec
   , ncol
+  , pnul
   )
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyKey (..)
@@ -282,6 +284,7 @@ import Arbiter.Core.Operations.Workers
   , registerWorker
   , setWorkerPaused
   , sweepStaleWorkers
+  , workerRegistered
   )
 import Arbiter.Core.Queues (QueueRow)
 import Arbiter.Core.RateLimit.Spec
@@ -831,6 +834,9 @@ claimJobs schemaName tableName maxJobs timeout mWorkerId =
 data ClaimSql = ClaimSql
   { claimSqlTable :: TableName
   , claimSqlBatchSize :: Int
+  , claimSqlClaimant :: Maybe UUID
+  -- ^ Bound as the claim's @claimed_by@, so one rendered statement serves every
+  -- claimant instead of a statement per UUID.
   , claimSqlFor :: Int -> Text
   }
 
@@ -849,13 +855,22 @@ mkClaimSql
   -> ClaimSql
 mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
   let admission = claimAdmissionFor @payload
-      render n = Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout mWorkerId
+      render n = Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout
       cache = IntMap.fromList [(n, render n) | n <- [1 .. poolSize]]
    in ClaimSql
         { claimSqlTable = tableName
         , claimSqlBatchSize = batchSize
+        , claimSqlClaimant = mWorkerId
         , claimSqlFor = \n -> IntMap.findWithDefault (render n) n cache
         }
+
+-- | A claim statement for @n@ rows, with the claimant bound rather than rendered.
+claimQuery :: ClaimSql -> Int -> Q.Query (JobRead Value)
+claimQuery cs n =
+  Q.Query
+    (claimSqlFor cs n)
+    [pnul CUuid (claimSqlClaimant cs)]
+    (jobRowCodec (claimSqlTable cs))
 
 -- | 'claimJobs' over a prebuilt 'ClaimSql'.
 claimJobsCached
@@ -865,7 +880,7 @@ claimJobsCached
   -> Int
   -> m [JobRead payload]
 claimJobsCached cs maxJobs = withDbTransaction $ do
-  rawJobs <- MA.executeQueryPrepared (Q.rawRows (jobRowCodec (claimSqlTable cs)) (claimSqlFor cs maxJobs))
+  rawJobs <- MA.executeQueryPrepared (claimQuery cs maxJobs)
   traverse decodePayload rawJobs
 
 -- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each of @maxBatches@
@@ -906,7 +921,7 @@ claimJobsBatchedCached cs maxBatches
   | claimSqlBatchSize cs < 1 = pure []
   | maxBatches < 1 = pure []
   | otherwise = withDbTransaction $ do
-      rawJobs <- MA.executeQueryPrepared (Q.rawRows (jobRowCodec (claimSqlTable cs)) (claimSqlFor cs maxBatches))
+      rawJobs <- MA.executeQueryPrepared (claimQuery cs maxBatches)
       jobs <- traverse decodePayload rawJobs
       let sorted = sortOn groupKey jobs
           groups = groupBy (\j1 j2 -> groupKey j1 == groupKey j2) sorted

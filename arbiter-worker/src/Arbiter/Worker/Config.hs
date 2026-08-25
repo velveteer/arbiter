@@ -137,6 +137,10 @@ data WorkerConfig m payload = WorkerConfig
   -- the @cron_schedules@ table each tick for runtime overrides. Default: @[]@.
   , reaperInterval :: NominalDiffTime
   -- ^ How often the reaper runs. Default: @300@ (5 minutes).
+  , reaperSparseInterval :: NominalDiffTime
+  -- ^ How often the reaper runs an operation that scans the whole schema. Default: @3600@ (1 hour).
+  , reaperBucketIdle :: NominalDiffTime
+  -- ^ Idle age at which the reaper prunes a rate-limit bucket. Default: @300@ (5 minutes).
   , reaperTimeout :: NominalDiffTime
   -- ^ Abort any single reaper statement that runs longer than this. Default: @300@ (5 minutes).
   , workerId :: UUID
@@ -246,6 +250,8 @@ fieldInvariants config =
     <*> waived (logConfig config)
     <*> waived (cronJobs config)
     <*> positive "reaperInterval" (reaperInterval config)
+    <*> positive "reaperSparseInterval" (reaperSparseInterval config)
+    <*> positive "reaperBucketIdle" (reaperBucketIdle config)
     <*> positive "reaperTimeout" (reaperTimeout config)
     <*> waived (workerId config)
     <*> waived (workerHost config)
@@ -384,6 +390,8 @@ mkDefaultConfig workerCnt mode = do
       , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
       , reaperInterval = 300
+      , reaperSparseInterval = 3600
+      , reaperBucketIdle = 300
       , reaperTimeout = 300
       , workerId = uuid
       , workerHost = Just (T.pack host)

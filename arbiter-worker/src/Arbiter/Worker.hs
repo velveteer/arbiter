@@ -12,6 +12,8 @@ module Arbiter.Worker
   , childResults
   , mergedChildResults
   , mergeChildResults
+  , storeJobResult
+  , storeEncodedResult
 
     -- * Configuration and logging
   , module Arbiter.Worker.Config
@@ -20,6 +22,8 @@ module Arbiter.Worker
   , module Arbiter.Worker.WorkerState
 
     -- * Reaper
+  , runMaintenancePass
+  , MaintenancePace (..)
   , runReaperOp
 
     -- * Cron
@@ -57,5 +61,6 @@ import Arbiter.Worker.EnabledQueues (getEnabledQueues)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.MultiQueue
 import Arbiter.Worker.Pool (runReaperOp, runWorkerPool)
-import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults)
+import Arbiter.Worker.Reaper (MaintenancePace (..), runMaintenancePass)
+import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults, storeEncodedResult, storeJobResult)
 import Arbiter.Worker.WorkerState

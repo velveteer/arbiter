@@ -19,6 +19,7 @@ module Arbiter.Concurrency
     -- * Pools
   , ConcurrencyPolicy
   , concurrencyPool
+  , policyPrefixOf
 
     -- * Management and observability views
   , ConcurrencyPolicyView (..)
@@ -27,12 +28,15 @@ module Arbiter.Concurrency
 
     -- * Operations
   , updateConcurrencyPolicyOverrides
+  , setConcurrencyLimit
+  , clearConcurrencyLimit
   , pruneConcurrencyKeys
   , reconcileConcurrencyCounts
   , listConcurrencyPolicies
   , listConcurrencyKeys
   ) where
 
+import Arbiter.Core.Admission (AdmissionPolicy (..))
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyFor
   , ConcurrencyPolicy
@@ -50,9 +54,11 @@ import Arbiter.Core.Concurrency.Stats
   , ConcurrencyPolicyView (..)
   )
 import Arbiter.Core.HighLevel
-  ( listConcurrencyKeys
+  ( clearConcurrencyLimit
+  , listConcurrencyKeys
   , listConcurrencyPolicies
   , pruneConcurrencyKeys
   , reconcileConcurrencyCounts
+  , setConcurrencyLimit
   , updateConcurrencyPolicyOverrides
   )

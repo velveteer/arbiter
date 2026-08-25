@@ -2,4 +2,4 @@
 
 Reusable conformance tests for Arbiter worker backends.
 
-See the [Arbiter project documentation](https://github.com/velveteer/arbiter#readme) for installation, setup, and examples.
+See the [Arbiter guide](https://arbiterq.dev/docs/) for installation, setup, and examples.

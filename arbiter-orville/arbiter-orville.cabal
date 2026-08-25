@@ -12,9 +12,6 @@ description:
   managing. Unlike arbiter-simple and arbiter-hasql, this package ships no
   instance of its own.
 
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
-
 license:         MIT
 license-file:    LICENSE
 author:          Joshua Miller

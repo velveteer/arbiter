@@ -5,6 +5,8 @@
 -- | Schema-wide maintenance coordinated across worker pools.
 module Arbiter.Worker.Reaper
   ( reaperLoop
+  , runMaintenancePass
+  , MaintenancePace (..)
   , runReaperOp
   ) where
 
@@ -15,16 +17,17 @@ import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
-import Control.Monad (forever, when)
+import Control.Monad (forever, void, when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Foldable (fold, traverse_)
 import Data.Int (Int64)
+import Data.Maybe (catMaybes)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, tryAny)
+import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 import UnliftIO.Concurrent (threadDelay)
 
 import Arbiter.Worker.Config (MaintenanceOp (..), maintenanceOpName)
@@ -41,61 +44,98 @@ reaperLoop
      )
   => LogConfig
   -> (MaintenanceOp -> Int64 -> m ())
-  -> NominalDiffTime
+  -> MaintenancePace
   -> NominalDiffTime
   -> m ()
-reaperLoop logCfg report interval stmtTimeout = do
+reaperLoop logCfg report pace stmtTimeout =
+  forever $ do
+    void $ runMaintenancePass logCfg report pace stmtTimeout
+    threadDelay (ceiling (paceWindow pace) * 1_000_000)
+
+-- | Gaps a caller holds between runs of each kind of work. A zero gap runs it every pass.
+data MaintenancePace = MaintenancePace
+  { paceWindow :: NominalDiffTime
+  -- ^ Gap between runs of one ordinary operation.
+  , paceSparseWindow :: NominalDiffTime
+  -- ^ Gap between runs of one whole-schema operation.
+  , paceBucketIdle :: NominalDiffTime
+  -- ^ Idle age at which a prune collects a rate-limit bucket.
+  }
+  deriving stock (Eq, Show)
+
+-- | One pass of the maintenance the reaper runs, with each operation independently
+-- gated across all callers. An operation whose window has not elapsed is skipped.
+-- Returns the operations that failed, which never stop the pass.
+runMaintenancePass
+  :: forall m
+   . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
+     , MonadArbiter m
+     , RegistryTables (RegistryOf m)
+     )
+  => LogConfig
+  -> (MaintenanceOp -> Int64 -> m ())
+  -> MaintenancePace
+  -> NominalDiffTime
+  -> m [MaintenanceOp]
+runMaintenancePass logCfg report pace stmtTimeout = do
   let reaped op n = runHook logCfg "onMaintenance" $ report op n
-      intervalMicros = ceiling interval * 1_000_000
       queues = registryTableNames (Proxy @(RegistryOf m))
-      pruneInterval = interval * 12
+      window = paceWindow pace
+      sparseWindow = paceSparseWindow pace
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schema <- Arb.getSchema
   let gatedCount op every work =
-        runReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
-          >>= traverse_ (reaped op)
+        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
+          >>= reportOutcome op (traverse_ (reaped op))
       reportFailed op =
         traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName op <> " failed for queue: " <> queue)
       reportSwept op done =
         traverse_ (\(n, failed) -> reaped op n >> reportFailed op failed >> when (n > 0) (done n))
       sweep op every done work =
-        runReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
-          >>= reportSwept op done
+        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
+          >>= reportOutcome op (reportSwept op done)
       refreshGroups =
         runReaperStateOp
           logCfg
           schema
           stmtTimeout
           (maintenanceOpName RefreshGroups)
-          interval
+          window
           (Ops.refreshAllGroups schema queues . fold)
-          >>= reportSwept RefreshGroups (const (pure ()))
-  forever $ do
-    refreshGroups
-    gatedCount SweepStaleWorkers interval $ Ops.sweepStaleWorkers schema
-    sweep
-      SweepExhaustedJobs
-      interval
-      (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
-      $ Ops.sweepExhaustedJobs schema queues
-    sweep
-      SweepCancelledJobs
-      interval
-      (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
-      $ Ops.sweepCancelledJobs schema queues
-    when hasRateLimit
-      $ gatedCount PruneRateLimitBuckets pruneInterval
-      $ Arb.pruneRateLimitBuckets @m interval
-    when hasConcurrency $ do
-      gatedCount ReconcileConcurrencyStale interval $ Arb.reconcileConcurrencyCountsIfStale @m
-      gatedCount ReconcilePruneConcurrency pruneInterval $ Arb.reconcileAndPruneConcurrency @m
-    sweep
-      PurgeArchives
-      interval
-      (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
-      $ Ops.purgeArchives schema queues
-    threadDelay intervalMicros
+          >>= reportOutcome RefreshGroups (reportSwept RefreshGroups (const (pure ())))
+  fmap catMaybes . sequence $
+    [ refreshGroups
+    , gatedCount SweepStaleWorkers window $ Ops.sweepStaleWorkers schema
+    , sweep
+        SweepExhaustedJobs
+        window
+        (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
+        $ Ops.sweepExhaustedJobs schema queues
+    , sweep
+        SweepCancelledJobs
+        window
+        (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
+        $ Ops.sweepCancelledJobs schema queues
+    ]
+      <> [gatedCount PruneRateLimitBuckets sparseWindow (Arb.pruneRateLimitBuckets @m (paceBucketIdle pace)) | hasRateLimit]
+      <> [gatedCount ReconcileConcurrencyStale window (Arb.reconcileConcurrencyCountsIfStale @m) | hasConcurrency]
+      <> [gatedCount ReconcilePruneConcurrency sparseWindow (Arb.reconcileAndPruneConcurrency @m) | hasConcurrency]
+      <> [ sweep
+             PurgeArchives
+             window
+             (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
+             $ Ops.purgeArchives schema queues
+         ]
+
+-- | Name the operation when it failed, otherwise report it through @emit@.
+reportOutcome
+  :: (Monad m)
+  => MaintenanceOp
+  -> (a -> m ())
+  -> Either SomeException a
+  -> m (Maybe MaintenanceOp)
+reportOutcome op emit = either (const (pure (Just op))) (\ran -> Nothing <$ emit ran)
 
 -- | Run one gated maintenance operation. Database statement timeouts bound
 -- individual statements. Failures are logged and do not stop the loop.
@@ -109,6 +149,19 @@ runReaperOp
   -> m a
   -> m (Maybe a)
 runReaperOp logCfg schema stmtTimeout task every work =
+  either (const Nothing) id <$> tryReaperOp logCfg schema stmtTimeout task every work
+
+-- | 'runReaperOp', keeping the failure. @Right Nothing@ is an operation already running.
+tryReaperOp
+  :: (MonadArbiter m)
+  => LogConfig
+  -> SchemaName
+  -> NominalDiffTime
+  -> Text
+  -> NominalDiffTime
+  -> m a
+  -> m (Either SomeException (Maybe a))
+tryReaperOp logCfg schema stmtTimeout task every work =
   reaperGate logCfg task $
     Ops.runGatedBounded schema task every stmtTimeout work
 
@@ -120,11 +173,11 @@ runReaperStateOp
   -> Text
   -> NominalDiffTime
   -> (Maybe s -> m (a, s))
-  -> m (Maybe a)
+  -> m (Either SomeException (Maybe a))
 runReaperStateOp logCfg schema stmtTimeout task every work =
   reaperGate logCfg task $
     Ops.runGatedStateBounded schema task every stmtTimeout work
 
-reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m (Maybe a) -> m (Maybe a)
+reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m (Either SomeException a)
 reaperGate logCfg task action =
-  tryAny action >>= either (\e -> Nothing <$ warnEx logCfg ("Reaper op failed: " <> task) e) pure
+  tryAny action >>= either (\e -> Left e <$ warnEx logCfg ("Reaper op failed: " <> task) e) (pure . Right)

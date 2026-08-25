@@ -73,6 +73,7 @@ import Arbiter.Core.Job.Schema
   , createJobQueueArchiveTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueGroupKeyIndexSQL
+  , createJobQueueGroupRetriedIndexSQL
   , createJobQueueTableSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
@@ -766,6 +767,7 @@ jobQueueMigrationsForTable schemaName tableName adm =
           script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
         , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
         , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
+        , script "create-group-retried-index" $ createJobQueueGroupRetriedIndexSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

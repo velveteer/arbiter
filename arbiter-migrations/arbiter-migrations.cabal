@@ -9,8 +9,6 @@ description:
   reconciled to the declared configuration on every run, so enabling or disabling
   them, or removing a queue from the registry, converges without editing
   migration history.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:            MIT
 license-file:       LICENSE

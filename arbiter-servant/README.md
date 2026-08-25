@@ -48,5 +48,5 @@ main = do
 
 A queue that stores a handler result uses `QueueWithResult "email_jobs" EmailJob
 Report` in place of `Queue`, importing `QueueSpec (..)` for the constructor. See
-the [project documentation](https://github.com/velveteer/arbiter#readme) for
-the worker side and the full feature set.
+the [Arbiter guide](https://arbiterq.dev/docs/) for the worker side and the full
+feature set.

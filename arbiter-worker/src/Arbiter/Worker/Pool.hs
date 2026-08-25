@@ -50,16 +50,15 @@ import Control.Monad (forever, replicateM, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Aeson (Value)
 import Data.Bifunctor (second)
 import Data.Bool (bool)
-import Data.Either (fromRight, partitionEithers)
+import Data.Either (fromRight)
 import Data.Foldable (toList, traverse_)
 import Data.Int (Int32, Int64)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -110,7 +109,8 @@ import Arbiter.Worker.Logger.Internal
   , withJobContextList
   , withJobContextOne
   )
-import Arbiter.Worker.Reaper (reaperLoop, runReaperOp)
+import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop, runReaperOp)
+import Arbiter.Worker.Results (storeEncodedResult, storeEncodedResults, storeJobResult)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.Settle
   ( CancelHandoff
@@ -133,6 +133,15 @@ import Arbiter.Worker.Settle
 -- ---------------------------------------------------------------------------
 -- Worker Pool
 -- ---------------------------------------------------------------------------
+
+-- | The pace the pool's reaper keeps.
+reaperPace :: WorkerConfig m payload -> MaintenancePace
+reaperPace config =
+  MaintenancePace
+    { paceWindow = reaperInterval config
+    , paceSparseWindow = reaperSparseInterval config
+    , paceBucketIdle = reaperBucketIdle config
+    }
 
 -- | Run a worker pool: a dispatcher and its worker threads.
 runWorkerPool
@@ -214,7 +223,7 @@ runWorkerPool config = do
         $ runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
     reaper <-
       spawn "Reaper" $
-        reaperLoop (logConfig config) (onMaintenance config) (reaperInterval config) (reaperTimeout config)
+        reaperLoop (logConfig config) (onMaintenance config) (reaperPace config) (reaperTimeout config)
 
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
     case res of
@@ -760,53 +769,6 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
       tryWarn (jobLog config job) "Reporting a job's failure failed" (reportWritten written)
     failJob failure job =
       handleJobFailure config Ops.LocksHeld shape failure startTime endTime job
-
--- | Store a job's result for its parent rollup, if it has one.
-storeJobResult
-  :: (EncodeJobResult result, MonadArbiter m)
-  => Text
-  -> Job.JobRead payload
-  -> result
-  -> m ()
-storeJobResult schemaName job = storeEncodedResult schemaName job . encodeJobResult
-
--- | 'storeJobResult' on an already-encoded result. 'Nothing' stores nothing.
-storeEncodedResult
-  :: (MonadArbiter m)
-  => Text
-  -> Job.JobRead payload
-  -> Maybe Value
-  -> m ()
-storeEncodedResult schemaName job mVal =
-  case (Job.parentId job, mVal) of
-    (Just pid, Just val) ->
-      void $ Ops.insertResult schemaName (Job.queueName job) pid (Job.primaryKey job) val
-    (Nothing, Just val)
-      | Ops.archivesOnAck job ->
-          void $ Ops.updateArchiveResult schemaName (Job.queueName job) (Job.primaryKey job) val
-    _ -> pure ()
-
--- | 'storeEncodedResult' over a batch from one queue: one statement for the
--- child results, one for the archived roots.
-storeEncodedResults
-  :: (MonadArbiter m)
-  => Text
-  -> [(Job.JobRead payload, Maybe Value)]
-  -> m ()
-storeEncodedResults _ [] = pure ()
-storeEncodedResults schemaName pairs@((firstJob, _) : _) = do
-  let (childRows, rootRows) = partitionEithers (mapMaybe resultRow pairs)
-      queue = Job.queueName firstJob
-  void $ Ops.insertResultsBatch schemaName queue childRows
-  void $ Ops.updateArchiveResultsBatch schemaName queue rootRows
-  where
-    resultRow (job, mVal) = do
-      val <- mVal
-      case Job.parentId job of
-        Just pid -> Just (Left (pid, Job.primaryKey job, val))
-        Nothing
-          | Ops.archivesOnAck job -> Just (Right (Job.primaryKey job, val))
-          | otherwise -> Nothing
 
 data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure
   deriving stock (Eq)

@@ -8,8 +8,6 @@ description:
   and statistics endpoints over a typed queue registry, plus a Server-Sent Events
   stream for live updates. Ships no authentication of its own: it exposes a WAI
   @Application@, so wrap it in your own middleware or put it behind a gateway.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:         MIT
 license-file:    LICENSE
@@ -65,6 +63,7 @@ library
     , stm                >=2.5  && <2.6
     , text               >=1.2  && <2.2
     , time               >=1.9  && <1.16
+    , uuid               >=1.3  && <1.4
     , uuid-types         >=1.0  && <1.1
     , wai                >=3.2  && <3.3
     , warp               >=3.3  && <3.5
@@ -92,3 +91,4 @@ test-suite arbiter-servant-tests
     , resource-pool
     , text
     , time
+    , uuid-types

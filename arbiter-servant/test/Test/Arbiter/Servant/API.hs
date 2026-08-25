@@ -14,7 +14,9 @@ import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
   , JobStatus (..)
+  , attempts
   , claimSeq
+  , claimedBy
   , dedupKey
   , defaultGroupedJob
   , defaultJob
@@ -28,19 +30,21 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Operations qualified as Ops
-import Arbiter.Core.QueueRegistry (Queue)
+import Arbiter.Core.QueueRegistry (QueueSpec (QueueWithResult))
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
+import Arbiter.Test.RateLimit (RLReg, rateLimitTable, setupRateLimitPolicy)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce, truncateToMicros)
-import Control.Monad (forM_)
+import Control.Monad (forM_, void)
 import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, toJSON, (.=))
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as LB
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
@@ -48,6 +52,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.UUID.Types qualified as UUID
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
 import Network.HTTP.Types (status200, status204, status400, status404, status409)
@@ -56,18 +61,51 @@ import Test.Hspec.Wai
 
 import Arbiter.Servant (ArbiterServerConfig (..), arbiterApp, initArbiterServer)
 import Arbiter.Servant.Types
-  ( ApiJob (..)
+  ( AckRequest (..)
+  , ApiJob (..)
   , ApiJobWithStatus (..)
   , ApiJobWrite (..)
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
+  , ClaimResponse (..)
   , DLQResponse (..)
+  , JobLease (..)
   , JobResponse (..)
   , JobsResponse (..)
+  , MaintenanceResponse (..)
   , StatsResponse (..)
   , WorkersResponse (..)
   )
+
+-- | A JSON POST. Servant answers a typed body with 415 when the header is absent.
+postJson :: ByteString -> LB.ByteString -> WaiSession st SResponse
+postJson path = request "POST" path [("Content-Type", "application/json")]
+
+-- | The jobs a claim response leased.
+decodeClaim :: SResponse -> [JobRead ServantTestPayload]
+decodeClaim response = case decode (simpleBody response) of
+  Just claim -> map unApiJob (claimedJobs claim)
+  Nothing -> error "claim response did not decode"
+
+-- | The lease a finalize has to present for this job.
+leaseBody :: JobRead ServantTestPayload -> LB.ByteString
+leaseBody job = encode (JobLease (claimSeq job) (fromMaybe UUID.nil (claimedBy job)))
+
+-- | A worker-pool identity, which the finalize routes refuse to act for.
+poolWorkerId :: UUID.UUID
+poolWorkerId = UUID.fromWords 0xa1b2c3d4 0xe5f60718 0x293a4b5c 0x6d7e8f90
+
+ackPath :: JobRead ServantTestPayload -> ByteString
+ackPath = jobVerbPath "ack"
+
+nackPath :: JobRead ServantTestPayload -> ByteString
+nackPath = jobVerbPath "nack"
+
+jobVerbPath :: Text -> JobRead ServantTestPayload -> ByteString
+jobVerbPath verb job =
+  TE.encodeUtf8 $
+    "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show (primaryKey job)) <> "/" <> verb
 
 jsonMatch :: Value -> ResponseMatcher
 jsonMatch v = ResponseMatcher 200 [] (MatchBody matcher)
@@ -81,6 +119,14 @@ jsonMatch v = ResponseMatcher 200 [] (MatchBody matcher)
 testSchema :: Text
 testSchema = "arbiter_servant_test"
 
+-- | Its own schema, to keep the maintenance gates clear of the other tests.
+pacedSchema :: Text
+pacedSchema = "arbiter_servant_paced_test"
+
+-- | A schema nothing created, so every maintenance operation raises.
+missingSchema :: Text
+missingSchema = "arbiter_servant_missing"
+
 -- | Test payload type
 data ServantTestPayload
   = TestMessage Text
@@ -89,7 +135,7 @@ data ServantTestPayload
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Test registry
-type ServantTestRegistry = '[Queue "arbiter_servant_test" ServantTestPayload]
+type ServantTestRegistry = '[QueueWithResult "arbiter_servant_test" ServantTestPayload [Text]]
 
 -- Table name for tests
 testTable :: Text
@@ -907,6 +953,92 @@ spec connStr = do
     it "round-trips, which is what the shared gauge payload relies on" $
       decode (encode overview) `shouldBe` Just overview
 
+  describe "Consumer API" $ with (cleanupDb >> pure app) $ do
+    it "POST /claim leases a job and returns its lease" $ do
+      liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "claim me"))
+
+      response <- postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1,\"leaseSeconds\":30}"
+      liftIO $ simpleStatus response `shouldBe` status200
+
+      let claimed = decodeClaim response
+      liftIO $ length claimed `shouldBe` 1
+      liftIO $ claimedBy (head claimed) `shouldNotBe` Nothing
+
+    it "POST /:id/ack completes a job the lease still holds" $ do
+      liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "ack me"))
+      claimed <- decodeClaim <$> postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1}"
+      let job = head claimed
+
+      postJson (ackPath job) (leaseBody job) `shouldRespondWith` 204
+
+      liftIO $ do
+        gone :: Maybe (JobRead ServantTestPayload) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable (primaryKey job)
+        gone `shouldBe` Nothing
+
+    it "POST /:id/ack refuses a lease the caller does not hold" $ do
+      liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "not yours"))
+      claimed <- decodeClaim <$> postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1}"
+      let job = head claimed
+          forged = encode (JobLease (claimSeq job) UUID.nil)
+
+      postJson (ackPath job) forged `shouldRespondWith` 409
+
+    it "POST /:id/ack keeps the result it carries for the parent rollup" $ do
+      parent <- liftIO $ do
+        Right (root :| _) <-
+          runSimpleDb mkEnv
+            $ JT.insertJobTree testSchema testTable
+            $ JT.rollup
+              (defaultJob (TestMessage "rollup parent"))
+              (JT.leaf (defaultJob (TestMessage "rollup child")) :| [])
+        pure (primaryKey root)
+
+      claimed <- decodeClaim <$> postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1}"
+      let child = head claimed
+          body = encode (AckRequest (JobLease (claimSeq child) (fromMaybe UUID.nil (claimedBy child))) (Just ["done" :: Text]))
+
+      postJson (ackPath child) body `shouldRespondWith` 204
+
+      liftIO $ do
+        (results, _, _, _) <- runSimpleDb mkEnv $ Ops.readChildResultsRaw testSchema testTable parent
+        Map.lookup (primaryKey child) results `shouldBe` Just (toJSON ["done" :: Text])
+
+    it "POST /:id/ack refuses a result the queue's type does not accept" $ do
+      liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "wrong result"))
+      claimed <- decodeClaim <$> postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1}"
+      let job = head claimed
+          body = encode $ object ["claimSeq" .= claimSeq job, "claimedBy" .= claimedBy job, "result" .= (42 :: Int)]
+
+      postJson (ackPath job) body `shouldRespondWith` 400
+
+    it "POST /:id/ack refuses a job a worker pool holds" $ do
+      job <- liftIO $ do
+        void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "pool job"))
+        void $ runSimpleDb mkEnv $ Ops.registerWorker testSchema poolWorkerId testTable Nothing Nothing 300 Nothing
+        head <$> runSimpleDb mkEnv (Ops.claimNextVisibleJobsAs @_ @ServantTestPayload testSchema testTable 1 60 poolWorkerId)
+
+      postJson (ackPath job) (leaseBody job) `shouldRespondWith` 409
+
+      liftIO $ do
+        still :: Maybe (JobRead ServantTestPayload) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable (primaryKey job)
+        fmap primaryKey still `shouldBe` Just (primaryKey job)
+
+    it "POST /:id/nack hands the job back without spending an attempt" $ do
+      liftIO $ void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "nack me"))
+      claimed <- decodeClaim <$> postJson "/api/v1/arbiter_servant_test/claim" "{\"maxJobs\":1}"
+      let job = head claimed
+
+      postJson (nackPath job) (leaseBody job) `shouldRespondWith` 204
+
+      liftIO $ do
+        Just back :: Maybe (JobRead ServantTestPayload) <-
+          runSimpleDb mkEnv $ Ops.getJobById testSchema testTable (primaryKey job)
+        attempts back `shouldBe` attempts job - 1
+
+    it "POST /maintenance runs a pass" $ do
+      response <- post "/api/v1/maintenance" ""
+      liftIO $ simpleStatus response `shouldBe` status200
+
   describe "Stats API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/stats returns zero counts for empty queue" $ do
       resp <- get "/api/v1/arbiter_servant_test/stats"
@@ -1233,3 +1365,33 @@ spec connStr = do
     it "POST /api/v1/workers/:id/resume returns 404 for unknown worker" $ do
       post "/api/v1/workers/22222222-2222-2222-2222-222222222222/resume" ""
         `shouldRespondWith` 404
+
+  describe "Maintenance API" $ do
+    pacedConfig <- runIO $ do
+      setupOnce connStr pacedSchema rateLimitTable False
+      setupRateLimitPolicy connStr pacedSchema
+      initArbiterServer (Proxy @RLReg) connStr pacedSchema
+    let pacedCleanup = withResource sharedPool $ cleanupData pacedSchema rateLimitTable
+
+    with (pacedCleanup >> pure (arbiterApp @RLReg pacedConfig)) $
+      it "POST /maintenance holds the sparse operations to their own cadence" $ do
+        firstResp <- post "/api/v1/maintenance" ""
+        secondResp <- post "/api/v1/maintenance" ""
+        liftIO $ do
+          firstPass :: MaintenanceResponse <- decodeBody firstResp
+          secondPass :: MaintenanceResponse <- decodeBody secondResp
+          maintenanceFailed firstPass `shouldBe` []
+          maintenanceFailed secondPass `shouldBe` []
+          Map.member "prune-rate-limit-buckets" (maintenanceOps firstPass) `shouldBe` True
+          Map.member "prune-rate-limit-buckets" (maintenanceOps secondPass) `shouldBe` False
+          Map.member "sweep-stale-workers" (maintenanceOps secondPass) `shouldBe` True
+
+    missingConfig <- runIO $ initArbiterServer (Proxy @ServantTestRegistry) connStr missingSchema
+    with (pure (arbiterApp @ServantTestRegistry missingConfig)) $
+      it "POST /maintenance names the operations that raised" $ do
+        resp <- post "/api/v1/maintenance" ""
+        liftIO $ do
+          simpleStatus resp `shouldBe` status200
+          body :: MaintenanceResponse <- decodeBody resp
+          maintenanceOps body `shouldBe` Map.empty
+          maintenanceFailed body `shouldSatisfy` elem "sweep-stale-workers"

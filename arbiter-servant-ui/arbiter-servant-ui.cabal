@@ -9,8 +9,6 @@ description:
   schedules, rate-limit and concurrency policies, queue pausing, and worker
   health. Assets are embedded in the binary, so there are no runtime file
   dependencies.
-  See the project documentation at <https://github.com/velveteer/arbiter#readme>
-  for setup and examples.
 
 license:            MIT
 license-file:       LICENSE

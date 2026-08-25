@@ -1,0 +1,21 @@
+[book]
+title = "Arbiter"
+description = "Distributed job processing in Haskell, backed by your own PostgreSQL database"
+src = "src"
+language = "en"
+
+[output.html]
+site-url = "/docs/"
+git-repository-url = "https://github.com/velveteer/arbiter"
+edit-url-template = "https://github.com/velveteer/arbiter/edit/main/book/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/alerts.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+runnable = false

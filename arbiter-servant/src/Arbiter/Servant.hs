@@ -30,6 +30,10 @@ module Arbiter.Servant
   , ArbiterServerConfig (..)
   , initArbiterServer
   , defaultQueueStatsCacheTtl
+  , defaultMaintenanceInterval
+  , defaultMaintenanceBucketIdle
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceTimeout
   , BuildServer (..)
 
     -- * API Types
@@ -43,8 +47,10 @@ module Arbiter.Servant
   , DLQAPI (..)
   , ArchiveAPI (..)
   , StatsAPI (..)
+  , MaintenanceAPI (..)
   , CronAPI (..)
   , WorkersAPI (..)
+  , HealthAPI (..)
   , RateLimitsAPI (..)
   , ConcurrencyAPI (..)
 

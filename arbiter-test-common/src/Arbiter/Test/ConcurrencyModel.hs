@@ -6,8 +6,9 @@
 
 -- | Property tests for per-job concurrency limits: a deterministic exact-model
 -- sweep over a job lifecycle (insert, claim, ack, retry, override, prune,
--- reconcile) and a concurrent never-over-admit check. Each model key is a seeded
--- pool driven through a single suffix. Claims are attributed so the gate engages.
+-- reconcile), a concurrent never-over-admit check, and a grouped drain-to-empty
+-- check. Each model key is a seeded pool driven through a single suffix. Claims
+-- are attributed so the gate engages.
 module Arbiter.Test.ConcurrencyModel
   ( concurrencyModelSpec
   ) where
@@ -19,18 +20,23 @@ import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
+  , defaultGroupedJob
   , defaultJob
   , payload
   , setDedupKey
   , setMaxAttempts
   )
 import Arbiter.Core.MonadArbiter (HasRegistry)
+import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (foldM_, void)
 import Data.Foldable (for_, traverse_)
 import Data.Int (Int32)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy (..))
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -80,6 +86,8 @@ concurrencyModelSpec run withConn schema = do
     check (prop_model run withConn schema) >>= (`shouldBe` True)
   it "concurrent claimers never admit more than a key's limit" $
     check (prop_concurrent run withConn schema) >>= (`shouldBe` True)
+  it "grouped jobs always drain, whatever the batch size and key layout" $
+    check (prop_groupedDrain run withConn schema) >>= (`shouldBe` True)
 
 -- Pure reference model.
 
@@ -267,7 +275,65 @@ prop_concurrent run withConn schema = withTests 30 $ property $ do
   stored <- evalIO (readCounts withConn schema)
   Map.lookup (storedKey k) stored === Just (fromIntegral claimed)
 
+-- | With one pool's key pinned at its cap by a job that is never acked, every group
+-- that has no job on that key still drains, however many pinned-key groups sort ahead
+-- of it. This is the general form of the starvation the grouped gate exists to prevent:
+-- a blocked group must not hold a candidate slot. Generated over batch size, per-poll
+-- slot budget, group size, and key layout.
+prop_groupedDrain
+  :: (HasRegistry sm CLReg)
+  => (forall a. sm a -> IO a)
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> Text
+  -> Property
+prop_groupedDrain run withConn schema = withTests 40 $ property $ do
+  perGroup <- forAll (Gen.int (Range.linear 1 3))
+  batchSize <- forAll (Gen.int (Range.linear 1 3))
+  -- Small, so the slot budget actually binds and a blocked group can crowd a cold one out.
+  maxBatches <- forAll (Gen.int (Range.linear 1 3))
+  keys <- forAll (Gen.list (Range.linear 2 16) (Gen.element (map fst modelPools)))
+  evalIO (resetState withConn schema)
+  -- Pin the hot pool at its cap with a claim that is never acked.
+  evalIO (void (run (HL.insertJobsBatch [defaultJob (CLPayload hotPool)]) :: IO [JobRead CLPayload]))
+  pinned <- evalIO (run (HL.claimNextVisibleJobsAs claimBatch 600 worker) :: IO [JobRead CLPayload])
+  length pinned === limitOf hotPool
+  let gk i = "dg" <> T.pack (show (i `div` perGroup :: Int))
+      tagged = [(gk i, k) | (i, k) <- zip [0 :: Int ..] keys]
+      js = [setMaxAttempts (Just 1000) (defaultGroupedJob g (CLPayload k)) | (g, k) <- tagged]
+      -- A group with no job on the pinned key has nothing legitimately blocking it.
+      cold = [g | g <- Set.toList (Set.fromList (map fst tagged)), all ((/= hotPool) . snd) (filter ((== g) . fst) tagged)]
+      cs = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 (Just worker)
+      round_ =
+        run
+          ( do
+              claimed <- Ops.claimJobsBatchedCached cs maxBatches
+              let got = concatMap NE.toList (claimed :: [NE.NonEmpty (JobRead CLPayload)])
+              traverse_ HL.ackJob got
+              pure (length got)
+          )
+      loop n
+        | n <= (0 :: Int) = pure ()
+        | otherwise = round_ >>= \k -> if k == 0 then pure () else loop (n - 1)
+  evalIO (void (run (HL.insertJobsBatch js) :: IO [JobRead CLPayload]))
+  evalIO (loop (length js + 4))
+  left <- evalIO (remainingGroups withConn schema)
+  filter (`elem` cold) left === []
+
 -- Helpers.
+
+-- | The pool pinned at its cap by 'prop_groupedDrain'.
+hotPool :: Text
+hotPool = "mx"
+
+-- | Group keys that still have rows.
+remainingGroups :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO [Text]
+remainingGroups withConn schema =
+  withConn $ \c -> do
+    rows <-
+      PG.query_
+        c
+        (stmt ("SELECT DISTINCT group_key FROM " <> jobQueueTable schema concurrencyTable <> " WHERE group_key IS NOT NULL"))
+    pure (map PG.fromOnly rows)
 
 groupByKey :: [JobRead CLPayload] -> Map Text [JobRead CLPayload]
 groupByKey = foldl' (\acc j -> Map.insertWith (++) (keyOf j) [j] acc) Map.empty

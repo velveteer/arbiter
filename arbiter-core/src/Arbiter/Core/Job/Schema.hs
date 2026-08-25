@@ -22,6 +22,7 @@ module Arbiter.Core.Job.Schema
 
     -- * Index Creation SQL
   , createJobQueueGroupKeyIndexSQL
+  , createJobQueueGroupRetriedIndexSQL
   , createJobQueueUngroupedReadyRankingIndexSQL
   , createJobQueueUngroupedDueIndexSQL
   , migrateUngroupedReadySplitIndexesSQL
@@ -409,6 +410,18 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
     [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_group_key")
     , "ON " <> jobQueueTable schemaName tableName <> " (group_key, priority ASC, id ASC)"
     , "WHERE group_key IS NOT NULL;"
+    ]
+
+-- | Partial index over @(group_key, attempts DESC, priority, id)@ for retried rows,
+-- read by the claim's group head gate. Retried rows rank ahead of the rest, so the
+-- gate merges this run with the @(group_key, priority, id)@ one instead of sorting
+-- the whole group.
+createJobQueueGroupRetriedIndexSQL :: Text -> Text -> Text
+createJobQueueGroupRetriedIndexSQL schemaName tableName =
+  T.unlines
+    [ "CREATE INDEX IF NOT EXISTS " <> quoteIdentifier ("idx_" <> tableName <> "_group_retried")
+    , "ON " <> jobQueueTable schemaName tableName <> " (group_key, attempts DESC, priority ASC, id ASC)"
+    , "WHERE group_key IS NOT NULL AND attempts > 0;"
     ]
 
 -- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL AND

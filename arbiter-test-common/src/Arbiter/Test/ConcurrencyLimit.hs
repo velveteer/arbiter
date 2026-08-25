@@ -42,6 +42,7 @@ import Arbiter.Core.Job.Types
   , JobWrite
   , defaultGroupedJob
   , defaultJob
+  , payload
   , setDedupKey
   )
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema, withDbTransaction)
@@ -151,6 +152,17 @@ concurrencyLimitSpec runM = do
           void $
             execStatement
               ("UPDATE " <> arbiterConcurrencyTable schema <> " SET in_flight = " <> tshow n <> " WHERE concurrency_key = ?")
+              [pval CText key]
+      -- A job that has already failed, so it keeps the head of its group's line.
+      markAttempted env key =
+        runM env $ do
+          schema <- getSchema
+          void $
+            execStatement
+              ( "UPDATE "
+                  <> jobQueueTable schema concurrencyTable
+                  <> " SET attempts = 1 WHERE concurrency_key = ? AND group_key IS NOT NULL"
+              )
               [pval CText key]
       deleteRow env key =
         runM env $ do
@@ -584,3 +596,40 @@ concurrencyLimitSpec runM = do
     enqueue env [job "declpool" "cold"]
     _ <- claimAs env
     inFlight env (fullKey "declpool" "cold") `shouldReturn` Just 1
+
+  it "a full concurrency key does not starve admissible grouped jobs behind it" $ \env -> do
+    -- The grouped analog: each blocked group takes a slot in the bounded window,
+    -- so a flood of groups on one full key must not crowd out a cold group behind them.
+    seed env 2
+    enqueue env [groupedJob ("hotg-" <> tshow i) "declpool" "ghot" | i <- [1 .. 150]]
+    filled <- claimAs env
+    length filled `shouldBe` 2
+    enqueue env [groupedJob "coldg" "declpool" "gcold"]
+    _ <- claimAs env
+    inFlight env (fullKey "declpool" "gcold") `shouldReturn` Just 1
+
+  it "gates a group on the row it would claim, not its lowest-id sibling" $ \env -> do
+    -- attempts DESC keeps a failed job at the head of its group's line, so the head
+    -- gate must judge that row. Here the fresh low-id sibling sits on a full key.
+    seed env 1
+    enqueue env [job "declpool" "gfresh"]
+    filled <- claimAs env
+    length filled `shouldBe` 1
+    enqueue env [groupedJob "rg" "declpool" "gfresh"]
+    enqueue env [groupedJob "rg" "declpool" "gretry"]
+    markAttempted env (fullKey "declpool" "gretry")
+    _ <- claimAs env
+    inFlight env (fullKey "declpool" "gretry") `shouldReturn` Just 1
+
+  it "keeps a group whose batch still has a claimable row under a blocked retry" $ \env -> do
+    -- The batch is taken attempts-first but cut by (priority, id), so it yields a claim
+    -- whenever its lowest-id row is admissible. The gate must judge that row.
+    seed env 1
+    enqueue env [job "declpool" "bhot"]
+    filled <- claimAs env
+    length filled `shouldBe` 1
+    enqueue env [groupedJob "bg" "declpool" "bfree"]
+    enqueue env [groupedJob "bg" "declpool" "bhot"]
+    markAttempted env (fullKey "declpool" "bhot")
+    claimed <- runM env (HL.claimNextVisibleJobsBatched 2 100 60) :: IO [NE.NonEmpty (JobRead CLPayload)]
+    map payload (concatMap NE.toList claimed) `shouldBe` [CLPayload "declpool:bfree"]

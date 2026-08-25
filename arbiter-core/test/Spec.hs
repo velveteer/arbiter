@@ -128,9 +128,18 @@ main = hspec $ do
       rendered `shouldSatisfy` T.isInfixOf "WHERE id = ANY(?) OR id IN (SELECT id FROM roots)"
 
     it "moves the claim token on a rate-limited defer as well as an admit" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60 Nothing)
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60)
       rendered `shouldSatisfy` T.isInfixOf "claim_seq = j.claim_seq + 1,"
       rendered `shouldSatisfy` (not . T.isInfixOf "WHEN dc._admit THEN j.claim_seq + 1")
+
+    it "reads the gated group head as two ordered runs, not one sort" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60)
+      rendered `shouldSatisfy` T.isInfixOf "AND t.attempts > 0 ORDER BY t.attempts DESC, t.priority ASC, t.id ASC LIMIT 10"
+      rendered `shouldSatisfy` T.isInfixOf "AND t.attempts = 0 ORDER BY t.priority ASC, t.id ASC LIMIT 10"
+
+    it "binds the claimant, so one statement serves every claimer" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60)
+      rendered `shouldSatisfy` T.isInfixOf "claimed_by = ?::uuid"
 
     it "measures queue ages from clock_timestamp, so none of them can go negative" $ do
       let rendered = squished (getQueueStatsSQL statsRowCodec "arbiter" "jobs")

@@ -18,6 +18,10 @@ module Arbiter.Servant.Server
   , ArbiterServerConfig (..)
   , initArbiterServer
   , defaultQueueStatsCacheTtl
+  , defaultMaintenanceInterval
+  , defaultMaintenanceBucketIdle
+  , defaultMaintenanceSparseInterval
+  , defaultMaintenanceTimeout
   , BuildServer (..)
   ) where
 
@@ -26,14 +30,19 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup)
 import Arbiter.Core.Job.Types qualified as Job
+import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
-import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload)
+import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload, SpecResult)
+import Arbiter.Core.Queues qualified as Queues
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
+import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, storeEncodedResult)
+import Arbiter.Worker.Config (maintenanceOpName)
 import Arbiter.Worker.Cron (updateCronScheduleChecked)
+import Arbiter.Worker.Logger (defaultLogConfig)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
@@ -52,14 +61,14 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO, try)
-import Control.Monad (forever, guard, join, unless, void)
+import Control.Monad (forever, guard, join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -72,6 +81,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
+import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
 import GHC.TypeLits (KnownSymbol, symbolVal)
@@ -91,6 +101,7 @@ import Arbiter.Servant.API
   , DLQAPI (..)
   , HealthAPI (..)
   , JobsAPI (..)
+  , MaintenanceAPI (..)
   , QueuesAPI (..)
   , RateLimitsAPI (..)
   , RegistryToAPI
@@ -127,6 +138,19 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   -- Default: 'defaultQueueStatsCacheTtl'.
   , healthCache :: CacheCell HealthResponse
   -- ^ Short-TTL cache for the readiness probe, collapsing dashboard polls.
+  , maintenanceInterval :: NominalDiffTime
+  -- ^ Minimum gap between runs of one maintenance operation. Zero runs every
+  -- operation on every call, which is what an explicit trigger usually wants.
+  -- Default: 'defaultMaintenanceInterval'.
+  , maintenanceSparseInterval :: NominalDiffTime
+  -- ^ Gap between runs of one whole-schema operation, whatever
+  -- 'maintenanceInterval' is. Default: 'defaultMaintenanceSparseInterval'.
+  , maintenanceBucketIdle :: NominalDiffTime
+  -- ^ Idle age at which a pass prunes a rate-limit bucket.
+  -- Default: 'defaultMaintenanceBucketIdle'.
+  , maintenanceTimeout :: NominalDiffTime
+  -- ^ Abort any single maintenance statement that runs longer than this.
+  -- Default: 'defaultMaintenanceTimeout'.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -173,15 +197,19 @@ initArbiterServer _proxy connStr schemaName = do
       , queueStatsCache = perQueueCache
       , queueStatsCacheTtl = defaultQueueStatsCacheTtl
       , healthCache = healthCell
+      , maintenanceInterval = defaultMaintenanceInterval
+      , maintenanceSparseInterval = defaultMaintenanceSparseInterval
+      , maintenanceBucketIdle = defaultMaintenanceBucketIdle
+      , maintenanceTimeout = defaultMaintenanceTimeout
       }
 
 -- | Jobs API handlers for a specific table.
 jobsServer
-  :: forall registry payload
-   . (JobPayload payload)
+  :: forall registry payload result
+   . (EncodeJobResult result, JobPayload payload)
   => Text
   -> ArbiterServerConfig registry
-  -> JobsAPI payload (AsServerT Handler)
+  -> JobsAPI payload result (AsServerT Handler)
 jobsServer table config =
   JobsAPI
     { listJobs = listJobsHandler @registry @payload table config
@@ -196,6 +224,9 @@ jobsServer table config =
     , resumeChildren = resumeChildrenHandler @registry table config
     , suspendJob = suspendJobHandler @registry @payload table config
     , resumeJob = resumeJobHandler @registry @payload table config
+    , ackClaimedJob = ackClaimedJobHandler @registry @payload @result table config
+    , nackClaimedJob = nackClaimedJobHandler @registry @payload table config
+    , extendClaimedJob = extendClaimedJobHandler @registry @payload table config
     }
 
 -- | List jobs with pagination and composable filters.
@@ -744,18 +775,159 @@ getAllStatsHandler config tables =
 
 -- | Table API handlers for a specific table.
 tableServer
-  :: forall registry payload
-   . (JobPayload payload)
+  :: forall registry payload result
+   . (EncodeJobResult result, JobPayload payload)
   => Text -- table
   -> ArbiterServerConfig registry
-  -> TableAPI payload (AsServerT Handler)
+  -> TableAPI payload result (AsServerT Handler)
 tableServer table config =
   TableAPI
-    { jobs = jobsServer @registry @payload table config
+    { jobs = jobsServer @registry @payload @result table config
+    , claimJobs = claimJobsHandler @registry @payload table config
     , dlq = dlqServer @registry @payload table config
     , archive = archiveServer @registry @payload table config
     , stats = statsServer @registry table config
     }
+
+-- | Lease visible jobs for a consumer outside a worker pool. Each job carries the
+-- claim sequence and claimant its finalize has to present.
+claimJobsHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> ClaimRequest
+  -> Handler (ClaimResponse payload)
+claimJobsHandler tableName config req = liftIO $ do
+  let env = serverEnv config
+      schemaName = schema env
+      maxJobs = clampInt 1 1000 (fromMaybe 1 (crMaxJobs req))
+      leaseSecs = realToFrac (clampDouble 1 3600 (fromMaybe 60 (crLeaseSeconds req)))
+  claimant <- UUID.nextRandom
+  jobs <- runSimpleDb env $ do
+    mQueue <- Ops.getQueue schemaName tableName
+    if maybe False Queues.paused mQueue
+      then pure []
+      else Ops.claimNextVisibleJobsAs @_ @payload schemaName tableName maxJobs leaseSecs claimant
+  pure $ ClaimResponse (map ApiJob jobs)
+
+-- | Complete a job the caller still holds. A result rides along for the parent
+-- rollup or the archive entry to keep, the way a worker's @ackWith@ stores one.
+ackClaimedJobHandler
+  :: forall registry payload result
+   . (EncodeJobResult result, JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> AckRequest result
+  -> Handler NoContent
+ackClaimedJobHandler tableName config jobId req =
+  withHeldJob @registry @payload tableName config jobId (arLease req) $ \schemaName job ->
+    withDbTransaction $ do
+      rows <- Ops.ackJob schemaName tableName job
+      when (rows > 0) $ storeEncodedResult schemaName job (arResult req >>= encodeJobResult)
+      pure rows
+
+-- | Hand a job back without spending its attempt. It returns when its lease runs out.
+nackClaimedJobHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> JobLease
+  -> Handler NoContent
+nackClaimedJobHandler tableName config jobId lease =
+  withHeldJob @registry @payload tableName config jobId lease $ \schemaName job ->
+    Ops.nackJob schemaName tableName job
+
+-- | Push out a held lease, the pull equivalent of a worker's heartbeat.
+extendClaimedJobHandler
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> ExtendRequest
+  -> Handler NoContent
+extendClaimedJobHandler tableName config jobId req =
+  withHeldJob @registry @payload tableName config jobId (erLease req) $ \schemaName job ->
+    Ops.setVisibilityTimeout schemaName tableName (realToFrac (clampDouble 1 3600 (erSeconds req))) job
+
+-- | Run a finalize against the job the lease names, refusing one the caller no longer
+-- holds. The statements guard on the claim sequence too, so a lease lost mid-request
+-- writes nothing. A lease a worker pool holds is refused outright.
+withHeldJob
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> JobLease
+  -> (Text -> Job.JobRead payload -> SimpleDb registry IO Int64)
+  -> Handler NoContent
+withHeldJob tableName config jobId lease finalize = do
+  let env = serverEnv config
+      schemaName = schema env
+      held job = Job.claimedBy job == Just (jlClaimedBy lease) && Job.claimSeq job == jlClaimSeq lease
+      refuse body = Left err409 {errBody = body}
+
+  result <- liftIO $ runSimpleDb env $ do
+    mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
+    case mJob of
+      Nothing -> pure $ Left err404 {errBody = "Job not found"}
+      Just job
+        | not (held job) -> pure $ refuse "Job is not held by this lease"
+        | otherwise -> do
+            pooled <- Ops.workerRegistered schemaName (jlClaimedBy lease)
+            if pooled
+              then pure $ refuse "Job is held by a worker pool"
+              else do
+                rowsAffected <- finalize schemaName job
+                pure $
+                  if rowsAffected > 0
+                    then Right ()
+                    else refuse (if Job.suspended job then "Job is suspended" else "Lease no longer held")
+
+  either throwError (const (pure NoContent)) result
+
+-- | Maintenance API handler.
+maintenanceServer
+  :: forall registry
+   . (HL.RegistryAdmissionPolicies registry, RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> MaintenanceAPI (AsServerT Handler)
+maintenanceServer config = MaintenanceAPI {runMaintenance = maintenanceHandler @registry config}
+
+-- | Run one maintenance pass, the work a worker pool's reaper would do. Operations
+-- exclude each other across callers, so a pass another caller is already running is
+-- skipped and absent from the response.
+maintenanceHandler
+  :: forall registry
+   . (HL.RegistryAdmissionPolicies registry, RegistryTables registry)
+  => ArbiterServerConfig registry
+  -> Handler MaintenanceResponse
+maintenanceHandler config = liftIO $ do
+  touched <- newIORef Map.empty
+  let env = serverEnv config
+      report op n = liftIO $ modifyIORef' touched (Map.insertWith (+) (maintenanceOpName op) n)
+      pace =
+        MaintenancePace
+          { paceWindow = maintenanceInterval config
+          , paceSparseWindow = maintenanceSparseInterval config
+          , paceBucketIdle = maintenanceBucketIdle config
+          }
+  failed <-
+    runSimpleDb env $
+      runMaintenancePass defaultLogConfig report pace (maintenanceTimeout config)
+  ops <- readIORef touched
+  pure $ MaintenanceResponse ops (map maintenanceOpName failed)
+
+clampInt :: Int -> Int -> Int -> Int
+clampInt lo hi = max lo . min hi
+
+clampDouble :: Double -> Double -> Double -> Double
+clampDouble lo hi = max lo . min hi
 
 -- | Queues API handler.
 queuesServer
@@ -1143,6 +1315,23 @@ overviewStatsCacheTtl = 5
 defaultQueueStatsCacheTtl :: NominalDiffTime
 defaultQueueStatsCacheTtl = 2
 
+-- | No minimum gap: an explicit maintenance call runs the work it asked for.
+-- Concurrent callers still exclude each other on the gate.
+defaultMaintenanceInterval :: NominalDiffTime
+defaultMaintenanceInterval = 0
+
+-- | Gap the whole-schema operations keep, matching a worker pool's reaper.
+defaultMaintenanceSparseInterval :: NominalDiffTime
+defaultMaintenanceSparseInterval = 3600
+
+-- | Bucket idle age, matching a worker pool's reaper.
+defaultMaintenanceBucketIdle :: NominalDiffTime
+defaultMaintenanceBucketIdle = 300
+
+-- | Statement timeout for one maintenance operation.
+defaultMaintenanceTimeout :: NominalDiffTime
+defaultMaintenanceTimeout = 300
+
 -- | Keyed TTL cache under an epoch bumped by 'invalidate'.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
@@ -1333,11 +1522,12 @@ reconcileConcurrencyHandler config = do
 -- | Server for the shared top-level routes.
 sharedServer
   :: forall registry
-   . (RegistryTables registry)
+   . (HL.RegistryAdmissionPolicies registry, RegistryTables registry)
   => ArbiterServerConfig registry
   -> ServerT SharedAPI Handler
 sharedServer config =
   queuesServer @registry (Proxy @registry) config
+    :<|> maintenanceServer @registry config
     :<|> eventsServer config
     :<|> cronServer config
     :<|> workersServer config
@@ -1351,14 +1541,16 @@ class BuildServer registry (reg :: JobPayloadRegistry) where
 
 -- Empty registry: the shared top-level routes alone.
 instance
-  (RegistryTables registry)
+  (HL.RegistryAdmissionPolicies registry, RegistryTables registry)
   => BuildServer registry '[]
   where
   buildServer = sharedServer
 
 -- One table: its endpoints, then the shared top-level routes.
 instance
-  ( JobPayload (SpecPayload spec)
+  ( EncodeJobResult (SpecResult spec)
+  , HL.RegistryAdmissionPolicies registry
+  , JobPayload (SpecPayload spec)
   , KnownSymbol (SpecName spec)
   , RegistryTables registry
   )
@@ -1366,12 +1558,13 @@ instance
   where
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
-     in tableServer @registry @(SpecPayload spec) tableName config
+     in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
           :<|> sharedServer config
 
 -- Two or more: this table's endpoints, then the rest.
 instance
   ( BuildServer registry (nextSpec ': moreRest)
+  , EncodeJobResult (SpecResult spec)
   , JobPayload (SpecPayload spec)
   , KnownSymbol (SpecName spec)
   )
@@ -1379,7 +1572,7 @@ instance
   where
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
-     in tableServer @registry @(SpecPayload spec) tableName config
+     in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
           :<|> buildServer @registry @(nextSpec ': moreRest) config
 
 -- | Complete Arbiter server at @\/api\/v1\/...@
@@ -1402,7 +1595,8 @@ arbiterServerHoisted
 arbiterServerHoisted nt config =
   hoistServer (Proxy @(ArbiterAPI registry)) nt (arbiterServer config)
 
--- | Convert to WAI Application.
+-- | Convert to WAI Application. The ack route parses a result, so each
+-- 'QueueWithResult' result type needs @FromJSON@ as well as @ToJSON@.
 arbiterApp
   :: forall registry
    . ( BuildServer registry registry
