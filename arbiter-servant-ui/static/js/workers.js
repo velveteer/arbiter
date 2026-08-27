@@ -103,11 +103,11 @@ const WORKERS_TABLE_HTML = `
                 :title="'Open ' + job.queueName"></a>
             </td>
           </template>
-          <td class="text-truncate" x-text="job.hostName ?? EMPTY"></td>
+          <td class="text-truncate" :title="job.hostName ?? ''" x-text="job.hostName ?? EMPTY"></td>
           <td x-text="job.workerCount ?? EMPTY"></td>
           <td><span :title="formatTime(job.lastHeartbeat)" x-text="formatAge(job.lastHeartbeat)"></span></td>
           <template x-if="anyMetadata">
-            <td class="text-truncate small font-monospace"
+            <td class="text-truncate small font-monospace" :title="job.metadata ? JSON.stringify(job.metadata) : ''"
                 x-text="job.metadata ? JSON.stringify(job.metadata) : EMPTY"></td>
           </template>
           <td>

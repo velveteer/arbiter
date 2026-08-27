@@ -48,8 +48,8 @@ pool.
 **Timezones.** Expressions default to UTC. Use `cronJobInTimezone` with an
 [IANA name](https://www.iana.org/time-zones) like `America/New_York` to run in
 local time. On the spring-forward day a schedule of `30 2 * * *` does not fire,
-because 02:30 does not occur locally. On the fall-back day a schedule of `30 1
-* * *` fires once, although 01:30 occurs twice.
+because 02:30 does not occur locally. On the fall-back day a schedule of
+`30 1 * * *` fires once, although 01:30 occurs twice.
 
 **Backfill.** `BackfillPolicy` replays missed minutes after downtime or a
 scheduler pause, bounded by a duration you give it.

@@ -139,7 +139,7 @@ label.queue-sort-label,
   font-family: monospace;
   font-size: 0.85rem;
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   background-color: var(--arb-surface);
   border: 1px solid var(--arb-border);
   color: var(--arb-teal-on-bg);
@@ -567,6 +567,11 @@ label.queue-sort-label,
    read at the start of the horizontally scrolling row. */
 .cell-actions {
   text-align: right;
+}
+
+/* A flex child that truncates rather than pushing its siblings out of the cell. */
+.cell-shrink {
+  min-width: 0;
 }
 
 /* The wrapper shrinks to its glyph, so the rest of the cell still belongs to the row. */

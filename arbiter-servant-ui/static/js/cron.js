@@ -53,13 +53,13 @@ const CRON_TABLE_HTML = `
     <colgroup>
       <col style="width: 12%">
       <template x-if="global"><col style="width: 11%"></template>
-      <col style="width: 16%">
+      <col style="width: 19%">
       <col style="width: 10%">
-      <col style="width: 10%">
-      <col style="width: 6%">
-      <col style="width: 14%">
       <col style="width: 12%">
-      <col style="width: 10%">
+      <col style="width: 6%">
+      <col style="width: 12%">
+      <col style="width: 11%">
+      <col style="width: 7%">
     </colgroup>
     <thead>
       <tr>
@@ -86,7 +86,7 @@ const CRON_TABLE_HTML = `
           <td>
             <div class="d-flex flex-column gap-0">
               <div class="d-flex flex-wrap align-items-center gap-1">
-                <span x-text="effectiveExpression(job)"></span>
+                <span class="font-monospace text-truncate cell-shrink" :title="effectiveExpression(job)" x-text="effectiveExpression(job)"></span>
                 <span x-show="isOverridden(job, 'expression')" class="badge bg-info-subtle text-info-emphasis">override</span>
               </div>
               <small class="text-muted" x-text="describeExpression(job)"></small>
@@ -96,9 +96,11 @@ const CRON_TABLE_HTML = `
             <span x-text="overlapLabel(effectiveOverlap(job))"></span>
             <span x-show="isOverridden(job, 'overlap')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
           </td>
-          <td class="text-truncate">
-            <span x-text="effectiveTimezone(job) || 'UTC'"></span>
-            <span x-show="isOverridden(job, 'timezone')" class="badge bg-info-subtle text-info-emphasis ms-1">override</span>
+          <td>
+            <div class="d-flex align-items-center gap-1">
+              <span class="text-truncate cell-shrink" :title="effectiveTimezone(job) || 'UTC'" x-text="effectiveTimezone(job) || 'UTC'"></span>
+              <span x-show="isOverridden(job, 'timezone')" class="badge bg-info-subtle text-info-emphasis">override</span>
+            </div>
           </td>
           <td>
             <div class="form-check form-switch">
