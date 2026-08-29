@@ -1546,34 +1546,19 @@ instance
   where
   buildServer = sharedServer
 
--- One table: its endpoints, then the shared top-level routes.
+-- One table: its endpoints, then whatever the rest of the registry builds.
 instance
-  ( EncodeJobResult (SpecResult spec)
-  , HL.RegistryAdmissionPolicies registry
-  , JobPayload (SpecPayload spec)
-  , KnownSymbol (SpecName spec)
-  , RegistryTables registry
-  )
-  => BuildServer registry (spec ': '[])
-  where
-  buildServer config =
-    let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
-     in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
-          :<|> sharedServer config
-
--- Two or more: this table's endpoints, then the rest.
-instance
-  ( BuildServer registry (nextSpec ': moreRest)
+  ( BuildServer registry rest
   , EncodeJobResult (SpecResult spec)
   , JobPayload (SpecPayload spec)
   , KnownSymbol (SpecName spec)
   )
-  => BuildServer registry (spec ': (nextSpec ': moreRest))
+  => BuildServer registry (spec ': rest)
   where
   buildServer config =
     let tableName = T.pack $ symbolVal (Proxy @(SpecName spec))
      in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
-          :<|> buildServer @registry @(nextSpec ': moreRest) config
+          :<|> buildServer @registry @rest config
 
 -- | Complete Arbiter server at @\/api\/v1\/...@
 arbiterServer

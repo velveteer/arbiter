@@ -460,8 +460,6 @@ type SharedAPI =
 -- top-level routes.
 type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
   RegistryToAPI '[] = SharedAPI
-  RegistryToAPI (spec ': '[]) =
-    SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)) :<|> SharedAPI
   RegistryToAPI (spec ': rest) =
     (SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)))
       :<|> RegistryToAPI rest
