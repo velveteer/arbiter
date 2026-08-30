@@ -49,4 +49,10 @@ outer rollback leaves the hook fired for a job that runs again.
 Batching is a separate choice. Use `defaultBatchedWorkerConfig` when per-job
 overhead dominates and you want per-job dispositions inside one claim.
 
+## Timings
+
+`visibilityTimeout` is how long a claim holds a job, and `jobHeartbeatInterval`
+is how often the worker renews that hold. `maxJobDuration` caps how long a
+handler may run at all. See [Leases and Deadlines](deadlines.md).
+
 See the [`WorkerConfig` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html) for all options.

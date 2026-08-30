@@ -24,6 +24,7 @@
 - [Worker Configuration](worker/configuration.md)
 - [Batched Handlers](worker/batched-handlers.md)
 - [Observability Hooks](worker/hooks.md)
+- [Leases and Deadlines](worker/deadlines.md)
 - [Graceful Shutdown](worker/shutdown.md)
 - [Backoff Strategies](worker/backoff.md)
 - [Wakeups (LISTEN/NOTIFY)](worker/wakeups.md)

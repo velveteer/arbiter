@@ -102,6 +102,8 @@ data WorkerConfig m payload = WorkerConfig
   , jobHeartbeatInterval :: NominalDiffTime
   -- ^ Interval for extending a job's visibility timeout during processing.
   -- Must be less than 'visibilityTimeout' to prevent job reclaim. Default: 30.
+  , maxJobDuration :: Maybe NominalDiffTime
+  -- ^ Interrupt a handler that runs longer than this. Default: 'Nothing', no bound.
   , workerHeartbeatInterval :: NominalDiffTime
   -- ^ Cadence for bumping @arbiter_workers.last_heartbeat@, the optional
   -- liveness file, and reconciling pause state from the DB. Must be well below
@@ -237,6 +239,7 @@ fieldInvariants config =
     <*> positive "pollInterval" (pollInterval config)
     <*> positive "visibilityTimeout" (visibilityTimeout config)
     <*> positive "jobHeartbeatInterval" (jobHeartbeatInterval config)
+    <*> traverse (positive "maxJobDuration") (maxJobDuration config)
     <*> positive "workerHeartbeatInterval" (workerHeartbeatInterval config)
     <*> waived (backoffStrategy config)
     <*> waived (jitter config)
@@ -377,6 +380,7 @@ mkDefaultConfig workerCnt mode = do
       , pollInterval = 5
       , visibilityTimeout = 60
       , jobHeartbeatInterval = 30
+      , maxJobDuration = Nothing
       , workerHeartbeatInterval = 10
       , backoffStrategy = exponentialBackoff 2.0 1_048_576
       , jitter = EqualJitter

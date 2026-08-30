@@ -1538,7 +1538,6 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) treePayloads
 
     it "reports each job of a force-cancelled batch exactly once" $ \env -> do
-      -- Window 3 of INVARIANTS.md. A tree cancel signals once per claimed job.
       cancelledRef <- newIORef ([] :: [Int64])
       startedRef <- newIORef (0 :: Int)
       let hooks =

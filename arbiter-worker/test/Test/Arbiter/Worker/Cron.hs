@@ -17,7 +17,7 @@ import Control.Exception (bracket, catch)
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Data.List (sort)
+import Data.List (find, sort)
 import Data.Maybe (isJust)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
@@ -25,6 +25,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
   ( UTCTime (..)
+  , addUTCTime
   , fromGregorian
   , getCurrentTime
   , secondsToDiffTime
@@ -59,6 +60,7 @@ import Arbiter.Worker.Cron
   , initCronSchedules
   , makeDedupKey
   , matchesInTimezone
+  , nextRunInTimezone
   , processCronCatchUp
   , processRunRequests
   , resolveTZ
@@ -211,6 +213,56 @@ spec connStr = do
             ]
           matches = filter (matchesInTimezone tz sched) ticks
       length matches `shouldBe` 1
+
+    it "nextRunInTimezone reports the tick the scheduler fires across a fall-back" $ do
+      -- 01:30 NY runs at 05:30 and 06:30 UTC. The scheduler fires the first.
+      let Right sched = parseCronSchedule "30 1 * * *"
+          tz = Just "America/New_York"
+          now = mkTime 2025 11 2 5 20 0
+      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 5 30 0)
+
+    it "nextRunInTimezone skips a spring-forward gap instead of naming a tick in it" $ do
+      -- Local 02:30 does not exist on 2025-03-09 in NY.
+      let Right sched = parseCronSchedule "30 2 * * *"
+          tz = Just "America/New_York"
+          now = mkTime 2025 3 9 6 0 0
+      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 3 10 6 30 0)
+
+    it "nextRunInTimezone agrees with matchesInTimezone on an ordinary day" $ do
+      let Right sched = parseCronSchedule "30 2 * * *"
+          tz = Just "America/New_York"
+          now = mkTime 2025 6 15 0 0 0
+          next = nextRunInTimezone tz sched now
+      next `shouldBe` Just (mkTime 2025 6 15 6 30 0)
+      fmap (matchesInTimezone tz sched) next `shouldBe` Just True
+
+    it "nextRunInTimezone names no tick an earlier one beats" $ do
+      -- Nothing before the reported tick may match.
+      let Right sched = parseCronSchedule "30 1 * * *"
+          tz = Just "America/New_York"
+          starts = [mkTime 2025 11 2 0 0 0, mkTime 2025 3 9 0 0 0, mkTime 2025 6 15 0 0 0]
+          earlierMatch now =
+            case nextRunInTimezone tz sched now of
+              Nothing -> Just now
+              Just next ->
+                find
+                  (matchesInTimezone tz sched)
+                  (takeWhile (< next) (iterate (addUTCTime 60) (addUTCTime 60 now)))
+      map earlierMatch starts `shouldBe` [Nothing, Nothing, Nothing]
+
+    it "nextRunInTimezone keeps the replayed hour's second pass" $ do
+      -- 01:30 EST is a later tick than 01:35 EDT, so a local-minute walk alone misses it.
+      let Right sched = parseCronSchedule "30 1 * * *"
+          tz = Just "America/New_York"
+          now = mkTime 2025 11 2 5 35 0
+      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 6 30 0)
+
+    it "nextRunInTimezone reports a replayed minute rather than skipping the day" $ do
+      -- 01:45 EDT ran at 05:45. 01:45 EST is a separate tick and fires once the first is gone.
+      let Right sched = parseCronSchedule "45 1 * * *"
+          tz = Just "America/New_York"
+          now = mkTime 2025 11 2 6 0 0
+      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 6 45 0)
 
     it "DST fall-back: '30 1 * * *' in America/New_York matches twice in UTC" $ do
       -- On 2025-11-02 in NY, clocks fall back 02:00 EDT -> 01:00 EST. Local

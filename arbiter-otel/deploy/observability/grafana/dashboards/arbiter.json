@@ -822,6 +822,7 @@
         "x": 0,
         "y": 84
       },
+      "timeFrom": "1h",
       "options": {
         "sortBy": [
           {
@@ -858,6 +859,7 @@
         "x": 0,
         "y": 94
       },
+      "timeFrom": "1h",
       "options": {
         "showTime": true,
         "wrapLogMessage": true,
@@ -871,7 +873,8 @@
             "uid": "${DS_LOKI}"
           },
           "expr": "{service_name=~\".+\"}",
-          "queryType": "range"
+          "queryType": "range",
+          "maxLines": 200
         }
       ]
     }

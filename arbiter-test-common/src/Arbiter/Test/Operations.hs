@@ -632,7 +632,6 @@ operationsSpec mkMessage mkResult runM = do
       runM env (HL.setVisibilityTimeoutBatch 120 [live])
         >>= (`shouldBe` [JobCancelled jobId])
 
-  -- One test per row of the window table in INVARIANTS.md.
   describe "Handoff windows" $ do
     it "refuses the retry write for a claim that was stolen" $ \env -> do
       -- Window 2.

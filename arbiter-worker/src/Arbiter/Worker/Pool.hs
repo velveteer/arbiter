@@ -12,6 +12,7 @@ module Arbiter.Worker.Pool
 
 import Arbiter.Core.Exceptions
   ( BranchCancelException (..)
+  , JobDeadlineExceeded (..)
   , JobException (..)
   , JobForceCancelled (..)
   , JobGoneException (..)
@@ -485,6 +486,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
           (observabilityHooks config)
           (jobHeartbeatInterval config)
           (visibilityTimeout config)
+          (maxJobDuration config)
           startTime
           jobs
           (pendingJobs handoff jobs)
@@ -739,8 +741,10 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
           tryLog (batchLog config jobs) Info "Job(s) nacked, will be reprocessed"
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
-          let failure@(_, kind) = classifyException exc
+          let failure@(reason, kind) = classifyException exc
               queue = Job.queueName firstJob
+          when (null unhandled) $
+            tryLog (batchLog config jobs) Warning ("Handler stopped with its jobs already finalized: " <> reason)
           schemaName <- getSchema
           -- A tree or branch cancel acts on the tree, not on this worker's claim.
           unowned <- if cancelsTree kind then unownedOf else pure []
@@ -786,6 +790,7 @@ classifyException e
   | Just (TreeCancel (TreeCancelException msg)) <- fromException e = (msg, TreeCancelFailure)
   | Just (BranchCancel (BranchCancelException msg)) <- fromException e = (msg, BranchCancelFailure)
   | Just (ParsingException msg) <- fromException e = (msg, PermanentFailure)
+  | Just (JobDeadlineExceeded msg) <- fromException e = (msg, RetryFailure)
   | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
 
 -- | Whether a failure deletes a job tree rather than acting on the job's own claim.

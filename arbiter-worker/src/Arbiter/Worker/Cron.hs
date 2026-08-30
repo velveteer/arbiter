@@ -30,6 +30,8 @@ module Arbiter.Worker.Cron
   , updateCronScheduleChecked
   , resolveTZ
   , matchesInTimezone
+  , nextRunInTimezone
+  , nextRunFromExpression
   , formatMinuteInTimezone
 
     -- * Internal
@@ -53,19 +55,21 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobWrite, setDedupKey)
 import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
+import Control.Applicative ((<|>))
 import Control.Concurrent.STM (retry)
 import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Either (isRight)
 import Data.Int (Int64)
-import Data.List (unfoldr)
+import Data.List (find, unfoldr)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time
-  ( NominalDiffTime
+  ( LocalTime
+  , NominalDiffTime
   , UTCTime (..)
   , addUTCTime
   , defaultTimeLocale
@@ -75,11 +79,12 @@ import Data.Time
   , localTimeToUTC
   , secondsToDiffTime
   , utc
+  , utcToLocalTime
   )
-import Data.Time.Zones (TZ, utcToLocalTimeTZ)
+import Data.Time.Zones (LocalToUTCResult (..), TZ, localTimeToUTCFull, utcToLocalTimeTZ)
 import Data.Time.Zones.All (fromTZName, tzByLabel)
 import GHC.Generics (Generic)
-import System.Cron (CronSchedule, parseCronSchedule, scheduleMatches)
+import System.Cron (CronSchedule, nextMatch, parseCronSchedule, scheduleMatches)
 import UnliftIO (TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny, writeTVar)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
@@ -223,6 +228,49 @@ matchesInTimezone (Just tzName) sched t =
       let local = utcToLocalTimeTZ tz t
           asUtc = localTimeToUTC utc local
        in scheduleMatches sched asUtc
+
+-- | The first tick after @now@ that @sched@ matches, evaluated in @tz@.
+-- 'Nothing' means UTC. An unknown tz name returns 'Nothing'.
+--
+-- A replayed local minute is reported, though its insert is deduped while the earlier run
+-- is still live.
+nextRunInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Maybe UTCTime
+nextRunInTimezone Nothing sched now = nextMatch sched now
+nextRunInTimezone (Just tzName) sched now = do
+  tz <- resolveTZ tzName
+  replayed tz <|> seek tz (localTimeToUTC utc (utcToLocalTimeTZ tz now))
+  where
+    -- A replayed minute runs ahead of @now@ in UTC while reading behind it locally.
+    replayed tz = do
+      endsAt <- replayEnd tz now
+      find (matchesInTimezone (Just tzName) sched) (minutesTo endsAt (truncateToMinute now))
+    seek tz from = do
+      localMinute <- nextMatch sched from
+      case find (> now) (ticksWearing tz (utcToLocalTime utc localMinute)) of
+        Just tick -> Just tick
+        Nothing -> seek tz localMinute
+
+-- | Minute ticks after @from@ up to and including @endsAt@.
+minutesTo :: UTCTime -> UTCTime -> [UTCTime]
+minutesTo endsAt from = takeWhile (<= endsAt) (iterate (addUTCTime 60) (addUTCTime 60 from))
+
+-- | When @t@ is in the first pass of a repeated local hour, when that hour reads again.
+replayEnd :: TZ -> UTCTime -> Maybe UTCTime
+replayEnd tz t = case localTimeToUTCFull tz (utcToLocalTimeTZ tz t) of
+  LTUAmbiguous _ second _ _ | t < second -> Just second
+  _ -> Nothing
+
+-- | Every UTC tick whose local clock in @tz@ reads @local@, earliest first.
+ticksWearing :: TZ -> LocalTime -> [UTCTime]
+ticksWearing tz local = case localTimeToUTCFull tz local of
+  LTUUnique tick _ -> [tick]
+  LTUAmbiguous first second _ _ -> [first, second]
+  LTUNone _ _ -> []
+
+-- | \'nextRunInTimezone\' over an unparsed expression. A bad one returns \'Nothing\'.
+nextRunFromExpression :: Maybe Text -> Text -> UTCTime -> Maybe UTCTime
+nextRunFromExpression tzName expr now =
+  either (const Nothing) (\sched -> nextRunInTimezone tzName sched now) (parseCronSchedule expr)
 
 -- | Format a UTC tick as @YYYY-MM-DDTHH:MM@ in the given timezone.
 -- DST fall-back maps two UTC instants to the same local minute, so dedup

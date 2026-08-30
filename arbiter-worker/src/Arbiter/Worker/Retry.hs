@@ -3,19 +3,17 @@
 -- | Retry combinators for worker infrastructure threads (notification listener,
 -- cron scheduler, etc.) that should survive transient database failures.
 module Arbiter.Worker.Retry
-  ( retryOnException
-  , retryOnExceptionForever
+  ( isJobSignal
+  , retryOnException
   , spawnRetried
   ) where
 
 import Arbiter.Core.Exceptions (JobException, JobGoneException, displayEx)
 import Arbiter.Core.Threads (labelArbiterThread)
-import Control.Monad (forever)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Maybe (isJust)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, SomeException, fromException, liftIO, throwIO)
+import UnliftIO (MonadUnliftIO, SomeException, fromException, liftIO)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
@@ -62,29 +60,7 @@ retryOnException stateVar logCfg label action = loop
                 Left () -> pure ()
                 Right () -> loop
 
--- | 'retryOnException' that never returns on its own, not even on shutdown. Job signals
--- propagate, since only the worker layer can act on them. Everything else is retried.
-retryOnExceptionForever
-  :: (MonadUnliftIO m)
-  => LogConfig
-  -> T.Text
-  -- ^ Label for log messages
-  -> NominalDiffTime
-  -- ^ Delay between retries on transient failure
-  -> m a
-  -- ^ Action to run (typically itself a forever loop)
-  -> m b
-retryOnExceptionForever logCfg label delay action = forever $ do
-  result <- tryAny action
-  case result of
-    Right _ -> pure ()
-    Left e
-      | isJobSignal e -> throwIO e
-      | otherwise -> do
-          tryLog logCfg Error $
-            label <> " error (retrying): " <> displayEx e
-          liftIO $ threadDelay (ceiling (delay * 1_000_000))
-
+-- | A signal only the worker layer can act on, so a retry loop rethrows it.
 isJobSignal :: SomeException -> Bool
 isJobSignal e =
   isJust (fromException e :: Maybe JobException)

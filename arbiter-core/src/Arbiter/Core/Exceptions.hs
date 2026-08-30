@@ -20,6 +20,7 @@ module Arbiter.Core.Exceptions
   , InternalException (..)
   , JobGoneException (..)
   , JobForceCancelled (..)
+  , JobDeadlineExceeded (..)
 
     -- * Helpers
   , throwRetryable
@@ -31,6 +32,7 @@ module Arbiter.Core.Exceptions
   , throwInternal
   , throwJobGone
   , throwJobGoneIds
+  , throwJobDeadline
   , namedJobIds
   , displayEx
   ) where
@@ -136,6 +138,14 @@ instance Exception JobForceCancelled where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
+-- | Handler ran past the pool's maximum job duration. Classified as a retryable failure.
+newtype JobDeadlineExceeded = JobDeadlineExceeded Text
+  deriving stock (Eq, Generic, Show)
+
+instance Exception JobDeadlineExceeded where
+  backtraceDesired _ = False
+  displayException (JobDeadlineExceeded msg) = T.unpack msg
+
 -- | Fail the job and let it retry.
 throwRetryable :: (MonadIO m) => Text -> m a
 throwRetryable msg = UE.throwIO (Retryable (JobRetryableException msg))
@@ -167,6 +177,10 @@ throwInternal msg = UE.throwIO (InternalException msg)
 -- | Names the jobs that went away, so the worker can tell them from the rest of the batch.
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
+
+-- | Stop a handler that has outrun the pool's maximum job duration.
+throwJobDeadline :: (MonadIO m) => Text -> m a
+throwJobDeadline msg = UE.throwIO (JobDeadlineExceeded msg)
 
 -- | Signal that the claim is no longer valid, naming no ids.
 throwJobGone :: (MonadIO m) => Text -> m a

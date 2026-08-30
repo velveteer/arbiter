@@ -94,6 +94,7 @@ test-suite arbiter-worker-tests
     Test.Arbiter.Worker.Concurrency
     Test.Arbiter.Worker.ConnectionRecovery
     Test.Arbiter.Worker.Cron
+    Test.Arbiter.Worker.Deadline
     Test.Arbiter.Worker.MultiQueue
     Test.Arbiter.Worker.PoolSizing
 
