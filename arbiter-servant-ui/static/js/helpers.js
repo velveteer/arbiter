@@ -35,7 +35,8 @@ const FILTER_BUILDER_HTML = `
         <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field" x-text="f.label"></a></li>
       </template>
     </ul>
-    <input type="text" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    <input :type="currentFilterField().type || 'text'" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    <button class="btn btn-outline-secondary" type="button" @click="addFilter()" :disabled="!newFilterValue" title="Add filter" aria-label="Add filter">+</button>
   </div>`;
 
 // Refresh button plus auto-refresh interval, stamped into each table toolbar.
@@ -60,7 +61,7 @@ const COLUMNS_MENU_HTML = `
   <div class="dropdown">
     <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Show/hide columns">Columns</button>
     <ul class="dropdown-menu p-2" style="min-width: 12rem;">
-      <template x-for="c in columns.filter((col) => !col.required)" :key="c.key">
+      <template x-for="c in togglableColumns()" :key="c.key">
         <li>
           <label class="dropdown-item d-flex align-items-center gap-2 mb-0">
             <input type="checkbox" class="form-check-input mt-0" :checked="colVisible(c.key)" @change="toggleCol(c.key)">
@@ -167,6 +168,11 @@ async function copyText(text, btn) {
     showToast('Copy failed: ' + e.message);
   }
 }
+
+// Bootstrap warns when a hiding modal still holds focus, so hand it back first.
+document.addEventListener('hide.bs.modal', (e) => {
+  if (e.target.contains(document.activeElement)) document.activeElement.blur();
+});
 
 function showModal(id) {
   const el = document.getElementById(id);
@@ -650,24 +656,81 @@ function tableTab(loadMethod, refreshStorageKey) {
     ...confirmArm(),
     ...tabActive(),
     ...refreshControl(loadMethod, refreshStorageKey),
-    _lastInvalidParentId: null,
-    _lastInvalidJobId: null,
     _onQueueChanged: null,
     _onSseReconnect: null,
     _onSseEvent: null,
+    _onUrlChanged: null,
+    _hashName: '',
     pendingChanges: 0,
 
-    // Filter builder: the group/parent/job filters, surfaced as chips plus one
-    // "field + value" adder. Each maps onto existing filter state, so applyFilter
-    // and the URL sync are unchanged.
+    // Take the filters the URL names, when the URL names this tab. Called at init
+    // for a deep link, and again on a history step, which lands on a URL this tab
+    // is already mounted for.
+    readUrlFilters(hashName) {
+      this._hashName = hashName;
+      if (location.hash.replace('#', '') !== hashName) return;
+      const p = new URLSearchParams(location.search);
+      this.filterFields.forEach((f) => {
+        const v = p.get(f.param) || '';
+        this[f.model] = v;
+        this[f.applied] = v;
+      });
+      this.sortBy = p.get('sort_by') || '';
+      this.sortDir = p.get('sort_dir') || '';
+      if (this.stateFilter !== undefined) this.stateFilter = p.get('status') || '';
+    },
+
+    // Write this tab's applied filters into the address bar, so the view is a link.
+    // Rewrites the current entry: a filter is a narrowing of where the reader already
+    // is, not a place of its own.
+    _syncFiltersToUrl() {
+      // A load that resolves after the reader moved on belongs to a tab the URL no
+      // longer names, and its filters are not the ones the address bar describes.
+      if (location.hash.replace('#', '') !== this._hashName) return;
+      const url = new URL(location.href);
+      for (const k of _filterKeys) url.searchParams.delete(k);
+      this.filterFields.forEach((f) => {
+        if (this[f.applied]) url.searchParams.set(f.param, this[f.applied]);
+      });
+      if (this.stateFilter) url.searchParams.set('status', this.stateFilter);
+      if (this.sortBy) url.searchParams.set('sort_by', this.sortBy);
+      if (this.sortDir) url.searchParams.set('sort_dir', this.sortDir);
+      history.replaceState(null, '', url);
+    },
+
+    // Filter builder: one chip per applied filter, plus a "field + value" adder.
+    // `param` names the field's query-string and API key, so a tab adds a filter by
+    // declaring it here and reading it in its own loader.
     filterFields: [
-      { field: 'group', label: 'Group', model: 'groupKeyFilter', applied: '_appliedGroupKey', numeric: false },
-      { field: 'parent', label: 'Parent ID', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
+      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
       // Job ID locates a single row, so it does not combine with the others.
-      { field: 'job', label: 'Job ID', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
     ],
     newFilterField: 'group',
     newFilterValue: '',
+    _lastInvalid: {},
+
+    // The applied value of one filter, letting a caller's overrides stand in for it.
+    // Loaders read their parameters through this, so a field is wired once.
+    filterValue(field, overrides) {
+      const f = this.filterFields.find((x) => x.field === field);
+      if (!f) return '';
+      return (overrides?.[field] ?? this[f.applied]) || '';
+    },
+
+    // Apply one filter and clear the rest. Backs the links that jump straight to a
+    // narrowed list (a parent's children, a worker's jobs, a policy's throttled jobs).
+    setOnlyFilter(field, value) {
+      const overrides = {};
+      this.filterFields.forEach((f) => {
+        const v = f.field === field ? String(value) : '';
+        this[f.model] = v;
+        overrides[f.field] = v;
+      });
+      if (this.stateFilter !== undefined) this.stateFilter = '';
+      this._resetView(overrides);
+    },
 
     currentFilterField() {
       return this.filterFields.find((f) => f.field === this.newFilterField) || this.filterFields[0];
@@ -678,7 +741,11 @@ function tableTab(loadMethod, refreshStorageKey) {
     activeFilterChips() {
       return this.filterFields
         .filter((f) => (this[f.applied] || '') !== '')
-        .map((f) => ({ field: f.field, label: f.label, value: this[f.applied] }));
+        .map((f) => ({
+          field: f.field,
+          label: f.label,
+          value: f.format ? f.format(this[f.applied]) : this[f.applied],
+        }));
     },
 
     addFilter() {
@@ -737,54 +804,40 @@ function tableTab(loadMethod, refreshStorageKey) {
       this._startTimer();
     },
 
-    _syncFiltersToUrl() {
-      writeFiltersToUrl({ groupKey: this._appliedGroupKey, parentId: this._appliedParentId, jobId: this._appliedJobId, sortBy: this.sortBy, sortDir: this.sortDir });
-    },
-
     applyFilter() {
-      const pid = this.parentIdFilter.trim();
-      const jid = (this.jobIdFilter || '').trim();
-      // Auto-apply fires this from both Enter and change/blur. Only warn once per value.
-      if (pid && !/^\d+$/.test(pid)) {
-        if (this._lastInvalidParentId !== pid) {
-          showToast('Parent ID must be a positive integer', 'warning');
-          this._lastInvalidParentId = pid;
+      const next = {};
+      for (const f of this.filterFields) {
+        const v = (this[f.model] || '').trim();
+        // Auto-apply fires from both Enter and change/blur. Only warn once per value.
+        if (f.numeric && v && !/^\d+$/.test(v)) {
+          if (this._lastInvalid[f.field] !== v) {
+            showToast(f.label + ' must be a positive integer', 'warning');
+            this._lastInvalid[f.field] = v;
+          }
+          return;
         }
-        return;
+        this._lastInvalid[f.field] = null;
+        this[f.model] = v;
+        next[f.field] = v;
       }
-      this._lastInvalidParentId = null;
-      if (jid && !/^\d+$/.test(jid)) {
-        if (this._lastInvalidJobId !== jid) {
-          showToast('Job ID must be a positive integer', 'warning');
-          this._lastInvalidJobId = jid;
-        }
-        return;
-      }
-      this._lastInvalidJobId = null;
-      if (pid === this._appliedParentId && jid === (this._appliedJobId || '') && this.groupKeyFilter === this._appliedGroupKey) return;
-      this.parentIdFilter = pid;
-      this.jobIdFilter = jid;
-      this._resetView({ groupKey: this.groupKeyFilter, parentId: pid, jobId: jid });
+      if (this.filterFields.every((f) => next[f.field] === (this[f.applied] || ''))) return;
+      this._resetView(next);
     },
 
     filterByParent(id) {
-      this.parentIdFilter = String(id);
-      this.groupKeyFilter = '';
-      this.jobIdFilter = '';
-      this._resetView({ groupKey: '', parentId: String(id), jobId: '' });
+      this.setOnlyFilter('parent', id);
     },
 
     _bindTableEvents(opts) {
       this._watchPolling();
+      // Clears what the old queue narrowed, then adopts whatever the new URL names.
+      // Reading here rather than in a second event keeps a queue change to one load:
+      // a history step lands on a URL that carries both a new queue and its filters.
       this._onQueueChanged = () => {
         this.disarm();
-        this.groupKeyFilter = '';
-        this.parentIdFilter = '';
-        this.jobIdFilter = '';
+        this.filterFields.forEach((f) => { this[f.model] = ''; this[f.applied] = ''; });
+        this._lastInvalid = {};
         this.newFilterValue = '';
-        this._appliedGroupKey = '';
-        this._appliedParentId = '';
-        this._appliedJobId = '';
         this.sortBy = '';
         this.sortDir = '';
         // Reset paging even while inactive, so the tab reopens on page 1 of the new
@@ -792,6 +845,7 @@ function tableTab(loadMethod, refreshStorageKey) {
         // is active-gated).
         this.offset = 0;
         if (opts.onQueueReset) opts.onQueueReset();
+        this.readUrlFilters(opts.hashName);
         if (this.active) this._resetView();
       };
       this._onSseReconnect = () => {
@@ -801,15 +855,24 @@ function tableTab(loadMethod, refreshStorageKey) {
         const count = opts.relevant(e.detail);
         if (count > 0) this.pendingChanges += count;
       };
+      // A history step lands on a URL whose filters this tab has to adopt. It runs
+      // after queueChanged, so a cross-queue step resets first and then reads.
+      this._onUrlChanged = () => {
+        this.readUrlFilters(opts.hashName);
+        this.offset = 0;
+        if (this.active) this._resetView();
+      };
       window.addEventListener(ARB_EVENTS.queueChanged, this._onQueueChanged);
       window.addEventListener(ARB_EVENTS.sseReconnect, this._onSseReconnect);
       window.addEventListener(ARB_EVENTS.sseEvent, this._onSseEvent);
+      window.addEventListener(ARB_EVENTS.urlChanged, this._onUrlChanged);
     },
 
     _unbindTableEvents() {
       window.removeEventListener(ARB_EVENTS.queueChanged, this._onQueueChanged);
       window.removeEventListener(ARB_EVENTS.sseReconnect, this._onSseReconnect);
       window.removeEventListener(ARB_EVENTS.sseEvent, this._onSseEvent);
+      window.removeEventListener(ARB_EVENTS.urlChanged, this._onUrlChanged);
       this._stopWatchPolling();
       releaseInitialLoad(this);
     },
@@ -1116,23 +1179,25 @@ function parseOverride(v, check) {
   return check(n) ? n : null;
 }
 
-// Shared drill-down lifecycle for the rate-limit and concurrency tabs. Owns the
-// expanded prefix and its capped child list, refreshes an open drill-down on each
-// poll without flashing the spinner, and closes a drill-down whose prefix vanished.
-// cfg supplies the field/method names, fetchers, and labels that differ per tab.
+// Shared drawer lifecycle for the rate-limit and concurrency tabs. Owns the open
+// policy and its capped child list, refreshes an open drawer on each poll without
+// flashing the spinner, and closes a drawer whose policy vanished. cfg supplies the
+// field/method names, fetchers, and labels that differ per tab.
 function drillDownTab(cfg) {
   return {
     ...loadState(),
     policies: [],
-    expandedPrefix: null,
+    selectedPolicy: null,
     [cfg.listField]: [],
     [cfg.loadingField]: false,
+    editing: false,
     _itemSeq: 0,
+    _onDrillHidden: null,
 
-    // Total items for the open prefix, from its policy row (the drill-down list is
-    // capped at cfg.itemLimit).
+    // Total items for the open policy, from its own row (the drawer list is capped
+    // at cfg.itemLimit).
     itemTotal() {
-      const p = this.policies.find((x) => x.prefix === this.expandedPrefix);
+      const p = this.selectedPolicy;
       return p ? p[cfg.countField] : this[cfg.listField].length;
     },
 
@@ -1143,10 +1208,43 @@ function drillDownTab(cfg) {
       return this.itemTotal() > cfg.itemLimit;
     },
 
-    // Placeholder rows to stand in for the ones on the way, so the panel opens at
+    // Placeholder rows to stand in for the ones on the way, so the list opens at
     // the height it keeps. The policy row already counted them.
     expectedItems() {
       return Math.max(1, Math.min(this.itemTotal(), cfg.itemLimit));
+    },
+
+    // The drawer also closes on its own: the close button, Escape, a navigation.
+    // Dropping the selection here covers every one of those.
+    bindDrillDrawer() {
+      this._onDrillHidden = (e) => {
+        if (e.target.id === cfg.drawerId) this._clearDrill();
+      };
+      document.addEventListener('hidden.bs.offcanvas', this._onDrillHidden);
+    },
+
+    unbindDrillDrawer() {
+      document.removeEventListener('hidden.bs.offcanvas', this._onDrillHidden);
+      this._onDrillHidden = null;
+    },
+
+    _clearDrill() {
+      this.selectedPolicy = null;
+      this[cfg.listField] = [];
+      this[cfg.loadingField] = false;
+      this.editing = false;
+    },
+
+    // The drawer is the editor's home, so open it on this policy first.
+    openEdit(p) {
+      this.buildEdit(p);
+      this.viewDetail(p);
+      this.editing = true;
+    },
+
+    cancelEdit() {
+      this.editing = false;
+      this.edit.error = '';
     },
 
     async loadPolicies() {
@@ -1154,14 +1252,17 @@ function drillDownTab(cfg) {
         const data = await cfg.fetchPolicies();
         if (isStale()) return;
         this.policies = data.policies || [];
-        // Close a drill-down whose prefix vanished.
-        if (this.expandedPrefix && !this.policies.some((p) => p.prefix === this.expandedPrefix)) {
-          this.expandedPrefix = null;
-          this[cfg.listField] = [];
+        // A policy that vanished takes its drawer with it. The rest re-point the
+        // open one at the fresh row, so the drawer reads the values the table does.
+        if (this.selectedPolicy && !this.policies.some((p) => p.prefix === this.selectedPolicy.prefix)) {
+          this.closeDetail();
+          this._clearDrill();
+        } else {
+          this.resyncDetailSelection();
         }
       });
-      // Keep an open drill-down fresh on each poll, without flashing the spinner.
-      if (this.expandedPrefix) await this[cfg.loadName](this.expandedPrefix, { silent: true });
+      // Keep an open drawer fresh on each poll, without flashing the spinner.
+      if (this.selectedPolicy) await this[cfg.loadName](this.selectedPolicy.prefix, { silent: true });
       await this._openUrlPrefix();
     },
 
@@ -1178,27 +1279,25 @@ function drillDownTab(cfg) {
       const p = this.policies.find((x) => x.prefix === want);
       if (!p) return;
       this._urlPrefixDone = true;
-      if (this.expandedPrefix !== p.prefix) await this[cfg.toggleName](p);
+      if (this.selectedPolicy?.prefix !== p.prefix) await this.viewDetail(p);
     },
 
-    // The whole row opens the drill-down. Controls inside it keep their own click.
-    rowClick(e, p) {
-      if (rowDetailClick(e)) this[cfg.toggleName](p);
+    // A row already in the drawer stays there, so a second click never closes what
+    // it just opened. The keyboard toggle is what closes it.
+    async viewDetail(p) {
+      const same = this.selectedPolicy?.prefix === p.prefix;
+      this.selectedPolicy = p;
+      this.editing = false;
+      showDrawer(cfg.drawerId);
+      if (same) return;
+      // Drop the previous policy's rows so they never render under the new heading.
+      this[cfg.listField] = [];
+      await this[cfg.loadName](p.prefix);
     },
 
     async [cfg.toggleName](p) {
-      if (this.expandedPrefix === p.prefix) {
-        this.expandedPrefix = null;
-        this[cfg.listField] = [];
-        this[cfg.loadingField] = false;
-        return;
-      }
-      // Drop the previous prefix's rows so they never render under the new heading.
-      this.expandedPrefix = p.prefix;
-      this[cfg.listField] = [];
-      // The panel carries this policy's editor, so it opens on this policy's values.
-      this.buildEdit(p);
-      await this[cfg.loadName](p.prefix);
+      if (this.selectedPolicy?.prefix === p.prefix) this.closeDetail();
+      else await this.viewDetail(p);
     },
 
     async [cfg.loadName](prefix, { silent = false } = {}) {
@@ -1212,7 +1311,7 @@ function drillDownTab(cfg) {
       }
       // A superseded fetch (or a closed/vanished drill-down) owns nothing anymore:
       // it must touch neither the list nor the spinner.
-      if (seq !== this._itemSeq || this.expandedPrefix !== prefix) return;
+      if (seq !== this._itemSeq || this.selectedPolicy?.prefix !== prefix) return;
       // The latest fetch settles the spinner, even a silent one that superseded a
       // user-initiated load.
       this[cfg.loadingField] = false;
@@ -1451,9 +1550,19 @@ function columnPrefs(columns, storageKey) {
     },
 
     colVisible(key) {
-      if (columns.find((c) => c.key === key)?.required) return true;
+      const col = columns.find((c) => c.key === key);
+      // A column marked narrow: false is dropped on a phone whatever the saved
+      // preference says. The preference is left untouched, so the desktop view is
+      // unchanged, and the drawer still carries every field a tap away.
+      if (col?.narrow === false && this.$store.app.narrow) return false;
+      if (col?.required) return true;
       if (key in this.colVis) return this.colVis[key];
       return !this.autoEmpty[key];
+    },
+
+    // The columns the menu can offer here: one dropped by width is not togglable.
+    togglableColumns() {
+      return columns.filter((c) => !c.required && !(c.narrow === false && this.$store.app.narrow));
     },
 
     toggleCol(key) {
@@ -1481,51 +1590,39 @@ function columnPrefs(columns, storageKey) {
 // URL filter sync
 // ---------------------------------------------------------------------------
 
-// Filter keys cleared on tab switch.
-const _filterKeys = ['group_key', 'parent_id', 'job_id', 'status', 'sort_by', 'sort_dir'];
+// Every filter key any tab writes, cleared as a set when the view changes. A tab's
+// own filterFields name which of them it owns.
+const _filterKeys = [
+  'group_key',
+  'parent_id',
+  'job_id',
+  'claimed_by',
+  'payload',
+  'rate_limit_prefix',
+  'concurrency_prefix',
+  'completed_after',
+  'completed_before',
+  'status',
+  'sort_by',
+  'sort_dir',
+];
 
-function readFiltersFromUrl() {
-  const p = new URLSearchParams(location.search);
-  return {
-    groupKey: p.get('group_key') || '',
-    parentId: p.get('parent_id') || '',
-    jobId: p.get('job_id') || '',
-    status: p.get('status') || '',
-    sortBy: p.get('sort_by') || '',
-    sortDir: p.get('sort_dir') || '',
-  };
-}
-
-function writeFiltersToUrl(filters) {
-  const url = new URL(location.href);
-  for (const k of _filterKeys) url.searchParams.delete(k);
-  if (filters.groupKey) url.searchParams.set('group_key', filters.groupKey);
-  if (filters.parentId) url.searchParams.set('parent_id', filters.parentId);
-  if (filters.jobId) url.searchParams.set('job_id', filters.jobId);
-  if (filters.status) url.searchParams.set('status', filters.status);
-  if (filters.sortBy) url.searchParams.set('sort_by', filters.sortBy);
-  if (filters.sortDir) url.searchParams.set('sort_dir', filters.sortDir);
-  history.replaceState(null, '', url);
-}
-
-function clearFiltersFromUrl() {
-  const url = new URL(location.href);
-  for (const k of _filterKeys) url.searchParams.delete(k);
-  history.replaceState(null, '', url);
-}
-
-// Relative URL to a queue's Jobs tab, optionally filtered by status. One source of
-// truth for the deep-link shape used by the queue cards, the stat cards, and the
-// store's in-app navigation.
-function queueJobsUrl(queue, status) {
+// Relative URL to a queue's Jobs tab, narrowed by any of the filter keys. One source
+// of truth for the deep-link shape used by the queue cards, the stat cards, the worker
+// rows, the policy tables, and the store's in-app navigation.
+function queueJobsUrl(queue, filters) {
   const p = new URLSearchParams({ queue });
-  if (status) p.set('status', status);
+  // A bare status keeps the older one-argument form the stat cards call.
+  const named = typeof filters === 'string' ? { status: filters } : filters || {};
+  for (const [k, v] of Object.entries(named)) {
+    if (v) p.set(k, String(v));
+  }
   return '?' + p.toString() + '#jobs';
 }
 
 // Relative URL to one job in a queue's Jobs tab, for the event log's job column.
 function queueJobUrl(queue, jobId) {
-  return '?' + new URLSearchParams({ queue, job_id: String(jobId) }).toString() + '#jobs';
+  return queueJobsUrl(queue, { job_id: jobId });
 }
 
 // Anchor click guard: true if this is a plain left-click to handle as an SPA nav

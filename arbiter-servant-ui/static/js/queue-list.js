@@ -20,6 +20,8 @@ document.addEventListener('alpine:init', () => {
   Alpine.data('queueListTab', () => ({
     ...pollingTab('load', ARB_TIMING.queueListPollMs, 'arb.queuesRefresh'),
     ...eventBusTab(),
+    ...confirmArm(),
+    maintenanceBusy: false,
     rows: [],
     ...loadState(),
     search: '',
@@ -36,6 +38,27 @@ document.addEventListener('alpine:init', () => {
     destroy() {
       this.teardownPolling();
       this._unbindBus();
+    },
+
+    // Run one maintenance pass by hand, the work a worker pool's reaper does on its
+    // own. Useful where no pool is running, or to reclaim without waiting a window.
+    // Operations exclude each other across callers, so one another caller is already
+    // running is skipped and absent from the report.
+    async runMaintenance() {
+      if (this.maintenanceBusy || !this.confirmArmed('maintenance')) return;
+      this.maintenanceBusy = true;
+      try {
+        const res = await ArbiterAPI.runMaintenance();
+        const rows = Object.values(res?.ops || {}).reduce((a, b) => a + b, 0);
+        const failed = res?.failed || [];
+        if (failed.length) showToast(`Maintenance finished, ${failed.length} operation(s) failed`, 'warning');
+        else showToast(rows > 0 ? `Maintenance touched ${rows} rows` : 'Maintenance found nothing to do', 'success');
+        this.load();
+      } catch (e) {
+        showToast('Maintenance failed: ' + e.message);
+      } finally {
+        this.maintenanceBusy = false;
+      }
     },
 
     async load() {

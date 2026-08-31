@@ -20,6 +20,10 @@ const CC_SORT_KEYS = {
   },
 };
 
+// Row actions offered by the drawer header, which binds each row as `job`.
+const CC_ACTIONS_HTML = `
+<li x-show="!editing"><a class="dropdown-item" href="#" @click.prevent="openEdit(job); closeDropdown($el)">Edit</a></li>`;
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('concurrencyTab', () => ({
     ...pollingTab('loadPolicies', ARB_TIMING.concurrencyPollMs, 'arb.concurrencyRefresh'),
@@ -33,10 +37,13 @@ document.addEventListener('alpine:init', () => {
       countField: 'keyCount',
       itemLimit: CC_KEY_LIMIT,
       itemLabel: 'keys',
+      drawerId: 'concurrencyDrawer',
       policyError: 'Failed to load concurrency pools',
       fetchPolicies: () => ArbiterAPI.listConcurrency(),
       fetchItems: (prefix, opts) => ArbiterAPI.listConcurrencyKeys(prefix, opts),
     }),
+    ...rowDetail('displayPolicies', 'prefix', 'selectedPolicy', { drawer: 'concurrencyDrawer' }),
+    detailActionsHtml: CC_ACTIONS_HTML,
     edit: {
       prefix: '',
       limitOn: false, limit: '',
@@ -49,6 +56,30 @@ document.addEventListener('alpine:init', () => {
     // Static header, so the count is fixed.
     colCount() {
       return 5;
+    },
+
+    get detailTitle() {
+      return this.selectedPolicy ? this.selectedPolicy.prefix : 'Pool';
+    },
+
+    get detailStatus() {
+      return this.selectedPolicy && this.isSaturated(this.selectedPolicy) ? 'at limit' : '';
+    },
+
+    detailStatusClass() {
+      return 'bg-danger-subtle text-danger-emphasis';
+    },
+
+    // The header's actions menu walks this, so the open pool is its one row.
+    get detailRows() {
+      const cur = this.selectedPolicy;
+      return cur ? [Object.assign({}, cur, { _id: cur.prefix })] : [];
+    },
+
+    // Heading for the drawer's key list, naming what the cap is hiding.
+    keysLabel() {
+      const total = this.itemTotal();
+      return this.hasMoreItems() ? `Keys (${this.itemCap} of ${this.fmtCount(total)})` : `Keys (${this.fmtCount(total)})`;
     },
 
     get displayPolicies() {
@@ -76,10 +107,12 @@ document.addEventListener('alpine:init', () => {
 
     init() {
       this.initPollingMounted();
+      this.bindDrillDrawer();
     },
 
     destroy() {
       this.teardownPolling();
+      this.unbindDrillDrawer();
     },
 
     // Effective cap (override falls back to default).
@@ -119,6 +152,7 @@ document.addEventListener('alpine:init', () => {
     async saveEdit() {
       await saveOverrides(this.edit, {
         apiFn: (prefix, body) => ArbiterAPI.updateConcurrencyPolicy(prefix, body),
+        close: () => { this.editing = false; },
         reload: () => this.loadPolicies(),
         buildBody: (e) => {
           // The override is sent as a value (override on) or null (revert to default).

@@ -40,6 +40,7 @@ import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 import Servant.API
@@ -87,7 +88,7 @@ instance ToHttpApiData JobStatus where
 
 -- | One queue's job routes.
 data JobsAPI payload result mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&sort_by=...&sort_dir=...
+  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...
     listJobs
       :: mode
         :- QueryParam "limit" Int
@@ -97,6 +98,10 @@ data JobsAPI payload result mode = JobsAPI
           :> QueryParam "job_id" Int64
           :> QueryFlag "roots_only"
           :> QueryParam "status" JobStatus
+          :> QueryParam "claimed_by" UUID
+          :> QueryParam "payload" Text
+          :> QueryParam "rate_limit_prefix" Text
+          :> QueryParam "concurrency_prefix" Text
           :> QueryParam "sort_by" JobSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
@@ -222,7 +227,7 @@ data DLQAPI payload mode = DLQAPI
 
 -- | One queue's archive routes.
 data ArchiveAPI payload mode = ArchiveAPI
-  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
+  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&completed_after=T&completed_before=T&sort_by=...&sort_dir=...
     listArchive
       :: mode
         :- QueryParam "limit" Int
@@ -230,6 +235,8 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "parent_id" Int64
           :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
+          :> QueryParam "completed_after" UTCTime
+          :> QueryParam "completed_before" UTCTime
           :> QueryParam "sort_by" ArchiveSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (ArchiveResponse payload)
@@ -337,7 +344,7 @@ data CronAPI mode = CronAPI
         :- "schedules"
           :> Capture "name" Text
           :> ReqBody '[JSON] CronScheduleUpdate
-          :> Patch '[JSON] CronScheduleRow
+          :> Patch '[JSON] CronScheduleView
   , -- POST /cron/schedules/:name/run
     runSchedule
       :: mode

@@ -5,18 +5,18 @@
 // weight is a relative share, renormalized over the visible columns to fill 100%.
 // autoHide columns drop out when no row on the page populates them.
 const JOB_COLUMNS = [
-  { key: 'select', label: '', weight: 3, required: true },
+  { key: 'select', label: '', weight: 3, required: true, narrow: false },
   { key: 'id', label: 'ID', weight: 4, required: true },
   { key: 'payload', label: 'Payload', weight: 14 },
-  { key: 'group', label: 'Group', weight: 7, autoHide: true },
-  { key: 'parent', label: 'Parent', weight: 7, autoHide: true },
-  { key: 'children', label: 'Children', weight: 9, autoHide: true },
-  { key: 'priority', label: 'Priority', weight: 8, autoHide: true },
-  { key: 'attempts', label: 'Attempts', weight: 8, autoHide: true },
+  { key: 'group', label: 'Group', weight: 7, autoHide: true, narrow: false },
+  { key: 'parent', label: 'Parent', weight: 7, autoHide: true, narrow: false },
+  { key: 'children', label: 'Children', weight: 9, autoHide: true, narrow: false },
+  { key: 'priority', label: 'Priority', weight: 8, autoHide: true, narrow: false },
+  { key: 'attempts', label: 'Attempts', weight: 8, autoHide: true, narrow: false },
   { key: 'status', label: 'Status', weight: 7 },
   { key: 'inserted', label: 'Inserted', weight: 8 },
-  { key: 'visible', label: 'Visible', weight: 10, autoHide: true },
-  { key: 'gates', label: 'Gates', weight: 10, autoHide: true },
+  { key: 'visible', label: 'Visible', weight: 10, autoHide: true, narrow: false },
+  { key: 'gates', label: 'Gates', weight: 10, autoHide: true, narrow: false },
   { key: 'actions', label: 'Actions', weight: 4 },
 ];
 
@@ -57,10 +57,30 @@ document.addEventListener('alpine:init', () => {
     groupKeyFilter: '',
     parentIdFilter: '',
     jobIdFilter: '',
+    claimedByFilter: '',
+    payloadFilter: '',
+    ratePrefixFilter: '',
+    concPrefixFilter: '',
     stateFilter: '',
     _appliedGroupKey: '',
     _appliedParentId: '',
     _appliedJobId: '',
+    _appliedClaimedBy: '',
+    _appliedPayload: '',
+    _appliedRatePrefix: '',
+    _appliedConcPrefix: '',
+
+    // The shared three, plus the ones only a job table can answer: which worker holds
+    // a job, what its payload says, and which policy gates it.
+    filterFields: [
+      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
+      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+      { field: 'worker', label: 'Worker', param: 'claimed_by', model: 'claimedByFilter', applied: '_appliedClaimedBy', format: shortId },
+      { field: 'payload', label: 'Payload', param: 'payload', model: 'payloadFilter', applied: '_appliedPayload' },
+      { field: 'rate', label: 'Rate limit', param: 'rate_limit_prefix', model: 'ratePrefixFilter', applied: '_appliedRatePrefix' },
+      { field: 'conc', label: 'Concurrency', param: 'concurrency_prefix', model: 'concPrefixFilter', applied: '_appliedConcPrefix' },
+    ],
     _onFilterJobs: null,
     childCounts: {},
     dlqChildCounts: {},
@@ -79,6 +99,19 @@ document.addEventListener('alpine:init', () => {
     _detailSeq: 0,
     notVisibleFormat: localStorage.getItem('arb.notVisibleFormat') || 'countdown',
 
+    fmtAge: formatDurationSecs,
+
+    // The sibling jobs the same worker holds: this queue's list, filtered to its lease.
+    workerJobsUrl(workerId) {
+      return queueJobsUrl(Alpine.store('app').selectedQueue, { claimed_by: workerId });
+    },
+
+    goToWorkerJobs(e, workerId) {
+      if (!plainNavClick(e)) return;
+      this.closeDetail();
+      this.setOnlyFilter('worker', workerId);
+    },
+
     toggleNotVisibleFormat() {
       this.notVisibleFormat = this.notVisibleFormat === 'countdown' ? 'absolute' : 'countdown';
       localStorage.setItem('arb.notVisibleFormat', this.notVisibleFormat);
@@ -89,10 +122,16 @@ document.addEventListener('alpine:init', () => {
       return this.notVisibleFormat === 'countdown' ? formatCountdown(iso) : formatTime(iso);
     },
 
+    // A filter that can match a child renders flat: a matching child has no visible
+    // parent to nest under. The parent filter is the exception, since it is asking
+    // for one parent's children in the first place.
+    get flatOnly() {
+      return !!(this.stateFilter || this._appliedClaimedBy || this._appliedPayload
+        || this._appliedRatePrefix || this._appliedConcPrefix);
+    },
+
     get effectiveViewMode() {
-      // A status filter spans the tree, so render flat (a matching child has no
-      // visible parent to nest under).
-      return this.stateFilter ? 'flat' : this.viewMode;
+      return this.flatOnly ? 'flat' : this.viewMode;
     },
 
     get displayJobs() {
@@ -258,7 +297,6 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Insert form
-    showInsertForm: false,
     insertPayload: '',
     insertGroupKey: '',
     insertDedupKey: '',
@@ -275,31 +313,9 @@ document.addEventListener('alpine:init', () => {
       try { JSON.parse(raw); return false; } catch { return true; }
     },
 
-    _syncFiltersToUrl() {
-      writeFiltersToUrl({
-        groupKey: this._appliedGroupKey,
-        parentId: this._appliedParentId,
-        jobId: this._appliedJobId,
-        status: this.stateFilter,
-        sortBy: this.sortBy,
-        sortDir: this.sortDir,
-      });
-    },
-
     init() {
       this._loadColPrefs();
-      const f = readFiltersFromUrl();
-      if (location.hash.replace('#', '') === 'jobs') {
-        this.groupKeyFilter = f.groupKey;
-        this._appliedGroupKey = f.groupKey;
-        this.parentIdFilter = f.parentId;
-        this._appliedParentId = f.parentId;
-        this.jobIdFilter = f.jobId;
-        this._appliedJobId = f.jobId;
-        this.stateFilter = f.status;
-        this.sortBy = f.sortBy;
-        this.sortDir = f.sortDir;
-      }
+      this.readUrlFilters('jobs');
       trackTabActive(this, '#tab-jobs', {
         onShow: () => { this.loadJobs(); this._startTimer(); },
         onHide: () => {
@@ -311,6 +327,7 @@ document.addEventListener('alpine:init', () => {
         },
       });
       this._bindTableEvents({
+        hashName: 'jobs',
         onQueueReset: () => { this.stateFilter = ''; this.selected = {}; this.resetAutoEmpty(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
@@ -366,18 +383,29 @@ document.addEventListener('alpine:init', () => {
     async loadJobs(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
-      const pid = filterOverrides?.parentId ?? this._appliedParentId;
-      const jid = filterOverrides?.jobId ?? this._appliedJobId;
+      const gk = this.filterValue('group', filterOverrides);
+      const pid = this.filterValue('parent', filterOverrides);
+      const jid = this.filterValue('job', filterOverrides);
+      const worker = this.filterValue('worker', filterOverrides);
+      const payload = this.filterValue('payload', filterOverrides);
+      const rate = this.filterValue('rate', filterOverrides);
+      const conc = this.filterValue('conc', filterOverrides);
       const startingPending = this.pendingChanges;
       await guardedLoad(this, 'Failed to load jobs', async (seq, isStale) => {
-        const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !pid && !gk && !jid;
+        // Any filter that can match a child renders flat, so a match is never hidden
+        // behind a parent the filter itself excluded.
+        const narrowed = !!(pid || gk || jid || worker || payload || rate || conc);
+        const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !narrowed;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
           offset: this.offset,
           groupKey: gk || undefined,
           parentId: pid || undefined,
           jobId: jid || undefined,
+          claimedBy: worker || undefined,
+          payload: payload || undefined,
+          ratePrefix: rate || undefined,
+          concPrefix: conc || undefined,
           status: this.stateFilter || undefined,
           rootsOnly,
           sortBy: this.sortBy || undefined,
@@ -388,6 +416,10 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this._appliedJobId = jid;
+        this._appliedClaimedBy = worker;
+        this._appliedPayload = payload;
+        this._appliedRatePrefix = rate;
+        this._appliedConcPrefix = conc;
         this.jobs = jobs;
         this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
@@ -495,7 +527,7 @@ document.addEventListener('alpine:init', () => {
           this.closeDetailIfOpen(id);
           if (String(id) === this._appliedParentId) {
             this.parentIdFilter = '';
-            this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
+            this._resetView({ parent: '' });
           } else {
             await this.loadJobs();
           }
@@ -516,7 +548,7 @@ document.addEventListener('alpine:init', () => {
           this.closeDetailIfOpen(id);
           if (String(id) === this._appliedParentId) {
             this.parentIdFilter = '';
-            this._resetView({ groupKey: this._appliedGroupKey, parentId: '' });
+            this._resetView({ parent: '' });
           } else {
             await this.loadJobs();
           }
@@ -667,6 +699,12 @@ document.addEventListener('alpine:init', () => {
       this.viewDetail(job.primaryKey);
     },
 
+    // Insert opens as a modal, so the form starts clean each time it is asked for.
+    openInsert() {
+      this.insertError = '';
+      showModal('insertJobModal');
+    },
+
     async submitInsert() {
       if (this.inserting) return;
       const queue = Alpine.store('app').selectedQueue;
@@ -729,6 +767,7 @@ document.addEventListener('alpine:init', () => {
         this.insertPriority = 0;
         this.insertNotVisibleUntil = '';
         this.insertMaxAttempts = '';
+        hideModal('insertJobModal');
         this.loadJobs();
         showToast('Job inserted', 'success');
       } catch (e) {

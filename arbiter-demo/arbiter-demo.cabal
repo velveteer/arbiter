@@ -36,7 +36,11 @@ executable arbiter-demo
     , arbiter-migrations
     , arbiter-otel
     , arbiter-servant
+    , arbiter-servant-openapi
     , arbiter-servant-ui
+    , openapi3
+    , servant-server
+    , servant-swagger-ui
     , arbiter-simple
     , arbiter-worker
     , async                                 >=2.2

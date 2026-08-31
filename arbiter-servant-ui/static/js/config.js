@@ -36,10 +36,15 @@ const ARB_CONFIG = {
   cronConfirm: 'type',
 };
 
+// The width below which a table shows only its identifying columns. Matches the
+// phone breakpoint in dashboard.css.
+const ARB_NARROW_MQ = '(max-width: 640px)';
+
 // Registry of window-dispatched event-bus names.
 const ARB_EVENTS = {
   queueChanged: 'queue-changed',
   sseEvent: 'sse-event',
   sseReconnect: 'sse-reconnect',
   filterJobs: 'filter-jobs',
+  urlChanged: 'url-changed',
 };

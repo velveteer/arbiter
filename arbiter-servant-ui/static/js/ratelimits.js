@@ -20,6 +20,13 @@ const RL_SORT_KEYS = {
   },
 };
 
+// Row actions, stamped into both the row menu and the drawer header.
+const RL_ACTIONS_HTML = `
+<li x-show="!editing"><a class="dropdown-item" href="#" @click.prevent="openEdit(job); closeDropdown($el)">Edit</a></li>
+<li><a class="dropdown-item" href="#" @click.prevent="resetPrefix(job)"
+  :class="{ 'fw-semibold': isArmed('reset:' + job.prefix) }"
+  x-text="isArmed('reset:' + job.prefix) ? 'Confirm reset' : 'Reset'"></a></li>`;
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('rateLimitsTab', () => ({
     ...pollingTab('loadPolicies', ARB_TIMING.rateLimitPollMs, 'arb.rateLimitRefresh'),
@@ -33,10 +40,13 @@ document.addEventListener('alpine:init', () => {
       countField: 'bucketCount',
       itemLimit: RL_BUCKET_LIMIT,
       itemLabel: 'buckets',
+      drawerId: 'rateLimitDrawer',
       policyError: 'Failed to load rate limits',
       fetchPolicies: () => ArbiterAPI.listRateLimits(),
       fetchItems: (prefix, opts) => ArbiterAPI.listRateLimitBuckets(prefix, opts),
     }),
+    ...rowDetail('displayPolicies', 'prefix', 'selectedPolicy', { drawer: 'rateLimitDrawer' }),
+    detailActionsHtml: RL_ACTIONS_HTML,
     edit: {
       prefix: '',
       maxOn: false, max: '',
@@ -51,6 +61,30 @@ document.addEventListener('alpine:init', () => {
     // Static header, so the count is fixed.
     colCount() {
       return 7;
+    },
+
+    get detailTitle() {
+      return this.selectedPolicy ? this.selectedPolicy.prefix : 'Policy';
+    },
+
+    get detailStatus() {
+      return this.selectedPolicy?.throttledCount > 0 ? 'throttling' : '';
+    },
+
+    detailStatusClass() {
+      return 'bg-warning-subtle text-warning-emphasis';
+    },
+
+    // The header's actions menu walks this, so the open policy is its one row.
+    get detailRows() {
+      const cur = this.selectedPolicy;
+      return cur ? [Object.assign({}, cur, { _id: cur.prefix })] : [];
+    },
+
+    // Heading for the drawer's bucket list, naming what the cap is hiding.
+    bucketsLabel() {
+      const total = this.itemTotal();
+      return this.hasMoreItems() ? `Keys (${this.itemCap} of ${this.fmtCount(total)})` : `Keys (${this.fmtCount(total)})`;
     },
 
     get displayPolicies() {
@@ -75,24 +109,49 @@ document.addEventListener('alpine:init', () => {
     // A policy row carries no queue, so the overview names the queues holding
     // throttled work. One goes straight to its jobs, otherwise the queue list
     // shows the throttled counts side by side.
+    // The jobs this policy is holding back. The queue is whichever one has them: a
+    // prefix belongs to a payload type, so in practice that is one queue.
     async openThrottled(p) {
       if (!p.throttledCount) return;
+      const filters = { status: 'throttled', rate_limit_prefix: p.prefix };
       try {
         const data = await ArbiterAPI.getAllStats();
-        const hot = (data.queues || []).filter((q) => (q.stats?.throttledJobs || 0) > 0);
-        if (hot.length === 1) Alpine.store('app').openQueueJobs(hot[0].queue, 'throttled');
-        else Alpine.store('app').setView('queues');
+        const throttled = (data.queues || []).filter((q) => (q.stats?.throttledJobs || 0) > 0);
+        const hot = await this._queuesHolding(throttled, p.prefix);
+        if (hot.length === 0) {
+          showToast('No queue is holding jobs this policy throttled', 'info');
+          return;
+        }
+        Alpine.store('app').openQueueJobs(hot[0], filters);
+        if (hot.length > 1) {
+          showToast(`${hot.length} queues hold jobs this policy throttled. Showing ${hot[0]}.`, 'info');
+        }
       } catch (e) {
         showToast('Failed to find throttled jobs: ' + e.message);
       }
     },
 
+    // Of the queues holding throttled work, the ones holding some of it under this
+    // prefix. A queue's throttled count covers every policy, so each is asked.
+    async _queuesHolding(queues, prefix) {
+      if (queues.length <= 1) return queues.map((q) => q.queue);
+      const counts = await mapLimit(queues, ARB_TIMING.bulkConcurrency, async (q) => {
+        const r = await ArbiterAPI.listJobs(q.queue, { limit: 1, status: 'throttled', ratePrefix: prefix });
+        return { queue: q.queue, total: r.jobsTotal || 0 };
+      });
+      return counts
+        .filter((c) => c.status === 'fulfilled' && c.value.total > 0)
+        .map((c) => c.value.queue);
+    },
+
     init() {
       this.initPollingMounted();
+      this.bindDrillDrawer();
     },
 
     destroy() {
       this.teardownPolling();
+      this.unbindDrillDrawer();
     },
 
     // Effective params (override falls back to default).
@@ -150,6 +209,7 @@ document.addEventListener('alpine:init', () => {
     async saveEdit() {
       await saveOverrides(this.edit, {
         apiFn: (prefix, body) => ArbiterAPI.updateRateLimitPolicy(prefix, body),
+        close: () => { this.editing = false; },
         reload: () => this.loadPolicies(),
         buildBody: (e) => {
           // Each field is sent as a value (override on) or null (revert to default).

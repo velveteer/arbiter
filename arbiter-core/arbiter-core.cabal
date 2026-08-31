@@ -64,6 +64,7 @@ library
     Arbiter.Core.Job.Status
     Arbiter.Core.Job.TraceContext
     Arbiter.Core.Job.Types
+    Arbiter.Core.Job.Types.Internal
     Arbiter.Core.JobResult
     Arbiter.Core.JobTree
     Arbiter.Core.Json
@@ -104,7 +105,6 @@ library
 
   other-modules:
     Arbiter.Core.HighLevel.Runtime
-    Arbiter.Core.Job.Types.Internal
     Arbiter.Core.Operations.Gates
     Arbiter.Core.Operations.Workers
 
@@ -138,3 +138,5 @@ test-suite arbiter-core-tests
     , base          >=4.20 && <5
     , hspec         >=2.0  && <2.12
     , text          >=1.2  && <2.2
+    , time          >=1.9  && <1.16
+    , uuid-types    >=1.0  && <1.1

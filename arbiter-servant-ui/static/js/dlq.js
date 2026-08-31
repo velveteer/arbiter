@@ -3,16 +3,16 @@
  */
 // Ordered column registry. Order must match the table header and cell order.
 const DLQ_COLUMNS = [
-  { key: 'select', label: 'Select', weight: 4, required: true },
-  { key: 'dlqid', label: 'DLQ ID', weight: 7 },
+  { key: 'select', label: 'Select', weight: 4, required: true, narrow: false },
+  { key: 'dlqid', label: 'DLQ ID', weight: 7, narrow: false },
   { key: 'jobid', label: 'Job ID', weight: 7 },
-  { key: 'parent', label: 'Parent', weight: 7 },
-  { key: 'group', label: 'Group', weight: 8 },
+  { key: 'parent', label: 'Parent', weight: 7, narrow: false },
+  { key: 'group', label: 'Group', weight: 8, narrow: false },
   { key: 'payload', label: 'Payload', weight: 13 },
   { key: 'failed', label: 'Failed', weight: 12 },
-  { key: 'attempts', label: 'Attempts', weight: 8 },
-  { key: 'error', label: 'Last Error', weight: 13 },
-  { key: 'gates', label: 'Gates', weight: 13, autoHide: true },
+  { key: 'attempts', label: 'Attempts', weight: 8, narrow: false },
+  { key: 'error', label: 'Last Error', weight: 13, narrow: false },
+  { key: 'gates', label: 'Gates', weight: 13, autoHide: true, narrow: false },
   { key: 'actions', label: 'Actions', weight: 5 },
 ];
 
@@ -47,17 +47,7 @@ document.addEventListener('alpine:init', () => {
 
     init() {
       this._loadColPrefs();
-      const f = readFiltersFromUrl();
-      if (location.hash.replace('#', '') === 'dlq') {
-        this.groupKeyFilter = f.groupKey;
-        this._appliedGroupKey = f.groupKey;
-        this.parentIdFilter = f.parentId;
-        this._appliedParentId = f.parentId;
-        this.jobIdFilter = f.jobId;
-        this._appliedJobId = f.jobId;
-        this.sortBy = f.sortBy;
-        this.sortDir = f.sortDir;
-      }
+      this.readUrlFilters('dlq');
       trackTabActive(this, '#tab-dlq', {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
         onHide: () => {
@@ -68,6 +58,7 @@ document.addEventListener('alpine:init', () => {
         },
       });
       this._bindTableEvents({
+        hashName: 'dlq',
         onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
@@ -85,9 +76,9 @@ document.addEventListener('alpine:init', () => {
     async loadDLQ(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
-      const pid = filterOverrides?.parentId ?? this._appliedParentId;
-      const jid = filterOverrides?.jobId ?? this._appliedJobId;
+      const gk = this.filterValue('group', filterOverrides);
+      const pid = this.filterValue('parent', filterOverrides);
+      const jid = this.filterValue('job', filterOverrides);
       const startingPending = this.pendingChanges;
       await guardedLoad(this, 'Failed to load DLQ', async (seq, isStale) => {
         const data = await ArbiterAPI.listDLQ(queue, {

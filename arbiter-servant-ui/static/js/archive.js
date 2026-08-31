@@ -3,16 +3,16 @@
  */
 // Order must match the table header and cell order.
 const ARCHIVE_COLUMNS = [
-  { key: 'select', label: 'Select', weight: 4, required: true },
-  { key: 'archiveid', label: 'Archive ID', weight: 6 },
+  { key: 'select', label: 'Select', weight: 4, required: true, narrow: false },
+  { key: 'archiveid', label: 'Archive ID', weight: 6, narrow: false },
   { key: 'jobid', label: 'Job ID', weight: 6 },
-  { key: 'parent', label: 'Parent', weight: 6 },
-  { key: 'group', label: 'Group', weight: 8 },
+  { key: 'parent', label: 'Parent', weight: 6, narrow: false },
+  { key: 'group', label: 'Group', weight: 8, narrow: false },
   { key: 'payload', label: 'Payload', weight: 18 },
-  { key: 'hasresult', label: 'Result', weight: 7 },
-  { key: 'inserted', label: 'Inserted', weight: 12 },
+  { key: 'hasresult', label: 'Result', weight: 7, narrow: false },
+  { key: 'inserted', label: 'Inserted', weight: 12, narrow: false },
   { key: 'completed', label: 'Completed', weight: 12 },
-  { key: 'attempts', label: 'Attempts', weight: 8 },
+  { key: 'attempts', label: 'Attempts', weight: 8, narrow: false },
   { key: 'actions', label: 'Actions', weight: 5 },
 ];
 
@@ -39,25 +39,29 @@ document.addEventListener('alpine:init', () => {
     parentIdFilter: '',
     groupKeyFilter: '',
     jobIdFilter: '',
+    completedAfterFilter: '',
+    completedBeforeFilter: '',
     _appliedParentId: '',
     _appliedGroupKey: '',
     _appliedJobId: '',
+    _appliedCompletedAfter: '',
+    _appliedCompletedBefore: '',
     sortBy: '',
     sortDir: '',
 
+    // The shared three, plus the completion window, which is the only way to find
+    // anything in an archive that has been accumulating for months.
+    filterFields: [
+      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
+      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+      { field: 'after', label: 'Completed after', param: 'completed_after', model: 'completedAfterFilter', applied: '_appliedCompletedAfter', type: 'datetime-local', format: formatTime },
+      { field: 'before', label: 'Completed before', param: 'completed_before', model: 'completedBeforeFilter', applied: '_appliedCompletedBefore', type: 'datetime-local', format: formatTime },
+    ],
+
     init() {
       this._loadColPrefs();
-      const f = readFiltersFromUrl();
-      if (location.hash.replace('#', '') === 'archive') {
-        this.groupKeyFilter = f.groupKey;
-        this._appliedGroupKey = f.groupKey;
-        this.parentIdFilter = f.parentId;
-        this._appliedParentId = f.parentId;
-        this.jobIdFilter = f.jobId;
-        this._appliedJobId = f.jobId;
-        this.sortBy = f.sortBy;
-        this.sortDir = f.sortDir;
-      }
+      this.readUrlFilters('archive');
       trackTabActive(this, '#tab-archive', {
         onShow: () => { this.loadArchive(); this._startTimer(); },
         onHide: () => {
@@ -70,6 +74,7 @@ document.addEventListener('alpine:init', () => {
       // No SSE event correlates with archival, so only queue switches and
       // reconnects trigger a reload. Routine updates ride the refresh timer.
       this._bindTableEvents({
+        hashName: 'archive',
         onQueueReset: () => { this.selected = {}; },
         relevant: () => 0,
       });
@@ -84,9 +89,11 @@ document.addEventListener('alpine:init', () => {
     async loadArchive(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = filterOverrides?.groupKey ?? this._appliedGroupKey;
-      const pid = filterOverrides?.parentId ?? this._appliedParentId;
-      const jid = filterOverrides?.jobId ?? this._appliedJobId;
+      const gk = this.filterValue('group', filterOverrides);
+      const pid = this.filterValue('parent', filterOverrides);
+      const jid = this.filterValue('job', filterOverrides);
+      const after = this.filterValue('after', filterOverrides);
+      const before = this.filterValue('before', filterOverrides);
       await guardedLoad(this, 'Failed to load archive', async (seq, isStale) => {
         const data = await ArbiterAPI.listArchive(queue, {
           limit: this.limit,
@@ -94,6 +101,8 @@ document.addEventListener('alpine:init', () => {
           parentId: pid || undefined,
           jobId: jid || undefined,
           groupKey: gk || undefined,
+          completedAfter: toIsoInstant(after),
+          completedBefore: toIsoInstant(before),
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
@@ -101,6 +110,8 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this._appliedJobId = jid;
+        this._appliedCompletedAfter = after;
+        this._appliedCompletedBefore = before;
         this.archiveJobs = data.archiveJobs || [];
         this.resyncDetailSelection();
         this.total = data.archiveTotal || 0;

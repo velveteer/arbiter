@@ -12,12 +12,14 @@ const WORKER_MODALS_HTML = `
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <h2 class="modal-title" id="workerPauseConfirmModalLabel">Pause worker</h2>
+        <div class="modal-heading">
+          <h2 class="modal-title" id="workerPauseConfirmModalLabel">Pause worker</h2>
+          <p class="modal-subject" :title="pendingWorker?.workerId" x-text="pendingWorker?.workerId"></p>
+        </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
         <p class="text-muted small mb-3">Pausing stops this worker pool from claiming new jobs until it is resumed. In-flight jobs finish, new ones wait.</p>
-        <p class="small mb-2">Worker <code x-text="pendingWorker?.workerId"></code></p>
         <label class="form-label small">Type the last <span x-text="workerConfirmLen"></span> characters <code x-text="confirmTarget"></code> to confirm:</label>
         <input type="text" class="form-control form-control-sm" x-model="confirmText" autocomplete="off" spellcheck="false"
                @keydown.enter.prevent="confirmPauseWorker()" :placeholder="confirmTarget">
@@ -69,7 +71,7 @@ const WORKER_MODALS_HTML = `
 // The worker table, stamped into both the per-queue Workers tab and the global
 // Workers view. The Queue column is the only difference between them.
 const WORKERS_TABLE_HTML = `
-<div class="table-responsive">
+<div class="table-responsive" :aria-busy="loading">
   <table class="table table-striped table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
     <colgroup>
       <col style="width: 10%">
@@ -167,6 +169,7 @@ const WORKERS_SUMMARY_HTML = `
 // Row actions, stamped into both the row menu and the drawer header.
 const WORKER_ACTIONS_HTML = `
 <li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job); closeDropdown($el)">Detail</a></li>
+<li><a class="dropdown-item" :href="jobsUrl(job)" @click="openJobs($event, job)">View held jobs</a></li>
 <li>
   <a class="dropdown-item" href="#" :class="{ 'text-warning fw-semibold': job.paused && isArmed('toggle:' + job.workerId), 'disabled': job.shuttingDown }"
     @click.prevent="togglePause(job)"
@@ -261,8 +264,16 @@ document.addEventListener('alpine:init', () => {
       return (this.global ? 8 : 7) - (this.anyMetadata ? 0 : 1);
     },
 
-    shortId(id) {
-      return String(id).slice(0, 8);
+    shortId,
+
+    // The jobs this worker currently holds: its queue's Jobs tab, filtered to its lease.
+    jobsUrl(worker) {
+      return worker ? queueJobsUrl(worker.queueName, { claimed_by: worker.workerId }) : '#';
+    },
+
+    openJobs(e, worker) {
+      if (!worker || !plainNavClick(e)) return;
+      Alpine.store('app').openQueueJobs(worker.queueName, { claimed_by: worker.workerId });
     },
 
     get threadCount() {

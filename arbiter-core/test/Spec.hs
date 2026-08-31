@@ -9,13 +9,16 @@ import Data.Int (Int32, Int64)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime (..), fromGregorian)
+import Data.UUID.Types qualified as UUID
 import Test.Hspec
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
 import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
-import Arbiter.Core.Operations (statsRowCodec)
+import Arbiter.Core.Operations (buildWhereClause, statsRowCodec)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
+import Arbiter.Core.Sql.Jobs (JobFilter (..))
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
 import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
@@ -41,6 +44,25 @@ colTag CTimestamptz = "ts"
 colTag CJsonb = "jsonb"
 colTag CFloat8 = "float8"
 colTag CUuid = "uuid"
+
+-- | The text a set of parameters carries, for asserting on an escaped search term.
+textParams :: [SomeParam] -> [Text]
+textParams params = [t | SomeParam (PScalar CText) t <- params]
+
+-- | One of every filter, in the order 'buildWhereClause' renders them.
+allFilters :: [JobFilter]
+allFilters =
+  [ FilterClaimedBy UUID.nil
+  , FilterPayloadText "term"
+  , FilterRateLimitPrefix "smtp"
+  , FilterConcurrencyPrefix "tenant"
+  , FilterInsertedAfter epoch
+  , FilterInsertedBefore epoch
+  , FilterCompletedAfter epoch
+  , FilterCompletedBefore epoch
+  ]
+  where
+    epoch = UTCTime (fromGregorian 2026 8 30) 0
 
 sqlOf :: Query a -> Text
 sqlOf = T.strip . qSql
@@ -146,6 +168,23 @@ main = hspec $ do
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(last_attempted_at)"
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(inserted_at)"
       rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")
+
+    it "renders each job filter against the column its table names" $ do
+      let rendered = squished (buildWhereClause allFilters)
+      rendered
+        `shouldBe` "WHERE claimed_by = ? AND payload::text ILIKE ? ESCAPE '\\' \
+                   \AND rate_limit_prefix = ? AND concurrency_prefix = ? \
+                   \AND inserted_at >= ? AND inserted_at < ? \
+                   \AND completed_at >= ? AND completed_at < ?"
+      paramTags (qParams (buildWhereClause allFilters))
+        `shouldBe` ["uuid", "text", "text", "text", "ts", "ts", "ts", "ts"]
+
+    it "matches a payload search literally, so its wildcards are not pattern syntax" $ do
+      let param = qParams (buildWhereClause [FilterPayloadText "50%_off"])
+      textParams param `shouldBe` ["%50\\%\\_off%"]
+
+    it "narrows nothing when no filter is given" $
+      squished (buildWhereClause []) `shouldBe` ""
 
     it "selects stats columns in the decoder's own order" $ do
       let cols = codecColumns statsRowCodec

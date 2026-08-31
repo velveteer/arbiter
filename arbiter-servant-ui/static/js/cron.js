@@ -31,6 +31,7 @@ const CRON_SORT_KEYS = {
   overlap: (s) => s.overrideOverlap ?? s.defaultOverlap ?? '',
   timezone: (s) => s.overrideTimezone ?? s.defaultTimezone ?? '',
   enabled: (s) => (s.enabled ? 1 : 0),
+  nextRun: (s) => Date.parse(s.nextRunAt || '') || Number.MAX_SAFE_INTEGER,
   lastFired: (s) => Date.parse(s.lastManualRunAt || s.lastFiredAt || '') || -1,
   lastChecked: (s) => Date.parse(s.lastCheckedAt || '') || -1,
 };
@@ -48,18 +49,19 @@ const CRON_ACTIONS_HTML = `
 // The schedule table, stamped into both the per-queue Cron tab and the global Cron
 // view. The Queue column is the only difference between them.
 const CRON_TABLE_HTML = `
-<div class="table-responsive">
+<div class="table-responsive" :aria-busy="loading">
   <table class="table table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
     <colgroup>
-      <col style="width: 12%">
-      <template x-if="global"><col style="width: 11%"></template>
-      <col style="width: 19%">
+      <col style="width: 11%">
+      <template x-if="global"><col style="width: 10%"></template>
+      <col style="width: 17%">
+      <col style="width: 9%">
       <col style="width: 10%">
-      <col style="width: 12%">
-      <col style="width: 6%">
+      <col style="width: 5%">
       <col style="width: 12%">
       <col style="width: 11%">
-      <col style="width: 7%">
+      <col style="width: 10%">
+      <col style="width: 5%">
     </colgroup>
     <thead>
       <tr>
@@ -69,6 +71,7 @@ const CRON_TABLE_HTML = `
         <th class="sortable" @click="toggleSort('overlap')" @keydown.enter.prevent="toggleSort('overlap')" @keydown.space.prevent="toggleSort('overlap')" tabindex="0" :aria-sort="ariaSort('overlap')">Overlap policy<span class="sort-caret" x-text="sortIndicator('overlap')" aria-hidden="true"></span></th>
         <th class="sortable" @click="toggleSort('timezone')" @keydown.enter.prevent="toggleSort('timezone')" @keydown.space.prevent="toggleSort('timezone')" tabindex="0" :aria-sort="ariaSort('timezone')">Timezone<span class="sort-caret" x-text="sortIndicator('timezone')" aria-hidden="true"></span></th>
         <th class="sortable" @click="toggleSort('enabled')" @keydown.enter.prevent="toggleSort('enabled')" @keydown.space.prevent="toggleSort('enabled')" tabindex="0" :aria-sort="ariaSort('enabled')">Enabled<span class="sort-caret" x-text="sortIndicator('enabled')" aria-hidden="true"></span></th>
+        <th class="sortable" @click="toggleSort('nextRun')" @keydown.enter.prevent="toggleSort('nextRun')" @keydown.space.prevent="toggleSort('nextRun')" tabindex="0" :aria-sort="ariaSort('nextRun')">Next run<span class="sort-caret" x-text="sortIndicator('nextRun')" aria-hidden="true"></span></th>
         <th class="sortable" @click="toggleSort('lastFired')" @keydown.enter.prevent="toggleSort('lastFired')" @keydown.space.prevent="toggleSort('lastFired')" tabindex="0" :aria-sort="ariaSort('lastFired')">Last fired<span class="sort-caret" x-text="sortIndicator('lastFired')" aria-hidden="true"></span></th>
         <th class="sortable" @click="toggleSort('lastChecked')" @keydown.enter.prevent="toggleSort('lastChecked')" @keydown.space.prevent="toggleSort('lastChecked')" tabindex="0" :aria-sort="ariaSort('lastChecked')">Last checked<span class="sort-caret" x-text="sortIndicator('lastChecked')" aria-hidden="true"></span></th>
         <th class="cell-actions">Actions</th>
@@ -108,6 +111,7 @@ const CRON_TABLE_HTML = `
                 :disabled="isBusy(job.name)" @change="onToggleEnabled(job, $event)">
             </div>
           </td>
+          <td class="text-nowrap" :title="nextRunTitle(job)" x-text="nextRunText(job)"></td>
           <td>
             <div class="d-flex flex-column gap-0">
               <span class="text-nowrap" :title="formatTime(lastFired(job).at, '')" x-text="formatAge(lastFired(job).at, 'Never')"></span>
@@ -162,6 +166,9 @@ const CRON_DRAWER_HTML = `
       <dd class="col-sm-7" x-text="selectedSchedule?.enabled ? 'Yes' : 'No'"></dd>
       <dt class="col-sm-5">Last fired</dt>
       <dd class="col-sm-7" x-text="selectedSchedule ? formatTime(lastFired(selectedSchedule).at, 'Never') : EMPTY"></dd>
+      <dt class="col-sm-5">Next run</dt>
+      <dd class="col-sm-7" :title="selectedSchedule ? nextRunTitle(selectedSchedule) : ''"
+        x-text="selectedSchedule ? nextRunText(selectedSchedule) : EMPTY"></dd>
       <dt class="col-sm-5">Last checked</dt>
       <dd class="col-sm-7" x-text="formatTime(selectedSchedule?.lastCheckedAt, 'Never')"></dd>
     </dl>
@@ -367,7 +374,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     colCount() {
-      return this.global ? 9 : 8;
+      return this.global ? 10 : 9;
     },
 
     get detailTitle() {
@@ -506,6 +513,17 @@ document.addEventListener('alpine:init', () => {
 
     isRunPending(s) {
       return s.runRequestedAt != null;
+    },
+
+    // When the schedule next fires. The server computes it from the effective
+    // expression and timezone, so a disabled or unparseable one simply has none.
+    nextRunText(s) {
+      if (!s?.nextRunAt) return s?.enabled ? EMPTY : 'Disabled';
+      return formatCountdown(s.nextRunAt);
+    },
+
+    nextRunTitle(s) {
+      return s?.nextRunAt ? formatTime(s.nextRunAt) : '';
     },
 
     lastFired(s) {

@@ -27,7 +27,10 @@ import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMi
 import Arbiter.Otel qualified as Otel
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
 import Arbiter.Servant (initArbiterServer)
-import Arbiter.Servant.UI (arbiterAppWithAdmin, arbiterAppWithAdminDev)
+import Arbiter.Servant.API (ArbiterAPI)
+import Arbiter.Servant.OpenApi (openApiSpec)
+import Arbiter.Servant.Server (ArbiterServerConfig, arbiterServer)
+import Arbiter.Servant.UI (AdminUI, adminUIServer, adminUIServerDev)
 import Arbiter.Simple
 import Arbiter.Worker
   ( BatchCallbacks (..)
@@ -53,6 +56,7 @@ import Data.List (unfoldr)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe)
+import Data.OpenApi (ToSchema)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
@@ -60,7 +64,11 @@ import Data.Text qualified as T
 import Data.Time (addUTCTime, diffTimeToPicoseconds, getCurrentTime, utctDayTime)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
-import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout)
+import Network.Wai.Handler.Warp
+  ( defaultSettings
+  , runSettings
+  , setPort
+  )
 import Network.Wai.Middleware.Cors
   ( CorsResourcePolicy (..)
   , cors
@@ -70,6 +78,8 @@ import Network.Wai.Middleware.RequestLogger (logStdout)
 import OpenTelemetry.Attributes qualified as Attr
 import OpenTelemetry.Instrumentation.Wai (newOpenTelemetryWaiMiddleware)
 import OpenTelemetry.Trace.Core qualified as Trace
+import Servant (Application, serve, (:<|>) (..))
+import Servant.Swagger.UI (SwaggerSchemaUI, swaggerSchemaUIServer)
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.Posix.Signals qualified as Signals
@@ -82,22 +92,22 @@ import System.Random (randomRIO)
 data DemoPayload
   = TestMessage Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, ToSchema)
 
 data EmailPayload
   = SendEmail Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, ToSchema)
 
 data NotificationPayload
   = PushNotification Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, ToSchema)
 
 -- | Cheap throwaway work the burst generator floods its queue with.
 newtype BulkPayload = BulkTask Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, ToSchema)
 
 -- | Pipeline payload for the rollup demo.
 --
@@ -107,7 +117,23 @@ data PipelinePayload
   = ProcessChunk Text
   | AggregateResults Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, ToSchema)
+
+-- | The demo's routes: the queue API, an OpenAPI description of it with a Swagger UI
+-- to read it in, and the dashboard. The dashboard is a catch-all, so it comes last.
+type DemoAPI =
+  ArbiterAPI DemoRegistry
+    :<|> SwaggerSchemaUI "docs" "openapi.json"
+    :<|> AdminUI
+
+-- | The demo application. @mDevDir@ serves the dashboard from disk when set, so an
+-- edit needs no rebuild.
+demoApp :: Maybe FilePath -> ArbiterServerConfig DemoRegistry -> Application
+demoApp mDevDir config =
+  serve (Proxy @DemoAPI) $
+    arbiterServer config
+      :<|> swaggerSchemaUIServer (openApiSpec @DemoRegistry)
+      :<|> maybe adminUIServer adminUIServerDev mDevDir
 
 -- | Demo registry with multiple queues
 type DemoRegistry =
@@ -223,15 +249,14 @@ runDemo tel = do
   -- Dev mode: serve static files from disk when ADMIN_DEV_DIR is set
   mDevDir <- lookupEnv "ADMIN_DEV_DIR"
   traceHttp <- newOpenTelemetryWaiMiddleware
-  let app = traceHttp $ case mDevDir of
-        Just dir -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdminDev @DemoRegistry dir serverConfig
-        Nothing -> cors (const $ Just policy) $ logStdout $ arbiterAppWithAdmin @DemoRegistry serverConfig
+  let app = traceHttp $ cors (const $ Just policy) $ logStdout $ demoApp mDevDir serverConfig
 
   -- Start server
   putStrLn ""
   putStrLn "=== Server Starting ==="
   putStrLn $ "API:     http://localhost:" <> show port <> "/api/v1"
   putStrLn $ "Admin:   http://localhost:" <> show port <> "/"
+  putStrLn $ "Docs:    http://localhost:" <> show port <> "/docs"
   putStrLn "Workers and cron schedules running across all queues"
   case mDevDir of
     Just dir -> putStrLn $ "Dev: serving static files from " <> dir
@@ -287,7 +312,7 @@ runDemo tel = do
   putStrLn $ "Telemetry: " <> T.unpack (Otel.telemetrySummary tel)
   race_
     (runSimpleDb workerEnv $ Otel.runWorkerPoolsWith tel defaultLogConfig workers)
-    (runSettings (setPort port $ setTimeout 0 defaultSettings) app)
+    (runSettings (setPort port defaultSettings) app)
 
 -- ---------------------------------------------------------------------------
 -- Worker configs

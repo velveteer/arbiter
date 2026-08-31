@@ -88,13 +88,17 @@ const ArbiterAPI = {
   },
 
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, sortBy, sortDir } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, claimedBy, payload, ratePrefix, concPrefix, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (status) qs += `&status=${encodeURIComponent(status)}`;
     if (rootsOnly) qs += `&roots_only=true`;
+    if (claimedBy) qs += `&claimed_by=${encodeURIComponent(claimedBy)}`;
+    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
+    if (ratePrefix) qs += `&rate_limit_prefix=${encodeURIComponent(ratePrefix)}`;
+    if (concPrefix) qs += `&concurrency_prefix=${encodeURIComponent(concPrefix)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/jobs${qs}`);
@@ -170,11 +174,13 @@ const ArbiterAPI = {
   },
 
   // Archive (completed jobs)
-  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, sortBy, sortDir } = {}) {
+  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, completedAfter, completedBefore, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
+    if (completedAfter) qs += `&completed_after=${encodeURIComponent(completedAfter)}`;
+    if (completedBefore) qs += `&completed_before=${encodeURIComponent(completedBefore)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/archive${qs}`);
@@ -249,6 +255,11 @@ const ArbiterAPI = {
 
   resumeWorker(workerId) {
     return this._fetch(`/workers/${encodeURIComponent(workerId)}/resume`, { method: 'POST' });
+  },
+
+  // One gated maintenance pass, the work a worker pool's reaper would do.
+  runMaintenance() {
+    return this._fetch('/maintenance', { method: 'POST' });
   },
 
   // Rate limits

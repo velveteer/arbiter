@@ -14,6 +14,14 @@
   --arb-purple-dim: #4c1d95;
   --arb-gold: #d97706;
   --arb-gold-dim: #92400e;
+
+  /* Semantic accents. These were written literally in a dozen rules while two of them
+     also existed as theme-scoped tokens, so the palette named a colour it did not
+     govern. Both themes share these; the dark theme reaches for the brighter pair. */
+  --arb-ok: #16a34a;
+  --arb-ok-bright: #34d399;
+  --arb-danger: #dc2626;
+  --arb-danger-deep: #991b1b;
 }
 
 /* ---- Light mode palette ---- */
@@ -29,13 +37,14 @@
   --arb-border: #c7cfe0;
   --arb-border-accent: #a78bfa;
   --arb-text: #1e293b;
-  --arb-text-muted: #64748b;
+  --arb-text-muted: #556575;
   --arb-glow: 0 1px 4px rgba(124, 58, 237, 0.08);
 
   /* Slightly darker accents for legibility on light bg */
   --arb-teal-on-bg: #0e7490;
+  --arb-teal-dim: #0b6480;
   --arb-purple-on-bg: #6d28d9;
-  --arb-gold-on-bg: #b45309;
+  --arb-gold-on-bg: #9a4a08;
 
   --arb-pause-bg: #fde68a;
   --arb-pause-fg: #78350f;
@@ -301,7 +310,7 @@ label.queue-sort-label,
 /* Filled circle: the stream is live, or the server is healthy. */
 .status-pip.connected .status-dot,
 .status-pip.ok .status-dot {
-  background-color: #16a34a;
+  background-color: var(--arb-ok);
 }
 
 /* Hollow ring: a stream attempt is in flight. */
@@ -314,7 +323,7 @@ label.queue-sort-label,
 .status-pip.disconnected .status-dot,
 .status-pip.down .status-dot {
   background-color: transparent;
-  border: 2px solid #dc2626;
+  border: 2px solid var(--arb-danger);
   animation: pulse-dot 1.5s infinite;
 }
 
@@ -421,7 +430,9 @@ label.queue-sort-label,
   box-shadow: var(--arb-glow);
 }
 
-.card-title {
+/* Names a card or a section. One style, whichever role it plays. */
+.card-title,
+.stat-section-label {
   color: var(--arb-text-muted) !important;
   text-transform: uppercase;
   font-size: 0.75rem;
@@ -437,11 +448,8 @@ label.queue-sort-label,
 }
 
 /* Section heading over a group of stat cards. */
+/* A section label stands off from the rows above it. */
 .stat-section-label {
-  color: var(--arb-text-muted);
-  text-transform: uppercase;
-  font-size: 0.75rem;
-  letter-spacing: 0.08em;
   margin: 1.5rem 0 0.75rem;
 }
 
@@ -728,7 +736,7 @@ label.queue-sort-label,
   gap: 0.35rem;
   padding: 0.15rem 0.5rem;
   border-radius: 0.35rem;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -742,7 +750,7 @@ label.queue-sort-label,
   gap: 0.3rem;
   padding: 0.15rem 0.5rem;
   border-radius: 0.35rem;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -921,7 +929,7 @@ label.queue-sort-label,
 }
 
 .qc-lbl {
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -952,7 +960,7 @@ label.queue-sort-label,
 }
 
 .qa-lbl {
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -1138,7 +1146,7 @@ label.queue-sort-label,
   border-radius: 50%;
   background: transparent;
   color: var(--arb-text-muted);
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   line-height: 1;
   cursor: pointer;
 }
@@ -1166,7 +1174,7 @@ label.queue-sort-label,
 
 .queue-sort-label {
   margin: 0;
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--arb-text-muted);
@@ -1270,6 +1278,13 @@ label.queue-sort-label,
     justify-content: space-between;
   }
 
+  /* A button keeps its label on one line and gives up none of its width: the sort
+     control beside it is the flexible one. */
+  .queue-toolbar-end > .btn {
+    flex: none;
+    white-space: nowrap;
+  }
+
   .queue-sort {
     flex: 1 1 auto;
     min-width: 0;
@@ -1281,6 +1296,52 @@ label.queue-sort-label,
 
   .qs-sep {
     display: none;
+  }
+
+
+  /* A control a finger has to find gets 24px to be found by. Links inside a table
+     row are left alone: they read as inline text, and padding them would tear the
+     dense layout the tables are for. */
+  .queue-card-stat,
+  .queue-card-dlq,
+  .queue-card-age,
+  .queue-sort-select {
+    min-height: 24px;
+  }
+
+  .queue-toolbar .btn,
+  .toolbar .btn,
+  .queue-sort-dir {
+    min-width: 24px;
+    min-height: 24px;
+  }
+
+  /* The wrapper draws the box, so the input has to fill it to be the target. */
+  .queue-search-input {
+    min-height: 24px;
+  }
+
+  /* Bootstrap sizes a switch in ems off the label and positions it by floating the
+     input under a padded parent. At the size a finger needs, that alignment no longer
+     holds, so the pair becomes a flex row and the switch keeps its 2:1 shape. */
+  .form-check.form-switch {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-left: 0;
+    min-height: 0;
+  }
+
+  .form-switch .form-check-input {
+    float: none;
+    flex: none;
+    margin: 0;
+    width: 2.75rem;
+    height: 1.5rem;
+  }
+
+  .form-switch .form-check-label {
+    margin: 0;
   }
 
   .queue-summary {
@@ -1378,31 +1439,32 @@ label.queue-sort-label,
 }
 
 .btn-primary {
-  --bs-btn-bg: var(--arb-teal-dim);
-  --bs-btn-border-color: var(--arb-teal-dim);
-  --bs-btn-hover-bg: #0e7490;
+  /* Dark enough that the white label clears the contrast floor on the fill. */
+  --bs-btn-bg: #0e7490;
+  --bs-btn-border-color: #0e7490;
+  --bs-btn-hover-bg: #0b6480;
   --bs-btn-hover-border-color: var(--arb-teal-on-bg);
   --bs-btn-color: #fff;
   --bs-btn-hover-color: #fff;
 }
 
 .btn-outline-success {
-  --bs-btn-color: #16a34a;
-  --bs-btn-border-color: #16a34a;
+  --bs-btn-color: var(--arb-ok);
+  --bs-btn-border-color: var(--arb-ok);
   --bs-btn-hover-color: #fff;
   --bs-btn-hover-bg: #15803d;
   --bs-btn-hover-border-color: #22c55e;
 }
 
 [data-bs-theme="dark"] .btn-outline-success {
-  --bs-btn-color: #34d399;
+  --bs-btn-color: var(--arb-ok-bright);
   --bs-btn-border-color: #10b981;
   --bs-btn-hover-bg: #065f46;
 }
 
 .btn-outline-danger {
-  --bs-btn-color: #dc2626;
-  --bs-btn-border-color: #dc2626;
+  --bs-btn-color: var(--arb-danger);
+  --bs-btn-border-color: var(--arb-danger);
   --bs-btn-hover-color: #fff;
   --bs-btn-hover-bg: #b91c1c;
   --bs-btn-hover-border-color: #ef4444;
@@ -1410,8 +1472,8 @@ label.queue-sort-label,
 
 [data-bs-theme="dark"] .btn-outline-danger {
   --bs-btn-color: var(--arb-danger-on-bg);
-  --bs-btn-border-color: #dc2626;
-  --bs-btn-hover-bg: #991b1b;
+  --bs-btn-border-color: var(--arb-danger);
+  --bs-btn-hover-bg: var(--arb-danger-deep);
 }
 
 .btn-outline-warning {
@@ -1486,13 +1548,13 @@ tr:hover .btn-row-actions:not(:disabled) {
 }
 
 .badge.bg-danger {
-  background-color: #991b1b !important;
+  background-color: var(--arb-danger-deep) !important;
   color: #fca5a5;
 }
 
 [data-bs-theme="light"] .badge.bg-danger {
   background-color: #fee2e2 !important;
-  color: #991b1b;
+  color: var(--arb-danger-deep);
 }
 
 .badge.bg-primary {
@@ -1572,25 +1634,6 @@ tr.policy-bad td:first-child::before {
   background-color: var(--arb-danger-on-bg);
 }
 
-/* Expansion state for a policy row, which the whole row toggles. */
-.drill-caret {
-  display: inline-block;
-  width: 0.9em;
-  margin-right: 0.15rem;
-  color: var(--arb-text-muted);
-  font-size: 0.8em;
-}
-
-/* A prefix's buckets or keys, opening as a row under the policy they belong to.
-   The panel is the only surface here, so the table inside it carries no grid of
-   its own and no second background. */
-.drill-child {
-  --arb-drill-pad: 2.5rem;
-  padding: 0.8rem 1rem 0.4rem var(--arb-drill-pad);
-  background-color: var(--arb-surface);
-  border-left: 3px solid var(--arb-teal-dim);
-}
-
 /* Placeholder row while a prefix's rows are on the way. It fills the height one
    row would, so the panel does not resize when they land. */
 .skeleton-bar {
@@ -1653,14 +1696,10 @@ tr.policy-bad td:first-child::before {
   height: 2.25rem;
 }
 
-.drill-child .table {
-  margin-bottom: 0.5rem;
-}
-
 /* ---- SSE dot glow in dark mode ---- */
 [data-bs-theme="dark"] .status-pip.connected .status-dot,
 [data-bs-theme="dark"] .status-pip.ok .status-dot {
-  background-color: #34d399;
+  background-color: var(--arb-ok-bright);
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
 }
 
@@ -1757,12 +1796,53 @@ tr.policy-bad td:first-child::before {
   box-shadow: 0 0 24px rgba(124, 58, 237, 0.1);
 }
 
+/* The action names the modal, the subject sits under it. Aligning to the start keeps
+   the close button beside the title rather than centred on the block. */
 .modal-header {
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
   border-bottom-color: var(--arb-border) !important;
 }
 
+/* Takes the row, so the close button sits at the far edge rather than beside the
+   title, and is bounded, so a long subject ellipsizes instead of wrapping. */
+.modal-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The drawer's title sizing, so a panel heading reads the same wherever it opens.
+   Left to the h2 default it renders at heading scale and doubles the header's height. */
 .modal-header .modal-title {
+  font-family: 'Electrolize', sans-serif;
+  font-size: 1.05rem;
+  line-height: 1.3;
+  letter-spacing: 0.04em;
   color: var(--arb-teal-on-bg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-bs-theme="dark"] .modal-header .modal-title {
+  text-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
+}
+
+.modal-subject {
+  margin: 0.25rem 0 0;
+  font-family: var(--bs-font-monospace);
+  font-size: 0.8rem;
+  line-height: 1.2;
+  color: var(--arb-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-header .btn-close {
+  margin: 0;
+  flex: none;
 }
 
 .modal dt {
@@ -1970,16 +2050,12 @@ tr.policy-bad td:first-child::before {
   border-bottom: 0;
 }
 
-/* Override editors: a drawer panel, or a block inside a drill-down. */
+/* Override editors, which live in a drawer panel. */
 .arb-edit .edit-note {
   color: var(--arb-text-muted);
   font-size: 0.78rem;
   padding: 0.5rem 0 0.4rem;
   margin: 0;
-}
-
-.inline-edit .edit-note {
-  padding: 1rem 0 0;
 }
 
 .arb-edit .form-check-label {
@@ -2019,34 +2095,6 @@ tr.policy-bad td:first-child::before {
 .drawer-edit .edit-field {
   padding: 0.7rem 0;
   border-bottom: 1px solid var(--arb-border);
-}
-
-/* In a drill-down they sit side by side, inset from the panel around them. */
-/* A band the width of the panel, so the editor reads as its own region while
-   its fields stay on the column the rows below use. The negative margins undo
-   the panel's padding, the padding puts it back. */
-.inline-edit {
-  margin: 0 -1rem 1rem calc(var(--arb-drill-pad) * -1);
-  padding: 0.9rem 1rem 1rem var(--arb-drill-pad);
-  background-color: var(--arb-bg);
-  border-top: 1px solid var(--arb-border);
-  border-bottom: 1px solid var(--arb-border);
-}
-
-.inline-edit-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.1rem 2.25rem;
-}
-
-.inline-edit .edit-field {
-  min-width: 14rem;
-}
-
-.inline-edit .edit-actions {
-  align-self: flex-end;
-  padding-top: 0;
-  padding-bottom: 0.15rem;
 }
 
 /* Drag handle on the drawer's leading edge. */
@@ -2332,4 +2380,172 @@ th.sortable:focus-visible {
   .status-pip.down .status-dot {
     animation: none;
   }
+}
+
+/* ---- Drill link: a subtle "go to the rows behind this value" affordance ---- */
+.drill-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  align-self: flex-start;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--arb-border);
+  border-radius: 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--arb-text-muted);
+  text-decoration: none;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.drill-link:hover {
+  color: var(--arb-teal-on-bg);
+  border-color: var(--arb-teal-on-bg);
+  background: var(--arb-surface-hover);
+}
+
+/* ---- Light-mode contrast ----
+   Bootstrap's outline variants take their text colour from the mid-weight palette,
+   which is tuned for a dark ground. On the light one they fall under the 4.5:1 floor,
+   so the light theme names darker ones. */
+[data-bs-theme="light"] .btn-outline-success {
+  --bs-btn-color: #157347;
+  --bs-btn-border-color: #157347;
+}
+
+[data-bs-theme="light"] .btn-outline-primary {
+  --bs-btn-color: #0a58ca;
+  --bs-btn-border-color: #0a58ca;
+}
+
+[data-bs-theme="light"] .btn-outline-danger {
+  --bs-btn-color: #b02a37;
+  --bs-btn-border-color: #b02a37;
+}
+
+[data-bs-theme="light"] code {
+  color: #a1265f;
+}
+
+/* The same, for the one variant a dark ground gets wrong. */
+[data-bs-theme="dark"] .btn-outline-primary {
+  --bs-btn-color: #6ea8fe;
+  --bs-btn-border-color: #3d8bfd;
+}
+
+/* Bootstrap's link blue is tuned for a white ground and falls short on this one. */
+[data-bs-theme="light"] {
+  --bs-link-color-rgb: 10, 88, 202;
+  --bs-link-hover-color-rgb: 8, 66, 152;
+}
+
+/* ---- Phones: undo the tablet density ----
+   The tablet block above cuts the base size, and the derived label sizes then land
+   under 11px on a phone, which reads at arm's length. 16px on the controls also stops
+   iOS zooming the page when one takes focus. Tables scroll rather than squeeze, so the
+   larger text costs no layout. */
+@media (max-width: 640px) {
+  body {
+    font-size: 1rem;
+  }
+
+  .table {
+    font-size: 0.875rem;
+  }
+
+  .form-control,
+  .form-select,
+  .queue-search-input {
+    font-size: 1rem;
+  }
+
+  .qs-lbl,
+  .qc-lbl,
+  .qa-lbl,
+  .queue-card-ready-label,
+  .queue-sort-label,
+  .stat-section-label,
+  .card-title {
+    font-size: 0.8rem;
+  }
+
+  .small,
+  small {
+    font-size: 0.875rem;
+  }
+
+  .sort-caret {
+    font-size: 0.95em;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+  }
+
+  /* The event-type filters are a row of chips: let them wrap rather than push the
+     page sideways once the labels are full size. */
+  .toolbar .d-flex.gap-2 {
+    flex-wrap: wrap;
+  }
+}
+
+/* ---- Phones: tables show what identifies a row ----
+   The column registry drops the rest (narrow: false), and the select cell goes with
+   them: it is unconditional in the markup, so the registry cannot reach it.
+   The width floors above exist so a full column set scrolls rather than compresses.
+   A reduced set has nothing to compress, so the floor comes off and the table fits. */
+@media (max-width: 640px) {
+  .table .select-cell {
+    display: none;
+  }
+
+  #tab-jobs table,
+  #tab-dlq table,
+  #tab-archive table {
+    min-width: 0;
+  }
+}
+
+/* ---- Empty state: the first screen a new install shows ---- */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 34rem;
+  margin: 4rem auto;
+  padding: 2rem 1.5rem;
+  text-align: center;
+  color: var(--arb-text-muted);
+}
+
+.empty-state-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--arb-teal-on-bg);
+  opacity: 0.7;
+}
+
+.empty-state-title {
+  margin: 0.25rem 0 0;
+  font-family: 'Electrolize', sans-serif;
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+  color: var(--arb-text);
+}
+
+.empty-state-note {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.empty-state-link {
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.empty-state-link:hover {
+  text-decoration: underline;
 }

@@ -25,6 +25,7 @@ module Arbiter.Servant.Server
   , BuildServer (..)
   ) where
 
+import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
@@ -41,7 +42,7 @@ import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, storeEncodedResult)
 import Arbiter.Worker.Config (maintenanceOpName)
-import Arbiter.Worker.Cron (updateCronScheduleChecked)
+import Arbiter.Worker.Cron (nextRunFromExpression, updateCronScheduleChecked)
 import Arbiter.Worker.Logger (defaultLogConfig)
 import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race_)
@@ -61,7 +62,7 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO, try)
-import Control.Monad (forever, guard, join, unless, void, when)
+import Control.Monad (forever, guard, join, mfilter, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
@@ -87,7 +88,7 @@ import Database.PostgreSQL.Simple.Notification (Notification (..), getNotificati
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import Network.HTTP.Types (status200)
 import Network.Wai (responseStream)
-import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort, setTimeout)
+import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort)
 import Servant
 import Servant.Server.Generic (AsServerT)
 import System.IO (stderr)
@@ -242,10 +243,14 @@ listJobsHandler
   -> Maybe Int64
   -> Bool
   -> Maybe JobStatus
+  -> Maybe UUID
+  -> Maybe Text
+  -> Maybe Text
+  -> Maybe Text
   -> Maybe JobSortColumn
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mSortBy mSortDir = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -256,6 +261,10 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
           , FilterId <$> mJobId
           , FilterRootsOnly <$ guard rootsOnly
           , FilterStatus <$> mStatus
+          , FilterClaimedBy <$> mClaimedBy
+          , FilterPayloadText <$> nonBlank mPayload
+          , FilterRateLimitPrefix <$> mRatePrefix
+          , FilterConcurrencyPrefix <$> mConcPrefix
           ]
 
   (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do
@@ -662,10 +671,12 @@ listArchiveHandler
   -> Maybe Int64
   -> Maybe Int64
   -> Maybe Text
+  -> Maybe UTCTime
+  -> Maybe UTCTime
   -> Maybe ArchiveSortColumn
   -> Maybe SortDir
   -> Handler (ArchiveResponse payload)
-listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortBy mSortDir = do
+listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mCompletedAfter mCompletedBefore mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       env = serverEnv config
       schemaName = schema env
@@ -674,6 +685,8 @@ listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mS
           [ FilterParentId <$> mParentId
           , FilterJobId <$> mJobId
           , FilterGroupKey <$> mGroupKey
+          , FilterCompletedAfter <$> mCompletedAfter
+          , FilterCompletedBefore <$> mCompletedBefore
           ]
 
   (archived, total) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
@@ -1135,7 +1148,19 @@ listCronSchedulesHandler config mQueue = do
   let env = serverEnv config
       schemaName = schema env
   rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName mQueue
-  pure $ CronSchedulesResponse {cronSchedules = rows}
+  now <- liftIO getCurrentTime
+  pure $ CronSchedulesResponse {cronSchedules = map (cronScheduleView now) rows}
+
+-- | A schedule row with the next tick it fires at. A disabled schedule has none:
+-- the expression still parses, but nothing is going to run it.
+cronScheduleView :: UTCTime -> CronScheduleRow -> CronScheduleView
+cronScheduleView now row@CS.CronScheduleRow {CS.enabled = isEnabled} =
+  CronScheduleView
+    { schedule = row
+    , nextRunAt = do
+        guard isEnabled
+        nextRunFromExpression (CS.effectiveTimezone row) (CS.effectiveExpression row) now
+    }
 
 -- | Update a cron schedule.
 updateCronScheduleHandler
@@ -1143,7 +1168,7 @@ updateCronScheduleHandler
    . ArbiterServerConfig registry
   -> Text
   -> CronScheduleUpdate
-  -> Handler CronScheduleRow
+  -> Handler CronScheduleView
 updateCronScheduleHandler config name update = do
   let env = serverEnv config
       schemaName = schema env
@@ -1155,7 +1180,7 @@ updateCronScheduleHandler config name update = do
   case result of
     Left err -> throwError err400 {errBody = LBS.fromStrict (encodeUtf8 err)}
     Right Nothing -> throwError err404 {errBody = "Cron schedule not found"}
-    Right (Just row) -> pure row
+    Right (Just row) -> flip cronScheduleView row <$> liftIO getCurrentTime
 
 -- | Request an out-of-band run of a cron schedule. A disabled schedule is
 -- refused so a manual run never fires what the schedule itself would not, and
@@ -1592,8 +1617,7 @@ arbiterApp
 arbiterApp config =
   serve (Proxy @(ArbiterAPI registry)) (arbiterServer config)
 
--- | Run the API server on a port, with Warp's idle timeout off so it cannot kill an SSE
--- stream.
+-- | Run the API server on a port.
 runArbiterAPI
   :: forall registry
    . ( BuildServer registry registry
@@ -1604,8 +1628,12 @@ runArbiterAPI
   -> IO ()
 runArbiterAPI port config = do
   putStrLn $ "Starting Arbiter API server on port " <> show port
-  let settings = setPort port $ setTimeout 0 defaultSettings
+  let settings = setPort port defaultSettings
   runSettings settings (arbiterApp config)
+
+-- | Drop a query parameter that carries no search term, so an empty box is no filter.
+nonBlank :: Maybe Text -> Maybe Text
+nonBlank = mfilter (not . T.null . T.strip)
 
 -- | Clamp pagination parameters to a limit of 1 to 1000 and a non-negative offset.
 validatePagination :: Int -> Maybe Int -> Maybe Int -> (Int, Int)

@@ -86,6 +86,7 @@ module Arbiter.Core.Operations
 
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
+  , buildWhereClause
   , listJobsFiltered
   , listJobsFilteredOrdered
   , listJobsWithStatus
@@ -336,6 +337,7 @@ parentCountCodec =
     <*> col "count" CInt8
     <*> col "count_suspended" CInt8
 
+-- | The @WHERE@ clause a set of filters narrows a listing by. Empty for no filters.
 buildWhereClause :: [Tmpl.JobFilter] -> Q.Query ()
 buildWhereClause [] = mempty
 buildWhereClause filters = Q.raw "WHERE " <> Q.sepBy " AND " (map filterToClause filters)
@@ -349,6 +351,26 @@ filterToClause (Tmpl.FilterStatus s) = [QQ.sql|status = #{st :: CText}|]
     st = jobStatusToText s
 filterToClause (Tmpl.FilterId i) = [QQ.sql|id = #{i :: CInt8}|]
 filterToClause (Tmpl.FilterJobId i) = [QQ.sql|job_id = #{i :: CInt8}|]
+filterToClause (Tmpl.FilterClaimedBy w) = [QQ.sql|claimed_by = #{w :: CUuid}|]
+filterToClause (Tmpl.FilterRateLimitPrefix p) = [QQ.sql|rate_limit_prefix = #{p :: CText}|]
+filterToClause (Tmpl.FilterConcurrencyPrefix p) = [QQ.sql|concurrency_prefix = #{p :: CText}|]
+filterToClause (Tmpl.FilterInsertedAfter t) = [QQ.sql|inserted_at >= #{t :: CTimestamptz}|]
+filterToClause (Tmpl.FilterInsertedBefore t) = [QQ.sql|inserted_at < #{t :: CTimestamptz}|]
+filterToClause (Tmpl.FilterCompletedAfter t) = [QQ.sql|completed_at >= #{t :: CTimestamptz}|]
+filterToClause (Tmpl.FilterCompletedBefore t) = [QQ.sql|completed_at < #{t :: CTimestamptz}|]
+filterToClause (Tmpl.FilterPayloadText t) = [QQ.sql|payload::text ILIKE #{pat :: CText} ESCAPE '\' |]
+  where
+    pat = "%" <> likeEscape t <> "%"
+
+-- | Escape the LIKE metacharacters in a substring searched for literally.
+likeEscape :: Text -> Text
+likeEscape = T.concatMap escape
+  where
+    escape c = if c `elem` likeMeta then T.pack ['\\', c] else T.singleton c
+
+-- | The characters LIKE reads as pattern syntax, plus its own escape character.
+likeMeta :: String
+likeMeta = "\\%_"
 
 -- | Run a single-row count @Query@, throwing a parse error on unexpected results.
 countStrict :: (MonadArbiter m) => Text -> Q.Query Int64 -> m Int64

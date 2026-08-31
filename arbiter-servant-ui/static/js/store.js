@@ -4,6 +4,14 @@
 // Top-level views that aren't queue-scoped (each a nav destination after Queues).
 const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency', 'cron', 'workers'];
 
+// A drilled-into queue's sub-tabs, in the order the tab strip lists them. The first
+// is the default a URL with no hash lands on.
+const QUEUE_SUB_TABS = ['stats', 'jobs', 'dlq', 'archive', 'cron', 'workers'];
+
+// The sub-tabs that own filter params. Each reads them on load and writes its own
+// back, so the URL keeps them across a step onto one of these tabs.
+const FILTERED_SUB_TABS = ['jobs', 'dlq', 'archive'];
+
 document.addEventListener('alpine:init', () => {
   Alpine.store('app', {
     queues: [],
@@ -15,6 +23,11 @@ document.addEventListener('alpine:init', () => {
     _loaderSeq: 0,
     _loaderTimer: null,
     _deepLinkPending: false,
+    // Reactive, so a table re-renders its columns when the window crosses the
+    // breakpoint rather than only on the next load.
+    narrow: window.matchMedia(ARB_NARROW_MQ).matches,
+    _pushing: false,
+    _restoring: false,
     detailReady: false,
     connected: false,
     sseDisabled: false,
@@ -117,10 +130,12 @@ document.addEventListener('alpine:init', () => {
       this._dropped = false;
     },
 
-    // Names where the reader is, for the page heading and the browser tab. A
-    // queue takes the name; otherwise the nav destination does.
+    // Names where the reader is, for the page heading and the browser tab. A drilled-into
+    // queue takes the name; otherwise the nav destination does. The queue area remembers
+    // its selection while a system view is open, so the view has to agree before the
+    // queue can name the page.
     get pageTitle() {
-      if (this.selectedQueue) return this.selectedQueue;
+      if (this.view === 'queues' && this.selectedQueue) return this.selectedQueue;
       return {
         queues: 'Queues',
         ratelimits: 'Rate Limits',
@@ -155,6 +170,8 @@ document.addEventListener('alpine:init', () => {
 
     async init() {
       this.startHealthPolling();
+      const narrowQuery = window.matchMedia(ARB_NARROW_MQ);
+      narrowQuery.addEventListener('change', (e) => { this.narrow = e.matches; });
       // Mount the detail one frame after the list unmounts. A same-flush
       // list-unmount plus detail-mount skips the last tab pane's Alpine init.
       Alpine.effect(() => {
@@ -203,15 +220,28 @@ document.addEventListener('alpine:init', () => {
       this.initialized = true;
       this.connectSSE();
 
-      // Sync tab → hash
+      // Sync tab → hash. A tab the reader clicked is a navigation, so it pushes; one
+      // a history step activated is not, and _restoring holds the push back.
       document.addEventListener('shown.bs.tab', (e) => {
         const target = e.target.getAttribute('data-bs-target');
-        if (target) {
-          const tab = target.replace('#tab-', '');
-          // Jobs/DLQ own the filter params and rewrite them on load; other sub-tabs
-          // must clear them, else a stale filter desyncs the URL from the view.
-          if (tab !== 'jobs' && tab !== 'dlq') clearFiltersFromUrl();
-          this._updateUrl(tab);
+        if (!target) return;
+        const tab = target.replace('#tab-', '');
+        // A sub-tab that owns no filter params must clear them, else a stale filter
+        // desyncs the URL from the view.
+        this._pushing = !this._restoring;
+        try {
+          this._updateUrl(tab, !FILTERED_SUB_TABS.includes(tab));
+        } finally {
+          this._pushing = false;
+        }
+      });
+
+      window.addEventListener('popstate', () => {
+        this._restoring = true;
+        try {
+          this._applyUrl();
+        } finally {
+          requestAnimationFrame(() => { this._restoring = false; });
         }
       });
     },
@@ -224,8 +254,22 @@ document.addEventListener('alpine:init', () => {
       dismissOpenModals();
       this.selectedQueue = queue;
       this.view = 'queues';
-      setUrl();
-      if (changed || forceReset) window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
+      this._pushing = true;
+      try {
+        setUrl();
+      } finally {
+        this._pushing = false;
+      }
+      // A different queue (or an explicit reset) clears the tabs, and the detail view
+      // mounts against the new URL. Staying in the same queue leaves it mounted, so
+      // nothing reads the URL or opens the sub-tab it names unless this does: the tabs
+      // adopt its filters first, then the one it points at is brought to the front.
+      if (changed || forceReset) {
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
+      } else {
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.urlChanged));
+        this.restoreSubTab(QUEUE_SUB_TABS);
+      }
     },
 
     // Drill into a queue's detail view (from the queue list or the quick-switcher).
@@ -233,22 +277,23 @@ document.addEventListener('alpine:init', () => {
     // the list resets to the default (Stats) by clearing the hash.
     openQueue(queue) {
       const wasInDetail = !!this.selectedQueue;
-      this._drillInto(queue, () => { clearFiltersFromUrl(); this._updateUrl(wasInDetail ? undefined : ''); }, true);
+      this._drillInto(queue, () => this._updateUrl(wasInDetail ? undefined : '', true), true);
     },
 
     // Drill into a named sub-tab of a queue's detail view (from a queue card badge).
     openQueueTab(queue, tab) {
-      this._drillInto(queue, () => { clearFiltersFromUrl(); this._updateUrl(tab); }, true);
+      this._drillInto(queue, () => this._updateUrl(tab, true), true);
     },
 
-    // Drill into a queue's Jobs tab pre-filtered to a status (from a queue card).
-    openQueueJobs(queue, status) {
-      this._drillInto(queue, () => history.replaceState(null, '', queueJobsUrl(queue, status)));
+    // Drill into a queue's Jobs tab pre-filtered. Takes a bare status, or any of the
+    // filter keys, so a worker row or a policy row can open the jobs it accounts for.
+    openQueueJobs(queue, filters) {
+      this._drillInto(queue, () => this._writeUrl(queueJobsUrl(queue, filters)));
     },
 
     // Drill into a queue's Jobs tab showing one job (from the event log).
     openQueueJob(queue, jobId) {
-      this._drillInto(queue, () => history.replaceState(null, '', queueJobUrl(queue, jobId)));
+      this._drillInto(queue, () => this._writeUrl(queueJobUrl(queue, jobId)));
     },
 
     // Open a policy view focused on one gate prefix, from a job's Gates cell.
@@ -257,11 +302,11 @@ document.addEventListener('alpine:init', () => {
       this.view = view;
       this.selectedQueue = '';
       const url = new URL(location.href);
-      url.searchParams.delete('queue');
+      for (const k of ['queue', ..._filterKeys]) url.searchParams.delete(k);
       url.searchParams.set('view', view);
       url.searchParams.set('prefix', prefix);
       url.hash = '';
-      history.replaceState(null, '', url);
+      this._writeUrl(url, true);
     },
 
     // Switch to a top-level view: 'queues' (the queue area) or one of SYSTEM_VIEWS.
@@ -272,14 +317,22 @@ document.addEventListener('alpine:init', () => {
       // button is never a no-op while a queue is open.
       if (view === 'queues') this.selectedQueue = '';
       // Clear any sub-tab hash left over from a queue detail view.
-      this._updateUrl('');
+      this._pushing = true;
+      try {
+        this._updateUrl('', true);
+      } finally {
+        this._pushing = false;
+      }
     },
 
-    _updateUrl(newHash) {
+    _updateUrl(newHash, dropFilters = false) {
       const url = new URL(location.href);
       url.searchParams.delete('view');
       url.searchParams.delete('queue');
       url.searchParams.delete('prefix');
+      // Cleared on the URL being built, never on the one being left: rewriting the
+      // outgoing entry would strip the filters Back is supposed to return to.
+      if (dropFilters) for (const k of _filterKeys) url.searchParams.delete(k);
       if (this.view === 'queues') {
         if (this.selectedQueue) url.searchParams.set('queue', this.selectedQueue);
       } else {
@@ -288,7 +341,59 @@ document.addEventListener('alpine:init', () => {
       if (newHash !== undefined) {
         url.hash = newHash;
       }
-      history.replaceState(null, '', url);
+      this._writeUrl(url);
+    },
+
+    // Write the address bar. A navigation pushes, so the browser's Back button walks
+    // the views the reader visited; everything else (a filter, a sort, a page) rewrites
+    // the current entry, so Back is never spent on a step nobody would call one.
+    // A push onto the identical URL is dropped, so a repeated click adds nothing.
+    _writeUrl(url, forcePush = false) {
+      const next = new URL(url, location.href);
+      if (next.href === location.href) return;
+      if (this._pushing || forcePush) history.pushState(null, '', next);
+      else history.replaceState(null, '', next);
+    },
+
+    // Activate the sub-tab the URL names without pushing an entry for it. A mount is
+    // part of the navigation that already pushed, not a step of its own, so this is
+    // what keeps one Back press out of a queue rather than two.
+    restoreSubTab(tabs) {
+      this._restoring = true;
+      try {
+        activateSubTabFromHash(tabs);
+      } finally {
+        requestAnimationFrame(() => { this._restoring = false; });
+      }
+    },
+
+    // Restore whatever the URL names, without writing history back. The browser has
+    // already moved the address bar, so this only brings the view into line with it.
+    _applyUrl() {
+      const params = new URLSearchParams(location.search);
+      const urlView = params.get('view');
+      const urlQueue = params.get('queue');
+      const nextView = SYSTEM_VIEWS.includes(urlView) ? urlView : 'queues';
+      const nextQueue =
+        nextView === 'queues' && urlQueue && this.queues.includes(urlQueue) ? urlQueue : '';
+      const queueChanged = this.selectedQueue !== nextQueue;
+      dismissOpenModals();
+      this.view = nextView;
+      this.selectedQueue = nextQueue;
+      if (!nextQueue) return;
+      // The detail view survives a step within one queue, so its sub-tab and filters
+      // are restored here rather than by a fresh mount. A step that lands on a
+      // different queue resets the tabs first, then reads the URL's own filters.
+      // A queue change already resets the tabs and has them read the new URL, so only
+      // a step within one queue needs telling separately. Dispatching both would load
+      // the same list twice.
+      if (queueChanged) {
+        window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: nextQueue }));
+      }
+      requestAnimationFrame(() => {
+        this.restoreSubTab(QUEUE_SUB_TABS);
+        if (!queueChanged) window.dispatchEvent(new CustomEvent(ARB_EVENTS.urlChanged));
+      });
     },
 
     toggleTheme() {

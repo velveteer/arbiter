@@ -74,7 +74,8 @@ import Arbiter.Core.Job.Types (JobRead, JobStatus)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 
--- | A narrowing predicate on a job listing.
+-- | A narrowing predicate on a job listing. A predicate names a column its table
+-- has, so @FilterJobId@ and the @completed_at@ range only suit the DLQ and archive.
 data JobFilter
   = FilterGroupKey Text
   | FilterParentId Int64
@@ -82,6 +83,14 @@ data JobFilter
   | FilterStatus JobStatus
   | FilterId Int64
   | FilterJobId Int64
+  | FilterClaimedBy UUID
+  | FilterPayloadText Text
+  | FilterRateLimitPrefix Text
+  | FilterConcurrencyPrefix Text
+  | FilterInsertedAfter UTCTime
+  | FilterInsertedBefore UTCTime
+  | FilterCompletedAfter UTCTime
+  | FilterCompletedBefore UTCTime
   deriving stock (Eq, Show)
 
 -- | Sortable columns on the main jobs table. Closed enum so the SQL builder

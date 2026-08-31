@@ -116,3 +116,20 @@ async function mapLimit(items, limit, worker) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
   return results;
 }
+
+// The leading run of a UUID, enough to tell two workers apart in a cell or a chip.
+function shortId(id) {
+  return String(id).slice(0, SHORT_ID_CHARS);
+}
+
+// Characters of a UUID a short form keeps: its first hyphen-delimited group.
+const SHORT_ID_CHARS = 8;
+
+// A datetime-local field's value as a UTC instant. The field carries local wall-clock
+// with no zone, so the reader's own zone is what resolves it. Blank stays blank, and an
+// unparseable value is dropped rather than sent as a filter nobody asked for.
+function toIsoInstant(localValue) {
+  if (!localValue) return undefined;
+  const at = new Date(localValue);
+  return Number.isNaN(at.getTime()) ? undefined : at.toISOString();
+}
