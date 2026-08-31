@@ -11,9 +11,10 @@ FROM haskell:9.14-slim-bookworm AS build
 WORKDIR /src
 
 # Build-time C deps: libpq headers + pg_config for postgresql-libpq, plus
-# pkg-config and zlib headers. (The runtime stage carries the shared libs.)
+# pkg-config, zlib and lzma headers. (The runtime stage carries the shared
+# libs.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq-dev pkg-config zlib1g-dev \
+ && apt-get install -y --no-install-recommends libpq-dev pkg-config zlib1g-dev liblzma-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # The exe depends on the local library packages and embeds
@@ -33,7 +34,7 @@ RUN --mount=type=cache,target=/root/.cabal \
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libpq5 libgmp10 libffi8 libnuma1 zlib1g ca-certificates \
+      libpq5 libgmp10 libffi8 libnuma1 zlib1g liblzma5 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -r -u 10001 demo
