@@ -1,0 +1,53 @@
+cabal-version:   2.2
+name:            arbiter-servant-openapi
+version:         0.1.0.0
+synopsis:        OpenAPI 3 description of the Arbiter REST API
+description:
+  Derives an OpenAPI 3 document from @arbiter-servant@'s route types, so paths,
+  methods, parameters, request and response bodies and status codes come from the
+  API itself.
+
+  The schema instances are orphans. They live here so @arbiter-servant@ carries no
+  OpenAPI dependency of its own.
+
+license:         MIT
+license-file:    LICENSE
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Web
+build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules: Arbiter.Servant.OpenApi
+  build-depends:
+    , aeson                      >=2.2  && <2.3
+    , arbiter-core               <0.2
+    , arbiter-servant            <0.2
+    , base                       >=4.20 && <5
+    , containers                 >=0.6  && <0.9
+    , insert-ordered-containers  >=0.2  && <0.3
+    , openapi3                   >=3.2  && <3.3
+    , servant-openapi3           >=2.0  && <2.2
+    , servant-server             >=0.19 && <0.21
+    , text                       >=1.2  && <2.2
+    , time                       >=1.9  && <1.16
+    , uuid-types                 >=1.0  && <1.1

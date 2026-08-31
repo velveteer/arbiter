@@ -7,6 +7,7 @@ packages:
   arbiter-hasql
   arbiter-orville
   arbiter-servant
+  arbiter-servant-openapi
   arbiter-servant-ui
   arbiter-otel
   arbiter-demo

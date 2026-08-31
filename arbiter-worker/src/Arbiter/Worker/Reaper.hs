@@ -19,6 +19,7 @@ import Arbiter.Core.QueueRegistry (RegistryTables (..))
 import Arbiter.Core.RateLimit.Spec (registryRateLimitPolicies)
 import Control.Monad (forever, void, when)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Either (fromRight)
 import Data.Foldable (fold, traverse_)
 import Data.Int (Int64)
 import Data.Maybe (catMaybes)
@@ -149,7 +150,7 @@ runReaperOp
   -> m a
   -> m (Maybe a)
 runReaperOp logCfg schema stmtTimeout task every work =
-  either (const Nothing) id <$> tryReaperOp logCfg schema stmtTimeout task every work
+  fromRight Nothing <$> tryReaperOp logCfg schema stmtTimeout task every work
 
 -- | 'runReaperOp', keeping the failure. @Right Nothing@ is an operation already running.
 tryReaperOp

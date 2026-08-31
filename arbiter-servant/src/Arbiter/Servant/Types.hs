@@ -58,6 +58,7 @@ import Data.Aeson
   , (.:?)
   , (.=)
   )
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -383,9 +384,27 @@ data BatchDeleteResponse = BatchDeleteResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | A cron schedule row plus the next tick its effective expression fires at.
+-- An expression that never fires again, or one the server cannot parse, has none.
+data CronScheduleView = CronScheduleView
+  { schedule :: CronScheduleRow
+  , nextRunAt :: Maybe UTCTime
+  }
+  deriving stock (Eq, Generic, Show)
+
+-- | The row's own fields, with @nextRunAt@ alongside them.
+instance ToJSON CronScheduleView where
+  toJSON v = case toJSON (schedule v) of
+    Object o -> Object (KM.insert "nextRunAt" (toJSON (nextRunAt v)) o)
+    other -> other
+
+instance FromJSON CronScheduleView where
+  parseJSON = withObject "CronScheduleView" $ \o ->
+    CronScheduleView <$> parseJSON (Object o) <*> o .:? "nextRunAt"
+
 -- | Cron schedules response.
 data CronSchedulesResponse = CronSchedulesResponse
-  { cronSchedules :: [CronScheduleRow]
+  { cronSchedules :: [CronScheduleView]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
