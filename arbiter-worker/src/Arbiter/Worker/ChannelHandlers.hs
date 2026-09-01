@@ -71,7 +71,7 @@ handleCancelNotif config runningJobs notif =
 
 -- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
 -- The cron-run channel is per-schema, so pools that do not own the named
--- schedule ignore the wake instead of issuing a useless pending-runs scan.
+-- schedule ignore the wake and do not issue a pending-runs scan.
 handleCronRunNotif
   :: (MonadUnliftIO m)
   => Set Text

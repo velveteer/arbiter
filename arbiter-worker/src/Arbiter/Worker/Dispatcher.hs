@@ -55,11 +55,10 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
           map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers
         BatchedJobsMode _ _ ->
           Ops.claimJobsBatchedCached claimSql freeWorkers
-      case eJobs of
-        Left e ->
-          tryLog (logConfig config) Error $ "Dispatcher exception: " <> displayEx e
-        Right batches ->
-          STM.atomically $ traverse_ (STM.writeTBQueue workQueue) batches
+      either
+        (\e -> tryLog (logConfig config) Error $ "Dispatcher exception: " <> displayEx e)
+        (STM.atomically . traverse_ (STM.writeTBQueue workQueue))
+        eJobs
       -- Pulse on every attempt so a failing claim path still proves liveness.
       STM.atomically $ void $ STM.tryPutTMVar (heartbeatSignal config) ()
 

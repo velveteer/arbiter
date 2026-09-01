@@ -1,9 +1,10 @@
 # Batched Handlers
 
-`defaultBatchedWorkerConfig` is `manualWorkerConfig` with more than one job per
-invocation: the handler receives up to `batchSize` jobs and can amortize work
-across them. Grouped jobs batch within one group, and ungrouped jobs batch from
-the ready pool. Finalize each one through the same callbacks.
+`defaultBatchedWorkerConfig` configures a manual handler that receives up to
+`batchSize` jobs in each invocation. The handler can combine operations for
+these jobs. A batch of grouped jobs contains one group. A batch of ungrouped
+jobs contains jobs from the ready set. Use the supplied callbacks to finalize
+each job.
 
 ```haskell
 -- defaultBatchedWorkerConfig <workerCount> <batchSize> handler
@@ -32,8 +33,13 @@ batchHandler jobs cbs =
       Worker.ackWith cbs job score
 ```
 
-`onJobSuccess` does not commit with those writes, and it can fire for a job
-that is later reprocessed. Put effects that must happen exactly once in the
-transaction next to the ack, not in the hook.
+`onJobSuccess` does not commit in the transaction with these writes. It can run
+for a job that Arbiter later processes again. Put effects that must occur one
+time in the same transaction as the ack.
 
-Dispositions are per job: a failure, cancel, or nack affects only that job, completed jobs stay done, and an untouched job is reprocessed. `ackWith` and `ackAllWith` carry the queue's [result](../features/results.md), while `ack` and `ackAll` store nothing and work on any queue. The [`BatchCallbacks` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks) list every disposition.
+A disposition applies to one job. A failure, cancellation, or nack does not
+change completed jobs in the batch. Arbiter reprocesses an unfinalized job.
+`ackWith` and `ackAllWith` store the queue [result](../features/results.md).
+`ack` and `ackAll` do not store a result and work with all queues. The
+[`BatchCallbacks` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
+list all dispositions.

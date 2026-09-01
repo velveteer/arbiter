@@ -1,7 +1,7 @@
 # arbiter-hasql (hasql)
 
-Built on `hasql` with `resource-pool`. Handlers receive a `Hasql.Connection`
-for typed hasql queries inside the worker transaction.
+This backend uses `hasql` and `resource-pool`. Handlers receive a
+`Hasql.Connection` for typed queries in the worker transaction.
 
 ```haskell
 env <- ArbH.createHasqlEnv (Proxy @AppRegistry) connStr "arbiter"

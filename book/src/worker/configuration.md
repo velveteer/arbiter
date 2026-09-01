@@ -1,50 +1,51 @@
 # Worker Configuration
 
-A pool is a `WorkerConfig`: a handler, a thread count, and the timings and
-callbacks around them. The config constructors return the record, and you
-override any field on it before wrapping it in a pool.
+A `WorkerConfig` defines a handler, thread count, timing values, and callbacks.
+Configuration constructors return this record. Update its fields before you
+create a pool.
 
-`poolConfigForWorkers` sizes the database connection pool from the worker pools
-you are about to run. Give it the same list you pass to `runWorkerPools`.
+`poolConfigForWorkers` calculates the database pool size from a list of worker
+pools. Pass the same list to `poolConfigForWorkers` and `runWorkerPools`.
 
 ## Running several queues
 
-One process can run a pool per queue. Build a config for each, name them with
-`namedWorkerPool`, and pass that one list everywhere: to
-`poolConfigForWorkers`, to `runWorkerPools`, and to
-[`shutdownPools`](shutdown.md).
+One process can run one pool for each queue. Create each configuration and name
+it with `namedWorkerPool`. Pass the same list to `poolConfigForWorkers`,
+`runWorkerPools`, and [`shutdownPools`](shutdown.md).
 
-The pools share a fate. If any one of them exits, the others wind down with it,
-and the first failure among them is rethrown once every pool has been joined.
+If one pool exits, Arbiter stops the other pools. After all pools stop, Arbiter
+throws the first recorded failure.
 
-`runWorkerPools` runs the pools named by `ARBITER_ENABLED_QUEUES`, a
-comma-separated list, and every configured pool when the variable is unset. One
-binary can therefore serve as several differently scoped deployments without a
-code change:
+`ARBITER_ENABLED_QUEUES` is a comma-separated list of pool names.
+`runWorkerPools` starts the named pools. If the variable is not set, it starts
+all configured pools. This variable permits different deployments to use the
+same binary.
 
-```
+```bash
 ARBITER_ENABLED_QUEUES=email_queue,image_queue
 ```
 
-Names are checked against the registry. One that matches no configured pool
-throws at startup, which catches a typo before it silently shrinks the fleet.
+Arbiter checks the names against the configured pools at startup. An unknown
+name causes an exception.
 
 ## Which constructor
 
-`transactionalWorkerConfig` runs the handler inside a transaction. Returning
-acks and stores the return value as the job's result. Throwing rolls the work
-back before the job retries or dead-letters. No path leaves a job unfinalized.
+`transactionalWorkerConfig` runs the handler in a transaction. A normal return
+acks the job and stores the returned result. An exception rolls back the work
+before Arbiter retries the job or moves it to the DLQ. Arbiter finalizes the job
+on each path.
 
-`manualWorkerConfig` and `defaultBatchedWorkerConfig` open no transaction and
-hand you callbacks instead. Scope your own transaction to the writes that need
-one, and a slow HTTP call in the middle of a handler holds no connection. In
-exchange, finalizing is yours on every path: a job you neither ack, fail, nor
-nack is reprocessed when its visibility lapses.
+`manualWorkerConfig` and `defaultBatchedWorkerConfig` do not start a handler
+transaction. They supply finalization callbacks. Create a transaction for the
+writes that require one. For example, an HTTP request can run without a held
+database connection. The handler must ack, fail, or nack each job. Arbiter
+reprocesses jobs that the handler does not finalize before visibility expires.
 
-Wrap a callback in your own `withDbTransaction` for the same atomic
-ack-with-writes, because the ack enlists as a savepoint. The ordering differs:
-the success hook fires at savepoint release, not at your outer commit, so an
-outer rollback leaves the hook fired for a job that runs again.
+Wrap a callback in `withDbTransaction` to commit the ack and application writes
+atomically. The ack uses a savepoint. The success hook runs when Arbiter
+releases that savepoint. It can run before the outer transaction commits. If
+the outer transaction rolls back, Arbiter can process the job again after the
+hook has run.
 
 Batching is a separate choice. Use `defaultBatchedWorkerConfig` when per-job
 overhead dominates and you want per-job dispositions inside one claim.

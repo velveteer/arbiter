@@ -23,6 +23,7 @@ import Arbiter.Core.PoolConfig (PoolConfig (..), defaultPoolConfig)
 import Arbiter.Core.QueueRegistry (RegistryTables)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Exception qualified as E
+import Control.Monad (unless)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
@@ -99,7 +100,7 @@ runSelectedWorkerPools
 runSelectedWorkerPools enabled pools = do
   let available = Set.fromList [name | NamedWorkerPool name _ <- pools]
       missing = Set.toList (Set.fromList enabled `Set.difference` available)
-  unlessNull missing
+  unless (null missing)
     $ liftIO . E.throwIO . WorkerPoolSelectionException
     $ "No worker pool configured for: " <> T.intercalate ", " missing
   case filter (\(NamedWorkerPool name _) -> name `elem` enabled) pools of
@@ -112,8 +113,6 @@ runSelectedWorkerPools enabled pools = do
         results <- traverse Async.waitCatch asyncs
         either (liftIO . E.throwIO) pure (sequence_ results)
   where
-    unlessNull values action = if null values then pure () else action
-
     withPoolAsync :: NamedWorkerPool m -> ContT () m (Async.Async ())
     withPoolAsync (NamedWorkerPool name cfg) =
       let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
@@ -140,6 +139,4 @@ poolConfigForWorkers pools = do
     validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
     validateSelected enabled (NamedWorkerPool name cfg)
       | name `notElem` enabled = pure ()
-      | otherwise = case validateWorkerConfig cfg of
-          Left err -> E.throwIO (WorkerConfigException err)
-          Right () -> pure ()
+      | otherwise = either (E.throwIO . WorkerConfigException) pure (validateWorkerConfig cfg)

@@ -1,14 +1,13 @@
 # Logging
 
-A pool writes structured JSON logs. `logConfig` sets where they go and at what
-level, and `defaultLogConfig` writes Info and above to stdout.
+A pool writes structured JSON logs. `logConfig` sets the destination and level.
+`defaultLogConfig` writes `Info` and higher levels to stdout.
 
-The destinations are stdout, stderr, a fast-logger `LoggerSet`, and a callback
-of your own. The callback receives the level, the message, and the structured
-context as `[Pair]`, which is how you fold arbiter's logs into your own logging
-stack. `silentLogConfig` turns logging off.
+Available destinations are stdout, stderr, a fast-logger `LoggerSet`, and a
+custom callback. The callback receives the level, message, and structured
+context as `[Pair]`. Use it to send Arbiter logs to an application logging
+system. `silentLogConfig` disables logging.
 
-Job context is attached for you, so a handler's own logs carry the same job
-fields as the pool's.
+Arbiter adds job context to handler logs and pool logs.
 
 See the [`Arbiter.Worker.Logger` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Logger.html) for `LogConfig` and every destination.

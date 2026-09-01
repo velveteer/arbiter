@@ -5,9 +5,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Per-job concurrency limits, declared like rate limits. A payload's
--- 'concurrencyFor' picks a pool and key per job, and statically collects every
--- pool it could use so the migration seeds them. The limit is the pool's.
+-- | Per-job concurrency limits. A payload's 'concurrencyFor' describes how to
+-- select a pool and key. Static inspection finds all pools that the migration
+-- must initialize. Each selected pool supplies the limit.
 module Arbiter.Core.Concurrency.Spec
   ( -- * Core types
     ConcurrencyKey (..)
@@ -51,8 +51,8 @@ import Arbiter.Core.Admission
   )
 import Arbiter.Core.Selector (Selector, chooseWhen, collectPolicies, runSelector, selectByCase)
 
--- | A resolved concurrency key: pool prefix and per-key suffix. Stored as
--- @prefix:suffix@, prefix kept separate so the policy lookup never re-splits on @:@.
+-- | A resolved concurrency key with a pool prefix and per-key suffix. The
+-- stored form is @prefix:suffix@. The separate prefix supports policy lookup.
 data ConcurrencyKey = ConcurrencyKey
   { ckPrefix :: Text
   , ckSuffix :: Text
@@ -86,8 +86,8 @@ instance AdmissionPolicy ConcurrencyPolicy where
 concurrencyPool :: Text -> Int32 -> ConcurrencyPolicy
 concurrencyPool prefix limit = ConcurrencyPolicy prefix (max 1 limit)
 
--- | A selective description of the concurrency key for a payload. Run it against a
--- job to pick the key. Inspect it statically to collect reachable pools.
+-- | A selective description of the concurrency key for a payload. Evaluation
+-- returns the job key. Static inspection returns the reachable pools.
 type ConcurrencyFor payload = Selector ConcurrencyPolicy payload (Maybe ConcurrencyKey)
 
 -- | This payload is unbounded.

@@ -171,9 +171,9 @@ lockJobTreesSQL schema tableName jobIds =
         SELECT count(*) AS @{count :: CInt8} FROM locked
       |]
 
--- | 'lockJobTreesSQL' widened to each named job's whole tree, so it covers what a tree
--- cancel goes on to delete rather than the subtree alone. The named ids seed the walk
--- down too, so an orphan locks its own subtree.
+-- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
+-- all rows that tree cancellation can delete. The named identifiers also start
+-- the downward walk, so an orphan locks its subtree.
 lockJobTreesFromRootSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesFromRootSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName

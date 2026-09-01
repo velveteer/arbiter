@@ -102,7 +102,7 @@ disableListener :: SimpleEnv registry -> SimpleEnv registry
 disableListener env = env {listener = Nothing}
 
 -- | Give the env a dedicated LISTEN connection opened from a connection string,
--- rather than borrowing a slot from the pool.
+-- and does not use a slot from the pool.
 useDedicatedListener :: (MonadIO m) => ByteString -> SimpleEnv registry -> m (SimpleEnv registry)
 useDedicatedListener connStr env = do
   d <- newDedicatedListen connStr

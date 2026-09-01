@@ -1,6 +1,6 @@
--- | A selector reads fields of a job and uses policies. Running it against a
--- job picks a result, while statically inspecting it collects every policy it
--- could reach (so a migration seeds exactly what a registry references).
+-- | A selector reads job fields and applies policies. Evaluation returns the
+-- selected result. Static inspection returns all reachable policies for
+-- migration initialization.
 module Arbiter.Core.Selector
   ( Selector
   , field
@@ -25,15 +25,15 @@ data Prim policy payload a
   | UsePolicy policy a
   deriving stock (Functor)
 
--- | A selective description over a payload, yielding an @a@. Run it against a job
--- to pick the @a@. Inspect it statically to collect reachable policies.
+-- | A selective description over a payload. Evaluation for a job returns an
+-- @a@. Static inspection returns the reachable policies.
 type Selector policy payload = Select (Prim policy payload)
 
 -- | Read a field of the job (for predicates or key suffixes).
 field :: (payload -> a) -> Selector policy payload a
 field = liftSelect . ReadField
 
--- | Use a policy: records it for seeding and yields it for building a key.
+-- | Record a policy for initialization and return it for key construction.
 usePolicy :: policy -> Selector policy payload policy
 usePolicy p = liftSelect (UsePolicy p p)
 
@@ -45,30 +45,28 @@ runSelector job program = runSelect nt program job
     nt (ReadField f) = f
     nt (UsePolicy _ x) = const x
 
--- | Every policy a selector could reach, over-approximating across both sides of
--- each choice (so seeding covers every branch).
+-- | All policies that a selector can reach across all branches.
 collectPolicies :: (Ord policy) => Selector policy payload a -> Set policy
 collectPolicies = Set.fromList . mapMaybe used . getEffects
   where
     used (UsePolicy p _) = Just p
     used (ReadField _) = Nothing
 
--- | Whether a selector could reach any policy, short-circuiting on the first one
--- without building the full policy set.
+-- | Test for a reachable policy. Stop at the first match.
 usesAnyPolicy :: Selector policy payload a -> Bool
 usesAnyPolicy = any isUse . getEffects
   where
     isUse (UsePolicy _ _) = True
     isUse (ReadField _) = False
 
--- | Choose between two selectors by a predicate on the job. Both sides are
--- visible to policy collection, so every policy either branch could use is seeded.
+-- | Select between two selectors with a job predicate. Policy collection
+-- inspects both branches.
 chooseWhen
   :: (payload -> Bool)
   -> Selector policy payload a
   -> Selector policy payload a
   -> Selector policy payload a
-chooseWhen p whenTrue whenFalse = ifS (field p) whenTrue whenFalse
+chooseWhen p = ifS (field p)
 
 -- | N-way 'chooseWhen': map the job to a finite tag, then each tag to its selector.
 -- Policy collection evaluates every tag in @[minBound..maxBound]@, so the tag's

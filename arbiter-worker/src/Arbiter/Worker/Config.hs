@@ -122,8 +122,7 @@ data WorkerConfig m payload = WorkerConfig
   , pauseVar :: TVar Bool
   -- ^ Per-pool pause flag. Write it through 'writePause'.
   , pauseEpoch :: TVar Word64
-  -- ^ Bumped by every 'pauseVar' write, so a reading taken before one lands is
-  -- discarded rather than applied on top of it.
+  -- ^ Incremented by each 'pauseVar' write. Discard a read with an older epoch.
   , livenessFile :: Maybe FilePath
   -- ^ When set, the heartbeat loop touches this file at the
   -- 'workerHeartbeatInterval' cadence, for a file-based liveness probe.
@@ -221,8 +220,8 @@ handlerBatchSize config = case handlerMode config of
   SingleJobMode _ -> 1
   BatchedJobsMode n _ -> n
 
--- | Validate invariants required for safe worker execution. Reports every
--- violation, not just the first.
+-- | Validate all invariants required for safe worker execution. Return all
+-- violations.
 validateWorkerConfig :: WorkerConfig m payload -> Either Text ()
 validateWorkerConfig config =
   case fieldInvariants config *> crossFieldInvariants config of
@@ -281,9 +280,7 @@ instance Functor Validation where
 instance Applicative Validation where
   pure = Validation . Right
   Validation (Left left) <*> Validation (Left right) = Validation (Left (left <> right))
-  Validation (Left left) <*> Validation (Right _) = Validation (Left left)
-  Validation (Right _) <*> Validation (Left right) = Validation (Left right)
-  Validation (Right f) <*> Validation (Right a) = Validation (Right (f a))
+  Validation f <*> Validation a = Validation (f <*> a)
 
 -- | A field carrying no invariant of its own.
 waived :: a -> Validation a
@@ -293,8 +290,8 @@ waived = pure
 positive :: (Num a, Ord a) => Text -> a -> Validation a
 positive label value = value <$ require (value > 0) (label <> " must be greater than zero")
 
--- | Reject a negative field, passing it through unchanged. Zero opts out of a
--- wait rather than misconfiguring one.
+-- | Reject a negative field and return a valid field unchanged. Zero disables
+-- the applicable wait.
 nonNegative :: (Num a, Ord a) => Text -> a -> Validation a
 nonNegative label value = value <$ require (value >= 0) (label <> " must not be negative")
 

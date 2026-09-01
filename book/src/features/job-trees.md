@@ -40,13 +40,13 @@ myTree = rollup (Arb.defaultJob Aggregate)
   )
 ```
 
-A nested rollup does not merge upward on its own. An intermediate finalizer has
-to return the merged value for it to reach the level above.
+A nested rollup does not automatically merge results into the next level. Each
+intermediate finalizer must return the merged value.
 
-A parent reads its children with `Worker.mergedChildResults`, which merges the
-results of its immediate children and reports the ones that dead-lettered,
-keyed for `retryFromDLQ`. Intermediate results are cleaned up when the parent
-is acked.
+A parent reads its immediate child results with `Worker.mergedChildResults`.
+This function merges successful results and reports DLQ entries by the key used
+for `retryFromDLQ`. Arbiter removes intermediate results when it acks the
+parent.
 
 ```haskell
 handler :: Arb.JobHandler (ArbS.SimpleDb PipelineRegistry IO) PipelinePayload [Text]
@@ -68,14 +68,14 @@ config <- Worker.transactionalWorkerConfig 4 handler
 
 Tree-scoped cancellation:
 
-- `throwTreeCancel` - cancels the entire tree (root and all descendants).
-- `throwBranchCancel` - deletes this job's parent and everything under it,
-  which takes this job and its siblings with it.
+- `throwTreeCancel` cancels the root and all descendants.
+- `throwBranchCancel` deletes the current job's parent and all descendants of
+  that parent. This includes the current job and its siblings.
 
 ## Recipe: Chunked Data Migration
 
-Migrate a large table in chunks. Each child job carries its own chunk of row
-ids, and the parent runs once every chunk is done:
+To migrate a large table in parts, assign a set of row identifiers to each
+child job. The parent runs after all child jobs finish:
 
 ```haskell
 import Data.List.NonEmpty qualified as NE

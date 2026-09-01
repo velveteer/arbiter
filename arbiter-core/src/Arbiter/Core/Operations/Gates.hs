@@ -11,6 +11,7 @@ module Arbiter.Core.Operations.Gates
   , runGatedStateBounded
   , setLocalStatementTimeout
   , gateNameFor
+  , micros
   , Shared (..)
   ) where
 
@@ -37,7 +38,8 @@ import Arbiter.Core.Sql.QQ qualified as QQ
 -- Global Gate Operations
 -- ---------------------------------------------------------------------------
 
--- | Bound the current transaction's statements to a wall-clock limit, so a stuck op aborts at the DB rather than hanging the caller.
+-- | Set a wall-clock limit for statements in the current transaction. The
+-- database aborts a statement that exceeds the limit.
 setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
 setLocalStatementTimeout limit =
   let ms = ceiling (realToFrac limit * 1000 :: Double) :: Int
@@ -144,21 +146,20 @@ maxGateNameLength = 200
 
 -- | Where a shared result came from.
 data Shared a
-  = -- | This caller won the gate and ran the work itself.
+  = -- | Result from work run by this caller.
     Ran a
-  | -- | Read from the gate, with its age in seconds.
+  | -- | Result read from the gate, with its age in seconds.
     Published Double a
   | -- | A published result this caller could not decode, with the parse error.
     Unreadable Text
   deriving stock (Eq, Functor, Show)
 
--- | 'runGated' where the callers that lost the gate read the winner's published
--- result. 'Nothing' once none is fresh within @maxAge@. The winner runs @work@
--- after the gate transaction commits, so a slow scan holds neither the gate row
--- nor a read snapshot. Exclusion is by interval rather than by lock, and the interval
--- restarts from the publish. A run or publish that throws puts the watermark back, so a
--- winner that keeps failing does not keep every other caller from running. That
--- compensation is bounded by @interval@.
+-- | Run gated work or read a result published by another caller. Return
+-- 'Nothing' if there is no result newer than @maxAge@. The work starts after
+-- the gate transaction commits. A slow operation does not retain the gate row
+-- or a read snapshot. The exclusion interval starts after publication. A failed
+-- operation or publication restores the watermark and permits another caller
+-- to run. The compensation period is limited to @interval@.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName
@@ -185,5 +186,6 @@ runGatedShared schemaName task interval maxAge work =
       void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Sql.releaseGateSQL schemaName task at previous))))
     decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)
 
+-- | An interval in microseconds, for the timeout and delay primitives.
 micros :: NominalDiffTime -> Int
 micros seconds = round (realToFrac seconds * 1_000_000 :: Double)

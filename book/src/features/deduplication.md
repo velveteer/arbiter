@@ -10,17 +10,18 @@ job1 = Arb.defaultJob payload & Arb.setDedupKey (Just $ IgnoreDuplicate "order-1
 job2 = Arb.defaultJob payload & Arb.setDedupKey (Just $ ReplaceDuplicate "order-123")
 ```
 
-Keys are per queue, and a job without a key never collides with anything.
+Keys have queue scope. Jobs that have no key cannot cause a deduplication
+conflict.
 
-`ReplaceDuplicate` takes every writable column from the new job: payload,
-priority, group key, attempt limit, admission keys, and retention. It then
-re-arms the row for a fresh run, clearing the attempt count, the last error,
-and any outstanding claim.
+`ReplaceDuplicate` copies each writable column from the new job: payload,
+priority, group key, attempt limit, admission keys, and retention. It clears
+the attempt count, last error, and active claim. The updated job is then ready
+for a new run.
 
-Replacement is refused while the existing job is in flight, is flagged for
-force-cancel, or has children in the queue or the DLQ. A refused replace looks
-exactly like a skipped insert: `insertJob` returns `Nothing` and the existing
-job runs on unchanged. A `Nothing` reports only that the key was already
-present, whether or not your payload replaced anything.
+Arbiter refuses replacement when the existing job is in flight, has a
+force-cancel flag, or has children in the queue or DLQ. For a refused
+replacement, `insertJob` returns `Nothing` and does not change the existing job.
+This return value states that the key existed. It does not state if replacement
+occurred.
 
 See the [`Arbiter.Core.Job.Dedup` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Dedup.html) for the key type.

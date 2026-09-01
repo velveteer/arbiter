@@ -1,10 +1,10 @@
 # Backend Integration
 
-Arbiter's core is backend-agnostic through the `MonadArbiter` typeclass. Three
-adapters ship with it: [arbiter-simple](simple.md),
-[arbiter-orville](orville.md), and [arbiter-hasql](hasql.md). Pick the one that
-matches the database library your application already uses. If throughput
-decides it instead, the benchmarks below measure all three.
+The `MonadArbiter` typeclass separates the core from database libraries.
+Arbiter provides three adapters: [arbiter-simple](simple.md),
+[arbiter-orville](orville.md), and [arbiter-hasql](hasql.md). Use the adapter for
+the database library in the application. The following benchmarks compare
+their throughput.
 
 Throughput in jobs/sec, 4 pools × 10 workers, PostgreSQL 18, Apple M5 Pro.
 hasql runs with prepared claim statements (the default).
@@ -45,7 +45,8 @@ cells are single / batched):
 | ungrouped | 2,188 / 10,077 | 2,196 / 6,931 | 1,638 / 6,080 | 1,491 / 4,346 |
 | grouped (5k groups) | 781 / 5,432 | 795 / 3,974 | 675 / 3,650 | 625 / 2,768 |
 
-In single-job mode a rate limit is free and a concurrency cap costs 14% grouped
-to 25% ungrouped. Batched mode pays more: one gate costs 27% to 40%, and both
-together cost about half the throughput. A grouped workload pays these
-percentages on top of the cost of grouping.
+In single-job mode, the measured rate limit has no throughput cost. The
+concurrency limit reduces throughput by 14% for grouped jobs and 25% for
+ungrouped jobs. In batched mode, one admission control reduces throughput by
+27% to 40%. Both controls reduce it by approximately 50%. These reductions are
+in addition to the cost of grouping.

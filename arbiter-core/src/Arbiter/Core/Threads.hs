@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | RTS thread labels, so an eventlog, ThreadScope session or @ghc-debug@ dump
--- names arbiter's threads instead of numbering them.
+-- assigns descriptive names to Arbiter threads.
 module Arbiter.Core.Threads
   ( labelArbiterThread
   ) where

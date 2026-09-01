@@ -57,9 +57,10 @@ import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Applicative ((<|>))
 import Control.Concurrent.STM (retry)
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (join, unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Either (isRight)
+import Data.Foldable (for_, traverse_)
 import Data.Int (Int64)
 import Data.List (find, unfoldr)
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -129,9 +130,7 @@ validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
   check mOverlap (isJust . overlapPolicyFromText) "Invalid overlap policy: must be SkipOverlap or AllowOverlap"
   check mTz (isJust . resolveTZ) "Invalid timezone: must be an IANA tz name (e.g. America/New_York)"
   where
-    check field ok message = case field of
-      Just (Just v) | not (ok v) -> Left message
-      _ -> Right ()
+    check field ok message = unless (all ok (join field)) (Left message)
 
 -- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
 -- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
@@ -141,9 +140,7 @@ updateCronScheduleChecked
   -> CS.CronScheduleUpdate
   -> m (Either Text Int64)
 updateCronScheduleChecked scheduleName upd =
-  case validateCronScheduleUpdate upd of
-    Left err -> pure (Left err)
-    Right () -> Right <$> HL.updateCronScheduleUnchecked scheduleName upd
+  traverse (const (HL.updateCronScheduleUnchecked scheduleName upd)) (validateCronScheduleUpdate upd)
 
 -- | A cron schedule. Built with 'cronJob', or 'cronJobInTimezone' for a non-UTC one.
 data CronJob payload = CronJob
@@ -183,18 +180,15 @@ cronJob
   -- ^ Job builder. Receives the tick kind and the tick time.
   -> Either String (CronJob payload)
 cronJob cronName expr ov mk =
-  case parseCronSchedule expr of
-    Left err -> Left err
-    Right _ ->
-      Right
-        CronJob
-          { name = cronName
-          , cronExpression = expr
-          , overlap = ov
-          , backfill = NoBackfill
-          , timezone = Nothing
-          , builder = mk
-          }
+  CronJob
+    { name = cronName
+    , cronExpression = expr
+    , overlap = ov
+    , backfill = NoBackfill
+    , timezone = Nothing
+    , builder = mk
+    }
+    <$ parseCronSchedule expr
 
 -- | Like 'cronJob' but evaluated in a specific timezone. The tz name is
 -- validated eagerly against the bundled @tzdata@ database.
@@ -243,16 +237,10 @@ nextRunInTimezone (Just tzName) sched now = do
     -- A replayed minute runs ahead of @now@ in UTC while reading behind it locally.
     replayed tz = do
       endsAt <- replayEnd tz now
-      find (matchesInTimezone (Just tzName) sched) (minutesTo endsAt (truncateToMinute now))
+      find (matchesInTimezone (Just tzName) sched) (enumMinutes (addUTCTime 60 (truncateToMinute now)) endsAt)
     seek tz from = do
       localMinute <- nextMatch sched from
-      case find (> now) (ticksWearing tz (utcToLocalTime utc localMinute)) of
-        Just tick -> Just tick
-        Nothing -> seek tz localMinute
-
--- | Minute ticks after @from@ up to and including @endsAt@.
-minutesTo :: UTCTime -> UTCTime -> [UTCTime]
-minutesTo endsAt from = takeWhile (<= endsAt) (iterate (addUTCTime 60) (addUTCTime 60 from))
+      find (> now) (ticksWearing tz (utcToLocalTime utc localMinute)) <|> seek tz localMinute
 
 -- | When @t@ is in the first pass of a repeated local hour, when that hour reads again.
 replayEnd :: TZ -> UTCTime -> Maybe UTCTime
@@ -276,13 +264,10 @@ nextRunFromExpression tzName expr now =
 -- DST fall-back maps two UTC instants to the same local minute, so dedup
 -- keys built from this collapse to a single fire.
 formatMinuteInTimezone :: Maybe Text -> UTCTime -> Text
-formatMinuteInTimezone Nothing t = formatMinute t
-formatMinuteInTimezone (Just tzName) t =
-  case resolveTZ tzName of
-    Nothing -> formatMinute t
-    Just tz ->
-      let local = utcToLocalTimeTZ tz t
-       in T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" local)
+formatMinuteInTimezone tzName t =
+  maybe (formatMinute t) localMinute (tzName >>= resolveTZ)
+  where
+    localMinute tz = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" (utcToLocalTimeTZ tz t))
 
 -- | Upsert default expression and overlap for each 'CronJob' into the
 -- @cron_schedules@ table. Preserves any user overrides and enabled state.
@@ -290,7 +275,7 @@ initCronSchedules
   :: (MonadArbiter m)
   => SchemaName -> Text -> [CronJob payload] -> LogConfig -> m ()
 initCronSchedules schemaName queueName jobs logCfg = do
-  forM_ jobs $ \cj ->
+  for_ jobs $ \cj ->
     Ops.upsertCronDefault
       schemaName
       (name cj)
@@ -356,7 +341,7 @@ processCronCatchUp
   -> m ()
 processCronCatchUp logCfg schemaName queueName jobs now = do
   let currentTick = truncateToMinute now
-  forM_ jobs (processOneCron currentTick)
+  traverse_ (processOneCron currentTick) jobs
   where
     processOneCron currentTick cj = do
       outcome <- tryAny . withDbTransaction $ do
@@ -400,8 +385,8 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
         when (replayCount > 0)
           $ logCron logCfg Info
           $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
-        forM_ ticksToFire $ \t ->
-          void $ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
+        for_ ticksToFire $ \t ->
+          tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
 
 data TickOutcome = NotLeader | Ran
 
@@ -464,15 +449,14 @@ resolveAndParse cj mRow =
             _ -> Effective ov sched tz
         else Disabled
 
--- | Attempt to insert a single cron-tick job. Returns 'False' on any failure
--- (logged), 'True' on successful insert or a dedup-blocked no-op.
+-- | Attempt to insert a single cron-tick job. Any failure is logged.
 --
 -- The insert and the per-tick @last_checked_at@ advance are atomic. If
 -- either fails the other rolls back, so a successful fire is always paired
 -- with a watermark advance to that tick.
 tryInsertCronJob
   :: (QueueOperation m payload)
-  => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m Bool
+  => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m ()
 tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
   result <- tryAny . withDbTransaction $ do
     -- Gate first: another pool may have already fired this minute.
@@ -482,13 +466,10 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
           jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cj kind tick
       void $ HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cj]
-  case result of
-    Left e -> do
-      logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> displayEx e
-      pure False
-    Right () -> do
-      logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick
-      pure True
+  either
+    (\e -> logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> displayEx e)
+    (const . logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick)
+    result
 
 data RunNowOutcome = Fired | Skipped | NotRequested
 
@@ -503,12 +484,13 @@ processRunRequests
   => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
 processRunRequests logCfg schemaName jobs now = do
   scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
-  case scan of
-    Left e -> logCron logCfg Error $ "Cron run-request scan failed: " <> displayEx e
-    Right pending -> do
-      let requested = Set.fromList pending
-      forM_ (filter (\cj -> Set.member (name cj) requested) jobs) (claimAndFire (truncateToMinute now))
+  either
+    (\e -> logCron logCfg Error $ "Cron run-request scan failed: " <> displayEx e)
+    (fireRequested . Set.fromList)
+    scan
   where
+    fireRequested requested =
+      traverse_ (claimAndFire (truncateToMinute now)) (filter (\cj -> Set.member (name cj) requested) jobs)
     claimAndFire tick cj = do
       outcome <- tryAny . withDbTransaction $ do
         claimed <- Ops.claimCronRun schemaName (name cj)
@@ -542,7 +524,7 @@ makeDedupKey :: CronJob payload -> UTCTime -> Text
 makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) (timezone cj) tick
 
 -- | For 'AllowOverlap', the key includes the tick formatted in the schedule's
--- timezone, so DST fall-back fires once instead of twice.
+-- timezone. A DST fall-back minute fires one time.
 makeDedupKeyFromParts :: Text -> OverlapPolicy -> Maybe Text -> UTCTime -> Text
 makeDedupKeyFromParts jobName ov tz tick = case ov of
   SkipOverlap -> skipOverlapKey jobName
@@ -553,14 +535,16 @@ makeDedupKeyFromParts jobName ov tz tick = case ov of
 skipOverlapKey :: Text -> Text
 skipOverlapKey jobName = "arbiter_cron:" <> jobName
 
--- | Compute the delay in microseconds until the next minute boundary,
--- clamped to @[0, 120_000_000]@.
+-- | The longest a scheduler tick waits for the next minute boundary.
+maxTickDelayMicros :: Int
+maxTickDelayMicros = 120_000_000
+
+-- | Delay in microseconds until the next minute boundary, clamped to
+-- @[0, 'maxTickDelayMicros']@.
 computeDelayMicros :: UTCTime -> Int
 computeDelayMicros now =
   let nextMinute = truncateToMinute (addUTCTime 60 now)
-      delaySeconds = diffUTCTime nextMinute now
-      rawMicros = ceiling (delaySeconds * 1_000_000) :: Int
-   in max 0 (min 120_000_000 rawMicros)
+   in max 0 (min maxTickDelayMicros (Ops.micros (diffUTCTime nextMinute now)))
 
 -- | Why the scheduler woke.
 data WakeReason = WakeShutdown | WakeMinute | WakeRunNow
@@ -586,11 +570,7 @@ waitForWake stateVar runNowVar timerVar = liftIO . atomically $ do
 
 -- | Snapshot of the current 'WorkerState' for use outside STM.
 isShuttingDown :: (MonadIO m) => TVar WorkerState -> m Bool
-isShuttingDown stateVar = do
-  st <- readTVarIO stateVar
-  pure $ case st of
-    ShuttingDown -> True
-    _ -> False
+isShuttingDown stateVar = (== ShuttingDown) <$> readTVarIO stateVar
 
 -- | Truncate a 'UTCTime' to the current minute (zero out seconds).
 truncateToMinute :: UTCTime -> UTCTime

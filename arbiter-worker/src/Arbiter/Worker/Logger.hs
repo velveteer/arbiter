@@ -53,8 +53,8 @@ data LogDestination
     LogFastLogger LoggerSet
   | -- | Log to a user-provided callback. The callback receives the 'LogLevel',
     -- the plain message 'Text', and all structured context as @['Pair']@
-    -- (job info, additional context, etc.). This lets you integrate Arbiter's
-    -- logs into your own structured logging stack.
+    -- such as job information and additional context. Use this callback to
+    -- send Arbiter logs to an application logging system.
     --
     -- @
     -- let cb level msg ctx = myLogger level msg ctx

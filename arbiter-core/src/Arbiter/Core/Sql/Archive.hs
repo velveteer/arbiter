@@ -31,7 +31,7 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
 -- | Archive columns: archive-specific fields + all Job read fields (with job_id
--- instead of id). Used as the SELECT list for archive listings.
+-- and renames @id@ to @job_id@). Used as the SELECT list for archive listings.
 allArchiveColumns :: [Text]
 allArchiveColumns = codecColumns (archiveRowCodec "")
 
@@ -76,7 +76,7 @@ archivePurgeBatch = 10000
 
 -- | Delete up to @archivePurgeBatch@ archived jobs whose per-row
 -- @archive_expires_at@ has passed. Capped per call so a large backlog drains over
--- several reaper ticks instead of one unbounded DELETE that stalls the loop.
+-- multiple reaper ticks and prevents an unbounded DELETE from stalling the loop.
 purgeArchiveSQL :: Text -> Text -> Text
 purgeArchiveSQL schema tableName =
   let archiveTbl = jobQueueArchiveTable schema tableName

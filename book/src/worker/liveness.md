@@ -1,11 +1,10 @@
 # Liveness Probes
 
-The heartbeat loop touches `livenessFile` on every worker heartbeat, so a probe
-can check the pool without a database round trip. The default path is
+The heartbeat loop updates `livenessFile` at each worker heartbeat. A probe can
+check this file without a database query. The default file is
 `arbiter-worker-<workerId>` in the system temporary directory.
 
-Fail the probe on a stale file to catch a pool whose process is up but whose
-workers have stopped:
+Configure the probe to fail when the file is stale:
 
 ```yaml
 livenessProbe:
@@ -15,6 +14,7 @@ livenessProbe:
   periodSeconds: 60
 ```
 
-The REST API carries the other two checks: `GET health` is a readiness check
-that touches the database, and `GET health/live` never does. See
+The REST API provides two other checks. `GET health` is a readiness check that
+queries the database. `GET health/live` is a liveness check that does not query
+the database. See
 [REST API and Admin UI](../rest-api.md).

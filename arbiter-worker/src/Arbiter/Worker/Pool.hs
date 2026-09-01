@@ -70,7 +70,6 @@ import System.Directory (removeFile)
 import UnliftIO
   ( MonadUnliftIO
   , atomically
-  , bracket
   , catchSyncOrAsync
   , checkSTM
   , finally
@@ -155,9 +154,7 @@ runWorkerPool
   => WorkerConfig m payload
   -> m ()
 runWorkerPool config = do
-  case validateWorkerConfig config of
-    Left err -> liftIO $ E.throwIO (WorkerConfigException err)
-    Right () -> pure ()
+  either (liftIO . E.throwIO . WorkerConfigException) pure (validateWorkerConfig config)
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
       -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.
@@ -169,11 +166,10 @@ runWorkerPool config = do
   workerFinishedVar <- newTVarIO False
   runningJobs <- STM.newTVarIO Map.empty
 
-  registerResult <- tryAny (registerSelf config schemaName queueName)
-  case registerResult of
-    Left e -> warnEx (logConfig config) "Worker registry insert failed" e
-    Right mPaused ->
-      traverse_ (atomically . writePause config) mPaused
+  tryAny (registerSelf config schemaName queueName)
+    >>= either
+      (warnEx (logConfig config) "Worker registry insert failed")
+      (traverse_ (atomically . writePause config))
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
   cronRunVar <- STM.newTVarIO False
@@ -244,13 +240,10 @@ publishListenerReady config ready =
 
 -- | Remove the liveness file when the pool exits, after the drain.
 withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload -> ContT r m ()
-withLivenessFile config = case livenessFile config of
-  Nothing -> pure ()
-  Just path -> ContT $ \k ->
-    bracket
-      (pure ())
-      (\_ -> void . tryAny . liftIO . removeFile $ path)
-      (\_ -> k ())
+withLivenessFile config =
+  traverse_
+    (\path -> ContT $ \k -> k () `finally` (void . tryAny . liftIO . removeFile) path)
+    (livenessFile config)
 
 -- | Re-insert the worker's registry row, returning the effective paused state for the
 -- caller to seed 'pauseVar' with.
@@ -297,7 +290,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
   result <- case mTimeout of
     Nothing -> Right () <$ drainLoop
     Just timeoutSecs ->
-      Async.race (threadDelay $ ceiling (timeoutSecs * 1_000_000)) waitForDrain
+      Async.race (threadDelay (Ops.micros timeoutSecs)) waitForDrain
   case result of
     Right () -> tryLog logCfg Info "All workers are now idle. Graceful shutdown complete."
     Left () -> tryLog logCfg Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
@@ -343,7 +336,7 @@ heartbeatLoop config schemaName queueName = do
     logCfg = logConfig config
     sig = heartbeatSignal config
     readShuttingDown = (== ShuttingDown) <$> STM.readTVar (workerStateVar config)
-    cadenceMicros = ceiling (workerHeartbeatInterval config * 1_000_000)
+    cadenceMicros = Ops.micros (workerHeartbeatInterval config)
     throttledWait = do
       delayVar <- STM.registerDelay cadenceMicros
       atomically $ do
@@ -599,7 +592,7 @@ finalizeForceCancelled
   -> [Int64]
   -- ^ The jobs the cancel named.
   -> [Int64]
-  -- ^ Jobs the same signal found gone, which report rather than take a nack.
+  -- ^ Jobs that the same signal found unavailable. Report these jobs without a nack.
   -> CancelHandoff
   -> m ()
 finalizeForceCancelled config jobs cancelledIds goneIds handoff = do
@@ -793,7 +786,7 @@ classifyException e
   | Just (JobDeadlineExceeded msg) <- fromException e = (msg, RetryFailure)
   | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
 
--- | Whether a failure deletes a job tree rather than acting on the job's own claim.
+-- | Whether a failure deletes a job tree or updates the job claim.
 cancelsTree :: FailureKind -> Bool
 cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
 

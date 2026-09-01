@@ -121,7 +121,7 @@ markWorkerShuttingDownSQL schemaName workerId =
   let tbl = arbiterWorkersTable schemaName
    in [sql|UPDATE ${tbl} SET shutting_down = TRUE, last_heartbeat = NOW() WHERE worker_id = #{workerId :: CUuid}|]
 
--- | Remove a worker row outright (clean shutdown, rather than waiting for the stale-sweeper).
+-- | Remove a worker row during clean shutdown.
 deleteWorkerSQL :: SchemaName -> UUID -> Query ()
 deleteWorkerSQL schemaName workerId =
   let tbl = arbiterWorkersTable schemaName

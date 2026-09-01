@@ -121,8 +121,8 @@ resolveTracer = do
 arbiterTracerOptions :: TracerOptions
 arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineControlFlow]}
 
--- | Arbiter's control-flow exceptions (nack, reclaimed, cancelled) are recorded on the
--- span rather than failing it, and a cancelled worker is not recorded at all.
+-- | Record control-flow exceptions for nacks, reclaims, and job cancellations
+-- without an error status. Ignore worker cancellation exceptions.
 routineControlFlow :: ExceptionHandler
 routineControlFlow e
   | Just JobNackException <- fromException e = recorded
@@ -170,8 +170,8 @@ jobEvent name reasonKey job msg = withActiveSpan (`addEvent` event)
         , newEventTimestamp = Nothing
         }
 
--- | The queue-wide half of a consumer span, resolved once for a pool rather than
--- rebuilt for every job it claims.
+-- | Queue attributes for consumer spans. Resolve them one time for each pool
+-- and reuse them for claimed jobs.
 data ConsumeSpan = ConsumeSpan
   { consumeName :: Text
   , consumeAttrs :: AttributeMap
@@ -202,9 +202,8 @@ withConsumeSpan mTracer cs jobs =
       PerBatch -> batchConsumerArgs cs jobs
       PerJob -> consumerArgs cs firstJob
 
--- | Capture the caller's context for an action running on a thread forked from it.
--- A context carrying no span propagates nothing, so an untraced deployment is left
--- unwrapped rather than paying the attach and detach.
+-- | Capture the caller context for an action on a child thread. Return the
+-- unchanged action if the context has no span.
 capturingContext :: (MonadUnliftIO m) => m (m a -> m a)
 capturingContext = (\ctx -> maybe id (const (withContext ctx)) (lookupSpan ctx)) <$> getContext
 

@@ -1,8 +1,8 @@
 # Observability Hooks
 
-`ObservabilityHooks` is a record of callbacks, one for each point in a job's
-lifecycle. Override the fields you need on `defaultObservabilityHooks`, which
-does nothing, then put the record on the pool's config.
+`ObservabilityHooks` contains callbacks for points in the job lifecycle. Start
+with `defaultObservabilityHooks`, update the required fields, and assign the
+record to the pool configuration. The default callbacks have no effect.
 
 ```haskell
 myHooks = Arb.defaultObservabilityHooks
@@ -18,12 +18,12 @@ config <- Worker.transactionalWorkerConfig 5 handler
 let instrumented = config { Worker.observabilityHooks = myHooks }
 ```
 
-A hook runs in the pool's own monad, so it can read the database as well as
-write to a metrics client.
+A hook runs in the pool monad. It can read the database and write to a metrics
+client.
 
 ## Which hook fires
 
-Every claimed job fires `onJobClaimed`, then reaches one of these outcomes:
+Each claimed job calls `onJobClaimed`. It then has one of these outcomes:
 
 | Outcome | Hooks |
 | --- | --- |
@@ -34,40 +34,40 @@ Every claimed job fires `onJobClaimed`, then reaches one of these outcomes:
 | The job went away mid-flight | `onJobUnavailable` |
 | The handler nacks the job | none |
 
-A cancel routes to `onJobCancelled` alone. A nack fires nothing.
+A cancellation calls `onJobCancelled`. A nack does not call a hook.
 
-`onJobFailure` always pairs with `onJobRetry` or `onJobFailedAndMovedToDLQ`.
-Time failures on `onJobFailure` and count them on the other two. Counting both
-records each failure twice.
+Each `onJobFailure` call is followed by `onJobRetry` or
+`onJobFailedAndMovedToDLQ`. Measure failure duration in `onJobFailure`. Count
+failures in one of the two outcome hooks to prevent duplicate counts.
 
-When a failure's write finds no row, the job reports through
-`onJobUnavailable`. Another worker holds it by then, and that worker's outcome
-is the one that counts.
+If a failure update finds no row, Arbiter calls `onJobUnavailable`. Another
+worker owns the job and reports its outcome.
 
-`onJobHeartbeat` fires for each running job on every heartbeat that extended
-its visibility. A job the heartbeat finds reclaimed or cancelled does not fire
-it.
+Each successful heartbeat extension for a running job calls `onJobHeartbeat`.
+Reclaimed or cancelled jobs do not call this hook.
 
 ## Composing hooks
 
-`ObservabilityHooks` is a `Monoid`. Joining two records with `<>` runs both at
-each point, left before right, and the right one runs however the left ended.
-`withHooks` layers a record onto whatever the config already carries:
+`ObservabilityHooks` is a `Monoid`. The `<>` operator runs the left callback
+before the right callback at each point. Arbiter runs the right callback if the
+left callback throws an exception. `withHooks` combines a record with the hooks
+in an existing configuration:
 
 ```haskell
 let instrumented = Worker.withHooks (myHooks <>) config
 ```
 
-`arbiter-otel` instruments a pool this way, so its metrics and your own hooks
-coexist on one config. See [OpenTelemetry](../opentelemetry.md).
+`arbiter-otel` uses this method to add instrumentation. Its metrics and
+application hooks can use one configuration. See
+[OpenTelemetry](../opentelemetry.md).
 
 ## What a hook cannot do
 
-A hook only reports. Its return value is discarded, and an exception it throws
-is caught and logged at `Warning`. The worker continues.
+Arbiter discards a hook return value. It catches hook exceptions, logs them at
+`Warning`, and continues the worker.
 
-`onJobSuccess` can fire for a job that is later reprocessed. Effects that must
-happen exactly once belong next to the ack, as
+`onJobSuccess` can run for a job that Arbiter processes again. Put effects that
+must occur one time in the same transaction as the ack. See
 [Batched Handlers](batched-handlers.md) describes.
 
 Reaper activity reports through `onMaintenance` on `WorkerConfig`, not through

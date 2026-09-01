@@ -251,7 +251,8 @@ instance FromJSON ClaimRequest where
 instance ToJSON ClaimRequest where
   toJSON req = object ["maxJobs" .= crMaxJobs req, "leaseSeconds" .= crLeaseSeconds req]
 
--- | The jobs one claim leased, each carrying the lease its finalize must present.
+-- | Jobs returned by one claim. Each job contains the lease fields required for
+-- finalization.
 newtype ClaimResponse payload = ClaimResponse {claimedJobs :: [ApiJob payload]}
   deriving stock (Eq, Show)
 
@@ -272,15 +273,14 @@ instance FromJSON JobLease where
   parseJSON = withObject "JobLease" $ \o ->
     JobLease <$> o .: "claimSeq" <*> o .: "claimedBy"
 
--- | Shared JSON field list for a lease. The requests that carry one append their own.
+-- | Shared JSON fields for a lease. Request encoders append request-specific fields.
 jobLeasePairs :: JobLease -> [Pair]
 jobLeasePairs lease = ["claimSeq" .= jlClaimSeq lease, "claimedBy" .= jlClaimedBy lease]
 
 instance ToJSON JobLease where
   toJSON = object . jobLeasePairs
 
--- | A lease plus the result to store, if the queue keeps one. An absent result
--- stores nothing, which is what a plain ack does.
+-- | A lease and an optional stored result. An absent result performs a plain ack.
 data AckRequest result = AckRequest
   { arLease :: JobLease
   , arResult :: Maybe result

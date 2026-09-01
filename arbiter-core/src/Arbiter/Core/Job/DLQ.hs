@@ -1,5 +1,5 @@
--- | Dead-letter queue types. Jobs land here after exhausting retries.
--- Recover with 'Arbiter.Core.HighLevel.retryFromDLQ' or delete with
+-- | Dead-letter queue types. Arbiter moves jobs here after their last retry.
+-- Recover a job with 'Arbiter.Core.HighLevel.retryFromDLQ' or delete it with
 -- 'Arbiter.Core.HighLevel.deleteDLQJob'.
 module Arbiter.Core.Job.DLQ
   ( DLQJob (..)
@@ -23,7 +23,7 @@ data DLQJob payload = DLQJob
   -- ^ When the job was moved to the DLQ
   , jobSnapshot :: JobSnapshot payload
   -- ^ Full job state at time of failure (payload, attempts, last_error, etc.).
-  -- For DLQ'd rollup finalizers, 'Arbiter.Core.Job.Types.parentState' on the snapshot carries the
+  -- For DLQ rollup finalizers, 'Arbiter.Core.Job.Types.parentState' in the snapshot contains the
   -- accumulated child results captured before the cascade delete.
   }
   deriving stock (Eq, Generic, Show)

@@ -141,7 +141,7 @@ addRateLimitColumnsSQL schemaName tableName =
 
 -- | Add the per-job token cost column to a queue's job and DLQ tables. Defaulted so
 -- old binaries that omit it on insert still succeed, and existing rows backfill to a
--- unit cost. The DLQ carries it so a retried job keeps its cost instead of resetting.
+-- unit cost. The DLQ stores it and a retried job retains its cost.
 addRateLimitCostColumnSQL :: SchemaName -> TableName -> Text
 addRateLimitCostColumnSQL schemaName tableName =
   T.unlines
@@ -254,7 +254,7 @@ createRateLimitBucketTriggersSQL schemaName tableName =
 
 -- | Index backing the throttle wake and per-prefix count, in its own migration. The
 -- prefix leads (per-prefix count and wake use it), and rate_limit_key trails so the
--- per-key wake is a point lookup rather than a prefix scan.
+-- each per-key wake uses a point lookup.
 createThrottledIndexSQL :: SchemaName -> TableName -> Text
 createThrottledIndexSQL schemaName tableName =
   T.unlines

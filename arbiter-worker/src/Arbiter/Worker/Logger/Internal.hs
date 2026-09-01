@@ -67,8 +67,6 @@ runHook
   -> m ()
   -- ^ Hook action
   -> m ()
-runHook cfg hookName action = do
-  result <- tryAny action
-  case result of
-    Left e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx e
-    Right _ -> pure ()
+runHook cfg hookName action =
+  tryAny action
+    >>= either (\e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx e) pure

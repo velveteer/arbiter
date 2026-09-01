@@ -17,7 +17,7 @@ import System.Environment (lookupEnv)
 --
 -- The default carries a @connect_timeout@ because libpq waits forever without one.
 -- A host that resolves to an address nothing answers on then hangs the suite with
--- no output, rather than failing with the host in the message.
+-- no output and does not expose the host in an error message.
 getTestConnectionString :: IO ByteString
 getTestConnectionString = do
   mConnStr <- lookupEnv "ARBITER_TEST_CONN_STRING"

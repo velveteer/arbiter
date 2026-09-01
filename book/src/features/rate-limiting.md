@@ -1,11 +1,11 @@
 # Rate Limiting
 
-Throttle jobs by an arbitrary key. A limit is shared by every queue in a
-registry, so one policy can govern a resource no matter which queues touch it.
+Use an arbitrary key to limit the job rate. A policy applies to all queues in a
+registry. Thus, one policy can control a resource that multiple queues use.
 
-Give a payload a `HasRateLimit` instance whose `rateLimitFor` selects a policy
-per job. The migration inspects the selector statically and seeds every policy
-it can reach, so there is no separate policy list to keep in sync.
+Define a `HasRateLimit` instance for the payload. Its `rateLimitFor` function
+selects a policy for each job. The migration finds and initializes all policies
+that the selector can use. You do not have to maintain a separate policy list.
 
 ```haskell
 import Arbiter.RateLimit
@@ -25,15 +25,16 @@ instance HasRateLimit EmailPayload where
       (limitBy bulk recipientDomain)
 ```
 
-`tokenBucket prefix n period` reads as "n per period, with bursts up to n". To
-bound bursts independently of the sustained rate, build a `Policy` directly and
-set `policyMax` (burst) apart from `policyRefill` / `policyInterval` (rate).
-Weight expensive jobs with `rateLimitCost`, or top up a bucket manually with
-`addRateLimitTokens`.
+`tokenBucket prefix n period` permits `n` jobs in each period and a burst of up
+to `n` jobs. To configure the burst independently, construct a `Policy`. Set
+`policyMax` for the burst. Set `policyRefill` and `policyInterval` for the
+sustained rate. Use `rateLimitCost` to assign a higher cost to a job. Use
+`addRateLimitTokens` to add tokens manually.
 
-A job its bucket denies is parked, not polled. It stays invisible until the
-bucket can afford it, then competes normally again. The API and admin UI show
-throttled counts per policy and let an operator override a policy at runtime.
+When a bucket denies a job, Arbiter makes the job invisible until sufficient
+tokens are available. Arbiter does not poll the denied job. The API and admin
+UI show the number of throttled jobs for each policy. An operator can also
+change a policy at run time.
 
 A fixed window is a manual bucket: declare it with a refill of 0 and reset it
 at the boundary from a cron.
@@ -52,38 +53,36 @@ daily =
 resetRateLimitBuckets (policyPrefixOf daily)
 ```
 
-Bucket state is not durable by default. After a database crash or a failover,
-buckets reset to full, so each key can burst to its max once before it settles
-back to the sustained rate. If that overshoot is unacceptable, for strict
-external quotas or for manual buckets that hold real credit, migrate the schema
-with durable buckets. Bucket state then survives a restart, at some throughput
-cost:
+Bucket state is not durable by default. After a database crash or failover,
+each bucket resets to full. Each key can then use one maximum burst before the
+sustained rate applies. Use durable buckets for strict external quotas or
+manual buckets that represent credit. Durable bucket state persists across a
+restart, but can reduce throughput:
 
 ```haskell
 runMigrationsForRegistry (Proxy @AppRegistry) connStr "arbiter"
   defaultMigrationConfig { rateLimitDurability = Durable }
 ```
 
-Durability is a property of the migrated schema, not the registry type, so the
-same registry can back an unlogged staging schema and a durable production one.
+Durability is a property of the migrated schema. It is not a property of the
+registry type. The same registry can use an unlogged staging schema and a
+durable production schema.
 
 > [!IMPORTANT]
-> Tokens are spent when a job is **claimed**, not when it finishes. A retry or
-> a redelivery (worker crash, visibility timeout) spends again, so size
-> policies against claims, not successful runs.
+> A job uses tokens when Arbiter **claims** it. Retries and redeliveries use
+> tokens again. Configure policies for the claim rate.
 >
-> A `rateLimitCost` above the bucket's max clamps to the max: the job drains a
-> full bucket and runs, rather than blocking forever. A rate limit bounds
-> arrivals over time. To bound how many jobs run at once, use a concurrency
-> limit.
+> Arbiter limits a `rateLimitCost` to the bucket maximum. A job with a higher
+> cost empties a full bucket and can run. A rate limit controls arrivals over
+> time. Use a concurrency limit to control the number of simultaneous jobs.
 
 ## When downstream returns 429
 
-Match the response to the scope of the pushback.
+Select the response based on the scope of the limit.
 
-**One key is throttled.** Drain that key's bucket so every job sharing it waits
-for the refill, then hand this job back. Take the key off the job instead of
-rebuilding it, so the suffix is the one the claim admitted against:
+**One key is throttled.** Empty the bucket for that key. Jobs with the same key
+then wait for a refill. Nack the current job. Read the key from the job to use
+the suffix that the claim operation used:
 
 ```haskell
 import Arbiter.RateLimit (addRateLimitTokens)
@@ -100,21 +99,21 @@ sendEmail job cbs = do
     Sent -> Worker.ack cbs job
 ```
 
-`Nothing` means the selector puts this job under no policy, leaving no bucket
-to drain. A drained bucket refills on its policy's own schedule.
+`Nothing` means that the selector did not assign a policy to the job. There is
+no bucket to empty. An empty bucket refills according to its policy.
 
 > [!IMPORTANT]
-> This is a manual handler on purpose. Under `transactionalWorkerConfig` the
-> whole handler runs in one transaction, so throwing to retry rolls back the
-> drain along with it. Manual and batched callbacks each commit on their own.
+> This example uses a manual handler. With `transactionalWorkerConfig`, the
+> bucket update and handler run in one transaction. A retry rolls back the
+> bucket update. Manual and batched callbacks commit independently.
 
-`throwRetryable` carries no delay of its own: the pool's `backoffStrategy` and
-jitter decide it from the attempt count. To honor a `Retry-After`, set the
-job's visibility to that window and nack it instead.
+`throwRetryable` does not specify a delay. The pool calculates the delay from
+the attempt count, `backoffStrategy`, and jitter. To use a `Retry-After` value,
+set the job visibility period and nack the job.
 
-**The whole policy is too fast.** Override it with a slower version of itself
-and clear the override when the vendor recovers. Both helpers take the policy
-you declared, so import it instead of restating one:
+**The complete policy is too fast.** Set a lower override and clear it when the
+vendor recovers. Both functions accept the declared policy. Import that policy
+to prevent a duplicate declaration:
 
 ```haskell
 import Arbiter.RateLimit (Policy (..), clearRateLimit, setRateLimit)

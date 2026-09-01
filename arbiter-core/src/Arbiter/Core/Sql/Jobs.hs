@@ -343,7 +343,8 @@ countDLQFilteredSQL schema tableName whereFrag =
 allJobColumns :: [Text]
 allJobColumns = codecColumns (jobRowCodec "")
 
--- | DLQ columns: DLQ-specific fields + all Job fields (with job_id instead of id).
+-- | DLQ-specific fields followed by all job fields. The DLQ uses @job_id@ for
+-- the main-table @id@.
 -- @drop 1 allJobColumns@ drops the @id@ column, replaced by @job_id@ in the DLQ table.
 allDLQColumns :: [Text]
 allDLQColumns = codecColumns (dlqRowCodec "")
@@ -381,7 +382,7 @@ enqueuedAgainCols = aliasedCols Nothing (filter (`notElem` ["parent_id", "parent
 requeuedColumns :: [Text]
 requeuedColumns = filter (`notElem` reArmedColumns) allJobColumns <> ["rate_limit_cost"]
 
--- | The columns a requeue sets for itself rather than copying from the failed run.
+-- | Columns that a requeue sets to new values.
 reArmedColumns :: [Text]
 reArmedColumns =
   [ "id"

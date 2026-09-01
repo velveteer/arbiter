@@ -112,7 +112,8 @@ otelHooks ms queue =
     cancelledAttr = outcome "cancelled"
     unavailableAttr = outcome "unavailable"
 
--- | Record what a reaper op touched. Reaper work is schema-wide, so it carries no queue.
+-- | Record rows affected by a reaper operation. Schema-wide reaper work has no
+-- queue attribute.
 otelMaintenance :: (MonadIO m) => ArbiterMeters -> MaintenanceOp -> Int64 -> m ()
 otelMaintenance ms op n = liftIO (counterAdd (maintained ms) n (attrs [("op", maintenanceOpName op)]))
 
@@ -120,7 +121,7 @@ otelMaintenance ms op n = liftIO (counterAdd (maintained ms) n (attrs [("op", ma
 attrs :: [(Text, Text)] -> Attributes
 attrs kvs = unsafeAttributesFromListIgnoringLimits [(k, toAttribute v) | (k, v) <- kvs]
 
--- | The @kind@ attribute an admission metric carries, shared by the counters and the
+-- | The @kind@ attribute for an admission metric. Counters and the
 -- gauges so a dashboard can join them.
 rateLimitKind, concurrencyKind :: Text
 rateLimitKind = "rate_limit"

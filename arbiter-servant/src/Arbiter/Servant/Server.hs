@@ -63,7 +63,7 @@ import Control.Concurrent.STM
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO, try)
 import Control.Monad (forever, guard, join, mfilter, unless, void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
@@ -161,6 +161,24 @@ data SSEHub = SSEHub
   , hubRefs :: TVar Int
   }
 
+-- | The schema every handler's statements run against.
+serverSchema :: ArbiterServerConfig registry -> Text
+serverSchema = schema . serverEnv
+
+-- | Run a statement on the server's own pool.
+runDb :: (MonadIO n) => ArbiterServerConfig registry -> SimpleDb registry IO a -> n a
+runDb config = liftIO . runSimpleDb (serverEnv config)
+
+-- | 'NoContent' when a statement touched a row, 404 otherwise.
+rowsOr404 :: LBS.ByteString -> Int64 -> Handler NoContent
+rowsOr404 missing rowsAffected
+  | rowsAffected > 0 = pure NoContent
+  | otherwise = throwError err404 {errBody = missing}
+
+-- | Answer a handler that decided its own error.
+noContentOr :: Either ServerError () -> Handler NoContent
+noContentOr = either throwError (const (pure NoContent))
+
 -- | Small pool configuration for admin API traffic.
 serverPoolConfig :: PoolConfig
 serverPoolConfig =
@@ -252,8 +270,7 @@ listJobsHandler
   -> Handler (JobsResponse payload)
 listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination 50 mLimit mOffset
-      env = serverEnv config
-      schemaName = schema env
+      schemaName = serverSchema config
       filters =
         catMaybes
           [ FilterGroupKey <$> mGroupKey
@@ -267,7 +284,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
           , FilterConcurrencyPrefix <$> mConcPrefix
           ]
 
-  (jobs, total, combined, dlqCounts) <- runSimpleDb env $ withDbTransaction $ do
+  (jobs, total, combined, dlqCounts) <- runDb config $ withDbTransaction $ do
     j <- Ops.listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countJobsFiltered schemaName tableName filters
     -- Every parent is a rollup finalizer, so a page without one needs no count queries.
@@ -303,10 +320,8 @@ insertJobHandler
   -> ApiJobWrite payload
   -> Handler (JobResponse (ApiJob payload))
 insertJobHandler tableName config (ApiJobWrite jobWrite) = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  mJob <- liftIO $ runSimpleDb env $ withPublishSpan tableName [jobWrite] $ do
+  let schemaName = serverSchema config
+  mJob <- runDb config $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
     case (inserted, Job.dedupKey jobWrite) of
       (Just j, _) -> pure (Just j)
@@ -326,13 +341,11 @@ insertJobsBatchHandler
   -> BatchInsertRequest payload
   -> Handler (BatchInsertResponse payload)
 insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
-  let env = serverEnv config
-      schemaName = schema env
+  let schemaName = serverSchema config
       writes = map unApiJobWrite jobWrites
 
   inserted <-
-    liftIO
-      $ runSimpleDb env
+    runDb config
       $ withPublishSpan tableName writes
       $ Ops.insertJobsBatch schemaName tableName writes
   let apiJobs = map ApiJob inserted
@@ -347,10 +360,8 @@ getJobHandler
   -> Int64
   -> Handler (JobResponse (ApiJobWithStatus payload))
 getJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  mJob <- liftIO $ runSimpleDb env $ Ops.getJobByIdWithStatus schemaName tableName jobId
+  let schemaName = serverSchema config
+  mJob <- runDb config $ Ops.getJobByIdWithStatus schemaName tableName jobId
   case mJob of
     Nothing -> throwError err404 {errBody = "Job not found"}
     Just (j, s) -> pure $ JobResponse {job = ApiJobWithStatus j s}
@@ -363,13 +374,8 @@ cancelJobHandler
   -> Int64
   -> Handler NoContent
 cancelJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  rowsAffected <- liftIO $ runSimpleDb env $ Ops.cancelJobCascade schemaName tableName jobId
-  if rowsAffected > 0
-    then pure NoContent
-    else throwError err404 {errBody = "Job not found"}
+  let schemaName = serverSchema config
+  runDb config (Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler
@@ -379,13 +385,8 @@ forceCancelJobHandler
   -> Int64
   -> Handler NoContent
 forceCancelJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  rowsAffected <- liftIO $ runSimpleDb env $ Ops.forceCancelJob schemaName tableName jobId
-  if rowsAffected > 0
-    then pure NoContent
-    else throwError err404 {errBody = "Job not found"}
+  let schemaName = serverSchema config
+  runDb config (Ops.forceCancelJob schemaName tableName jobId) >>= rowsOr404 "Job not found"
 
 -- | Promote a job (make it immediately visible).
 promoteJobHandler
@@ -396,10 +397,8 @@ promoteJobHandler
   -> Int64
   -> Handler NoContent
 promoteJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ do
     rowsAffected <- Ops.promoteJob schemaName tableName jobId
     if rowsAffected > 0
       then pure (Right ())
@@ -413,9 +412,7 @@ promoteJobHandler tableName config jobId = do
             | otherwise ->
                 pure (Left err409 {errBody = "Job is already visible"})
 
-  case result of
-    Left err -> throwError err
-    Right () -> pure NoContent
+  noContentOr result
 
 -- | Move a job to the dead letter queue.
 moveToDLQHandler
@@ -426,10 +423,8 @@ moveToDLQHandler
   -> Int64
   -> Handler NoContent
 moveToDLQHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ withDbTransaction $ do
     mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
     case mJob of
       Nothing -> pure Nothing
@@ -449,10 +444,8 @@ pauseChildrenHandler
   -> Int64
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  void . liftIO . runSimpleDb env $
+  let schemaName = serverSchema config
+  void . runDb config $
     Ops.pauseChildren schemaName tableName jobId
 
   -- Pausing nothing is not an error: the children may be in-flight, suspended or done.
@@ -466,10 +459,8 @@ resumeChildrenHandler
   -> Int64
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  void . liftIO . runSimpleDb env $
+  let schemaName = serverSchema config
+  void . runDb config $
     Ops.resumeChildren schemaName tableName jobId
 
   -- Resuming nothing is not an error: the children may be unsuspended or done.
@@ -484,10 +475,8 @@ suspendJobHandler
   -> Int64
   -> Handler NoContent
 suspendJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ do
     rowsAffected <- Ops.suspendJob schemaName tableName jobId
     if rowsAffected > 0
       then pure (Right ())
@@ -501,9 +490,7 @@ suspendJobHandler tableName config jobId = do
             | otherwise ->
                 pure (Left err409 {errBody = "Job is in-flight - cannot suspend"})
 
-  case result of
-    Left err -> throwError err
-    Right () -> pure NoContent
+  noContentOr result
 
 -- | Resume a suspended job, making it claimable again. Refuses a finalizer with children
 -- still running, so its handler cannot start early.
@@ -515,10 +502,8 @@ resumeJobHandler
   -> Int64
   -> Handler NoContent
 resumeJobHandler tableName config jobId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ do
     rowsAffected <- Ops.resumeJob schemaName tableName jobId
     if rowsAffected > 0
       then pure (Right ())
@@ -534,9 +519,7 @@ resumeJobHandler tableName config jobId = do
             | otherwise ->
                 pure (Left err409 {errBody = "Job could not be resumed (concurrent modification)"})
 
-  case result of
-    Left err -> throwError err
-    Right () -> pure NoContent
+  noContentOr result
 
 -- | DLQ API handlers for a specific table.
 dlqServer
@@ -569,8 +552,7 @@ listDLQHandler
   -> Handler (DLQResponse payload)
 listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
-      env = serverEnv config
-      schemaName = schema env
+      schemaName = serverSchema config
       filters =
         catMaybes
           [ FilterParentId <$> mParentId
@@ -578,7 +560,7 @@ listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortB
           , FilterGroupKey <$> mGroupKey
           ]
 
-  (dlqJobs, total) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+  (dlqJobs, total) <- runDb config $ withDbTransaction $ do
     j <- Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countDLQFiltered schemaName tableName filters
     pure (j, c)
@@ -602,10 +584,8 @@ retryFromDLQHandler
   -> Int64
   -> Handler NoContent
 retryFromDLQHandler tableName config dlqId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ withDbTransaction $ do
     mJob <- Ops.retryFromDLQ @_ @payload schemaName tableName dlqId
     case mJob of
       Just _ -> pure (Right ())
@@ -624,13 +604,8 @@ deleteDLQHandler
   -> Int64
   -> Handler NoContent
 deleteDLQHandler tableName config dlqId = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  rowsAffected <- liftIO $ runSimpleDb env $ Ops.deleteDLQJob schemaName tableName dlqId
-  if rowsAffected > 0
-    then pure NoContent
-    else throwError err404 {errBody = "DLQ job not found"}
+  let schemaName = serverSchema config
+  runDb config (Ops.deleteDLQJob schemaName tableName dlqId) >>= rowsOr404 "DLQ job not found"
 
 -- | Batch delete jobs from DLQ permanently.
 deleteDLQBatchHandler
@@ -640,9 +615,8 @@ deleteDLQBatchHandler
   -> BatchDeleteRequest
   -> Handler BatchDeleteResponse
 deleteDLQBatchHandler tableName config (BatchDeleteRequest dlqIds) = do
-  let env = serverEnv config
-      schemaName = schema env
-  rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteDLQJobsBatch schemaName tableName dlqIds
+  let schemaName = serverSchema config
+  rowsDeleted <- runDb config $ Ops.deleteDLQJobsBatch schemaName tableName dlqIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
 -- | Archive API handler for a specific table.
@@ -678,8 +652,7 @@ listArchiveHandler
   -> Handler (ArchiveResponse payload)
 listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mCompletedAfter mCompletedBefore mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
-      env = serverEnv config
-      schemaName = schema env
+      schemaName = serverSchema config
       filters =
         catMaybes
           [ FilterParentId <$> mParentId
@@ -689,7 +662,7 @@ listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mC
           , FilterCompletedBefore <$> mCompletedBefore
           ]
 
-  (archived, total) <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+  (archived, total) <- runDb config $ withDbTransaction $ do
     j <- Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset
     c <- Ops.countArchiveFiltered schemaName tableName filters
     pure (j, c)
@@ -711,9 +684,8 @@ reEnqueueArchiveHandler
   -> Int64
   -> Handler NoContent
 reEnqueueArchiveHandler tableName config archiveId = do
-  let env = serverEnv config
-      schemaName = schema env
-  mJob <- liftIO $ runSimpleDb env $ Ops.reEnqueueFromArchive @_ @payload schemaName tableName archiveId
+  let schemaName = serverSchema config
+  mJob <- runDb config $ Ops.reEnqueueFromArchive @_ @payload schemaName tableName archiveId
   case mJob of
     Just _ -> pure NoContent
     Nothing -> throwError err404 {errBody = "Archived job not found"}
@@ -726,12 +698,8 @@ deleteArchiveHandler
   -> Int64
   -> Handler NoContent
 deleteArchiveHandler tableName config archiveId = do
-  let env = serverEnv config
-      schemaName = schema env
-  rowsAffected <- liftIO $ runSimpleDb env $ Ops.deleteArchiveJob schemaName tableName archiveId
-  if rowsAffected > 0
-    then pure NoContent
-    else throwError err404 {errBody = "Archived job not found"}
+  let schemaName = serverSchema config
+  runDb config (Ops.deleteArchiveJob schemaName tableName archiveId) >>= rowsOr404 "Archived job not found"
 
 -- | Bulk-purge archived jobs by archive primary key.
 deleteArchiveBatchHandler
@@ -741,9 +709,8 @@ deleteArchiveBatchHandler
   -> BatchDeleteRequest
   -> Handler BatchDeleteResponse
 deleteArchiveBatchHandler tableName config (BatchDeleteRequest archiveIds) = do
-  let env = serverEnv config
-      schemaName = schema env
-  rowsDeleted <- liftIO $ runSimpleDb env $ Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
+  let schemaName = serverSchema config
+  rowsDeleted <- runDb config $ Ops.deleteArchiveJobsBatch schemaName tableName archiveIds
   pure $ BatchDeleteResponse {deleted = rowsDeleted}
 
 -- | Stats API handler for a specific table.
@@ -765,10 +732,9 @@ getStatsHandler
   -> Handler StatsResponse
 getStatsHandler tableName config =
   liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
-    let env = serverEnv config
-        schemaName = schema env
+    let schemaName = serverSchema config
 
-    queueStats <- runSimpleDb env $ Ops.getQueueStats schemaName tableName
+    queueStats <- runDb config $ Ops.getQueueStats schemaName tableName
     now <- getCurrentTime
     let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
 
@@ -782,9 +748,8 @@ getAllStatsHandler
   -> Handler AllStatsResponse
 getAllStatsHandler config tables =
   liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
-    let env = serverEnv config
-        schemaName = schema env
-    AllStatsResponse <$> runSimpleDb env (Ops.getAllQueueStats schemaName tables)
+    let schemaName = serverSchema config
+    AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName tables)
 
 -- | Table API handlers for a specific table.
 tableServer
@@ -802,8 +767,8 @@ tableServer table config =
     , stats = statsServer @registry table config
     }
 
--- | Lease visible jobs for a consumer outside a worker pool. Each job carries the
--- claim sequence and claimant its finalize has to present.
+-- | Lease visible jobs to a consumer outside a worker pool. Each returned job
+-- contains the claim sequence and claimant required for finalization.
 claimJobsHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -812,20 +777,19 @@ claimJobsHandler
   -> ClaimRequest
   -> Handler (ClaimResponse payload)
 claimJobsHandler tableName config req = liftIO $ do
-  let env = serverEnv config
-      schemaName = schema env
-      maxJobs = clampInt 1 1000 (fromMaybe 1 (crMaxJobs req))
-      leaseSecs = realToFrac (clampDouble 1 3600 (fromMaybe 60 (crLeaseSeconds req)))
+  let schemaName = serverSchema config
+      maxJobs = clamp 1 1000 (fromMaybe 1 (crMaxJobs req))
+      leaseSecs = realToFrac (clamp 1 3600 (fromMaybe 60 (crLeaseSeconds req)))
   claimant <- UUID.nextRandom
-  jobs <- runSimpleDb env $ do
+  jobs <- runDb config $ do
     mQueue <- Ops.getQueue schemaName tableName
     if maybe False Queues.paused mQueue
       then pure []
       else Ops.claimNextVisibleJobsAs @_ @payload schemaName tableName maxJobs leaseSecs claimant
   pure $ ClaimResponse (map ApiJob jobs)
 
--- | Complete a job the caller still holds. A result rides along for the parent
--- rollup or the archive entry to keep, the way a worker's @ackWith@ stores one.
+-- | Complete a job that the caller holds. Store an optional result in the
+-- parent rollup or archive entry, as worker @ackWith@ does.
 ackClaimedJobHandler
   :: forall registry payload result
    . (EncodeJobResult result, JobPayload payload)
@@ -841,7 +805,8 @@ ackClaimedJobHandler tableName config jobId req =
       when (rows > 0) $ storeEncodedResult schemaName job (arResult req >>= encodeJobResult)
       pure rows
 
--- | Hand a job back without spending its attempt. It returns when its lease runs out.
+-- | Restore the attempt used by a claim. The job becomes available when its
+-- lease expires.
 nackClaimedJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -854,7 +819,7 @@ nackClaimedJobHandler tableName config jobId lease =
   withHeldJob @registry @payload tableName config jobId lease $ \schemaName job ->
     Ops.nackJob schemaName tableName job
 
--- | Push out a held lease, the pull equivalent of a worker's heartbeat.
+-- | Extend a held lease. This is the HTTP consumer equivalent of a worker heartbeat.
 extendClaimedJobHandler
   :: forall registry payload
    . (JobPayload payload)
@@ -865,11 +830,11 @@ extendClaimedJobHandler
   -> Handler NoContent
 extendClaimedJobHandler tableName config jobId req =
   withHeldJob @registry @payload tableName config jobId (erLease req) $ \schemaName job ->
-    Ops.setVisibilityTimeout schemaName tableName (realToFrac (clampDouble 1 3600 (erSeconds req))) job
+    Ops.setVisibilityTimeout schemaName tableName (realToFrac (clamp 1 3600 (erSeconds req))) job
 
--- | Run a finalize against the job the lease names, refusing one the caller no longer
--- holds. The statements guard on the claim sequence too, so a lease lost mid-request
--- writes nothing. A lease a worker pool holds is refused outright.
+-- | Finalize the job identified by a lease. Refuse a lease that the caller no
+-- longer holds or a lease held by a worker pool. Each statement checks the claim
+-- sequence and writes no change after a lease is lost.
 withHeldJob
   :: forall registry payload
    . (JobPayload payload)
@@ -880,12 +845,11 @@ withHeldJob
   -> (Text -> Job.JobRead payload -> SimpleDb registry IO Int64)
   -> Handler NoContent
 withHeldJob tableName config jobId lease finalize = do
-  let env = serverEnv config
-      schemaName = schema env
+  let schemaName = serverSchema config
       held job = Job.claimedBy job == Just (jlClaimedBy lease) && Job.claimSeq job == jlClaimSeq lease
       refuse body = Left err409 {errBody = body}
 
-  result <- liftIO $ runSimpleDb env $ do
+  result <- runDb config $ do
     mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
     case mJob of
       Nothing -> pure $ Left err404 {errBody = "Job not found"}
@@ -902,7 +866,7 @@ withHeldJob tableName config jobId lease finalize = do
                     then Right ()
                     else refuse (if Job.suspended job then "Job is suspended" else "Lease no longer held")
 
-  either throwError (const (pure NoContent)) result
+  noContentOr result
 
 -- | Maintenance API handler.
 maintenanceServer
@@ -922,8 +886,7 @@ maintenanceHandler
   -> Handler MaintenanceResponse
 maintenanceHandler config = liftIO $ do
   touched <- newIORef Map.empty
-  let env = serverEnv config
-      report op n = liftIO $ modifyIORef' touched (Map.insertWith (+) (maintenanceOpName op) n)
+  let report op n = liftIO $ modifyIORef' touched (Map.insertWith (+) (maintenanceOpName op) n)
       pace =
         MaintenancePace
           { paceWindow = maintenanceInterval config
@@ -931,16 +894,14 @@ maintenanceHandler config = liftIO $ do
           , paceBucketIdle = maintenanceBucketIdle config
           }
   failed <-
-    runSimpleDb env $
+    runDb config $
       runMaintenancePass defaultLogConfig report pace (maintenanceTimeout config)
   ops <- readIORef touched
   pure $ MaintenanceResponse ops (map maintenanceOpName failed)
 
-clampInt :: Int -> Int -> Int -> Int
-clampInt lo hi = max lo . min hi
-
-clampDouble :: Double -> Double -> Double -> Double
-clampDouble lo hi = max lo . min hi
+-- | Hold a caller-supplied value inside the range an endpoint accepts.
+clamp :: (Ord a) => a -> a -> a -> a
+clamp lo hi = max lo . min hi
 
 -- | Queues API handler.
 queuesServer
@@ -966,9 +927,8 @@ getQueueDetailsHandler
   -> Text
   -> Handler (Maybe QueueRow)
 getQueueDetailsHandler config queue = do
-  let env = serverEnv config
-      schemaName = schema env
-  liftIO $ runSimpleDb env $ Ops.getQueue schemaName queue
+  let schemaName = serverSchema config
+  runDb config $ Ops.getQueue schemaName queue
 
 -- | Flip the @paused@ flag for a queue, validated against the registry. The
 -- @arbiter_queues@ row is created lazily on first pause.
@@ -982,20 +942,18 @@ setQueuePausedHandler
 setQueuePausedHandler config knownQueues p queue = do
   unless (queue `elem` knownQueues) $
     throwError err404 {errBody = "Unknown queue"}
-  let env = serverEnv config
-      schemaName = schema env
-  void . liftIO $ runSimpleDb env $ Ops.setQueuePaused schemaName queue p
+  let schemaName = serverSchema config
+  void . runDb config $ Ops.setQueuePaused schemaName queue p
   -- The landing overview shows each queue's paused flag, so refresh it promptly.
   invalidate (allQueueStatsCache config)
   invalidate (queueStatsCache config)
   pure NoContent
 
--- | The SSE stream, as a raw WAI application. Flushes after every event so the browser
--- sees it at once, and sends a keepalive comment every 15 seconds to hold the connection
--- open through a reverse proxy. Every client reads its own duplicate of the shared
--- broadcast hub rather than holding a Postgres connection, so viewers cost Warp threads
--- and not pool slots. With 'enableSSE' off it sends one @disabled@ event and closes,
--- which the admin UI reads as a signal to stop reconnecting.
+-- | Serve the SSE stream as a raw WAI application. Flush after each event and
+-- send a keepalive comment every 15 seconds. Each client reads a duplicate of
+-- the shared broadcast hub and does not use a PostgreSQL pool connection. If
+-- 'enableSSE' is false, send one @disabled@ event and close the stream. The
+-- admin UI then stops reconnection attempts.
 eventsServer
   :: forall registry
    . ArbiterServerConfig registry
@@ -1145,9 +1103,8 @@ listCronSchedulesHandler
   -> Maybe Text
   -> Handler CronSchedulesResponse
 listCronSchedulesHandler config mQueue = do
-  let env = serverEnv config
-      schemaName = schema env
-  rows <- liftIO $ runSimpleDb env $ Ops.listCronSchedules schemaName mQueue
+  let schemaName = serverSchema config
+  rows <- runDb config $ Ops.listCronSchedules schemaName mQueue
   now <- liftIO getCurrentTime
   pure $ CronSchedulesResponse {cronSchedules = map (cronScheduleView now) rows}
 
@@ -1170,10 +1127,8 @@ updateCronScheduleHandler
   -> CronScheduleUpdate
   -> Handler CronScheduleView
 updateCronScheduleHandler config name update = do
-  let env = serverEnv config
-      schemaName = schema env
-
-  result <- liftIO $ runSimpleDb env $ withDbTransaction $ do
+  let schemaName = serverSchema config
+  result <- runDb config $ withDbTransaction $ do
     outcome <- updateCronScheduleChecked name update
     traverse (const (Ops.getCronScheduleByName schemaName name)) outcome
 
@@ -1191,9 +1146,8 @@ runCronScheduleHandler
   -> Text
   -> Handler NoContent
 runCronScheduleHandler config name = do
-  let env = serverEnv config
-      schemaName = schema env
-  outcome <- liftIO $ runSimpleDb env $ Ops.requestCronRun schemaName name
+  let schemaName = serverSchema config
+  outcome <- runDb config $ Ops.requestCronRun schemaName name
   case outcome of
     Ops.RunReqNotFound -> throwError err404 {errBody = "Cron schedule not found"}
     Ops.RunReqDisabled -> throwError err409 {errBody = "Cron schedule is disabled"}
@@ -1220,9 +1174,8 @@ listWorkersHandler
   -> Maybe Double
   -> Handler WorkersResponse
 listWorkersHandler config mQueue mLiveSecs = do
-  let env = serverEnv config
-      schemaName = schema env
-  rows <- liftIO $ runSimpleDb env $ Ops.listWorkers schemaName mQueue (realToFrac <$> mLiveSecs)
+  let schemaName = serverSchema config
+  rows <- runDb config $ Ops.listWorkers schemaName mQueue (realToFrac <$> mLiveSecs)
   pure $ WorkersResponse {workers = rows}
 
 -- | Set a worker's @paused@ flag. The worker reconciles its local state on
@@ -1234,12 +1187,8 @@ setWorkerPausedHandler
   -> UUID
   -> Handler NoContent
 setWorkerPausedHandler config p wid = do
-  let env = serverEnv config
-      schemaName = schema env
-  n <- liftIO $ runSimpleDb env $ Ops.setWorkerPaused schemaName wid p
-  if n == 0
-    then throwError err404 {errBody = "Worker not found"}
-    else pure NoContent
+  let schemaName = serverSchema config
+  runDb config (Ops.setWorkerPaused schemaName wid p) >>= rowsOr404 "Worker not found"
 
 -- | Rate-limit management/observability handlers.
 rateLimitsServer
@@ -1291,10 +1240,9 @@ probeHealth
    . ArbiterServerConfig registry
   -> IO HealthResponse
 probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
-  let env = serverEnv config
-      schemaName = schema env
+  let schemaName = serverSchema config
   started <- getCurrentTime
-  probed <- try @SomeException $ timeout healthProbeMicros (runSimpleDb env Health.getPgDbHealth)
+  probed <- try @SomeException $ timeout healthProbeMicros (runDb config Health.getPgDbHealth)
   either swallowSync (const (pure ())) probed
   finished <- getCurrentTime
   let elapsedMs = realToFrac (diffUTCTime finished started) * 1000
@@ -1322,7 +1270,7 @@ probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
 healthCacheTtl :: NominalDiffTime
 healthCacheTtl = 2
 
--- | Cap on the probe, so a starved pool answers @down@ rather than holding the
+-- | Probe time limit. A pool with no available connection reports @down@ after the
 -- request open. A connect already blocked in the driver is not interruptible, so
 -- the connection string still wants its own @connect_timeout@.
 healthProbeMicros :: Int
@@ -1410,7 +1358,7 @@ listRateLimitsHandler
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
   liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
-    views <- runSimpleDb (serverEnv config) HL.listRateLimitPolicies
+    views <- runDb config HL.listRateLimitPolicies
     pure $ RateLimitPoliciesResponse {policies = views}
 
 -- | List a prefix's buckets with fill levels, paginated (default 100, max 1000).
@@ -1423,16 +1371,16 @@ listRateLimitBucketsHandler
   -> Handler RateLimitBucketsResponse
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination 100 mLimit mOffset
-  rows <- liftIO $ runSimpleDb (serverEnv config) (HL.listRateLimitBuckets prefix limit offset)
+  rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
   pure $ RateLimitBucketsResponse {buckets = rows}
 
 updateThenView
-  :: SimpleEnv registry
+  :: ArbiterServerConfig registry
   -> SimpleDb registry IO (Maybe a)
   -> LBS.ByteString
   -> Handler a
-updateThenView env action notFound = do
-  mView <- liftIO $ runSimpleDb env action
+updateThenView config action notFound = do
+  mView <- runDb config action
   maybe (throwError err404 {errBody = notFound}) pure mView
 
 -- | Set or clear a policy's override params, then return the updated view.
@@ -1456,7 +1404,7 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
       let update = case (mMax, mRefill, mIv) of
             (Nothing, Nothing, Nothing) -> pure ()
             _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
-      view <- updateThenView (serverEnv config) (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
+      view <- updateThenView config (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
       invalidate (rateLimitPoliciesCache config)
       pure view
 
@@ -1470,7 +1418,7 @@ resetRateLimitBucketsHandler
 resetRateLimitBucketsHandler config prefix = do
   let action =
         HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> HL.resetRateLimitBuckets prefix else pure Nothing
-  n <- updateThenView (serverEnv config) action "Rate-limit policy not found"
+  n <- updateThenView config action "Rate-limit policy not found"
   invalidate (rateLimitPoliciesCache config)
   pure $ RateLimitResetResponse {reset = n}
 
@@ -1495,7 +1443,7 @@ listConcurrencyHandler
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
   liftIO $ cachedFor policyStatsCacheTtl (concurrencyPoliciesCache config) $ do
-    views <- runSimpleDb (serverEnv config) HL.listConcurrencyPolicies
+    views <- runDb config HL.listConcurrencyPolicies
     pure $ ConcurrencyPoliciesResponse {policies = views}
 
 -- | List a prefix's keys with in-flight fill levels, paginated (default 100, max 1000).
@@ -1508,7 +1456,7 @@ listConcurrencyKeysHandler
   -> Handler ConcurrencyKeysResponse
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination 100 mLimit mOffset
-  rows <- liftIO $ runSimpleDb (serverEnv config) (HL.listConcurrencyKeys prefix limit offset)
+  rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
   pure $ ConcurrencyKeysResponse {keys = rows}
 
 -- | Set or clear a pool's override limit, then return the updated view.
@@ -1529,7 +1477,7 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLim) 
       let action = case mLim of
             Nothing -> HL.getConcurrencyPolicy prefix
             Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
-      view <- updateThenView (serverEnv config) action "Concurrency pool not found"
+      view <- updateThenView config action "Concurrency pool not found"
       invalidate (concurrencyPoliciesCache config)
       pure view
 
@@ -1540,7 +1488,7 @@ reconcileConcurrencyHandler
   => ArbiterServerConfig registry
   -> Handler ConcurrencyReconcileResponse
 reconcileConcurrencyHandler config = do
-  n <- liftIO $ runSimpleDb (serverEnv config) HL.reconcileConcurrencyCounts
+  n <- runDb config HL.reconcileConcurrencyCounts
   invalidate (concurrencyPoliciesCache config)
   pure $ ConcurrencyReconcileResponse {reconciled = n}
 
@@ -1631,7 +1579,7 @@ runArbiterAPI port config = do
   let settings = setPort port defaultSettings
   runSettings settings (arbiterApp config)
 
--- | Drop a query parameter that carries no search term, so an empty box is no filter.
+-- | Remove an empty search parameter. An empty search box does not add a filter.
 nonBlank :: Maybe Text -> Maybe Text
 nonBlank = mfilter (not . T.null . T.strip)
 

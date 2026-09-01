@@ -27,7 +27,7 @@ waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
         threadDelay 100_000
         go (n - 1)
 
--- | 'withAsync' with the handle linked, so a thread that dies raises here instead of
--- leaving a 'waitUntil' polling for something that can no longer happen.
+-- | Run 'withAsync' with a linked handle. Raise a child-thread failure in the
+-- caller and stop the associated 'waitUntil'.
 withLinkedAsync :: (MonadUnliftIO m) => m a -> (Async a -> m b) -> m b
 withLinkedAsync run body = withAsync run $ \handle -> link handle >> body handle

@@ -50,11 +50,9 @@ import Arbiter.Servant.Types
 -- | Case-insensitive lookup of an enum value by its canonical name.
 parseEnum :: (Bounded a, Enum a) => (a -> Text) -> Text -> Either Text a
 parseEnum toName t =
-  let lower = T.toLower t
-      table = [(T.toLower (toName x), x) | x <- [minBound .. maxBound]]
-   in case lookup lower table of
-        Just x -> Right x
-        Nothing -> Left $ "unknown value: " <> t
+  maybe (Left $ "unknown value: " <> t) Right (lookup (T.toLower t) table)
+  where
+    table = [(T.toLower (toName x), x) | x <- [minBound .. maxBound]]
 
 instance FromHttpApiData JobSortColumn where
   parseQueryParam = parseEnum jobSortColumnName

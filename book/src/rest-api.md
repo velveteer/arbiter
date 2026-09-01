@@ -24,9 +24,9 @@ type MyAPI =
 
 See the [arbiter-servant-ui haddocks](https://arbiterq.dev/arbiter-servant-ui/Arbiter-Servant-UI.html) for the UI's route type.
 
-`POST jobs` and `POST jobs/batch` enqueue, so a service in any language can
-produce jobs without linking arbiter. The other per-queue routes are the
-operator surface the admin UI is built on.
+`POST jobs` and `POST jobs/batch` enqueue jobs. Services in other languages can
+use these endpoints without an Arbiter library. The admin UI uses the other
+per-queue endpoints for operator functions.
 
 ## Endpoints
 
@@ -85,17 +85,17 @@ Global endpoints under `/api/v1/`:
 | `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
 | `POST` | `concurrency/reconcile` | Repair the in-flight counts of every pool |
 | `POST` | `maintenance` | Run one gated maintenance pass |
-| `GET` | `health` | Readiness - checks the database, 503 when unreachable |
-| `GET` | `health/live` | Liveness - never touches the database |
+| `GET` | `health` | Readiness check. Returns 503 when the database is unavailable |
+| `GET` | `health/live` | Liveness check. Does not query the database |
 
 ## Consuming over HTTP
 
-`POST claim` leases visible jobs the same way a worker pool does: it spends
-admission, bumps the attempt count, stamps a claimant, and hides each job for
-the lease window. A paused queue leases nothing, so a pause stops HTTP
-consumers and worker pools alike.
+`POST claim` applies the worker-pool claim operation. It uses admission tokens,
+increments the attempt count, records a claimant, and makes each job invisible
+for the lease period. A paused queue does not return leases. The pause applies
+to HTTP consumers and worker pools.
 
-```
+```http
 POST /api/v1/email_queue/claim
 {"maxJobs": 5, "leaseSeconds": 60}
 ```
@@ -103,69 +103,67 @@ POST /api/v1/email_queue/claim
 `maxJobs` defaults to 1 and clamps to 1000. `leaseSeconds` defaults to 60 and
 clamps to 3600.
 
-Each job in the response carries `claimSeq` and `claimedBy`. Those two are the
-lease, and every finalize has to present them:
+Each response job contains `claimSeq` and `claimedBy`. These fields identify the
+lease. Each finalization request must include them:
 
-```
+```http
 POST /api/v1/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31"}
 ```
 
 On a queue declared with `QueueWithResult`, `ack` also takes the result:
 
-```
+```http
 POST /api/v1/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31", "result": ["delivered"]}
 ```
 
-The result lands where a worker's `ackWith` puts it: in the parent's rollup for
-a child job, on the archive entry for an archived root. A body that does not
-match the queue's result type is refused with 400. Leave `result` out to store
-nothing. Because this route parses a result, mounting the API needs `FromJSON`
-for the result type as well as `ToJSON`.
+Arbiter stores the result in the parent rollup for a child job, or in the
+archive entry for an archived root job. This is the same behavior as
+`ackWith`. A body that does not match the queue result type returns 400. Omit
+`result` to store no result. Mounting this route requires `FromJSON` and
+`ToJSON` for the result type.
 
-`ack` completes the job. `nack` hands it back without spending its attempt, and
-the job stays hidden for what is left of its lease, as a worker's nack does.
-`extend` pushes the lease out, which a worker's heartbeat does in-process. Its
-body adds a required `seconds`, clamped to 3600 and counted from now. A lease
-that no longer matches the row is refused with 409, so a job reclaimed after
-its window lapsed cannot be acked by the previous holder.
+`ack` completes the job. `nack` restores the used attempt and keeps the job
+invisible for the remainder of its lease. `extend` sets a later lease
+expiration, as a worker heartbeat does. The request body requires `seconds`.
+Arbiter limits the value to 3600 and measures it from the request time. If the
+lease fields do not match the row, the endpoint returns 409. Thus, a previous
+holder cannot ack a reclaimed job.
 
-These routes finalize only the leases `POST claim` hands out. A lease a worker
-pool holds is refused with 409.
+These routes finalize leases created by `POST claim`. They return 409 for a
+lease held by a worker pool.
 
-Nothing renews a lease on its own. A consumer that stops calling `extend` loses
-the job to the next claim when the window passes, the same at-least-once
-behavior a crashed worker gets.
+The server does not renew an HTTP lease automatically. The consumer must call
+`extend`. After an unextended lease expires, another consumer can claim the
+job. This gives at-least-once delivery after a consumer failure.
 
 > [!IMPORTANT]
-> A claim hands out a lease on real work, and arbiter ships no authentication
-> of its own. Authenticate these routes before you expose them: WAI middleware,
-> a Servant auth combinator over the mounted API, or a proxy in front of the
-> process.
+> Arbiter does not authenticate claim or finalization requests. Add
+> authentication before you expose these routes. You can use WAI middleware, a
+> Servant authentication combinator, or an authenticating proxy.
 
 ## Maintenance
 
-`POST maintenance` runs one pass of the schema-wide work a worker pool's reaper
-would do: stale workers, exhausted and cancelled jobs, rate-limit buckets,
-concurrency counts, archive retention, and group summaries.
+`POST maintenance` performs one pass of schema maintenance. It processes stale
+workers, exhausted and cancelled jobs, rate-limit buckets, concurrency counts,
+archive retention, and group summaries.
 
-Operations exclude each other across callers, so two servers that call at once
-do the work once. Nothing is throttled by default. Raise `maintenanceInterval`
-on the server config to set a minimum gap between runs of an operation.
-`maintenanceTimeout` bounds a single statement.
+Concurrent callers cannot run the same operation. The default has no minimum
+interval. Set `maintenanceInterval` in the server configuration to define the
+minimum interval for each operation. `maintenanceTimeout` limits one statement.
 
-A whole-schema operation keeps its own gap, `maintenanceSparseInterval`,
-whatever `maintenanceInterval` is. `maintenanceBucketIdle` is the idle age at
-which a pass prunes a rate-limit bucket.
+`maintenanceSparseInterval` defines a separate minimum interval for
+schema-wide operations. `maintenanceBucketIdle` specifies how long a
+rate-limit bucket must be inactive before removal.
 
-The response reports the rows each operation touched and names the ones that
-raised. An operation in neither was skipped:
+The response gives the affected row count for each completed operation and the
+names of failed operations. Operations absent from both lists were skipped:
 
 ```json
 {"ops": {"sweep-stale-workers": 2, "purge-archives": 140}, "failed": []}
 ```
 
-A deployment that runs a worker pool needs none of this, because the pool's
-reaper already does it. It matters when nothing in the deployment runs a pool.
+Worker pools run this maintenance in their reaper. Use the endpoint when a
+deployment does not run a worker pool.
 

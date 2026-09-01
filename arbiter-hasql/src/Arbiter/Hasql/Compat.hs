@@ -31,11 +31,9 @@ import Hasql.Connection.Setting.Connection qualified as ConnSetting
 
 -- | Run a bare SQL command, such as @BEGIN@ or @COMMIT@.
 runSQL :: (MonadUnliftIO m) => Hasql.Connection -> ByteString -> m ()
-runSQL conn sql = do
-  result <- liftIO $ Hasql.use conn (runScript (TE.decodeUtf8With TE.lenientDecode sql))
-  case result of
-    Right () -> pure ()
-    Left err -> throwInternal $ "hasql runSQL error: " <> T.pack (show err)
+runSQL conn sql =
+  liftIO (Hasql.use conn (runScript (TE.decodeUtf8With TE.lenientDecode sql)))
+    >>= either (\err -> throwInternal $ "hasql runSQL error: " <> T.pack (show err)) pure
 
 #if MIN_VERSION_hasql(1,10,0)
 runScript :: T.Text -> Session.Session ()
@@ -81,18 +79,18 @@ txStatusNeedsRollback LibPQ.TransInTrans = True
 txStatusNeedsRollback LibPQ.TransInError = True
 txStatusNeedsRollback _ = False
 
--- | Convert a connection string ByteString to hasql settings.
-hasqlSettings :: ByteString -> HasqlSettings
-hasqlSettings = hasqlSettingsFromConnStr
-
 #if MIN_VERSION_hasql(1,10,0)
 -- | Connection settings, whose representation follows the hasql version.
 type HasqlSettings = Settings.Settings
-hasqlSettingsFromConnStr :: ByteString -> Settings.Settings
-hasqlSettingsFromConnStr = Settings.connectionString . TE.decodeUtf8With TE.lenientDecode
+
+-- | Convert a connection string ByteString to hasql settings.
+hasqlSettings :: ByteString -> HasqlSettings
+hasqlSettings = Settings.connectionString . TE.decodeUtf8With TE.lenientDecode
 #else
 -- | Connection settings, whose representation follows the hasql version.
 type HasqlSettings = [Setting.Setting]
-hasqlSettingsFromConnStr :: ByteString -> [Setting.Setting]
-hasqlSettingsFromConnStr connStr = [Setting.connection (ConnSetting.string (TE.decodeUtf8With TE.lenientDecode connStr))]
+
+-- | Convert a connection string ByteString to hasql settings.
+hasqlSettings :: ByteString -> HasqlSettings
+hasqlSettings connStr = [Setting.connection (ConnSetting.string (TE.decodeUtf8With TE.lenientDecode connStr))]
 #endif

@@ -118,7 +118,7 @@ disableListener :: HasqlEnv registry -> HasqlEnv registry
 disableListener env = env {listener = Nothing}
 
 -- | Give the env a dedicated LISTEN connection opened from a connection string,
--- rather than borrowing a slot from the pool.
+-- and does not use a slot from the pool.
 useDedicatedListener :: (MonadIO m) => ByteString -> HasqlEnv registry -> m (HasqlEnv registry)
 useDedicatedListener connStr env = do
   d <- newDedicatedListen connStr
@@ -246,7 +246,7 @@ createHasqlEnvWithPool _proxy connPool schemaName = liftIO $ do
       }
 
 -- | Enable or disable prepared hot statements (the claim). Prepared once per pooled
--- connection, so the plan is reused instead of rebuilt every call. Requires direct
+-- connection and reuses the plan for each call. Requires direct
 -- connections or a pooler that supports server-side prepared statements.
 setPreparedStatements :: Bool -> HasqlEnv registry -> HasqlEnv registry
 setPreparedStatements flag env = env {hasqlPool = (hasqlPool env) {preparedStatements = flag}}

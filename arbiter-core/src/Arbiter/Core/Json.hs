@@ -11,8 +11,8 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 
--- | Generic options that omit @Nothing@ fields, so a cleared override is dropped
--- from the JSON rather than serialized as an explicit @null@.
+-- | Generic options that omit @Nothing@ fields. A cleared override is absent
+-- from the JSON. It is not encoded as @null@.
 patchOptions :: Options
 patchOptions = defaultOptions {omitNothingFields = True}
 

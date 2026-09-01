@@ -42,12 +42,10 @@ heartbeatWait intervalSecs extended remaining
   where
     beat = realToFrac intervalSecs
 
--- | Run an action under a heartbeat thread that extends its jobs' visibility timeout
--- every interval, so a long-running handler does not have its work claimed out from
--- under it. A job the handler already finalized is skipped, one that is simply gone is
--- not an error, and a reclaimed one throws: every job in a batch shares a deadline, so a
--- reclaim means the whole batch's lease has lapsed and the remaining work is wasted.
--- Fires the heartbeat hook each tick.
+-- | Run an action with a heartbeat thread that extends job visibility at each
+-- interval. Skip jobs that the handler finalized. An absent job is a normal
+-- condition. A reclaimed job causes an exception because all jobs in a batch
+-- share one deadline. Call the heartbeat hook after each successful extension.
 withJobsHeartbeat
   :: forall payload m a
    . (JobOperation m payload)

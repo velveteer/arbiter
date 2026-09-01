@@ -42,9 +42,8 @@ type AppRegistry =
    ]
 ```
 
-The registry is enforced at compile time - each payload type maps to exactly
-one table, and a duplicate table name or a duplicate payload type is a type
-error.
+The compiler checks the registry. Each payload type maps to one table. A
+duplicate table name or payload type is a type error.
 
 ## Migrations
 
@@ -69,14 +68,15 @@ CREATE SCHEMA IF NOT EXISTS arbiter;
 GRANT USAGE, CREATE ON SCHEMA arbiter TO your_app_user;
 ```
 
-`enableNotifications` and `enableEventStreaming` are reconciled. Re-run
-migrations after you change one and its triggers are installed or dropped, with
-no edit to migration history.
+Migrations reconcile `enableNotifications` and `enableEventStreaming`. Run the
+migrations after you change either option. The migration installs or removes
+the applicable triggers. Do not edit the migration history.
 
-Migrations are safe to run from more than one replica at once. Set
-`migrationLockTimeout` to bound the wait for the migration lock, which then
-returns a `MigrationError`. The default waits. Give migrations a direct
-connection: a pooler in transaction mode lets two replicas migrate together.
+Multiple replicas can run migrations concurrently. `migrationLockTimeout`
+limits the wait for the migration lock. Arbiter returns `MigrationError` if the
+wait exceeds this limit. The default has no time limit. Use a direct database
+connection for migrations. A pooler in transaction mode cannot serialize
+migration sessions.
 
 ## Inserting Jobs
 
@@ -89,15 +89,15 @@ import Data.Proxy (Proxy (..))
 env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
 
 ArbS.runSimpleDb env $ do
-  -- Ungrouped - processed concurrently by any available worker
+  -- Ungrouped: processed concurrently by any available worker
   _ <- Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example.com" "Alice")
 
-  -- Grouped - jobs with the same group key are processed serially (one at a time)
+  -- Grouped: jobs with the same group key are processed one at a time
   _ <- Arb.insertJob (Arb.defaultGroupedJob "user-42" $ SendReceipt "alice@example.com" 1001)
 ```
 
-`insertJob` returns `Maybe (JobRead payload)` - `Nothing` when a dedup key
-causes the insert to be skipped.
+`insertJob` returns `Maybe (JobRead payload)`. It returns `Nothing` when a
+deduplication key causes Arbiter to skip the insert.
 
 ## Configuring a Job
 
@@ -124,7 +124,7 @@ import Database.PostgreSQL.Simple qualified as PG
 
 main :: IO ()
 main = do
-  -- 1 pool of 5 concurrent worker threads, using postgresql-simple via arbiter-simple backend
+  -- One pool with five worker threads, using the arbiter-simple backend
   config <- Worker.transactionalWorkerConfig 5 processEmail
   let workers = [Worker.namedWorkerPool config]
   poolCfg <- Worker.poolConfigForWorkers workers
@@ -152,8 +152,8 @@ you. If the handler returns, the job and the handler's writes commit together.
 If it throws, the transaction rolls back and the job is retried or moved to the
 DLQ.
 
-`manualWorkerConfig` opens no transaction and hands you callbacks to finalize
-the job yourself - ack it, fail it, cancel it, or leave it to be reprocessed:
+`manualWorkerConfig` does not start a transaction. It supplies callbacks to ack,
+fail, cancel, or reprocess the job:
 
 ```haskell
 config <- Worker.manualWorkerConfig 5 processEmail

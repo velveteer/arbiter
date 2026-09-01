@@ -135,7 +135,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (find, traverse_)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -268,13 +268,10 @@ allTableAdmission = TableAdmission True True
 maxQueueNameBytes :: Int
 maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. 63])
   where
-    identifiersDistinct n =
-      let rendered = renderedIdentifiers (T.replicate n "q")
-          owners = Map.fromListWith Set.union [(T.take 63 name, Set.singleton name) | name <- rendered]
-       in all ((== 1) . Set.size) (Map.elems owners)
+    identifiersDistinct n = null (conflictingPrefixes (T.take 63) id (renderedIdentifiers (T.replicate n "q")))
 
--- | Every identifier a queue's DDL names, read back off the rendered SQL rather than
--- a hand-listed set, so nothing has to be remembered when an object is added.
+-- | All identifiers in a queue's rendered DDL. This derives the set directly
+-- from the SQL and includes newly added objects.
 renderedIdentifiers :: TableName -> [Text]
 renderedIdentifiers table =
   concatMap quoted $
@@ -313,23 +310,18 @@ validateRegistryNames schemaName tables
   | otherwise = Right ()
   where
     byteLength = BS.length . encodeUtf8
-    generatedOwners =
-      Map.fromListWith
-        Set.union
-        [ (generated, Set.singleton table)
-        | table <- tables
-        , generated <- queueTableNames table
-        ]
-    generatedCollision = fst <$> find ((> 1) . Set.size . snd) (Map.toList generatedOwners)
-    reservedCollision = find (`Set.member` Map.keysSet generatedOwners) sharedArbiterTables
-    channelOwners =
-      Map.fromListWith
-        Set.union
-        [ (channel schemaName table, Set.singleton table)
+    generatedCollision =
+      sharedName [(generated, table) | table <- tables, generated <- queueTableNames table]
+    reservedCollision =
+      find (`Set.member` Set.fromList (concatMap queueTableNames tables)) sharedArbiterTables
+    channelCollision =
+      sharedName
+        [ (channel schemaName table, table)
         | table <- tables
         , channel <- [pauseNotifyChannel, cancelNotifyChannel]
         ]
-    channelCollision = fst <$> find ((> 1) . Set.size . snd) (Map.toList channelOwners)
+    -- The first generated name more than one queue claims.
+    sharedName = listToMaybe . conflictingPrefixes fst snd
 
 -- | Run migrations for multiple tables within a single schema, seeding the given
 -- rate-limit policies. On migration success, reconciles the policy and bucket
@@ -403,7 +395,7 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
     Right _ -> pure ()
     Left (e :: PG.SqlError) -> do
       exists <- schemaExists conn schemaName
-      when (not exists) $
+      unless exists $
         ioError
           ( userError $
               "Failed to create schema "
@@ -598,27 +590,21 @@ reconcileOptionalTriggers conn schemaName tables config =
     exists :: (PG.ToRow params) => Query -> params -> IO Bool
     exists sql params = do
       rows <- query conn sql params
-      pure $ case rows of
-        Only present : _ -> present
-        _ -> False
+      pure (maybe False fromOnly (listToMaybe rows))
 
-    dropEventTriggersExcept keep =
+    dropTriggersMarked marker keep =
       executeRendered
         ( dropTriggerSelect
             <> triggerJoins
             <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
                \AND NOT (c.relname::text = ANY(?::text[]))"
         )
-        (schemaName, eventStreamingObjectCommentPrefix <> "%", PGArray keep)
+        (schemaName, marker <> "%", PGArray keep)
+
+    dropEventTriggersExcept = dropTriggersMarked eventStreamingObjectCommentPrefix
 
     dropNotifyObjectsExcept keep = do
-      executeRendered
-        ( dropTriggerSelect
-            <> triggerJoins
-            <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
-               \AND NOT (c.relname::text = ANY(?::text[]))"
-        )
-        (schemaName, notifyObjectCommentPrefix <> "%", PGArray keep)
+      dropTriggersMarked notifyObjectCommentPrefix keep
       -- A function still carrying a trigger is one the sweep spared, so it stays.
       executeRendered
         "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \

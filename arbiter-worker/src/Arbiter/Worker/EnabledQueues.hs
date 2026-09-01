@@ -61,16 +61,16 @@ requestedQueues envVar registry = do
             (_, []) -> pure requested
             _ -> throwInternal $ "Unknown queue names: " <> T.intercalate ", " invalid
 
--- | 'getEnabledQueues' for @ARBITER_ENABLED_QUEUES@, resolving the registry from
--- the monad through 'RegistryOf' instead of a passed 'Proxy'.
+-- | 'getEnabledQueues' for @ARBITER_ENABLED_QUEUES@. Resolve the registry from
+-- the monad through 'RegistryOf'.
 enabledQueuesForMonad
   :: forall m
    . (RegistryTables (RegistryOf m))
   => IO [Text]
 enabledQueuesForMonad = getEnabledQueues enabledQueuesEnvVar (Proxy @(RegistryOf m))
 
--- | 'requestedQueues' for @ARBITER_ENABLED_QUEUES@, resolving the registry from
--- the monad through 'RegistryOf' instead of a passed 'Proxy'.
+-- | 'requestedQueues' for @ARBITER_ENABLED_QUEUES@. Resolve the registry from
+-- the monad through 'RegistryOf'.
 requestedQueuesForMonad
   :: forall m
    . (RegistryTables (RegistryOf m))

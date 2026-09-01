@@ -98,7 +98,7 @@ resetRateLimitBucketsSQL schema prefix =
       |]
 
 -- | Clear the rate-limit deferral on a prefix's throttled jobs so a window reset
--- releases work parked mid-window instead of leaving it until a full interval elapses.
+-- releases work parked in the middle of a window before the full interval elapses.
 -- One statement over all given queue tables.
 wakeThrottledJobsSQL :: SchemaName -> [TableName] -> Text -> Query Int64
 wakeThrottledJobsSQL schema tableNames prefix =

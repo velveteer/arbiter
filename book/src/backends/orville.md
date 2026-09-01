@@ -1,7 +1,7 @@
 # arbiter-orville (orville-postgresql)
 
-Built on `orville-postgresql`. Orville manages connections and transactions
-itself, so handlers receive no connection parameter. This backend needs a
+This backend uses `orville-postgresql`. Orville manages its connections and
+transactions. Thus, handlers do not receive a connection parameter. Define a
 custom monad with `MonadOrville` and `MonadArbiter` instances:
 
 ```haskell
@@ -14,19 +14,17 @@ instance MonadArbiter AppM where
   -- ... executeQuery / executeStatement / withDbTransaction / runHandlerWithConnection
 ```
 
-`Handler` is the shape of your handlers - Orville passes no connection, so it
-is just the job. `Arb.JobHandler AppM payload result` is that shape at one
-queue's job type, and is what you write in a handler's own signature.
+`Handler` specifies the handler type. Because Orville does not pass a
+connection, this type contains the job argument only. Use
+`Arb.JobHandler AppM payload result` in handler signatures.
 [Writing a Backend](custom.md) covers the methods elided above.
 
-Because Orville does not expose its pooled connections for LISTEN/NOTIFY, the
-shared listener runs on its own dedicated connection. Build a `DedicatedListen`
-(from `Arbiter.Core.Listen`) with the same connection string as your Orville
-pool, keep it in your reader environment, and return it from `getListener`.
+Orville does not expose its pooled connections for `LISTEN/NOTIFY`. Create a
+`DedicatedListen` from `Arbiter.Core.Listen` with the Orville pool connection
+string. Store it in the reader environment and return it from `getListener`.
 
-`createOrvilleConnectionOptions` takes an arbiter `PoolConfig`, so
-`poolConfigForWorkers` sizes your Orville pool for the workers that will use
-it:
+`createOrvilleConnectionOptions` accepts an Arbiter `PoolConfig`. Use
+`poolConfigForWorkers` to calculate the Orville pool size:
 
 ```haskell
 import Arbiter.Core.Listen (DedicatedListen, dedicatedListener, newDedicatedListen)

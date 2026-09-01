@@ -95,7 +95,7 @@ instance HasConcurrency CLPayload where
 type CLReg = '[Queue "arbiter_concurrency_test" CLPayload]
 
 -- | A second payload declaring a different pool, with a two-payload registry, so the
--- registry-collection test exercises the cross-payload union (not just one payload).
+-- registry-collection test exercises the cross-payload union.
 newtype CLPayload2 = CLPayload2 Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

@@ -1285,7 +1285,7 @@ getParentStateSnapshot jobId = do
 
 -- | Schema-wide groups-table refresh, correcting every registered queue's summary drift.
 -- Walks each groups table to the end, one bounded batch and one transaction at a time.
--- A deliberate repair rather than a hot path: the reaper runs 'Ops.refreshAllGroups' for
+-- This is a repair operation. The reaper runs 'Ops.refreshAllGroups' for
 -- a single batch per tick. Returns the rows rewritten and the queue names that failed.
 refreshAllGroupsFully
   :: forall m

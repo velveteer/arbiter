@@ -1,5 +1,5 @@
--- | Completed-job archive types. An acked job with a positive @archiveFor@ lands
--- here and is purged once its retention expires. Entries can be re-run via
+-- | Completed-job archive types. Arbiter archives an acked job when @archiveFor@
+-- is positive and removes it after the retention period. Re-enqueue entries with
 -- 'Arbiter.Core.HighLevel.reEnqueueFromArchive'.
 module Arbiter.Core.Job.Archive
   ( ArchiveJob (..)

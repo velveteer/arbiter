@@ -208,9 +208,7 @@ hubLoop listener hub = go baseBackoff
             logErrorAll hub msg
             threadDelay backoff
             go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2))
-      case result of
-        Right () -> restart "arbiter listener: connection loop exited unexpectedly"
-        Left e -> restart (displayEx e)
+      restart (either displayEx (const "arbiter listener: connection loop exited unexpectedly") result)
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
 connectionLoop :: RunningHub -> PQ.Connection -> IO ()
@@ -271,11 +269,8 @@ reconcile hub conn = do
 dispatch :: RunningHub -> Notification -> IO ()
 dispatch hub n = do
   hs <- Map.findWithDefault [] (notificationChannel n) <$> readTVarIO (hubHandlers hub)
-  for_ hs $ \(_, lg, h) -> do
-    result <- tryAny (h n)
-    case result of
-      Right () -> pure ()
-      Left e -> hubWarn lg ("channel handler exception: " <> displayEx e)
+  for_ hs $ \(_, lg, h) ->
+    tryAny (h n) >>= either (hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
 
 -- | Report a connection failure to every registered pool.
 logErrorAll :: RunningHub -> Text -> IO ()

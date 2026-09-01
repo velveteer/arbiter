@@ -1,9 +1,8 @@
--- | The batch handoff and the settle ordering built on it.
+-- | Batch finalization state and ordered finalization operations.
 --
--- A settle commits a job's outcome, records that it did, then reports it. The record
--- has to land before the report, or a heartbeat tick reads a job this worker already
--- settled and reports it a second time. 'settle' runs the three in that order, so a
--- caller reaching the handoff through it cannot fire a hook first.
+-- A finalization commits the outcome, records it, and then calls its hooks. The
+-- record must precede the hooks. Otherwise, a concurrent heartbeat can report
+-- the finalized job again. 'settle' enforces this order.
 module Arbiter.Worker.Settle
   ( -- * Handoff
     CancelHandoff
@@ -51,8 +50,7 @@ data BatchProgress = BatchProgress
   -- ^ Whether the force-cancel finalizer ran to completion.
   }
 
--- | What a force-cancel finalizer needs from the handler's scope, whichever side of
--- the job span runs it.
+-- | Finalization state shared by the handler and force-cancel operation.
 newtype CancelHandoff = CancelHandoff (IORef BatchProgress)
 
 newCancelHandoff :: (MonadIO m) => m CancelHandoff
@@ -68,14 +66,12 @@ onProgress (CancelHandoff ref) = liftIO . atomicModifyIORef' ref
 hasIdIn :: Set.Set Int64 -> Job.JobRead payload -> Bool
 hasIdIn ids job = Set.member (Job.primaryKey job) ids
 
--- | The batch's jobs a predicate selects, children-first, so the row locks taken for
--- them follow the same order as ack and force-cancel. The heartbeat needs this too:
--- its batch update joins the rows in the order they are handed to it.
+-- | Select jobs from the batch in descending identifier order. This gives ack,
+-- force-cancel, and heartbeat operations the same row-lock order.
 byIdDesc :: (Job.JobRead payload -> Bool) -> NonEmpty (Job.JobRead payload) -> [Job.JobRead payload]
 byIdDesc p = sortOn (Down . Job.primaryKey) . filter p . toList
 
--- | The batch's jobs still awaiting an outcome, which keeps the force-cancel finalizer
--- and the outcome report from both reporting the same job.
+-- | Jobs in the batch that have no recorded outcome.
 pendingJobs :: (MonadIO m) => CancelHandoff -> NonEmpty (Job.JobRead payload) -> m [Job.JobRead payload]
 pendingJobs handoff jobs = do
   progress <- readProgress handoff
@@ -116,8 +112,8 @@ finalized js = Settled js []
 disowned :: [Job.JobRead payload] -> Settled payload
 disowned js = Settled [] js
 
--- | Write a settle into the handoff in one update, so no reader sees half of it. A job
--- found under another claim counts as handled too.
+-- | Record a finalization in one atomic update. Jobs owned by another claim also
+-- count as handled.
 record :: (MonadIO m) => CancelHandoff -> Settled payload -> m ()
 record handoff (Settled handled unowned) =
   onProgress handoff $ \p ->
@@ -148,8 +144,8 @@ settleWith protect handoff commit accounts hooks = do
   a <- protect $ commit >>= \r -> r <$ record handoff (accounts r)
   hooks a
 
--- | 'settleWith' over a set known before the commit runs, holding off an async exception
--- between the commit and the record.
+-- | Apply 'settleWith' to a set known before the commit. Mask asynchronous
+-- exceptions between the commit and state update.
 settle
   :: (MonadUnliftIO m)
   => CancelHandoff
@@ -169,7 +165,8 @@ settleBy
   -> m b
 settleBy = settleWith mask_
 
--- | 'settle' leaving the commit interruptible, for a transaction that holds the handler.
+-- | Apply 'settle' with an interruptible commit for a transaction that contains
+-- the handler.
 settleInterruptibly
   :: (MonadIO m)
   => CancelHandoff

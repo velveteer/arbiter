@@ -8,14 +8,13 @@ job1 = Arb.defaultJob payload & Arb.setArchiveFor (Just Arb.dayRetention)       
 job2 = Arb.defaultJob payload & Arb.setArchiveFor (Just $ Arb.dayRetention * 7) -- 1 week
 ```
 
-Archiving is opt-in per job, and expired entries are purged automatically. The
-archive entry keeps the [result](results.md) its handler returned, so it is
-where you read back what a standalone job produced. The REST API and admin UI
-list archived jobs, re-enqueue them as fresh jobs, and delete them.
+Archiving is optional for each job. Arbiter automatically removes expired
+entries. An archive entry contains the [result](results.md) from its handler.
+Use the REST API or admin UI to list, re-enqueue, or delete archived jobs.
 
-A re-enqueued job starts standalone. It carries its payload and settings, and
-leaves its parent link behind. Re-running one member of a finished
-[tree](job-trees.md) therefore gives you that job alone. To recover a tree that
-failed, retry it from the [dead-letter queue](dead-letter-queue.md).
+A re-enqueued job has no parent. It retains its payload and settings. Thus,
+re-enqueueing one member of a completed [tree](job-trees.md) creates one
+independent job. To recover a failed tree, retry it from the
+[dead-letter queue](dead-letter-queue.md).
 
 See the [`Arbiter.Core.Job.Archive` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Archive.html) for the archive row and its queries.

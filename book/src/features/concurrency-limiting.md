@@ -1,8 +1,8 @@
 # Concurrency Limiting
 
-Cap how many jobs sharing a key run at once. A `HasConcurrency` instance names
-a **pool** (a prefix with a default limit) and a per-job key suffix. Keys are
-global, so a pool spans every queue in a registry.
+Set a maximum number of concurrent jobs for each key. A `HasConcurrency`
+instance specifies a **pool** and a key suffix for each job. A pool consists of
+a prefix and a default limit. Keys apply to all queues in a registry.
 
 ```haskell
 import Arbiter.Concurrency (ConcurrencyPolicy, HasConcurrency (..), concurrencyBy, concurrencyPool)
@@ -18,40 +18,40 @@ instance HasConcurrency SyncPayload where
   concurrencyFor = concurrencyBy syncPool tenantOf
 ```
 
-Build the selector from `noConcurrency` / `concurrencyBy` / `globalConcurrency`
-/ `concurrencyByCase`. The limit is the pool's, so every key under the prefix
-shares one cap. An operator retunes a whole pool at runtime through the API or
-admin UI. The override takes precedence until it is cleared, and the declared
-default then applies again. An override of 0 pauses the pool: nothing under it
-is claimed until the override is raised or cleared.
+Build the selector with `noConcurrency`, `concurrencyBy`, `globalConcurrency`,
+or `concurrencyByCase`. The pool limit applies separately to each key with that
+prefix. An operator can change the pool limit through the API or admin UI. The
+override applies until an operator clears it. Arbiter then uses the declared
+default. A value of 0 prevents claims for all keys in the pool.
 
 ## Concurrency limit 1 vs. a group key
 
-Both cap a key to one job in flight. They differ on failure:
+Both options permit one in-flight job for each key. Their failure behavior is
+different:
 
 | | `group_key` | concurrency limit 1 |
 | --- | --- | --- |
 | What it is | a scheduling primitive (ordered head per group) | a counter |
-| On retry/backoff | the failing job **holds the head** - the group makes no progress until it succeeds or dead-letters | the failing job **releases its slot** - a sibling runs while it backs off |
+| On retry/backoff | the failing job **remains first**. The group waits until the job succeeds or moves to the DLQ | the failing job **releases its slot**. Another job can run during the backoff |
 | Ordering | eligible jobs run in insertion order within priority | none beyond the claim's sort |
 | Batching | claims an ordered batch per group | N independent jobs |
 
-Use a **group key** to serialize a sequence (event streams, state machines).
-Use **concurrency 1** as a mutex (one sync per tenant). They are orthogonal, so
-a job can carry both.
+Use a **group key** for a serial sequence, such as an event stream or state
+machine. Use **concurrency 1** as a mutex, such as one synchronization per
+tenant. A job can use both features.
 
 > [!IMPORTANT]
-> The cap counts claims: a slot is held until its job is acked, retried, or
-> reclaimed, so a timed-out-but-unacked job still occupies its slot until then.
+> The limit counts claims. A job occupies a slot until Arbiter acks, retries, or
+> reclaims it. An unacked job continues to occupy a slot after its handler times
+> out.
 >
-> Maintenance is automatic. Drained keys are cleaned up periodically, and a
-> pool's in-flight accounting recovers on its own after a restart or failover.
+> Arbiter periodically removes inactive keys. It also reconstructs in-flight
+> counts after a restart or failover.
 
 ## Limits from an external signal
 
-An override is a runtime value, and the cap can follow a signal from outside
-your code. A handler that talks to the vendor usually sees that signal first.
-Retune from the handler.
+A handler can update an override in response to an external capacity signal.
+For example, update the override when a vendor response reports a new limit.
 
 ```haskell
 import Arbiter.Concurrency (setConcurrencyLimit)
@@ -67,15 +67,14 @@ syncHandler _conn job = do
     Ok -> pure ()
 ```
 
-The next claim reads the new limit. The pool tightens or opens up with no
-deploy and no restart, and any code with a `MonadArbiter` can write the
-override.
+The next claim uses the new limit. This change does not require a deployment or
+restart. Code with a `MonadArbiter` instance can write the override.
 
-`clearConcurrencyLimit syncPool` drops it again. Both helpers take the pool you
-declared, which pins the prefix they write to the one the instance admits
-against.
+`clearConcurrencyLimit syncPool` removes the override. Both functions accept a
+declared pool and use its prefix.
 
-The handler above is transactional, so the write commits with the job's ack. If
-it then throws, the override rolls back with the rest of the handler's work.
+The handler in this example is transactional. The override and job ack commit
+in the same transaction. If the handler throws an exception, the transaction
+rolls back both changes.
 
 See the [`Arbiter.Concurrency` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Concurrency.html) for the selector DSL and the pool type.

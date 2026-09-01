@@ -1,7 +1,7 @@
 # arbiter-simple (postgresql-simple)
 
-Built on `postgresql-simple` with `resource-pool`. Handlers receive a raw
-`Connection`. Nested transactions use savepoints automatically.
+This backend uses `postgresql-simple` and `resource-pool`. Handlers receive a
+raw `Connection`. Nested transactions automatically use savepoints.
 
 ```haskell
 env <- ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"

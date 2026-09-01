@@ -414,7 +414,7 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
 
 -- | Partial index over @(group_key, attempts DESC, priority, id)@ for retried rows,
 -- read by the claim's group head gate. Retried rows rank ahead of the rest, so the
--- gate merges this run with the @(group_key, priority, id)@ one instead of sorting
+-- gate merges this run with the @(group_key, priority, id)@ scan and avoids sorting
 -- the whole group.
 createJobQueueGroupRetriedIndexSQL :: Text -> Text -> Text
 createJobQueueGroupRetriedIndexSQL schemaName tableName =
@@ -427,7 +427,7 @@ createJobQueueGroupRetriedIndexSQL schemaName tableName =
 -- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL AND
 -- NOT suspended@). Scheduled/backoff/in-flight rows have @not_visible_until@ set
 -- and suspended rows are excluded, so they are absent, and the claim's ordered
--- @LIMIT@ short-circuits at the head over ready rows instead of walking them.
+-- @LIMIT@ stops the scan at the first ready rows.
 createJobQueueUngroupedReadyRankingIndexSQL :: Text -> Text -> Text
 createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
   T.unlines
@@ -973,7 +973,7 @@ createNotifyFunctionSQL schemaName tableName =
         ]
 
 -- | A table's job-arrival NOTIFY trigger. Statement-level, so a batch insert notifies
--- once rather than per row.
+-- one time for the statement.
 createNotifyTriggerSQL :: Text -> Text -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName

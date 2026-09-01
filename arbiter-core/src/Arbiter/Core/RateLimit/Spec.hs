@@ -5,10 +5,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Per-job token-bucket rate limits. A payload's 'rateLimitFor' is a small
--- selective description: running it against a job picks the policy and key, while
--- statically inspecting it collects every policy it could use. So the migration
--- seeds exactly the policies a registry references.
+-- | Per-job token-bucket rate limits. A payload's 'rateLimitFor' describes how
+-- to select its policy and key. Static inspection finds all policies that the
+-- migration must initialize.
 module Arbiter.Core.RateLimit.Spec
   ( -- * Core types
     Durability (..)
@@ -57,8 +56,8 @@ import Arbiter.Core.Selector (Selector, chooseWhen, collectPolicies, runSelector
 data Durability = Durable | Unlogged
   deriving stock (Eq, Show)
 
--- | A resolved key: prefix and per-key suffix. Stored as @prefix:suffix@, prefix
--- kept separate so policy lookup never re-splits on @:@.
+-- | A resolved key with a prefix and per-key suffix. The stored form is
+-- @prefix:suffix@. The separate prefix supports policy lookup.
 data RateLimitKey = RateLimitKey
   { rlkPrefix :: Text
   , rlkSuffix :: Text
@@ -94,8 +93,8 @@ instance AdmissionPolicy Policy where
 tokenBucket :: Text -> Double -> NominalDiffTime -> Policy
 tokenBucket prefix n period = Policy prefix n n (max 1e-6 period)
 
--- | A selective description of the rate-limit key for a payload. Run it against
--- a job to pick the key. Inspect it statically to collect reachable policies.
+-- | A selective description of the rate-limit key for a payload. Evaluation
+-- returns the job key. Static inspection returns the reachable policies.
 type RateLimitFor payload = Selector Policy payload (Maybe RateLimitKey)
 
 -- | This payload is unlimited.

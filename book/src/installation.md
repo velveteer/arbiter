@@ -2,9 +2,9 @@
 
 Install directly from GitHub:
 
-**Cabal** - add to your `cabal.project`:
+**Cabal:** Add this source repository to `cabal.project`:
 
-```
+```text
 source-repository-package
   type: git
   location: https://github.com/velveteer/arbiter.git
@@ -16,7 +16,7 @@ source-repository-package
     arbiter-migrations
 ```
 
-**Stack** - add to your `stack.yaml`:
+**Stack:** Add this source repository to `stack.yaml`:
 
 ```yaml
 extra-deps:

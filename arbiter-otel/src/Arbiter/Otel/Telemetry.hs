@@ -197,7 +197,7 @@ summarize :: Maybe Text -> [Text] -> Text
 summarize service notes =
   T.intercalate ", " (("telemetry on, service.name=" <> fromMaybe "unset" service) : notes)
 
--- | The service name the detected resource carries, which every signal is exported under.
+-- | Service name in the detected resource. All signals use this name.
 serviceName :: MaterializedResources -> Maybe Text
 serviceName res = lookupAttributeByKey (getMaterializedResourcesAttributes res) ("service.name" :: AttributeKey Text)
 
@@ -206,11 +206,11 @@ withTelemetryIf :: Bool -> (Telemetry -> IO a) -> IO a
 withTelemetryIf True action = withTelemetry action
 withTelemetryIf False action = action inertTelemetry
 
--- | A handle over the API's no-op providers, installing nothing.
+-- | A handle that uses the API no-op providers.
 inertTelemetry :: Telemetry
 inertTelemetry = baseTelemetry noopMeterProvider
 
--- | An exporting-nothing handle over @mp@. The installers record-update the fields
+-- | A non-exporting handle over @mp@. The installers update the fields
 -- they actually set.
 baseTelemetry :: MeterProvider -> Telemetry
 baseTelemetry mp =
@@ -232,7 +232,7 @@ withTelemetryFromEnv action = do
   disabled <- lookupBooleanEnv "OTEL_SDK_DISABLED"
   withTelemetryIf (not disabled) action
 
--- | Send a log config's output to this handle's destination as well as its own.
+-- | Send log output to the configured destination and this handle's destination.
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 

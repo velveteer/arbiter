@@ -257,7 +257,7 @@ concurrencySpec mkMessage runM = do
       let totalClaimed = length c1 + length c2 + length c3
       totalClaimed `shouldBe` 1
 
--- | Aggressive race condition tests designed to surface concurrency bugs.
+-- | High-contention tests for concurrency defects.
 --
 -- These tests use high contention and many iterations to maximize the
 -- probability of hitting race windows. They stress the system with:

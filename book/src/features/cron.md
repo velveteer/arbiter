@@ -41,21 +41,21 @@ import Arbiter.Worker.Cron qualified as Cron
 The builder receives a `TickKind` (`Live` for the current minute, `Replay` for
 any catch-up tick) and the tick time.
 
-A schedule enqueues onto the pool that carries it, so its builder returns that
-pool's payload type. Schedules for a different queue belong on that queue's
-pool.
+A schedule enqueues jobs on its configured pool. Its builder must return the
+payload type for that pool. Configure schedules for other queues on their
+respective pools.
 
-**Timezones.** Expressions default to UTC. Use `cronJobInTimezone` with an
-[IANA name](https://www.iana.org/time-zones) like `America/New_York` to run in
-local time. On the spring-forward day a schedule of `30 2 * * *` does not fire,
-because 02:30 does not occur locally. On the fall-back day a schedule of
-`30 1 * * *` fires once, although 01:30 occurs twice.
+**Time zones.** Expressions use UTC by default. Use `cronJobInTimezone` and an
+[IANA name](https://www.iana.org/time-zones), such as `America/New_York`, for
+local time. A schedule of `30 2 * * *` does not run on a spring transition day
+that has no 02:30. A schedule of `30 1 * * *` runs one time on a fall transition
+day that has two occurrences of 01:30.
 
 **Backfill.** `BackfillPolicy` replays missed minutes after downtime or a
-scheduler pause, bounded by a duration you give it.
+scheduler pause. The policy duration limits the replay period.
 
-**Runtime overrides.** The REST API and admin UI edit a schedule's expression,
-overlap, timezone, and enabled state without a redeploy. Set an override to
-`null` to fall back to the value in code.
+**Runtime overrides.** Use the REST API or admin UI to change a schedule's
+expression, overlap policy, time zone, and enabled state. These changes do not
+require a deployment. Set an override to `null` to use the value from code.
 
 See the [`Arbiter.Worker.Cron` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Cron.html) for the schedule type.

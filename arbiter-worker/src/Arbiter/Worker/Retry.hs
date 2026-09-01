@@ -10,6 +10,7 @@ module Arbiter.Worker.Retry
 
 import Arbiter.Core.Exceptions (JobException, JobGoneException, displayEx)
 import Arbiter.Core.Threads (labelArbiterThread)
+import Control.Monad (unless)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Maybe (isJust)
 import Data.Text qualified as T
@@ -36,29 +37,21 @@ retryOnException
   -> m ()
 retryOnException stateVar logCfg label action = loop
   where
-    loop = do
-      result <- tryAny action
-      case result of
-        Right () -> pure ()
-        Left e -> do
-          status <- readTVarIO stateVar
-          case status of
-            ShuttingDown -> pure ()
-            _ -> do
-              tryLog logCfg Error $
-                label <> " error (retrying): " <> displayEx e
-              sleepResult <-
-                race
-                  ( liftIO . atomically $
-                      readTVar stateVar >>= \st ->
-                        case st of
-                          ShuttingDown -> pure ()
-                          _ -> retrySTM
-                  )
-                  (liftIO $ threadDelay 5_000_000)
-              case sleepResult of
-                Left () -> pure ()
-                Right () -> loop
+    loop = tryAny action >>= either onFailure pure
+    onFailure e = do
+      stopping <- (== ShuttingDown) <$> readTVarIO stateVar
+      unless stopping $ do
+        tryLog logCfg Error $ label <> " error (retrying): " <> displayEx e
+        -- Shutdown wins the race, so a pool tearing down does not wait out the backoff.
+        race awaitShutdown (liftIO (threadDelay retryBackoffMicros))
+          >>= either pure (const loop)
+    awaitShutdown = liftIO . atomically $ do
+      st <- readTVar stateVar
+      unless (st == ShuttingDown) retrySTM
+
+-- | Wait between attempts of a retried infrastructure thread.
+retryBackoffMicros :: Int
+retryBackoffMicros = 5_000_000
 
 -- | A signal only the worker layer can act on, so a retry loop rethrows it.
 isJobSignal :: SomeException -> Bool
@@ -67,7 +60,7 @@ isJobSignal e =
     || isJust (fromException e :: Maybe JobGoneException)
 
 -- | Spawn a thread under 'withAsync' and 'retryOnException', so a transient failure
--- restarts the action rather than killing the thread.
+-- restarts the action and keeps the thread active.
 spawnRetried
   :: (MonadUnliftIO m)
   => TVar WorkerState

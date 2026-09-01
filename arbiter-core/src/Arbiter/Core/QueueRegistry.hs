@@ -70,7 +70,7 @@ type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) ::
   SpecForPayload payload registry = MatchIn payload '[] registry
 
 -- | Walk to the entry for @payload@, carrying the entries already passed over
--- so its match is checked against every other entry, not just the later ones.
+-- and compares its match with all other entries.
 type family
   MatchIn (payload :: Type) (seen :: JobPayloadRegistry) (rest :: JobPayloadRegistry)
     :: QueueSpec

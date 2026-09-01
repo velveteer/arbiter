@@ -1312,9 +1312,9 @@ withRetry act = go (5 :: Int)
           | n > 0 && isRetryableError e -> go (n - 1)
           | otherwise -> throwIO e
 
--- | A transient serialization or deadlock abort. postgresql-simple and hasql
--- surface 40P01\/40001 with different exception types, so match the SQLSTATE in
--- the rendered message rather than a single backend's error constructor.
+-- | Detect a transient serialization or deadlock abort. PostgreSQL-simple and
+-- Hasql use different exception types for 40P01 and 40001. Match the SQLSTATE in
+-- the rendered message for both backends.
 isRetryableError :: SomeException -> Bool
 isRetryableError e = any (`isInfixOf` show e) ["40P01", "40001"]
 
@@ -1378,11 +1378,10 @@ prop_engine run schema table withConn reset = withTests 300 $ property $ do
   settled <- evalIO (queryViolations schema table withConn)
   settled === []
 
--- | N-way concurrent property. Generates up to 8 independent branches of
--- self-contained actions -- shrinkable and seed-reproducible -- and runs them
--- concurrently under the gap-free HOL detector (installed by the caller), then
--- quiesces with a reaper tick and asserts both the detector log and the settled
--- summary oracle are clean.
+-- | Concurrent property with up to eight independent action branches. The
+-- branches are shrinkable and reproducible from the seed. Run them under the
+-- caller-installed HOL detector. Then run one reaper tick and check the detector
+-- log and settled summary.
 prop_concurrent
   :: forall sm
    . (ArbiterC sm)
@@ -1407,7 +1406,7 @@ prop_concurrent run schema table withConn reset = withTests 100 $ withShrinks 0 
     (,) <$> countHolViolations schema table withConn <*> queryViolations schema table withConn
   (hol <> settled) === []
 
--- | Bound a concurrent test's wall time so a regression can never hang CI.
+-- | Set a wall-clock time limit for a concurrent test.
 withinSecs :: Int -> IO () -> IO ()
 withinSecs s act =
   timeout (s * 1_000_000) act
@@ -1420,12 +1419,11 @@ withinSecs s act =
 -- the diffuse fuzz, these reproduce a regression on nearly every run, so they
 -- are reliable CI guards.
 
--- | Guard for the cross-group trigger deadlock. Two actors hammer opposing
--- multi-group operations: a batch insert spanning g1+g3 versus a dedup move
--- toggling a key between them. The canonical @FOR UPDATE@ in the group triggers
--- must lock group rows in a consistent order. Without it these deadlock within a
--- few hundred operations. We count @40P01@ rather than retrying, since detecting
--- a deadlock is the whole point, and assert none occurred.
+-- | Test for the cross-group trigger deadlock. Two actors repeatedly run
+-- conflicting multi-group operations. One inserts a batch across g1 and g3.
+-- The other moves a deduplication key between those groups. The @FOR UPDATE@
+-- clauses must lock group rows in a consistent order. Count @40P01@ errors and
+-- require a count of zero.
 deadlockGuard
   :: forall sm
    . (ArbiterC sm)

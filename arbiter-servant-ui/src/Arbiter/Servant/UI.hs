@@ -65,12 +65,11 @@ import System.FilePath ((</>))
 staticFiles :: [(FilePath, ByteString)]
 staticFiles = $(embedDir "static")
 
--- | The embedded files, with every asset the page links to carrying this build's
--- version, so an asset is cached for good and a new build reaches clients by naming
--- new urls rather than by anything expiring.
+-- | Embedded files with the build version in each asset URL. Versioned assets
+-- can use an immutable cache. A new build produces new URLs.
 --
--- Each file's own path is substituted where it appears as a complete attribute value.
--- Nothing else can match: a bound attribute holds an expression, not a path.
+-- Replace a file path only when it is a complete attribute value. Bound
+-- attributes contain expressions and do not match these paths.
 versionedFiles :: [(FilePath, ByteString)]
 versionedFiles = map stampPage staticFiles
   where
@@ -80,9 +79,8 @@ versionedFiles = map stampPage staticFiles
     stamp path = replaceAll (attribute path) (attribute (versionedPath path))
     attribute value = BS8.pack (value <> "\"")
 
--- | Where a stamped url puts a file: under a segment naming this build. A path segment
--- rather than a query, since a proxy between here and the reader is likelier to cache
--- one, and it is what a build tool would emit.
+-- | Put an asset below a path segment that identifies the build. Path segments
+-- give reverse proxies and build tools stable cache keys.
 versionedPath :: FilePath -> FilePath
 versionedPath path = T.unpack versionPrefix <> "/" <> BS8.unpack buildVersion <> "/" <> path
 
@@ -90,20 +88,18 @@ versionedPath path = T.unpack versionPrefix <> "/" <> BS8.unpack buildVersion <>
 versionPrefix :: Text
 versionPrefix = "v"
 
--- | Drop the version a stamped url carries, reporting whether one was there. The
--- version selects nothing: it only makes the url new, so an old one still resolves and
--- a reader holding a stale page is served rather than broken.
+-- | Remove a version prefix and report if one was present. The resolver ignores
+-- the version value, which keeps URLs from older pages valid.
 stripVersion :: [Text] -> (Bool, [Text])
 stripVersion (prefix : _version : rest) | prefix == versionPrefix = (True, rest)
 stripVersion segments = (False, segments)
 
--- | The dashboard's entry point, the one file that cannot carry a version of its own:
--- it is what names the others, so it is fetched afresh to learn their current versions.
+-- | Dashboard entry point. It has no version because it contains the current
+-- versioned asset URLs and must be fetched again.
 indexPath :: FilePath
 indexPath = "index.html"
 
--- | One version for the whole bundle. The files ship together inside one binary, so
--- they change together, and a version per file would only add ways to be wrong.
+-- | One version for all files embedded in the binary.
 buildVersion :: ByteString
 buildVersion = BS8.pack (showHex (fromIntegral (hash (map snd staticFiles)) :: Word) "")
 
@@ -134,15 +130,12 @@ devAdminApplication :: FilePath -> Application
 devAdminApplication dir = serveStaticApp AlwaysFresh $ \fp ->
   (Just <$> BS.readFile (dir </> fp)) `catch` (\(_ :: IOException) -> pure Nothing)
 
--- | The application both forms share, over a resolver for the files: @index.html@ at the
--- root, everything else by relative path. A root request without its trailing slash is
--- redirected to one, so the page's relative asset paths still resolve when the UI is
--- mounted under a prefix.
+-- | Serve files through a resolver. The root returns @index.html@ and other
+-- paths return the named file. Redirect a root path without a trailing slash so
+-- relative asset paths work below a mount prefix.
 --
--- Assets are reached through the versioned URLs @index.html@ names, and are cached for
--- good: a new build stamps new URLs rather than expiring the old ones. @index.html@
--- itself is never cached, so a new build is picked up on the next load. A version prefix
--- names an asset, so it never reaches @index.html@.
+-- Cache versioned assets as immutable. Do not cache @index.html@. A version
+-- prefix is valid only for an asset path.
 serveStaticApp :: Caching -> (FilePath -> IO (Maybe ByteString)) -> Application
 serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
   where
@@ -162,15 +155,12 @@ serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
         (LBS.fromStrict content)
     notFound = responseLBS status404 [("Content-Type", "text/plain")] "Not found"
 
--- | Whether a response may be held at all. The embedded files are stamped with this
--- build's version and cannot change under a running server; files read from disk are
--- edited while it runs, which is the whole point of serving them that way.
+-- | Response caching mode. Embedded, versioned files are immutable while the
+-- server runs. Files read from disk can change between requests.
 data Caching = Versioned | AlwaysFresh
 
--- | Caching headers for a response. A url carrying a version came from an @index.html@
--- this build stamped, so its bytes cannot change under it. Everything else is the page
--- itself, or a url nothing links to, and is fetched afresh. A stylesheet's own urls
--- resolve against its versioned path, so what it reaches is versioned too.
+-- | Cache versioned asset responses as immutable. Require revalidation for
+-- unversioned responses. Relative URLs in a stylesheet inherit its versioned path.
 cacheHeaders :: Caching -> Bool -> [(HeaderName, ByteString)]
 cacheHeaders Versioned True =
   [cacheControl ("public, max-age=" <> BS8.pack (show immutableMaxAge) <> ", immutable")]
@@ -179,12 +169,12 @@ cacheHeaders _ _ = [cacheControl "no-cache"]
 cacheControl :: ByteString -> (HeaderName, ByteString)
 cacheControl = (,) "Cache-Control"
 
--- | How long a versioned asset stands: a year, the longest value the spec defines.
+-- | One-year cache duration for a versioned asset.
 immutableMaxAge :: Int
 immutableMaxAge = 31536000
 
--- | Security headers included on all static responses. The dashboard loads no third-party
--- code and talks only to its own origin, so the policy names exactly that.
+-- | Security headers for all static responses. The dashboard uses resources
+-- from its own origin.
 securityHeaders :: [(HeaderName, ByteString)]
 securityHeaders =
   [ ("X-Content-Type-Options", "nosniff")
@@ -193,10 +183,9 @@ securityHeaders =
   , ("Content-Security-Policy", contentSecurityPolicy)
   ]
 
--- | The dashboard's own bundled assets, and nothing else. @connect-src@ covers the API
--- fetches and the event stream, both same-origin. Alpine compiles its attribute
--- expressions with the Function constructor, so @script-src@ has to allow eval.
--- Style bindings write the style attribute, which is what @unsafe-inline@ permits here.
+-- | Content security policy for bundled dashboard assets. @connect-src@ permits
+-- same-origin API and event-stream requests. Alpine requires @unsafe-eval@ for
+-- attribute expressions. Style bindings require @unsafe-inline@.
 contentSecurityPolicy :: ByteString
 contentSecurityPolicy =
   BS.intercalate

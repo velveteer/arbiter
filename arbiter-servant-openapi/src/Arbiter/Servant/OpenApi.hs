@@ -6,23 +6,18 @@
 -- schema instances below need read as redundant.
 {-# OPTIONS_GHC -Wno-orphans -Wno-unused-imports #-}
 
--- | An OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI', derived from
--- the route types alone. @RegistryToAPI@ expands to the same route tree the
--- server is built from, so walking it yields every queue under its own
--- 'SpecName', carrying its own payload and result schemas. Paths, methods,
--- parameters, request and response bodies and status codes all come from the
--- API, and the document cannot describe a route the server does not serve.
+-- | OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI'. The route types
+-- define paths, methods, parameters, bodies, responses, and status codes.
+-- @RegistryToAPI@ expands to the server route tree and includes each queue by
+-- its registry name with its payload and result schemas.
 --
--- A payload therefore needs a 'ToSchema' instance, the same bargain any
--- servant-openapi3 user makes. @deriving anyclass (ToSchema)@ covers a payload
--- whose JSON is generic; 'Data.Aeson.Value' has one here already, for a queue
--- whose payload is free-form.
+-- Each payload requires a 'ToSchema' instance. For generic JSON, use
+-- @deriving anyclass (ToSchema)@. This module defines a 'Data.Aeson.Value'
+-- instance for free-form payloads.
 --
--- The schemas below are the one hand-written part, and only where the JSON
--- itself is hand-written. Each applies its record's own constructor, so a
--- field that is missing, misordered or of the wrong type stops compiling
--- rather than shipping a wrong document. A type whose encoding is generic
--- takes the generic schema, which follows the same field names.
+-- Handwritten schemas are present for handwritten JSON encodings. Each schema
+-- applies the applicable record constructor. Missing, misordered, or incorrect
+-- field types cause a compile error. Generic encodings use generic schemas.
 module Arbiter.Servant.OpenApi
   ( -- * The document
     openApiSpec
@@ -141,9 +136,8 @@ openApiSpec = toJSON (sectioned described)
               }
         }
 
--- | Group the operations into sections, so a reader meets one queue's routes at a
--- time rather than one flat list. The section is the segment under the mount point,
--- which is a queue's name for its own routes and the feature's name for the rest.
+-- | Group operations by the first path segment below the mount point. Queue
+-- routes use the queue name. Other routes use the feature name.
 sectioned :: OpenApi -> OpenApi
 sectioned spec =
   spec
@@ -151,28 +145,21 @@ sectioned spec =
     , _openApiTags = InsOrdSet.fromList (map describeSection sections)
     }
   where
-    sections = ordNub (map section (InsOrd.keys (_openApiPaths spec)))
-    ordNub = foldr (\x acc -> x : filter (/= x) acc) []
+    sections = map section (InsOrd.keys (_openApiPaths spec))
 
 -- | The path's section: the segment after the @\/api\/v1@ mount point.
 section :: FilePath -> TagName
-section path = case drop (length mountSegments) (segmentsOf path) of
-  name : _ -> T.pack name
-  [] -> T.pack "api"
-  where
-    segmentsOf = filter (not . null) . foldr split [[]]
-    split c acc@(current : rest)
-      | c == '/' = [] : acc
-      | otherwise = (c : current) : rest
-    split _ [] = []
+section path =
+  case drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path))) of
+    name : _ -> name
+    [] -> "api"
 
 -- | The segments the API is mounted under, which name no section of their own.
-mountSegments :: [FilePath]
+mountSegments :: [Text]
 mountSegments = ["api", "v1"]
 
--- | A @Raw@ route has no type to describe it, so 'toOpenApi' leaves its path with no
--- operations at all. The event stream is the only one, and it is a real endpoint, so
--- it gets the one hand-written operation in this document.
+-- | Add a description for the event stream. 'toOpenApi' does not add an
+-- operation for a @Raw@ route because that route has no response type.
 describeRaw :: PathItem -> PathItem
 describeRaw item
   | any ($ item) operationFields = item
@@ -191,8 +178,7 @@ describeRaw item
         , _pathItemTrace
         ]
 
--- | The event stream, which answers with an endless @text/event-stream@ rather than a
--- body a schema could describe.
+-- | Description of the continuous @text/event-stream@ response.
 streamOperation :: Operation
 streamOperation =
   mempty
@@ -269,15 +255,13 @@ apiDescription =
 -- ---------------------------------------------------------------------------
 -- Schema builders
 --
--- A property names a field and pulls in the schema of the type behind it, so the two
--- travel together. Under 'Ap' that pair is a monoid, which makes a run of fields one
--- expression and a schema one line per field.
+-- A property combines a field name with the schema of its type. The applicative
+-- instance combines properties into one field list.
 -- ---------------------------------------------------------------------------
 
--- | A schema's fields, carrying the type of the value they describe. That value is
--- phantom at run time; its type is not. Applying a record's own constructor to a run of
--- fields is what holds the schema to the shape the encoder writes: a field that is
--- missing, misordered or of the wrong type stops compiling here.
+-- | Schema fields indexed by the described value type. The value is a runtime
+-- phantom. Applying the record constructor checks the field count, order, and
+-- types at compile time.
 newtype Fields a = Fields (Declare (Definitions Schema) [(Text, Referenced Schema)])
 
 instance Functor Fields where
@@ -295,8 +279,7 @@ prop name = Fields (pure . (,) name <$> declareSchemaRef (Proxy @a))
 patch :: forall a. (ToSchema a) => Text -> Fields (Maybe (Maybe a))
 patch name = Just <$> prop @(Maybe a) name
 
--- | One field whose schema is written out rather than referenced, for a shape that
--- appears in a single place.
+-- | One field with an inline schema for a shape used in one location.
 inlineProp :: forall a. Text -> Schema -> Fields a
 inlineProp name schema = Fields (pure [(name, Inline schema)])
 
@@ -319,8 +302,8 @@ schemaOver required props =
     , _schemaRequired = required
     }
 
--- | A schema name qualified by the payload it carries. Two queues with different
--- payload types describe different jobs, so they cannot share one definition.
+-- | Qualify a schema name with its payload type. Different payload types use
+-- different job definitions.
 carrying :: forall payload. (ToSchema payload) => Text -> Text
 carrying base = maybe base ((base <> "_") <>) (OpenApi.schemaName (Proxy @payload))
 
@@ -378,7 +361,7 @@ instance ToSchema HealthStatus where
 instance ToSchema DedupKey where
   declareNamedSchema _ =
     closedSchema "DedupKey" $
-      -- A tagged pair rather than a record, so the strategy picks the constructor.
+      -- Use the strategy field to select the constructor for this tagged pair.
       (\key _strategy -> IgnoreDuplicate key)
         <$> prop @Text "key"
         <*> inlineProp @Text "strategy" (stringEnum ["ignore", "replace"])
@@ -395,10 +378,9 @@ admissionKeySchema
 admissionKeySchema mk name =
   closedSchema name (mk <$> prop @Text "prefix" <*> prop @Text "suffix")
 
--- | The fields 'Arbiter.Servant.Types.apiJobPairs' writes. The record's own constructor
--- checks them: the encoder is flatter than the record, so the trace context and the
--- admission keys are each rebuilt from the two fields they are spread across, and
--- @isRollup@ rides along with no argument of its own because the encoder derives it.
+-- | Fields written by 'Arbiter.Servant.Types.apiJobPairs'. The record
+-- constructor checks their types and order. Reconstruct the trace context and
+-- admission keys from their flattened fields. The encoder derives @isRollup@.
 jobFields :: forall payload. (ToSchema payload) => Fields (JobRead payload)
 jobFields =
   Job
@@ -474,7 +456,7 @@ instance (ToSchema payload) => ToSchema (ApiArchiveJob payload) where
         <*> (unApiJob <$> prop @(ApiJob payload) "jobSnapshot")
         <*> prop @(Maybe Value) "result"
 
--- | The claimed jobs arrive under @jobs@, not under the field name behind it.
+-- | Schema for claimed jobs under the JSON field @jobs@.
 instance (ToSchema payload) => ToSchema (ClaimResponse payload) where
   declareNamedSchema _ =
     closedSchema (carrying @payload "ClaimResponse") $
@@ -488,7 +470,7 @@ instance ToSchema ClaimRequest where
 instance ToSchema JobLease where
   declareNamedSchema _ = closedSchema "JobLease" leaseFields
 
--- | The result a caller may hand back with the ack, of the queue's own result type.
+-- | Ack request with an optional queue result.
 instance (ToSchema result) => ToSchema (AckRequest result) where
   declareNamedSchema _ =
     objectSchema
@@ -500,8 +482,7 @@ instance ToSchema ExtendRequest where
   declareNamedSchema _ =
     closedSchema "ExtendRequest" (ExtendRequest <$> leaseFields <*> prop @Double "seconds")
 
--- | The lease a caller proves it holds a job with, spread into the request body rather
--- than nested under a field of its own.
+-- | Lease fields at the top level of the request body.
 leaseFields :: Fields JobLease
 leaseFields = JobLease <$> prop @Int64 "claimSeq" <*> prop @UUID "claimedBy"
 

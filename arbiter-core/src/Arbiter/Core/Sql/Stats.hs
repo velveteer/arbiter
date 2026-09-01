@@ -29,7 +29,7 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 -- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
 -- far-future scheduled job does not skew the queue's backlog latency.
 -- @oldest_in_flight_age_seconds@ measures from the claim that leased each row, so a
--- handler that never returns keeps climbing instead of never being measured.
+-- an active handler continues to increase until it returns.
 --
 -- The select list is rendered from the decoder's own columns.
 getQueueStatsSQL :: RowCodec a -> SchemaName -> TableName -> Query a

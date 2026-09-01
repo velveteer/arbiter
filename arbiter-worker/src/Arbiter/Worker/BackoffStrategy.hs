@@ -71,15 +71,11 @@ calculateBackoff strategy attempts = case strategy of
 applyJitter :: Jitter -> NominalDiffTime -> IO NominalDiffTime
 applyJitter jitter delay = case jitter of
   NoJitter -> pure delay
-  FullJitter -> do
-    let delayD = realToFrac delay :: Double
-    jitteredD <- randomRIO (0, delayD)
-    pure (realToFrac jitteredD)
-  EqualJitter -> do
-    let half = delay / 2
-        halfD = realToFrac half :: Double
-    jitterAmountD <- randomRIO (0, halfD)
-    pure (half + realToFrac jitterAmountD)
+  FullJitter -> randomBelow delay
+  EqualJitter -> (half +) <$> randomBelow half
+  where
+    half = delay / 2
+    randomBelow limit = realToFrac <$> randomRIO (0, realToFrac limit :: Double)
 
 -- | @exponentialBackoff 2 300@ doubles each attempt, capped at 5 minutes.
 exponentialBackoff :: Double -> NominalDiffTime -> BackoffStrategy

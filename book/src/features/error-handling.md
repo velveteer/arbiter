@@ -8,19 +8,19 @@ Arb.throwBranchCancel "Subtask failed" -- cancel current branch
 Arb.throwNack                          -- reprocess later, not a failure (no attempt consumed)
 ```
 
-A batched handler has the same dispositions per job through the
-`BatchCallbacks` record (`failRetry`, `failPermanent`, `cancelBranch`,
-`cancelTree`, `nack`), so one job's outcome does not affect the rest of the
-batch. A throw applies to the jobs the handler has not yet finalized.
+The `BatchCallbacks` record gives a batched handler these dispositions for each
+job: `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, and `nack`.
+One job's disposition does not change other completed jobs in the batch. A
+thrown exception applies to all jobs that the handler has not finalized.
 
-Any other exception is retryable. A job retries until it reaches its
-`maxAttempts`, then moves to the DLQ. A payload that fails to decode is the
-exception: it is permanent and goes straight to the DLQ, since retrying cannot
-change the outcome.
+Other exceptions are retryable. Arbiter retries a job until it reaches
+`maxAttempts`, and then moves it to the DLQ. A payload decode error is
+permanent because another attempt uses the same invalid payload. Arbiter moves
+such a job directly to the DLQ.
 
 ## Classifying an exception
 
-Decide the disposition where you know what the error means:
+Set the disposition where the application classifies the error:
 
 ```haskell
 processCharge conn job = do
@@ -32,13 +32,12 @@ processCharge conn job = do
     Right receipt -> pure receipt
 ```
 
-A retryable error costs an attempt and comes back after the backoff. A
-permanent one goes straight to the DLQ with its message and skips the attempts
-the job had left.
+A retryable error uses one attempt. Arbiter retries the job after the backoff.
+A permanent error moves the job and its message directly to the DLQ.
 
-`throwNack` is not a failure. It costs no attempt, fires no failure hook, and
-the job is reprocessed when its claim's remaining visibility runs out. Use it
-when the job is valid but its precondition is not yet met:
+`throwNack` does not record a failure, use an attempt, or call a failure hook.
+Arbiter processes the job again after the remaining visibility period. Use
+`throwNack` when a valid job has an unmet precondition:
 
 ```haskell
 processExport conn job = do
@@ -47,18 +46,18 @@ processExport conn job = do
   runExport conn job
 ```
 
-For a tree, `throwBranchCancel` gives up on this child and the branch it hangs
-from, while `throwTreeCancel` abandons the whole tree. Both are cancellations,
-not failures, so neither fires the failure hook.
+For a tree, `throwBranchCancel` cancels the current child and its branch.
+`throwTreeCancel` cancels the complete tree. Cancellations do not call the
+failure hook.
 
 ## Errors in traces
 
-A job that fails marks its consumer span with an error status and the message,
-whether it retries or lands in the DLQ. A batch span is the exception: it also
-covers the jobs that succeeded, so it keeps its status and only the per-job
-spans carry the error.
+A failed job adds an error status and message to its consumer span. This applies
+to retries and permanent failures. A batch span can include successful jobs,
+and therefore does not get an error status. The spans for failed jobs contain
+the error.
 
-A cancel and a nack leave the span status alone. See
+A cancel or nack does not change the span status. See
 [OpenTelemetry](../opentelemetry.md).
 
 See the [`Arbiter.Core.Exceptions` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Exceptions.html) for each disposition.

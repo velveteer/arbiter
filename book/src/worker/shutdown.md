@@ -19,7 +19,7 @@ env <- ArbS.createSimpleEnvWithConfig (Proxy @AppRegistry) connStr "arbiter" poo
 ArbS.runSimpleDb env $ Worker.runWorkerPools workers
 ```
 
-The dispatcher stops claiming and in-flight jobs drain. `runWorkerPools`
-returns once they finish, or once `gracefulShutdownTimeout` runs out, whichever
-comes first. A job still running at the timeout is left alone and redelivered
-after its visibility lapses.
+The dispatcher stops new claims and waits for in-flight jobs.
+`runWorkerPools` returns when those jobs finish or when
+`gracefulShutdownTimeout` expires. Arbiter does not finalize a job that still
+runs at the timeout. It redelivers the job after its visibility period expires.

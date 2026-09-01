@@ -108,7 +108,7 @@ tryAcquireCronLeaderSQL schema queue name =
 
 -- | How long a run request stays claimable. Only a pool serving the queue can
 -- claim one, so a request older than this had no pool to take it and expires
--- instead of pinning the schedule.
+-- and does not pin the schedule.
 cronRunRequestTtl :: Text
 cronRunRequestTtl = "INTERVAL '5 minutes'"
 

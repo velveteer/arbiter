@@ -39,8 +39,8 @@ sweepableGuard =
     <> T.pack (show defaultMaxAttempts)
     <> ") AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
 
--- | Move a job to the DLQ in one statement, carrying every job column plus the
--- failure that sent it there.
+-- | Move a job to the DLQ in one statement. Copy each job column and the
+-- failure message.
 moveToDLQSQL :: DLQMove -> Text -> Text -> Int64 -> Int64 -> Text -> Query Int64
 moveToDLQSQL move schema tableName jobId cseq errorMsg =
   let tbl = jobQueueTable schema tableName
@@ -64,10 +64,9 @@ moveToDLQSQL move schema tableName jobId cseq errorMsg =
         SELECT count(*) AS @{count :: CInt8} FROM deleted_job
       |]
 
--- | Select up to @limit@ claimable jobs whose attempts reached their limit,
--- with the scalar fields the tree-aware DLQ move needs. Each row is then moved
--- via @moveToDLQFields@. The cap drains a large backlog over several passes
--- rather than fetching an unbounded set at once.
+-- | Select up to @limit@ claimable jobs that reached their attempt limit.
+-- Include the scalar fields required by the tree-aware DLQ operation. Process a
+-- large backlog in multiple bounded passes.
 selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
@@ -80,11 +79,11 @@ selectExhaustedJobsSQL schema tableName limit =
         LIMIT ${lim}
       |]
 
--- | Retry a DLQ job with its whole DLQ'd tree: naming any member recovers the root,
--- every DLQ'd descendant, and the finalizers above them in one statement. A finalizer
--- comes back suspended when children come back with it, unsuspended when none do, so
--- it runs on its snapshot. A root whose parent left the main queue is refused, which
--- keeps the retry from orphaning children. The dedup key is dropped on retry.
+-- | Retry a DLQ job and its complete DLQ tree in one statement. Any member
+-- identifies the tree. Restore the root, all descendants in the DLQ, and their
+-- finalizers. Keep a finalizer suspended when it has restored children. Make it
+-- ready when it has no children. Refuse a root whose parent is absent from the
+-- main queue. Remove the deduplication key during the retry.
 retryFromDLQSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 retryFromDLQSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
