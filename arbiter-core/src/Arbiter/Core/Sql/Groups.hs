@@ -13,7 +13,8 @@ module Arbiter.Core.Sql.Groups
 import Data.Int (Int64)
 import Data.Text (Text)
 
-import Arbiter.Core.Job.Schema (groupAggregates, inFlightPredicate, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Schema.Groups (groupAggregates, inFlightPredicate)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 

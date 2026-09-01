@@ -61,6 +61,7 @@ library
     Arbiter.Core.Job.Dedup
     Arbiter.Core.Job.DLQ
     Arbiter.Core.Job.Schema
+    Arbiter.Core.Job.Schema.Groups
     Arbiter.Core.Job.Status
     Arbiter.Core.Job.TraceContext
     Arbiter.Core.Job.Types

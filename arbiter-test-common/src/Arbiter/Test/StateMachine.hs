@@ -24,9 +24,7 @@
 --   * no job exceeds its @max_attempts@
 --   * no duplicate live @dedup_key@
 --   * no concurrency key has more claimed-in-flight jobs than its effective cap
---   * job_count, ready_count, next_due, in_flight_until match their recompute
---     from the main table, and min_priority\/min_id never exceed theirs (the
---     DELETE trigger lets those drift downward, healed by the reaper)
+--   * every group summary column matches its recompute from the main table
 --
 -- Generated inserts also carry rate-limit keys and concurrency slots, so the
 -- claim, retry, and DLQ round-trip paths are exercised on limited jobs.
@@ -53,7 +51,7 @@ import Arbiter.Core.Concurrency.Spec
   , noConcurrency
   )
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Schema (inFlightPredicate)
+import Arbiter.Core.Job.Schema.Groups (inFlightPredicate)
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , JobRead
@@ -274,14 +272,12 @@ driftViolations schema table withConn = withConn $ \conn -> do
     -- stored timestamps compare exactly against the recompute. The recompute
     -- filters mirror the trigger definitions: ready = unblocked-now, next_due =
     -- any parked/leased row, in_flight = leased/backoff/throttled (inFlightPredicate).
-    -- min_priority/min_id only ratchet down on delete (the DELETE trigger drops
-    -- their maintenance), so they are bounded below, not matched exactly.
     oracleSql =
       "SELECT gk, drift FROM (SELECT COALESCE(g.group_key, e.group_key) AS gk, concat_ws(', '"
         <> ", CASE WHEN g.group_key IS NULL THEN 'missing summary row' END"
         <> ", CASE WHEN e.group_key IS NULL THEN 'orphan summary row' END"
-        <> ", CASE WHEN g.min_priority > e.min_priority THEN 'min_priority' END"
-        <> ", CASE WHEN g.min_id > e.min_id THEN 'min_id' END"
+        <> ", CASE WHEN g.min_priority IS DISTINCT FROM e.min_priority THEN 'min_priority' END"
+        <> ", CASE WHEN g.min_id IS DISTINCT FROM e.min_id THEN 'min_id' END"
         <> ", CASE WHEN g.job_count IS DISTINCT FROM e.job_count THEN 'job_count' END"
         <> ", CASE WHEN g.ready_count IS DISTINCT FROM e.ready_count THEN 'ready_count' END"
         <> ", CASE WHEN g.next_due IS DISTINCT FROM e.next_due THEN 'next_due' END"
@@ -290,7 +286,7 @@ driftViolations schema table withConn = withConn $ \conn -> do
         <> groupsTbl
         <> " WHERE job_count > 0) g FULL OUTER JOIN (SELECT group_key"
         <> ", MIN(priority)::int AS min_priority"
-        <> ", MIN(id)::bigint AS min_id"
+        <> ", (MIN(ARRAY[priority::bigint, id]))[2]::bigint AS min_id"
         <> ", COUNT(*)::bigint AS job_count"
         <> ", COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended)::bigint AS ready_count"
         <> ", MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due"
