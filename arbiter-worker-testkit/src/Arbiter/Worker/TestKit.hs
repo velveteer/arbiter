@@ -979,11 +979,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           pure (job1Count >= 2 && job2Count >= 2)
         job1Before <- countFor (head jobIds)
         job2Before <- countFor (jobIds !! 1)
-        threadDelay 1_200_000
-        job1After <- countFor (head jobIds)
-        job2After <- countFor (jobIds !! 1)
-        job1After `shouldSatisfy` (> job1Before)
-        job2After `shouldSatisfy` (> job2Before)
+        waitUntil 3_000 $ do
+          job1After <- countFor (head jobIds)
+          job2After <- countFor (jobIds !! 1)
+          pure (job1After > job1Before && job2After > job2Before)
 
     it "a throw fails only the jobs not yet completed" $ \env -> do
       failuresRef <- newIORef ([] :: [Int64])
