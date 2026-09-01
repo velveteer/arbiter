@@ -7,6 +7,7 @@ module Arbiter.Core.Sql.Cron
   , upsertCronDefaultSQL
   , listCronSchedulesSQL
   , getCronScheduleByNameSQL
+  , updateCronScheduleSQL
   , touchCronLastFiredSQL
   , touchCronCheckedSQL
   , tryFireCronGateSQL
@@ -22,10 +23,10 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec)
-import Arbiter.Core.CronSchedule (CronScheduleRow, cronSchedulesTable)
+import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..), cronSchedulesTable)
 import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, rows)
+import Arbiter.Core.Sql.Query (Query, raw, rows, sepBy)
 import Arbiter.Core.SqlLiterals (textLiteral)
 
 -- | The @cron_schedules@ read columns, comma separated.
@@ -72,6 +73,27 @@ getCronScheduleByNameSQL :: Text -> Text -> Query CronScheduleRow
 getCronScheduleByNameSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
    in rows cronScheduleRowCodec [sql|SELECT ${cronReadColumns} FROM ${tbl} WHERE name = #{name :: CText}|]
+
+-- | Patch a cron schedule's overrides. 'Nothing' when the patch sets no column.
+updateCronScheduleSQL :: Text -> Text -> CronScheduleUpdate -> Maybe (Query ())
+updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpr mOverlap mTz mEnabled)
+  | null clauses = Nothing
+  | otherwise =
+      let tbl = cronSchedulesTable schemaName
+          setFrag = sepBy ", " (clauses <> [raw "updated_at = NOW()"])
+       in Just [sql|UPDATE ${tbl} SET ${setFrag} WHERE name = #{name :: CText}|]
+  where
+    clauses =
+      concat
+        [ patch "override_expression" mExpr
+        , patch "override_overlap" mOverlap
+        , patch "override_timezone" mTz
+        , case mEnabled of
+            Nothing -> []
+            Just True -> [raw "enabled = TRUE"]
+            Just False -> [raw "enabled = FALSE", raw "run_requested_at = NULL"]
+        ]
+    patch col = foldMap (\mv -> [raw (col <> " = ") <> maybe (raw "NULL") (\v -> [sql|#{v :: CText}|]) mv])
 
 -- | Set @last_fired_at@ to NOW() for a schedule.
 touchCronLastFiredSQL :: Text -> Text -> Query ()

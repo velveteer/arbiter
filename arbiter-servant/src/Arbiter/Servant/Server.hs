@@ -179,6 +179,27 @@ rowsOr404 missing rowsAffected
 noContentOr :: Either ServerError () -> Handler NoContent
 noContentOr = either throwError (const (pure NoContent))
 
+-- | Run a job mutation. When it touches no row, re-read the job and answer 404, or
+-- the 409 that @refuse@ derives from the job's state.
+mutateJob
+  :: forall payload registry
+   . (JobPayload payload)
+  => Text
+  -> ArbiterServerConfig registry
+  -> Int64
+  -> (Text -> SimpleDb registry IO Int64)
+  -> (Job.JobRead payload -> LBS.ByteString)
+  -> Handler NoContent
+mutateJob tableName config jobId mutate refuse =
+  noContentOr =<< runDb config (mutate schemaName >>= diagnose)
+  where
+    schemaName = serverSchema config
+    diagnose rowsAffected
+      | rowsAffected > 0 = pure (Right ())
+      | otherwise =
+          maybe (Left err404 {errBody = "Job not found"}) (\job -> Left err409 {errBody = refuse job})
+            <$> Ops.getJobById @_ @payload schemaName tableName jobId
+
 -- | Small pool configuration for admin API traffic.
 serverPoolConfig :: PoolConfig
 serverPoolConfig =
@@ -396,23 +417,12 @@ promoteJobHandler
   -> ArbiterServerConfig registry
   -> Int64
   -> Handler NoContent
-promoteJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  result <- runDb config $ do
-    rowsAffected <- Ops.promoteJob schemaName tableName jobId
-    if rowsAffected > 0
-      then pure (Right ())
-      else do
-        mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
-        case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
-          Just job
-            | Job.suspended job ->
-                pure (Left err409 {errBody = "Job is suspended - use resume endpoint"})
-            | otherwise ->
-                pure (Left err409 {errBody = "Job is already visible"})
-
-  noContentOr result
+promoteJobHandler tableName config jobId =
+  mutateJob @payload tableName config jobId (\s -> Ops.promoteJob s tableName jobId) refuse
+  where
+    refuse job
+      | Job.suspended job = "Job is suspended - use resume endpoint"
+      | otherwise = "Job is already visible"
 
 -- | Move a job to the dead letter queue.
 moveToDLQHandler
@@ -474,23 +484,12 @@ suspendJobHandler
   -> ArbiterServerConfig registry
   -> Int64
   -> Handler NoContent
-suspendJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  result <- runDb config $ do
-    rowsAffected <- Ops.suspendJob schemaName tableName jobId
-    if rowsAffected > 0
-      then pure (Right ())
-      else do
-        mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
-        case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
-          Just job
-            | Job.suspended job ->
-                pure (Left err409 {errBody = "Job is already suspended"})
-            | otherwise ->
-                pure (Left err409 {errBody = "Job is in-flight - cannot suspend"})
-
-  noContentOr result
+suspendJobHandler tableName config jobId =
+  mutateJob @payload tableName config jobId (\s -> Ops.suspendJob s tableName jobId) refuse
+  where
+    refuse job
+      | Job.suspended job = "Job is already suspended"
+      | otherwise = "Job is in-flight - cannot suspend"
 
 -- | Resume a suspended job, making it claimable again. Refuses a finalizer with children
 -- still running, so its handler cannot start early.
@@ -501,25 +500,13 @@ resumeJobHandler
   -> ArbiterServerConfig registry
   -> Int64
   -> Handler NoContent
-resumeJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  result <- runDb config $ do
-    rowsAffected <- Ops.resumeJob schemaName tableName jobId
-    if rowsAffected > 0
-      then pure (Right ())
-      else do
-        mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
-        case mJob of
-          Nothing -> pure (Left err404 {errBody = "Job not found"})
-          Just job
-            | not (Job.suspended job) ->
-                pure (Left err409 {errBody = "Job is not suspended"})
-            | isRollup job ->
-                pure (Left err409 {errBody = "Cannot resume a rollup finalizer with active children"})
-            | otherwise ->
-                pure (Left err409 {errBody = "Job could not be resumed (concurrent modification)"})
-
-  noContentOr result
+resumeJobHandler tableName config jobId =
+  mutateJob @payload tableName config jobId (\s -> Ops.resumeJob s tableName jobId) refuse
+  where
+    refuse job
+      | not (Job.suspended job) = "Job is not suspended"
+      | isRollup job = "Cannot resume a rollup finalizer with active children"
+      | otherwise = "Job could not be resumed (concurrent modification)"
 
 -- | DLQ API handlers for a specific table.
 dlqServer
@@ -1246,23 +1233,15 @@ probeHealth config = cachedFor healthCacheTtl (healthCache config) $ do
   either swallowSync (const (pure ())) probed
   finished <- getCurrentTime
   let elapsedMs = realToFrac (diffUTCTime finished started) * 1000
-  pure $ case join (eitherToMaybe probed) of
-    Nothing ->
-      HealthResponse
-        { status = Down
-        , schemaName = schemaName
-        , checkedAt = finished
-        , dbLatencyMs = Nothing
-        , db = Nothing
-        }
-    Just dbHealth ->
-      HealthResponse
-        { status = Ok
-        , schemaName = schemaName
-        , checkedAt = finished
-        , dbLatencyMs = Just elapsedMs
-        , db = dbHealth
-        }
+  let reached = join (eitherToMaybe probed)
+  pure
+    HealthResponse
+      { status = maybe Down (const Ok) reached
+      , schemaName = schemaName
+      , checkedAt = finished
+      , dbLatencyMs = elapsedMs <$ reached
+      , db = join reached
+      }
   where
     eitherToMaybe = either (const Nothing) Just
 

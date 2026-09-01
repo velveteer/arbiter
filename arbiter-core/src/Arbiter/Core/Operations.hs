@@ -236,7 +236,6 @@ import Arbiter.Core.Concurrency.Spec
   )
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate (..), ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
-import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (throwParsing)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -244,7 +243,7 @@ import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
   ( AdmissionColumns (..)
   , ClaimSeq
-  , DedupKey (IgnoreDuplicate, ReplaceDuplicate)
+  , DedupKey (ReplaceDuplicate)
   , JobId
   , JobPayload
   , JobRead
@@ -853,7 +852,7 @@ data ClaimSql = ClaimSql
   , claimSqlClaimant :: Maybe UUID
   -- ^ Bound as the claim's @claimed_by@, so one rendered statement serves every
   -- claimant in one statement for all UUID values.
-  , claimSqlFor :: Int -> Text
+  , claimSqlFor :: Int -> Q.Query (JobRead Value)
   }
 
 -- | Assemble a pool's claim statements. Every input except the per-poll capacity
@@ -871,7 +870,10 @@ mkClaimSql
   -> ClaimSql
 mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
   let admission = claimAdmissionFor @payload
-      render n = Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout
+      claimant = [pnul CUuid mWorkerId]
+      codec = jobRowCodec tableName
+      render n =
+        Q.Query (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout) claimant codec
       cache = IntMap.fromList [(n, render n) | n <- [1 .. poolSize]]
    in ClaimSql
         { claimSqlTable = tableName
@@ -879,14 +881,6 @@ mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
         , claimSqlClaimant = mWorkerId
         , claimSqlFor = \n -> IntMap.findWithDefault (render n) n cache
         }
-
--- | A claim statement for @n@ rows. The claimant is a bound parameter.
-claimQuery :: ClaimSql -> Int -> Q.Query (JobRead Value)
-claimQuery cs n =
-  Q.Query
-    (claimSqlFor cs n)
-    [pnul CUuid (claimSqlClaimant cs)]
-    (jobRowCodec (claimSqlTable cs))
 
 -- | 'claimJobs' over a prebuilt 'ClaimSql'.
 claimJobsCached
@@ -896,7 +890,7 @@ claimJobsCached
   -> Int
   -> m [JobRead payload]
 claimJobsCached cs maxJobs = withDbTransaction $ do
-  rawJobs <- MA.executeQueryPrepared (claimQuery cs maxJobs)
+  rawJobs <- MA.executeQueryPrepared (claimSqlFor cs maxJobs)
   traverse decodePayload rawJobs
 
 -- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each of @maxBatches@
@@ -937,7 +931,7 @@ claimJobsBatchedCached cs maxBatches
   | claimSqlBatchSize cs < 1 = pure []
   | maxBatches < 1 = pure []
   | otherwise = withDbTransaction $ do
-      rawJobs <- MA.executeQueryPrepared (claimQuery cs maxBatches)
+      rawJobs <- MA.executeQueryPrepared (claimSqlFor cs maxBatches)
       jobs <- traverse decodePayload rawJobs
       let sorted = sortOn groupKey jobs
           groups = groupBy (\j1 j2 -> groupKey j1 == groupKey j2) sorted
@@ -2489,33 +2483,8 @@ updateCronSchedule
   -- ^ Schedule name
   -> CronScheduleUpdate
   -> m Int64
-updateCronSchedule schemaName scheduleName (CronScheduleUpdate mExpr mOverlap mTz mEnabled) = do
-  let clauses :: [Q.Query ()]
-      clauses =
-        concat
-          [ case mExpr of
-              Nothing -> []
-              Just Nothing -> [Q.raw "override_expression = NULL"]
-              Just (Just expr) -> [[QQ.sql|override_expression = #{expr :: CText}|]]
-          , case mOverlap of
-              Nothing -> []
-              Just Nothing -> [Q.raw "override_overlap = NULL"]
-              Just (Just ov) -> [[QQ.sql|override_overlap = #{ov :: CText}|]]
-          , case mTz of
-              Nothing -> []
-              Just Nothing -> [Q.raw "override_timezone = NULL"]
-              Just (Just tz) -> [[QQ.sql|override_timezone = #{tz :: CText}|]]
-          , case mEnabled of
-              Nothing -> []
-              Just True -> [Q.raw "enabled = TRUE"]
-              Just False -> [Q.raw "enabled = FALSE", Q.raw "run_requested_at = NULL"]
-          ]
-  if null clauses
-    then pure 0
-    else do
-      let tbl = CS.cronSchedulesTable schemaName
-          setFrag = Q.sepBy ", " (clauses <> [Q.raw "updated_at = NOW()"])
-      MA.executeStatement [QQ.sql|UPDATE ${tbl} SET ${setFrag} WHERE name = #{scheduleName :: CText}|]
+updateCronSchedule schemaName scheduleName upd =
+  maybe (pure 0) MA.executeStatement (Tmpl.updateCronScheduleSQL schemaName scheduleName upd)
 
 -- | Update @last_fired_at@ to NOW() for a cron schedule.
 touchCronLastFired
