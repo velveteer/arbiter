@@ -47,7 +47,7 @@ library
     Arbiter.Simple.SimpleDb
 
   build-depends:
-    , arbiter-core       <0.2
+    , arbiter-core       >=0.1  && <0.2
     , base               >=4.20 && <5
     , bytestring         >=0.10 && <0.13
     , exceptions         >=0.10 && <0.11
@@ -73,9 +73,9 @@ test-suite arbiter-simple-tests
     Test.Arbiter.Simple.TestHelpers
 
   build-depends:
-    , arbiter-core         <0.2
+    , arbiter-core         >=0.1 && <0.2
     , arbiter-simple
-    , arbiter-test-common
+    , arbiter-test-common  >=0.1 && <0.2
     , base
     , bytestring
     , hspec                >=2.0 && <2.12

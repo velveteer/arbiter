@@ -66,7 +66,7 @@ library
 
   build-depends:
     , aeson               >=2.0  && <2.3
-    , arbiter-core        <0.2
+    , arbiter-core        >=0.1  && <0.2
     , base                >=4.20 && <5
     , containers          >=0.6  && <0.9
     , cron                >=0.7  && <0.9
@@ -100,9 +100,9 @@ test-suite arbiter-worker-tests
 
   build-depends:
     , aeson
-    , arbiter-core         <0.2
-    , arbiter-simple
-    , arbiter-test-common
+    , arbiter-core         >=0.1 && <0.2
+    , arbiter-simple       >=0.1 && <0.2
+    , arbiter-test-common  >=0.1 && <0.2
     , arbiter-worker
     , base
     , bytestring

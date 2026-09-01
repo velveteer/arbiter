@@ -37,13 +37,13 @@ benchmark benchmarks
   ghc-options:    -threaded -rtsopts "-with-rtsopts=-N -A128m"
   build-depends:
     , aeson                 >=2.0
-    , arbiter-core
-    , arbiter-hasql
-    , arbiter-migrations
-    , arbiter-orville
-    , arbiter-otel
-    , arbiter-simple
-    , arbiter-worker
+    , arbiter-core          >=0.1  && <0.2
+    , arbiter-hasql         >=0.1  && <0.2
+    , arbiter-migrations    >=0.1  && <0.2
+    , arbiter-orville       >=0.1  && <0.2
+    , arbiter-otel          >=0.1  && <0.2
+    , arbiter-simple        >=0.1  && <0.2
+    , arbiter-worker        >=0.1  && <0.2
     , async                 >=2.2
     , base                  >=4.20 && <5
     , bytestring            >=0.10

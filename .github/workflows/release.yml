@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 
 env:
-  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-ui arbiter-otel
+  RELEASE_PACKAGES: arbiter-core arbiter-migrations arbiter-test-common arbiter-worker arbiter-worker-testkit arbiter-simple arbiter-hasql arbiter-orville arbiter-servant arbiter-servant-openapi arbiter-servant-ui arbiter-otel
 
 jobs:
   release:

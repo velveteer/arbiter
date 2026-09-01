@@ -32,24 +32,24 @@ executable arbiter-demo
   hs-source-dirs: .
   build-depends:
     , aeson                                 >=2.0
-    , arbiter-core
-    , arbiter-migrations
-    , arbiter-otel
-    , arbiter-servant
-    , arbiter-servant-openapi
-    , arbiter-servant-ui
-    , openapi3
-    , servant-server
-    , servant-swagger-ui
-    , arbiter-simple
-    , arbiter-worker
+    , arbiter-core                          >=0.1  && <0.2
+    , arbiter-migrations                    >=0.1  && <0.2
+    , arbiter-otel                          >=0.1  && <0.2
+    , arbiter-servant                       >=0.1  && <0.2
+    , arbiter-servant-openapi               >=0.1  && <0.2
+    , arbiter-servant-ui                    >=0.1  && <0.2
+    , arbiter-simple                        >=0.1  && <0.2
+    , arbiter-worker                        >=0.1  && <0.2
     , async                                 >=2.2
     , base                                  >=4.20 && <5
     , bytestring                            >=0.10
     , hs-opentelemetry-api                  >=1.0  && <1.1
     , hs-opentelemetry-instrumentation-wai  >=1.0  && <1.1
+    , openapi3
     , postgresql-simple                     >=0.6
     , random                                >=1.2
+    , servant-server
+    , servant-swagger-ui
     , text                                  >=1.2
     , time                                  >=1.9
     , unix                                  >=2.7

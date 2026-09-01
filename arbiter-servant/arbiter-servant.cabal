@@ -48,9 +48,9 @@ library
 
   build-depends:
     , aeson              >=2.2  && <2.3
-    , arbiter-core       <0.2
-    , arbiter-simple     <0.2
-    , arbiter-worker     <0.2
+    , arbiter-core       >=0.1  && <0.2
+    , arbiter-simple     >=0.1  && <0.2
+    , arbiter-worker     >=0.1  && <0.2
     , async              >=2.2  && <2.3
     , base               >=4.20 && <5
     , bytestring         >=0.10 && <0.13
@@ -77,10 +77,10 @@ test-suite arbiter-servant-tests
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   build-depends:
     , aeson
-    , arbiter-core         <0.2
+    , arbiter-core         >=0.1 && <0.2
     , arbiter-servant
-    , arbiter-simple       <0.2
-    , arbiter-test-common
+    , arbiter-simple       >=0.1 && <0.2
+    , arbiter-test-common  >=0.1 && <0.2
     , base
     , bytestring
     , containers

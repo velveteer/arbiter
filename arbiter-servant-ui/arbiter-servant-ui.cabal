@@ -33,6 +33,8 @@ extra-source-files:
   static/vendor/*.js
   static/vendor/fonts/*.css
   static/vendor/fonts/*.woff2
+  static/vendor/licenses/*.md
+  static/vendor/licenses/*.txt
 
 homepage:           https://github.com/velveteer/arbiter
 bug-reports:        https://github.com/velveteer/arbiter/issues
@@ -56,7 +58,7 @@ library
   hs-source-dirs:  src
   exposed-modules: Arbiter.Servant.UI
   build-depends:
-    , arbiter-servant  <0.2
+    , arbiter-servant  >=0.1    && <0.2
     , base             >=4.20   && <5
     , bytestring       >=0.10   && <0.13
     , file-embed       >=0.0.10 && <0.1

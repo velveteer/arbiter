@@ -49,7 +49,7 @@ library
 
   build-depends:
     , aeson               >=2.0  && <2.3
-    , arbiter-core        <0.2
+    , arbiter-core        >=0.1  && <0.2
     , base                >=4.20 && <5
     , bytestring          >=0.10 && <0.13
     , orville-postgresql  >=1.0  && <1.2
@@ -74,11 +74,11 @@ test-suite arbiter-orville-tests
 
   build-depends:
     , aeson
-    , arbiter-core            <0.2
+    , arbiter-core            >=0.1 && <0.2
     , arbiter-orville
-    , arbiter-test-common
-    , arbiter-worker
-    , arbiter-worker-testkit
+    , arbiter-test-common     >=0.1 && <0.2
+    , arbiter-worker          >=0.1 && <0.2
+    , arbiter-worker-testkit  >=0.1 && <0.2
     , base
     , bytestring
     , exceptions

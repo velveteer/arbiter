@@ -49,7 +49,7 @@ library
     Arbiter.Hasql.MonadArbiter
 
   build-depends:
-    , arbiter-core      <0.2
+    , arbiter-core      >=0.1  && <0.2
     , base              >=4.20 && <5
     , bytestring        >=0.10 && <0.13
     , exceptions        >=0.10 && <0.11
@@ -78,10 +78,10 @@ test-suite arbiter-hasql-tests
 
   build-depends:
     , aeson
-    , arbiter-core            <0.2
+    , arbiter-core            >=0.1 && <0.2
     , arbiter-hasql
-    , arbiter-test-common
-    , arbiter-worker-testkit
+    , arbiter-test-common     >=0.1 && <0.2
+    , arbiter-worker-testkit  >=0.1 && <0.2
     , base
     , bytestring
     , hasql

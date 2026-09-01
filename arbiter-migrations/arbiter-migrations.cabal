@@ -44,7 +44,7 @@ library
   hs-source-dirs:  src
   exposed-modules: Arbiter.Migrations
   build-depends:
-    , arbiter-core          <0.2
+    , arbiter-core          >=0.1  && <0.2
     , base                  >=4.20 && <5
     , bytestring            >=0.10 && <0.13
     , containers            >=0.6  && <0.9
@@ -61,7 +61,7 @@ test-suite arbiter-migrations-tests
   main-is:        Spec.hs
   build-depends:
     , aeson                 >=2.0  && <2.3
-    , arbiter-core
+    , arbiter-core          >=0.1  && <0.2
     , arbiter-migrations
     , async                 >=2.2  && <2.3
     , base                  >=4.20 && <5
