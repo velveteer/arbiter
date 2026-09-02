@@ -5,7 +5,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, someExceptionContext, try)
 import Control.Exception.Context (displayExceptionContext)
-import Data.Aeson (ToJSON (..), Value (String), object, (.=))
+import Data.Aeson (ToJSON (..), Value (String))
 import Data.Int (Int32, Int64)
 import Data.List (isInfixOf)
 import Data.Text (Text)
@@ -27,7 +27,7 @@ import Arbiter.Core.Codec
   , writeColumnNames
   )
 import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
-import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds, kindFromField)
+import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Job.Types (PayloadColumns (..), defaultJob)
 import Arbiter.Core.Operations (QueueStats, buildWhereClause, statsRowCodec)
@@ -137,14 +137,6 @@ instance HasKind Envelope where
   kindOf (Envelope b) = Just (lowerFirst (constructorKind b))
   kindsFor = map lowerFirst (constructorKinds @KindPayload)
 
--- | A payload with no constructors to name, labelled from the data itself.
-newtype RuntimePayload = RuntimePayload Value
-  deriving stock (Eq, Show)
-
-instance HasKind RuntimePayload where
-  kindOf (RuntimePayload v) = kindFromField "type" v
-  kindsFor = []
-
 -- | The per-queue stats query over a declared label set.
 statsSQL :: [Text] -> Query QueueStats
 statsSQL = getQueueStatsSQL statsRowCodec "arbiter" "jobs"
@@ -203,11 +195,6 @@ main = hspec $ do
     it "labels an envelope by the constructor of the body it wraps" $ do
       kindOf (Envelope (SendWelcome "alice")) `shouldBe` Just "sendWelcome"
       map Just (kindsFor @Envelope) `shouldBe` map (kindOf . Envelope) [SendWelcome "a", SendReceipt 1]
-
-    it "labels a payload that has no constructors to name from its data" $ do
-      kindOf (RuntimePayload (object ["type" .= ("from_data" :: Text)])) `shouldBe` Just "from_data"
-      kindOf (RuntimePayload (object ["other" .= ("x" :: Text)])) `shouldBe` Nothing
-      kindsFor @RuntimePayload `shouldBe` []
 
     it "writes the payload column from the encoding the caller built" $
       jsonParams (cScalar (jobCodec "jobs") sentinelSource) `shouldBe` [String "sentinel"]

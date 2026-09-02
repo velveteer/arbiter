@@ -6,7 +6,6 @@ module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job
   , HasKind (..)
-  , kindFromField
   , constructorKind
   , constructorKinds
   , PayloadKeys (..)
@@ -91,7 +90,7 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.Job.Dedup (DedupKey (..), dedupParts)
-import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds, kindFromField)
+import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds)
 import Arbiter.Core.Job.Status (JobStatus (..), jobStatusFromText, jobStatusToText)
 import Arbiter.Core.Job.TraceContext (TraceContext (..), toTraceContext)
 import Arbiter.Core.Job.Types.Internal

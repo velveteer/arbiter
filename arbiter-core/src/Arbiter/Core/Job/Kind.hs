@@ -5,16 +5,12 @@
 -- | A payload's variant label, stored on the job row for filtering and grouping.
 module Arbiter.Core.Job.Kind
   ( HasKind (..)
-  , kindFromField
   , constructorKind
   , constructorKinds
   , GKindOf (..)
   , GKindsOf (..)
   ) where
 
-import Data.Aeson (Value (Object, String))
-import Data.Aeson.Key qualified as Key
-import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -36,24 +32,6 @@ class HasKind payload where
 instance {-# OVERLAPPABLE #-} HasKind payload where
   kindOf _ = Nothing
   kindsFor = []
-
--- | The string at a field of a JSON payload, for a payload with no constructors
--- to name. Wrap the payload in a newtype: an instance on @Value@ itself is an
--- orphan, and a call site that does not import it labels the job NULL.
---
--- @
--- newtype RuntimeJob = RuntimeJob Value
---
--- instance HasKind RuntimeJob where
---   kindOf (RuntimeJob v) = kindFromField "type" v
---   kindsFor = []
--- @
-kindFromField :: Text -> Value -> Maybe Text
-kindFromField field = \case
-  Object o -> case KeyMap.lookup (Key.fromText field) o of
-    Just (String t) -> Just t
-    _ -> Nothing
-  _ -> Nothing
 
 -- | The constructor name of a value, for a payload that wraps the sum it wants
 -- labelled. Needs @Generic@ on the wrapped type, not a 'HasKind' instance.
