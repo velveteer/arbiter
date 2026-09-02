@@ -120,7 +120,7 @@ function summaryMemory(storageKey) {
 
     summaryClass(has) {
       if (!this.loaded) return this.summaryExpected ? 'is-pending' : 'd-none';
-      if (seen !== has) {
+      if (seen !== has && !this._loadErrored) {
         seen = has;
         localStorage.setItem(storageKey, has ? '1' : '0');
       }

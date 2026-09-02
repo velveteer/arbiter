@@ -283,12 +283,16 @@ spec = do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
         ms <- orFail "expected metrics on" (Otel.meters tel)
-        let hooks = Otel.otelHooks ms queue
-        onJobClaimed hooks job now
-        onJobSuccess hooks job now now
-        onJobFailedAndMovedToDLQ hooks "boom" job
-        onJobCancelled hooks job "cancelled"
-        onJobUnavailable hooks job "no longer available"
+        let noopHandler :: JobHandler (SimpleDb Reg IO) Greeting ()
+            noopHandler _conn _job = pure ()
+        -- Through the pool's own instrumentation, which is what labels a running pool.
+        hooks <- observabilityHooks . Otel.instrumentConfig tel <$> transactionalWorkerConfig 1 noopHandler
+        runSimpleDb plainEnv $ do
+          onJobClaimed hooks job now
+          onJobSuccess hooks job now now
+          onJobFailedAndMovedToDLQ hooks "boom" job
+          onJobCancelled hooks job "cancelled"
+          onJobUnavailable hooks job "no longer available"
         Otel.otelMaintenance ms SweepExhaustedJobs 3
 
         loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [(queue, kindsFor @Greeting)] 1

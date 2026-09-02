@@ -198,10 +198,7 @@ runWorkerPool config = do
         pure (pure True)
       Just listener ->
         ContT $
-          Listen.withChannels
-            (Listen.withDefaultListenerLog (sharedHubLogFor (logConfig config)) listener)
-            (hubLogFor (logConfig config))
-            handlers
+          Listen.withChannels listener (hubLogFor (logConfig config)) handlers
     void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
     let spawn = spawnRetried (workerStateVar config) (logConfig config) queueName
     heartbeat <-

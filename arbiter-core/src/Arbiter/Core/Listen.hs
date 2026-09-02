@@ -8,8 +8,6 @@ module Arbiter.Core.Listen
   , HubLog (..)
   , withChannels
   , newPoolListener
-  , withListenerLog
-  , withDefaultListenerLog
 
     -- * Dedicated-connection listener
   , DedicatedListen
@@ -39,21 +37,22 @@ import Control.Concurrent.STM
   , writeTVar
   )
 import Control.Exception (bracket, onException, uninterruptibleMask_)
-import Control.Monad (guard, unless, void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BSC
-import Data.Either (isRight)
 import Data.Foldable (for_, traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.LibPQ qualified as PQ
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (threadWaitReadSTM)
@@ -62,6 +61,12 @@ import UnliftIO.Async qualified as Async
 import UnliftIO.Exception (tryAny)
 
 import Arbiter.Core.Exceptions (displayEx, throwInternal)
+import Arbiter.Core.FailureGate
+  ( clearFailure
+  , defaultFailureRepeatInterval
+  , holdFailure
+  , newFailureGate
+  )
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 import Arbiter.Core.Threads (labelArbiterThread)
 
@@ -72,11 +77,16 @@ data Notification = Notification
   }
   deriving stock (Eq, Show)
 
--- | A registrant's loggers, carrying its logging context.
+-- | How a registrant wants hub events reported.
 data HubLog = HubLog
-  { hubInfo :: Text -> IO ()
+  { hubRecovered :: Text -> IO ()
+  -- ^ The hub's connection came back.
   , hubWarn :: Text -> IO ()
+  -- ^ This registrant's own channel handler raised.
   , hubError :: Text -> IO ()
+  -- ^ The hub's connection failed.
+  , hubRepeatInterval :: NominalDiffTime
+  -- ^ How often a standing connection failure says so again.
   }
 
 -- | Everything the worker needs to run a shared listener for one env.
@@ -85,24 +95,13 @@ data Listener = Listener
   -- ^ Rendezvous, lazily started and refcounted. Shared across an env's pools.
   , listenerWithConn :: (PQ.Connection -> IO ()) -> IO ()
   -- ^ Run the loop with a libpq connection, for the connection's lifetime.
-  , listenerLog :: Maybe HubLog
-  -- ^ Reports the hub's own connection. Unset reports to every registrant.
   }
-
--- | Set the hub's own logger.
-withListenerLog :: HubLog -> Listener -> Listener
-withListenerLog logger listener = listener {listenerLog = Just logger}
-
--- | 'withListenerLog' unless one is already set.
-withDefaultListenerLog :: HubLog -> Listener -> Listener
-withDefaultListenerLog logger listener =
-  maybe (withListenerLog logger listener) (const listener) (listenerLog listener)
 
 -- | Build a pool-backed 'Listener' with a fresh hub slot from a connection runner.
 newPoolListener :: ((PQ.Connection -> IO ()) -> IO ()) -> IO Listener
 newPoolListener withConn = do
   slot <- newMVar Nothing
-  pure (Listener slot withConn Nothing)
+  pure (Listener slot withConn)
 
 -- | Mutable hub state behind the slot. Opaque to callers.
 data RunningHub = RunningHub
@@ -204,16 +203,10 @@ maxBackoff = 30_000_000
 stableSeconds :: Double
 stableSeconds = 30
 
--- | Gap between repeats of a standing failure, so a monitor watching the error
--- rate does not see an ongoing outage clear itself.
-failureRepeatSeconds :: Double
-failureRepeatSeconds = 60
-
 hubLoop :: Listener -> RunningHub -> IO ()
-hubLoop listener hub = go baseBackoff Nothing
+hubLoop listener hub = newFailureGate >>= go baseBackoff
   where
-    -- @reported@ carries the standing failure's line and when it went out.
-    go backoff reported = do
+    go backoff gate = do
       -- Set once the channels are subscribed, which a connection alone is not.
       readyAt <- newIORef Nothing
       -- Clear before each attempt so a failed reconnect does not leave stale subscriptions.
@@ -223,22 +216,26 @@ hubLoop listener hub = go baseBackoff Nothing
           listenerWithConn listener $ \conn ->
             connectionLoop hub conn $ do
               getMonotonicTime >>= writeIORef readyAt . Just
-              when (isJust reported) . void $
-                logHub hubInfo listener hub "arbiter listener: reconnected"
+              recovered <- clearFailure gate
+              when recovered . void $ logHub hubRecovered hub "arbiter listener: reconnected"
       let restart msg = do
             mStart <- readIORef readyAt
             ended <- getMonotonicTime
             let uptime = maybe 0 (ended -) mStart
-            -- An attempt that subscribed is a fresh failure, however it ends.
-            reported' <-
-              if isNothing mStart && standing msg ended reported
-                then pure reported
-                else (\sent -> (msg, ended) <$ guard sent) <$> logHub hubError listener hub msg
+            repeatAfter <- hubRepeatAfter hub
+            worth <- holdFailure gate repeatAfter msg
+            when worth $ reportFailure gate msg
             threadDelay backoff
-            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) reported'
+            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) gate
       restart $ "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
-    -- The line the standing failure already has, until it is due to repeat.
-    standing msg now = maybe False (\(held, at) -> held == msg && now - at < failureRepeatSeconds)
+    -- Not held when it reached no one.
+    reportFailure gate msg =
+      logHub hubError hub msg >>= \sent -> unless sent (void (clearFailure gate))
+
+-- | The tightest repeat cadence the registrants ask for.
+hubRepeatAfter :: RunningHub -> IO NominalDiffTime
+hubRepeatAfter hub =
+  maybe defaultFailureRepeatInterval minimum . NE.nonEmpty . map hubRepeatInterval <$> hubLoggers hub
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
 -- @onReady@ runs once the first reconcile has subscribed.
@@ -301,16 +298,20 @@ dispatch hub n = do
   for_ hs $ \(_, lg, h) ->
     tryAny (h n) >>= either (void . tryAny . hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
 
--- | Report a hub event through the hub's own logger, or every registrant's when
--- unset. False when the message reached no one, a logger that throws included.
-logHub :: (HubLog -> Text -> IO ()) -> Listener -> RunningHub -> Text -> IO Bool
-logHub channel listener hub msg =
-  maybe broadcast emit (listenerLog listener)
+-- | Report a hub event through one registrant, the first whose logger takes it.
+-- The hub is shared, so a broadcast repeats one event once per pool. False when
+-- it reached no one.
+logHub :: (HubLog -> Text -> IO ()) -> RunningHub -> Text -> IO Bool
+logHub channel hub msg = hubLoggers hub >>= emitFirst
   where
-    emit lg = isRight <$> tryAny (channel lg msg)
-    broadcast = do
-      loggers <- registrants <$> readTVarIO (hubHandlers hub)
-      or <$> traverse emit loggers
+    emitFirst [] = pure False
+    emitFirst (lg : rest) =
+      tryAny (channel lg msg) >>= either (const (emitFirst rest)) (const (pure True))
+
+-- | One logger per registration.
+hubLoggers :: RunningHub -> IO [HubLog]
+hubLoggers hub = registrants <$> readTVarIO (hubHandlers hub)
+  where
     registrants handlers =
       Map.elems (Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs])
 
@@ -341,8 +342,7 @@ newDedicatedListen connStr = liftIO $ do
 dedicatedListener :: DedicatedListen -> Listener
 dedicatedListener d =
   Listener
-    { listenerLog = Nothing
-    , listenerSlot = dedicatedSlot d
+    { listenerSlot = dedicatedSlot d
     , listenerWithConn = \action ->
         bracket (interruptibleConnectDb (dedicatedConnStr d)) PQ.finish $ \conn -> do
           st <- PQ.status conn

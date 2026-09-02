@@ -11,7 +11,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import System.Timeout (timeout)
 import Test.Hspec
-import UnliftIO.STM (atomically, checkSTM, modifyTVar', newTVarIO, readTVar)
+import UnliftIO.STM (atomically, checkSTM, modifyTVar', newTVarIO, readTVar, readTVarIO)
 
 import Arbiter.Worker.Logger
   ( LogConfig (..)
@@ -21,7 +21,6 @@ import Arbiter.Worker.Logger
   , hubLogFor
   , newFailureGate
   , newFailureGates
-  , sharedHubLogFor
   , tryReported
   , tryReportedOn
   , (.=)
@@ -32,24 +31,32 @@ spec = do
   listenerSpec
   gateSpec
 
--- | How long a hub failure has to reach the registrant.
+-- | How long a hub failure has to reach a registrant.
 reportWaitMicros :: Int
-reportWaitMicros = 2_000_000
+reportWaitMicros = 5_000_000
 
 listenerSpec :: Spec
 listenerSpec = describe "Listener logging" $
-  it "reports a connection failure to every registrant when the listener has no logger" $ do
-    reported <- newTVarIO ([] :: [Text])
+  it "reports a connection failure once, not once per registrant" $ do
     listener <- Listen.newPoolListener (const (throwIO (ErrorCall "connect failed")))
-    let lg =
-          HubLog
-            { hubInfo = const (pure ())
-            , hubWarn = const (pure ())
-            , hubError = \msg -> atomically (modifyTVar' reported (msg :))
-            }
-    Listen.withChannels listener lg [("arbiter_logging_test", const (pure ()))] $ \_ ->
-      timeout reportWaitMicros (atomically (readTVar reported >>= checkSTM . not . null))
+    first <- newTVarIO ([] :: [Text])
+    second <- newTVarIO ([] :: [Text])
+    Listen.withChannels listener (reportingTo first) [("arbiter_logging_test_a", const (pure ()))] $ \_ ->
+      Listen.withChannels listener (reportingTo second) [("arbiter_logging_test_b", const (pure ()))] $ \_ -> do
+        heard first
+        readTVarIO second `shouldReturn` []
+  where
+    -- Every attempt reports, so a registrant that hears the hub hears repeats.
+    heard seen =
+      timeout reportWaitMicros (atomically (readTVar seen >>= checkSTM . (>= 2) . length))
         `shouldNotReturn` Nothing
+    reportingTo seen =
+      HubLog
+        { hubRecovered = const (pure ())
+        , hubWarn = const (pure ())
+        , hubError = \msg -> atomically (modifyTVar' seen (msg :))
+        , hubRepeatInterval = 0
+        }
 
 gateSpec :: Spec
 gateSpec = describe "Failure gates" $ do
@@ -124,9 +131,16 @@ gateSpec = describe "Failure gates" $ do
             , additionalContext = pure ["service" .= ("checkout" :: Text)]
             , identityContext = ["pool" .= ("email_queue" :: Text)]
             }
-    hubError (sharedHubLogFor cfg) "arbiter listener: connect failed"
-    hubWarn (hubLogFor cfg) "channel handler exception: boom"
-    (reverse <$> readIORef ref) `shouldReturn` [["service"], ["pool", "service"]]
+        lg = hubLogFor cfg
+    hubError lg "arbiter listener: connect failed"
+    hubRecovered lg "arbiter listener: reconnected"
+    hubWarn lg "channel handler exception: boom"
+    (reverse <$> readIORef ref)
+      `shouldReturn` [["service"], ["service"], ["pool", "service"]]
+
+  it "takes the hub's repeat cadence from the pool's own setting" $
+    hubRepeatInterval (hubLogFor defaultLogConfig {failureRepeatInterval = 300})
+      `shouldBe` 300
 
   it "gates each subject on its own" $ do
     (cfg, readLines) <- capturingConfig

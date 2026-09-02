@@ -54,6 +54,7 @@ library
     Arbiter.Core.Concurrency.Stats
     Arbiter.Core.CronSchedule
     Arbiter.Core.Exceptions
+    Arbiter.Core.FailureGate
     Arbiter.Core.Gates
     Arbiter.Core.Health
     Arbiter.Core.HighLevel

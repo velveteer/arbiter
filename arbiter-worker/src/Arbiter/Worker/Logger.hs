@@ -18,7 +18,6 @@ module Arbiter.Worker.Logger
   , warnEx
   , recoveryLevel
   , hubLogFor
-  , sharedHubLogFor
 
     -- * Repeat suppression
   , FailureGate
@@ -35,6 +34,13 @@ module Arbiter.Worker.Logger
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
+import Arbiter.Core.FailureGate
+  ( FailureGate
+  , clearFailure
+  , defaultFailureRepeatInterval
+  , holdFailure
+  , newFailureGate
+  )
 import Arbiter.Core.Listen (HubLog (..))
 import Control.Exception (finally)
 import Control.Monad (void, when)
@@ -44,12 +50,11 @@ import Control.Monad.Logger.Aeson ((.=))
 import Control.Monad.Logger.Aeson qualified as MLA
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
-import GHC.Clock (getMonotonicTime)
 import System.Log.FastLogger (LoggerSet)
 import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 
@@ -98,13 +103,8 @@ data LogConfig = LogConfig
   -- ^ The library's pool and worker pairs. 'additionalContext' wins on a
   -- collision. Default: @[]@.
   , failureRepeatInterval :: NominalDiffTime
-  -- ^ How often a standing failure says so again, so a monitor watching the error
-  -- rate does not see an ongoing outage clear itself. Default: 60s.
+  -- ^ How often a standing failure says so again. Default: 60s.
   }
-
--- | Gap between repeats of a standing failure.
-defaultFailureRepeatInterval :: NominalDiffTime
-defaultFailureRepeatInterval = 60
 
 -- | Default log configuration: Info level to stdout, no additional context.
 defaultLogConfig :: LogConfig
@@ -129,18 +129,8 @@ tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
 warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
 warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> displayEx e
 
--- | The failure a repeating action reported last and when, absent while healthy.
-newtype FailureGate = FailureGate (IORef (Maybe (Text, Double)))
-
--- | A gate for one repeating action, starting healthy.
-newFailureGate :: (MonadIO m) => m FailureGate
-newFailureGate = FailureGate <$> liftIO (newIORef Nothing)
-
--- | Log an attempt only when it changes the gate, so an outage logs one line
--- instead of one per attempt, then says so again every 'failureRepeatInterval'.
--- A failure that reads differently from the one the gate holds is a new outage
--- and logs again. @subject@ reads with both failed and recovered, and a log that
--- shows the failure always shows the recovery.
+-- | Log an attempt only when it changes the gate. @subject@ reads with both
+-- failed and recovered.
 reportOutcome
   :: (MonadUnliftIO m)
   => LogConfig
@@ -149,46 +139,34 @@ reportOutcome
   -> Text
   -> Either SomeException a
   -> m ()
-reportOutcome cfg level (FailureGate ref) subject result = do
-  reported <- liftIO (readIORef ref)
-  now <- liftIO getMonotonicTime
-  case result of
-    Left e
-      | let failure = displayEx e
-      , worthLogging failure now reported ->
-          liftIO (writeIORef ref (Just (failure, now)))
-            *> tryLog cfg level (subject <> " failed: " <> failure)
-    Right _
-      | Just _ <- reported ->
-          liftIO (writeIORef ref Nothing)
-            *> tryLog cfg (recoveryLevel cfg level) (subject <> " recovered")
-    _ -> pure ()
-  where
-    worthLogging failure now =
-      maybe True (\(held, at) -> held /= failure || now - at >= repeatAfter)
-    repeatAfter = realToFrac (failureRepeatInterval cfg)
+reportOutcome cfg level gate subject = \case
+  Left e ->
+    let failure = displayEx e
+     in holdFailure gate (failureRepeatInterval cfg) failure
+          >>= \worth -> when worth (tryLog cfg level (subject <> " failed: " <> failure))
+  Right _ ->
+    clearFailure gate
+      >>= \recovered -> when recovered (tryLog cfg (recoveryLevel cfg level) (subject <> " recovered"))
 
--- | Hub loggers over @cfg@, for events that belong to the registrant.
+-- | Hub loggers over @cfg@. The hub's own events drop the 'identityContext'.
 hubLogFor :: LogConfig -> HubLog
 hubLogFor cfg =
   HubLog
-    { hubInfo = tryLog cfg (recoveryLevel cfg Error)
+    { hubRecovered = tryLog shared (recoveryLevel cfg Error)
     , hubWarn = tryLog cfg Warning
-    , hubError = tryLog cfg Error
+    , hubError = tryLog shared Error
+    , hubRepeatInterval = failureRepeatInterval cfg
     }
+  where
+    shared = cfg {identityContext = []}
 
--- | 'hubLogFor' without the 'identityContext', for events that belong to the hub.
-sharedHubLogFor :: LogConfig -> HubLog
-sharedHubLogFor cfg = hubLogFor cfg {identityContext = []}
-
--- | The gentlest level a recovery can take and still reach a log that showed the
--- failure. Never louder than the failure itself.
+-- | The gentlest level a recovery can take and still reach a log that showed
+-- the failure.
 recoveryLevel :: LogConfig -> LogLevel -> LogLevel
 recoveryLevel cfg level = min level (max Info (minLogLevel cfg))
 
--- | Gates addressed by subject, for a caller whose failure sites are known only
--- at runtime. Every subject holds its gate for the life of the store, so draw
--- them from a bounded set.
+-- | Gates addressed by subject, drawn from a bounded set: every subject holds
+-- its gate for the life of the store.
 newtype FailureGates = FailureGates (IORef (Map Text FailureGate))
 
 -- | An empty gate store.

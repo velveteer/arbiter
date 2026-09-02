@@ -50,6 +50,7 @@ module Arbiter.Otel
   ) where
 
 import Arbiter.Core.HighLevel qualified as Arb
+import Arbiter.Core.Job.Types (HasKind)
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
 import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryQueueKinds)
 import Arbiter.Core.Threads (labelArbiterThread)
@@ -170,14 +171,14 @@ withTelemetryHere baseLog use = withRunInIO $ \runDb ->
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig
   :: forall m payload
-   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+   . (HasKind payload, KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
   => Telemetry
   -> WorkerConfig m payload
   -> WorkerConfig m payload
 instrumentConfig tel = labelledConfig tel (Arb.queueTable @payload @m)
 
 labelledConfig
-  :: (MonadUnliftIO m)
+  :: (HasKind payload, MonadUnliftIO m)
   => Telemetry
   -> Text
   -> WorkerConfig m payload
