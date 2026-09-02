@@ -211,8 +211,8 @@ document.addEventListener('alpine:init', () => {
           }
         }
       } catch (e) {
-        console.error('Failed to load queues:', e);
-        showToast('Failed to load queues: ' + e.message);
+        console.error('Could not load queues:', e);
+        showToast('Could not load queues: ' + e.message);
       } finally {
         this.releaseLoader(loaderToken);
       }

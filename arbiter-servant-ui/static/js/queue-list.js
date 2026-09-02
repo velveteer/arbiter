@@ -19,11 +19,13 @@ const QUEUE_SORT_KEYS = {
 document.addEventListener('alpine:init', () => {
   Alpine.data('queueListTab', () => ({
     ...pollingTab('load', ARB_TIMING.queueListPollMs, 'arb.queuesRefresh'),
+    loadNoun: 'queues',
+    ...summaryMemory('arb.summary.queues'),
     ...eventBusTab(),
     ...confirmArm(),
     maintenanceBusy: false,
     rows: [],
-    ...loadState(),
+    ...loadState((s) => s.rows.length === 0),
     search: '',
     viewMode: localStorage.getItem('arb.queueView') || '',
     // The only ordering that holds still while the counts under it move.
@@ -62,7 +64,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async load() {
-      await guardedLoad(this, 'Failed to load queues', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.getAllStats();
         if (isStale()) return;
         this.rows = data.queues || [];

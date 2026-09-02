@@ -53,6 +53,7 @@ import Arbiter.Core.Job.Schema
   ( SchemaName
   , TableName
   , addClaimSeqColumnSQL
+  , addKindColumnSQL
   , addTraceContextColumnSQL
   , cancelNotifyChannel
   , createArchiveCompletedAtIndexSQL
@@ -760,6 +761,7 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "create-group-in-flight-index" $ createJobQueueGroupInFlightIndexSQL schemaName tableName
         , script "create-groups-trigger-functions-v10" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
+        , script "add-kind-column" $ addKindColumnSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

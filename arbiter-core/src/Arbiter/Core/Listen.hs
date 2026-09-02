@@ -37,12 +37,13 @@ import Control.Concurrent.STM
   , writeTVar
   )
 import Control.Exception (bracket, onException, uninterruptibleMask_)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Foldable (for_, traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -51,6 +52,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.LibPQ qualified as PQ
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (threadWaitReadSTM)
@@ -59,6 +61,12 @@ import UnliftIO.Async qualified as Async
 import UnliftIO.Exception (tryAny)
 
 import Arbiter.Core.Exceptions (displayEx, throwInternal)
+import Arbiter.Core.FailureGate
+  ( clearFailure
+  , defaultFailureRepeatInterval
+  , holdFailure
+  , newFailureGate
+  )
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 import Arbiter.Core.Threads (labelArbiterThread)
 
@@ -69,10 +77,16 @@ data Notification = Notification
   }
   deriving stock (Eq, Show)
 
--- | A registrant's warn and error loggers, carrying its logging context.
+-- | How a registrant wants hub events reported.
 data HubLog = HubLog
-  { hubWarn :: Text -> IO ()
+  { hubRecovered :: Text -> IO ()
+  -- ^ The hub's connection came back.
+  , hubWarn :: Text -> IO ()
+  -- ^ This registrant's own channel handler raised.
   , hubError :: Text -> IO ()
+  -- ^ The hub's connection failed.
+  , hubRepeatInterval :: NominalDiffTime
+  -- ^ How often a standing connection failure says so again.
   }
 
 -- | Everything the worker needs to run a shared listener for one env.
@@ -190,29 +204,46 @@ stableSeconds :: Double
 stableSeconds = 30
 
 hubLoop :: Listener -> RunningHub -> IO ()
-hubLoop listener hub = go baseBackoff
+hubLoop listener hub = newFailureGate >>= go baseBackoff
   where
-    go backoff = do
-      connectedAt <- newIORef Nothing
+    go backoff gate = do
+      -- Set once the channels are subscribed, which a connection alone is not.
+      readyAt <- newIORef Nothing
       -- Clear before each attempt so a failed reconnect does not leave stale subscriptions.
       atomically $ writeTVar (hubSubscribed hub) Set.empty
       result <-
         tryAny $
-          listenerWithConn listener $ \conn -> do
-            getMonotonicTime >>= writeIORef connectedAt . Just
-            connectionLoop hub conn
+          listenerWithConn listener $ \conn ->
+            connectionLoop hub conn $ do
+              getMonotonicTime >>= writeIORef readyAt . Just
+              recovered <- clearFailure gate
+              when recovered . void $ logHub hubRecovered hub "arbiter listener: reconnected"
       let restart msg = do
-            mStart <- readIORef connectedAt
+            mStart <- readIORef readyAt
             ended <- getMonotonicTime
             let uptime = maybe 0 (ended -) mStart
-            logErrorAll hub msg
+            repeatAfter <- hubRepeatAfter hub
+            worth <- holdFailure gate repeatAfter msg
+            when worth $ reportFailure gate msg
             threadDelay backoff
-            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2))
-      restart (either displayEx (const "arbiter listener: connection loop exited unexpectedly") result)
+            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) gate
+      restart $ "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
+    -- Not held when it reached no one.
+    reportFailure gate msg =
+      logHub hubError hub msg >>= \sent -> unless sent (void (clearFailure gate))
+
+-- | The tightest repeat cadence the registrants ask for.
+hubRepeatAfter :: RunningHub -> IO NominalDiffTime
+hubRepeatAfter hub =
+  maybe defaultFailureRepeatInterval minimum . NE.nonEmpty . map hubRepeatInterval <$> hubLoggers hub
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
-connectionLoop :: RunningHub -> PQ.Connection -> IO ()
-connectionLoop hub conn = reconcile hub conn >>= loop
+-- @onReady@ runs once the first reconcile has subscribed.
+connectionLoop :: RunningHub -> PQ.Connection -> IO () -> IO ()
+connectionLoop hub conn onReady = do
+  desired <- reconcile hub conn
+  onReady
+  loop desired
   where
     loop desired = do
       mNotify <- PQ.notifies conn
@@ -221,7 +252,7 @@ connectionLoop hub conn = reconcile hub conn >>= loop
         Nothing -> do
           mfd <- PQ.socket conn
           case mfd of
-            Nothing -> throwInternal "arbiter listener: connection has no socket"
+            Nothing -> throwInternal "connection has no socket"
             Just fd -> do
               changed <-
                 bracket (threadWaitReadSTM fd) snd $ \(waitRead, _) ->
@@ -229,7 +260,7 @@ connectionLoop hub conn = reconcile hub conn >>= loop
                     (False <$ waitRead)
                       `orElse` (readTVar (hubHandlers hub) >>= \hs -> True <$ check (Map.keysSet hs /= desired))
               ok <- PQ.consumeInput conn
-              unless ok $ throwInternal "arbiter listener: consumeInput failed"
+              unless ok $ throwInternal "consumeInput failed"
               if changed then reconcile hub conn >>= loop else loop desired
 
 -- | Bring the wire's subscriptions in line with the registered channels.
@@ -252,17 +283,12 @@ reconcile hub conn = do
       case mres of
         Nothing ->
           throwInternal $
-            "arbiter listener: "
-              <> T.pack (BSC.unpack verb)
-              <> " returned no result"
+            T.pack (BSC.unpack verb) <> " returned no result"
         Just res -> do
           st <- PQ.resultStatus res
           when (st /= PQ.CommandOk)
             $ throwInternal
-            $ "arbiter listener: "
-              <> T.pack (BSC.unpack verb)
-              <> " failed with "
-              <> T.pack (show st)
+            $ T.pack (BSC.unpack verb) <> " failed with " <> T.pack (show st)
     escapeChannel chan =
       fromMaybe (quoteChannel chan) <$> PQ.escapeIdentifier conn chan
 
@@ -270,14 +296,24 @@ dispatch :: RunningHub -> Notification -> IO ()
 dispatch hub n = do
   hs <- Map.findWithDefault [] (notificationChannel n) <$> readTVarIO (hubHandlers hub)
   for_ hs $ \(_, lg, h) ->
-    tryAny (h n) >>= either (hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
+    tryAny (h n) >>= either (void . tryAny . hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
 
--- | Report a connection failure to every registered pool.
-logErrorAll :: RunningHub -> Text -> IO ()
-logErrorAll hub msg = do
-  handlers <- readTVarIO (hubHandlers hub)
-  let loggers = Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs]
-  traverse_ (`hubError` msg) (Map.elems loggers)
+-- | Report a hub event through one registrant, the first whose logger takes it.
+-- The hub is shared, so a broadcast repeats one event once per pool. False when
+-- it reached no one.
+logHub :: (HubLog -> Text -> IO ()) -> RunningHub -> Text -> IO Bool
+logHub channel hub msg = hubLoggers hub >>= emitFirst
+  where
+    emitFirst [] = pure False
+    emitFirst (lg : rest) =
+      tryAny (channel lg msg) >>= either (const (emitFirst rest)) (const (pure True))
+
+-- | One logger per registration.
+hubLoggers :: RunningHub -> IO [HubLog]
+hubLoggers hub = registrants <$> readTVarIO (hubHandlers hub)
+  where
+    registrants handlers =
+      Map.elems (Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs])
 
 toNotification :: PQ.Notify -> Notification
 toNotification n =
@@ -315,8 +351,7 @@ dedicatedListener d =
             _ -> do
               merr <- PQ.errorMessage conn
               throwInternal $
-                "arbiter listener: connect failed"
-                  <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
+                "connect failed" <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
     }
 
 -- | Open a libpq connection asynchronously so a teardown cancel is not lost in the uninterruptible connect FFI.
@@ -337,4 +372,4 @@ interruptibleConnectDb connStr = do
     waitSocket conn wait =
       PQ.socket conn >>= \case
         Just fd -> wait fd
-        Nothing -> throwInternal "arbiter listener: connection has no socket during connect"
+        Nothing -> throwInternal "connection has no socket during connect"

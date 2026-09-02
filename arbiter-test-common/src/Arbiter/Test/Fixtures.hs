@@ -7,6 +7,7 @@ module Arbiter.Test.Fixtures
   , WorkerTestPayload (..)
   ) where
 
+import Arbiter.Core.Job.Kind (HasKind)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import GHC.Generics (Generic)
@@ -18,6 +19,8 @@ data TestPayload
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
+instance HasKind TestPayload
+
 -- | A payload for the worker pool suites, with a failing and a slow variant.
 data WorkerTestPayload
   = SimpleTask Text
@@ -25,3 +28,5 @@ data WorkerTestPayload
   | SlowTask Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+instance HasKind WorkerTestPayload

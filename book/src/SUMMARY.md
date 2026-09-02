@@ -9,6 +9,7 @@
 # Job Features
 
 - [Priority](features/priority.md)
+- [Payload Kinds](features/kinds.md)
 - [Deduplication](features/deduplication.md)
 - [Job Results](features/results.md)
 - [Job Trees](features/job-trees.md)

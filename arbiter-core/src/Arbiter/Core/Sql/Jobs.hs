@@ -84,6 +84,7 @@ data JobFilter
   | FilterId Int64
   | FilterJobId Int64
   | FilterClaimedBy UUID
+  | FilterKind Text
   | FilterPayloadText Text
   | FilterRateLimitPrefix Text
   | FilterConcurrencyPrefix Text

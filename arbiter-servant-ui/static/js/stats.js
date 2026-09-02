@@ -12,8 +12,9 @@ document.addEventListener('alpine:init', () => {
     ...tabActive(),
     ...pollSpinner(),
     ...refreshControl('loadStats', 'arb.statsRefresh', '30s'),
+    loadNoun: 'stats',
     stats: null,
-    ...loadState(),
+    ...loadState((s) => !s.stats),
     active: false,
 
     init() {
@@ -60,7 +61,7 @@ document.addEventListener('alpine:init', () => {
     async loadStats() {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      await guardedLoad(this, 'Failed to load stats', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.getStats(queue);
         if (isStale()) return;
         this.stats = data.stats;

@@ -59,6 +59,7 @@ Per-queue endpoints under `/api/v1/:queue/`:
 | `DELETE` | `archive/:id` | Purge one archive entry |
 | `POST` | `archive/batch-delete` | Batch purge archive entries |
 | `GET` | `stats` | Queue statistics |
+| `GET` | `kinds` | List the payload variant labels the queue declares |
 
 Global endpoints under `/api/v1/`:
 

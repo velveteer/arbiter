@@ -18,6 +18,7 @@ module Arbiter.Core.Job.Schema
   , queueTableNames
   , addTraceContextColumnSQL
   , addClaimSeqColumnSQL
+  , addKindColumnSQL
   , setMaxAttemptsDefaultSQL
 
     -- * Index Creation SQL
@@ -290,6 +291,11 @@ addTraceContextColumnSQL schemaName tableName =
 addClaimSeqColumnSQL :: Text -> Text -> Text
 addClaimSeqColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["claim_seq BIGINT NOT NULL DEFAULT 0"]
+
+-- | Add the payload variant label to a queue's three job tables.
+addKindColumnSQL :: Text -> Text -> Text
+addKindColumnSQL schemaName tableName =
+  addJobColumnsSQL schemaName tableName ["kind TEXT"]
 
 -- | 'jobColumns' for the DLQ table, with @job_id@ in place of @id@.
 jobColumnsForDLQ :: Text

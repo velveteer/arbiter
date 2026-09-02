@@ -20,6 +20,7 @@ data MetricName
   | HandlerDuration
   | -- Queue depth
     QueueDepth
+  | QueueDepthByKind
   | QueueOldestReadyAge
   | QueueOldestInFlightAge
   | Workers
@@ -41,6 +42,7 @@ data MetricName
   | PgDbBackends
   | PgDbOldestTransactionAge
   | PgDbOldestQueryAge
+  | DbReachable
   | GaugesAge
   deriving stock (Bounded, Enum, Eq, Show)
 
@@ -54,6 +56,7 @@ metricName = \case
   MaintenanceRows -> "arbiter.maintenance.rows"
   HandlerDuration -> "arbiter.job.handler.duration"
   QueueDepth -> "arbiter.queue.depth"
+  QueueDepthByKind -> "arbiter.queue.depth_by_kind"
   QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
   QueueOldestInFlightAge -> "arbiter.queue.oldest_in_flight_age"
   Workers -> "arbiter.workers"
@@ -73,6 +76,7 @@ metricName = \case
   PgDbBackends -> "arbiter.pg.database.backends"
   PgDbOldestTransactionAge -> "arbiter.pg.database.oldest_transaction_age"
   PgDbOldestQueryAge -> "arbiter.pg.database.oldest_query_age"
+  DbReachable -> "arbiter.db.reachable"
   GaugesAge -> "arbiter.gauges.age"
 
 -- | Every metric name arbiter exports.

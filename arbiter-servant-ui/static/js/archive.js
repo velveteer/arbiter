@@ -8,6 +8,7 @@ const ARCHIVE_COLUMNS = [
   { key: 'jobid', label: 'Job ID', weight: 6 },
   { key: 'parent', label: 'Parent', weight: 6, narrow: false },
   { key: 'group', label: 'Group', weight: 8, narrow: false },
+  { key: 'kind', label: 'Kind', weight: 8, autoHide: true, narrow: false },
   { key: 'payload', label: 'Payload', weight: 18 },
   { key: 'hasresult', label: 'Result', weight: 7, narrow: false },
   { key: 'inserted', label: 'Inserted', weight: 12, narrow: false },
@@ -27,23 +28,26 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(ARCHIVE_COLUMNS, 'arb.archiveCols'),
     ...rowDetail('archiveJobs', 'archivePrimaryKey', 'selectedArchiveJob', { drawer: 'archiveDetailDrawer' }),
     ...tableTab('loadArchive', 'arb.archiveRefresh'),
+    loadNoun: 'archived jobs',
     archiveJobs: [],
     rowNoun: 'archived job',
     detailActionsHtml: ARCHIVE_ACTIONS_HTML,
     rowNounPlural: '',
     total: 0,
-    ...loadState(),
+    ...loadState((s) => s.archiveJobs.length === 0),
     active: false,
     selectedArchiveJob: null,
     bulkBusy: false,
     parentIdFilter: '',
     groupKeyFilter: '',
     jobIdFilter: '',
+    kindFilter: '',
     completedAfterFilter: '',
     completedBeforeFilter: '',
     _appliedParentId: '',
     _appliedGroupKey: '',
     _appliedJobId: '',
+    _appliedKind: '',
     _appliedCompletedAfter: '',
     _appliedCompletedBefore: '',
     sortBy: '',
@@ -55,6 +59,7 @@ document.addEventListener('alpine:init', () => {
       { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
       { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
       { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
       { field: 'after', label: 'Completed after', param: 'completed_after', model: 'completedAfterFilter', applied: '_appliedCompletedAfter', type: 'datetime-local', format: formatTime },
       { field: 'before', label: 'Completed before', param: 'completed_before', model: 'completedBeforeFilter', applied: '_appliedCompletedBefore', type: 'datetime-local', format: formatTime },
     ],
@@ -62,6 +67,7 @@ document.addEventListener('alpine:init', () => {
     init() {
       this._loadColPrefs();
       this.readUrlFilters('archive');
+      this.loadKinds();
       trackTabActive(this, '#tab-archive', {
         onShow: () => { this.loadArchive(); this._startTimer(); },
         onHide: () => {
@@ -75,7 +81,7 @@ document.addEventListener('alpine:init', () => {
       // reconnects trigger a reload. Routine updates ride the refresh timer.
       this._bindTableEvents({
         hashName: 'archive',
-        onQueueReset: () => { this.selected = {}; },
+        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
         relevant: () => 0,
       });
     },
@@ -92,15 +98,17 @@ document.addEventListener('alpine:init', () => {
       const gk = this.filterValue('group', filterOverrides);
       const pid = this.filterValue('parent', filterOverrides);
       const jid = this.filterValue('job', filterOverrides);
+      const kind = this.filterValue('kind', filterOverrides);
       const after = this.filterValue('after', filterOverrides);
       const before = this.filterValue('before', filterOverrides);
-      await guardedLoad(this, 'Failed to load archive', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listArchive(queue, {
           limit: this.limit,
           offset: this.offset,
           parentId: pid || undefined,
           jobId: jid || undefined,
           groupKey: gk || undefined,
+          kind: kind || undefined,
           completedAfter: toIsoInstant(after),
           completedBefore: toIsoInstant(before),
           sortBy: this.sortBy || undefined,
@@ -110,11 +118,15 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this._appliedJobId = jid;
+        this._appliedKind = kind;
         this._appliedCompletedAfter = after;
         this._appliedCompletedBefore = before;
         this.archiveJobs = data.archiveJobs || [];
         this.resyncDetailSelection();
         this.total = data.archiveTotal || 0;
+        if (this.archiveJobs.length > 0) {
+          this.setAutoEmpty({ kind: this.archiveJobs.every((j) => !j.jobSnapshot?.kind) });
+        }
         // Drop selections for rows no longer on the current page.
         const present = new Set(this.archiveJobs.map(j => String(j.archivePrimaryKey)));
         const pruned = {};

@@ -12,6 +12,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
+  , HasKind
   , JobRead
   , JobStatus (..)
   , attempts
@@ -133,6 +134,8 @@ data ServantTestPayload
   | TestCalculation Int Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
+
+instance HasKind ServantTestPayload
 
 -- | Test registry
 type ServantTestRegistry = '[QueueWithResult "arbiter_servant_test" ServantTestPayload [Text]]
@@ -388,6 +391,24 @@ spec connStr = do
         length (jobs body) `shouldBe` 1
         -- Verify only groupA jobs returned (not groupB)
         forM_ (jobs body) $ \j -> groupKey (ajwsJob j) `shouldBe` Just "groupA"
+
+    it "GET /api/v1/arbiter_servant_test/jobs supports kind filter" $ do
+      liftIO $ do
+        _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "kinded"))
+        _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestCalculation 1 2))
+        pure ()
+
+      resp <- get "/api/v1/arbiter_servant_test/jobs?kind=TestCalculation"
+      liftIO $ do
+        body :: JobsResponse ServantTestPayload <- decodeBody resp
+        jobsTotal body `shouldBe` 1
+        map (payload . ajwsJob) (jobs body) `shouldBe` [TestCalculation 1 2]
+
+    it "GET /api/v1/arbiter_servant_test/kinds lists every label the payload carries" $ do
+      resp <- get "/api/v1/arbiter_servant_test/kinds"
+      liftIO $ do
+        body :: [Text] <- decodeBody resp
+        body `shouldBe` ["TestMessage", "TestCalculation"]
 
     it "GET /api/v1/arbiter_servant_test/jobs sort_by/sort_dir changes ordering" $ do
       ids <- liftIO $ do
@@ -921,7 +942,9 @@ spec connStr = do
     let overview =
           Ops.QueueOverview
             { Ops.overviewQueue = "greetings"
-            , Ops.overviewStats = Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5) (Just 4.5) 2
+            , Ops.overviewStats =
+                Ops.QueueStats 8 3 2 1 1 0 1 0 (Just 12.5) (Just 4.5) 2 $
+                  Map.fromList [("TestMessage", 5), ("TestCalculation", 3)]
             , Ops.overviewQueuePaused = True
             , Ops.overviewWorkersLive = 4
             , Ops.overviewWorkersPaused = 1
@@ -946,12 +969,33 @@ spec connStr = do
               , "dlqJobs": 2
               , "oldestReadyAgeSeconds": 12.5
               , "oldestInFlightAgeSeconds": 4.5
+              , "kindCounts": { "TestMessage": 5, "TestCalculation": 3 }
               }
           }
         |]
 
     it "round-trips, which is what the shared gauge payload relies on" $
       decode (encode overview) `shouldBe` Just overview
+
+    -- A stats object as a replica predating the kind rollup publishes it.
+    let olderStats =
+          [aesonQQ|
+            { "totalJobs": 8
+            , "readyJobs": 3
+            , "inFlightJobs": 2
+            , "scheduledJobs": 1
+            , "backoffJobs": 1
+            , "throttledJobs": 0
+            , "suspendedJobs": 1
+            , "cancelledJobs": 0
+            , "dlqJobs": 2
+            , "oldestReadyAgeSeconds": 12.5
+            , "oldestInFlightAgeSeconds": 4.5
+            }
+          |]
+
+    it "decodes a stats object carrying no kind rollup" $
+      (Ops.kindCounts <$> decode @Ops.QueueStats (encode olderStats)) `shouldBe` Just Map.empty
 
   describe "Consumer API" $ with (cleanupDb >> pure app) $ do
     it "POST /claim leases a job and returns its lease" $ do

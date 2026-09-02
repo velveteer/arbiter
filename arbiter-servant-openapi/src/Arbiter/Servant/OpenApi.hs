@@ -40,9 +40,9 @@ import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Dedup (DedupKey (IgnoreDuplicate))
 import Arbiter.Core.Job.TraceContext (toTraceContext)
 import Arbiter.Core.Job.Types
-  ( AdmissionKeys (AdmissionKeys)
-  , JobRead
+  ( JobRead
   , JobStatus
+  , PayloadKeys (PayloadKeys)
   , defaultJob
   , jobStatusToText
   , setArchiveFor
@@ -380,7 +380,7 @@ admissionKeySchema mk name =
 
 -- | Fields written by 'Arbiter.Servant.Types.apiJobPairs'. The record
 -- constructor checks their types and order. Reconstruct the trace context and
--- admission keys from their flattened fields. The encoder derives @isRollup@.
+-- payload keys from their flattened fields. The encoder derives @isRollup@.
 jobFields :: forall payload. (ToSchema payload) => Fields (JobRead payload)
 jobFields =
   Job
@@ -404,7 +404,11 @@ jobFields =
     <*> prop @(Maybe UUID) "claimedBy"
     <*> prop @Int64 "claimSeq"
     <*> prop @(Maybe Int32) "archiveFor"
-    <*> (AdmissionKeys <$> prop @(Maybe RateLimitKey) "rateLimit" <*> prop @(Maybe ConcurrencyKey) "concurrency")
+    <*> ( PayloadKeys
+            <$> prop @(Maybe Text) "kind"
+            <*> prop @(Maybe RateLimitKey) "rateLimit"
+            <*> prop @(Maybe ConcurrencyKey) "concurrency"
+        )
     <* prop @Bool "isRollup"
 
 instance (ToSchema payload) => ToSchema (ApiJob payload) where

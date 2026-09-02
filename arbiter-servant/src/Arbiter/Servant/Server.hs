@@ -29,7 +29,7 @@ import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Health qualified as Health
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema qualified as Schema
-import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup)
+import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup, kindsFor)
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.MonadArbiter (withDbTransaction)
@@ -286,10 +286,11 @@ listJobsHandler
   -> Maybe Text
   -> Maybe Text
   -> Maybe Text
+  -> Maybe Text
   -> Maybe JobSortColumn
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
-listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
+listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mKind mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       schemaName = serverSchema config
       filters =
@@ -300,6 +301,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
           , FilterRootsOnly <$ guard rootsOnly
           , FilterStatus <$> mStatus
           , FilterClaimedBy <$> mClaimedBy
+          , FilterKind <$> nonBlank mKind
           , FilterPayloadText <$> nonBlank mPayload
           , FilterRateLimitPrefix <$> mRatePrefix
           , FilterConcurrencyPrefix <$> mConcPrefix
@@ -534,10 +536,11 @@ listDLQHandler
   -> Maybe Int64
   -> Maybe Int64
   -> Maybe Text
+  -> Maybe Text
   -> Maybe DLQSortColumn
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
-listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortBy mSortDir = do
+listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       schemaName = serverSchema config
       filters =
@@ -545,6 +548,7 @@ listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mSortB
           [ FilterParentId <$> mParentId
           , FilterJobId <$> mJobId
           , FilterGroupKey <$> mGroupKey
+          , FilterKind <$> nonBlank mKind
           ]
 
   (dlqJobs, total) <- runDb config $ withDbTransaction $ do
@@ -632,12 +636,13 @@ listArchiveHandler
   -> Maybe Int64
   -> Maybe Int64
   -> Maybe Text
+  -> Maybe Text
   -> Maybe UTCTime
   -> Maybe UTCTime
   -> Maybe ArchiveSortColumn
   -> Maybe SortDir
   -> Handler (ArchiveResponse payload)
-listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mCompletedAfter mCompletedBefore mSortBy mSortDir = do
+listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mCompletedAfter mCompletedBefore mSortBy mSortDir = do
   let (limit, offset) = validatePagination 50 mLimit mOffset
       schemaName = serverSchema config
       filters =
@@ -645,6 +650,7 @@ listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mC
           [ FilterParentId <$> mParentId
           , FilterJobId <$> mJobId
           , FilterGroupKey <$> mGroupKey
+          , FilterKind <$> nonBlank mKind
           , FilterCompletedAfter <$> mCompletedAfter
           , FilterCompletedBefore <$> mCompletedBefore
           ]
@@ -702,26 +708,28 @@ deleteArchiveBatchHandler tableName config (BatchDeleteRequest archiveIds) = do
 
 -- | Stats API handler for a specific table.
 statsServer
-  :: forall registry
-   . Text
+  :: forall registry payload
+   . (JobPayload payload)
+  => Text
   -> ArbiterServerConfig registry
   -> StatsAPI (AsServerT Handler)
 statsServer tableName config =
   StatsAPI
-    { getStats = getStatsHandler @registry tableName config
+    { getStats = getStatsHandler @registry tableName (kindsFor @payload) config
     }
 
 -- | Get queue statistics.
 getStatsHandler
   :: forall registry
    . Text
+  -> [Text]
   -> ArbiterServerConfig registry
   -> Handler StatsResponse
-getStatsHandler tableName config =
+getStatsHandler tableName kinds config =
   liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
     let schemaName = serverSchema config
 
-    queueStats <- runDb config $ Ops.getQueueStats schemaName tableName
+    queueStats <- runDb config $ Ops.getQueueStats schemaName tableName kinds
     now <- getCurrentTime
     let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
 
@@ -731,12 +739,12 @@ getStatsHandler tableName config =
 getAllStatsHandler
   :: forall registry
    . ArbiterServerConfig registry
-  -> [Text]
+  -> [(Text, [Text])]
   -> Handler AllStatsResponse
-getAllStatsHandler config tables =
+getAllStatsHandler config queueKinds =
   liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
     let schemaName = serverSchema config
-    AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName tables)
+    AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName queueKinds)
 
 -- | Table API handlers for a specific table.
 tableServer
@@ -751,7 +759,8 @@ tableServer table config =
     , claimJobs = claimJobsHandler @registry @payload table config
     , dlq = dlqServer @registry @payload table config
     , archive = archiveServer @registry @payload table config
-    , stats = statsServer @registry table config
+    , stats = statsServer @registry @payload table config
+    , listKinds = pure (kindsFor @payload)
     }
 
 -- | Lease visible jobs to a consumer outside a worker pool. Each returned job
@@ -901,7 +910,7 @@ queuesServer registryProxy config =
   let known = registryTableNames registryProxy
    in QueuesAPI
         { listQueues = pure $ QueuesResponse {queues = known}
-        , getAllStats = getAllStatsHandler config known
+        , getAllStats = getAllStatsHandler config (registryQueueKinds registryProxy)
         , getDetails = getQueueDetailsHandler config
         , pauseQueue = setQueuePausedHandler config known True
         , resumeQueue = setQueuePausedHandler config known False

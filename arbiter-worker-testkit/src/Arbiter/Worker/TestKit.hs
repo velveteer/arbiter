@@ -18,6 +18,7 @@ import Arbiter.Core.Exceptions
   , throwRetryable
   , throwTreeCancel
   )
+import Arbiter.Core.FailureGate qualified as FailureGate
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
@@ -31,8 +32,11 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   , groupKey
+  , jobKind
+  , kindOf
   , parentId
   , payload
+  , payloadKeys
   , primaryKey
   , setArchiveFor
   , setGroupKey
@@ -194,6 +198,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           pure (any ((== mkSimple "arch-done") . payload . Archive.jobSnapshot) arch)
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
         map (payload . Archive.jobSnapshot) arch `shouldBe` [mkSimple "arch-done"]
+        map (jobKind . payloadKeys . Archive.jobSnapshot) arch
+          `shouldBe` [kindOf (mkSimple "arch-done" :: payload)]
 
     it "fetches an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()
@@ -1686,7 +1692,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
         withSharedListener env $ \listener -> do
           good <- newIORef (0 :: Int)
           warned <- newIORef (0 :: Int)
-          let hubLog = Listen.HubLog (\_ -> bumpRef warned) (const (pure ()))
+          let hubLog = quietHubLog {Listen.hubWarn = \_ -> bumpRef warned}
               goodName = schema <> "_iso_good"
               badName = schema <> "_iso_bad"
               handlers =
@@ -1721,7 +1727,13 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
 
 -- | A hub logger that swallows warn and error output.
 quietHubLog :: Listen.HubLog
-quietHubLog = Listen.HubLog (const (pure ())) (const (pure ()))
+quietHubLog =
+  Listen.HubLog
+    { Listen.hubRecovered = const (pure ())
+    , Listen.hubWarn = const (pure ())
+    , Listen.hubError = const (pure ())
+    , Listen.hubRepeatInterval = FailureGate.defaultFailureRepeatInterval
+    }
 
 -- | Channel handler that ignores the notification.
 ignoreNotif :: Listen.Notification -> IO ()

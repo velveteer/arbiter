@@ -10,7 +10,8 @@ import Arbiter.Concurrency (HasConcurrency)
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ (DLQJob (dlqPrimaryKey))
 import Arbiter.Core.Job.Types
-  ( ObservabilityHooks (..)
+  ( HasKind (..)
+  , ObservabilityHooks (..)
   , TraceContext (..)
   , defaultJob
   , defaultObservabilityHooks
@@ -33,6 +34,7 @@ import Arbiter.Core.Trace
   , recordJobFailure
   , resolveTracer
   , withConsumeSpan
+  , withPublishSpan
   )
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.RateLimit (HasRateLimit)
@@ -119,7 +121,7 @@ import Arbiter.Otel.Metrics qualified as Metrics
 
 newtype Greeting = Greeting Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, HasConcurrency, HasRateLimit, ToJSON)
+  deriving anyclass (FromJSON, HasConcurrency, HasKind, HasRateLimit, ToJSON)
 
 type Reg = '[Queue "greetings" Greeting]
 
@@ -281,26 +283,31 @@ spec = do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
         ms <- orFail "expected metrics on" (Otel.meters tel)
-        let hooks = Otel.otelHooks ms queue
-        onJobClaimed hooks job now
-        onJobSuccess hooks job now now
-        onJobFailedAndMovedToDLQ hooks "boom" job
-        onJobCancelled hooks job "cancelled"
-        onJobUnavailable hooks job "no longer available"
+        let noopHandler :: JobHandler (SimpleDb Reg IO) Greeting ()
+            noopHandler _conn _job = pure ()
+        -- Through the pool's own instrumentation, which is what labels a running pool.
+        hooks <- observabilityHooks . Otel.instrumentConfig tel <$> transactionalWorkerConfig 1 noopHandler
+        runSimpleDb plainEnv $ do
+          onJobClaimed hooks job now
+          onJobSuccess hooks job now now
+          onJobFailedAndMovedToDLQ hooks "boom" job
+          onJobCancelled hooks job "cancelled"
+          onJobUnavailable hooks job "no longer available"
         Otel.otelMaintenance ms SweepExhaustedJobs 3
 
-        loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [queue] 1
+        loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [(queue, kindsFor @Greeting)] 1
         withAsync loop $ \_ -> do
           waitUntil 30_000 $ recordedWith "arbiter.queue.depth" [("queue", queue)] <$> collected env
           points <- collected env
           traverse_
             (\(name, kvs) -> points `shouldSatisfy` recordedWith name kvs)
-            [ ("arbiter.jobs.processed", [("outcome", "success")])
+            [ ("arbiter.jobs.processed", [("outcome", "success"), ("kind", "Greeting")])
             , ("arbiter.jobs.processed", [("outcome", "dlq")])
             , ("arbiter.jobs.processed", [("outcome", "cancelled")])
             , ("arbiter.jobs.processed", [("outcome", "unavailable")])
             , ("arbiter.maintenance.rows", [("op", "sweep-exhausted-jobs")])
             , ("arbiter.queue.depth", [("queue", queue)])
+            , ("arbiter.queue.depth_by_kind", [("queue", queue), ("kind", "Greeting")])
             , ("arbiter.pg.database.backends", [])
             , ("arbiter.pg.table.blocks", [("table", queue), ("source", "hit")])
             , ("arbiter.pg.table.xid_age", [("table", queue)])
@@ -397,6 +404,14 @@ spec = do
       map (traceId . frozenLinkContext) (values (hotLinks hot))
         `shouldBe` map traceId (toList (spanContextOf . traceparent =<< traceContext job))
       (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext sp))
+      kindAttrOf hot `shouldBe` Just "Greeting"
+
+    it "labels a publish span with the variant the payload derives" $ do
+      (published, publishProvider) <- recordingTracerProvider
+      setGlobalTracerProvider publishProvider
+      runSimpleDb plainEnv $ withPublishSpan queue [defaultJob (Greeting "published")] (pure ())
+      hot <- traverse (readIORef . spanHot) =<< readIORef published
+      map kindAttrOf hot `shouldBe` [Just "Greeting"]
 
   describe "lifecycle hooks" $
     it "fires onJobClaimed under the job's consumer span" $ do
@@ -421,6 +436,7 @@ spec = do
         waitUntil 20_000 $ elem hookTraceId . map (traceId . spanContext) <$> readIORef recorded
   where
     values = toList . appendOnlyBoundedCollectionValues
+    kindAttrOf hot = lookupAttributeByKey (hotAttributes hot) ("arbiter.kind" :: AttributeKey Text)
     spanContextOf tp = decodeSpanContext (Just (encodeUtf8 tp)) Nothing
     enqueue env p = insertRaw env (defaultJob p)
     insertRaw env job = do

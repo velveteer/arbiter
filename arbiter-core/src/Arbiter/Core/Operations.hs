@@ -193,7 +193,19 @@ module Arbiter.Core.Operations
 
 import Control.Monad (foldM, join, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, fromJSON, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson
+  ( FromJSON (..)
+  , Result (..)
+  , ToJSON (..)
+  , Value
+  , fromJSON
+  , object
+  , withObject
+  , (.!=)
+  , (.:)
+  , (.:?)
+  , (.=)
+  )
 import Data.Bifunctor (bimap, first)
 import Data.Either (fromRight, isLeft, partitionEithers)
 import Data.Foldable (for_, toList, traverse_)
@@ -202,6 +214,7 @@ import Data.IntMap qualified as IntMap
 import Data.List (groupBy, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Monoid (Ap (..), Sum (..))
@@ -218,7 +231,7 @@ import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Core.Codec
   ( Col (..)
-  , JobWriteSource
+  , JobWriteSource (..)
   , RowCodec
   , codecColumns
   , col
@@ -239,16 +252,17 @@ import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
 import Arbiter.Core.Exceptions (throwParsing)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
+import Arbiter.Core.Job.Kind (HasKind, kindOf)
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
-  ( AdmissionColumns (..)
-  , ClaimSeq
+  ( ClaimSeq
   , DedupKey (ReplaceDuplicate)
   , JobId
   , JobPayload
   , JobRead
   , JobStatus (..)
   , JobWrite
+  , PayloadColumns (..)
   , archiveFor
   , attempts
   , claimSeq
@@ -352,6 +366,7 @@ filterToClause (Tmpl.FilterStatus s) = [QQ.sql|status = #{st :: CText}|]
 filterToClause (Tmpl.FilterId i) = [QQ.sql|id = #{i :: CInt8}|]
 filterToClause (Tmpl.FilterJobId i) = [QQ.sql|job_id = #{i :: CInt8}|]
 filterToClause (Tmpl.FilterClaimedBy w) = [QQ.sql|claimed_by = #{w :: CUuid}|]
+filterToClause (Tmpl.FilterKind k) = [QQ.sql|kind = #{k :: CText}|]
 filterToClause (Tmpl.FilterRateLimitPrefix p) = [QQ.sql|rate_limit_prefix = #{p :: CText}|]
 filterToClause (Tmpl.FilterConcurrencyPrefix p) = [QQ.sql|concurrency_prefix = #{p :: CText}|]
 filterToClause (Tmpl.FilterInsertedAfter t) = [QQ.sql|inserted_at >= #{t :: CTimestamptz}|]
@@ -398,18 +413,22 @@ advisoryXactLockManySQL :: Text -> [Int64] -> Q.Query (Maybe Text)
 advisoryXactLockManySQL key pids =
   [QQ.sql|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText} FROM unnest(#{pids :: [CInt8]}::bigint[]) AS t(id) ORDER BY id|]
 
--- | The admission columns for a job, derived from its payload.
-admissionColumns
-  :: forall payload. (HasConcurrency payload, HasRateLimit payload) => payload -> AdmissionColumns
-admissionColumns p =
+-- | The columns a job derives from its payload.
+payloadColumns
+  :: forall payload
+   . (HasConcurrency payload, HasKind payload, HasRateLimit payload)
+  => payload
+  -> PayloadColumns
+payloadColumns p =
   let rlKey = runRateLimitFor p (rateLimitFor @payload)
       ccKey = runConcurrencyFor p (concurrencyFor @payload)
-   in AdmissionColumns
-        { acRateLimitKey = rateLimitKeyText <$> rlKey
-        , acRateLimitPrefix = rlkPrefix <$> rlKey
-        , acRateLimitCost = rateLimitCost p
-        , acConcurrencyKey = concurrencyKeyText <$> ccKey
-        , acConcurrencyPrefix = ckPrefix <$> ccKey
+   in PayloadColumns
+        { pcKind = kindOf p
+        , pcRateLimitKey = rateLimitKeyText <$> rlKey
+        , pcRateLimitPrefix = rlkPrefix <$> rlKey
+        , pcRateLimitCost = rateLimitCost p
+        , pcConcurrencyKey = concurrencyKeyText <$> ccKey
+        , pcConcurrencyPrefix = ckPrefix <$> ccKey
         }
 
 -- | What an insert path puts on its jobs, carrying the ambient trace context.
@@ -436,7 +455,15 @@ internalStampedRow
   -> JobWriteSource payload
 internalStampedRow stamp parent state suspended job =
   let stamped = stamp job
-   in (stamped, admissionColumns (JT.payload stamped), parent, state, suspended)
+      encoded = toJSON (JT.payload stamped)
+   in JobWriteSource
+        { sourceJob = stamped
+        , sourceEncoded = encoded
+        , sourceColumns = payloadColumns (JT.payload stamped)
+        , sourceParentId = parent
+        , sourceParentState = state
+        , sourceSuspended = suspended
+        }
 
 -- | 'insertJob' over a stamp the caller shares across its inserts.
 insertJobStamped
@@ -1915,13 +1942,47 @@ data QueueStats = QueueStats
   , dlqJobs :: Int64
   -- ^ Entries in the companion DLQ table. Not part of the status partition:
   -- these rows have left the queue table, so they do not count toward 'totalJobs'.
+  , kindCounts :: Map Text Int64
+  -- ^ Depth by declared payload variant. Rows with no declared label are left out.
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+
+instance ToJSON QueueStats where
+  toJSON s =
+    object
+      [ "totalJobs" .= totalJobs s
+      , "readyJobs" .= readyJobs s
+      , "inFlightJobs" .= inFlightJobs s
+      , "scheduledJobs" .= scheduledJobs s
+      , "backoffJobs" .= backoffJobs s
+      , "throttledJobs" .= throttledJobs s
+      , "suspendedJobs" .= suspendedJobs s
+      , "cancelledJobs" .= cancelledJobs s
+      , "oldestReadyAgeSeconds" .= oldestReadyAgeSeconds s
+      , "oldestInFlightAgeSeconds" .= oldestInFlightAgeSeconds s
+      , "dlqJobs" .= dlqJobs s
+      , "kindCounts" .= kindCounts s
+      ]
+
+instance FromJSON QueueStats where
+  parseJSON = withObject "QueueStats" $ \o ->
+    QueueStats
+      <$> o .: "totalJobs"
+      <*> o .: "readyJobs"
+      <*> o .: "inFlightJobs"
+      <*> o .: "scheduledJobs"
+      <*> o .: "backoffJobs"
+      <*> o .: "throttledJobs"
+      <*> o .: "suspendedJobs"
+      <*> o .: "cancelledJobs"
+      <*> o .:? "oldestReadyAgeSeconds"
+      <*> o .:? "oldestInFlightAgeSeconds"
+      <*> o .: "dlqJobs"
+      <*> o .:? "kindCounts" .!= Map.empty
 
 -- | All-zero counts, the fallback for an aggregate query that returned no row.
 emptyQueueStats :: QueueStats
-emptyQueueStats = QueueStats 0 0 0 0 0 0 0 0 Nothing Nothing 0
+emptyQueueStats = QueueStats 0 0 0 0 0 0 0 0 Nothing Nothing 0 Map.empty
 
 -- | The per-status depths a 'QueueStats' carries.
 queueStatusCounts :: QueueStats -> [(JobStatus, Int64)]
@@ -1951,6 +2012,15 @@ statsRowCodec =
     <*> ncol "oldest_ready_age_seconds" CFloat8
     <*> ncol "oldest_in_flight_age_seconds" CFloat8
     <*> col "dlq_jobs" CInt8
+    <*> (decodeKindCounts <$> ncol "kind_counts" CJsonb)
+
+-- | The @jsonb_object_agg@ rollup as a map.
+decodeKindCounts :: Maybe Value -> Map Text Int64
+decodeKindCounts = foldMap (fromResult . fromJSON)
+  where
+    fromResult = \case
+      Success counts -> counts
+      Error _ -> Map.empty
 
 -- | A queue's per-status counts and backlog ages.
 getQueueStats
@@ -1959,9 +2029,11 @@ getQueueStats
   -- ^ Schema name
   -> TableName
   -- ^ Table name
+  -> [Text]
+  -- ^ The labels the payload declares. 'kindCounts' covers only these.
   -> m QueueStats
-getQueueStats schemaName tableName = do
-  rows <- MA.executeQuery (Tmpl.getQueueStatsSQL statsRowCodec schemaName tableName)
+getQueueStats schemaName tableName kinds = do
+  rows <- MA.executeQuery (Tmpl.getQueueStatsSQL statsRowCodec schemaName tableName kinds)
 
   -- The aggregate query always returns exactly one row. The empty fallback
   -- only guards against an unexpected truncation.
@@ -2009,11 +2081,12 @@ allStatsRowCodec =
 getAllQueueStats
   :: (MonadArbiter m)
   => SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
+  -- ^ Each queue with the labels its payload declares.
   -> m [QueueOverview]
 getAllQueueStats _ [] = pure []
-getAllQueueStats schemaName tableNames =
-  MA.executeQuery (Tmpl.allQueueStatsSQL allStatsRowCodec (codecColumns statsRowCodec) schemaName tableNames)
+getAllQueueStats schemaName queueKinds =
+  MA.executeQuery (Tmpl.allQueueStatsSQL allStatsRowCodec (codecColumns statsRowCodec) schemaName queueKinds)
 
 -- ---------------------------------------------------------------------------
 -- Count Operations

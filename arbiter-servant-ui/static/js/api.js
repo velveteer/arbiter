@@ -87,8 +87,12 @@ const ArbiterAPI = {
     return this._fetch('/queues');
   },
 
+  listKinds(table) {
+    return this._fetch(`/${table}/kinds`);
+  },
+
   // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, claimedBy, payload, ratePrefix, concPrefix, sortBy, sortDir } = {}) {
+  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, claimedBy, kind, payload, ratePrefix, concPrefix, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (parentId) qs += `&parent_id=${parentId}`;
@@ -96,6 +100,7 @@ const ArbiterAPI = {
     if (status) qs += `&status=${encodeURIComponent(status)}`;
     if (rootsOnly) qs += `&roots_only=true`;
     if (claimedBy) qs += `&claimed_by=${encodeURIComponent(claimedBy)}`;
+    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
     if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
     if (ratePrefix) qs += `&rate_limit_prefix=${encodeURIComponent(ratePrefix)}`;
     if (concPrefix) qs += `&concurrency_prefix=${encodeURIComponent(concPrefix)}`;
@@ -148,11 +153,12 @@ const ArbiterAPI = {
   },
 
   // DLQ
-  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, sortBy, sortDir } = {}) {
+  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
+    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/dlq${qs}`);
@@ -174,11 +180,12 @@ const ArbiterAPI = {
   },
 
   // Archive (completed jobs)
-  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, completedAfter, completedBefore, sortBy, sortDir } = {}) {
+  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, completedAfter, completedBefore, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
+    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
     if (completedAfter) qs += `&completed_after=${encodeURIComponent(completedAfter)}`;
     if (completedBefore) qs += `&completed_before=${encodeURIComponent(completedBefore)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;

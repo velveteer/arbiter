@@ -32,10 +32,20 @@ const FILTER_BUILDER_HTML = `
     <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Filter field" x-text="currentFilterField().label"></button>
     <ul class="dropdown-menu">
       <template x-for="f in filterFields" :key="f.field">
-        <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field" x-text="f.label"></a></li>
+        <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field; newFilterValue = ''" x-text="f.label"></a></li>
       </template>
     </ul>
-    <input :type="currentFilterField().type || 'text'" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    <template x-if="!currentFilterOptions().length">
+      <input :type="currentFilterField().type || 'text'" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    </template>
+    <template x-if="currentFilterOptions().length">
+      <select class="form-select" style="min-width: 150px;" aria-label="Filter value" x-model="newFilterValue" @keyup.escape="newFilterValue = ''">
+        <option value="" x-text="currentFilterPlaceholder()"></option>
+        <template x-for="o in currentFilterOptions()" :key="o">
+          <option :value="o" x-text="o"></option>
+        </template>
+      </select>
+    </template>
     <button class="btn btn-outline-secondary" type="button" @click="addFilter()" :disabled="!newFilterValue" title="Add filter" aria-label="Add filter">+</button>
   </div>`;
 
@@ -83,15 +93,41 @@ const TABLE_SKELETON_HTML = `
     </tr>
   </template>`;
 
-// Placeholder items for a summary strip whose numbers have not landed yet. The
-// strip itself is on screen from the first frame, so only its contents swap.
-const SUMMARY_SKELETON_HTML = `
-  <template x-for="i in (loading && !loaded && slowLoad ? 4 : 0)" :key="'qs-skeleton-' + i">
-    <div class="qs-item qs-item-skeleton">
-      <span class="skeleton-bar qs-skel-val"></span>
-      <span class="skeleton-bar qs-skel-lbl"></span>
-    </div>
-  </template>`;
+// The one panel every view puts in place of its table when a first load did not
+// land. It reads the noun the view loads and the message the server gave, so the
+// views answer a failure alike.
+const LOAD_ERROR_HTML = `
+<div class="empty-state" role="alert" x-show="loadFailed()">
+  <svg class="empty-state-icon is-error" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3">
+    <path d="M12 4.4 21.2 19.4H2.8z" stroke-linejoin="round"/>
+    <path d="M12 10.2v3.6M12 16.6h.01" stroke-linecap="round"/>
+  </svg>
+  <p class="empty-state-title">Could not load <span x-text="loadNoun"></span></p>
+  <p class="empty-state-note" x-text="_loadErrorMsg"></p>
+  <button type="button" class="btn btn-outline-secondary btn-sm empty-state-action" :disabled="loading" @click="refresh()"
+    ><span :class="loading ? 'spin' : 'd-none'" aria-hidden="true">&#x21bb;</span>
+    <span x-text="loading ? ' Trying…' : 'Try again'"></span></button>
+</div>`;
+
+// Chrome a view only wears when it has rows: its roll-up strip, and the queue
+// landing's toolbar. Whether the view had rows is known before the load answers,
+// so the slot is held from the first frame and the numbers land in it instead of
+// pushing the table down. A view that was empty holds nothing.
+function summaryMemory(storageKey) {
+  let seen = null;
+  return {
+    summaryExpected: localStorage.getItem(storageKey) === '1',
+
+    summaryClass(has) {
+      if (!this.loaded) return this.summaryExpected ? 'is-pending' : 'd-none';
+      if (seen !== has && !this._loadErrored) {
+        seen = has;
+        localStorage.setItem(storageKey, has ? '1' : '0');
+      }
+      return has ? '' : 'd-none';
+    },
+  };
+}
 
 // Pager. The head carries the count, page jump and page size; the foot repeats
 // just the controls. rowNoun names what is being counted.
@@ -486,7 +522,9 @@ function pollSpinner() {
 
 // The per-component state guardedLoad owns. Alpine writes an undeclared property
 // to a shared parent scope, so each slot is declared on the component itself.
-function loadState() {
+// isEmpty reads whether the view has nothing on screen, which decides whether a
+// failure takes the whole view or stays a toast over the rows already there.
+function loadState(isEmpty = () => true) {
   return {
     loading: false,
     loaded: false,
@@ -497,14 +535,28 @@ function loadState() {
     _loadSeq: 0,
     _loadsInFlight: 0,
     _loadErrored: false,
+    _loadErrorMsg: '',
     _loaderToken: null,
+
+    // The view has nothing to show and its last load did not land.
+    loadFailed() {
+      return this._loadErrored && isEmpty(this);
+    },
+
+    // The toolbar and table wait out a quick first load, so a failure opens as
+    // the panel rather than a table that appears and goes. A load slow enough to
+    // earn placeholders shows them, and every later load keeps the rows it has.
+    viewReady() {
+      return !this.loadFailed() && (this.loaded || this.slowLoad);
+    },
   };
 }
 
 // Runs a load body under the loading flag, a stale-response guard, and a
 // one-shot error toast. body(seq, isStale) does the fetch + apply. opts.suppressToast,
 // if it returns true at error time, skips the toast (still logs).
-async function guardedLoad(self, errorLabel, body, opts) {
+async function guardedLoad(self, body, opts) {
+  const errorLabel = 'Could not load ' + self.loadNoun;
   // The first load of a view drives the global top-bar loader instead of an
   // in-table "Loading…" flash. Later polls only spin that view's Refresh button.
   // The release is idempotent, so a concurrent load must not claim twice.
@@ -531,7 +583,12 @@ async function guardedLoad(self, errorLabel, body, opts) {
     if (isStale()) return;
     console.error(errorLabel + ':', e);
     if (opts && opts.suppressToast && opts.suppressToast()) return;
-    if (!self._loadErrored) { self._loadErrored = true; showToast(errorLabel + ': ' + e.message); }
+    const first = !self._loadErrored;
+    self._loadErrored = true;
+    self._loadErrorMsg = e.message;
+    // The panel carries a failure the view can show. A toast is for the rest: a
+    // poll that failed under rows already on screen.
+    if (first && !self.loadFailed()) showToast(errorLabel + ': ' + e.message);
   } finally {
     // The winner owns the flag. An abandoned load clears it once nothing is outstanding.
     self._loadsInFlight--;
@@ -698,6 +755,18 @@ function tableTab(loadMethod, refreshStorageKey) {
       history.replaceState(null, '', url);
     },
 
+    // The selected queue's declared label set, for a Kind filter's options.
+    kindOptions: [],
+    async loadKinds() {
+      const queue = Alpine.store('app').selectedQueue;
+      if (!queue) return;
+      try {
+        this.kindOptions = (await ArbiterAPI.listKinds(queue)) || [];
+      } catch {
+        this.kindOptions = [];
+      }
+    },
+
     // Filter builder: one chip per applied filter, plus a "field + value" adder.
     // `param` names the field's query-string and API key, so a tab adds a filter by
     // declaring it here and reading it in its own loader.
@@ -737,6 +806,11 @@ function tableTab(loadMethod, refreshStorageKey) {
     },
     currentFilterPlaceholder() {
       return this.currentFilterField().label + '…';
+    },
+    // `options` names the component property holding a field's value list.
+    currentFilterOptions() {
+      const f = this.currentFilterField();
+      return (f.options && this[f.options]) || [];
     },
     activeFilterChips() {
       return this.filterFields
@@ -1185,7 +1259,7 @@ function parseOverride(v, check) {
 // field/method names, fetchers, and labels that differ per tab.
 function drillDownTab(cfg) {
   return {
-    ...loadState(),
+    ...loadState((s) => s.policies.length === 0),
     policies: [],
     selectedPolicy: null,
     [cfg.listField]: [],
@@ -1248,7 +1322,7 @@ function drillDownTab(cfg) {
     },
 
     async loadPolicies() {
-      await guardedLoad(this, cfg.policyError, async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await cfg.fetchPolicies();
         if (isStale()) return;
         this.policies = data.policies || [];
@@ -1318,7 +1392,7 @@ function drillDownTab(cfg) {
       if (err) {
         // On a background poll, keep the stale list rather than blanking it.
         if (silent) return;
-        showToast(`Failed to load ${cfg.itemLabel}: ${err.message}`);
+        showToast(`Could not load ${cfg.itemLabel}: ${err.message}`);
         this[cfg.listField] = [];
       } else {
         this[cfg.listField] = data[cfg.listField] || [];
@@ -1597,6 +1671,7 @@ const _filterKeys = [
   'parent_id',
   'job_id',
   'claimed_by',
+  'kind',
   'payload',
   'rate_limit_prefix',
   'concurrency_prefix',

@@ -5,6 +5,7 @@
 module Arbiter.Otel.Gauges
   ( startGauges
   , withGaugeLoop
+  , reachabilityOf
   ) where
 
 import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (..))
@@ -26,15 +27,16 @@ import Arbiter.Core.Operations
   , setLocalStatementTimeout
   )
 import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
-import Arbiter.Worker (LogConfig, LogLevel (..), tryLog, warnEx)
+import Arbiter.Worker (LogConfig (..), LogLevel (..), newFailureGate, reportOutcome, tryLog)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically, modifyTVar', readTVarIO, writeTVar)
 import Control.Exception (SomeException)
 import Control.Monad (forever, void)
 import Data.Bifunctor (first)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (for_, toList, traverse_)
 import Data.HashMap.Strict (HashMap)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
@@ -82,11 +84,12 @@ startGauges
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
+  -- ^ Each queue with the labels its payload declares.
   -> NominalDiffTime
   -> IO (IO ())
-startGauges tel baseLog runDb schema queueTables refreshInterval = do
-  (loop, stop) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
+startGauges tel baseLog runDb schema queueKinds refreshInterval = do
+  (loop, stop) <- prepareGauges tel baseLog runDb schema queueKinds refreshInterval
   pure (loop `finally` stop)
 
 -- | 'startGauges' with the reading bracketed, so the instruments stop observing however
@@ -97,13 +100,14 @@ withGaugeLoop
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
+  -- ^ Each queue with the labels its payload declares.
   -> NominalDiffTime
   -> (IO () -> IO b)
   -- ^ Runs the refresh loop, typically on a thread of its own.
   -> IO b
-withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
-  bracket (prepareGauges tel baseLog runDb schema queueTables refreshInterval) snd (use . fst)
+withGaugeLoop tel baseLog runDb schema queueKinds refreshInterval use =
+  bracket (prepareGauges tel baseLog runDb schema queueKinds refreshInterval) snd (use . fst)
 
 -- | The refresh loop and the action retiring the reading its instruments observe.
 prepareGauges
@@ -112,20 +116,23 @@ prepareGauges
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
   -> NominalDiffTime
   -> IO (IO (), IO ())
-prepareGauges tel baseLog runDb schema queueTables refreshInterval
+prepareGauges tel baseLog runDb schema queueKinds refreshInterval
   | isNothing (Tel.meters tel) = pure (pure (), pure ())
   | otherwise = do
       cells <- newGaugeCells =<< getMonotonicTime
-      advance <- arbiterMeter (Tel.provider tel) >>= flip registerInstruments cells
+      reachable <- newIORef Nothing
+      advance <- arbiterMeter (Tel.provider tel) >>= \meter -> registerInstruments meter reachable cells
       loop <-
         gaugeRefreshLoop
-          (Tel.telemetryLogConfig tel baseLog)
+          -- The loop belongs to no single pool, so it drops their identity.
+          (Tel.telemetryLogConfig tel baseLog) {identityContext = []}
+          reachable
           runDb
           schema
-          queueTables
+          queueKinds
           (max 1 refreshInterval)
           cells
           advance
@@ -133,8 +140,8 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
 
 -- | Register the instruments, each reading whatever the loop last cached, and return the
 -- action that carries a freshly published reading onto the counters.
-registerInstruments :: Meter -> GaugeCells -> IO (Cached -> IO ())
-registerInstruments meter cells = do
+registerInstruments :: Meter -> IORef (Maybe Bool) -> GaugeCells -> IO (Cached -> IO ())
+registerInstruments meter reachable cells = do
   let withCached emit = [\res -> readTVarIO (cache cells) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
@@ -167,6 +174,12 @@ registerInstruments meter cells = do
       over queues $ \o ->
         [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
         | (st, n) <- statusCounts (overviewStats o)
+        ]
+  reg Name.QueueDepthByKind "{job}" "Jobs in a queue by payload variant" $
+    observed $
+      over queues $ \o ->
+        [ ([("queue", overviewQueue o), ("kind", k)], fromIntegral n)
+        | (k, n) <- Map.toList (kindCounts (overviewStats o))
         ]
   reg Name.QueueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
     perQueue oldestReadyAgeSeconds
@@ -221,6 +234,13 @@ registerInstruments meter cells = do
           perTableTotals "source" (\t -> [("hit", Health.blksHit t), ("disk", Health.blksRead t)])
       ]
 
+  -- Absent until the first scan, so a reading never claims to know before it does.
+  regGauge
+    Name.DbReachable
+    "{status}"
+    "1 when the last health scan reached the database, 0 when it failed"
+    [\res -> readIORef reachable >>= traverse_ (\ok -> observe res (if ok then 1 else 0) (attrs []))]
+
   -- How far behind the exported readings have fallen, from registration until the
   -- first. A stopped loop leaves the other gauges holding their last reading, which
   -- only this tells apart from a fresh one.
@@ -253,8 +273,8 @@ registerInstruments meter cells = do
     observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
     perConcurrency field = observed (over concurrency (\p -> [([("policy", Conc.prefix p)], field p)]))
     bothKinds concField rateField = observed $ \snap ->
-      [([("kind", concurrencyKind), ("policy", Conc.prefix p)], concField p) | p <- concurrency snap]
-        <> [([("kind", rateLimitKind), ("policy", RL.prefix p)], rateField p) | p <- rateLimits snap]
+      [([("policy_kind", concurrencyKind), ("policy", Conc.prefix p)], concField p) | p <- concurrency snap]
+        <> [([("policy_kind", rateLimitKind), ("policy", RL.prefix p)], rateField p) | p <- rateLimits snap]
     dbOf = toList . db
     perTableTotals label pairs =
       over tables (\t -> [([("table", Health.table t), (label, k)], v) | (k, v) <- pairs t])
@@ -268,29 +288,39 @@ registerInstruments meter cells = do
     perDb = observed . dbTotal
     perDbBy label = observed . perDbTotals label
 
+-- | What a scan says about the database. An abandoned scan says nothing, so the
+-- last verdict stands.
+reachabilityOf :: Either SomeException (Maybe a) -> Maybe Bool
+reachabilityOf = either (const (Just False)) (True <$)
+
 -- | The loop that scans and publishes the reading every instrument reads from.
 gaugeRefreshLoop
   :: forall m
    . (MonadArbiter m)
   => LogConfig
+  -> IORef (Maybe Bool)
+  -- ^ Set from every scan, for the reachability gauge to observe.
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
   -> NominalDiffTime
   -> GaugeCells
   -> (Cached -> IO ())
   -- ^ Carries a published reading onto the counters.
   -> IO (IO ())
-gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance = do
+gaugeRefreshLoop logCfg reachable runDb schema queueKinds refreshInterval cells advance = do
   gateRef <- newIORef Nothing
+  refreshGate <- newFailureGate
   pure $ forever $ do
     started <- getMonotonicTime
     refreshed <- refresh gateRef
     now <- getMonotonicTime
-    either
-      (warn "Gauge refresh failed, keeping the last reading")
-      (traverse_ publish . (>>= stamp started now))
-      refreshed
+    -- A failed scan keeps the last reading, so only the state change is worth a line.
+    -- A scan that says nothing about the database moves neither the gate nor the gauge.
+    for_ (reachabilityOf refreshed) $ \ok -> do
+      reportOutcome logCfg Warning refreshGate "Gauge refresh" refreshed
+      writeIORef reachable (Just ok)
+    traverse_ (traverse_ publish . (>>= stamp started now)) refreshed
     let elapsed = now - started
     -- The gate reopens gateInterval after the publish, so a scan slower than the
     -- slack would otherwise lose the gate on the very next tick.
@@ -336,8 +366,15 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance =
     -- none of them pins a snapshot for the whole scan.
     boundedRead :: forall a. m a -> m a
     boundedRead q = withDbTransaction (setLocalStatementTimeout staleAfter >> q)
+    queueTables = map fst queueKinds
+    -- A declared label exports a series whether or not a row carries it.
+    declared = Map.fromList queueKinds
+    zeroFilled o =
+      let zeros = Map.fromList [(k, 0) | k <- Map.findWithDefault [] (overviewQueue o) declared]
+          stats = overviewStats o
+       in o {overviewStats = stats {kindCounts = Map.union (kindCounts stats) zeros}}
     scan = do
-      overviews <- boundedRead (getAllQueueStats schema queueTables)
+      overviews <- map zeroFilled <$> boundedRead (getAllQueueStats schema queueKinds)
       (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth schema queueTables)
       concPolicies <- boundedRead (listConcurrencyPolicies schema)
       -- No queue tables, so the policy read stays off the job tables: the
@@ -351,7 +388,6 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance =
           , concurrency = concPolicies
           , rateLimits = rlPolicies
           }
-    warn = warnEx logCfg
 
 -- | Count an absolute total's rise since the scan it was last counted from.
 addRise

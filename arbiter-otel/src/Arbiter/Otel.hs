@@ -50,8 +50,9 @@ module Arbiter.Otel
   ) where
 
 import Arbiter.Core.HighLevel qualified as Arb
+import Arbiter.Core.Job.Types (HasKind)
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
-import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryTableNames)
+import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryQueueKinds)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
@@ -106,7 +107,7 @@ withGauges
 withGauges tel baseLog action = do
   schema <- getSchema
   withRunInIO $ \runDb ->
-    withGaugeLoop tel baseLog runDb schema (registryTableNames (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
+    withGaugeLoop tel baseLog runDb schema (registryQueueKinds (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
       \loop -> withAsync (labelArbiterThread "gauges" Nothing >> loop) (const (runDb action))
 
 -- | 'Arbiter.Worker.runWorkerPools' with the SDK installed from the environment, the
@@ -170,14 +171,14 @@ withTelemetryHere baseLog use = withRunInIO $ \runDb ->
 -- | 'instrumentPool' over a bare config, labelled by the payload's registry queue.
 instrumentConfig
   :: forall m payload
-   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+   . (HasKind payload, KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
   => Telemetry
   -> WorkerConfig m payload
   -> WorkerConfig m payload
 instrumentConfig tel = labelledConfig tel (Arb.queueTable @payload @m)
 
 labelledConfig
-  :: (MonadUnliftIO m)
+  :: (HasKind payload, MonadUnliftIO m)
   => Telemetry
   -> Text
   -> WorkerConfig m payload

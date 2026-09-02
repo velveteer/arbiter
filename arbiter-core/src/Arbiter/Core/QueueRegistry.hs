@@ -34,6 +34,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 
+import Arbiter.Core.Job.Kind (HasKind (..))
+
 -- | A queue's table name, payload type, and handler result type. A @type data@
 -- constructor, so it takes no promotion tick.
 type data QueueSpec = QueueWithResult Symbol Type Type
@@ -148,11 +150,16 @@ type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: 
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
   registryTableNames :: Proxy registry -> [Text]
 
+  -- | Each queue with the labels its payload declares.
+  registryQueueKinds :: Proxy registry -> [(Text, [Text])]
+
 instance RegistryTables '[] where
   registryTableNames _ = []
+  registryQueueKinds _ = []
 
 instance
-  ( KnownSymbol (SpecName spec)
+  ( HasKind (SpecPayload spec)
+  , KnownSymbol (SpecName spec)
   , NotInPayloads (SpecPayload spec) rest
   , NotInTables (SpecName spec) rest
   , RegistryTables rest
@@ -161,3 +168,6 @@ instance
   where
   registryTableNames _ =
     T.pack (symbolVal (Proxy @(SpecName spec))) : registryTableNames (Proxy @rest)
+  registryQueueKinds _ =
+    (T.pack (symbolVal (Proxy @(SpecName spec))), kindsFor @(SpecPayload spec))
+      : registryQueueKinds (Proxy @rest)

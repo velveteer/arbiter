@@ -111,8 +111,9 @@ apiJobPairs job =
   , "claimedBy" .= Arb.claimedBy job
   , "claimSeq" .= Arb.claimSeq job
   , "archiveFor" .= Arb.archiveFor job
-  , "rateLimit" .= Arb.jobRateLimitKey (Arb.admission job)
-  , "concurrency" .= Arb.jobConcurrencyKey (Arb.admission job)
+  , "kind" .= Arb.jobKind (Arb.payloadKeys job)
+  , "rateLimit" .= Arb.jobRateLimitKey (Arb.payloadKeys job)
+  , "concurrency" .= Arb.jobConcurrencyKey (Arb.payloadKeys job)
   ]
 
 instance (ToJSON payload) => ToJSON (ApiJob payload) where

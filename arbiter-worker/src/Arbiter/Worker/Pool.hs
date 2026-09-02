@@ -198,10 +198,7 @@ runWorkerPool config = do
         pure (pure True)
       Just listener ->
         ContT $
-          Listen.withChannels
-            listener
-            (Listen.HubLog (tryLog (logConfig config) Warning) (tryLog (logConfig config) Error))
-            handlers
+          Listen.withChannels listener (hubLogFor (logConfig config)) handlers
     void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
     let spawn = spawnRetried (workerStateVar config) (logConfig config) queueName
     heartbeat <-
@@ -330,8 +327,9 @@ heartbeatLoop
   -- ^ Queue name (used when the row needs re-registering).
   -> m ()
 heartbeatLoop config schemaName queueName = do
-  tick
-  forever $ throttledWait *> tick
+  gate <- newFailureGate
+  tick gate
+  forever $ throttledWait *> tick gate
   where
     logCfg = logConfig config
     sig = heartbeatSignal config
@@ -343,16 +341,15 @@ heartbeatLoop config schemaName queueName = do
         STM.readTVar delayVar >>= checkSTM
         paused <- STM.readTVar (pauseVar config)
         unless paused $ STM.takeTMVar sig
-    tick = do
+    tick gate = do
       traverse_
         (\path -> tryWarn logCfg "Liveness probe write failed" (liftIO $ writeFile path ""))
         (livenessFile config)
       epoch <- STM.atomically $ STM.readTVar (pauseEpoch config)
-      result <- tryAny $ Ops.heartbeatWorker schemaName (workerId config)
-      case result of
-        Left e -> warnEx logCfg "Worker registry heartbeat failed" e
-        Right Nothing -> reregister
-        Right (Just rp) -> reconcile epoch rp
+      result <-
+        tryReported logCfg Warning gate "Worker registry heartbeat" $
+          Ops.heartbeatWorker schemaName (workerId config)
+      traverse_ (maybe reregister (reconcile epoch)) result
     reregister = do
       shutting <- STM.atomically readShuttingDown
       unless shutting $ do

@@ -5,18 +5,32 @@ module Main (main) where
 
 import Control.Exception (SomeException, someExceptionContext, try)
 import Control.Exception.Context (displayExceptionContext)
+import Data.Aeson (ToJSON (..), Value (String), object, (.=))
 import Data.Int (Int32, Int64)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), fromGregorian)
 import Data.UUID.Types qualified as UUID
+import GHC.Generics (Generic)
 import Test.Hspec
 
-import Arbiter.Core.Codec (Col (..), ParamType (..), SomeParam (..), codecColumns)
+import Arbiter.Core.Codec
+  ( Col (..)
+  , JobWriteSource (..)
+  , ParamType (..)
+  , SomeParam (..)
+  , cScalar
+  , codecColumns
+  , jobCodec
+  , jobRowCodec
+  , writeColumnNames
+  )
 import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
+import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds, kindFromField)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
-import Arbiter.Core.Operations (buildWhereClause, statsRowCodec)
+import Arbiter.Core.Job.Types (PayloadColumns (..), defaultJob)
+import Arbiter.Core.Operations (QueueStats, buildWhereClause, statsRowCodec)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.Jobs (JobFilter (..))
 import Arbiter.Core.Sql.QQ (sql)
@@ -45,6 +59,22 @@ colTag CJsonb = "jsonb"
 colTag CFloat8 = "float8"
 colTag CUuid = "uuid"
 
+-- | The JSONB values a set of parameters carries.
+jsonParams :: [SomeParam] -> [Value]
+jsonParams params = [v | SomeParam (PScalar CJsonb) v <- params]
+
+-- | An insert source whose stored encoding is not the payload's own.
+sentinelSource :: JobWriteSource KindPayload
+sentinelSource =
+  JobWriteSource
+    { sourceJob = defaultJob (SendWelcome "alice")
+    , sourceEncoded = String "sentinel"
+    , sourceColumns = PayloadColumns Nothing Nothing Nothing 1 Nothing Nothing
+    , sourceParentId = Nothing
+    , sourceParentState = Nothing
+    , sourceSuspended = False
+    }
+
 -- | The text a set of parameters carries, for asserting on an escaped search term.
 textParams :: [SomeParam] -> [Text]
 textParams params = [t | SomeParam (PScalar CText) t <- params]
@@ -53,6 +83,7 @@ textParams params = [t | SomeParam (PScalar CText) t <- params]
 allFilters :: [JobFilter]
 allFilters =
   [ FilterClaimedBy UUID.nil
+  , FilterKind "SendWelcome"
   , FilterPayloadText "term"
   , FilterRateLimitPrefix "smtp"
   , FilterConcurrencyPrefix "tenant"
@@ -63,6 +94,60 @@ allFilters =
   ]
   where
     epoch = UTCTime (fromGregorian 2026 8 30) 0
+
+-- | A tagged sum taking the generic default.
+data KindPayload
+  = SendWelcome Text
+  | SendReceipt Int32
+  deriving stock (Eq, Generic, Show)
+
+instance ToJSON KindPayload
+
+instance HasKind KindPayload
+
+-- | A payload with no instance, taking the empty default.
+newtype PlainPayload = PlainPayload Text
+  deriving stock (Eq, Show)
+
+instance ToJSON PlainPayload where
+  toJSON (PlainPayload t) = toJSON t
+
+-- | A payload labelling its constructors by something other than their names.
+data RenamedPayload
+  = RenamedA
+  | RenamedB
+  deriving stock (Bounded, Enum, Eq, Generic, Show)
+
+renamedTag :: RenamedPayload -> Text
+renamedTag RenamedA = "a_lower"
+renamedTag RenamedB = "b_lower"
+
+instance HasKind RenamedPayload where
+  kindOf = Just . renamedTag
+  kindsFor = map renamedTag [minBound .. maxBound]
+
+-- | An envelope labelled from the sum it wraps.
+newtype Envelope = Envelope KindPayload
+  deriving stock (Eq, Show)
+
+lowerFirst :: Text -> Text
+lowerFirst t = maybe t (\(c, rest) -> T.toLower (T.singleton c) <> rest) (T.uncons t)
+
+instance HasKind Envelope where
+  kindOf (Envelope b) = Just (lowerFirst (constructorKind b))
+  kindsFor = map lowerFirst (constructorKinds @KindPayload)
+
+-- | A payload with no constructors to name, labelled from the data itself.
+newtype RuntimePayload = RuntimePayload Value
+  deriving stock (Eq, Show)
+
+instance HasKind RuntimePayload where
+  kindOf (RuntimePayload v) = kindFromField "type" v
+  kindsFor = []
+
+-- | The per-queue stats query over a declared label set.
+statsSQL :: [Text] -> Query QueueStats
+statsSQL = getQueueStatsSQL statsRowCodec "arbiter" "jobs"
 
 sqlOf :: Query a -> Text
 sqlOf = T.strip . qSql
@@ -98,6 +183,38 @@ main = hspec $ do
 
     it "rejects unknown health text" $
       workerHealthFromText "new_health" `shouldBe` Left "unknown worker health: new_health"
+
+  describe "payload kinds" $ do
+    it "labels a job with its constructor name" $ do
+      kindOf (SendWelcome "alice") `shouldBe` Just "SendWelcome"
+      kindOf (SendReceipt 1) `shouldBe` Just "SendReceipt"
+
+    it "collects every constructor, in declaration order" $
+      kindsFor @KindPayload `shouldBe` ["SendWelcome", "SendReceipt"]
+
+    it "leaves a payload with no instance unlabelled" $ do
+      kindOf (PlainPayload "x") `shouldBe` Nothing
+      kindsFor @PlainPayload `shouldBe` []
+
+    it "takes both the label and the set from a hand-written instance" $ do
+      kindOf RenamedA `shouldBe` Just "a_lower"
+      map Just (kindsFor @RenamedPayload) `shouldBe` map kindOf [minBound .. maxBound :: RenamedPayload]
+
+    it "labels an envelope by the constructor of the body it wraps" $ do
+      kindOf (Envelope (SendWelcome "alice")) `shouldBe` Just "sendWelcome"
+      map Just (kindsFor @Envelope) `shouldBe` map (kindOf . Envelope) [SendWelcome "a", SendReceipt 1]
+
+    it "labels a payload that has no constructors to name from its data" $ do
+      kindOf (RuntimePayload (object ["type" .= ("from_data" :: Text)])) `shouldBe` Just "from_data"
+      kindOf (RuntimePayload (object ["other" .= ("x" :: Text)])) `shouldBe` Nothing
+      kindsFor @RuntimePayload `shouldBe` []
+
+    it "writes the payload column from the encoding the caller built" $
+      jsonParams (cScalar (jobCodec "jobs") sentinelSource) `shouldBe` [String "sentinel"]
+
+    it "stores the label as a written column that reads back" $ do
+      writeColumnNames `shouldSatisfy` elem "kind"
+      codecColumns (jobRowCodec "jobs") `shouldSatisfy` elem "kind"
 
   describe "sql quasiquoter" $ do
     it "emits one placeholder per input hole, in order" $ do
@@ -164,7 +281,7 @@ main = hspec $ do
       rendered `shouldSatisfy` T.isInfixOf "claimed_by = ?::uuid"
 
     it "measures queue ages from clock_timestamp, so none of them can go negative" $ do
-      let rendered = squished (getQueueStatsSQL statsRowCodec "arbiter" "jobs")
+      let rendered = squished (statsSQL [])
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(last_attempted_at)"
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(inserted_at)"
       rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")
@@ -172,12 +289,12 @@ main = hspec $ do
     it "renders each job filter against the column its table names" $ do
       let rendered = squished (buildWhereClause allFilters)
       rendered
-        `shouldBe` "WHERE claimed_by = ? AND payload::text ILIKE ? ESCAPE '\\' \
+        `shouldBe` "WHERE claimed_by = ? AND kind = ? AND payload::text ILIKE ? ESCAPE '\\' \
                    \AND rate_limit_prefix = ? AND concurrency_prefix = ? \
                    \AND inserted_at >= ? AND inserted_at < ? \
                    \AND completed_at >= ? AND completed_at < ?"
       paramTags (qParams (buildWhereClause allFilters))
-        `shouldBe` ["uuid", "text", "text", "text", "ts", "ts", "ts", "ts"]
+        `shouldBe` ["uuid", "text", "text", "text", "text", "ts", "ts", "ts", "ts"]
 
     it "matches a payload search literally, so its wildcards are not pattern syntax" $ do
       let param = qParams (buildWhereClause [FilterPayloadText "50%_off"])
@@ -186,9 +303,22 @@ main = hspec $ do
     it "narrows nothing when no filter is given" $
       squished (buildWhereClause []) `shouldBe` ""
 
+    it "rolls up depth by label over the rows the stats query already reads" $ do
+      let rendered = squished (statsSQL (kindsFor @KindPayload))
+      rendered `shouldSatisfy` T.isInfixOf "GROUP BY GROUPING SETS ((), (kind))"
+      rendered `shouldSatisfy` T.isInfixOf "jsonb_object_agg"
+      T.count "FROM \"arbiter\".\"jobs\"" rendered `shouldBe` 1
+
+    it "rolls up only the labels the payload declares" $
+      squished (statsSQL (kindsFor @KindPayload))
+        `shouldSatisfy` T.isInfixOf "CASE WHEN kind IN ('SendWelcome', 'SendReceipt') THEN kind END AS kind"
+
+    it "rolls up nothing for a payload that declares no label" $
+      squished (statsSQL (kindsFor @PlainPayload)) `shouldSatisfy` T.isInfixOf "NULL::text AS kind"
+
     it "selects stats columns in the decoder's own order" $ do
       let cols = codecColumns statsRowCodec
-          rendered = squished (getQueueStatsSQL statsRowCodec "arbiter" "jobs")
+          rendered = squished (statsSQL (kindsFor @KindPayload))
           aliasAt c = T.length (fst (T.breakOn (" AS " <> c) rendered))
           positions = map aliasAt cols
       cols `shouldSatisfy` all (\c -> T.isInfixOf (" AS " <> c) rendered)

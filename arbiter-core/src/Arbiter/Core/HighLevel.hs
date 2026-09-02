@@ -181,6 +181,7 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types
   ( ClaimSeq
+  , HasKind
   , JobId
   , JobPayload
   , JobRead
@@ -188,6 +189,7 @@ import Arbiter.Core.Job.Types
   , RegistryAdmissionPolicies
   , claimSeq
   , claimedBy
+  , kindsFor
   , primaryKey
   )
 import Arbiter.Core.Job.Types qualified as Job
@@ -229,7 +231,7 @@ onQueue op = getSchema >>= \schemaName -> op schemaName (queueTable @payload @m)
 
 publishSpan
   :: forall payload m a
-   . (KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
+   . (HasKind payload, KnownSymbol (TableForPayload payload (RegistryOf m)), MonadUnliftIO m)
   => [JobWrite payload]
   -> m a
   -> m a
@@ -947,7 +949,7 @@ getQueueStats
   :: forall payload m
    . (QueueOperation m payload)
   => m Ops.QueueStats
-getQueueStats = onQueue @payload $ \s t -> Ops.getQueueStats s t
+getQueueStats = onQueue @payload $ \s t -> Ops.getQueueStats s t (kindsFor @payload)
 
 -- ---------------------------------------------------------------------------
 -- Count Operations

@@ -27,6 +27,8 @@ const CC_ACTIONS_HTML = `
 document.addEventListener('alpine:init', () => {
   Alpine.data('concurrencyTab', () => ({
     ...pollingTab('loadPolicies', ARB_TIMING.concurrencyPollMs, 'arb.concurrencyRefresh'),
+    loadNoun: 'concurrency pools',
+    ...summaryMemory('arb.summary.concurrency'),
     ...clientSort('policies', CC_SORT_KEYS, 'prefix', 'prefix'),
     ...confirmArm(),
     ...drillDownTab({
@@ -38,7 +40,6 @@ document.addEventListener('alpine:init', () => {
       itemLimit: CC_KEY_LIMIT,
       itemLabel: 'keys',
       drawerId: 'concurrencyDrawer',
-      policyError: 'Failed to load concurrency pools',
       fetchPolicies: () => ArbiterAPI.listConcurrency(),
       fetchItems: (prefix, opts) => ArbiterAPI.listConcurrencyKeys(prefix, opts),
     }),

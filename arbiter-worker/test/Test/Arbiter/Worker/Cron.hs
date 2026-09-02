@@ -10,7 +10,7 @@ import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
-import Arbiter.Simple (SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
+import Arbiter.Simple (SimpleDb, SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
 import Control.Exception (bracket, catch)
@@ -60,13 +60,14 @@ import Arbiter.Worker.Cron
   , initCronSchedules
   , makeDedupKey
   , matchesInTimezone
+  , newCronLog
   , nextRunInTimezone
   , processCronCatchUp
   , processRunRequests
   , resolveTZ
   , truncateToMinute
   )
-import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..))
+import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), defaultLogConfig)
 
 type WorkerTestRegistry = '[Queue "arbiter_cron_test" WorkerTestPayload]
 
@@ -79,11 +80,32 @@ testTable = "arbiter_cron_test"
 -- | A silent logger for tests (filters out everything below Error).
 testLogConfig :: LogConfig
 testLogConfig =
-  LogConfig
+  defaultLogConfig
     { minLogLevel = Error -- Only show errors
     , logDestination = LogStdout
-    , additionalContext = pure []
     }
+
+-- | 'processCronCatchUp' under a fresh gate store, so one case never suppresses
+-- the next one's log line.
+catchUpAt
+  :: Text
+  -> Text
+  -> [CronJob WorkerTestPayload]
+  -> UTCTime
+  -> SimpleDb WorkerTestRegistry IO ()
+catchUpAt schema table jobs tick = do
+  cronLog <- newCronLog testLogConfig
+  processCronCatchUp cronLog schema table jobs tick
+
+-- | 'processRunRequests' under a fresh gate store.
+runRequestsAt
+  :: Text
+  -> [CronJob WorkerTestPayload]
+  -> UTCTime
+  -> SimpleDb WorkerTestRegistry IO ()
+runRequestsAt schema jobs now = do
+  cronLog <- newCronLog testLogConfig
+  processRunRequests cronLog schema jobs now
 
 -- | Helper to build a UTCTime from components.
 mkTime :: Integer -> Int -> Int -> Int -> Int -> Int -> UTCTime
@@ -381,7 +403,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick
+          catchUpAt testSchema testTable [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -399,7 +421,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick
+          catchUpAt testSchema testTable [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -415,8 +437,8 @@ spec connStr = do
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick1
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick2
+          catchUpAt testSchema testTable [cj] tick1
+          catchUpAt testSchema testTable [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         -- Both ticks produce the same dedup key "arbiter_cron:every-min", so only 1 job
@@ -433,8 +455,8 @@ spec connStr = do
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick1
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick2
+          catchUpAt testSchema testTable [cj] tick1
+          catchUpAt testSchema testTable [cj] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 2
@@ -455,7 +477,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cjAlways, cjNever] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cjAlways, cjNever] tick
+          catchUpAt testSchema testTable [cjAlways, cjNever] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -471,7 +493,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 14 30 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick
+          catchUpAt testSchema testTable [cj] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -495,7 +517,7 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [good, bad] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [good, bad] tick
+          catchUpAt testSchema testTable [good, bad] tick
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
         let getRow n = lookup n [(CS.name r, r) | r <- rows]
@@ -524,7 +546,7 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-nightly"
-          processRunRequests testLogConfig testSchema [cj] now
+          runRequestsAt testSchema [cj] now
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "manual"]
@@ -546,12 +568,12 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [failing] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-atomic"
-          processRunRequests testLogConfig testSchema [failing] now
+          runRequestsAt testSchema [failing] now
 
         Just pendingRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-atomic"
         CS.runRequestedAt pendingRow `shouldNotBe` Nothing
 
-        runSimpleDb env $ processRunRequests testLogConfig testSchema [working] now
+        runSimpleDb env $ runRequestsAt testSchema [working] now
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "manual"]
 
@@ -564,7 +586,7 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-gate"
-          processRunRequests testLogConfig testSchema [cj] now
+          runRequestsAt testSchema [cj] now
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-gate"
         CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
@@ -575,9 +597,9 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-skipmark"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun testSchema "run-skipmark"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 31 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 31 0)
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-skipmark"
         CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
@@ -596,7 +618,7 @@ spec connStr = do
               (PG.Only ("run-expire" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ processRunRequests testLogConfig testSchema [cj] now
+        runSimpleDb env $ runRequestsAt testSchema [cj] now
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` []
 
@@ -618,8 +640,8 @@ spec connStr = do
           initCronSchedules testSchema testTable [cj] testLogConfig
           void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-backfill"]
           _ <- Ops.requestCronRun testSchema "run-backfill"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
-          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         sort [t | SimpleTask t <- map payload jobs]
@@ -637,8 +659,8 @@ spec connStr = do
           initCronSchedules testSchema testTable [cj] testLogConfig
           void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-skipbf"]
           _ <- Ops.requestCronRun testSchema "run-skipbf"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
-          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "2025-06-15T12:30"]
@@ -647,7 +669,7 @@ spec connStr = do
         let Right cj = cronJob "run-none" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -662,7 +684,7 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-tick"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask (T.pack (show (mkTime 2025 6 15 12 30 0)))]
@@ -701,9 +723,9 @@ spec connStr = do
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-skip"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun testSchema "run-skip"
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 31 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 31 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -723,7 +745,7 @@ spec connStr = do
                 , overrideTimezone = Nothing
                 , enabled = Just False
                 }
-          processRunRequests testLogConfig testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -765,7 +787,7 @@ spec connStr = do
                 , overrideTimezone = Nothing
                 , enabled = Just False
                 }
-          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -786,7 +808,7 @@ spec connStr = do
                 , enabled = Nothing
                 }
           -- Tick at 12:00 should NOT fire (overridden to 3am only)
-          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -795,7 +817,7 @@ spec connStr = do
         let Right cj = cronJob "fire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "fire"))
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
 
         mRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "fire-test"
         case mRow of
@@ -865,7 +887,7 @@ spec connStr = do
               (PG.Only ("catchup-backfill" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         -- Expect at least 5 missed minutes plus the current one.
@@ -891,7 +913,7 @@ spec connStr = do
               (PG.Only ("catchup-nobackfill" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -909,7 +931,7 @@ spec connStr = do
         runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -921,7 +943,7 @@ spec connStr = do
             currentTickPast = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] currentTickPast
+          catchUpAt testSchema testTable [cj] currentTickPast
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
         case lookup "watermark" [(CS.name r, r) | r <- rows] of
@@ -936,8 +958,8 @@ spec connStr = do
             earlier = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] later
-          processCronCatchUp testLogConfig testSchema testTable [cj] earlier
+          catchUpAt testSchema testTable [cj] later
+          catchUpAt testSchema testTable [cj] earlier
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
         case lookup "monotonic" [(CS.name r, r) | r <- rows] of
@@ -957,13 +979,13 @@ spec connStr = do
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cj] testLogConfig
-          processCronCatchUp testLogConfig testSchema testTable [cj] tick
+          catchUpAt testSchema testTable [cj] tick
 
         claimed <- runSimpleDb env $ HL.claimNextVisibleJobs 100 60 :: IO [JobRead WorkerTestPayload]
         length claimed `shouldBe` 1
         runSimpleDb env $ forM_ claimed $ \j -> void $ HL.ackJob j
 
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] tick
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] tick
         afterRetry <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         afterRetry `shouldBe` []
 
@@ -979,7 +1001,7 @@ spec connStr = do
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
               (tick, "skew-race" :: Text)
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] tick
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] tick
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
@@ -994,7 +1016,7 @@ spec connStr = do
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
               (tickPrev, "skew-advance" :: Text)
-        runSimpleDb env $ processCronCatchUp testLogConfig testSchema testTable [cj] tickNext
+        runSimpleDb env $ catchUpAt testSchema testTable [cj] tickNext
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 

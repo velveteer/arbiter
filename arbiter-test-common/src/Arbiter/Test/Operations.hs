@@ -103,6 +103,39 @@ operationsSpec mkMessage mkResult runM = do
           rows <- execQuery ("SELECT job_count FROM " <> tbl <> " WHERE group_key = ?") [pval CText key] (col "job_count" CInt4)
           pure (listToMaybe rows :: Maybe Int32)
 
+  describe "job kind" $ do
+    it "stores the label its payload derives" $ \env -> do
+      let job = setGroupKey (Just "kind-store") $ defaultJob (mkMessage "labelled")
+      Just inserted <- runM env (HL.insertJob job)
+      jobKind (payloadKeys inserted) `shouldBe` kindOf (mkMessage "labelled" :: payload)
+      jobKind (payloadKeys inserted) `shouldNotBe` Nothing
+
+    it "narrows a listing to one label" $ \env -> do
+      let job = setGroupKey (Just "kind-filter") $ defaultJob (mkMessage "filtered")
+      void $ runM env (HL.insertJob job)
+      Just k <- pure (kindOf (mkMessage "filtered" :: payload))
+      matched <- runM env (HL.listJobsFiltered [Ops.FilterKind k] 10 0) :: IO [JobRead payload]
+      map payload matched `shouldBe` [mkMessage "filtered"]
+      missed <- runM env (HL.listJobsFiltered [Ops.FilterKind "NoSuchKind"] 10 0) :: IO [JobRead payload]
+      missed `shouldBe` []
+
+    it "counts queue depth by label" $ \env -> do
+      let counted = mkMessage "counted" :: payload
+      void $ runM env (HL.insertJob (setGroupKey (Just "kind-count") (defaultJob counted)))
+      void $ runM env (HL.insertJob (setGroupKey (Just "kind-count") (defaultJob counted)))
+      Just k <- pure (kindOf counted)
+      stats <- runM env (HL.getQueueStats @payload)
+      Map.lookup k (Ops.kindCounts stats) `shouldBe` Just 2
+
+    it "carries the label into the dead-letter queue" $ \env -> do
+      let job = setGroupKey (Just "kind-dlq") $ defaultJob (mkMessage "dead")
+      void $ runM env (HL.insertJob job)
+      claimed <- claimJobs env 1
+      void $ runM env (HL.moveToDLQ "boom" (head claimed))
+      Just k <- pure (kindOf (mkMessage "dead" :: payload))
+      dead <- runM env (HL.listDLQFiltered [Ops.FilterKind k] 10 0) :: IO [DLQ.DLQJob payload]
+      map (jobKind . payloadKeys . DLQ.jobSnapshot) dead `shouldBe` [Just k]
+
   describe "claimNextVisibleJobs" $ do
     it "claims jobs in priority order" $ \env -> do
       -- Insert jobs with different priorities

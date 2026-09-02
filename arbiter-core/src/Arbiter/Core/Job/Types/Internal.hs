@@ -22,7 +22,7 @@ module Arbiter.Core.Job.Types.Internal
   , claimedBy
   , claimSeq
   , archiveFor
-  , admission
+  , payloadKeys
   ) where
 
 import Data.Aeson (Value)
@@ -56,7 +56,7 @@ data JobRecord payload key q insertedAt adm = Job
   , claimedBy :: Maybe UUID
   , claimSeq :: Int64
   , archiveFor :: Maybe Int32
-  , admission :: adm
+  , payloadKeys :: adm
   }
   deriving stock (Eq, Show)
 
@@ -140,6 +140,6 @@ claimSeq Job {claimSeq = value} = value
 archiveFor :: JobRecord payload key q insertedAt adm -> Maybe Int32
 archiveFor Job {archiveFor = value} = value
 
--- | Admission keys stamped from the payload at enqueue.
-admission :: JobRecord payload key q insertedAt adm -> adm
-admission Job {admission = value} = value
+-- | The labels and keys stamped from the payload at enqueue.
+payloadKeys :: JobRecord payload key q insertedAt adm -> adm
+payloadKeys Job {payloadKeys = value} = value
