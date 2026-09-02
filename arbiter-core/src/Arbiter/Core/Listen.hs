@@ -39,15 +39,16 @@ import Control.Concurrent.STM
   , writeTVar
   )
 import Control.Exception (bracket, onException, uninterruptibleMask_)
-import Control.Monad (unless, void, when)
+import Control.Monad (guard, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BSC
+import Data.Either (isRight)
 import Data.Foldable (for_, traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -203,10 +204,15 @@ maxBackoff = 30_000_000
 stableSeconds :: Double
 stableSeconds = 30
 
+-- | Gap between repeats of a standing failure, so a monitor watching the error
+-- rate does not see an ongoing outage clear itself.
+failureRepeatSeconds :: Double
+failureRepeatSeconds = 60
+
 hubLoop :: Listener -> RunningHub -> IO ()
-hubLoop listener hub = go baseBackoff False
+hubLoop listener hub = go baseBackoff Nothing
   where
-    -- @reported@ carries whether the standing failure already has a line.
+    -- @reported@ carries the standing failure's line and when it went out.
     go backoff reported = do
       -- Set once the channels are subscribed, which a connection alone is not.
       readyAt <- newIORef Nothing
@@ -217,19 +223,22 @@ hubLoop listener hub = go baseBackoff False
           listenerWithConn listener $ \conn ->
             connectionLoop hub conn $ do
               getMonotonicTime >>= writeIORef readyAt . Just
-              when reported $ void (logHub hubInfo listener hub "arbiter listener: reconnected")
+              when (isJust reported) . void $
+                logHub hubInfo listener hub "arbiter listener: reconnected"
       let restart msg = do
             mStart <- readIORef readyAt
             ended <- getMonotonicTime
             let uptime = maybe 0 (ended -) mStart
             -- An attempt that subscribed is a fresh failure, however it ends.
             reported' <-
-              if reported && isNothing mStart
+              if isNothing mStart && standing msg ended reported
                 then pure reported
-                else logHub hubError listener hub msg
+                else (\sent -> (msg, ended) <$ guard sent) <$> logHub hubError listener hub msg
             threadDelay backoff
             go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) reported'
       restart $ "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
+    -- The line the standing failure already has, until it is due to repeat.
+    standing msg now = maybe False (\(held, at) -> held == msg && now - at < failureRepeatSeconds)
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
 -- @onReady@ runs once the first reconcile has subscribed.
@@ -290,17 +299,18 @@ dispatch :: RunningHub -> Notification -> IO ()
 dispatch hub n = do
   hs <- Map.findWithDefault [] (notificationChannel n) <$> readTVarIO (hubHandlers hub)
   for_ hs $ \(_, lg, h) ->
-    tryAny (h n) >>= either (hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
+    tryAny (h n) >>= either (void . tryAny . hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
 
 -- | Report a hub event through the hub's own logger, or every registrant's when
--- unset. False when the message reached no one.
+-- unset. False when the message reached no one, a logger that throws included.
 logHub :: (HubLog -> Text -> IO ()) -> Listener -> RunningHub -> Text -> IO Bool
 logHub channel listener hub msg =
-  maybe broadcast (\lg -> True <$ channel lg msg) (listenerLog listener)
+  maybe broadcast emit (listenerLog listener)
   where
+    emit lg = isRight <$> tryAny (channel lg msg)
     broadcast = do
       loggers <- registrants <$> readTVarIO (hubHandlers hub)
-      not (null loggers) <$ traverse_ (`channel` msg) loggers
+      or <$> traverse emit loggers
     registrants handlers =
       Map.elems (Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs])
 

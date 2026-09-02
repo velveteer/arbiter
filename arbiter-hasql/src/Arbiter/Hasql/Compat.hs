@@ -68,7 +68,7 @@ withHasqlLibPQConnection conn action = do
   result <- Hasql.use conn $ Session.onLibpqConnection $ \pq -> do
     a <- action pq
     pure (Right a, pq)
-  either (const (throwInternal "arbiter listener: connection lost")) pure result
+  either (const (throwInternal "connection lost")) pure result
 #else
 withHasqlLibPQConnection = Hasql.withLibPQConnection
 #endif
