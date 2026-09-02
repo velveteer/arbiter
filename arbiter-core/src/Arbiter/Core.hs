@@ -25,6 +25,7 @@ module Arbiter.Core
 
     -- * Schema
   , module Arbiter.Core.Job.Schema
+  , module Arbiter.Core.Job.Schema.Groups
 
     -- * Exceptions
   , module Arbiter.Core.Exceptions
@@ -71,6 +72,7 @@ import Arbiter.Core.HighLevel
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema
+import Arbiter.Core.Job.Schema.Groups
 import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult
 import Arbiter.Core.JobTree hiding (insertJobTree) -- use HighLevel.insertJobTree

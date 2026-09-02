@@ -68,7 +68,7 @@ Arbiter discards a hook return value. It catches hook exceptions, logs them at
 
 `onJobSuccess` can run for a job that Arbiter processes again. Put effects that
 must occur one time in the same transaction as the ack. See
-[Batched Handlers](batched-handlers.md) describes.
+[Batched Handlers](batched-handlers.md).
 
 Reaper activity reports through `onMaintenance` on `WorkerConfig`, not through
 the hooks record.

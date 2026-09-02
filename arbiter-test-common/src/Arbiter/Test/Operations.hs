@@ -1536,6 +1536,19 @@ operationsSpec mkMessage mkResult runM = do
       NE.length (head groupedBatches) `shouldBe` 2
       groupKey (NE.head (head groupedBatches)) `shouldBe` Just "fair-batch-a"
 
+    it "ranks an ungrouped batch by its head row, not its lowest id" $ \env -> do
+      -- The oldest ungrouped row carries the worst priority, so it is not the
+      -- batch head. The batch must rank on the head's (priority, id) pair.
+      void $ runM env (HL.insertJob (setPriority 5 $ defaultJob (mkMessage "SlotRankTail")))
+      void $ runM env (HL.insertJob (setPriority 0 $ defaultGroupedJob "slot-head-rank" (mkMessage "SlotRankGroup")))
+      void $ runM env (HL.insertJob (setPriority 0 $ defaultJob (mkMessage "SlotRankHead")))
+
+      -- One slot. The group head has a lower id than the ungrouped head at the
+      -- same priority, so the group takes it.
+      batches <- claimBatched env 2 1 :: IO [NonEmpty (JobRead payload)]
+      length batches `shouldBe` 1
+      groupKey (NE.head (head batches)) `shouldBe` Just "slot-head-rank"
+
     it "respects per-group ordering within groups" $ \env -> do
       -- Insert jobs in batch-hol-test
       void $ runM env (HL.insertJob (defaultGroupedJob "batch-hol-test" (mkMessage "First")))

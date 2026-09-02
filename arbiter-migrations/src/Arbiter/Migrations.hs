@@ -66,14 +66,8 @@ import Arbiter.Core.Job.Schema
   , createDedupKeyIndexSQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
-  , createGroupsEmptiedIndexSQL
-  , createGroupsTableSQL
-  , createGroupsTriggerFunctionsSQL
-  , createGroupsTriggersSQL
   , createJobQueueArchiveTableSQL
   , createJobQueueDLQTableSQL
-  , createJobQueueGroupKeyIndexSQL
-  , createJobQueueGroupRetriedIndexSQL
   , createJobQueueTableSQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
@@ -89,7 +83,6 @@ import Arbiter.Core.Job.Schema
   , eventStreamingTriggerName
   , jobQueueTable
   , legacyEventStreamingTriggers
-  , migrateGroupsReadyRankingSQL
   , migrateUngroupedReadySplitIndexesSQL
   , notifyAdoptedObjectComment
   , notifyFunctionName
@@ -99,6 +92,17 @@ import Arbiter.Core.Job.Schema
   , pauseNotifyChannel
   , queueTableNames
   , setMaxAttemptsDefaultSQL
+  )
+import Arbiter.Core.Job.Schema.Groups
+  ( createGroupsEmptiedIndexSQL
+  , createGroupsTableSQL
+  , createGroupsTriggerFunctionsSQL
+  , createGroupsTriggersSQL
+  , createJobQueueGroupInFlightIndexSQL
+  , createJobQueueGroupKeyIndexSQL
+  , createJobQueueGroupRetriedIndexSQL
+  , createJobQueueGroupedDueIndexSQL
+  , migrateGroupsReadyRankingSQL
   )
 import Arbiter.Core.Job.Types (RegistryAdmissionPolicies)
 import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..), RegistryTables (..))
@@ -733,8 +737,6 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "migrate-groups-ready-ranking" $ migrateGroupsReadyRankingSQL schemaName tableName
         , script "add-rate-limit-columns" $ addRateLimitColumnsSQL schemaName tableName
         , script "create-throttled-index" $ createThrottledIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v9" $ createGroupsTriggerFunctionsSQL schemaName tableName
-        , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-concurrency-columns" $ addConcurrencyColumnsSQL schemaName tableName
         , script "create-concurrency-index" $ createConcurrencyIndexSQL schemaName tableName
         , script "add-rate-limit-cost-column" $ addRateLimitCostColumnSQL schemaName tableName
@@ -754,6 +756,10 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
         , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
         , script "create-group-retried-index" $ createJobQueueGroupRetriedIndexSQL schemaName tableName
+        , script "create-grouped-due-index" $ createJobQueueGroupedDueIndexSQL schemaName tableName
+        , script "create-group-in-flight-index" $ createJobQueueGroupInFlightIndexSQL schemaName tableName
+        , script "create-groups-trigger-functions-v10" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         ]
       concurrencyTriggers
         | tableConcurrency adm =

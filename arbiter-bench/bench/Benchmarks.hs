@@ -164,6 +164,8 @@ type BenchRegistry =
 data QueueFlavor
   = Ungrouped
   | Grouped Int
+  | -- | Grouped with 80 percent of jobs assigned to a small hot set.
+    GroupedSkewed Int Int
   | Mixed Int
   | -- | Grouped, with a fraction of jobs scheduled into the near future and a
     -- fraction that fail once into backoff, exercising the next_due and
@@ -177,6 +179,23 @@ data QueueFlavor
     -- ready, exercising the ungrouped ready/due index split.
     UngroupedDormant
   deriving stock (Eq)
+
+-- | Deterministic 80/20 group distribution. Eight jobs in each ten go to the
+-- hot set. The rest span all other groups. The group comes from a separate
+-- counter, so a hot or cold set whose size shares a factor with ten still
+-- receives every one of its groups.
+skewedGroupKey :: Int -> Int -> Int -> Text
+skewedGroupKey numGroups hotGroups i =
+  T.pack $ "g" <> show groupNumber
+  where
+    total = max 1 numGroups
+    hot = max 1 (min hotGroups total)
+    cold = max 1 (total - hot)
+    spread = i `div` 10
+    groupNumber
+      | i `mod` 10 < 8 = (spread `mod` hot) + 1
+      | hot == total = (spread `mod` hot) + 1
+      | otherwise = hot + (spread `mod` cold) + 1
 
 data BenchMode
   = BenchSingleJobMode
@@ -374,7 +393,7 @@ multiTrial n setup measure unit = do
 -- Write-amplification / autovacuum sampling
 -- ---------------------------------------------------------------------------
 
--- | Per-table cumulative counters from pg_stat_user_tables.
+-- | Per-table readings from pg_stat_user_tables. All cumulative except the dead-tuple gauge.
 data TableSnap = TableSnap
   { tnUpd :: Int64
   , tnHot :: Int64
@@ -398,6 +417,14 @@ hotPct a b =
   let du = fromIntegral (tnUpd b - tnUpd a) :: Double
       dh = fromIntegral (tnHot b - tnHot a) :: Double
    in if du > 0 then dh / du * 100 else 0
+
+-- | Dead tuples a table holds at one instant. Autovacuum lowers this, so it is read, not differenced.
+deadAt :: TableSnap -> Int64
+deadAt = tnDead
+
+-- | 'deadAt' per 1000 jobs.
+deadPerK :: TableSnap -> Double -> Double
+deadPerK b jobs = fromIntegral (deadAt b) / jobs * 1000
 
 -- | A table's snapshot row by relname from a pg_stat_user_tables result.
 snapRow :: [(Text, Int64, Int64, Int64, Int64)] -> Text -> TableSnap
@@ -428,6 +455,7 @@ captureDbSnapshot conn = do
 -- measured over the post-warmup window.
 data SteadyResult = SteadyResult
   { srThroughput :: Double
+  , srGroupTriggerUsPerJob :: Double
   , srWalPerJob :: Double
   , srQueueHotPct :: Double
   , srQueueUpdPerJob :: Double
@@ -445,15 +473,16 @@ mkSteadyResult :: Double -> Int -> DbSnapshot -> DbSnapshot -> [TriggerStats] ->
 mkSteadyResult throughput processed s0 s1 trg =
   SteadyResult
     { srThroughput = throughput
+    , srGroupTriggerUsPerJob = sum (map tsTotalTimeMs trg) * 1000 / jobs
     , srWalPerJob = fromIntegral (dsWal s1 - dsWal s0) / jobs
     , srQueueHotPct = hotPct (dsQueue s0) (dsQueue s1)
     , srQueueUpdPerJob = fromIntegral (tnUpd (dsQueue s1) - tnUpd (dsQueue s0)) / jobs
-    , srQueueDead = tnDead (dsQueue s1)
-    , srQueueDeadPerK = fromIntegral (tnDead (dsQueue s1)) / jobs * 1000
+    , srQueueDead = deadAt (dsQueue s1)
+    , srQueueDeadPerK = deadPerK (dsQueue s1) jobs
     , srQueueAutovac = tnAutovac (dsQueue s1) - tnAutovac (dsQueue s0)
     , srGroupsHotPct = hotPct (dsGroups s0) (dsGroups s1)
-    , srGroupsDead = tnDead (dsGroups s1)
-    , srGroupsDeadPerK = fromIntegral (tnDead (dsGroups s1)) / jobs * 1000
+    , srGroupsDead = deadAt (dsGroups s1)
+    , srGroupsDeadPerK = deadPerK (dsGroups s1) jobs
     , srGroupsAutovac = tnAutovac (dsGroups s1) - tnAutovac (dsGroups s0)
     , srTriggers = trg
     }
@@ -464,6 +493,9 @@ formatSteady :: [SteadyResult] -> String
 formatSteady [] = "(no samples)"
 formatSteady rs =
   formatStats "jobs/sec" (computeStats (map srThroughput rs))
+    <> "\n  group triggers: "
+    <> showFFloat (Just 2) (meanOf srGroupTriggerUsPerJob) ""
+    <> " us/job"
     <> "\n  write-amp: "
     <> showFFloat (Just 0) (meanOf srWalPerJob) ""
     <> " B WAL/job | queue HOT "
@@ -683,6 +715,10 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
                       [defaultJob (BenchBatch i) | i <- [1 .. producerBatchSize]]
                     Grouped numGroups ->
                       [ defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
+                      | i <- [1 .. producerBatchSize]
+                      ]
+                    GroupedSkewed numGroups hotGroups ->
+                      [ defaultGroupedJob (skewedGroupKey numGroups hotGroups (offset + i)) (BenchBatch i)
                       | i <- [1 .. producerBatchSize]
                       ]
                     Mixed numGroups ->
@@ -1018,6 +1054,10 @@ setupQueue simpleEnv totalJobs flavor = do
           [ defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
           | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
           ]
+        GroupedSkewed numGroups hotGroups ->
+          [ defaultGroupedJob (skewedGroupKey numGroups hotGroups i) (BenchBatch i)
+          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          ]
         Mixed numGroups ->
           [ if even i
               then defaultJob (BenchBatch i)
@@ -1103,6 +1143,8 @@ main = do
           simpleWorkerBenches statsConn simpleEnv simpleRun
       , bgroup "Worker Throughput (hasql)" $
           hasqlWorkerBenches statsConn simpleEnv hasqlPreparedRun
+      , bgroup "Group Cardinality and Skew (hasql)" $
+          groupShapeBenches statsConn simpleEnv hasqlPreparedRun
       , bgroup "Worker Throughput (orville)" $
           orvilleWorkerBenches statsConn simpleEnv orvilleRun
       , bgroup "Steady-State Throughput (simple)" $
@@ -1170,6 +1212,37 @@ hasqlWorkerBenches statsConn simpleEnv runM =
 orvilleWorkerBenches :: Connection -> SimpleEnv BenchRegistry -> RunM OrvilleM -> [Benchmark]
 orvilleWorkerBenches statsConn simpleEnv runM =
   mkWorkerBenches simpleEnv (\n d p w m -> orvilleWorkerTrial runM statsConn n d p w m)
+
+-- | Measure the group-maintenance cost as group size and key skew increase.
+-- A smaller trial set keeps this diagnostic suite practical.
+groupShapeBenches :: Connection -> SimpleEnv BenchRegistry -> RunM HasqlM -> [Benchmark]
+groupShapeBenches statsConn simpleEnv runM = map profile shapes
+  where
+    totalJobs = 300000
+    shapeTrials = 3
+    shapeDurationUs = 5_000_000
+    trial = hasqlWorkerTrial runM statsConn
+    cardinality jobsPerGroup =
+      ( show jobsPerGroup <> " jobs/group"
+      , Grouped (max 1 (totalJobs `div` jobsPerGroup))
+      )
+    shapes =
+      map cardinality [1, 10, 100, 1000, 10000]
+        <> [("80/20 skew, 1000 groups, 10 hot", GroupedSkewed 1000 10)]
+    profile (label, flavor) =
+      bgroup
+        label
+        [ measured "single job mode" BenchSingleJobMode
+        , measured "batched mode (size 10)" (BenchBatchedJobsMode 10)
+        ]
+      where
+        measured name mode =
+          singleTest name
+            $ ThroughputBench
+            $ multiTrialSteady
+              shapeTrials
+              (setupQueue simpleEnv totalJobs flavor)
+              (trial totalJobs shapeDurationUs 4 10 mode)
 
 mkWorkerBenches
   :: SimpleEnv BenchRegistry

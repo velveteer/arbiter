@@ -353,7 +353,8 @@ ungroupedPoolCtes tbl ungroupedLimit bs dma ccGate =
       LIMIT ${ungroupedLimit}
     ),
     ungrouped_batch_info AS (
-      SELECT batch_num, MIN(priority) AS min_priority, MIN(id) AS min_id
+      SELECT batch_num, MIN(priority) AS min_priority,
+        (MIN(ARRAY[priority::bigint, id]))[2] AS min_id
       FROM ungrouped_numbered
       GROUP BY batch_num
     )
