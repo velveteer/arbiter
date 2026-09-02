@@ -50,6 +50,7 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(JOB_COLUMNS, 'arb.jobCols.v2'),
     ...rowDetail('selectableJobs', 'primaryKey', 'selectedJob', { openWith: (row) => row.primaryKey, drawer: 'jobDetailDrawer' }),
     ...tableTab('loadJobs', 'arb.jobsRefresh'),
+    loadNoun: 'jobs',
     bulkBusy: false,
     rowNoun: 'job',
     rowNounPlural: '',
@@ -91,7 +92,7 @@ document.addEventListener('alpine:init', () => {
     expandedParents: {},
     _expandSeq: {},
     viewMode: 'tree',
-    ...loadState(),
+    ...loadState((s) => s.displayJobs.length === 0),
     active: false,
     selectedJob: null,
     sortBy: '',
@@ -256,7 +257,7 @@ document.addEventListener('alpine:init', () => {
         };
       } catch (e) {
         if (this._expandSeq[id] !== seq) return;
-        showToast('Failed to load children: ' + e.message);
+        showToast('Could not load children: ' + e.message);
       }
     },
 
@@ -398,7 +399,7 @@ document.addEventListener('alpine:init', () => {
       const rate = this.filterValue('rate', filterOverrides);
       const conc = this.filterValue('conc', filterOverrides);
       const startingPending = this.pendingChanges;
-      await guardedLoad(this, 'Failed to load jobs', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         // Any filter that can match a child renders flat, so a match is never hidden
         // behind a parent the filter itself excluded.
         const narrowed = !!(pid || gk || jid || worker || kind || payload || rate || conc);

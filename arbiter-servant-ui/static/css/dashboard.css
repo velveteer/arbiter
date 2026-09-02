@@ -998,9 +998,16 @@ label.queue-sort-label,
 }
 
 /* ---- Queue landing: instance roll-up + layout toolbar ---- */
-/* The strip is on screen from the first frame and keeps its height, so its
-   numbers land in place instead of the bar appearing under them. */
+/* A view that had a roll-up last time holds its slot while the load runs, so the
+   numbers fade into place rather than pushing the table down. A view that had
+   none holds nothing, so an empty one never opens a gap and closes it again. */
+.is-pending {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .queue-summary {
+  transition: opacity 0.18s ease-out;
   min-height: 3.25rem;
   box-sizing: border-box;
   display: flex;
@@ -1012,32 +1019,6 @@ label.queue-sort-label,
   background-color: var(--arb-surface);
   border: 1px solid var(--arb-border);
   border-radius: 0.6rem;
-}
-
-/* Placeholders stand in the flex row itself, not in a wrapper of their own. */
-.qs-skeleton {
-  display: contents;
-}
-
-.queue-summary.is-loading .qs-item:not(.qs-item-skeleton) {
-  display: none;
-}
-
-.qs-item-skeleton {
-  gap: 0.55rem;
-  animation: skeleton-in 0.22s ease-out both;
-}
-
-.qs-skel-val {
-  width: 1.6rem;
-  height: 0.95rem;
-  margin: 0;
-}
-
-.qs-skel-lbl {
-  width: 4rem;
-  height: 0.6rem;
-  margin: 0;
 }
 
 .qs-item {
@@ -1070,6 +1051,7 @@ label.queue-sort-label,
    between the tabs the way stacked utility classes did. */
 .toolbar,
 .queue-toolbar {
+  transition: opacity 0.18s ease-out;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2514,8 +2496,8 @@ th.sortable:focus-visible {
   align-items: center;
   gap: 0.5rem;
   max-width: 34rem;
-  margin: 4rem auto;
-  padding: 2rem 1.5rem;
+  margin: 0 auto;
+  padding: 6rem 1.5rem 2rem;
   text-align: center;
   color: var(--arb-text-muted);
 }
@@ -2538,6 +2520,16 @@ th.sortable:focus-visible {
 .empty-state-note {
   margin: 0;
   line-height: 1.6;
+}
+
+/* The same panel says a load failed, in the one colour a failure is drawn in. */
+.empty-state-icon.is-error {
+  color: var(--arb-danger-on-bg);
+  opacity: 0.85;
+}
+
+.empty-state-action {
+  margin-top: 0.75rem;
 }
 
 .empty-state-link {

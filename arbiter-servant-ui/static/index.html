@@ -70,9 +70,9 @@
   <!-- ============================================================ -->
   <template x-if="$store.app.view === 'queues' && !$store.app.selectedQueue && !$store.app._deepLinkPending">
     <div x-data="queueListTab">
+      <div x-html="LOAD_ERROR_HTML"></div>
       <!-- Instance roll-up: the whole-fleet answer to "is anything wrong". -->
-      <div class="queue-summary" :class="{ 'is-loading': !loaded, 'd-none': loaded && rows.length === 0 }">
-        <div class="qs-skeleton" x-html="SUMMARY_SKELETON_HTML"></div>
+      <div class="queue-summary" :class="summaryClass(rows.length > 0)">
         <div class="qs-item">
           <span class="qs-val" x-text="fmtCount(summary.ready)"></span>
           <span class="qs-lbl">ready</span>
@@ -105,7 +105,7 @@
       </div>
 
       <!-- Toolbar: find a queue, and choose how the set is laid out. -->
-      <div class="queue-toolbar" :class="{ invisible: !loaded, 'd-none': loaded && rows.length === 0 }">
+      <div class="queue-toolbar" :class="summaryClass(rows.length > 0)">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <div class="queue-search">
           <svg class="queue-search-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -167,7 +167,7 @@
       </div>
 
       <!-- Card view -->
-      <div class="queue-grid" x-show="loaded && viewMode !== 'list'">
+      <div class="queue-grid" x-show="viewReady() && viewMode !== 'list'">
         <template x-for="r in displayRows" :key="r.queue">
           <div class="queue-card" :class="{ 'is-throttled': r.stats?.throttledJobs > 0, 'is-paused': r.paused, 'is-failing': dlqCount(r) > 0 }">
             <a class="queue-card-head" :href="queueUrl(r.queue)" @click="navTo($event, r.queue)">
@@ -223,7 +223,7 @@
       </div>
 
       <!-- List view: the same data, rankable by any column. -->
-      <div class="table-responsive" x-show="loaded && viewMode === 'list'">
+      <div class="table-responsive" x-show="viewReady() && viewMode === 'list'">
         <table class="table table-striped table-hover table-sm sticky-head queue-table">
           <thead>
             <tr>
@@ -273,7 +273,6 @@
       </div>
 
       <div class="queue-list-empty" x-show="viewMode !== 'list' && displayRows.length === 0 && rows.length > 0">No queue matches that filter.</div>
-      <div class="queue-list-empty" x-show="_loadErrored && rows.length === 0">Failed to load queues. <a href="#" @click.prevent="load()">Retry</a></div>
       <!-- First run: the registry has no queues, so there is nothing to operate yet.
            Say where queues come from rather than leaving a blank page. -->
       <div class="empty-state" x-show="loaded && !_loadErrored && rows.length === 0">
@@ -376,7 +375,8 @@
       <div class="tab-content mt-3">
     <!-- Stats Tab -->
     <div class="tab-pane fade" id="tab-stats" role="tabpanel" x-data="statsTab">
-      <div x-show="$store.app.selectedQueue">
+      <div x-html="LOAD_ERROR_HTML"></div>
+      <div x-show="$store.app.selectedQueue && viewReady()">
         <div class="toolbar">
           <div x-html="TABLE_REFRESH_HTML"></div>
         </div>
@@ -480,8 +480,9 @@
 
     <!-- Jobs Tab -->
     <div class="tab-pane fade" id="tab-jobs" role="tabpanel" x-data="jobsTab">
+      <div x-html="LOAD_ERROR_HTML"></div>
       <!-- Toolbar -->
-      <div class="toolbar">
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <!-- Filters -->
         <div class="filter-builder" x-html="FILTER_BUILDER_HTML"></div>
@@ -581,10 +582,10 @@
       </div>
 
       <!-- Pagination (top) -->
-      <div x-html="PAGINATION_TOP_HTML"></div>
+      <div x-html="PAGINATION_TOP_HTML" x-show="viewReady()"></div>
 
       <!-- Jobs table -->
-      <div class="table-responsive" :aria-busy="loading">
+      <div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
         <table class="table table-striped table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
@@ -730,9 +731,6 @@
                 </template>
               </tr>
             </template>
-            <tr x-show="_loadErrored && displayJobs.length === 0">
-              <td :colspan="columns.length" class="text-danger text-center">Failed to load jobs. <a href="#" @click.prevent="loadJobs()">Retry</a></td>
-            </tr>
             <tr x-show="!_loadErrored && loaded && displayJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No jobs found.</td>
             </tr>
@@ -742,7 +740,7 @@
       </div>
 
       <!-- Pagination (bottom) -->
-      <div class="mb-4" x-show="loaded && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
+      <div class="mb-4" x-show="viewReady() && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
 
       <!-- Job detail drawer. No backdrop, so the list stays readable and the
            arrows walk it without a close/reopen per job. -->
@@ -855,7 +853,8 @@
 
     <!-- DLQ Tab -->
     <div class="tab-pane fade" id="tab-dlq" role="tabpanel" x-data="dlqTab">
-      <div class="toolbar">
+      <div x-html="LOAD_ERROR_HTML"></div>
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <!-- Filters -->
         <div class="filter-builder" x-html="FILTER_BUILDER_HTML"></div>
@@ -875,9 +874,9 @@
       </div>
 
       <!-- Pagination (top) -->
-      <div x-html="PAGINATION_TOP_HTML"></div>
+      <div x-html="PAGINATION_TOP_HTML" x-show="viewReady()"></div>
 
-      <div class="table-responsive" :aria-busy="loading">
+      <div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
         <table class="table table-striped table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
@@ -944,9 +943,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="_loadErrored && dlqJobs.length === 0">
-              <td :colspan="columns.length" class="text-danger text-center">Failed to load DLQ entries. <a href="#" @click.prevent="loadDLQ()">Retry</a></td>
-            </tr>
             <tr x-show="!_loadErrored && loaded && dlqJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No DLQ entries.</td>
             </tr>
@@ -956,7 +952,7 @@
       </div>
 
       <!-- Pagination (bottom) -->
-      <div class="mb-4" x-show="loaded && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
+      <div class="mb-4" x-show="viewReady() && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
 
       <!-- DLQ Detail Modal -->
       <div class="offcanvas offcanvas-end detail-drawer" tabindex="-1" id="dlqDetailDrawer"
@@ -1002,7 +998,8 @@
 
     <!-- Archive Tab (read-only completed-job history) -->
     <div class="tab-pane fade" id="tab-archive" role="tabpanel" x-data="archiveTab">
-      <div class="toolbar">
+      <div x-html="LOAD_ERROR_HTML"></div>
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <!-- Filters -->
         <div class="filter-builder" x-html="FILTER_BUILDER_HTML"></div>
@@ -1021,9 +1018,9 @@
       </div>
 
       <!-- Pagination (top) -->
-      <div x-html="PAGINATION_TOP_HTML"></div>
+      <div x-html="PAGINATION_TOP_HTML" x-show="viewReady()"></div>
 
-      <div class="table-responsive" :aria-busy="loading">
+      <div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
         <table class="table table-striped table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
           <thead>
             <tr>
@@ -1080,9 +1077,6 @@
                 </td>
               </tr>
             </template>
-            <tr x-show="_loadErrored && archiveJobs.length === 0">
-              <td :colspan="columns.length" class="text-danger text-center">Failed to load archive. <a href="#" @click.prevent="loadArchive()">Retry</a></td>
-            </tr>
             <tr x-show="!_loadErrored && loaded && archiveJobs.length === 0">
               <td :colspan="columns.length" class="text-muted text-center">No archived jobs.</td>
             </tr>
@@ -1092,7 +1086,7 @@
       </div>
 
       <!-- Pagination (bottom) -->
-      <div class="mb-4" x-show="loaded && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
+      <div class="mb-4" x-show="viewReady() && totalPages > 1" x-html="PAGINATION_BOTTOM_HTML"></div>
 
       <!-- Archive Detail Modal -->
       <div class="offcanvas offcanvas-end detail-drawer" tabindex="-1" id="archiveDetailDrawer"
@@ -1136,7 +1130,7 @@
       <div x-show="$store.app.initialized && !$store.app.selectedQueue" class="text-muted mt-3">No queues available.</div>
       <template x-if="$store.app.selectedQueue">
         <div>
-          <div class="toolbar">
+          <div class="toolbar" x-show="viewReady()">
             <div x-html="TABLE_REFRESH_HTML"></div>
           </div>
           <div x-html="CRON_TABLE_HTML"></div>
@@ -1149,7 +1143,7 @@
     <div class="tab-pane fade" id="tab-workers" role="tabpanel" x-data="workersTab">
       <div x-show="$store.app.initialized && !$store.app.selectedQueue" class="text-muted mt-3">No queues available.</div>
       <template x-if="$store.app.selectedQueue">
-        <div class="toolbar">
+        <div class="toolbar" x-show="viewReady()">
           <div x-html="TABLE_REFRESH_HTML"></div>
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="workers-live-only" x-model="liveOnly" @change="persistLiveOnly()">
@@ -1174,7 +1168,7 @@
     <!-- Global worker registry: same component as the per-queue Workers tab, scoped to all queues. -->
     <div id="tab-workers-overview" x-data="workersTab({ global: true })">
       <div x-html="WORKERS_SUMMARY_HTML"></div>
-      <div class="toolbar">
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" id="workers-live-only-global" x-model="liveOnly" @change="persistLiveOnly()">
@@ -1287,8 +1281,8 @@
     <div class="mt-3">
     <!-- Rate Limits Tab -->
     <div id="tab-ratelimits" x-data="rateLimitsTab">
-      <div class="queue-summary" :class="{ 'is-loading': !loaded, 'd-none': loaded && policies.length === 0 }">
-        <div class="qs-skeleton" x-html="SUMMARY_SKELETON_HTML"></div>
+      <div x-html="LOAD_ERROR_HTML"></div>
+      <div class="queue-summary" :class="summaryClass(policies.length > 0)">
         <div class="qs-item">
           <span class="qs-val" x-text="policies.length"></span>
           <span class="qs-lbl" x-text="pluralize(policies.length, 'policy', 'policies')"></span>
@@ -1306,11 +1300,11 @@
           <span class="qs-lbl">lowest fill</span>
         </div>
       </div>
-      <div class="toolbar">
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
       </div>
 
-      <div class="table-responsive" :aria-busy="loading">
+      <div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
         <table class="table table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
           <colgroup>
             <col style="width: 22%">
@@ -1373,8 +1367,7 @@
             </tbody>
           </template>
           <tbody>
-            <tr x-show="!loading && _loadErrored && policies.length === 0"><td colspan="7" class="text-danger text-center">Failed to load rate limits. <a href="#" @click.prevent="loadPolicies()">Retry</a></td></tr>
-            <tr x-show="!loading && !_loadErrored && loaded && policies.length === 0"><td colspan="7" class="text-muted text-center">No rate-limit policies declared.</td></tr>
+            <tr x-show="!_loadErrored && loaded && policies.length === 0"><td :colspan="colCount()" class="text-muted text-center">No rate-limit policies declared.</td></tr>
           </tbody>
           <tbody x-html="TABLE_SKELETON_HTML"></tbody>
         </table>
@@ -1493,8 +1486,7 @@
     <div class="mt-3">
     <!-- Global cron overview: same component as the per-queue Cron tab, scoped to all queues. -->
     <div id="tab-cron-overview" x-data="cronTab({ global: true })">
-      <div class="queue-summary" :class="{ 'is-loading': !loaded, 'd-none': loaded && schedules.length === 0 }">
-        <div class="qs-skeleton" x-html="SUMMARY_SKELETON_HTML"></div>
+      <div class="queue-summary" :class="summaryClass(schedules.length > 0)">
         <div class="qs-item">
           <span class="qs-val" x-text="schedules.length"></span>
           <span class="qs-lbl" x-text="pluralize(schedules.length, 'schedule')"></span>
@@ -1508,7 +1500,7 @@
           <span class="qs-lbl">run pending</span>
         </div>
       </div>
-      <div class="toolbar">
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
       </div>
       <div x-html="CRON_TABLE_HTML"></div>
@@ -1524,8 +1516,8 @@
     <div class="mt-3">
     <!-- Concurrency Tab -->
     <div id="tab-concurrency" x-data="concurrencyTab">
-      <div class="queue-summary" :class="{ 'is-loading': !loaded, 'd-none': loaded && policies.length === 0 }">
-        <div class="qs-skeleton" x-html="SUMMARY_SKELETON_HTML"></div>
+      <div x-html="LOAD_ERROR_HTML"></div>
+      <div class="queue-summary" :class="summaryClass(policies.length > 0)">
         <div class="qs-item">
           <span class="qs-val" x-text="policies.length"></span>
           <span class="qs-lbl" x-text="pluralize(policies.length, 'pool')"></span>
@@ -1543,13 +1535,13 @@
           <span class="qs-lbl" x-text="pluralize(summary.saturated, 'pool at limit', 'pools at limit')"></span>
         </div>
       </div>
-      <div class="toolbar">
+      <div class="toolbar" x-show="viewReady()">
         <div x-html="TABLE_REFRESH_HTML"></div>
         <button class="btn btn-sm" :class="isArmed('reconcile') ? 'btn-warning' : 'btn-outline-secondary'"
           @click="reconcile()" x-text="isArmed('reconcile') ? 'Confirm reconcile' : 'Reconcile counts'"></button>
       </div>
 
-      <div class="table-responsive" :aria-busy="loading">
+      <div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
         <table class="table table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
           <colgroup>
             <col style="width: 40%">
@@ -1596,8 +1588,7 @@
             </tbody>
           </template>
           <tbody>
-            <tr x-show="!loading && _loadErrored && policies.length === 0"><td colspan="5" class="text-danger text-center">Failed to load concurrency pools. <a href="#" @click.prevent="loadPolicies()">Retry</a></td></tr>
-            <tr x-show="!loading && !_loadErrored && loaded && policies.length === 0"><td colspan="5" class="text-muted text-center">No concurrency pools declared.</td></tr>
+            <tr x-show="!_loadErrored && loaded && policies.length === 0"><td :colspan="colCount()" class="text-muted text-center">No concurrency pools declared.</td></tr>
           </tbody>
           <tbody x-html="TABLE_SKELETON_HTML"></tbody>
         </table>

@@ -62,7 +62,7 @@ document.addEventListener('alpine:init', () => {
           this.paused = false;
           this.pausedAt = null;
         } else {
-          console.error('Failed to load queue details:', e);
+          console.error('Could not load queue details:', e);
         }
       }
       // Recompute every refresh so the relative age string ticks (formatAge reads

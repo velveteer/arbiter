@@ -28,12 +28,13 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(ARCHIVE_COLUMNS, 'arb.archiveCols'),
     ...rowDetail('archiveJobs', 'archivePrimaryKey', 'selectedArchiveJob', { drawer: 'archiveDetailDrawer' }),
     ...tableTab('loadArchive', 'arb.archiveRefresh'),
+    loadNoun: 'archived jobs',
     archiveJobs: [],
     rowNoun: 'archived job',
     detailActionsHtml: ARCHIVE_ACTIONS_HTML,
     rowNounPlural: '',
     total: 0,
-    ...loadState(),
+    ...loadState((s) => s.archiveJobs.length === 0),
     active: false,
     selectedArchiveJob: null,
     bulkBusy: false,
@@ -100,7 +101,7 @@ document.addEventListener('alpine:init', () => {
       const kind = this.filterValue('kind', filterOverrides);
       const after = this.filterValue('after', filterOverrides);
       const before = this.filterValue('before', filterOverrides);
-      await guardedLoad(this, 'Failed to load archive', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listArchive(queue, {
           limit: this.limit,
           offset: this.offset,

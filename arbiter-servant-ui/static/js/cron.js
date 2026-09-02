@@ -49,7 +49,8 @@ const CRON_ACTIONS_HTML = `
 // The schedule table, stamped into both the per-queue Cron tab and the global Cron
 // view. The Queue column is the only difference between them.
 const CRON_TABLE_HTML = `
-<div class="table-responsive" :aria-busy="loading">
+${LOAD_ERROR_HTML}
+<div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
   <table class="table table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
     <colgroup>
       <col style="width: 11%">
@@ -132,9 +133,6 @@ const CRON_TABLE_HTML = `
           </td>
         </tr>
       </template>
-      <tr x-show="_loadErrored && schedules.length === 0">
-        <td :colspan="colCount()" class="text-danger text-center">Failed to load cron schedules. <a href="#" @click.prevent="loadSchedules()">Retry</a></td>
-      </tr>
       <tr x-show="!_loadErrored && loaded && schedules.length === 0">
         <td :colspan="colCount()" class="text-muted text-center">No cron schedules configured.</td>
       </tr>
@@ -349,6 +347,8 @@ document.addEventListener('alpine:init', () => {
 
   Alpine.data('cronTab', (opts = {}) => ({
     ...pollingTab('loadSchedules', ARB_TIMING.cronPollMs, 'arb.cronRefresh'),
+    loadNoun: 'cron schedules',
+    ...summaryMemory('arb.summary.cron'),
     ...clientSort('schedules', CRON_SORT_KEYS, 'name', 'name'),
     ...confirmArm(),
     ...rowDetail('displaySchedules', 'name', 'selectedSchedule'),
@@ -357,7 +357,7 @@ document.addEventListener('alpine:init', () => {
     schedules: [],
     selectedSchedule: null,
     detailActionsHtml: CRON_ACTIONS_HTML,
-    ...loadState(),
+    ...loadState((s) => s.schedules.length === 0),
     active: false,
 
     // Roll-up for the global header strip.
@@ -427,7 +427,7 @@ document.addEventListener('alpine:init', () => {
         this.schedules = [];
         return;
       }
-      await guardedLoad(this, 'Failed to load cron schedules', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listCronSchedules({ queue });
         if (isStale()) return;
         this.schedules = data.cronSchedules || [];

@@ -30,6 +30,8 @@ const RL_ACTIONS_HTML = `
 document.addEventListener('alpine:init', () => {
   Alpine.data('rateLimitsTab', () => ({
     ...pollingTab('loadPolicies', ARB_TIMING.rateLimitPollMs, 'arb.rateLimitRefresh'),
+    loadNoun: 'rate limits',
+    ...summaryMemory('arb.summary.ratelimits'),
     ...clientSort('policies', RL_SORT_KEYS, 'prefix', 'prefix'),
     ...confirmArm(),
     ...drillDownTab({
@@ -41,7 +43,6 @@ document.addEventListener('alpine:init', () => {
       itemLimit: RL_BUCKET_LIMIT,
       itemLabel: 'buckets',
       drawerId: 'rateLimitDrawer',
-      policyError: 'Failed to load rate limits',
       fetchPolicies: () => ArbiterAPI.listRateLimits(),
       fetchItems: (prefix, opts) => ArbiterAPI.listRateLimitBuckets(prefix, opts),
     }),

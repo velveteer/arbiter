@@ -71,7 +71,8 @@ const WORKER_MODALS_HTML = `
 // The worker table, stamped into both the per-queue Workers tab and the global
 // Workers view. The Queue column is the only difference between them.
 const WORKERS_TABLE_HTML = `
-<div class="table-responsive" :aria-busy="loading">
+${LOAD_ERROR_HTML}
+<div class="table-responsive" :aria-busy="loading" x-show="viewReady()">
   <table class="table table-striped table-hover table-sm sticky-head" style="table-layout: fixed; width: 100%;">
     <colgroup>
       <col style="width: 10%">
@@ -124,9 +125,6 @@ const WORKERS_TABLE_HTML = `
           </td>
         </tr>
       </template>
-      <tr x-show="_loadErrored && displayWorkers.length === 0">
-        <td :colspan="colCount()" class="text-danger text-center">Failed to load workers. <a href="#" @click.prevent="loadWorkers()">Retry</a></td>
-      </tr>
       <tr x-show="!_loadErrored && loaded && displayWorkers.length === 0">
         <td :colspan="colCount()" class="text-muted text-center"
           x-text="liveOnly && workers.length > 0 ? 'No active workers.' : 'No workers registered.'"></td>
@@ -138,8 +136,7 @@ const WORKERS_TABLE_HTML = `
 
 // Roll-up strip, stamped above the toolbar in the global Workers view.
 const WORKERS_SUMMARY_HTML = `
-<div class="queue-summary" :class="{ 'is-loading': !loaded, 'd-none': loaded && workers.length === 0 }">
-  <div class="qs-skeleton" x-html="SUMMARY_SKELETON_HTML"></div>
+<div class="queue-summary" :class="summaryClass(workers.length > 0)">
   <div class="qs-item">
     <span class="qs-val" x-text="workers.length"></span>
     <span class="qs-lbl" x-text="pluralize(workers.length, 'worker')"></span>
@@ -197,6 +194,8 @@ function healthRank(w) {
 document.addEventListener('alpine:init', () => {
   Alpine.data('workersTab', (opts = {}) => ({
     ...pollingTab('loadWorkers', ARB_TIMING.workerPollMs, 'arb.workersRefresh'),
+    loadNoun: 'workers',
+    ...summaryMemory('arb.summary.workers'),
     ...clientSort('workers', WORKER_SORT_KEYS, '', 'workerId'),
     ...confirmArm(),
     ...typeToConfirm('pauseConfirm'),
@@ -204,7 +203,7 @@ document.addEventListener('alpine:init', () => {
     global: !!opts.global,
     detailActionsHtml: WORKER_ACTIONS_HTML,
     workers: [],
-    ...loadState(),
+    ...loadState((s) => s.displayWorkers.length === 0),
     selectedWorker: null,
     liveOnly: localStorage.getItem('arb.workersLiveOnly') === 'true',
     // How many trailing worker-id characters the pause confirmation asks for.
@@ -233,7 +232,7 @@ document.addEventListener('alpine:init', () => {
         this.workers = [];
         return;
       }
-      await guardedLoad(this, 'Failed to load workers', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listWorkers({ queue });
         if (isStale()) return;
         this.workers = data.workers || [];

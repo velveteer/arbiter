@@ -28,12 +28,13 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols.v2'),
     ...rowDetail('dlqJobs', 'dlqPrimaryKey', 'selectedDLQJob', { drawer: 'dlqDetailDrawer' }),
     ...tableTab('loadDLQ', 'arb.dlqRefresh'),
+    loadNoun: 'DLQ entries',
     dlqJobs: [],
     rowNoun: 'DLQ entry',
     detailActionsHtml: DLQ_ACTIONS_HTML,
     rowNounPlural: 'DLQ entries',
     total: 0,
-    ...loadState(),
+    ...loadState((s) => s.dlqJobs.length === 0),
     active: false,
     selectedDLQJob: null,
     bulkBusy: false,
@@ -92,7 +93,7 @@ document.addEventListener('alpine:init', () => {
       const jid = this.filterValue('job', filterOverrides);
       const kind = this.filterValue('kind', filterOverrides);
       const startingPending = this.pendingChanges;
-      await guardedLoad(this, 'Failed to load DLQ', async (seq, isStale) => {
+      await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listDLQ(queue, {
           limit: this.limit,
           offset: this.offset,
