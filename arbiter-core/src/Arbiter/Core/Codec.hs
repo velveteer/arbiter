@@ -36,7 +36,7 @@ module Arbiter.Core.Codec
   , cScalar
   , cArray
   , jobCodec
-  , JobWriteSource
+  , JobWriteSource (..)
   , writeColumnNames
 
     -- * Job codecs
@@ -59,7 +59,7 @@ module Arbiter.Core.Codec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
-import Data.Aeson (ToJSON (..), Value)
+import Data.Aeson (Value)
 import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -71,11 +71,11 @@ import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView (..), ConcurrencyPolicyView (..))
 import Arbiter.Core.CronSchedule (CronScheduleRow (..))
 import Arbiter.Core.Job.Types
-  ( AdmissionColumns (..)
-  , AdmissionKeys (..)
-  , DedupKey (..)
+  ( DedupKey (..)
   , JobRead
   , JobWrite
+  , PayloadColumns (..)
+  , PayloadKeys (..)
   , TraceContext (..)
   , dedupParts
   , defaultMaxAttempts
@@ -243,29 +243,31 @@ pgType = \case
 -- Job codecs
 -- ---------------------------------------------------------------------------
 
+-- | The insert side of a job row. The payload encoding is built once by the caller.
+data JobWriteSource payload = JobWriteSource
+  { sourceJob :: JobWrite payload
+  , sourceEncoded :: Value
+  , sourceColumns :: PayloadColumns
+  , sourceParentId :: Maybe Int64
+  , sourceParentState :: Maybe Value
+  , sourceSuspended :: Bool
+  }
+
 -- | A job codec pinned to a @Value@ payload, for the decode and column-list
 -- projections that ignore the write source.
-type JobWriteSource payload =
-  ( JobWrite payload
-  , AdmissionColumns
-  , Maybe Int64
-  , Maybe Value
-  , Bool
-  )
-
 type JobCodec a = Codec (JobWriteSource Value) a
 
 -- | Main-table codec. The write source contains public enqueue fields,
--- admission columns, parent id, rollup state, and suspension state.
-jobCodec :: (ToJSON payload) => Text -> Codec (JobWriteSource payload) (JobRead Value)
+-- payload columns, parent id, rollup state, and suspension state.
+jobCodec :: Text -> Codec (JobWriteSource payload) (JobRead Value)
 jobCodec = jobCodecWith "id"
 
 -- | 'jobCodec' with an explicit primary-key column.
-jobCodecWith :: (ToJSON payload) => Text -> Text -> Codec (JobWriteSource payload) (JobRead Value)
+jobCodecWith :: Text -> Text -> Codec (JobWriteSource payload) (JobRead Value)
 jobCodecWith idColumn queueName =
   Job
     <$> ro (col idColumn CInt8)
-    <*> lmap (toJSON . JT.payload . sourceJob) (rw "payload" CJsonb)
+    <*> lmap sourceEncoded (rw "payload" CJsonb)
     <*> pure queueName
     <*> lmap (JT.groupKey . sourceJob) (rwN "group_key" CText)
     <*> ro (col "inserted_at" CTimestamptz)
@@ -284,26 +286,11 @@ jobCodecWith idColumn queueName =
     <*> ro (ncol "claimed_by" CUuid)
     <*> ro (col "claim_seq" CInt8)
     <*> lmap (JT.archiveFor . sourceJob) (rwN "archive_for" CInt4)
-    <*> lmap sourceAdmission admissionCodec
+    <*> lmap sourceColumns payloadCodec
 
 -- | Decoder for a main-table job row.
 jobRowCodec :: Text -> RowCodec (JobRead Value)
 jobRowCodec queueName = cDecode (jobCodec queueName :: JobCodec (JobRead Value))
-
-sourceJob :: JobWriteSource payload -> JobWrite payload
-sourceJob (job, _, _, _, _) = job
-
-sourceAdmission :: JobWriteSource payload -> AdmissionColumns
-sourceAdmission (_, admission, _, _, _) = admission
-
-sourceParentId :: JobWriteSource payload -> Maybe Int64
-sourceParentId (_, _, parent, _, _) = parent
-
-sourceParentState :: JobWriteSource payload -> Maybe Value
-sourceParentState (_, _, _, state, _) = state
-
-sourceSuspended :: JobWriteSource payload -> Bool
-sourceSuspended (_, _, _, _, suspended) = suspended
 
 traceCodec :: Codec (JobWriteSource payload) (Maybe TraceContext)
 traceCodec =
@@ -321,12 +308,13 @@ dedupCodec =
     toDedupKey (Just k) (Just "replace") = Just (ReplaceDuplicate k)
     toDedupKey (Just k) _ = Just (IgnoreDuplicate k)
 
-admissionCodec :: Codec AdmissionColumns AdmissionKeys
-admissionCodec =
-  AdmissionKeys
-    <$> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey JT.acRateLimitKey JT.acRateLimitPrefix
-    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey JT.acConcurrencyKey JT.acConcurrencyPrefix
-    <* wo "rate_limit_cost" CFloat8 JT.acRateLimitCost
+payloadCodec :: Codec PayloadColumns PayloadKeys
+payloadCodec =
+  PayloadKeys
+    <$> lmap JT.pcKind (rwN "kind" CText)
+    <*> prefixedKeyCodec "rate_limit_key" "rate_limit_prefix" RateLimitKey JT.pcRateLimitKey JT.pcRateLimitPrefix
+    <*> prefixedKeyCodec "concurrency_key" "concurrency_prefix" ConcurrencyKey JT.pcConcurrencyKey JT.pcConcurrencyPrefix
+    <* wo "rate_limit_cost" CFloat8 JT.pcRateLimitCost
 
 -- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
 -- prefix columns, recovering the suffix by dropping the @prefix:@ part (so suffixes

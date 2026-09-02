@@ -32,10 +32,20 @@ const FILTER_BUILDER_HTML = `
     <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Filter field" x-text="currentFilterField().label"></button>
     <ul class="dropdown-menu">
       <template x-for="f in filterFields" :key="f.field">
-        <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field" x-text="f.label"></a></li>
+        <li><a class="dropdown-item" href="#" :class="{ active: newFilterField === f.field }" @click.prevent="newFilterField = f.field; newFilterValue = ''" x-text="f.label"></a></li>
       </template>
     </ul>
-    <input :type="currentFilterField().type || 'text'" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    <template x-if="!currentFilterOptions().length">
+      <input :type="currentFilterField().type || 'text'" class="form-control" style="min-width: 150px;" :placeholder="currentFilterPlaceholder()" aria-label="Filter value" x-model="newFilterValue" @keyup.enter="addFilter()" @keyup.escape="newFilterValue = ''">
+    </template>
+    <template x-if="currentFilterOptions().length">
+      <select class="form-select" style="min-width: 150px;" aria-label="Filter value" x-model="newFilterValue" @keyup.escape="newFilterValue = ''">
+        <option value="" x-text="currentFilterPlaceholder()"></option>
+        <template x-for="o in currentFilterOptions()" :key="o">
+          <option :value="o" x-text="o"></option>
+        </template>
+      </select>
+    </template>
     <button class="btn btn-outline-secondary" type="button" @click="addFilter()" :disabled="!newFilterValue" title="Add filter" aria-label="Add filter">+</button>
   </div>`;
 
@@ -698,6 +708,18 @@ function tableTab(loadMethod, refreshStorageKey) {
       history.replaceState(null, '', url);
     },
 
+    // The selected queue's declared label set, for a Kind filter's options.
+    kindOptions: [],
+    async loadKinds() {
+      const queue = Alpine.store('app').selectedQueue;
+      if (!queue) return;
+      try {
+        this.kindOptions = (await ArbiterAPI.listKinds(queue)) || [];
+      } catch {
+        this.kindOptions = [];
+      }
+    },
+
     // Filter builder: one chip per applied filter, plus a "field + value" adder.
     // `param` names the field's query-string and API key, so a tab adds a filter by
     // declaring it here and reading it in its own loader.
@@ -737,6 +759,11 @@ function tableTab(loadMethod, refreshStorageKey) {
     },
     currentFilterPlaceholder() {
       return this.currentFilterField().label + '…';
+    },
+    // `options` names the component property holding a field's value list.
+    currentFilterOptions() {
+      const f = this.currentFilterField();
+      return (f.options && this[f.options]) || [];
     },
     activeFilterChips() {
       return this.filterFields
@@ -1597,6 +1624,7 @@ const _filterKeys = [
   'parent_id',
   'job_id',
   'claimed_by',
+  'kind',
   'payload',
   'rate_limit_prefix',
   'concurrency_prefix',

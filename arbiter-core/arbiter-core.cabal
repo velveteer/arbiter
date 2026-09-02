@@ -60,6 +60,7 @@ library
     Arbiter.Core.Job.Archive
     Arbiter.Core.Job.Dedup
     Arbiter.Core.Job.DLQ
+    Arbiter.Core.Job.Kind
     Arbiter.Core.Job.Schema
     Arbiter.Core.Job.Schema.Groups
     Arbiter.Core.Job.Status
@@ -135,6 +136,7 @@ test-suite arbiter-core-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
+    , aeson         >=2.0  && <2.3
     , arbiter-core
     , base          >=4.20 && <5
     , hspec         >=2.0  && <2.12

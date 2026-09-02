@@ -87,7 +87,7 @@ import Arbiter.Core.Exceptions
   , JobNackException (..)
   )
 import Arbiter.Core.Job.Schema (TableName)
-import Arbiter.Core.Job.Types (Job, JobRead, JobWrite, TraceContext (..))
+import Arbiter.Core.Job.Types (HasKind (..), Job, JobRead, JobWrite, TraceContext (..))
 import Arbiter.Core.Job.Types qualified as JT
 
 -- $enrichment
@@ -139,7 +139,7 @@ spanning mTracer name args action =
   maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
 -- | Run an action inside a @publish \<queue\>@ producer span over @n@ jobs.
-withPublishSpan :: (MonadUnliftIO m) => TableName -> [JobWrite payload] -> m a -> m a
+withPublishSpan :: (HasKind payload, MonadUnliftIO m) => TableName -> [JobWrite payload] -> m a -> m a
 withPublishSpan queue jobs action =
   resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue jobs) action
 
@@ -230,7 +230,7 @@ spanContextForJob job = do
 
 -- | A lone job contributes its own attributes. A batch reports its size instead, per
 -- the messaging conventions, since the jobs in it need not agree.
-producerArgs :: TableName -> [JobWrite payload] -> SpanArguments
+producerArgs :: (HasKind payload) => TableName -> [JobWrite payload] -> SpanArguments
 producerArgs queue jobs =
   defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish" <> published}
   where
@@ -244,8 +244,12 @@ jobShapeAttrs job =
   ("arbiter.priority", toAttribute (fromIntegral (JT.priority job) :: Int))
     : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
 
-writeAttrs :: JobWrite payload -> AttributeMap
-writeAttrs = HM.fromList . jobShapeAttrs
+writeAttrs :: (HasKind payload) => JobWrite payload -> AttributeMap
+writeAttrs job = HM.fromList (kindAttr (kindOf (JT.payload job)) <> jobShapeAttrs job)
+
+-- | The payload's variant label, absent for a payload that declares none.
+kindAttr :: Maybe Text -> [(Text, Attribute)]
+kindAttr k = [("arbiter.kind", toAttribute v) | v <- maybeToList k]
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
 consumerArgs cs job =
@@ -290,4 +294,5 @@ jobAttrs job =
     [ ("messaging.message.id", messageId job)
     , ("messaging.message.retry.count", toAttribute (max 0 (fromIntegral (JT.attempts job) - 1) :: Int))
     ]
+      <> kindAttr (JT.jobKind (JT.payloadKeys job))
       <> jobShapeAttrs job

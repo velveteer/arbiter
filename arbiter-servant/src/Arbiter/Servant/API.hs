@@ -97,6 +97,7 @@ data JobsAPI payload result mode = JobsAPI
           :> QueryFlag "roots_only"
           :> QueryParam "status" JobStatus
           :> QueryParam "claimed_by" UUID
+          :> QueryParam "kind" Text
           :> QueryParam "payload" Text
           :> QueryParam "rate_limit_prefix" Text
           :> QueryParam "concurrency_prefix" Text
@@ -200,6 +201,7 @@ data DLQAPI payload mode = DLQAPI
           :> QueryParam "parent_id" Int64
           :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
+          :> QueryParam "kind" Text
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
@@ -233,6 +235,7 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "parent_id" Int64
           :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
+          :> QueryParam "kind" Text
           :> QueryParam "completed_after" UTCTime
           :> QueryParam "completed_before" UTCTime
           :> QueryParam "sort_by" ArchiveSortColumn
@@ -288,6 +291,7 @@ data TableAPI payload result mode = TableAPI
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
+  , listKinds :: mode :- "kinds" :> Get '[JSON] [Text]
   }
   deriving stock (Generic)
 

@@ -591,6 +591,7 @@
               <th class="select-cell" :style="'width:' + colPct('select') + '%'"><input class="form-check-input m-0" type="checkbox" title="Select all on this page" aria-label="Select all on this page"
                   :checked="allSelected" @change="toggleSelectAll()"></th>
               <th class="sortable" :style="'width:' + colPct('id') + '%'" @click="toggleSort('id')" @keydown.enter.prevent="toggleSort('id')" @keydown.space.prevent="toggleSort('id')" tabindex="0" :aria-sort="sortBy === 'id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">ID<span class="sort-caret" x-text="sortIndicator('id')" aria-hidden="true"></span></th>
+              <th :class="{ 'd-none': !colVisible('kind') }" :style="'width:' + colPct('kind') + '%'">Kind</th>
               <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
               <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')" @keydown.enter.prevent="toggleSort('group_key')" @keydown.space.prevent="toggleSort('group_key')" tabindex="0" :aria-sort="sortBy === 'group_key' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Group<span class="sort-caret" x-text="sortIndicator('group_key')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')" @keydown.enter.prevent="toggleSort('parent_id')" @keydown.space.prevent="toggleSort('parent_id')" tabindex="0" :aria-sort="sortBy === 'parent_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Parent<span class="sort-caret" x-text="sortIndicator('parent_id')" aria-hidden="true"></span></th>
@@ -625,6 +626,9 @@
                   <td class="text-truncate"
                     :style="job._depth ? 'background: linear-gradient(to right, color-mix(in srgb, var(--arb-teal-dim) 35%, transparent) ' + (job._depth * 12) + 'px, transparent ' + (job._depth * 12 + 6) + 'px)' : ''"
                     x-text="job.primaryKey"></td>
+                </template>
+                <template x-if="!job._isMoreRow">
+                  <td class="text-truncate" x-show="colVisible('kind')" x-text="job.kind || EMPTY"></td>
                 </template>
                 <template x-if="!job._isMoreRow">
                   <td class="text-truncate" x-show="colVisible('payload')" :title="JSON.stringify(job.payload)"
@@ -883,6 +887,7 @@
               <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')" @keydown.enter.prevent="toggleSort('job_id')" @keydown.space.prevent="toggleSort('job_id')" tabindex="0" :aria-sort="sortBy === 'job_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Job ID<span class="sort-caret" x-text="sortIndicator('job_id')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')" @keydown.enter.prevent="toggleSort('parent_id')" @keydown.space.prevent="toggleSort('parent_id')" tabindex="0" :aria-sort="sortBy === 'parent_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Parent<span class="sort-caret" x-text="sortIndicator('parent_id')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')" @keydown.enter.prevent="toggleSort('group_key')" @keydown.space.prevent="toggleSort('group_key')" tabindex="0" :aria-sort="sortBy === 'group_key' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Group<span class="sort-caret" x-text="sortIndicator('group_key')" aria-hidden="true"></span></th>
+              <th :class="{ 'd-none': !colVisible('kind') }" :style="'width:' + colPct('kind') + '%'">Kind</th>
               <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
               <th class="sortable" :class="{ 'd-none': !colVisible('failed') }" :style="'width:' + colPct('failed') + '%'" @click="toggleSort('failed_at')" @keydown.enter.prevent="toggleSort('failed_at')" @keydown.space.prevent="toggleSort('failed_at')" tabindex="0" :aria-sort="sortBy === 'failed_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Failed<span class="sort-caret" x-text="sortIndicator('failed_at')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('attempts') }" :style="'width:' + colPct('attempts') + '%'" @click="toggleSort('attempts')" @keydown.enter.prevent="toggleSort('attempts')" @keydown.space.prevent="toggleSort('attempts')" tabindex="0" :aria-sort="sortBy === 'attempts' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Attempts<span class="sort-caret" x-text="sortIndicator('attempts')" aria-hidden="true"></span></th>
@@ -909,6 +914,7 @@
                   </template>
                 </td>
                 <td class="text-truncate" x-show="colVisible('group')" x-text="job.jobSnapshot?.groupKey || EMPTY"></td>
+                <td class="text-truncate" x-show="colVisible('kind')" x-text="job.jobSnapshot?.kind || EMPTY"></td>
                 <td class="text-truncate" x-show="colVisible('payload')" :title="JSON.stringify(job.jobSnapshot?.payload)"
                   x-text="truncate(job.jobSnapshot?.payload)"></td>
                 <td class="text-truncate" x-show="colVisible('failed')" :title="formatTime(job.failedAt, EMPTY)" x-text="formatAge(job.failedAt, EMPTY)"></td>
@@ -1027,6 +1033,7 @@
               <th class="sortable" :class="{ 'd-none': !colVisible('jobid') }" :style="'width:' + colPct('jobid') + '%'" @click="toggleSort('job_id')" @keydown.enter.prevent="toggleSort('job_id')" @keydown.space.prevent="toggleSort('job_id')" tabindex="0" :aria-sort="sortBy === 'job_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Job ID<span class="sort-caret" x-text="sortIndicator('job_id')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('parent') }" :style="'width:' + colPct('parent') + '%'" @click="toggleSort('parent_id')" @keydown.enter.prevent="toggleSort('parent_id')" @keydown.space.prevent="toggleSort('parent_id')" tabindex="0" :aria-sort="sortBy === 'parent_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Parent<span class="sort-caret" x-text="sortIndicator('parent_id')" aria-hidden="true"></span></th>
               <th class="sortable" :class="{ 'd-none': !colVisible('group') }" :style="'width:' + colPct('group') + '%'" @click="toggleSort('group_key')" @keydown.enter.prevent="toggleSort('group_key')" @keydown.space.prevent="toggleSort('group_key')" tabindex="0" :aria-sort="sortBy === 'group_key' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Group<span class="sort-caret" x-text="sortIndicator('group_key')" aria-hidden="true"></span></th>
+              <th :class="{ 'd-none': !colVisible('kind') }" :style="'width:' + colPct('kind') + '%'">Kind</th>
               <th :class="{ 'd-none': !colVisible('payload') }" :style="'width:' + colPct('payload') + '%'">Payload</th>
               <th :class="{ 'd-none': !colVisible('hasresult') }" :style="'width:' + colPct('hasresult') + '%'">Result</th>
               <th class="sortable" :class="{ 'd-none': !colVisible('inserted') }" :style="'width:' + colPct('inserted') + '%'" @click="toggleSort('inserted_at')" @keydown.enter.prevent="toggleSort('inserted_at')" @keydown.space.prevent="toggleSort('inserted_at')" tabindex="0" :aria-sort="sortBy === 'inserted_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'">Inserted<span class="sort-caret" x-text="sortIndicator('inserted_at')" aria-hidden="true"></span></th>
@@ -1053,6 +1060,7 @@
                   </template>
                 </td>
                 <td class="text-truncate" x-show="colVisible('group')" x-text="job.jobSnapshot?.groupKey || EMPTY"></td>
+                <td class="text-truncate" x-show="colVisible('kind')" x-text="job.jobSnapshot?.kind || EMPTY"></td>
                 <td class="text-truncate" x-show="colVisible('payload')" :title="JSON.stringify(job.jobSnapshot?.payload)"
                   x-text="truncate(job.jobSnapshot?.payload)"></td>
                 <td class="text-center" x-show="colVisible('hasresult')">

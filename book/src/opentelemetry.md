@@ -35,6 +35,10 @@ and for jobs that a handler enqueues. A REST API enqueue joins the request trace
 when the server uses `newOpenTelemetryWaiMiddleware`
 (`hs-opentelemetry-instrumentation-wai`).
 
+Both spans carry the job's [payload kind](features/kinds.md) as `arbiter.kind`.
+The producer span derives it from the payload. The consumer span reads the
+stored label.
+
 `Arbiter.Core.Trace` has the helpers for annotating a job's span, opening child
 spans, and wrapping an enqueue made outside a handler.
 
@@ -46,6 +50,11 @@ activity, Arbiter table health, and PostgreSQL health. The
 module defines the name and unit of each instrument.
 
 Admission metrics use the policy as the key. They do not use admission keys.
+On these metrics, `kind` is the policy type: `rate_limit` or `concurrency`.
+
+Queue depth and the job counters set `kind` only to a label from the payload's
+`kindsFor` set. A payload that declares no labels exports no `kind`. The number
+of series is therefore bounded by that set.
 
 Grant `pg_read_all_stats` to collect PostgreSQL health data outside the Arbiter
 role. One replica scans during each interval. The other replicas export that

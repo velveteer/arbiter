@@ -5,8 +5,12 @@
 module Arbiter.Core.Job.Types
   ( -- * Core Job Type
     Job
-  , AdmissionKeys (..)
-  , AdmissionColumns (..)
+  , HasKind (..)
+  , kindFromField
+  , constructorKind
+  , constructorKinds
+  , PayloadKeys (..)
+  , PayloadColumns (..)
   , JobRead
   , JobWrite
   , primaryKey
@@ -29,7 +33,7 @@ module Arbiter.Core.Job.Types
   , claimedBy
   , claimSeq
   , archiveFor
-  , admission
+  , payloadKeys
   , defaultJob
   , defaultGroupedJob
   , setPayload
@@ -87,11 +91,11 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey, HasConcurrency, RegistryConcurrencyPolicies)
 import Arbiter.Core.Job.Dedup (DedupKey (..), dedupParts)
+import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds, kindFromField)
 import Arbiter.Core.Job.Status (JobStatus (..), jobStatusFromText, jobStatusToText)
 import Arbiter.Core.Job.TraceContext (TraceContext (..), toTraceContext)
 import Arbiter.Core.Job.Types.Internal
   ( JobRecord (..)
-  , admission
   , archiveFor
   , attempts
   , claimSeq
@@ -106,6 +110,7 @@ import Arbiter.Core.Job.Types.Internal
   , parentId
   , parentState
   , payload
+  , payloadKeys
   , primaryKey
   , priority
   , queueName
@@ -116,27 +121,30 @@ import Arbiter.Core.Job.Types.Internal
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
 
 -- | A job parametrized over payload, primary key, queue name, insertion
--- timestamp, and admission metadata. The constructor is internal.
+-- timestamp, and the columns derived from the payload. The constructor is internal.
 type Job payload key q insertedAt adm =
   JobRecord payload key q insertedAt adm
 
--- | The admission keys gating a stored job's claim, one field per kind.
-data AdmissionKeys = AdmissionKeys
-  { jobRateLimitKey :: Maybe RateLimitKey
+-- | The labels and keys a stored job carries from its payload, one field each.
+data PayloadKeys = PayloadKeys
+  { jobKind :: Maybe Text
+  -- ^ From the payload's 'Arbiter.Core.Job.Kind.HasKind' instance.
+  , jobRateLimitKey :: Maybe RateLimitKey
   -- ^ From the payload's 'Arbiter.Core.RateLimit.Spec.HasRateLimit' instance.
   , jobConcurrencyKey :: Maybe ConcurrencyKey
   -- ^ From the payload's 'Arbiter.Core.Concurrency.Spec.HasConcurrency' instance.
   }
   deriving stock (Eq, Generic, Show)
 
--- | The writable admission columns, resolved from a payload at enqueue. The @key@
--- and @prefix@ columns round-trip via 'AdmissionKeys'. @cost@ is write-only.
-data AdmissionColumns = AdmissionColumns
-  { acRateLimitKey :: Maybe Text
-  , acRateLimitPrefix :: Maybe Text
-  , acRateLimitCost :: Double
-  , acConcurrencyKey :: Maybe Text
-  , acConcurrencyPrefix :: Maybe Text
+-- | The writable columns resolved from a payload at enqueue. The @kind@, @key@
+-- and @prefix@ columns round-trip via 'PayloadKeys'. @cost@ is write-only.
+data PayloadColumns = PayloadColumns
+  { pcKind :: Maybe Text
+  , pcRateLimitKey :: Maybe Text
+  , pcRateLimitPrefix :: Maybe Text
+  , pcRateLimitCost :: Double
+  , pcConcurrencyKey :: Maybe Text
+  , pcConcurrencyPrefix :: Maybe Text
   }
   deriving stock (Eq, Generic, Show)
 
@@ -154,7 +162,7 @@ isRollup :: Job p Int64 q t adm -> Bool
 isRollup = isJust . parentState
 
 -- | A job read from the database.
-type JobRead payload = Job payload Int64 Text UTCTime AdmissionKeys
+type JobRead payload = Job payload Int64 Text UTCTime PayloadKeys
 
 -- | A job ready to enqueue. Arbiter owns claim, retry, parent, rollup, and
 -- suspension state. Use the exported setters to configure enqueue fields.
@@ -184,7 +192,7 @@ instance (FromJSON payload) => FromJSON (JobRead payload) where
       <*> v .:? "claimedBy"
       <*> v .:? "claimSeq" .!= 0
       <*> v .:? "archiveFor"
-      <*> (AdmissionKeys <$> v .:? "rateLimit" <*> v .:? "concurrency")
+      <*> (PayloadKeys <$> v .:? "kind" <*> v .:? "rateLimit" <*> v .:? "concurrency")
 
 -- | Ungrouped 'JobWrite' with default values. For serial processing within a
 -- group, use 'defaultGroupedJob'.
@@ -211,7 +219,7 @@ defaultJob value =
     , claimedBy = Nothing
     , claimSeq = 0
     , archiveFor = Nothing
-    , admission = ()
+    , payloadKeys = ()
     }
 
 -- | 'defaultJob' with a group key. Jobs sharing a group key are processed serially.
@@ -259,7 +267,7 @@ mapPayload f job = job {payload = f (payload job)}
 
 -- | The full payload contract: JSON round-trip for JSONB storage plus the rate-limit and concurrency declarations (both default to unlimited).
 type JobPayload payload =
-  (FromJSON payload, ToJSON payload, HasRateLimit payload, HasConcurrency payload)
+  (FromJSON payload, ToJSON payload, HasKind payload, HasRateLimit payload, HasConcurrency payload)
 
 -- | The registry declares both admission policy kinds.
 type RegistryAdmissionPolicies registry =

@@ -35,6 +35,7 @@ import Data.Bifunctor (first)
 import Data.Foldable (toList, traverse_)
 import Data.HashMap.Strict (HashMap)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
@@ -82,11 +83,12 @@ startGauges
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
+  -- ^ Each queue with the labels its payload declares.
   -> NominalDiffTime
   -> IO (IO ())
-startGauges tel baseLog runDb schema queueTables refreshInterval = do
-  (loop, stop) <- prepareGauges tel baseLog runDb schema queueTables refreshInterval
+startGauges tel baseLog runDb schema queueKinds refreshInterval = do
+  (loop, stop) <- prepareGauges tel baseLog runDb schema queueKinds refreshInterval
   pure (loop `finally` stop)
 
 -- | 'startGauges' with the reading bracketed, so the instruments stop observing however
@@ -97,13 +99,14 @@ withGaugeLoop
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
+  -- ^ Each queue with the labels its payload declares.
   -> NominalDiffTime
   -> (IO () -> IO b)
   -- ^ Runs the refresh loop, typically on a thread of its own.
   -> IO b
-withGaugeLoop tel baseLog runDb schema queueTables refreshInterval use =
-  bracket (prepareGauges tel baseLog runDb schema queueTables refreshInterval) snd (use . fst)
+withGaugeLoop tel baseLog runDb schema queueKinds refreshInterval use =
+  bracket (prepareGauges tel baseLog runDb schema queueKinds refreshInterval) snd (use . fst)
 
 -- | The refresh loop and the action retiring the reading its instruments observe.
 prepareGauges
@@ -112,10 +115,10 @@ prepareGauges
   -> LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
   -> NominalDiffTime
   -> IO (IO (), IO ())
-prepareGauges tel baseLog runDb schema queueTables refreshInterval
+prepareGauges tel baseLog runDb schema queueKinds refreshInterval
   | isNothing (Tel.meters tel) = pure (pure (), pure ())
   | otherwise = do
       cells <- newGaugeCells =<< getMonotonicTime
@@ -125,7 +128,7 @@ prepareGauges tel baseLog runDb schema queueTables refreshInterval
           (Tel.telemetryLogConfig tel baseLog)
           runDb
           schema
-          queueTables
+          queueKinds
           (max 1 refreshInterval)
           cells
           advance
@@ -167,6 +170,12 @@ registerInstruments meter cells = do
       over queues $ \o ->
         [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
         | (st, n) <- statusCounts (overviewStats o)
+        ]
+  reg Name.QueueDepthByKind "{job}" "Jobs in a queue by payload variant" $
+    observed $
+      over queues $ \o ->
+        [ ([("queue", overviewQueue o), ("kind", k)], fromIntegral n)
+        | (k, n) <- Map.toList (kindCounts (overviewStats o))
         ]
   reg Name.QueueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
     perQueue oldestReadyAgeSeconds
@@ -275,13 +284,13 @@ gaugeRefreshLoop
   => LogConfig
   -> (forall a. m a -> IO a)
   -> SchemaName
-  -> [TableName]
+  -> [(TableName, [Text])]
   -> NominalDiffTime
   -> GaugeCells
   -> (Cached -> IO ())
   -- ^ Carries a published reading onto the counters.
   -> IO (IO ())
-gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance = do
+gaugeRefreshLoop logCfg runDb schema queueKinds refreshInterval cells advance = do
   gateRef <- newIORef Nothing
   pure $ forever $ do
     started <- getMonotonicTime
@@ -336,8 +345,15 @@ gaugeRefreshLoop logCfg runDb schema queueTables refreshInterval cells advance =
     -- none of them pins a snapshot for the whole scan.
     boundedRead :: forall a. m a -> m a
     boundedRead q = withDbTransaction (setLocalStatementTimeout staleAfter >> q)
+    queueTables = map fst queueKinds
+    -- A declared label exports a series whether or not a row carries it.
+    declared = Map.fromList queueKinds
+    zeroFilled o =
+      let zeros = Map.fromList [(k, 0) | k <- Map.findWithDefault [] (overviewQueue o) declared]
+          stats = overviewStats o
+       in o {overviewStats = stats {kindCounts = Map.union (kindCounts stats) zeros}}
     scan = do
-      overviews <- boundedRead (getAllQueueStats schema queueTables)
+      overviews <- map zeroFilled <$> boundedRead (getAllQueueStats schema queueKinds)
       (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth schema queueTables)
       concPolicies <- boundedRead (listConcurrencyPolicies schema)
       -- No queue tables, so the policy read stays off the job tables: the

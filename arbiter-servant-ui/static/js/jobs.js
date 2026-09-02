@@ -7,6 +7,7 @@
 const JOB_COLUMNS = [
   { key: 'select', label: '', weight: 3, required: true, narrow: false },
   { key: 'id', label: 'ID', weight: 4, required: true },
+  { key: 'kind', label: 'Kind', weight: 8, autoHide: true, narrow: false },
   { key: 'payload', label: 'Payload', weight: 14 },
   { key: 'group', label: 'Group', weight: 7, autoHide: true, narrow: false },
   { key: 'parent', label: 'Parent', weight: 7, autoHide: true, narrow: false },
@@ -58,6 +59,7 @@ document.addEventListener('alpine:init', () => {
     parentIdFilter: '',
     jobIdFilter: '',
     claimedByFilter: '',
+    kindFilter: '',
     payloadFilter: '',
     ratePrefixFilter: '',
     concPrefixFilter: '',
@@ -66,6 +68,7 @@ document.addEventListener('alpine:init', () => {
     _appliedParentId: '',
     _appliedJobId: '',
     _appliedClaimedBy: '',
+    _appliedKind: '',
     _appliedPayload: '',
     _appliedRatePrefix: '',
     _appliedConcPrefix: '',
@@ -77,6 +80,7 @@ document.addEventListener('alpine:init', () => {
       { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
       { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
       { field: 'worker', label: 'Worker', param: 'claimed_by', model: 'claimedByFilter', applied: '_appliedClaimedBy', format: shortId },
+      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
       { field: 'payload', label: 'Payload', param: 'payload', model: 'payloadFilter', applied: '_appliedPayload' },
       { field: 'rate', label: 'Rate limit', param: 'rate_limit_prefix', model: 'ratePrefixFilter', applied: '_appliedRatePrefix' },
       { field: 'conc', label: 'Concurrency', param: 'concurrency_prefix', model: 'concPrefixFilter', applied: '_appliedConcPrefix' },
@@ -212,6 +216,7 @@ document.addEventListener('alpine:init', () => {
     _refreshAutoEmpty(jobs) {
       if (jobs.length === 0) return;
       this.setAutoEmpty({
+        kind: jobs.every((j) => !j.kind),
         group: jobs.every((j) => !j.groupKey),
         parent: jobs.every((j) => !j.parentId),
         children: jobs.every((j) => !this.childCounts[j.primaryKey] && !this.dlqChildCounts[j.primaryKey]),
@@ -316,6 +321,7 @@ document.addEventListener('alpine:init', () => {
     init() {
       this._loadColPrefs();
       this.readUrlFilters('jobs');
+      this.loadKinds();
       trackTabActive(this, '#tab-jobs', {
         onShow: () => { this.loadJobs(); this._startTimer(); },
         onHide: () => {
@@ -328,7 +334,7 @@ document.addEventListener('alpine:init', () => {
       });
       this._bindTableEvents({
         hashName: 'jobs',
-        onQueueReset: () => { this.stateFilter = ''; this.selected = {}; this.resetAutoEmpty(); },
+        onQueueReset: () => { this.stateFilter = ''; this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           // Inserts land as ready/scheduled (or suspended for rollup parents), but
@@ -387,6 +393,7 @@ document.addEventListener('alpine:init', () => {
       const pid = this.filterValue('parent', filterOverrides);
       const jid = this.filterValue('job', filterOverrides);
       const worker = this.filterValue('worker', filterOverrides);
+      const kind = this.filterValue('kind', filterOverrides);
       const payload = this.filterValue('payload', filterOverrides);
       const rate = this.filterValue('rate', filterOverrides);
       const conc = this.filterValue('conc', filterOverrides);
@@ -394,7 +401,7 @@ document.addEventListener('alpine:init', () => {
       await guardedLoad(this, 'Failed to load jobs', async (seq, isStale) => {
         // Any filter that can match a child renders flat, so a match is never hidden
         // behind a parent the filter itself excluded.
-        const narrowed = !!(pid || gk || jid || worker || payload || rate || conc);
+        const narrowed = !!(pid || gk || jid || worker || kind || payload || rate || conc);
         const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !narrowed;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
@@ -403,6 +410,7 @@ document.addEventListener('alpine:init', () => {
           parentId: pid || undefined,
           jobId: jid || undefined,
           claimedBy: worker || undefined,
+          kind: kind || undefined,
           payload: payload || undefined,
           ratePrefix: rate || undefined,
           concPrefix: conc || undefined,
@@ -417,6 +425,7 @@ document.addEventListener('alpine:init', () => {
         this._appliedParentId = pid;
         this._appliedJobId = jid;
         this._appliedClaimedBy = worker;
+        this._appliedKind = kind;
         this._appliedPayload = payload;
         this._appliedRatePrefix = rate;
         this._appliedConcPrefix = conc;

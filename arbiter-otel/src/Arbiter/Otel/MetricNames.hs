@@ -20,6 +20,7 @@ data MetricName
   | HandlerDuration
   | -- Queue depth
     QueueDepth
+  | QueueDepthByKind
   | QueueOldestReadyAge
   | QueueOldestInFlightAge
   | Workers
@@ -54,6 +55,7 @@ metricName = \case
   MaintenanceRows -> "arbiter.maintenance.rows"
   HandlerDuration -> "arbiter.job.handler.duration"
   QueueDepth -> "arbiter.queue.depth"
+  QueueDepthByKind -> "arbiter.queue.depth_by_kind"
   QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
   QueueOldestInFlightAge -> "arbiter.queue.oldest_in_flight_age"
   Workers -> "arbiter.workers"

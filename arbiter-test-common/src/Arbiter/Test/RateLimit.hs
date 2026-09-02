@@ -27,13 +27,13 @@ import Arbiter.Core.Job.Types
   , JobRead
   , JobStatus (..)
   , JobWrite
-  , admission
   , attempts
   , claimSeq
   , defaultGroupedJob
   , defaultJob
   , jobRateLimitKey
   , payload
+  , payloadKeys
   , primaryKey
   , setDedupKey
   )
@@ -452,7 +452,7 @@ rateLimitSpec runM = do
         case find ((== "dlqkey") . rlTenant . payload . DLQ.jobSnapshot) dlqs of
           Just d -> do
             retried <- runM env (HL.retryFromDLQ (DLQ.dlqPrimaryKey d)) :: IO (Maybe (JobRead RLPayload))
-            (jobRateLimitKey . admission <$> retried) `shouldBe` Just (Just (RateLimitKey "rl" "dlqkey"))
+            (jobRateLimitKey . payloadKeys <$> retried) `shouldBe` Just (Just (RateLimitKey "rl" "dlqkey"))
           Nothing -> expectationFailure "job did not reach the DLQ"
       _ -> expectationFailure ("expected exactly one claimed job, got " <> show (length claimed))
 

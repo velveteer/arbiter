@@ -93,7 +93,7 @@ sendEmail job cbs = do
   case outcome of
     TooManyRequests retryAfter -> do
       -- Empty the bucket. Any amount at or above its burst works, tokens floor at zero.
-      traverse_ (\key -> addRateLimitTokens key (-1000)) (Arb.jobRateLimitKey (Arb.admission job))
+      traverse_ (\key -> addRateLimitTokens key (-1000)) (Arb.jobRateLimitKey (Arb.payloadKeys job))
       void $ Arb.setVisibilityTimeout retryAfter job
       Worker.nack cbs job
     Sent -> Worker.ack cbs job

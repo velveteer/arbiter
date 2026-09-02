@@ -5,7 +5,7 @@
 Arbiter
 </h1>
 
-An opinionated, production-ready PostgreSQL job queue for Haskell applications.
+A PostgreSQL job queue for Haskell applications.
 
 <a href="https://demo.arbiterq.dev/"><img src="https://img.shields.io/badge/Live_Demo-0e7490?style=for-the-badge&amp;logo=rocket&amp;logoColor=white" alt="Live Demo" /></a>
 <a href="https://arbiterq.dev/docs/"><img src="https://img.shields.io/badge/Guide-0f766e?style=for-the-badge&amp;logo=readthedocs&amp;logoColor=white" alt="Guide" /></a>

@@ -100,6 +100,35 @@
       ]
     },
     {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Queue depth by payload variant",
+      "description": "Shared reading, so this aggregates with max, never sum. The series are the labels the payload declares, so unlabelled rows and labels outside that set are left out: these sum to the queue depth only when every row carries a declared label.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue, kind) (arbiter_queue_depth_by_kind)",
+          "legendFormat": "{{queue}} / {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      }
+    },
+    {
       "id": 3,
       "type": "timeseries",
       "title": "Jobs processed /s by outcome (retries are not terminal)",
@@ -112,7 +141,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -145,7 +174,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -173,7 +202,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 24
       },
       "targets": [
         {
@@ -202,7 +231,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -236,7 +265,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -274,7 +303,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 24
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -307,7 +336,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -345,7 +374,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "fieldConfig": {
         "defaults": {
@@ -373,7 +402,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 40
       },
       "fieldConfig": {
         "defaults": {
@@ -401,7 +430,7 @@
         "h": 6,
         "w": 6,
         "x": 0,
-        "y": 40
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -430,7 +459,7 @@
         "h": 6,
         "w": 6,
         "x": 6,
-        "y": 40
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -457,7 +486,7 @@
         "h": 6,
         "w": 6,
         "x": 12,
-        "y": 40
+        "y": 48
       },
       "targets": [
         {
@@ -502,7 +531,7 @@
         "h": 6,
         "w": 6,
         "x": 18,
-        "y": 40
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -546,7 +575,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 46
+        "y": 54
       },
       "fieldConfig": {
         "defaults": {
@@ -574,7 +603,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 54
       },
       "fieldConfig": {
         "defaults": {
@@ -623,7 +652,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 62
       },
       "fieldConfig": {
         "defaults": {
@@ -652,7 +681,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 62
       },
       "fieldConfig": {
         "defaults": {
@@ -680,7 +709,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 70
       },
       "fieldConfig": {
         "defaults": {
@@ -708,7 +737,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 70
       },
       "fieldConfig": {
         "defaults": {
@@ -737,7 +766,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 78
       },
       "fieldConfig": {
         "defaults": {
@@ -765,7 +794,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {
@@ -792,7 +821,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {
@@ -820,7 +849,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 84
+        "y": 92
       },
       "timeFrom": "1h",
       "options": {
@@ -857,7 +886,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 102
       },
       "timeFrom": "1h",
       "options": {

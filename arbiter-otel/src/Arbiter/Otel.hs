@@ -51,7 +51,7 @@ module Arbiter.Otel
 
 import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, getSchema)
-import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryTableNames)
+import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload, registryQueueKinds)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Arbiter.Worker (NamedWorkerPool (..))
 import Arbiter.Worker qualified as Worker
@@ -106,7 +106,7 @@ withGauges
 withGauges tel baseLog action = do
   schema <- getSchema
   withRunInIO $ \runDb ->
-    withGaugeLoop tel baseLog runDb schema (registryTableNames (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
+    withGaugeLoop tel baseLog runDb schema (registryQueueKinds (Proxy @(RegistryOf m))) (gaugeRefresh tel) $
       \loop -> withAsync (labelArbiterThread "gauges" Nothing >> loop) (const (runDb action))
 
 -- | 'Arbiter.Worker.runWorkerPools' with the SDK installed from the environment, the

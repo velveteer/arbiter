@@ -12,7 +12,8 @@ module Main (main) where
 import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-  ( defaultJob
+  ( HasKind
+  , defaultJob
   , payload
   , primaryKey
   , setArchiveFor
@@ -92,22 +93,22 @@ import System.Random (randomRIO)
 data DemoPayload
   = TestMessage Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON, ToSchema)
+  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 data EmailPayload
   = SendEmail Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON, ToSchema)
+  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 data NotificationPayload
   = PushNotification Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON, ToSchema)
+  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 -- | Cheap throwaway work the burst generator floods its queue with.
 newtype BulkPayload = BulkTask Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON, ToSchema)
+  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 -- | Pipeline payload for the rollup demo.
 --
@@ -117,7 +118,7 @@ data PipelinePayload
   = ProcessChunk Text
   | AggregateResults Text
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON, ToSchema)
+  deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 -- | The demo's routes: the queue API, an OpenAPI description of it with a Swagger UI
 -- to read it in, and the dashboard. The dashboard is a catch-all, so it comes last.

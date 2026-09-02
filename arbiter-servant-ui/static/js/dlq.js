@@ -8,6 +8,7 @@ const DLQ_COLUMNS = [
   { key: 'jobid', label: 'Job ID', weight: 7 },
   { key: 'parent', label: 'Parent', weight: 7, narrow: false },
   { key: 'group', label: 'Group', weight: 8, narrow: false },
+  { key: 'kind', label: 'Kind', weight: 8, autoHide: true, narrow: false },
   { key: 'payload', label: 'Payload', weight: 13 },
   { key: 'failed', label: 'Failed', weight: 12 },
   { key: 'attempts', label: 'Attempts', weight: 8, narrow: false },
@@ -39,15 +40,25 @@ document.addEventListener('alpine:init', () => {
     parentIdFilter: '',
     groupKeyFilter: '',
     jobIdFilter: '',
+    kindFilter: '',
     _appliedParentId: '',
     _appliedGroupKey: '',
     _appliedJobId: '',
+    _appliedKind: '',
     sortBy: '',
     sortDir: '',
+
+    filterFields: [
+      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
+      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
+    ],
 
     init() {
       this._loadColPrefs();
       this.readUrlFilters('dlq');
+      this.loadKinds();
       trackTabActive(this, '#tab-dlq', {
         onShow: () => { this.loadDLQ(); this._startTimer(); },
         onHide: () => {
@@ -59,7 +70,7 @@ document.addEventListener('alpine:init', () => {
       });
       this._bindTableEvents({
         hashName: 'dlq',
-        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); },
+        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           return events.filter(evt => evt.table === queue && evt.event === 'job_dlq').length;
@@ -79,6 +90,7 @@ document.addEventListener('alpine:init', () => {
       const gk = this.filterValue('group', filterOverrides);
       const pid = this.filterValue('parent', filterOverrides);
       const jid = this.filterValue('job', filterOverrides);
+      const kind = this.filterValue('kind', filterOverrides);
       const startingPending = this.pendingChanges;
       await guardedLoad(this, 'Failed to load DLQ', async (seq, isStale) => {
         const data = await ArbiterAPI.listDLQ(queue, {
@@ -87,6 +99,7 @@ document.addEventListener('alpine:init', () => {
           parentId: pid || undefined,
           jobId: jid || undefined,
           groupKey: gk || undefined,
+          kind: kind || undefined,
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
@@ -94,11 +107,13 @@ document.addEventListener('alpine:init', () => {
         this._appliedGroupKey = gk;
         this._appliedParentId = pid;
         this._appliedJobId = jid;
+        this._appliedKind = kind;
         this.dlqJobs = data.dlqJobs || [];
         this.total = data.dlqTotal || 0;
         this.resyncDetailSelection();
         if (this.dlqJobs.length > 0) {
           this.setAutoEmpty({
+            kind: this.dlqJobs.every((j) => !j.jobSnapshot?.kind),
             gates: this.dlqJobs.every((j) => !j.jobSnapshot?.rateLimit && !j.jobSnapshot?.concurrency),
           });
         }

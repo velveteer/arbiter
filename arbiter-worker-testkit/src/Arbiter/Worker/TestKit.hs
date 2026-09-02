@@ -31,8 +31,11 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   , groupKey
+  , jobKind
+  , kindOf
   , parentId
   , payload
+  , payloadKeys
   , primaryKey
   , setArchiveFor
   , setGroupKey
@@ -194,6 +197,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           pure (any ((== mkSimple "arch-done") . payload . Archive.jobSnapshot) arch)
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
         map (payload . Archive.jobSnapshot) arch `shouldBe` [mkSimple "arch-done"]
+        map (jobKind . payloadKeys . Archive.jobSnapshot) arch
+          `shouldBe` [kindOf (mkSimple "arch-done" :: payload)]
 
     it "fetches an archived job by id" $ \env -> do
       config <- mkConfig $ \_job -> pure ()

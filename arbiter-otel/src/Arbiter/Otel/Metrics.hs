@@ -14,13 +14,22 @@ module Arbiter.Otel.Metrics
   ) where
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (..))
-import Arbiter.Core.Job.Types (AdmissionKeys (..), ObservabilityHooks (..), admission, defaultObservabilityHooks)
+import Arbiter.Core.Job.Types
+  ( HasKind (..)
+  , ObservabilityHooks (..)
+  , PayloadKeys (..)
+  , defaultObservabilityHooks
+  , payloadKeys
+  )
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Worker.Config (MaintenanceOp, maintenanceOpName)
+import Control.Monad (mfilter)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Fixed (Fixed (MkFixed))
 import Data.Foldable (traverse_)
 import Data.Int (Int64)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Time.Clock (diffUTCTime, nominalDiffTimeToSeconds)
 import OpenTelemetry.Attributes (Attributes, toAttribute, unsafeAttributesFromListIgnoringLimits)
@@ -81,36 +90,47 @@ durationBuckets =
     }
 
 -- | Observability hooks recording one queue's jobs to the instruments.
-otelHooks :: (MonadIO m) => ArbiterMeters -> Text -> ObservabilityHooks m payload
+otelHooks :: forall m payload. (HasKind payload, MonadIO m) => ArbiterMeters -> Text -> ObservabilityHooks m payload
 otelHooks ms queue =
   defaultObservabilityHooks
     { onJobClaimed = \job _ -> liftIO $ do
-        counterAdd (claimed ms) 1 queueAttr
-        traverse_ (admissionThrough rateLimitKind . rlkPrefix) (jobRateLimitKey (admission job))
-        traverse_ (admissionThrough concurrencyKind . ckPrefix) (jobConcurrencyKey (admission job))
-    , onJobSuccess = \_ start end -> liftIO $ do
-        counterAdd (processed ms) 1 successAttr
-        histogramRecord (duration ms) (secs start end) successAttr
-    , onJobFailure = \_ _ start end -> liftIO (histogramRecord (duration ms) (secs start end) failureAttr)
-    , onJobRetry = \_ _ -> liftIO (counterAdd (retried ms) 1 queueAttr)
-    , onJobFailedAndMovedToDLQ = \_ _ -> liftIO (counterAdd (processed ms) 1 dlqAttr)
-    , onJobCancelled = \_ _ -> liftIO (counterAdd (processed ms) 1 cancelledAttr)
-    , onJobUnavailable = \_ _ -> liftIO (counterAdd (processed ms) 1 unavailableAttr)
+        counterAdd (claimed ms) 1 (queueAttr (labelOf job))
+        traverse_ (admissionThrough rateLimitKind . rlkPrefix) (jobRateLimitKey (payloadKeys job))
+        traverse_ (admissionThrough concurrencyKind . ckPrefix) (jobConcurrencyKey (payloadKeys job))
+    , onJobSuccess = \job start end -> liftIO $ do
+        let attributes = successAttr (labelOf job)
+        counterAdd (processed ms) 1 attributes
+        histogramRecord (duration ms) (secs start end) attributes
+    , onJobFailure = \job _ start end -> liftIO (histogramRecord (duration ms) (secs start end) (failureAttr (labelOf job)))
+    , onJobRetry = \job _ -> liftIO (counterAdd (retried ms) 1 (queueAttr (labelOf job)))
+    , onJobFailedAndMovedToDLQ = \_ job -> liftIO (counterAdd (processed ms) 1 (dlqAttr (labelOf job)))
+    , onJobCancelled = \job _ -> liftIO (counterAdd (processed ms) 1 (cancelledAttr (labelOf job)))
+    , onJobUnavailable = \job _ -> liftIO (counterAdd (processed ms) 1 (unavailableAttr (labelOf job)))
     }
   where
     -- A clock stepped backwards must not subtract from the histogram's sum.
     secs start end = case nominalDiffTimeToSeconds (diffUTCTime end start) of
       MkFixed ps -> max 0 (fromInteger ps / 1e12)
-    outcome o = attrs [("queue", queue), ("outcome", o)]
-    queueAttr = attrs [("queue", queue)]
+    -- The declared labels, never the stored one on its own: a payload labelling by
+    -- tenant would be unbounded.
+    declared = Set.fromList (kindsFor @payload)
+    labelOf job = mfilter (`Set.member` declared) (jobKind (payloadKeys job))
+    -- One attribute set per label, built once per hook set rather than per job.
+    byLabel :: (Maybe Text -> Attributes) -> Maybe Text -> Attributes
+    byLabel build = \label -> Map.findWithDefault (build Nothing) label table
+      where
+        table = Map.fromList [(label, build label) | label <- Nothing : map Just (Set.toList declared)]
+    kindPair = foldMap (\k -> [("kind", k)])
+    queueAttr = byLabel (\label -> attrs (("queue", queue) : kindPair label))
+    outcomeAttr o = byLabel (\label -> attrs ([("queue", queue), ("outcome", o)] <> kindPair label))
+    successAttr = outcomeAttr "success"
+    failureAttr = outcomeAttr "failure"
+    dlqAttr = outcomeAttr "dlq"
+    cancelledAttr = outcomeAttr "cancelled"
+    unavailableAttr = outcomeAttr "unavailable"
     -- The policy prefix, never the key: a per-tenant suffix would be unbounded.
     admissionThrough kind prefix =
       counterAdd (admitted ms) 1 (attrs [("queue", queue), ("kind", kind), ("policy", prefix)])
-    successAttr = outcome "success"
-    failureAttr = outcome "failure"
-    dlqAttr = outcome "dlq"
-    cancelledAttr = outcome "cancelled"
-    unavailableAttr = outcome "unavailable"
 
 -- | Record rows affected by a reaper operation. Schema-wide reaper work has no
 -- queue attribute.
