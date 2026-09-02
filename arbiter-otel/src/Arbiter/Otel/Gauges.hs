@@ -237,7 +237,7 @@ registerInstruments meter reachable cells = do
   -- Absent until the first scan, so a reading never claims to know before it does.
   regGauge
     Name.DbReachable
-    "1"
+    "{status}"
     "1 when the last health scan reached the database, 0 when it failed"
     [\res -> readIORef reachable >>= traverse_ (\ok -> observe res (if ok then 1 else 0) (attrs []))]
 
