@@ -42,6 +42,7 @@ data MetricName
   | PgDbBackends
   | PgDbOldestTransactionAge
   | PgDbOldestQueryAge
+  | DbReachable
   | GaugesAge
   deriving stock (Bounded, Enum, Eq, Show)
 
@@ -75,6 +76,7 @@ metricName = \case
   PgDbBackends -> "arbiter.pg.database.backends"
   PgDbOldestTransactionAge -> "arbiter.pg.database.oldest_transaction_age"
   PgDbOldestQueryAge -> "arbiter.pg.database.oldest_query_age"
+  DbReachable -> "arbiter.db.reachable"
   GaugesAge -> "arbiter.gauges.age"
 
 -- | Every metric name arbiter exports.

@@ -118,10 +118,10 @@ runSelectedWorkerPools enabled pools = do
       let cfg' = cfg {logConfig = withPoolContext name (logConfig cfg)}
        in ContT $ Async.withAsync (labelArbiterThread "pool" (Just name) >> runWorkerPool cfg')
 
--- | Inject the pool name into log context. User context wins on collision.
+-- | Name the pool a message came from.
 withPoolContext :: Text -> LogConfig -> LogConfig
 withPoolContext poolName lc =
-  lc {additionalContext = (("pool" .= poolName) :) <$> additionalContext lc}
+  lc {identityContext = identityContext lc <> ["pool" .= poolName]}
 
 -- | A single-stripe pool sized at twice the enabled worker count plus one for
 -- the listener, with a minimum size of three.

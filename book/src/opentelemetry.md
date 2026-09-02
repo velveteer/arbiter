@@ -50,7 +50,7 @@ activity, Arbiter table health, and PostgreSQL health. The
 module defines the name and unit of each instrument.
 
 Admission metrics use the policy as the key. They do not use admission keys.
-On these metrics, `kind` is the policy type: `rate_limit` or `concurrency`.
+On these metrics, `policy_kind` is the policy type: `rate_limit` or `concurrency`.
 
 Queue depth and the job counters set `kind` only to a label from the payload's
 `kindsFor` set. A payload that declares no labels exports no `kind`. The number

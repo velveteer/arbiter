@@ -280,7 +280,7 @@
       "targets": [
         {
           "refId": "B",
-          "expr": "max by (policy) (arbiter_admission_limit{kind=\"concurrency\"})",
+          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"concurrency\"})",
           "legendFormat": "{{policy}} cap per key"
         },
         {
@@ -356,7 +356,7 @@
         },
         {
           "refId": "C",
-          "expr": "max by (policy) (arbiter_admission_limit{kind=\"rate_limit\"})",
+          "expr": "max by (policy) (arbiter_admission_limit{policy_kind=\"rate_limit\"})",
           "legendFormat": "{{policy}} bucket size"
         }
       ]
@@ -384,8 +384,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind, policy) (rate(arbiter_admission_admitted_total[5m]))",
-          "legendFormat": "{{kind}} {{policy}}"
+          "expr": "sum by (policy_kind, policy) (rate(arbiter_admission_admitted_total[5m]))",
+          "legendFormat": "{{policy_kind}} {{policy}}"
         }
       ]
     },
@@ -663,8 +663,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (kind, policy) (arbiter_admission_keys)",
-          "legendFormat": "{{kind}} / {{policy}}"
+          "expr": "max by (policy_kind, policy) (arbiter_admission_keys)",
+          "legendFormat": "{{policy_kind}} / {{policy}}"
         }
       ]
     },
@@ -792,7 +792,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 86
       },
@@ -819,8 +819,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 86
       },
       "fieldConfig": {
@@ -834,6 +834,64 @@
         {
           "refId": "A",
           "expr": "max(arbiter_pg_database_backends)"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "Database reachable",
+      "description": "0 when the last health scan did not reach the database. Aggregates with min, so one replica that cannot reach it shows here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 86
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "unreachable",
+                  "index": 0
+                },
+                "1": {
+                  "text": "reachable",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(arbiter_db_reachable)"
         }
       ]
     },

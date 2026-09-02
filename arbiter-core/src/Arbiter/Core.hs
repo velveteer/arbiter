@@ -54,6 +54,8 @@ module Arbiter.Core
   , HubLog (..)
   , withChannels
   , newPoolListener
+  , withListenerLog
+  , withDefaultListenerLog
   , DedicatedListen
   , newDedicatedListen
   , dedicatedListener
@@ -85,6 +87,8 @@ import Arbiter.Core.Listen
   , newDedicatedListen
   , newPoolListener
   , withChannels
+  , withDefaultListenerLog
+  , withListenerLog
   )
 import Arbiter.Core.MonadArbiter
 import Arbiter.Core.PoolConfig

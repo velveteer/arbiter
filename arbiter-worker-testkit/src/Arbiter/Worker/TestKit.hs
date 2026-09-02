@@ -1691,7 +1691,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
         withSharedListener env $ \listener -> do
           good <- newIORef (0 :: Int)
           warned <- newIORef (0 :: Int)
-          let hubLog = Listen.HubLog (\_ -> bumpRef warned) (const (pure ()))
+          let hubLog = Listen.HubLog (const (pure ())) (\_ -> bumpRef warned) (const (pure ()))
               goodName = schema <> "_iso_good"
               badName = schema <> "_iso_bad"
               handlers =
@@ -1726,7 +1726,7 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
 
 -- | A hub logger that swallows warn and error output.
 quietHubLog :: Listen.HubLog
-quietHubLog = Listen.HubLog (const (pure ())) (const (pure ()))
+quietHubLog = Listen.HubLog (const (pure ())) (const (pure ())) (const (pure ()))
 
 -- | Channel handler that ignores the notification.
 ignoreNotif :: Listen.Notification -> IO ()

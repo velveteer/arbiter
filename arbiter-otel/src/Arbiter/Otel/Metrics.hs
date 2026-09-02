@@ -129,8 +129,8 @@ otelHooks ms queue =
     cancelledAttr = outcomeAttr "cancelled"
     unavailableAttr = outcomeAttr "unavailable"
     -- The policy prefix, never the key: a per-tenant suffix would be unbounded.
-    admissionThrough kind prefix =
-      counterAdd (admitted ms) 1 (attrs [("queue", queue), ("kind", kind), ("policy", prefix)])
+    admissionThrough policyKind prefix =
+      counterAdd (admitted ms) 1 (attrs [("queue", queue), ("policy_kind", policyKind), ("policy", prefix)])
 
 -- | Record rows affected by a reaper operation. Schema-wide reaper work has no
 -- queue attribute.
@@ -141,7 +141,7 @@ otelMaintenance ms op n = liftIO (counterAdd (maintained ms) n (attrs [("op", ma
 attrs :: [(Text, Text)] -> Attributes
 attrs kvs = unsafeAttributesFromListIgnoringLimits [(k, toAttribute v) | (k, v) <- kvs]
 
--- | The @kind@ attribute for an admission metric. Counters and the
+-- | The @policy_kind@ attribute for an admission metric. Counters and the
 -- gauges so a dashboard can join them.
 rateLimitKind, concurrencyKind :: Text
 rateLimitKind = "rate_limit"

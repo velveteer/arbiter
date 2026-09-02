@@ -35,6 +35,8 @@ module Arbiter.Worker.Cron
   , formatMinuteInTimezone
 
     -- * Internal
+  , CronLog
+  , newCronLog
   , runCronScheduler
   , initCronSchedules
   , processCronCatchUp
@@ -86,9 +88,20 @@ import Data.Time.Zones (LocalToUTCResult (..), TZ, localTimeToUTCFull, utcToLoca
 import Data.Time.Zones.All (fromTZName, tzByLabel)
 import GHC.Generics (Generic)
 import System.Cron (CronSchedule, nextMatch, parseCronSchedule, scheduleMatches)
-import UnliftIO (TVar, atomically, liftIO, readTVar, readTVarIO, registerDelay, tryAny, writeTVar)
+import UnliftIO
+  ( MonadUnliftIO
+  , SomeException
+  , TVar
+  , atomically
+  , liftIO
+  , readTVar
+  , readTVarIO
+  , registerDelay
+  , tryAny
+  , writeTVar
+  )
 
-import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)
+import Arbiter.Worker.Logger (FailureGates, LogConfig, LogLevel (..), newFailureGates, tryLog, tryReportedOn)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | How overlapping cron ticks are deduplicated.
@@ -283,7 +296,7 @@ initCronSchedules schemaName queueName jobs logCfg = do
       (cronExpression cj)
       (overlapPolicyToText (overlap cj))
       (timezone cj)
-  logCron logCfg Info $
+  liftIO . tryLog logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
 -- | Scheduler entry point. Exits cleanly when the worker state becomes
@@ -301,37 +314,38 @@ runCronScheduler
   -> m ()
 runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
   initCronSchedules schemaName queueName jobs logCfg
+  cronLog <- newCronLog logCfg
   startupNow <- liftIO getCurrentTime
   shuttingDown <- isShuttingDown stateVar
   unless shuttingDown $ do
-    processRunRequests logCfg schemaName jobs startupNow
-    processCronCatchUp logCfg schemaName queueName jobs startupNow
-  logCron logCfg Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
-  loop
+    processRunRequests cronLog schemaName jobs startupNow
+    processCronCatchUp cronLog schemaName queueName jobs startupNow
+  logCron cronLog Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
+  loop cronLog
   where
-    loop = do
+    loop cronLog = do
       now <- liftIO getCurrentTime
       timerVar <- liftIO $ registerDelay (computeDelayMicros now)
-      serve timerVar
-    serve timerVar = do
+      serve cronLog timerVar
+    serve cronLog timerVar = do
       wake <- waitForWake stateVar runNowVar timerVar
       case wake of
         WakeShutdown -> pure ()
         WakeMinute -> do
           now <- liftIO getCurrentTime
-          processRunRequests logCfg schemaName jobs now
-          processCronCatchUp logCfg schemaName queueName jobs now
-          loop
+          processRunRequests cronLog schemaName jobs now
+          processCronCatchUp cronLog schemaName queueName jobs now
+          loop cronLog
         WakeRunNow -> do
           now <- liftIO getCurrentTime
-          processRunRequests logCfg schemaName jobs now
-          serve timerVar
+          processRunRequests cronLog schemaName jobs now
+          serve cronLog timerVar
 
 -- | Scheduler catch-up step. Each cron runs in its own transaction.
 -- Backfill schedules hold a per-(schema, queue, name) advisory lock.
 processCronCatchUp
   :: (QueueOperation m payload)
-  => LogConfig
+  => CronLog
   -> Text
   -> Text
   -- ^ Queue name
@@ -339,12 +353,12 @@ processCronCatchUp
   -> UTCTime
   -- ^ Current wall-clock time
   -> m ()
-processCronCatchUp logCfg schemaName queueName jobs now = do
+processCronCatchUp cronLog schemaName queueName jobs now = do
   let currentTick = truncateToMinute now
   traverse_ (processOneCron currentTick) jobs
   where
     processOneCron currentTick cj = do
-      outcome <- tryAny . withDbTransaction $ do
+      outcome <- tryCron cronLog ("Cron '" <> name cj <> "' tick") . withDbTransaction $ do
         haveLeader <- case backfill cj of
           NoBackfill -> pure True
           Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cj)
@@ -356,15 +370,14 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
             void $ Ops.touchCronChecked schemaName currentTick [name cj]
             pure Ran
       case outcome of
-        Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' tick aborted: " <> displayEx e
+        Left _ -> pure ()
         Right NotLeader ->
-          logCron logCfg Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
+          logCron cronLog Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
         Right Ran -> pure ()
     processOne mRow currentTick cj = case resolveAndParse cj mRow of
       Disabled -> pure ()
       ParseError expr err ->
-        logCron logCfg Error $
+        logCron cronLog Error $
           "Cron schedule '"
             <> name cj
             <> "' has invalid effective expression '"
@@ -372,7 +385,7 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
             <> "': "
             <> T.pack err
       InvalidTimezone tzName ->
-        logCron logCfg Error $
+        logCron cronLog Error $
           "Cron schedule '"
             <> name cj
             <> "' has unknown timezone '"
@@ -383,10 +396,10 @@ processCronCatchUp logCfg schemaName queueName jobs now = do
             ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
             replayCount = length (filter (/= currentTick) ticksToFire)
         when (replayCount > 0)
-          $ logCron logCfg Info
+          $ logCron cronLog Info
           $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
         for_ ticksToFire $ \t ->
-          tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
+          tryInsertCronJob cronLog schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
 
 data TickOutcome = NotLeader | Ran
 
@@ -456,9 +469,9 @@ resolveAndParse cj mRow =
 -- with a watermark advance to that tick.
 tryInsertCronJob
   :: (QueueOperation m payload)
-  => LogConfig -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m ()
-tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
-  result <- tryAny . withDbTransaction $ do
+  => CronLog -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m ()
+tryInsertCronJob cronLog schemaName cj effectiveOv effectiveTz kind tick = do
+  result <- tryCron cronLog ("Cron schedule '" <> name cj <> "' insert") . withDbTransaction $ do
     -- Gate first: another pool may have already fired this minute.
     fired <- Ops.tryFireCronGate schemaName (name cj) tick
     when fired $ do
@@ -466,9 +479,8 @@ tryInsertCronJob logCfg schemaName cj effectiveOv effectiveTz kind tick = do
           jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cj kind tick
       void $ HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cj]
-  either
-    (\e -> logCron logCfg Error $ "Cron schedule '" <> name cj <> "' failed to insert: " <> displayEx e)
-    (const . logCron logCfg Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick)
+  traverse_
+    (const . logCron cronLog Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick)
     result
 
 data RunNowOutcome = Fired | Skipped | NotRequested
@@ -481,28 +493,26 @@ data RunNowOutcome = Fired | Skipped | NotRequested
 processRunRequests
   :: forall payload m
    . (QueueOperation m payload)
-  => LogConfig -> Text -> [CronJob payload] -> UTCTime -> m ()
-processRunRequests logCfg schemaName jobs now = do
-  scan <- tryAny $ Ops.pendingCronRuns schemaName (map name jobs)
-  either
-    (\e -> logCron logCfg Error $ "Cron run-request scan failed: " <> displayEx e)
-    (fireRequested . Set.fromList)
-    scan
+  => CronLog -> Text -> [CronJob payload] -> UTCTime -> m ()
+processRunRequests cronLog schemaName jobs now = do
+  scan <- tryCron cronLog "Cron run-request scan" $ Ops.pendingCronRuns schemaName (map name jobs)
+  traverse_ (fireRequested . Set.fromList) scan
   where
     fireRequested requested =
       traverse_ (claimAndFire (truncateToMinute now)) (filter (\cj -> Set.member (name cj) requested) jobs)
+    -- A run-now happens only when somebody asks for one, so every failure is news.
     claimAndFire tick cj = do
       outcome <- tryAny . withDbTransaction $ do
         claimed <- Ops.claimCronRun schemaName (name cj)
         maybe (pure NotRequested) (fireClaimed tick cj) claimed
       case outcome of
         Left e ->
-          logCron logCfg Error $ "Cron '" <> name cj <> "' run-now aborted: " <> displayEx e
+          logCron cronLog Error $ "Cron '" <> name cj <> "' run-now aborted: " <> displayEx e
         Right NotRequested -> pure ()
         Right Fired ->
-          logCron logCfg Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
+          logCron cronLog Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
         Right Skipped ->
-          logCron logCfg Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
+          logCron cronLog Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
     fireClaimed tick cj row = do
       let key = case effectiveOverlapFor cj row of
             SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cj)))
@@ -515,9 +525,24 @@ processRunRequests logCfg schemaName jobs now = do
           pure Fired
         Nothing -> pure Skipped
 
+-- | The scheduler's logger with the gates its repeating failures report through.
+data CronLog = CronLog
+  { cronLogConfig :: LogConfig
+  , cronLogGates :: FailureGates
+  }
+
+-- | A 'CronLog' with no gate tripped, for one scheduler run.
+newCronLog :: (MonadIO m) => LogConfig -> m CronLog
+newCronLog logCfg = CronLog logCfg <$> newFailureGates
+
 -- | Log a cron message, swallowing logger failures.
-logCron :: (MonadIO m) => LogConfig -> LogLevel -> Text -> m ()
-logCron logCfg level msg = liftIO $ tryLog logCfg level msg
+logCron :: (MonadIO m) => CronLog -> LogLevel -> Text -> m ()
+logCron cronLog level msg = liftIO $ tryLog (cronLogConfig cronLog) level msg
+
+-- | Run a scheduler step, reporting only when its outcome changes. A schedule that
+-- keeps failing the same way says so one time, then again when it recovers.
+tryCron :: (MonadUnliftIO m) => CronLog -> Text -> m a -> m (Either SomeException a)
+tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cronLog)
 
 -- | Dedup key for a cron job, from its code-defined overlap and timezone.
 makeDedupKey :: CronJob payload -> UTCTime -> Text

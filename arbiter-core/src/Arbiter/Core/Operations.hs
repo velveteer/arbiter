@@ -2016,7 +2016,7 @@ statsRowCodec =
 
 -- | The @jsonb_object_agg@ rollup as a map.
 decodeKindCounts :: Maybe Value -> Map Text Int64
-decodeKindCounts = foldMap fromResult . fmap fromJSON
+decodeKindCounts = foldMap (fromResult . fromJSON)
   where
     fromResult = \case
       Success counts -> counts

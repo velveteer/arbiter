@@ -8,6 +8,8 @@ module Arbiter.Core.Listen
   , HubLog (..)
   , withChannels
   , newPoolListener
+  , withListenerLog
+  , withDefaultListenerLog
 
     -- * Dedicated-connection listener
   , DedicatedListen
@@ -37,7 +39,7 @@ import Control.Concurrent.STM
   , writeTVar
   )
 import Control.Exception (bracket, onException, uninterruptibleMask_)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BSC
@@ -45,7 +47,7 @@ import Data.Foldable (for_, traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -69,9 +71,10 @@ data Notification = Notification
   }
   deriving stock (Eq, Show)
 
--- | A registrant's warn and error loggers, carrying its logging context.
+-- | A registrant's loggers, carrying its logging context.
 data HubLog = HubLog
-  { hubWarn :: Text -> IO ()
+  { hubInfo :: Text -> IO ()
+  , hubWarn :: Text -> IO ()
   , hubError :: Text -> IO ()
   }
 
@@ -81,13 +84,24 @@ data Listener = Listener
   -- ^ Rendezvous, lazily started and refcounted. Shared across an env's pools.
   , listenerWithConn :: (PQ.Connection -> IO ()) -> IO ()
   -- ^ Run the loop with a libpq connection, for the connection's lifetime.
+  , listenerLog :: Maybe HubLog
+  -- ^ Reports the hub's own connection. Unset reports to every registrant.
   }
+
+-- | Set the hub's own logger.
+withListenerLog :: HubLog -> Listener -> Listener
+withListenerLog logger listener = listener {listenerLog = Just logger}
+
+-- | 'withListenerLog' unless one is already set.
+withDefaultListenerLog :: HubLog -> Listener -> Listener
+withDefaultListenerLog logger listener =
+  maybe (withListenerLog logger listener) (const listener) (listenerLog listener)
 
 -- | Build a pool-backed 'Listener' with a fresh hub slot from a connection runner.
 newPoolListener :: ((PQ.Connection -> IO ()) -> IO ()) -> IO Listener
 newPoolListener withConn = do
   slot <- newMVar Nothing
-  pure (Listener slot withConn)
+  pure (Listener slot withConn Nothing)
 
 -- | Mutable hub state behind the slot. Opaque to callers.
 data RunningHub = RunningHub
@@ -190,29 +204,40 @@ stableSeconds :: Double
 stableSeconds = 30
 
 hubLoop :: Listener -> RunningHub -> IO ()
-hubLoop listener hub = go baseBackoff
+hubLoop listener hub = go baseBackoff False
   where
-    go backoff = do
-      connectedAt <- newIORef Nothing
+    -- @reported@ carries whether the standing failure already has a line.
+    go backoff reported = do
+      -- Set once the channels are subscribed, which a connection alone is not.
+      readyAt <- newIORef Nothing
       -- Clear before each attempt so a failed reconnect does not leave stale subscriptions.
       atomically $ writeTVar (hubSubscribed hub) Set.empty
       result <-
         tryAny $
-          listenerWithConn listener $ \conn -> do
-            getMonotonicTime >>= writeIORef connectedAt . Just
-            connectionLoop hub conn
+          listenerWithConn listener $ \conn ->
+            connectionLoop hub conn $ do
+              getMonotonicTime >>= writeIORef readyAt . Just
+              when reported $ void (logHub hubInfo listener hub "arbiter listener: reconnected")
       let restart msg = do
-            mStart <- readIORef connectedAt
+            mStart <- readIORef readyAt
             ended <- getMonotonicTime
             let uptime = maybe 0 (ended -) mStart
-            logErrorAll hub msg
+            -- An attempt that subscribed is a fresh failure, however it ends.
+            reported' <-
+              if reported && isNothing mStart
+                then pure reported
+                else logHub hubError listener hub msg
             threadDelay backoff
-            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2))
-      restart (either displayEx (const "arbiter listener: connection loop exited unexpectedly") result)
+            go (if uptime >= stableSeconds then baseBackoff else min maxBackoff (backoff * 2)) reported'
+      restart $ "arbiter listener: " <> either displayEx (const "connection loop exited unexpectedly") result
 
 -- | Reconcile on the first iteration and whenever the desired channel set changes.
-connectionLoop :: RunningHub -> PQ.Connection -> IO ()
-connectionLoop hub conn = reconcile hub conn >>= loop
+-- @onReady@ runs once the first reconcile has subscribed.
+connectionLoop :: RunningHub -> PQ.Connection -> IO () -> IO ()
+connectionLoop hub conn onReady = do
+  desired <- reconcile hub conn
+  onReady
+  loop desired
   where
     loop desired = do
       mNotify <- PQ.notifies conn
@@ -221,7 +246,7 @@ connectionLoop hub conn = reconcile hub conn >>= loop
         Nothing -> do
           mfd <- PQ.socket conn
           case mfd of
-            Nothing -> throwInternal "arbiter listener: connection has no socket"
+            Nothing -> throwInternal "connection has no socket"
             Just fd -> do
               changed <-
                 bracket (threadWaitReadSTM fd) snd $ \(waitRead, _) ->
@@ -229,7 +254,7 @@ connectionLoop hub conn = reconcile hub conn >>= loop
                     (False <$ waitRead)
                       `orElse` (readTVar (hubHandlers hub) >>= \hs -> True <$ check (Map.keysSet hs /= desired))
               ok <- PQ.consumeInput conn
-              unless ok $ throwInternal "arbiter listener: consumeInput failed"
+              unless ok $ throwInternal "consumeInput failed"
               if changed then reconcile hub conn >>= loop else loop desired
 
 -- | Bring the wire's subscriptions in line with the registered channels.
@@ -252,17 +277,12 @@ reconcile hub conn = do
       case mres of
         Nothing ->
           throwInternal $
-            "arbiter listener: "
-              <> T.pack (BSC.unpack verb)
-              <> " returned no result"
+            T.pack (BSC.unpack verb) <> " returned no result"
         Just res -> do
           st <- PQ.resultStatus res
           when (st /= PQ.CommandOk)
             $ throwInternal
-            $ "arbiter listener: "
-              <> T.pack (BSC.unpack verb)
-              <> " failed with "
-              <> T.pack (show st)
+            $ T.pack (BSC.unpack verb) <> " failed with " <> T.pack (show st)
     escapeChannel chan =
       fromMaybe (quoteChannel chan) <$> PQ.escapeIdentifier conn chan
 
@@ -272,12 +292,17 @@ dispatch hub n = do
   for_ hs $ \(_, lg, h) ->
     tryAny (h n) >>= either (hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
 
--- | Report a connection failure to every registered pool.
-logErrorAll :: RunningHub -> Text -> IO ()
-logErrorAll hub msg = do
-  handlers <- readTVarIO (hubHandlers hub)
-  let loggers = Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs]
-  traverse_ (`hubError` msg) (Map.elems loggers)
+-- | Report a hub event through the hub's own logger, or every registrant's when
+-- unset. False when the message reached no one.
+logHub :: (HubLog -> Text -> IO ()) -> Listener -> RunningHub -> Text -> IO Bool
+logHub channel listener hub msg =
+  maybe broadcast (\lg -> True <$ channel lg msg) (listenerLog listener)
+  where
+    broadcast = do
+      loggers <- registrants <$> readTVarIO (hubHandlers hub)
+      not (null loggers) <$ traverse_ (`channel` msg) loggers
+    registrants handlers =
+      Map.elems (Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs])
 
 toNotification :: PQ.Notify -> Notification
 toNotification n =
@@ -306,7 +331,8 @@ newDedicatedListen connStr = liftIO $ do
 dedicatedListener :: DedicatedListen -> Listener
 dedicatedListener d =
   Listener
-    { listenerSlot = dedicatedSlot d
+    { listenerLog = Nothing
+    , listenerSlot = dedicatedSlot d
     , listenerWithConn = \action ->
         bracket (interruptibleConnectDb (dedicatedConnStr d)) PQ.finish $ \conn -> do
           st <- PQ.status conn
@@ -315,8 +341,7 @@ dedicatedListener d =
             _ -> do
               merr <- PQ.errorMessage conn
               throwInternal $
-                "arbiter listener: connect failed"
-                  <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
+                "connect failed" <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
     }
 
 -- | Open a libpq connection asynchronously so a teardown cancel is not lost in the uninterruptible connect FFI.
@@ -337,4 +362,4 @@ interruptibleConnectDb connStr = do
     waitSocket conn wait =
       PQ.socket conn >>= \case
         Just fd -> wait fd
-        Nothing -> throwInternal "arbiter listener: connection has no socket during connect"
+        Nothing -> throwInternal "connection has no socket during connect"
