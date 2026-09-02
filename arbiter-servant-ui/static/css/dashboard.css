@@ -1003,7 +1003,7 @@ label.queue-sort-label,
    none holds nothing, so an empty one never opens a gap and closes it again. */
 .is-pending {
   opacity: 0;
-  pointer-events: none;
+  visibility: hidden;
 }
 
 .queue-summary {
@@ -1051,12 +1051,15 @@ label.queue-sort-label,
    between the tabs the way stacked utility classes did. */
 .toolbar,
 .queue-toolbar {
-  transition: opacity 0.18s ease-out;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.6rem;
   margin-bottom: 1rem;
+}
+
+.queue-toolbar {
+  transition: opacity 0.18s ease-out;
 }
 
 .queue-toolbar-end {

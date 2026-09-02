@@ -97,14 +97,16 @@ const TABLE_SKELETON_HTML = `
 // land. It reads the noun the view loads and the message the server gave, so the
 // views answer a failure alike.
 const LOAD_ERROR_HTML = `
-<div class="empty-state" x-show="loadFailed()">
+<div class="empty-state" role="alert" x-show="loadFailed()">
   <svg class="empty-state-icon is-error" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3">
     <path d="M12 4.4 21.2 19.4H2.8z" stroke-linejoin="round"/>
     <path d="M12 10.2v3.6M12 16.6h.01" stroke-linecap="round"/>
   </svg>
   <p class="empty-state-title">Could not load <span x-text="loadNoun"></span></p>
   <p class="empty-state-note" x-text="_loadErrorMsg"></p>
-  <button type="button" class="btn btn-outline-secondary btn-sm empty-state-action" @click="refresh()">Try again</button>
+  <button type="button" class="btn btn-outline-secondary btn-sm empty-state-action" :disabled="loading" @click="refresh()"
+    ><span :class="loading ? 'spin' : 'd-none'" aria-hidden="true">&#x21bb;</span>
+    <span x-text="loading ? ' Trying…' : 'Try again'"></span></button>
 </div>`;
 
 // Chrome a view only wears when it has rows: its roll-up strip, and the queue
@@ -580,10 +582,10 @@ async function guardedLoad(self, body, opts) {
   } catch (e) {
     if (isStale()) return;
     console.error(errorLabel + ':', e);
+    if (opts && opts.suppressToast && opts.suppressToast()) return;
     const first = !self._loadErrored;
     self._loadErrored = true;
     self._loadErrorMsg = e.message;
-    if (opts && opts.suppressToast && opts.suppressToast()) return;
     // The panel carries a failure the view can show. A toast is for the rest: a
     // poll that failed under rows already on screen.
     if (first && !self.loadFailed()) showToast(errorLabel + ': ' + e.message);
