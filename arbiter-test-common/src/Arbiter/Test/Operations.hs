@@ -1289,8 +1289,9 @@ operationsSpec mkMessage mkResult runM = do
       map attempts claimed `shouldBe` [1]
       runM env (HL.nackJob (head claimed)) `shouldReturn` 1
 
-      -- Make the job visible, so only the attempt budget can refuse the move.
-      runM env (HL.promoteJob @payload (primaryKey inserted)) `shouldReturn` 1
+      -- Release the nack's remaining wait, so only the attempt budget can refuse the
+      -- move. Promote refuses a nacked job, which keeps its claim.
+      runM env (HL.setVisibilityTimeout 0 (head claimed)) `shouldReturn` 1
 
       -- The sweep's snapshot, taken while the job was still out of attempts.
       moved <- runM env $ do
@@ -2820,6 +2821,17 @@ operationsSpec mkMessage mkResult runM = do
       Just found <- runM env (HL.getJobById @payload (primaryKey inserted))
       suspended found `shouldBe` True
 
+    it "promoteJob leaves a suspended scheduled job's delay alone" $ \env -> do
+      now <- getCurrentTime
+      let futureTime = truncateToMicros (addUTCTime 3600 now)
+          job = setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "PromoteSuspSched")
+      Just inserted <- runM env (HL.insertJob job)
+      runM env (HL.suspendJob @payload (primaryKey inserted)) `shouldReturn` 1
+      promoted <- runM env (HL.promoteJob @payload (primaryKey inserted))
+      promoted `shouldBe` 0
+      Just found <- runM env (HL.getJobById @payload (primaryKey inserted))
+      notVisibleUntil found `shouldBe` Just futureTime
+
     it "promoteJob refuses to promote in-flight job" $ \env -> do
       -- Insert and claim a job (claiming sets not_visible_until to a future time)
       Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "PromoteInFlight")))
@@ -2836,6 +2848,22 @@ operationsSpec mkMessage mkResult runM = do
       -- Job should still not be claimable
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed2 `shouldBe` 0
+
+    it "promoteJob refuses to promote a retried job back in flight" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "PromoteRetriedInFlight")))
+      [attempt1] <- claimJobsAs env 1 UUID.nil
+      -- Zero backoff so the retry is immediately re-claimable. The retry leaves last_error set.
+      void $ runM env (HL.updateJobForRetry 0 "fail 1" attempt1)
+
+      -- Second attempt. Nothing clears last_error on a re-claim.
+      [attempt2] <- claimJobsAs env 1 UUID.nil
+      attempts attempt2 `shouldBe` 2
+
+      promotedAgain <- runM env (HL.promoteJob @payload (primaryKey attempt2))
+      promotedAgain `shouldBe` 0
+
+      claimed3 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length claimed3 `shouldBe` 0
 
     it "cancelJobsBatch partial cancel does not wake parent" $ \env -> do
       Right (parent :| children) <-

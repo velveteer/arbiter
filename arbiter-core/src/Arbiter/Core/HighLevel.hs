@@ -501,14 +501,13 @@ mkClaimSql
   => Int
   -> Int
   -> NominalDiffTime
-  -> Maybe UUID
+  -> UUID
   -> m Ops.ClaimSql
-mkClaimSql batchSize poolSize timeout mWorkerId =
+mkClaimSql batchSize poolSize timeout workerId =
   onQueue @payload $ \s t ->
-    pure $ Ops.mkClaimSql (Proxy @payload) s t batchSize poolSize timeout mWorkerId
+    pure $ Ops.mkClaimSql (Proxy @payload) s t batchSize poolSize timeout workerId
 
--- | 'claimNextVisibleJobs' stamping @claimed_by@ on every row it claims, which is how
--- the dispatcher attributes a claim.
+-- | 'claimNextVisibleJobs' under a given worker id, which is how the dispatcher claims.
 claimNextVisibleJobsAs
   :: forall payload m
    . (QueueOperation m payload)

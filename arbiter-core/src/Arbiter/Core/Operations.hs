@@ -226,6 +226,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
+import Data.UUID.Types qualified as UUID
 import GHC.Generics (Generic)
 import UnliftIO (MonadUnliftIO, tryAny)
 
@@ -238,7 +239,7 @@ import Arbiter.Core.Codec
   , jobCodec
   , jobRowCodec
   , ncol
-  , pnul
+  , pval
   )
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyKey (..)
@@ -832,7 +833,13 @@ claimAdmissionFor =
     , Claim.admitConcurrent = usesAnyPolicy (concurrencyFor @payload)
     }
 
--- | Claim up to @maxJobs@ visible jobs, one per group. Leaves @claimed_by@ NULL.
+-- | The claimant stamped by the claim variants that take no worker id. Those are a
+-- test affordance, and a claim that left @claimed_by@ null would be indistinguishable
+-- from a retry backoff.
+anonymousClaimant :: UUID
+anonymousClaimant = UUID.fromWords 0xa4b17e40 0 0 1
+
+-- | Claim up to @maxJobs@ visible jobs, one per group. Stamps 'anonymousClaimant'.
 claimNextVisibleJobs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -842,10 +849,9 @@ claimNextVisibleJobs
   -> NominalDiffTime
   -> m [JobRead payload]
 claimNextVisibleJobs schemaName tableName maxJobs timeout =
-  claimJobs schemaName tableName maxJobs timeout Nothing
+  claimJobs schemaName tableName maxJobs timeout anonymousClaimant
 
--- | 'claimNextVisibleJobs' with claim attribution. Stamps the given worker
--- UUID onto every claimed row's @claimed_by@ column.
+-- | 'claimNextVisibleJobs' under a given worker id rather than 'anonymousClaimant'.
 claimNextVisibleJobsAs
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -856,7 +862,7 @@ claimNextVisibleJobsAs
   -> UUID
   -> m [JobRead payload]
 claimNextVisibleJobsAs schemaName tableName maxJobs timeout workerId =
-  claimJobs schemaName tableName maxJobs timeout (Just workerId)
+  claimJobs schemaName tableName maxJobs timeout workerId
 
 claimJobs
   :: forall m payload
@@ -865,18 +871,18 @@ claimJobs
   -> TableName
   -> Int
   -> NominalDiffTime
-  -> Maybe UUID
+  -> UUID
   -> m [JobRead payload]
-claimJobs schemaName tableName maxJobs timeout mWorkerId =
+claimJobs schemaName tableName maxJobs timeout workerId =
   -- Batch size 1 is the single-job claim.
-  claimJobsCached (mkClaimSql (Proxy @payload) schemaName tableName 1 0 timeout mWorkerId) maxJobs
+  claimJobsCached (mkClaimSql (Proxy @payload) schemaName tableName 1 0 timeout workerId) maxJobs
 
 -- | A pool's claim statements, rendered once per capacity in @[1 .. poolSize]@.
 -- 'claimSqlFor' falls back to a fresh render outside that range.
 data ClaimSql = ClaimSql
   { claimSqlTable :: TableName
   , claimSqlBatchSize :: Int
-  , claimSqlClaimant :: Maybe UUID
+  , claimSqlClaimant :: UUID
   -- ^ Bound as the claim's @claimed_by@, so one rendered statement serves every
   -- claimant in one statement for all UUID values.
   , claimSqlFor :: Int -> Q.Query (JobRead Value)
@@ -893,11 +899,11 @@ mkClaimSql
   -> Int
   -> Int
   -> NominalDiffTime
-  -> Maybe UUID
+  -> UUID
   -> ClaimSql
-mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
+mkClaimSql _ schemaName tableName batchSize poolSize timeout workerId =
   let admission = claimAdmissionFor @payload
-      claimant = [pnul CUuid mWorkerId]
+      claimant = [pval CUuid workerId]
       codec = jobRowCodec tableName
       render n =
         Q.Query (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize n timeout) claimant codec
@@ -905,7 +911,7 @@ mkClaimSql _ schemaName tableName batchSize poolSize timeout mWorkerId =
    in ClaimSql
         { claimSqlTable = tableName
         , claimSqlBatchSize = batchSize
-        , claimSqlClaimant = mWorkerId
+        , claimSqlClaimant = workerId
         , claimSqlFor = \n -> IntMap.findWithDefault (render n) n cache
         }
 
@@ -932,7 +938,7 @@ claimNextVisibleJobsBatched
   -> NominalDiffTime
   -> m [NonEmpty (JobRead payload)]
 claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout =
-  claimJobsBatched schemaName tableName batchSize maxBatches timeout Nothing
+  claimJobsBatched schemaName tableName batchSize maxBatches timeout anonymousClaimant
 
 claimJobsBatched
   :: forall m payload
@@ -942,10 +948,10 @@ claimJobsBatched
   -> Int
   -> Int
   -> NominalDiffTime
-  -> Maybe UUID
+  -> UUID
   -> m [NonEmpty (JobRead payload)]
-claimJobsBatched schemaName tableName batchSize maxBatches timeout mWorkerId =
-  claimJobsBatchedCached (mkClaimSql (Proxy @payload) schemaName tableName batchSize 0 timeout mWorkerId) maxBatches
+claimJobsBatched schemaName tableName batchSize maxBatches timeout workerId =
+  claimJobsBatchedCached (mkClaimSql (Proxy @payload) schemaName tableName batchSize 0 timeout workerId) maxBatches
 
 -- | 'claimJobsBatched' over a prebuilt 'ClaimSql'.
 claimJobsBatchedCached

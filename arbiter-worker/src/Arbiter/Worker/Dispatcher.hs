@@ -33,7 +33,7 @@ runDispatcher
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
   claimSql <-
-    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (Just (workerId config))
+    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (workerId config)
   claimGate <- newFailureGate
   let
     calcFreeWorkers :: STM.STM Int

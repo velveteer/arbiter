@@ -222,7 +222,8 @@ promoteJobSQL schema tableName jobId =
         SET not_visible_until = NULL,
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8}
+          AND NOT suspended
           AND not_visible_until IS NOT NULL
           AND not_visible_until > NOW()
-          AND (attempts = 0 OR last_error IS NOT NULL)
+          AND claimed_by IS NULL
       |]
