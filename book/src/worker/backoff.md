@@ -12,8 +12,8 @@ config { Worker.jitter = NoJitter }
 ```
 
 The claim operation increments the attempt count before the handler starts.
-Arbiter calculates the delay from the new count. Thus, the first failure is
-attempt 1, and `exponentialBackoff 2.0` gives a two-second delay before the
+Arbiter calculates the delay from the new count. The first failure is attempt
+1. Therefore, `exponentialBackoff 2.0` gives a two-second delay before the
 first retry.
 
 Jitter changes the calculated delay. The default `EqualJitter` selects a value

@@ -1,7 +1,7 @@
 # Graceful Shutdown
 
-Install signal handlers after you construct the worker configs. For one pool or
-several, call `shutdownPools` with the same list you pass to `runWorkerPools`:
+Install signal handlers after construction of the worker configurations. Pass
+the same pool list to `shutdownPools` and `runWorkerPools`:
 
 ```haskell
 import System.Posix.Signals qualified as Signals

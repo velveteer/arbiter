@@ -1,7 +1,7 @@
 # arbiter-orville (orville-postgresql)
 
 This backend uses `orville-postgresql`. Orville manages its connections and
-transactions. Thus, handlers do not receive a connection parameter. Define a
+transactions. Handlers do not receive a connection parameter. Define a
 custom monad with `MonadOrville` and `MonadArbiter` instances:
 
 ```haskell

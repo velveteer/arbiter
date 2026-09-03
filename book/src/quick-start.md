@@ -69,7 +69,7 @@ GRANT USAGE, CREATE ON SCHEMA arbiter TO your_app_user;
 ```
 
 Migrations reconcile `enableNotifications` and `enableEventStreaming`. Run the
-migrations after you change either option. The migration installs or removes
+migrations after a change to either option. The migration installs or removes
 the applicable triggers. Do not edit the migration history.
 
 Multiple replicas can run migrations concurrently. `migrationLockTimeout`
@@ -147,8 +147,8 @@ processEmail conn job = do
         (recipient, orderId)
 ```
 
-`transactionalWorkerConfig` wraps each handler in a transaction and acks for
-you. If the handler returns, the job and the handler's writes commit together.
+`transactionalWorkerConfig` wraps each handler in a transaction and acks the
+job. If the handler returns, the job and the handler's writes commit together.
 If it throws, the transaction rolls back and the job is retried or moved to the
 DLQ.
 

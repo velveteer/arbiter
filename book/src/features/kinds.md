@@ -1,16 +1,40 @@
 # Payload Kinds
 
-A job stores a `kind`. Arbiter derives it from the payload at enqueue. Filter
-jobs by it, and break queue depth down by it.
+A payload kind is an optional `Text` label stored with each job. Arbiter calls
+`kindOf` during insertion. Kind labels support job filters, queue statistics,
+metrics, traces, and the admin UI.
 
-`HasKind` gives the label. No instance means no label.
+`HasKind` defines the label for one payload and the finite set of labels for its
+payload type:
 
-| Member | Gives |
-|--------|-------|
-| `kindOf` | the label of one job |
-| `kindsFor` | every label `kindOf` can return |
+| Member | Type | Description |
+|--------|------|-------------|
+| `kindOf` | `payload -> Maybe Text` | Returns the label for a payload. |
+| `kindsFor` | `[Text]` | Lists all labels returned by `kindOf`. |
 
-## Write the two functions
+The fallback instance for a payload type returns `Nothing` and an empty list.
+Declare a payload-specific instance to enable kind labels.
+
+## Constructor Labels
+
+The generic implementation uses data-constructor names. Derive `Generic` and
+declare an empty instance:
+
+```haskell
+data EmailPayload
+  = SendWelcome UserId
+  | SendReceipt OrderId
+  deriving stock (Generic)
+
+instance HasKind EmailPayload
+```
+
+For this instance, `kindOf (SendReceipt 7)` returns `Just "SendReceipt"` and
+`kindsFor @EmailPayload` returns `["SendWelcome", "SendReceipt"]`.
+
+## Custom Labels
+
+Implement both members when constructor names are not suitable:
 
 ```haskell
 data EmailKind = Welcome | Receipt | PasswordReset
@@ -29,32 +53,18 @@ instance HasKind EmailPayload where
   kindsFor = map emailKindText [minBound .. maxBound]
 ```
 
-`EmailPayload Receipt "a@b.c"` stores `kind = "receipt"`. The queue declares
+For this instance, `kindOf (EmailPayload Receipt "a@b.c")` returns
+`Just "receipt"`. `kindsFor @EmailPayload` returns
 `["welcome", "receipt", "passwordreset"]`.
 
-> Build `kindOf` and `kindsFor` from the same function. Arbiter stores a label
-> that `kindsFor` omits, but counts it nowhere.
+`kindsFor` must contain each non-`Nothing` value that `kindOf` can return.
+Arbiter excludes undeclared labels from kind metrics and the `kindCounts`
+statistics field.
 
-## Or take the generic default
+## Labels from a Nested Type
 
-The default uses the constructor names.
-
-```haskell
-data EmailPayload
-  = SendWelcome UserId
-  | SendReceipt OrderId
-  deriving stock (Generic)
-
-instance HasKind EmailPayload
-```
-
-`SendReceipt 7` stores `kind = "SendReceipt"`. The queue declares
-`["SendWelcome", "SendReceipt"]`.
-
-## Or read the constructors of another type
-
-`constructorKind` and `constructorKinds` need `Generic` on that type, not
-`HasKind`. Use them for a wrapper, or for a sum from a library you do not own.
+`constructorKind` and `constructorKinds` read the constructors of any
+`Generic` type. They do not require a `HasKind` instance on that type.
 
 ```haskell
 data Envelope = Envelope
@@ -67,19 +77,24 @@ instance HasKind Envelope where
   kindsFor = constructorKinds @EmailPayload
 ```
 
-## Where the label appears
+This form supports wrapper payloads and external sum types without an orphan
+`HasKind` instance.
 
-| Surface | Uses |
-|---------|------|
-| `GET /api/v1/:queue/jobs?kind=` (also `dlq` and `archive`) | stored label |
+## Label Use
+
+| Interface | Label source |
+|-----------|--------------|
+| `GET /api/v1/:queue/jobs?kind=` and the equivalent DLQ and archive filters | Stored job label |
 | `GET /api/v1/:queue/kinds` | `kindsFor` |
-| Admin UI Kind column and filter | both |
-| `GET /api/v1/:queue/stats` `kindCounts` | stored label, filtered by `kindsFor` |
-| `arbiter.queue.depth_by_kind` | `kindsFor` |
-| `arbiter.jobs.*` and the handler histogram | stored label, filtered by `kindsFor` |
-| `arbiter.kind` on the producer and consumer spans | `kindOf` and the stored label |
+| Admin UI kind column | Stored job label |
+| Admin UI kind filter | `kindsFor` |
+| `GET /api/v1/:queue/stats` field `kindCounts` | Stored labels declared by `kindsFor` |
+| `arbiter.queue.depth_by_kind` | Stored labels declared by `kindsFor` |
+| `arbiter.jobs.*` metrics and the handler histogram | Stored labels declared by `kindsFor` |
+| Producer span attribute `arbiter.kind` | `kindOf` |
+| Consumer span attribute `arbiter.kind` | Stored job label |
 
-`kindsFor` bounds the metrics and the `kindCounts` rollup. Spans have no bound
-and always carry the label.
+The finite `kindsFor` set limits metric cardinality. Span attributes can include
+an undeclared label.
 
-See the [`Arbiter.Core.Job.Kind` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Kind.html).
+API details: [`Arbiter.Core.Job.Kind`](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Kind.html).

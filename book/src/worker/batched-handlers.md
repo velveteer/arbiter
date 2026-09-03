@@ -21,8 +21,9 @@ batchHandler jobs cbs = do
   Worker.ackAllWith cbs scored
 ```
 
-Each callback runs in its own transaction. Wrap one in your own
-`withDbTransaction` to commit the ack together with your writes:
+Each callback runs in a separate transaction. Wrap a callback in
+`withDbTransaction` to commit the ack and application writes in one
+transaction:
 
 ```haskell
 batchHandler jobs cbs =

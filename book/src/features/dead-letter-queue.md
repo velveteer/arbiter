@@ -17,7 +17,7 @@ traverse_
   entries
 ```
 
-## Retrying
+## Retry
 
 `retryFromDLQ` takes a DLQ row id and returns the requeued job.
 
@@ -25,10 +25,10 @@ traverse_
 requeued <- Arb.retryFromDLQ @OrderPayload dlqId
 ```
 
-A retry recovers the applicable DLQ tree in one statement. You can specify any
-member of the tree. Arbiter restores the root, all descendants in the DLQ, and
-their finalizers. Thus, a retry of one failed fan-out child also restores failed
-siblings.
+A retry recovers the applicable DLQ tree in one statement. The specified row
+can be any member of the tree. Arbiter restores the root, all descendants in
+the DLQ, and their finalizers. A retry of one failed fan-out child also restores
+failed siblings.
 
 A restored finalizer is suspended if it has children in the DLQ or main queue.
 A finalizer with no children is ready and uses its stored snapshot. Arbiter
@@ -48,7 +48,7 @@ child results. Arbiter records this state before it deletes the children.
 > A retry removes the deduplication key. After a job has entered the DLQ, a new
 > insert can use the old [`IgnoreDuplicate`](deduplication.md) key.
 
-## Discarding
+## Deletion
 
 `deleteDLQJob` removes one entry and `deleteDLQJobsBatch` removes several. Both
 are permanent.

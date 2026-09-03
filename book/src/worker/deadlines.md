@@ -40,7 +40,7 @@ occupy concurrency pool slots.
 > the process runs. The heartbeat continues to renew the lease. Another worker
 > cannot reclaim the job.
 
-## Choosing the timings
+## Timing Constraints
 
 `jobHeartbeatInterval` must be less than `visibilityTimeout`. The pool does not
 start if the values are invalid. After a database connection failure, the

@@ -18,7 +18,7 @@ Other exceptions are retryable. Arbiter retries a job until it reaches
 permanent because another attempt uses the same invalid payload. Arbiter moves
 such a job directly to the DLQ.
 
-## Classifying an exception
+## Exception Classification
 
 Set the disposition where the application classifies the error:
 
@@ -50,7 +50,7 @@ For a tree, `throwBranchCancel` cancels the current child and its branch.
 `throwTreeCancel` cancels the complete tree. Cancellations do not call the
 failure hook.
 
-## Errors in traces
+## Trace Errors
 
 A failed job adds an error status and message to its consumer span. This applies
 to retries and permanent failures. A batch span can include successful jobs,

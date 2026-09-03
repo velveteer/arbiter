@@ -18,5 +18,5 @@ until it succeeds or moves to the DLQ. This rule has precedence over the
 priority of other jobs in that group.
 
 A group is eligible when it has a ready job. Arbiter ranks the group by the
-lowest priority number in that group, including delayed jobs. Thus, a delayed
-high-priority job increases the rank of its group.
+lowest priority number in that group, including delayed jobs. A delayed
+high-priority job therefore increases the rank of its group.

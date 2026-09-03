@@ -19,11 +19,11 @@ Use `Otel.runWorkerPools` in place of `runWorkerPools`. The arguments are the
 same. It installs the SDK, instruments the pools, and starts the gauges. Call it
 one time in each process.
 
-Standard `OTEL_*` variables configure exporters, endpoints, and intervals. You
-can set `OTEL_SDK_DISABLED=true`. Arbiter sends logs to OTel and to the configured
+Standard `OTEL_*` variables configure exporters, endpoints, and intervals.
+Set `OTEL_SDK_DISABLED=true` to disable the SDK. Arbiter sends logs to OTel and to the configured
 log destination. Each log contains the job trace, ID, queue, and attempt.
 
-Use `runWorkerPoolsWith` and a bracket from `Arbiter.Otel` when you manage the
+Use `runWorkerPoolsWith` and a bracket from `Arbiter.Otel` to manage the
 telemetry handle, install a separate SDK, or start pools by another method. The
 `With` functions also accept the base log configuration for the gauge loop.
 

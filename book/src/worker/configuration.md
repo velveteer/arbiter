@@ -1,13 +1,13 @@
 # Worker Configuration
 
 A `WorkerConfig` defines a handler, thread count, timing values, and callbacks.
-Configuration constructors return this record. Update its fields before you
-create a pool.
+Configuration constructors return this record. Update its fields before pool
+creation.
 
 `poolConfigForWorkers` calculates the database pool size from a list of worker
 pools. Pass the same list to `poolConfigForWorkers` and `runWorkerPools`.
 
-## Running several queues
+## Multiple Queues
 
 One process can run one pool for each queue. Create each configuration and name
 it with `namedWorkerPool`. Pass the same list to `poolConfigForWorkers`,
@@ -28,7 +28,7 @@ ARBITER_ENABLED_QUEUES=email_queue,image_queue
 Arbiter checks the names against the configured pools at startup. An unknown
 name causes an exception.
 
-## Which constructor
+## Configuration Types
 
 `transactionalWorkerConfig` runs the handler in a transaction. A normal return
 acks the job and stores the returned result. An exception rolls back the work
@@ -47,8 +47,9 @@ releases that savepoint. It can run before the outer transaction commits. If
 the outer transaction rolls back, Arbiter can process the job again after the
 hook has run.
 
-Batching is a separate choice. Use `defaultBatchedWorkerConfig` when per-job
-overhead dominates and you want per-job dispositions inside one claim.
+Batching is independent of transaction mode. Use
+`defaultBatchedWorkerConfig` when per-job overhead is too high and each job
+requires a separate disposition in one claim.
 
 ## Timings
 

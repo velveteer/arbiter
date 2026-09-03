@@ -72,7 +72,7 @@ Tree-scoped cancellation:
 - `throwBranchCancel` deletes the current job's parent and all descendants of
   that parent. This includes the current job and its siblings.
 
-## Recipe: Chunked Data Migration
+## Chunked Data Migration
 
 To migrate a large table in parts, assign a set of row identifiers to each
 child job. The parent runs after all child jobs finish:

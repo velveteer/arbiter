@@ -14,11 +14,10 @@ livenessProbe:
   periodSeconds: 60
 ```
 
-`find` exits 0 whether or not anything matched `-mmin`, so a bare `find` passes
-on a stale heartbeat and only fails once the file is gone -- which is the one
-case that does not want a restart, since the pool removes the file after a clean
-drain. Piping to `grep -q .` makes the probe fail when nothing is fresh, and
-also when the glob matched no file at all.
+`find` exits with status 0 when no file matches `-mmin`. Therefore, a command
+that uses only `find` passes when the heartbeat is stale. The `grep -q .`
+command makes the probe fail when no current heartbeat file exists. The pool
+removes the file after a normal shutdown.
 
 The REST API provides two other checks. `GET health` is a readiness check that
 queries the database. `GET health/live` is a liveness check that does not query

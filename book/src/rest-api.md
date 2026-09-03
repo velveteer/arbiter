@@ -1,8 +1,8 @@
 # REST API and Admin UI
 
 The `arbiter-servant` and `arbiter-servant-ui` packages provide a REST API and
-admin dashboard. They can be used as standalone WAI applications or integrated
-into your own Servant API.
+admin dashboard. Use them as standalone WAI applications or integrate them
+into an existing Servant API.
 
 ```haskell
 import Arbiter.Servant qualified as Servant
@@ -129,7 +129,7 @@ archive entry for an archived root job. This is the same behavior as
 invisible for the remainder of its lease. `extend` sets a later lease
 expiration, as a worker heartbeat does. The request body requires `seconds`.
 Arbiter limits the value to 3600 and measures it from the request time. If the
-lease fields do not match the row, the endpoint returns 409. Thus, a previous
+lease fields do not match the row, the endpoint returns 409. A previous lease
 holder cannot ack a reclaimed job.
 
 These routes finalize leases created by `POST claim`. They return 409 for a
@@ -137,12 +137,12 @@ lease held by a worker pool.
 
 The server does not renew an HTTP lease automatically. The consumer must call
 `extend`. After an unextended lease expires, another consumer can claim the
-job. This gives at-least-once delivery after a consumer failure.
+job. This behavior provides at-least-once delivery after a consumer failure.
 
 > [!IMPORTANT]
 > Arbiter does not authenticate claim or finalization requests. Add
-> authentication before you expose these routes. You can use WAI middleware, a
-> Servant authentication combinator, or an authenticating proxy.
+> authentication before exposing these routes. Use WAI middleware, a Servant
+> authentication combinator, or an authenticating proxy.
 
 ## Maintenance
 

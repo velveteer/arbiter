@@ -1,16 +1,16 @@
 # Rate Limiting
 
 Use an arbitrary key to limit the job rate. A policy applies to all queues in a
-registry. Thus, one policy can control a resource that multiple queues use.
+registry. One policy can control a resource used by multiple queues.
 
 Define a `HasRateLimit` instance for the payload. Its `rateLimitFor` function
 selects a policy for each job. The migration finds and initializes all policies
-that the selector can use. You do not have to maintain a separate policy list.
+that the selector can use. A separate policy list is not required.
 
 ```haskell
 import Arbiter.RateLimit
 
--- Your own functions on the payload.
+-- Application functions on the payload.
 isTransactional :: EmailPayload -> Bool
 recipientDomain :: EmailPayload -> Text
 
@@ -76,7 +76,7 @@ durable production schema.
 > cost empties a full bucket and can run. A rate limit controls arrivals over
 > time. Use a concurrency limit to control the number of simultaneous jobs.
 
-## When downstream returns 429
+## HTTP 429 Responses
 
 Select the response based on the scope of the limit.
 

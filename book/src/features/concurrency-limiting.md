@@ -7,7 +7,7 @@ a prefix and a default limit. Keys apply to all queues in a registry.
 ```haskell
 import Arbiter.Concurrency (ConcurrencyPolicy, HasConcurrency (..), concurrencyBy, concurrencyPool)
 
--- Your own function on the payload.
+-- Application function on the payload.
 tenantOf :: SyncPayload -> Text
 
 -- At most 2 sync jobs per tenant in flight at once.
@@ -24,7 +24,7 @@ prefix. An operator can change the pool limit through the API or admin UI. The
 override applies until an operator clears it. Arbiter then uses the declared
 default. A value of 0 prevents claims for all keys in the pool.
 
-## Concurrency limit 1 vs. a group key
+## Concurrency Limit 1 and Group Keys
 
 Both options permit one in-flight job for each key. Their failure behavior is
 different:
@@ -48,7 +48,7 @@ tenant. A job can use both features.
 > Arbiter periodically removes inactive keys. It also reconstructs in-flight
 > counts after a restart or failover.
 
-## Limits from an external signal
+## External Limit Updates
 
 A handler can update an override in response to an external capacity signal.
 For example, update the override when a vendor response reports a new limit.

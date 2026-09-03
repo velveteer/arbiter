@@ -21,7 +21,7 @@ let instrumented = config { Worker.observabilityHooks = myHooks }
 A hook runs in the pool monad. It can read the database and write to a metrics
 client.
 
-## Which hook fires
+## Hook Invocation
 
 Each claimed job calls `onJobClaimed`. It then has one of these outcomes:
 
@@ -46,7 +46,7 @@ worker owns the job and reports its outcome.
 Each successful heartbeat extension for a running job calls `onJobHeartbeat`.
 Reclaimed or cancelled jobs do not call this hook.
 
-## Composing hooks
+## Hook Composition
 
 `ObservabilityHooks` is a `Monoid`. The `<>` operator runs the left callback
 before the right callback at each point. Arbiter runs the right callback if the
@@ -61,7 +61,7 @@ let instrumented = Worker.withHooks (myHooks <>) config
 application hooks can use one configuration. See
 [OpenTelemetry](../opentelemetry.md).
 
-## What a hook cannot do
+## Hook Restrictions
 
 Arbiter discards a hook return value. It catches hook exceptions, logs them at
 `Warning`, and continues the worker.

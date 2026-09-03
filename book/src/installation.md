@@ -29,4 +29,5 @@ extra-deps:
       - arbiter-migrations
 ```
 
-Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` depending on your backend.
+Replace `arbiter-simple` with the package for the selected backend:
+`arbiter-orville` or `arbiter-hasql`.
