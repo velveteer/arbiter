@@ -3,9 +3,7 @@
 
 -- | Cross-process coordination for database gauge scans.
 module Arbiter.Otel.Gauges.Coordination
-  ( RefreshedSnapshot (..)
-  , RefreshResult (..)
-  , RefreshSource (..)
+  ( RefreshSource (..)
   , prepareRefreshSource
   ) where
 
@@ -23,23 +21,17 @@ import UnliftIO.Exception (tryAny)
 import Arbiter.Otel.Gauges.Cache (Snapshot)
 import Arbiter.Otel.Gauges.Scan (scanSnapshot)
 
--- | Origin and value of a shared snapshot.
-data RefreshedSnapshot
-  = Scanned Snapshot
-  | ReadShared Double Snapshot
-
--- | Result of one coordinated refresh.
-data RefreshResult
-  = RefreshReady RefreshedSnapshot
-  | RefreshSkipped
-  | RefreshFailed SomeException
-
--- | A prepared refresh operation and its timing values.
+-- | A prepared refresh operation and its timing values. A refresh that says nothing
+-- about the database yields @Right Nothing@.
 data RefreshSource = RefreshSource
-  { runRefresh :: IO RefreshResult
-  , refreshInterval :: NominalDiffTime
+  { runRefresh :: IO (Either SomeException (Maybe (Shared Snapshot)))
   , minimumDelay :: NominalDiffTime
   }
+
+-- | The gate interval over the refresh interval. Under the loop's period, so a
+-- replica can win the gate on consecutive ticks.
+gateIntervalFactor :: NominalDiffTime
+gateIntervalFactor = 0.9
 
 -- | Prepare a coordinated refresh operation for one queue set.
 prepareRefreshSource
@@ -49,58 +41,46 @@ prepareRefreshSource
   -> SchemaName
   -> [(TableName, [Text])]
   -> NominalDiffTime
+  -> NominalDiffTime
+  -- ^ How old a reading may be before it is stale.
   -> IO Bool
   -- ^ Whether the local cache is stale.
   -> IO RefreshSource
-prepareRefreshSource logCfg runDb schema queueKinds refreshInterval cacheIsStale = do
+prepareRefreshSource logCfg runDb schema queueKinds refreshInterval freshnessWindow cacheIsStale = do
   gateCache <- newIORef Nothing
   pure
     RefreshSource
       { runRefresh = refresh gateCache
-      , refreshInterval = refreshInterval
       , minimumDelay = gateInterval
       }
   where
-    gateInterval = 0.9 * refreshInterval
-    freshnessWindow = 3 * refreshInterval
+    gateInterval = gateIntervalFactor * refreshInterval
     queueTables = map fst queueKinds
     scan = scanSnapshot freshnessWindow schema queueKinds
 
-    refresh gateCache =
-      tryAny (resolveGate gateCache) >>= \case
-        Left err -> pure (RefreshFailed err)
-        Right gate -> bounded (runDb (runGatedShared schema gate gateInterval freshnessWindow scan)) >>= classify
+    refresh gateCache = tryAny (resolveGate gateCache) >>= either (pure . Left) sharedScan
 
-    resolveGate gateCache = do
-      cached <- readIORef gateCache
-      case cached of
-        Just gate -> pure gate
-        Nothing -> do
-          gate <- runDb (gateNameFor "refresh-gauges" queueTables)
-          writeIORef gateCache (Just gate)
-          pure gate
+    sharedScan gate =
+      bounded (runDb (runGatedShared schema gate gateInterval freshnessWindow scan)) >>= \case
+        Right (Just (Unreadable why)) -> localScan why
+        r -> pure r
 
-    bounded action = do
+    -- Fixed for the registration, and a query of its own when it is long.
+    resolveGate gateCache =
+      readIORef gateCache
+        >>= maybe (runDb (gateNameFor "refresh-gauges" queueTables) >>= \gate -> gate <$ writeIORef gateCache (Just gate)) pure
+
+    -- A scan that outlives the freshness window is abandoned, so long as a fresh
+    -- reading stands in for it. Only unblocks a driver that yields to the runtime.
+    bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
+    bounded act = do
       stale <- cacheIsStale
-      result <- tryAny (if stale then Just <$> action else timeout (micros freshnessWindow) action)
-      case result of
-        Left err -> pure (Left err)
-        Right Nothing -> do
-          tryLog logCfg Warning "Gauge scan exceeded the freshness window"
-          pure (Right Nothing)
-        Right (Just shared) -> pure (Right shared)
-
-    classify = \case
-      Left err -> pure (RefreshFailed err)
-      Right Nothing -> pure RefreshSkipped
-      Right (Just (Ran snapshot)) -> pure (RefreshReady (Scanned snapshot))
-      Right (Just (Published age snapshot)) -> pure (RefreshReady (ReadShared age snapshot))
-      Right (Just (Unreadable why)) -> localScan why
+      tryAny (if stale then Just <$> act else timeout (micros freshnessWindow) act)
+        >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
+    abandoned = "Gauge scan outlived the freshness window, abandoned"
 
     -- Only an unreadable payload falls back, and only with nothing fresh of its own.
     localScan why = do
       tryLog logCfg Warning ("Shared gauge payload unreadable, scanning locally: " <> why)
       stale <- cacheIsStale
-      if stale
-        then either RefreshFailed (RefreshReady . Scanned) <$> tryAny (runDb scan)
-        else pure RefreshSkipped
+      if stale then tryAny (Just . Ran <$> runDb scan) else pure (Right Nothing)

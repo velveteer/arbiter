@@ -940,6 +940,23 @@ operationsSpec mkMessage mkResult runM = do
       attempts replaced `shouldBe` 0
       lastError replaced `shouldBe` Nothing
 
+    it "ReplaceDuplicate returns Nothing when a retried job is running its next attempt" $ \env -> do
+      let job1 =
+            setDedupKey (Just (ReplaceDuplicate "retry-live-key")) $
+              defaultGroupedJob "dedup-retry-live-1" (mkMessage "Original")
+      Just _ <- runM env (HL.insertJob job1)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.updateJobForRetry 0 "Simulated failure" (head claimed))
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
+      lastError (head reclaimed) `shouldBe` Just "Simulated failure"
+
+      let job2 =
+            setDedupKey (Just (ReplaceDuplicate "retry-live-key")) $
+              defaultGroupedJob "dedup-retry-live-2" (mkMessage "Replacement")
+      replaced <- runM env (HL.insertJob job2)
+      replaced `shouldBe` Nothing
+
     it "Dedup key only applies to jobs in queue (not after ack)" $ \env -> do
       let job1 =
             setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-1" (mkMessage "First")
@@ -1172,6 +1189,22 @@ operationsSpec mkMessage mkResult runM = do
       payload (head inserted) `shouldBe` mkMessage "FreshReplacement"
       attempts (head inserted) `shouldBe` 0
       lastError (head inserted) `shouldBe` Nothing
+
+    it "batch ReplaceDuplicate does not replace a retried job running its next attempt" $ \env -> do
+      let existingJob =
+            setDedupKey (Just (ReplaceDuplicate "batch-retry-live-key")) $ defaultJob (mkMessage "Original")
+      Just _ <- runM env (HL.insertJob existingJob)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.updateJobForRetry 0 "Simulated failure" (head claimed))
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
+
+      let batchJobs =
+            [ setDedupKey (Just (ReplaceDuplicate "batch-retry-live-key")) $ defaultJob (mkMessage "Replacement")
+            , defaultJob (mkMessage "Other")
+            ]
+      inserted <- runM env (HL.insertJobsBatch batchJobs)
+      map payload inserted `shouldBe` [mkMessage "Other"]
 
   describe "updateJobForRetry" $ do
     it "updates job with error message and visibility timeout" $ \env -> do
@@ -1771,6 +1804,27 @@ operationsSpec mkMessage mkResult runM = do
       let idsToCancel = [primaryKey job1, 999999, primaryKey job2, 888888]
       deleted <- runM env (HL.cancelJobsBatch @payload idsToCancel)
       deleted `shouldBe` 2
+
+    it "cancels two batches over the same parents concurrently without deadlocking" $ \env -> do
+      forM_ [1 .. 8 :: Int] $ \round' -> do
+        let name side = mkMessage ("cancel-lockorder-" <> T.pack (show round') <> "-" <> side)
+            tree side =
+              JT.rollup
+                (defaultJob (name (side <> "-parent")))
+                (JT.leaf (defaultJob (name (side <> "-x"))) :| [JT.leaf (defaultJob (name (side <> "-y")))])
+        Right (_ :| [ax, ay]) <- runM env (HL.insertJobTree (tree "a"))
+        Right (_ :| [bx, by]) <- runM env (HL.insertJobTree (tree "b"))
+        -- Opposite parent order on each side, so an unordered lock pass cycles.
+        (left, right) <-
+          concurrently
+            (runM env (HL.cancelJobsBatch @payload [primaryKey ax, primaryKey by]))
+            (runM env (HL.cancelJobsBatch @payload [primaryKey bx, primaryKey ay]))
+        left `shouldBe` 2
+        right `shouldBe` 2
+        parents <- claimJobs env 2
+        length parents `shouldBe` 2
+        runM env (HL.ackJobsBatch parents) >>= ((`shouldBe` 2) . length)
+        runM env (HL.listJobs @payload 100 0) >>= (`shouldBe` [])
 
     it "moveToDLQBatch moves multiple jobs with individual error messages" $ \env -> do
       -- Insert and claim 3 jobs

@@ -72,7 +72,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Pool qualified as Pool
 import Data.Set qualified as Set
 import Data.String (fromString)
@@ -424,6 +424,7 @@ promoteJobHandler tableName config jobId =
   where
     refuse job
       | Job.suspended job = "Job is suspended - use resume endpoint"
+      | isJust (Job.claimedBy job) = "Job is in flight - wait for its lease to lapse"
       | otherwise = "Job is already visible"
 
 -- | Move a job to the dead letter queue.

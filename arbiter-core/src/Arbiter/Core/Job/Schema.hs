@@ -597,7 +597,8 @@ dropNotifyFunctionSQL schemaName tableName =
 
 -- | Event-streaming function that receives the logical queue name and DLQ flag
 -- from each trigger. Trigger arguments avoid inferring either value from table
--- suffixes, so queue names ending in @_dlq@ remain unambiguous.
+-- suffixes, so queue names ending in @_dlq@ remain unambiguous. A leased row whose
+-- update only extended its lease is not an event.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
@@ -609,6 +610,13 @@ createEventStreamingFunctionSQL schemaName =
         , "  queue_name text := TG_ARGV[0];"
         , "  is_dlq boolean := TG_ARGV[1]::boolean;"
         , "BEGIN"
+        , "  IF TG_OP = 'UPDATE' THEN"
+        , "    IF NEW.claimed_by IS NOT NULL AND NEW.claim_seq = OLD.claim_seq"
+        , "       AND NEW.not_visible_until >= OLD.not_visible_until"
+        , "       AND " <> leaseStripped "OLD" <> " = " <> leaseStripped "NEW" <> " THEN"
+        , "      RETURN NULL;"
+        , "    END IF;"
+        , "  END IF;"
         , "  CASE TG_OP"
         , "    WHEN 'INSERT' THEN"
         , "      event_type := CASE WHEN is_dlq THEN 'job_dlq' ELSE 'job_inserted' END;"
@@ -632,6 +640,8 @@ createEventStreamingFunctionSQL schemaName =
         , "$$ LANGUAGE plpgsql;"
         , "COMMENT ON FUNCTION " <> funcName <> "() IS '" <> eventStreamingObjectComment <> "';"
         ]
+  where
+    leaseStripped row = "(to_jsonb(" <> row <> ") - 'not_visible_until' - 'updated_at')"
 
 -- | Install event-streaming triggers with explicit logical queue metadata.
 createEventStreamingTriggersSQL :: SchemaName -> TableName -> Text

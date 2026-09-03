@@ -14,11 +14,11 @@ module Arbiter.Worker.Logger.Internal
 
 import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Job.Types qualified as Job
+import Control.Monad (void)
 import Data.Aeson (KeyValue (..), object)
 import Data.Aeson.Types (Pair)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty, toList)
 import Data.Text (Text)
-import Control.Monad (void)
 import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), tryLog, warnEx)

@@ -432,9 +432,9 @@ replaceableGuard :: Text -> Text -> Text
 replaceableGuard tbl dlqTbl =
   [text|
     (${tbl}.attempts = 0
+      OR ${tbl}.claimed_by IS NULL
       OR ${tbl}.not_visible_until IS NULL
-      OR ${tbl}.not_visible_until <= NOW()
-      OR ${tbl}.last_error IS NOT NULL)
+      OR ${tbl}.not_visible_until <= NOW())
       AND ${tbl}.cancel_requested_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
       AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)

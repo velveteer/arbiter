@@ -58,7 +58,7 @@ import Arbiter.Worker.Config
 import Arbiter.Worker.Logger (silentLogConfig)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (SomeException, finally, throwIO, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -853,6 +853,55 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
           map WR.workerId rows `shouldContain` [wid]
 
+      it "re-registers with the queue's pause state" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
+        let config = baseConfig {workerCount = 1, pollInterval = 5.0, workerHeartbeatInterval = 2.0}
+            wid = workerId config
+            registered = do
+              rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+              pure $ wid `elem` map WR.workerId rows
+
+        withLinkedAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ (== Running) <$> getWorkerState config
+          waitUntil 10_000 $ getListenerReady config
+          -- Let the tick the startup claim signalled pass.
+          threadDelay 2_500_000
+
+          void $ runSimpleDb env $ Ops.deregisterWorker testSchema wid
+          -- The pause fans out per registry row, so a worker without one hears nothing.
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
+          threadDelay 300_000
+          getWorkerState config `shouldReturn` Running
+
+          -- A claim signals the heartbeat, whose tick finds the row gone and re-registers.
+          void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "wake"))
+          waitUntil 5_000 registered
+          waitUntil 500 $ (== Paused) <$> getWorkerState config
+          void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable False
+
+      it "starts paused when the registry insert fails, then registers on a later heartbeat" $ \env -> do
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = pure ()
+        baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 1 (noResult handler)
+        let config = baseConfig {workerCount = 1, pollInterval = 0.1, workerHeartbeatInterval = 0.2}
+            wid = workerId config
+            registry = testSchema <> ".arbiter_workers"
+            hidden = testSchema <> ".arbiter_workers_hidden"
+
+        conn <- PG.connectPostgreSQL connStr
+        execute_ conn ("ALTER TABLE " <> registry <> " RENAME TO arbiter_workers_hidden")
+        let restore = execute_ conn ("ALTER TABLE " <> hidden <> " RENAME TO arbiter_workers")
+        withLinkedAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
+          (threadDelay 500_000 *> getWorkerState config) `finally` restore >>= (`shouldBe` Paused)
+          waitUntil 5_000 $ (== Running) <$> getWorkerState config
+          rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
+          map WR.workerId rows `shouldContain` [wid]
+        PG.close conn
+
     describe "Queue pause" $ do
       it "stamps paused_at on first pause and clears it on resume" $ \env -> do
         void $ runSimpleDb env $ Ops.ensureQueue testSchema testTable
@@ -1519,6 +1568,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         case filter ((== wid) . WR.workerId) rows of
           [row] -> WR.health row `shouldBe` WR.Draining
           _ -> expectationFailure "expected exactly one row for the worker"
+
+    describe "Cron schedule defaults" $ do
+      it "leaves an unchanged schedule's updated_at alone" $ \env -> do
+        let upsert expr = Ops.upsertCronDefault testSchema "cron-steady" testTable expr "AllowOverlap" Nothing
+            readBack = runSimpleDb env $ Ops.getCronScheduleByName testSchema "cron-steady"
+        void $ runSimpleDb env (upsert "* * * * *")
+        Just first <- readBack
+        void $ runSimpleDb env (upsert "* * * * *")
+        Just second <- readBack
+        CS.updatedAt second `shouldBe` CS.updatedAt first
+        void $ runSimpleDb env (upsert "*/5 * * * *")
+        Just third <- readBack
+        CS.updatedAt third `shouldSatisfy` (> CS.updatedAt first)
 
     describe "Cron queue filter" $ do
       it "filters cron schedules by queue" $ \env -> do

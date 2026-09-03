@@ -20,6 +20,7 @@ module Arbiter.Core.Sql.Tree
   , resumeJobSQL
   , jobExistsSQL
   , getParentIdSQL
+  , getParentIdsSQL
   , insertResultSQL
   , insertResultsBatchSQL
   , getResultsByParentSQL
@@ -362,6 +363,12 @@ getParentIdSQL :: Text -> Text -> Int64 -> Query (Maybe Int64)
 getParentIdSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${tbl} WHERE id = #{jobId :: CInt8}|]
+
+-- | Fetch the parent ids of several jobs.
+getParentIdsSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+getParentIdsSQL schema tableName jobIds =
+  let tbl = jobQueueTable schema tableName
+   in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${tbl} WHERE id = ANY(#{jobIds :: [CInt8]})|]
 
 -- ---------------------------------------------------------------------------
 -- Results Table Operations

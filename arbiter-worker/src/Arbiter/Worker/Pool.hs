@@ -63,7 +63,7 @@ import Arbiter.Worker.Config
 import Arbiter.Worker.Cron (CronJob (..), runCronScheduler)
 import Arbiter.Worker.Dispatcher
 import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (tryWarn)
+import Arbiter.Worker.Logger.Internal (tryWarn, tryWarnWith)
 import Arbiter.Worker.Processing (workerLoop)
 import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop, runReaperOp)
 import Arbiter.Worker.Retry (spawnRetried)
@@ -110,7 +110,8 @@ runWorkerPool config = do
 
   tryAny (registerSelf config schemaName queueName)
     >>= either
-      (warnEx (logConfig config) "Worker registry insert failed")
+      ( \e -> warnEx (logConfig config) "Worker registry insert failed, starting paused" e *> atomically (writePause config True)
+      )
       (traverse_ (atomically . writePause config))
 
   dispatcherNotifVar <- STM.newTVarIO Nothing
@@ -291,12 +292,13 @@ heartbeatLoop config schemaName queueName = do
       result <-
         tryReported logCfg Warning gate "Worker registry heartbeat" $
           Ops.heartbeatWorker schemaName (workerId config)
-      traverse_ (maybe reregister (reconcile epoch)) result
-    reregister = do
+      traverse_ (maybe (reregister epoch) (reconcile epoch)) result
+    reregister epoch = do
       shutting <- STM.atomically readShuttingDown
       unless shutting $ do
         tryLog logCfg Warning "Worker registry row missing, re-registering"
-        tryWarn logCfg "Worker re-registration failed" (registerSelf config schemaName queueName)
+        tryWarnWith logCfg "Worker re-registration failed" Nothing (registerSelf config schemaName queueName)
+          >>= traverse_ (reconcile epoch)
     reconcile epoch rp =
       STM.atomically $ do
         shutting <- readShuttingDown

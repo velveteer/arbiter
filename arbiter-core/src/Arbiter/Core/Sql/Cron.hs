@@ -42,6 +42,7 @@ cronReadColumns = T.intercalate ", " (map expire (codecColumns cronScheduleRowCo
     expire c = c
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
+-- An unchanged schedule is left alone, so a restart does not touch its row.
 upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Query ()
 upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
   let tbl = cronSchedulesTable schemaName
@@ -54,6 +55,8 @@ upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
           default_overlap = EXCLUDED.default_overlap,
           default_timezone = EXCLUDED.default_timezone,
           updated_at = NOW()
+        WHERE (${tbl}.queue_name, ${tbl}.default_expression, ${tbl}.default_overlap, ${tbl}.default_timezone)
+          IS DISTINCT FROM (EXCLUDED.queue_name, EXCLUDED.default_expression, EXCLUDED.default_overlap, EXCLUDED.default_timezone)
       |]
 
 -- | List cron schedules ordered by name, optionally filtered by queue.

@@ -18,29 +18,40 @@ import Control.Concurrent.STM (readTVarIO)
 import Control.Monad (void)
 import Data.Bifunctor (first)
 import Data.Foldable (toList, traverse_)
+import Data.HashMap.Strict (HashMap)
+import Data.IORef (IORef, atomicModifyIORef')
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import GHC.Clock (getMonotonicTime)
 import OpenTelemetry.Metric.Core
-  ( Meter
+  ( Counter
+  , Meter
+  , counterAdd
   , defaultAdvisoryParameters
+  , meterCreateCounterDouble
   , meterCreateObservableGaugeDouble
   , observe
   )
 
 import Arbiter.Otel.Gauges.Cache
-  ( Cached (..)
+  ( Baseline
+  , Cached (..)
   , GaugeCache (..)
-  , GaugeState (..)
+  , SeriesKey
   , Snapshot (..)
+  , lastScan
+  , live
+  , riseSince
   )
 import Arbiter.Otel.MetricNames qualified as Name
 import Arbiter.Otel.Metrics (attrs, concurrencyKind, rateLimitKind)
 
--- | Register instruments that read the last shared snapshot.
-registerInstruments :: Meter -> GaugeCache -> IO ()
+-- | Register instruments that read the last shared snapshot, and return the action
+-- that carries a freshly published reading onto the counters.
+registerInstruments :: Meter -> GaugeCache -> IO (Cached -> IO ())
 registerInstruments meter cache = do
-  let withCached emit = [\res -> readTVarIO (gaugeState cache) >>= traverse_ (emit res) . currentSnapshot]
+  let withCached emit = [\res -> readTVarIO (export cache) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
       -- Every replica exports the winner's reading, so aggregate with max, never sum.
       shared desc = desc <> " (shared reading, do not sum across replicas)"
@@ -54,6 +65,18 @@ registerInstruments meter cache = do
             defaultAdvisoryParameters
             cbs
       reg name unit desc emit = regGauge name unit (shared desc) (callback emit)
+      regCounter name unit desc series = do
+        counter <-
+          meterCreateCounterDouble
+            meter
+            (Name.metricName name)
+            (Just unit)
+            (Just (shared desc))
+            defaultAdvisoryParameters
+        pure $ \c ->
+          traverse_
+            (addRise (counterBaselines cache) (Name.metricName name) counter (takenAt c))
+            (series (reading c))
 
   reg Name.QueueDepth "{job}" "Jobs in a queue by status" $
     observed $
@@ -112,22 +135,20 @@ registerInstruments meter cache = do
   reg Name.PgDbBackends "{backend}" "Backends connected to the database" $
     perDb (fromIntegral . Health.numBackends)
 
-  reg Name.PgTableScans "{scan}" "Cumulative table scans by access path"
-    $ observed
-    $ perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
-  reg Name.PgTableBlocks "{block}" "Cumulative table block reads by source"
-    $ observed
-    $ perTableTotals "source" (\t -> [("hit", Health.blksHit t), ("disk", Health.blksRead t)])
+  advances <-
+    sequence
+      [ regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
+          perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
+      , regCounter Name.PgTableBlocks "{block}" "Block reads for the table, by whether they hit the cache" $
+          perTableTotals "source" (\t -> [("hit", Health.blksHit t), ("disk", Health.blksRead t)])
+      ]
 
   -- Absent until the first scan, so a reading never claims to know before it does.
   regGauge
     Name.DbReachable
     "{status}"
     "1 when the last health scan reached the database, 0 when it failed"
-    [ \res -> do
-        reachable <- databaseReachable <$> readTVarIO (gaugeState cache)
-        traverse_ (\ok -> observe res (if ok then 1 else 0) (attrs [])) reachable
-    ]
+    [\res -> readTVarIO (databaseReachable cache) >>= traverse_ (\ok -> observe res (if ok then 1 else 0) (attrs []))]
 
   -- How far behind the exported readings have fallen, from registration until the
   -- first. A stopped loop leaves the other gauges holding their last reading, which
@@ -138,11 +159,11 @@ registerInstruments meter cache = do
     "Seconds since the exported readings were scanned"
     [ \res -> do
         now <- getMonotonicTime
-        scanned <- lastScanTime <$> readTVarIO (gaugeState cache)
+        scanned <- lastScan <$> readTVarIO (export cache)
         observe res (now - fromMaybe (registeredAt cache) scanned) (attrs [])
     ]
 
-  pure ()
+  pure (\c -> traverse_ ($ c) advances)
   where
     effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
     effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
@@ -155,7 +176,8 @@ registerInstruments meter cache = do
       , ("blocked", Health.connBlocked h)
       , ("other", Health.connOther h)
       ]
-    -- Each series is a set of labelled values selected from the snapshot.
+    -- Every series is a list of rows picked out of the snapshot, each row labelled
+    -- and valued. Counters hand that list over, gauges observe it.
     over pick label snap = concatMap label (pick snap)
     observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
     perConcurrency field = observed (over concurrency (\p -> [([("policy", Conc.prefix p)], field p)]))
@@ -174,3 +196,16 @@ registerInstruments meter cache = do
       observed (over queues (\o -> [([("queue", overviewQueue o)], fromMaybe 0 (field (overviewStats o)))]))
     perDb = observed . dbTotal
     perDbBy label = observed . perDbTotals label
+
+-- | Count an absolute total's rise since the scan it was last counted from.
+addRise
+  :: IORef (HashMap SeriesKey Baseline)
+  -> Text
+  -> Counter Double
+  -> Double
+  -- ^ Monotonic time the reading was scanned at.
+  -> ([(Text, Text)], Double)
+  -> IO ()
+addRise baselines name counter scannedAt (kvs, total) = do
+  rise <- atomicModifyIORef' baselines (riseSince (name, kvs) scannedAt total)
+  counterAdd counter rise (attrs kvs)

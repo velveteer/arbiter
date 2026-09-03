@@ -1887,7 +1887,8 @@ cancelJobInner schemaName tableName jobId = do
   countOr0 (Tmpl.cancelJobSQL schemaName tableName jobId)
 
 -- | 'cancelJob' over several ids in one transaction, so cancelling siblings leaves the
--- last one to find the parent childless and resume it. Returns the number deleted.
+-- last one to find the parent childless and resume it. Locks the union of parents and
+-- rows first. Returns the number deleted.
 cancelJobsBatch
   :: (MonadArbiter m)
   => Text
@@ -1899,7 +1900,12 @@ cancelJobsBatch
   -> m Int64
 cancelJobsBatch _ _ [] = pure 0
 cancelJobsBatch schemaName tableName jobIds =
-  withDbTransaction $ sum <$> traverse (cancelJobInner schemaName tableName) jobIds
+  withDbTransaction $ do
+    let ids = Set.toList (Set.fromList jobIds)
+    parents <- MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName ids)
+    lockJobParents schemaName tableName parents
+    lockJobTrees schemaName tableName ids
+    sum <$> traverse (countOr0 . Tmpl.cancelJobSQL schemaName tableName) ids
 
 -- | Make a delayed or retrying job immediately visible. Refuses an in-flight job.
 promoteJob

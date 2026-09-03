@@ -15,12 +15,12 @@
 -- @
 module Arbiter.Otel
   ( -- * Setup
-    Telemetry
-  , newTelemetry
+    Telemetry (..)
+  , withTelemetry
+  , withTelemetryIf
   , withTelemetryFromEnv
   , withExternalTelemetry
   , telemetryLogConfig
-  , telemetrySummary
 
     -- * Instrumenting a pool
   , instrumentPool
@@ -61,10 +61,11 @@ import Arbiter.Otel.MetricNames (arbiterMetricNames)
 import Arbiter.Otel.Metrics (otelHooks, otelMaintenance)
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
-  , newTelemetry
   , telemetryLogConfig
   , withExternalTelemetry
+  , withTelemetry
   , withTelemetryFromEnv
+  , withTelemetryIf
   )
 
 -- | Give a pool consumer spans, lifecycle metrics, and the telemetry log destination.
