@@ -14,7 +14,13 @@ import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), handlerBatchSize, readEffectiveState)
+import Arbiter.Worker.Config
+  ( HandlerMode (..)
+  , WorkerConfig (..)
+  , handlerBatchSize
+  , heartbeatSignal
+  , readEffectiveState
+  )
 import Arbiter.Worker.Logger (LogLevel (..), newFailureGate, tryReported)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 

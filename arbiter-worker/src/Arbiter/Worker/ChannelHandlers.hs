@@ -31,7 +31,7 @@ import UnliftIO.Exception (finally, throwTo)
 import UnliftIO.STM (TVar, readTVar)
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (WorkerConfig (..), writePause)
+import Arbiter.Worker.Config (WorkerConfig (..), workerStateVar, writePause)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | The handler threads in flight, by job id.

@@ -42,7 +42,7 @@ import Arbiter.Simple
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
-import Arbiter.Worker (mergedChildResults, runReaperOp, runWorkerPool)
+import Arbiter.Worker (WorkerState (..), mergedChildResults, runReaperOp, runWorkerPool)
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
   , ackAll
@@ -56,7 +56,6 @@ import Arbiter.Worker.Config
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Logger (silentLogConfig)
-import Arbiter.Worker.WorkerState (WorkerState (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, throwIO, try)

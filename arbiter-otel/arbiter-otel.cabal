@@ -44,8 +44,13 @@ library
   hs-source-dirs:  src
   exposed-modules:
     Arbiter.Otel
+
+  other-modules:
     Arbiter.Otel.Gauges
-    Arbiter.Otel.Gauges.Cells
+    Arbiter.Otel.Gauges.Cache
+    Arbiter.Otel.Gauges.Coordination
+    Arbiter.Otel.Gauges.Instruments
+    Arbiter.Otel.Gauges.Scan
     Arbiter.Otel.Logs
     Arbiter.Otel.MetricNames
     Arbiter.Otel.Metrics

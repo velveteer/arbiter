@@ -36,7 +36,12 @@ import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async qualified as Async
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (WorkerConfig (..), WorkerConfigException (..), validateWorkerConfig)
+import Arbiter.Worker.Config
+  ( WorkerConfig (..)
+  , WorkerConfigException (..)
+  , validateWorkerConfig
+  , workerStateVar
+  )
 import Arbiter.Worker.EnabledQueues (enabledQueuesForMonad, requestedQueuesForMonad)
 import Arbiter.Worker.Logger (LogConfig (..), (.=))
 import Arbiter.Worker.Pool (runWorkerPool)

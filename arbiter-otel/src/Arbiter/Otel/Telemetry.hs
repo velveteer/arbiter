@@ -4,6 +4,7 @@
 -- each signal's endpoint and exporter from the standard @OTEL_@ variables.
 module Arbiter.Otel.Telemetry
   ( Telemetry (..)
+  , newTelemetry
   , withTelemetry
   , withTelemetryIf
   , withTelemetryFromEnv
@@ -236,15 +237,21 @@ withTelemetryFromEnv action = do
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 
--- | Build 'Telemetry' over providers the caller installed itself, which the meters and
--- the log destination bind to here. A 'Nothing' provider leaves that signal off, as
--- does a provider whose instruments fail to build.
+-- | Build telemetry instruments over providers owned by the application.
+newTelemetry :: MeterProvider -> Maybe LoggerProvider -> IO Telemetry
+newTelemetry mp = buildExternalTelemetry (Just mp)
+
+-- | Run an action with application-owned providers. Missing providers disable
+-- their applicable signals.
 withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
-withExternalTelemetry mmp mlp action = do
+withExternalTelemetry mmp mlp action = buildExternalTelemetry mmp mlp >>= action
+
+buildExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> IO Telemetry
+buildExternalTelemetry mmp mlp = do
   tracing <- isJust <$> resolveTracer
   ms <- traverse arbiterInstruments mmp
   readerOpts <- periodicMetricReaderOptionsFromEnv
-  action
+  pure
     (baseTelemetry (fromMaybe noopMeterProvider mmp))
       { meters = either (const Nothing) Just =<< ms
       , logDestination = loggerDestination <$> mlp

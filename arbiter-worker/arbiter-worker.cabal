@@ -45,24 +45,28 @@ library
   exposed-modules:
     Arbiter.Worker
     Arbiter.Worker.BackoffStrategy
-    Arbiter.Worker.ChannelHandlers
     Arbiter.Worker.Config
     Arbiter.Worker.Cron
-    Arbiter.Worker.EnabledQueues
     Arbiter.Worker.Logger
-    Arbiter.Worker.MultiQueue
-    Arbiter.Worker.WorkerState
 
   other-modules:
+    Arbiter.Worker.ChannelHandlers
+    Arbiter.Worker.Cron.Scheduler
+    Arbiter.Worker.Cron.Types
     Arbiter.Worker.Dispatcher
+    Arbiter.Worker.EnabledQueues
+    Arbiter.Worker.MultiQueue
     Arbiter.Worker.Heartbeat
     Arbiter.Worker.Logger.Internal
     Arbiter.Worker.NotificationListener
     Arbiter.Worker.Pool
+    Arbiter.Worker.Processing
     Arbiter.Worker.Reaper
     Arbiter.Worker.Results
     Arbiter.Worker.Retry
     Arbiter.Worker.Settle
+    Arbiter.Worker.Settlement
+    Arbiter.Worker.WorkerState
 
   build-depends:
     , aeson               >=2.0  && <2.3

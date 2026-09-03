@@ -15,12 +15,12 @@
 -- @
 module Arbiter.Otel
   ( -- * Setup
-    Telemetry (..)
-  , withTelemetry
-  , withTelemetryIf
+    Telemetry
+  , newTelemetry
   , withTelemetryFromEnv
   , withExternalTelemetry
   , telemetryLogConfig
+  , telemetrySummary
 
     -- * Instrumenting a pool
   , instrumentPool
@@ -37,15 +37,7 @@ module Arbiter.Otel
   , withGauges
   , startGauges
 
-    -- * Metrics
-  , ArbiterMeters
-  , arbiterMeter
-  , newArbiterMeters
-  , otelHooks
-  , otelMaintenance
-  , otelLogs
-  , loggerDestination
-  , attrs
+    -- * Metric names
   , arbiterMetricNames
   ) where
 
@@ -65,23 +57,14 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
-import Arbiter.Otel.Logs (loggerDestination, otelLogs)
 import Arbiter.Otel.MetricNames (arbiterMetricNames)
-import Arbiter.Otel.Metrics
-  ( ArbiterMeters
-  , arbiterMeter
-  , attrs
-  , newArbiterMeters
-  , otelHooks
-  , otelMaintenance
-  )
+import Arbiter.Otel.Metrics (otelHooks, otelMaintenance)
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
+  , newTelemetry
   , telemetryLogConfig
   , withExternalTelemetry
-  , withTelemetry
   , withTelemetryFromEnv
-  , withTelemetryIf
   )
 
 -- | Give a pool consumer spans, lifecycle metrics, and the telemetry log destination.

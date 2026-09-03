@@ -442,7 +442,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(max by (table) (rate(arbiter_pg_table_blocks_total{source=\"hit\"}[5m]))) / sum(max by (table, source) (rate(arbiter_pg_table_blocks_total[5m])))"
+          "expr": "sum(clamp_min(delta(max by (table) (arbiter_pg_table_blocks{source=\"hit\"})[5m:]), 0)) / sum(clamp_min(delta(max by (table, source) (arbiter_pg_table_blocks)[5m:]), 0))"
         }
       ]
     },
@@ -691,7 +691,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (table, path) (rate(arbiter_pg_table_scans_total[5m]))",
+          "expr": "clamp_min(delta(max by (table, path) (arbiter_pg_table_scans)[5m:]), 0) / 300",
           "legendFormat": "{{table}} / {{path}}"
         }
       ]
