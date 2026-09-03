@@ -126,9 +126,9 @@ instance (FromJSON payload) => FromJSON (ApiJob payload) where
   parseJSON value = ApiJob <$> parseJSON value
 
 instance (FromJSON payload) => FromJSON (ApiJobWithStatus payload) where
-  parseJSON v = do
-    ApiJob job <- parseJSON v
-    status <- withObject "JobWithStatus" (.: "status") v
+  parseJSON value = do
+    ApiJob job <- parseJSON value
+    status <- withObject "JobWithStatus" (.: "status") value
     pure $ ApiJobWithStatus job status
 
 instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
@@ -144,14 +144,14 @@ instance (ToJSON payload) => ToJSON (ApiJobWrite payload) where
       ]
 
 instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
-  parseJSON = withObject "JobWrite" $ \v -> do
-    payload <- v .: "payload"
-    group <- v .:? "groupKey"
-    priority <- v .:? "priority" .!= 0
-    visibleAt <- v .:? "notVisibleUntil"
-    dedup <- v .:? "dedupKey"
-    attempts <- v .:? "maxAttempts"
-    retention <- v .:! "archiveFor" .!= Nothing
+  parseJSON = withObject "JobWrite" $ \obj -> do
+    payload <- obj .: "payload"
+    group <- obj .:? "groupKey"
+    priority <- obj .:? "priority" .!= 0
+    visibleAt <- obj .:? "notVisibleUntil"
+    dedup <- obj .:? "dedupKey"
+    attempts <- obj .:? "maxAttempts"
+    retention <- obj .:! "archiveFor" .!= Nothing
     pure . ApiJobWrite
       $ Arb.setArchiveFor retention
       $ Arb.setMaxAttempts attempts
@@ -174,12 +174,12 @@ instance (ToJSON payload) => ToJSON (ApiDLQJob payload) where
       ]
 
 instance (FromJSON payload) => FromJSON (ApiDLQJob payload) where
-  parseJSON = withObject "DLQJob" $ \v -> do
-    apiJob <- v .: "jobSnapshot"
+  parseJSON = withObject "DLQJob" $ \obj -> do
+    apiJob <- obj .: "jobSnapshot"
     dlq <-
       DLQ.DLQJob
-        <$> v .: "dlqPrimaryKey"
-        <*> v .: "failedAt"
+        <$> obj .: "dlqPrimaryKey"
+        <*> obj .: "failedAt"
         <*> pure (unApiJob apiJob)
     pure $ ApiDLQJob dlq
 
@@ -188,24 +188,24 @@ newtype ApiArchiveJob payload = ApiArchiveJob {unApiArchiveJob :: Archive.Archiv
   deriving stock (Eq, Show)
 
 instance (ToJSON payload) => ToJSON (ApiArchiveJob payload) where
-  toJSON (ApiArchiveJob a) =
+  toJSON (ApiArchiveJob archived) =
     object
-      [ "archivePrimaryKey" .= Archive.archivePrimaryKey a
-      , "completedAt" .= Archive.completedAt a
-      , "jobSnapshot" .= ApiJob (Archive.jobSnapshot a)
-      , "result" .= Archive.archivedResult a
+      [ "archivePrimaryKey" .= Archive.archivePrimaryKey archived
+      , "completedAt" .= Archive.completedAt archived
+      , "jobSnapshot" .= ApiJob (Archive.jobSnapshot archived)
+      , "result" .= Archive.archivedResult archived
       ]
 
 instance (FromJSON payload) => FromJSON (ApiArchiveJob payload) where
-  parseJSON = withObject "ArchiveJob" $ \v -> do
-    apiJob <- v .: "jobSnapshot"
-    a <-
+  parseJSON = withObject "ArchiveJob" $ \obj -> do
+    apiJob <- obj .: "jobSnapshot"
+    archived <-
       Archive.ArchiveJob
-        <$> v .: "archivePrimaryKey"
-        <*> v .: "completedAt"
+        <$> obj .: "archivePrimaryKey"
+        <*> obj .: "completedAt"
         <*> pure (unApiJob apiJob)
-        <*> v .:? "result"
-    pure $ ApiArchiveJob a
+        <*> obj .:? "result"
+    pure $ ApiArchiveJob archived
 
 -- | Response wrapper for archived jobs.
 data ArchiveResponse payload = ArchiveResponse
@@ -246,8 +246,8 @@ data ClaimRequest = ClaimRequest
   deriving stock (Eq, Show)
 
 instance FromJSON ClaimRequest where
-  parseJSON = withObject "ClaimRequest" $ \o ->
-    ClaimRequest <$> o .:? "maxJobs" <*> o .:? "leaseSeconds"
+  parseJSON = withObject "ClaimRequest" $ \obj ->
+    ClaimRequest <$> obj .:? "maxJobs" <*> obj .:? "leaseSeconds"
 
 instance ToJSON ClaimRequest where
   toJSON req = object ["maxJobs" .= crMaxJobs req, "leaseSeconds" .= crLeaseSeconds req]
@@ -258,10 +258,10 @@ newtype ClaimResponse payload = ClaimResponse {claimedJobs :: [ApiJob payload]}
   deriving stock (Eq, Show)
 
 instance (ToJSON payload) => ToJSON (ClaimResponse payload) where
-  toJSON (ClaimResponse js) = object ["jobs" .= js]
+  toJSON (ClaimResponse claimed) = object ["jobs" .= claimed]
 
 instance (FromJSON payload) => FromJSON (ClaimResponse payload) where
-  parseJSON = withObject "ClaimResponse" $ \o -> ClaimResponse <$> o .: "jobs"
+  parseJSON = withObject "ClaimResponse" $ \obj -> ClaimResponse <$> obj .: "jobs"
 
 -- | Proof that the caller still holds a claimed job.
 data JobLease = JobLease
@@ -271,8 +271,8 @@ data JobLease = JobLease
   deriving stock (Eq, Show)
 
 instance FromJSON JobLease where
-  parseJSON = withObject "JobLease" $ \o ->
-    JobLease <$> o .: "claimSeq" <*> o .: "claimedBy"
+  parseJSON = withObject "JobLease" $ \obj ->
+    JobLease <$> obj .: "claimSeq" <*> obj .: "claimedBy"
 
 -- | Shared JSON fields for a lease. Request encoders append request-specific fields.
 jobLeasePairs :: JobLease -> [Pair]
@@ -289,11 +289,11 @@ data AckRequest result = AckRequest
   deriving stock (Eq, Show)
 
 instance (FromJSON result) => FromJSON (AckRequest result) where
-  parseJSON = withObject "AckRequest" $ \o ->
-    AckRequest <$> parseJSON (Object o) <*> o .:? "result"
+  parseJSON = withObject "AckRequest" $ \obj ->
+    AckRequest <$> parseJSON (Object obj) <*> obj .:? "result"
 
 instance (ToJSON result) => ToJSON (AckRequest result) where
-  toJSON req = object (jobLeasePairs (arLease req) <> foldMap (\r -> ["result" .= r]) (arResult req))
+  toJSON req = object (jobLeasePairs (arLease req) <> foldMap (\stored -> ["result" .= stored]) (arResult req))
 
 -- | A lease plus the window to hide the job for, counted from now.
 data ExtendRequest = ExtendRequest
@@ -303,8 +303,8 @@ data ExtendRequest = ExtendRequest
   deriving stock (Eq, Show)
 
 instance FromJSON ExtendRequest where
-  parseJSON = withObject "ExtendRequest" $ \o ->
-    ExtendRequest <$> parseJSON (Object o) <*> o .: "seconds"
+  parseJSON = withObject "ExtendRequest" $ \obj ->
+    ExtendRequest <$> parseJSON (Object obj) <*> obj .: "seconds"
 
 instance ToJSON ExtendRequest where
   toJSON req = object (jobLeasePairs (erLease req) <> ["seconds" .= erSeconds req])
@@ -321,8 +321,8 @@ instance ToJSON MaintenanceResponse where
   toJSON (MaintenanceResponse ops failed) = object ["ops" .= ops, "failed" .= failed]
 
 instance FromJSON MaintenanceResponse where
-  parseJSON = withObject "MaintenanceResponse" $ \o ->
-    MaintenanceResponse <$> o .: "ops" <*> o .:? "failed" .!= []
+  parseJSON = withObject "MaintenanceResponse" $ \obj ->
+    MaintenanceResponse <$> obj .: "ops" <*> obj .:? "failed" .!= []
 
 -- | Response wrapper for DLQ jobs.
 data DLQResponse payload = DLQResponse
@@ -395,13 +395,13 @@ data CronScheduleView = CronScheduleView
 
 -- | The row's own fields, with @nextRunAt@ alongside them.
 instance ToJSON CronScheduleView where
-  toJSON v = case toJSON (schedule v) of
-    Object o -> Object (KM.insert "nextRunAt" (toJSON (nextRunAt v)) o)
+  toJSON view = case toJSON (schedule view) of
+    Object obj -> Object (KM.insert "nextRunAt" (toJSON (nextRunAt view)) obj)
     other -> other
 
 instance FromJSON CronScheduleView where
-  parseJSON = withObject "CronScheduleView" $ \o ->
-    CronScheduleView <$> parseJSON (Object o) <*> o .:? "nextRunAt"
+  parseJSON = withObject "CronScheduleView" $ \obj ->
+    CronScheduleView <$> parseJSON (Object obj) <*> obj .:? "nextRunAt"
 
 -- | Cron schedules response.
 data CronSchedulesResponse = CronSchedulesResponse
@@ -467,7 +467,7 @@ instance ToJSON HealthStatus where
   toJSON = toJSON . healthStatusToText
 
 instance FromJSON HealthStatus where
-  parseJSON = withText "HealthStatus" $ \t -> case t of
+  parseJSON = withText "HealthStatus" $ \txt -> case txt of
     "ok" -> pure Ok
     "down" -> pure Down
     _ -> fail "expected ok or down"

@@ -89,5 +89,5 @@ countOrZero :: (MonadArbiter m) => Query Int64 -> m Int64
 countOrZero query = do
   rows <- MA.executeQuery query
   pure $ case rows of
-    [n] -> n
+    [count] -> count
     _ -> 0

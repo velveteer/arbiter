@@ -64,8 +64,8 @@ calculateBackoff strategy attempts = case strategy of
      in min cap delay
   Constant delay ->
     delay
-  Custom f ->
-    f attempts
+  Custom delayFor ->
+    delayFor attempts
 
 -- | Apply jitter to a calculated delay.
 applyJitter :: Jitter -> NominalDiffTime -> IO NominalDiffTime

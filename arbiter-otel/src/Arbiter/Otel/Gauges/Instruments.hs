@@ -53,7 +53,7 @@ registerInstruments :: Meter -> GaugeCache -> IO (Cached -> IO ())
 registerInstruments meter cache = do
   let withCached emit = [\res -> readTVarIO (export cache) >>= traverse_ (emit res) . live]
       callback emit = withCached (\res -> emit res . reading)
-      -- Every replica exports the winner's reading, so aggregate with max, never sum.
+      -- Every replica exports the winner's reading. Aggregate with max.
       shared desc = desc <> " (shared reading, do not sum across replicas)"
       regGauge name unit desc cbs =
         void $
@@ -73,37 +73,37 @@ registerInstruments meter cache = do
             (Just unit)
             (Just (shared desc))
             defaultAdvisoryParameters
-        pure $ \c ->
+        pure $ \cached ->
           traverse_
-            (addRise (counterBaselines cache) (Name.metricName name) counter (takenAt c))
-            (series (reading c))
+            (addRise (counterBaselines cache) (Name.metricName name) counter (takenAt cached))
+            (series (reading cached))
 
   reg Name.QueueDepth "{job}" "Jobs in a queue by status" $
     observed $
-      over queues $ \o ->
-        [ ([("queue", overviewQueue o), ("status", st)], fromIntegral n)
-        | (st, n) <- statusCounts (overviewStats o)
+      over queues $ \overview ->
+        [ ([("queue", overviewQueue overview), ("status", status)], fromIntegral count)
+        | (status, count) <- statusCounts (overviewStats overview)
         ]
   reg Name.QueueDepthByKind "{job}" "Jobs in a queue by payload variant" $
     observed $
-      over queues $ \o ->
-        [ ([("queue", overviewQueue o), ("kind", k)], fromIntegral n)
-        | (k, n) <- Map.toList (kindCounts (overviewStats o))
+      over queues $ \overview ->
+        [ ([("queue", overviewQueue overview), ("kind", kind)], fromIntegral count)
+        | (kind, count) <- Map.toList (kindCounts (overviewStats overview))
         ]
   reg Name.QueueOldestReadyAge "s" "Age of the oldest claimable job (0 = none ready)" $
     perQueue oldestReadyAgeSeconds
   reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased (0 = none in flight)" $
     perQueue oldestInFlightAgeSeconds
-  -- Active and paused partition the pools with a fresh heartbeat, so a queue's fleet is their sum.
+  -- Active and paused partition the pools with a fresh heartbeat. A queue's fleet is their sum.
   reg Name.Workers "{worker}" "Registered workers by state" $
     observed $
-      over queues $ \o ->
-        let paused = overviewWorkersPaused o
-         in [ ([("queue", overviewQueue o), ("state", "active")], fromIntegral (max 0 (overviewWorkersLive o - paused)))
-            , ([("queue", overviewQueue o), ("state", "paused")], fromIntegral paused)
+      over queues $ \overview ->
+        let paused = overviewWorkersPaused overview
+         in [ ([("queue", overviewQueue overview), ("state", "active")], fromIntegral (max 0 (overviewWorkersLive overview - paused)))
+            , ([("queue", overviewQueue overview), ("state", "paused")], fromIntegral paused)
             ]
 
-  -- Keyed by policy prefix, never by admission key: a per-tenant suffix would be unbounded.
+  -- Keyed by policy prefix.
   reg Name.AdmissionKeys "{key}" "Live admission keys, by policy" $
     bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
   reg Name.AdmissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
@@ -114,9 +114,9 @@ registerInstruments meter cache = do
     perConcurrency (fromIntegral . fromMaybe 0 . Conc.maxInFlight)
   reg Name.AdmissionTokens "{token}" "Rate-limit tokens left across a policy's buckets" $
     observed $
-      over rateLimits $ \p ->
-        [ ([("policy", RL.prefix p), ("stat", stat)], fromMaybe 0 mt)
-        | (stat, mt) <- [("min", RL.minTokens p), ("avg", RL.avgTokens p)]
+      over rateLimits $ \policy ->
+        [ ([("policy", RL.prefix policy), ("stat", stat)], fromMaybe 0 tokens)
+        | (stat, tokens) <- [("min", RL.minTokens policy), ("avg", RL.avgTokens policy)]
         ]
 
   reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
@@ -138,21 +138,23 @@ registerInstruments meter cache = do
   advances <-
     sequence
       [ regCounter Name.PgTableScans "{scan}" "Table scans, by the access path they took" $
-          perTableTotals "path" (\t -> [("seq", Health.seqScan t), ("index", Health.idxScan t)])
+          perTableTotals "path" (\tableHealth -> [("seq", Health.seqScan tableHealth), ("index", Health.idxScan tableHealth)])
       , regCounter Name.PgTableBlocks "{block}" "Block reads for the table, by whether they hit the cache" $
-          perTableTotals "source" (\t -> [("hit", Health.blksHit t), ("disk", Health.blksRead t)])
+          perTableTotals "source" (\tableHealth -> [("hit", Health.blksHit tableHealth), ("disk", Health.blksRead tableHealth)])
       ]
 
-  -- Absent until the first scan, so a reading never claims to know before it does.
+  -- Absent until the first scan.
   regGauge
     Name.DbReachable
     "{status}"
     "1 when the last health scan reached the database, 0 when it failed"
-    [\res -> readTVarIO (databaseReachable cache) >>= traverse_ (\ok -> observe res (if ok then 1 else 0) (attrs []))]
+    [ \res ->
+        readTVarIO (databaseReachable cache) >>= traverse_ (\reachable -> observe res (if reachable then 1 else 0) (attrs []))
+    ]
 
-  -- How far behind the exported readings have fallen, from registration until the
-  -- first. A stopped loop leaves the other gauges holding their last reading, which
-  -- only this tells apart from a fresh one.
+  -- How far behind the exported readings have fallen. Before the first scan it counts
+  -- from registration. A stopped loop leaves the other gauges holding their last
+  -- reading. This gauge tells that reading apart from a fresh one.
   regGauge
     Name.GaugesAge
     "s"
@@ -163,37 +165,41 @@ registerInstruments meter cache = do
         observe res (now - fromMaybe (registeredAt cache) scanned) (attrs [])
     ]
 
-  pure (\c -> traverse_ ($ c) advances)
+  pure (\cached -> traverse_ ($ cached) advances)
   where
-    effectiveLimit p = fromMaybe (Conc.defaultLimit p) (Conc.overrideLimit p)
-    effectiveMaxTokens p = fromMaybe (RL.defaultMaxTokens p) (RL.overrideMaxTokens p)
+    effectiveLimit policy = fromMaybe (Conc.defaultLimit policy) (Conc.overrideLimit policy)
+    effectiveMaxTokens policy = fromMaybe (RL.defaultMaxTokens policy) (RL.overrideMaxTokens policy)
     statusCounts = map (first jobStatusToText) . queueStatusCounts
-    connCounts h =
-      [ ("active", Health.connActive h)
-      , ("idle", Health.connIdle h)
-      , ("idle_in_transaction", Health.connIdleInTxn h)
-      , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted h)
-      , ("blocked", Health.connBlocked h)
-      , ("other", Health.connOther h)
+    connCounts dbHealth =
+      [ ("active", Health.connActive dbHealth)
+      , ("idle", Health.connIdle dbHealth)
+      , ("idle_in_transaction", Health.connIdleInTxn dbHealth)
+      , ("idle_in_transaction_aborted", Health.connIdleInTxnAborted dbHealth)
+      , ("blocked", Health.connBlocked dbHealth)
+      , ("other", Health.connOther dbHealth)
       ]
     -- Every series is a list of rows picked out of the snapshot, each row labelled
     -- and valued. Counters hand that list over, gauges observe it.
     over pick label snap = concatMap label (pick snap)
-    observed rows res = traverse_ (\(kvs, v) -> observe res v (attrs kvs)) . rows
-    perConcurrency field = observed (over concurrency (\p -> [([("policy", Conc.prefix p)], field p)]))
+    observed rows res = traverse_ (\(kvs, value) -> observe res value (attrs kvs)) . rows
+    perConcurrency field = observed (over concurrency (\policy -> [([("policy", Conc.prefix policy)], field policy)]))
     bothKinds concField rateField = observed $ \snap ->
-      [([("policy_kind", concurrencyKind), ("policy", Conc.prefix p)], concField p) | p <- concurrency snap]
-        <> [([("policy_kind", rateLimitKind), ("policy", RL.prefix p)], rateField p) | p <- rateLimits snap]
+      [([("policy_kind", concurrencyKind), ("policy", Conc.prefix policy)], concField policy) | policy <- concurrency snap]
+        <> [([("policy_kind", rateLimitKind), ("policy", RL.prefix policy)], rateField policy) | policy <- rateLimits snap]
     dbOf = toList . db
     perTableTotals label pairs =
-      over tables (\t -> [([("table", Health.table t), (label, k)], v) | (k, v) <- pairs t])
-    perDbTotals label pairs = over dbOf (\h -> [([(label, k)], v) | (k, v) <- pairs h])
-    dbTotal field = over dbOf (\h -> [([], field h)])
-    perTable field = observed (over tables (\t -> [([("table", Health.table t)], field t)]))
+      over
+        tables
+        (\tableHealth -> [([("table", Health.table tableHealth), (label, key)], value) | (key, value) <- pairs tableHealth])
+    perDbTotals label pairs = over dbOf (\dbHealth -> [([(label, key)], value) | (key, value) <- pairs dbHealth])
+    dbTotal field = over dbOf (\dbHealth -> [([], field dbHealth)])
+    perTable field = observed (over tables (\tableHealth -> [([("table", Health.table tableHealth)], field tableHealth)]))
     perTableMaybe field =
-      observed (over tables (\t -> [([("table", Health.table t)], v) | v <- toList (field t)]))
+      observed
+        (over tables (\tableHealth -> [([("table", Health.table tableHealth)], value) | value <- toList (field tableHealth)]))
     perQueue field =
-      observed (over queues (\o -> [([("queue", overviewQueue o)], fromMaybe 0 (field (overviewStats o)))]))
+      observed
+        (over queues (\overview -> [([("queue", overviewQueue overview)], fromMaybe 0 (field (overviewStats overview)))]))
     perDb = observed . dbTotal
     perDbBy label = observed . perDbTotals label
 

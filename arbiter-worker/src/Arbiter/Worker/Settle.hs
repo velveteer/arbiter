@@ -1,8 +1,7 @@
 -- | Batch finalization state and ordered finalization operations.
 --
 -- A finalization commits the outcome, records it, and then calls its hooks. The
--- record must precede the hooks. Otherwise, a concurrent heartbeat can report
--- the finalized job again. 'settle' enforces this order.
+-- record precedes the hooks. 'settle' enforces this order.
 module Arbiter.Worker.Settle
   ( -- * Handoff
     CancelHandoff
@@ -69,7 +68,7 @@ hasIdIn ids job = Set.member (Job.primaryKey job) ids
 -- | Select jobs from the batch in descending identifier order. This gives ack,
 -- force-cancel, and heartbeat operations the same row-lock order.
 byIdDesc :: (Job.JobRead payload -> Bool) -> NonEmpty (Job.JobRead payload) -> [Job.JobRead payload]
-byIdDesc p = sortOn (Down . Job.primaryKey) . filter p . toList
+byIdDesc keep = sortOn (Down . Job.primaryKey) . filter keep . toList
 
 -- | Jobs in the batch that have no recorded outcome.
 pendingJobs :: (MonadIO m) => CancelHandoff -> NonEmpty (Job.JobRead payload) -> m [Job.JobRead payload]
@@ -87,39 +86,40 @@ unownedJobs handoff jobs = do
 -- and every id recorded so far.
 recordCancelled :: (MonadIO m) => CancelHandoff -> Set.Set Int64 -> m (Set.Set Int64, Set.Set Int64)
 recordCancelled handoff ids =
-  onProgress handoff $ \p ->
-    let s = progressCancelled p <> ids in (p {progressCancelled = s}, (ids Set.\\ progressCancelled p, s))
+  onProgress handoff $ \progress ->
+    let cancelled = progressCancelled progress <> ids
+     in (progress {progressCancelled = cancelled}, (ids Set.\\ progressCancelled progress, cancelled))
 
--- | Whether a force-cancel was finalized in full, which only the finalizer records.
+-- | Whether the force-cancel finalizer ran to completion.
 cancelFinalized :: (MonadIO m) => CancelHandoff -> m Bool
 cancelFinalized = fmap progressFinalized . readProgress
 
 markCancelFinalized :: (MonadIO m) => CancelHandoff -> m ()
-markCancelFinalized handoff = onProgress handoff $ \p -> (p {progressFinalized = True}, ())
+markCancelFinalized handoff = onProgress handoff $ \progress -> (progress {progressFinalized = True}, ())
 
 -- | What a settle accounted for: the jobs it finalized, and the jobs it found under
 -- another claim.
 data Settled payload = Settled [Job.JobRead payload] [Job.JobRead payload]
 
 instance Semigroup (Settled payload) where
-  Settled a b <> Settled c d = Settled (a <> c) (b <> d)
+  Settled handledA unownedA <> Settled handledB unownedB = Settled (handledA <> handledB) (unownedA <> unownedB)
 
 -- | Jobs a settle finalized.
 finalized :: [Job.JobRead payload] -> Settled payload
-finalized js = Settled js []
+finalized jobs = Settled jobs []
 
 -- | Jobs a settle found under another claim.
 disowned :: [Job.JobRead payload] -> Settled payload
-disowned js = Settled [] js
+disowned jobs = Settled [] jobs
 
 -- | Record a finalization in one atomic update. Jobs owned by another claim also
 -- count as handled.
 record :: (MonadIO m) => CancelHandoff -> Settled payload -> m ()
 record handoff (Settled handled unowned) =
-  onProgress handoff $ \p ->
-    ( p
-        { progressHandled = progressHandled p <> ids handled <> gone
-        , progressUnowned = progressUnowned p <> gone
+  onProgress handoff $ \progress ->
+    ( progress
+        { progressHandled = progressHandled progress <> ids handled <> gone
+        , progressUnowned = progressUnowned progress <> gone
         }
     , ()
     )
@@ -138,11 +138,11 @@ settleWith
   -> (a -> Settled payload)
   -- ^ What it accounted for.
   -> (a -> m b)
-  -- ^ Hooks, which the record always precedes.
+  -- ^ Hooks. The record precedes them.
   -> m b
 settleWith protect handoff commit accounts hooks = do
-  a <- protect $ commit >>= \r -> r <$ record handoff (accounts r)
-  hooks a
+  outcome <- protect $ commit >>= \result -> result <$ record handoff (accounts result)
+  hooks outcome
 
 -- | Apply 'settleWith' to a set known before the commit. Mask asynchronous
 -- exceptions between the commit and state update.
@@ -153,9 +153,9 @@ settle
   -> m a
   -> (a -> m b)
   -> m b
-settle handoff s commit = settleWith mask_ handoff commit (const s)
+settle handoff settled commit = settleWith mask_ handoff commit (const settled)
 
--- | 'settle' for a commit that decides what it settled, which only a bulk ack needs.
+-- | 'settle' for a commit that decides what it settled.
 settleBy
   :: (MonadUnliftIO m)
   => CancelHandoff
@@ -174,4 +174,4 @@ settleInterruptibly
   -> m a
   -> (a -> m b)
   -> m b
-settleInterruptibly handoff s commit = settleWith id handoff commit (const s)
+settleInterruptibly handoff settled commit = settleWith id handoff commit (const settled)

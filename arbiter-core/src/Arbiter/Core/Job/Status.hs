@@ -27,12 +27,11 @@ jobStatusToText Suspended = "suspended"
 jobStatusToText Throttled = "throttled"
 jobStatusToText Cancelled = "cancelled"
 
--- | Strict inverse of 'jobStatusToText'. Unknown values are rejected so SQL
--- changes and mixed-version deployments cannot silently report a job as ready.
+-- | Strict inverse of 'jobStatusToText'. Unknown values are rejected.
 jobStatusFromText :: Text -> Either Text JobStatus
-jobStatusFromText t =
-  maybe (Left ("unknown job status: " <> t)) Right $
-    lookup t [(jobStatusToText status, status) | status <- [minBound .. maxBound]]
+jobStatusFromText name =
+  maybe (Left ("unknown job status: " <> name)) Right $
+    lookup name [(jobStatusToText status, status) | status <- [minBound .. maxBound]]
 
 instance ToJSON JobStatus where
   toJSON = toJSON . jobStatusToText

@@ -33,7 +33,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   pool <- runIO (createHasqlPool 40 connStr)
   pgPool <- runIO (createSharedPool connStr)
-  -- Prepared claims on, so this suite covers the prepared statement path.
+  -- This suite runs with prepared claims on.
   env <- runIO (setPreparedStatements True <$> createHasqlEnvWithPool (Proxy @SMRegistry) pool testSchema)
   let run :: forall a. HasqlDb SMRegistry IO a -> IO a
       run = runHasqlDb env

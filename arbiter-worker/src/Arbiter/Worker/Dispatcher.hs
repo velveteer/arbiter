@@ -37,7 +37,7 @@ runDispatcher
   -> STM.TVar (Maybe Notification)
   -> m ()
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
-  -- The claim statement only varies with free capacity, so render every variant once.
+  -- The claim statement varies only with free capacity. Render every variant once.
   claimSql <-
     Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (workerId config)
   claimGate <- newFailureGate
@@ -45,8 +45,8 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do
       busyCount <- STM.readTVar busyWorkerCount
-      qLen <- fromIntegral <$> STM.lengthTBQueue workQueue
-      pure $ workerCapacity - (busyCount + qLen)
+      queuedCount <- fromIntegral <$> STM.lengthTBQueue workQueue
+      pure $ workerCapacity - (busyCount + queuedCount)
 
     getFreeWorkers :: STM.STM (Maybe Int)
     getFreeWorkers = do
@@ -62,7 +62,7 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
           BatchedJobsMode _ _ ->
             Ops.claimJobsBatchedCached claimSql freeWorkers
       traverse_ (STM.atomically . traverse_ (STM.writeTBQueue workQueue)) eJobs
-      -- Pulse on every attempt so a failing claim path still proves liveness.
+      -- Pulse on every attempt, including a failed claim.
       STM.atomically $ void $ STM.tryPutTMVar (heartbeatSignal config) ()
 
     claimOnWakeup :: m ()
@@ -71,8 +71,8 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
       traverse_ claimAndEnqueue mFree
 
     workerFinishedTrigger = Just $ do
-      d <- STM.readTVar workerFinishedVar
-      STM.checkSTM d
+      finished <- STM.readTVar workerFinishedVar
+      STM.checkSTM finished
       STM.writeTVar workerFinishedVar False
 
   runNotificationConsumer

@@ -79,7 +79,7 @@ spec connStr = do
         cleanup connStr
         ref <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb SizingTestRegistry IO) WorkerTestPayload ()
-            handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
+            handler _conn _job = liftIO $ atomicModifyIORef' ref $ \count -> (count + 1, ())
         config <- transactionalWorkerConfig 3 handler
         let pools = [namedWorkerPool config {pollInterval = 0.2, jitter = NoJitter}]
         poolCfg <- poolConfigForWorkers pools
@@ -87,10 +87,10 @@ spec connStr = do
         env <- createSimpleEnvWithConfig (Proxy @SizingTestRegistry) connStr testSchema poolCfg
         withAsync (runSimpleDb env $ runWorkerPools pools) $ \_ -> do
           producer <- createSimpleEnv (Proxy @SizingTestRegistry) connStr testSchema
-          forM_ [1 :: Int .. 6] $ \i ->
+          forM_ [1 :: Int .. 6] $ \jobIndex ->
             runSimpleDb producer
               $ void
-              $ HL.insertJob (defaultJob (SimpleTask (T.pack ("sizing " <> show i))))
+              $ HL.insertJob (defaultJob (SimpleTask (T.pack ("sizing " <> show jobIndex))))
           waitUntil 10_000 $ (== 6) <$> readIORef ref
           readIORef ref >>= (`shouldBe` 6)
           destroySimpleEnv producer

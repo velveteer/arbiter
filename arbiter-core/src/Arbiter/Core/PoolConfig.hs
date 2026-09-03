@@ -11,12 +11,12 @@ data PoolConfig = PoolConfig
   , poolIdleTimeout :: Int
   -- ^ Idle timeout (seconds)
   , poolStripes :: Maybe Int
-  -- ^ Sub-pools, which spread checkout contention. 'Nothing' picks one per CPU.
+  -- ^ Sub-pools. 'Nothing' picks one per CPU.
   }
   deriving stock (Eq, Show)
 
 -- | 10 connections, 300s idle timeout, 1 stripe. For workers, size the pool
--- with 'Arbiter.Worker.poolConfigForWorkers' instead.
+-- with 'Arbiter.Worker.poolConfigForWorkers'.
 defaultPoolConfig :: PoolConfig
 defaultPoolConfig =
   PoolConfig

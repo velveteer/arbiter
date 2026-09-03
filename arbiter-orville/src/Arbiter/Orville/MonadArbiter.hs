@@ -65,23 +65,23 @@ orvilleRunHandlerWithConnection :: (job -> m result) -> job -> m result
 orvilleRunHandlerWithConnection handler job = handler job
 
 someParamToSqlValue :: SomeParam -> Either Text SqlValue
-someParamToSqlValue (SomeParam (PScalar c) v) =
-  Right $ FieldDef.fieldValueToSqlValue (colFieldDef "" c) v
-someParamToSqlValue (SomeParam (PNullable c) v) =
-  Right $ FieldDef.fieldValueToSqlValue (O.nullableField (colFieldDef "" c)) v
-someParamToSqlValue (SomeParam (PArray c) vs) = do
-  bs <- traverse (colToBytes c) vs
-  Right $ SqlValue.fromRawBytes $ Array.fmtArray bs
-someParamToSqlValue (SomeParam (PNullArray c) vs) = do
-  bs <- traverse (colToNullableBytes c) vs
-  Right $ SqlValue.fromRawBytes $ Array.fmtNullableArray bs
+someParamToSqlValue (SomeParam (PScalar col) value) =
+  Right $ FieldDef.fieldValueToSqlValue (colFieldDef "" col) value
+someParamToSqlValue (SomeParam (PNullable col) value) =
+  Right $ FieldDef.fieldValueToSqlValue (O.nullableField (colFieldDef "" col)) value
+someParamToSqlValue (SomeParam (PArray col) values) = do
+  bytes <- traverse (colToBytes col) values
+  Right $ SqlValue.fromRawBytes $ Array.fmtArray bytes
+someParamToSqlValue (SomeParam (PNullArray col) values) = do
+  bytes <- traverse (colToNullableBytes col) values
+  Right $ SqlValue.fromRawBytes $ Array.fmtNullableArray bytes
 
 colToBytes :: Col a -> a -> Either Text ByteString
-colToBytes c v = sqlValueToBytes $ FieldDef.fieldValueToSqlValue (colFieldDef "" c) v
+colToBytes col value = sqlValueToBytes $ FieldDef.fieldValueToSqlValue (colFieldDef "" col) value
 
 colToNullableBytes :: Col a -> Maybe a -> Either Text (Maybe ByteString)
 colToNullableBytes _ Nothing = Right Nothing
-colToNullableBytes c (Just v) = Just <$> colToBytes c v
+colToNullableBytes col (Just value) = Just <$> colToBytes col value
 
 sqlValueToBytes :: SqlValue -> Either Text ByteString
 sqlValueToBytes =
@@ -101,13 +101,13 @@ sqlValueToParam =
 encodeParams :: (MonadIO m) => [SomeParam] -> m [Maybe PgTextFormatValue]
 encodeParams = traverse toPgParam
   where
-    toPgParam p = case someParamToSqlValue p >>= sqlValueToParam of
+    toPgParam param = case someParamToSqlValue param >>= sqlValueToParam of
       Left err -> throwInternal $ "param encoding error: " <> err
-      Right pgv -> pure pgv
+      Right pgValue -> pure pgValue
 
 orvilleCol :: NullCol a -> O.SqlMarshaller () a
-orvilleCol (NotNull name c) = O.marshallReadOnly $ O.marshallField id (colFieldDef name c)
-orvilleCol (Nullable name c) = O.marshallReadOnly $ O.marshallField id (O.nullableField (colFieldDef name c))
+orvilleCol (NotNull name col) = O.marshallReadOnly $ O.marshallField id (colFieldDef name col)
+orvilleCol (Nullable name col) = O.marshallReadOnly $ O.marshallField id (O.nullableField (colFieldDef name col))
 
 colFieldDef :: Text -> Col a -> O.FieldDefinition O.NotNull a
 colFieldDef name CInt4 = O.integerField (T.unpack name)
@@ -131,6 +131,6 @@ readRowCount res = do
   mbTuples <- LibPQ.cmdTuples res
   case mbTuples of
     Nothing -> pure 0
-    Just bs -> case SqlValue.toInt (SqlValue.fromRawBytes bs) of
-      Right n -> pure (fromIntegral n)
+    Just bytes -> case SqlValue.toInt (SqlValue.fromRawBytes bytes) of
+      Right count -> pure (fromIntegral count)
       Left _ -> pure 0

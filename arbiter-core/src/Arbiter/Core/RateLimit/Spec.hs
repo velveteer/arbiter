@@ -65,16 +65,16 @@ data RateLimitKey = RateLimitKey
   deriving stock (Eq, Show)
 
 instance ToJSON RateLimitKey where
-  toJSON (RateLimitKey p s) = prefixedKeyToJSON p s
+  toJSON (RateLimitKey prefix suffix) = prefixedKeyToJSON prefix suffix
 
 instance FromJSON RateLimitKey where
   parseJSON = prefixedKeyParseJSON "RateLimitKey" RateLimitKey
 
 -- | The bucket key as stored, prefix and suffix joined.
 rateLimitKeyText :: RateLimitKey -> Text
-rateLimitKeyText (RateLimitKey p s) = prefixedKeyText p s
+rateLimitKeyText (RateLimitKey prefix suffix) = prefixedKeyText prefix suffix
 
--- | A token-bucket policy: burst @policyMax@, refilling @policyRefill@ every
+-- | A token-bucket policy. Burst @policyMax@, refilling @policyRefill@ every
 -- @policyInterval@. A @policyRefill@ of 0 is a manually-refilled bucket.
 data Policy = Policy
   { policyPrefix :: Text
@@ -88,10 +88,10 @@ instance AdmissionPolicy Policy where
   policyPrefixOf = policyPrefix
 
 -- | "N per period" with burst N (max = refill = n). The period is floored to a
--- tiny positive value, since the seeded default must be positive. The prefix must
--- not contain @:@ (the key separator), which the migration enforces.
+-- tiny positive value. The prefix must not contain @:@, the key separator. The
+-- migration enforces this.
 tokenBucket :: Text -> Double -> NominalDiffTime -> Policy
-tokenBucket prefix n period = Policy prefix n n (max 1e-6 period)
+tokenBucket prefix count period = Policy prefix count count (max 1e-6 period)
 
 -- | A selective description of the rate-limit key for a payload. Evaluation
 -- returns the job key. Static inspection returns the reachable policies.
@@ -109,8 +109,8 @@ limitBy = selectBy RateLimitKey
 globalLimit :: Policy -> Text -> RateLimitFor payload
 globalLimit pol suffix = limitBy pol (const suffix)
 
--- | N-way 'chooseWhen': map the job to a finite tag, then each tag to its selector.
--- Policy collection evaluates every tag in @[minBound..maxBound]@, so the tag's
+-- | N-way 'chooseWhen'. Maps the job to a finite tag, then each tag to its selector.
+-- Policy collection evaluates every tag in @[minBound..maxBound]@. The tag's
 -- 'Bounded'\/'Enum' and the selector must be total over @k@.
 limitByCase :: (Bounded k, Enum k, Eq k) => (payload -> k) -> (k -> RateLimitFor payload) -> RateLimitFor payload
 limitByCase = selectByCase
@@ -119,7 +119,7 @@ limitByCase = selectByCase
 runRateLimitFor :: payload -> RateLimitFor payload -> Maybe RateLimitKey
 runRateLimitFor = runSelector
 
--- | A payload's per-job key selection. Defaults to unlimited, so only limited
+-- | A payload's per-job key selection. Defaults to unlimited. Only limited
 -- payloads need an instance.
 class HasRateLimit payload where
   -- | The selector deciding which policy (if any) limits a given job.

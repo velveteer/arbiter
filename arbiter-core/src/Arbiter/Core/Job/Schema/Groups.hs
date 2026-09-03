@@ -3,7 +3,7 @@
 
 -- | Schema for the per-queue group summary table and the statement-level triggers
 -- that maintain it. The summary carries each group's head, counts and visibility
--- deadlines so the claim ranks groups without scanning their jobs.
+-- deadlines. The claim ranks groups from it.
 module Arbiter.Core.Job.Schema.Groups
   ( -- * Grouped Job Indexes
     createJobQueueGroupKeyIndexSQL
@@ -39,7 +39,7 @@ import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
 -- subqueries and by the maintenance triggers recomputing a group's minima and
--- @in_flight_until@ without leaving the index.
+-- @in_flight_until@.
 createJobQueueGroupKeyIndexSQL :: Text -> Text -> Text
 createJobQueueGroupKeyIndexSQL schemaName tableName =
   T.unlines
@@ -49,9 +49,8 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
     ]
 
 -- | Partial index over @(group_key, attempts DESC, priority, id)@ for retried rows,
--- read by the claim's group head gate. Retried rows rank ahead of the rest, so the
--- gate merges this run with the @(group_key, priority, id)@ scan and avoids sorting
--- the whole group.
+-- read by the claim's group head gate. Retried rows rank ahead of the rest. The
+-- gate merges this run with the @(group_key, priority, id)@ scan.
 createJobQueueGroupRetriedIndexSQL :: Text -> Text -> Text
 createJobQueueGroupRetriedIndexSQL schemaName tableName =
   T.unlines
@@ -155,7 +154,7 @@ groupsMergeSet groupsTbl =
   |]
 
 -- | Lock a queue's group summaries in @group_key@ order. Every maintenance function
--- takes them this way, so two concurrent statements cannot deadlock on them.
+-- takes them this way.
 groupsLock :: Text -> Text -> Text
 groupsLock groupsTbl keys =
   [text|
@@ -165,13 +164,13 @@ groupsLock groupsTbl keys =
   |]
 
 groupsInsertFunction :: Text -> Text -> Text -> Text
-groupsInsertFunction funcName groupsTbl dd =
+groupsInsertFunction funcName groupsTbl dollarQuote =
   let mergeSet = groupsMergeSet groupsTbl
       aggs = groupAggregates ""
       lockRows = groupsLock groupsTbl "SELECT group_key FROM new_table WHERE group_key IS NOT NULL"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM new_table WHERE group_key IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
@@ -193,7 +192,7 @@ groupsInsertFunction funcName groupsTbl dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 -- | The group summary aggregates over job rows grouped by @group_key@. @min_id@ is the
@@ -244,7 +243,7 @@ summaryValueChanged =
 -- | Apply a group's count deltas and replace all four extrema with indexed point
 -- lookups. @deltaRows@ supplies @group_key@, @count_delta@ and @ready_delta@. Each
 -- lookup reads one index entry and stops. A group whose summary comes out unchanged
--- keeps its row, which no update to this table can rewrite in place.
+-- keeps its row.
 groupsSnapshotUpdate :: Text -> Text -> Text -> Text
 groupsSnapshotUpdate groupsTbl tbl deltaRows =
   let scheduled = scheduledPredicate "q."
@@ -294,7 +293,7 @@ groupsSnapshotUpdate groupsTbl tbl deltaRows =
 
 -- | Removed rows leave their group summary.
 groupsDeleteFunction :: Text -> Text -> Text -> Text -> Text
-groupsDeleteFunction funcName groupsTbl tbl dd =
+groupsDeleteFunction funcName groupsTbl tbl dollarQuote =
   let ready = readyPredicate ""
       lockRows = groupsLock groupsTbl "SELECT group_key FROM old_table WHERE group_key IS NOT NULL"
       removeUpdate =
@@ -308,7 +307,7 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
           |]
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM old_table WHERE group_key IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
@@ -318,14 +317,14 @@ groupsDeleteFunction funcName groupsTbl tbl dd =
       ${removeUpdate}
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 -- | Updated rows keep their group unless a dedup replace moved them. A moved row
 -- leaves the old summary and merges into the new one. Counts come from the
--- transition tables, everything else from the snapshot lookups.
+-- transition tables. Everything else comes from the snapshot lookups.
 groupsUpdateFunction :: Text -> Text -> Text -> Text -> Text
-groupsUpdateFunction funcName groupsTbl tbl dd =
+groupsUpdateFunction funcName groupsTbl tbl dollarQuote =
   let valueChanged = summaryValueChanged
       changed = "n.group_key IS DISTINCT FROM o.group_key OR " <> valueChanged
       readyOld = readyPredicate "o."
@@ -380,7 +379,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
           |]
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM new_table WHERE group_key IS NOT NULL LIMIT 1)
          AND NOT EXISTS (SELECT 1 FROM old_table WHERE group_key IS NOT NULL LIMIT 1) THEN
@@ -416,7 +415,7 @@ groupsUpdateFunction funcName groupsTbl tbl dd =
       ${sameGroupUpdate}
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 -- | Group maintenance with indexed extremum replacement. Transition tables
@@ -427,11 +426,11 @@ createGroupsTriggerFunctionsSQL schemaName tableName =
       tbl = jobQueueTable schemaName tableName
       baseName = "maintain_" <> tableName <> "_groups"
       (funcInsert, funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dd = "$$"
+      dollarQuote = "$$"
    in T.unlines
-        [ groupsInsertFunction funcInsert groupsTbl dd
-        , groupsDeleteFunction funcDelete groupsTbl tbl dd
-        , groupsUpdateFunction funcUpdate groupsTbl tbl dd
+        [ groupsInsertFunction funcInsert groupsTbl dollarQuote
+        , groupsDeleteFunction funcDelete groupsTbl tbl dollarQuote
+        , groupsUpdateFunction funcUpdate groupsTbl tbl dollarQuote
         ]
 
 -- | The three statement-level AFTER triggers calling a queue's groups maintenance

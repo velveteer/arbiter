@@ -89,13 +89,12 @@ versionPrefix :: Text
 versionPrefix = "v"
 
 -- | Remove a version prefix and report if one was present. The resolver ignores
--- the version value, which keeps URLs from older pages valid.
+-- the version value.
 stripVersion :: [Text] -> (Bool, [Text])
 stripVersion (prefix : _version : rest) | prefix == versionPrefix = (True, rest)
 stripVersion segments = (False, segments)
 
--- | Dashboard entry point. It has no version because it contains the current
--- versioned asset URLs and must be fetched again.
+-- | Dashboard entry point. It has no version and is fetched again on each load.
 indexPath :: FilePath
 indexPath = "index.html"
 
@@ -119,23 +118,22 @@ adminUIServer = Tagged adminApplication
 
 -- | Hoisted variant for integration into a route tree using a custom monad.
 adminUIServerHoisted :: forall m. (forall x. Handler x -> m x) -> ServerT AdminUI m
-adminUIServerHoisted nt = hoistServer (Proxy @AdminUI) nt adminUIServer
+adminUIServerHoisted natTrans = hoistServer (Proxy @AdminUI) natTrans adminUIServer
 
 -- | The dashboard as a standalone WAI application over the embedded files.
 adminApplication :: Application
-adminApplication = serveStaticApp Versioned $ \fp -> pure (lookup fp versionedFiles)
+adminApplication = serveStaticApp Versioned $ \filePath -> pure (lookup filePath versionedFiles)
 
--- | The dashboard served from disk, read per request, so an edit needs no rebuild.
+-- | The dashboard served from disk, read per request.
 devAdminApplication :: FilePath -> Application
-devAdminApplication dir = serveStaticApp AlwaysFresh $ \fp ->
-  (Just <$> BS.readFile (dir </> fp)) `catch` (\(_ :: IOException) -> pure Nothing)
+devAdminApplication dir = serveStaticApp AlwaysFresh $ \filePath ->
+  (Just <$> BS.readFile (dir </> filePath)) `catch` (\(_ :: IOException) -> pure Nothing)
 
 -- | Serve files through a resolver. The root returns @index.html@ and other
--- paths return the named file. Redirect a root path without a trailing slash so
--- relative asset paths work below a mount prefix.
+-- paths return the named file. Redirect a root path without a trailing slash.
 --
 -- Cache versioned assets as immutable. Do not cache @index.html@. A version
--- prefix is valid only for an asset path.
+-- prefix is valid for asset paths.
 serveStaticApp :: Caching -> (FilePath -> IO (Maybe ByteString)) -> Application
 serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
   where
@@ -222,7 +220,7 @@ adminUIServerDev dir = Tagged (devAdminApplication dir)
 -- | Hoisted dev-mode variant for integration into a route tree using a custom monad.
 adminUIServerDevHoisted
   :: forall m. (forall x. Handler x -> m x) -> FilePath -> ServerT AdminUI m
-adminUIServerDevHoisted nt dir = hoistServer (Proxy @AdminUI) nt (adminUIServerDev dir)
+adminUIServerDevHoisted natTrans dir = hoistServer (Proxy @AdminUI) natTrans (adminUIServerDev dir)
 
 -- | The API at @\/api\/v1@ and the admin UI at the root, in one application.
 arbiterAppWithAdmin

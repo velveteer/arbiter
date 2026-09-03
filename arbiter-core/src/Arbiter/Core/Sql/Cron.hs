@@ -18,37 +18,48 @@ module Arbiter.Core.Sql.Cron
   , pendingCronRunsSQL
   ) where
 
+import Control.Monad (join)
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (UTCTime)
+import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec)
+import Arbiter.Core.Codec (cronScheduleRowCodec)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..), cronSchedulesTable)
 import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, raw, rows, sepBy)
+import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.SqlLiterals (textLiteral)
 
--- | The @cron_schedules@ read columns, comma separated.
+-- | The @cron_schedules@ read columns, in codec order.
 allCronColumns :: Text
-allCronColumns = T.intercalate ", " (codecColumns cronScheduleRowCodec)
+allCronColumns =
+  [text|
+    name, queue_name, default_expression, default_overlap, default_timezone,
+    override_expression, override_overlap, override_timezone, enabled,
+    last_fired_at, last_checked_at, run_requested_at, last_manual_run_at, created_at, updated_at
+  |]
 
--- | 'allCronColumns' with an expired @run_requested_at@ read back as NULL, so a
--- request no pool claimed in time reaches readers as the no-op it now is.
+-- | 'allCronColumns' with an expired @run_requested_at@ read back as NULL.
 cronReadColumns :: Text
-cronReadColumns = T.intercalate ", " (map expire (codecColumns cronScheduleRowCodec))
-  where
-    expire "run_requested_at" = "(CASE WHEN " <> cronRunPending <> " THEN run_requested_at END) AS run_requested_at"
-    expire c = c
+cronReadColumns =
+  [text|
+    name, queue_name, default_expression, default_overlap, default_timezone,
+    override_expression, override_overlap, override_timezone, enabled,
+    last_fired_at, last_checked_at,
+    (CASE WHEN ${cronRunPending} THEN run_requested_at END) AS run_requested_at,
+    last_manual_run_at, created_at, updated_at
+  |]
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
--- An unchanged schedule is left alone, so a restart does not touch its row.
+-- An unchanged schedule is left alone.
 upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Query ()
 upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
   let tbl = cronSchedulesTable schemaName
    in [sql|
         INSERT INTO ${tbl} (name, queue_name, default_expression, default_overlap, default_timezone)
-        VALUES (#{name :: CText}, #{queueName :: CText}, #{defaultExpr :: CText}, #{defaultOv :: CText}, #{defaultTz :: Maybe CText})
+        VALUES (#{name :: CText}, #{queueName :: CText}, #{defaultExpr :: CText},
+                #{defaultOv :: CText}, #{defaultTz :: Maybe CText})
         ON CONFLICT (name) DO UPDATE SET
           queue_name = EXCLUDED.queue_name,
           default_expression = EXCLUDED.default_expression,
@@ -56,7 +67,8 @@ upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
           default_timezone = EXCLUDED.default_timezone,
           updated_at = NOW()
         WHERE (${tbl}.queue_name, ${tbl}.default_expression, ${tbl}.default_overlap, ${tbl}.default_timezone)
-          IS DISTINCT FROM (EXCLUDED.queue_name, EXCLUDED.default_expression, EXCLUDED.default_overlap, EXCLUDED.default_timezone)
+          IS DISTINCT FROM (EXCLUDED.queue_name, EXCLUDED.default_expression,
+                            EXCLUDED.default_overlap, EXCLUDED.default_timezone)
       |]
 
 -- | List cron schedules ordered by name, optionally filtered by queue.
@@ -78,25 +90,36 @@ getCronScheduleByNameSQL schemaName name =
    in rows cronScheduleRowCodec [sql|SELECT ${cronReadColumns} FROM ${tbl} WHERE name = #{name :: CText}|]
 
 -- | Patch a cron schedule's overrides. 'Nothing' when the patch sets no column.
+-- @Just Nothing@ clears an override. Disabling also drops a pending run request.
 updateCronScheduleSQL :: Text -> Text -> CronScheduleUpdate -> Maybe (Query ())
-updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpr mOverlap mTz mEnabled)
-  | null clauses = Nothing
-  | otherwise =
-      let tbl = cronSchedulesTable schemaName
-          setFrag = sepBy ", " (clauses <> [raw "updated_at = NOW()"])
-       in Just [sql|UPDATE ${tbl} SET ${setFrag} WHERE name = #{name :: CText}|]
-  where
-    clauses =
-      concat
-        [ patch "override_expression" mExpr
-        , patch "override_overlap" mOverlap
-        , patch "override_timezone" mTz
-        , case mEnabled of
-            Nothing -> []
-            Just True -> [raw "enabled = TRUE"]
-            Just False -> [raw "enabled = FALSE", raw "run_requested_at = NULL"]
-        ]
-    patch col = foldMap (\mv -> [raw (col <> " = ") <> maybe (raw "NULL") (\v -> [sql|#{v :: CText}|]) mv])
+updateCronScheduleSQL _ _ (CronScheduleUpdate Nothing Nothing Nothing Nothing) = Nothing
+updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpression mOverlap mTimezone mEnabled) =
+  let tbl = cronSchedulesTable schemaName
+      setExpression = isJust mExpression
+      expression = join mExpression
+      setOverlap = isJust mOverlap
+      overlap = join mOverlap
+      setTimezone = isJust mTimezone
+      timezone = join mTimezone
+   in Just
+        [sql|
+          UPDATE ${tbl}
+          SET override_expression = CASE WHEN #{setExpression :: CBool}::boolean
+                                         THEN #{expression :: Maybe CText}::text
+                                         ELSE override_expression END,
+              override_overlap = CASE WHEN #{setOverlap :: CBool}::boolean
+                                      THEN #{overlap :: Maybe CText}::text
+                                      ELSE override_overlap END,
+              override_timezone = CASE WHEN #{setTimezone :: CBool}::boolean
+                                       THEN #{timezone :: Maybe CText}::text
+                                       ELSE override_timezone END,
+              enabled = COALESCE(#{mEnabled :: Maybe CBool}::boolean, enabled),
+              run_requested_at = CASE WHEN #{mEnabled :: Maybe CBool}::boolean IS FALSE
+                                      THEN NULL
+                                      ELSE run_requested_at END,
+              updated_at = NOW()
+          WHERE name = #{name :: CText}
+        |]
 
 -- | Set @last_fired_at@ to NOW() for a schedule.
 touchCronLastFiredSQL :: Text -> Text -> Query ()
@@ -105,17 +128,20 @@ touchCronLastFiredSQL schemaName name =
    in [sql|UPDATE ${tbl} SET last_fired_at = NOW() WHERE name = #{name :: CText}|]
 
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
--- schedule names. The watermark must be the minute boundary the scheduler
--- finished evaluating (not DB @NOW()@) so a slow iteration cannot leapfrog
--- @last_checked_at@ past minutes it never tested. @GREATEST@ guards against
--- backward motion under concurrent worker pools with skewed clocks.
+-- schedule names. The watermark is the minute boundary the scheduler finished
+-- evaluating. @GREATEST@ keeps it from moving backward under concurrent worker
+-- pools with skewed clocks.
 touchCronCheckedSQL :: Text -> UTCTime -> [Text] -> Query ()
 touchCronCheckedSQL schemaName watermark names =
   let tbl = cronSchedulesTable schemaName
-   in [sql|UPDATE ${tbl} SET last_checked_at = GREATEST(last_checked_at, #{watermark :: CTimestamptz}) WHERE name = ANY(#{names :: [CText]})|]
+   in [sql|
+        UPDATE ${tbl}
+        SET last_checked_at = GREATEST(last_checked_at, #{watermark :: CTimestamptz})
+        WHERE name = ANY(#{names :: [CText]})
+      |]
 
 -- | Fire-once-per-minute gate. Advances @last_fired_at@ to the minute floor
--- only if the existing value is strictly less. 0 rows = another pool won.
+-- when the existing value is less. Zero rows means another pool won.
 tryFireCronGateSQL :: Text -> UTCTime -> Text -> Query ()
 tryFireCronGateSQL schemaName minuteFloor name =
   let tbl = cronSchedulesTable schemaName
@@ -129,17 +155,19 @@ tryFireCronGateSQL schemaName minuteFloor name =
 -- | Per-(schema, queue, name) transaction-scoped advisory lock for cron.
 tryAcquireCronLeaderSQL :: Text -> Text -> Text -> Query Bool
 tryAcquireCronLeaderSQL schema queue name =
-  [sql|SELECT pg_try_advisory_xact_lock(hashtextextended(#{schema :: CText} || ':' || #{queue :: CText} || ':' || #{name :: CText}, 0)) AS @{result :: CBool}|]
+  [sql|
+    SELECT pg_try_advisory_xact_lock(
+      hashtextextended(#{schema :: CText} || ':' || #{queue :: CText} || ':' || #{name :: CText}, 0)
+    ) AS @{result :: CBool}
+  |]
 
--- | How long a run request stays claimable. Only a pool serving the queue can
--- claim one, so a request older than this had no pool to take it and expires
--- and does not pin the schedule.
+-- | How long a run request stays claimable.
 cronRunRequestTtl :: Text
 cronRunRequestTtl = "INTERVAL '5 minutes'"
 
 -- | A run request that is still claimable.
 cronRunPending :: Text
-cronRunPending = "(run_requested_at IS NOT NULL AND run_requested_at > NOW() - " <> cronRunRequestTtl <> ")"
+cronRunPending = [text|(run_requested_at IS NOT NULL AND run_requested_at > NOW() - ${cronRunRequestTtl})|]
 
 -- | Stamp a run request on an enabled schedule and NOTIFY, returning a status.
 requestCronRunSQL :: Text -> Text -> Query Text
@@ -148,12 +176,12 @@ requestCronRunSQL schemaName name =
       chan = textLiteral (cronRunNotifyChannel schemaName)
    in [sql|
         WITH found AS (SELECT enabled, run_requested_at FROM ${tbl} WHERE name = #{name :: CText} FOR UPDATE),
-        upd AS (
+        stamped AS (
           UPDATE ${tbl} SET run_requested_at = NOW(), updated_at = NOW()
           WHERE name = #{name :: CText} AND enabled AND NOT ${cronRunPending}
           RETURNING pg_notify(${chan}, name))
         SELECT CASE
-          WHEN EXISTS (SELECT 1 FROM upd) THEN 'stamped'
+          WHEN EXISTS (SELECT 1 FROM stamped) THEN 'stamped'
           WHEN EXISTS (SELECT 1 FROM found WHERE enabled AND ${cronRunPending}) THEN 'pending'
           WHEN EXISTS (SELECT 1 FROM found) THEN 'disabled'
           ELSE 'not_found' END AS @{status :: CText}
@@ -175,7 +203,11 @@ claimCronRunSQL schemaName name =
 touchCronManualRunSQL :: Text -> UTCTime -> Text -> Query ()
 touchCronManualRunSQL schemaName firedAt name =
   let tbl = cronSchedulesTable schemaName
-   in [sql|UPDATE ${tbl} SET last_manual_run_at = GREATEST(last_manual_run_at, #{firedAt :: CTimestamptz}), updated_at = NOW() WHERE name = #{name :: CText}|]
+   in [sql|
+        UPDATE ${tbl}
+        SET last_manual_run_at = GREATEST(last_manual_run_at, #{firedAt :: CTimestamptz}), updated_at = NOW()
+        WHERE name = #{name :: CText}
+      |]
 
 -- | Names of enabled schedules with a pending run request among the given names.
 pendingCronRunsSQL :: Text -> [Text] -> Query Text

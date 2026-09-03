@@ -16,4 +16,4 @@ data TraceContext = TraceContext
 
 -- | A trace context from its two stored halves. An orphan @tracestate@ is dropped.
 toTraceContext :: Maybe Text -> Maybe Text -> Maybe TraceContext
-toTraceContext tp ts = flip TraceContext ts <$> tp
+toTraceContext parent state = flip TraceContext state <$> parent

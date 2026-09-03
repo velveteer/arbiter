@@ -125,8 +125,8 @@ runSelectedWorkerPools enabled pools = do
 
 -- | Name the pool a message came from.
 withPoolContext :: Text -> LogConfig -> LogConfig
-withPoolContext poolName lc =
-  lc {identityContext = identityContext lc <> ["pool" .= poolName]}
+withPoolContext poolName logCfg =
+  logCfg {identityContext = identityContext logCfg <> ["pool" .= poolName]}
 
 -- | A single-stripe pool sized at twice the enabled worker count plus one for
 -- the listener, with a minimum size of three.
@@ -138,8 +138,8 @@ poolConfigForWorkers
 poolConfigForWorkers pools = do
   enabled <- enabledQueuesForMonad @m
   traverse_ (validateSelected enabled) pools
-  let n = sum [workerCount cfg | NamedWorkerPool name cfg <- pools, name `elem` enabled]
-  pure defaultPoolConfig {poolSize = max 2 (2 * n) + 1}
+  let enabledWorkers = sum [workerCount cfg | NamedWorkerPool name cfg <- pools, name `elem` enabled]
+  pure defaultPoolConfig {poolSize = max 2 (2 * enabledWorkers) + 1}
   where
     validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
     validateSelected enabled (NamedWorkerPool name cfg)

@@ -47,21 +47,21 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
--- | What the instruments export. 'Idle' keeps the last reading's scan time, which the
--- staleness series goes on growing from, and has none before the first scan.
+-- | What the instruments export. 'Idle' keeps the last reading's scan time for the
+-- staleness series. Before the first scan it has none.
 data Export = Live Cached | Idle (Maybe Double)
 
 -- | The scan behind an export, if it has one.
 live :: Export -> Maybe Cached
 live = \case
-  Live c -> Just c
+  Live cached -> Just cached
   Idle _ -> Nothing
 
 -- | When the export was last scanned, if it ever was.
 lastScan :: Export -> Maybe Double
 lastScan = \case
-  Live c -> Just (takenAt c)
-  Idle at -> at
+  Live cached -> Just (takenAt cached)
+  Idle lastAt -> lastAt
 
 -- | Stop exporting readings, keeping when the last one was scanned.
 retire :: Export -> Export
@@ -105,9 +105,9 @@ setReachable cache = writeTVar (databaseReachable cache) . Just
 retireCache :: GaugeCache -> STM ()
 retireCache cache = modifyTVar' (export cache) retire
 
--- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
--- reading or one already counted, the whole total for a counter that was reset,
--- otherwise the difference.
+-- | What a total scanned at @scannedAt@ adds to its series. The first reading and an
+-- already counted reading add nothing. A reset counter adds the whole total. Any other
+-- reading adds the difference.
 riseSince
   :: SeriesKey
   -> Double

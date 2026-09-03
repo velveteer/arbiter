@@ -2,8 +2,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
--- A type named only in an instance head does not count as a use, so the imports the
--- schema instances below need read as redundant.
+-- A type named only in an instance head does not count as a use. GHC reports the
+-- imports the schema instances need as redundant.
 {-# OPTIONS_GHC -Wno-orphans -Wno-unused-imports #-}
 
 -- | OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI'. The route types
@@ -147,19 +147,19 @@ sectioned spec =
   where
     sections = map section (InsOrd.keys (_openApiPaths spec))
 
--- | The path's section: the segment after the @\/api\/v1@ mount point.
+-- | The path's section, the segment after the @\/api\/v1@ mount point.
 section :: FilePath -> TagName
 section path =
   case drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path))) of
     name : _ -> name
     [] -> "api"
 
--- | The segments the API is mounted under, which name no section of their own.
+-- | The segments the API is mounted under.
 mountSegments :: [Text]
 mountSegments = ["api", "v1"]
 
--- | Add a description for the event stream. 'toOpenApi' does not add an
--- operation for a @Raw@ route because that route has no response type.
+-- | Add a description for the event stream. 'toOpenApi' adds no operation for
+-- a @Raw@ route.
 describeRaw :: PathItem -> PathItem
 describeRaw item
   | any ($ item) operationFields = item
@@ -216,9 +216,9 @@ tagPath name item =
     , _pathItemTrace = tagged (_pathItemTrace item)
     }
   where
-    tagged = fmap (\op -> op {_operationTags = InsOrdSet.insert name (_operationTags op)})
+    tagged = fmap (\operation -> operation {_operationTags = InsOrdSet.insert name (_operationTags operation)})
 
--- | A section's own entry, so the reader gets a heading with a sentence under it.
+-- | A section's tag entry, a heading with a sentence under it.
 describeSection :: TagName -> Tag
 describeSection name =
   Tag
@@ -227,7 +227,7 @@ describeSection name =
     , _tagExternalDocs = Nothing
     }
   where
-    queueDescription q = "Jobs, dead letters, archive and stats for the " <> q <> " queue."
+    queueDescription queueName = "Jobs, dead letters, archive and stats for the " <> queueName <> " queue."
 
 -- | What each schema-wide section is for. A section not named here is a queue.
 sectionDescriptions :: [(TagName, Text)]
@@ -249,8 +249,8 @@ apiDescription =
   \claiming a lease and acking, nacking or extending it, and operate the queue itself. \
   \The schema-wide sections cover queues, cron, workers, rate limits, concurrency, \
   \maintenance and health.\n\nThe document is derived from the server's own route \
-  \types, so every payload and result below is the queue's real schema rather than an \
-  \opaque object. The server ships no authentication: put it behind your own."
+  \types. Every payload and result below is the queue's real schema. The server ships \
+  \no authentication. Put it behind your own."
 
 -- ---------------------------------------------------------------------------
 -- Schema builders
@@ -265,11 +265,11 @@ apiDescription =
 newtype Fields a = Fields (Declare (Definitions Schema) [(Text, Referenced Schema)])
 
 instance Functor Fields where
-  fmap _ (Fields d) = Fields d
+  fmap _ (Fields declared) = Fields declared
 
 instance Applicative Fields where
   pure _ = Fields (pure [])
-  Fields f <*> Fields x = Fields (liftA2 (<>) f x)
+  Fields left <*> Fields right = Fields (liftA2 (<>) left right)
 
 -- | One field, named here and typed by the schema of @a@.
 prop :: forall a. (ToSchema a) => Text -> Fields a
@@ -292,7 +292,7 @@ objectSchema name required (Fields declared) =
 closedSchema :: Text -> Fields a -> Declare (Definitions Schema) NamedSchema
 closedSchema name (Fields declared) = named <$> declared
   where
-    named ps = NamedSchema (Just name) (schemaOver (map fst ps) ps)
+    named props = NamedSchema (Just name) (schemaOver (map fst props) props)
 
 schemaOver :: [Text] -> [(Text, Referenced Schema)] -> Schema
 schemaOver required props =
@@ -309,7 +309,7 @@ carrying base = maybe base ((base <> "_") <>) (OpenApi.schemaName (Proxy @payloa
 
 -- | A string schema accepting exactly the names an enum round-trips through.
 enumSchema :: forall a p. (Bounded a, Enum a) => (a -> Text) -> p a -> Schema
-enumSchema name _ = stringEnum [name x | x <- [minBound .. maxBound :: a]]
+enumSchema name _ = stringEnum [name value | value <- [minBound .. maxBound :: a]]
 
 -- | A string schema accepting exactly the given values.
 stringEnum :: [Text] -> Schema
@@ -375,8 +375,8 @@ instance ToSchema ConcurrencyKey where
 -- | A gate key, split into the policy prefix and the per-job suffix.
 admissionKeySchema
   :: (Text -> Text -> a) -> Text -> Declare (Definitions Schema) NamedSchema
-admissionKeySchema mk name =
-  closedSchema name (mk <$> prop @Text "prefix" <*> prop @Text "suffix")
+admissionKeySchema mkKey name =
+  closedSchema name (mkKey <$> prop @Text "prefix" <*> prop @Text "suffix")
 
 -- | Fields written by 'Arbiter.Servant.Types.apiJobPairs'. The record
 -- constructor checks their types and order. Reconstruct the trace context and
@@ -532,9 +532,8 @@ instance ToSchema RateLimitBucketView where
 
 instance ToSchema RateLimitPolicyUpdate where
   declareNamedSchema _ =
-    -- A patch field is Maybe (Maybe a): absent leaves the override alone, null clears
-    -- it. Only the inner value has a shape, so the schema describes that and the outer
-    -- Maybe is what a present field means.
+    -- A patch field is Maybe (Maybe a). An absent field leaves the override alone.
+    -- A null clears it. The schema describes the inner value.
     objectSchema "RateLimitPolicyUpdate" [] $
       RateLimitPolicyUpdate
         <$> patch @Double "overrideMaxTokens"
@@ -561,8 +560,7 @@ instance ToSchema ConcurrencyPolicyUpdate where
 -- ---------------------------------------------------------------------------
 
 -- | A generic schema under a name of its own. A type applied to its payload is named
--- after its constructor alone, with 'carrying' adding the payload back where two
--- queues would otherwise collide on one definition.
+-- after its constructor alone. 'carrying' adds the payload back.
 renamed
   :: forall a
    . (GToSchema (Rep a), Generic a, Typeable a)

@@ -37,7 +37,7 @@ reportWaitMicros = 5_000_000
 
 listenerSpec :: Spec
 listenerSpec = describe "Listener logging" $
-  it "reports a connection failure once, not once per registrant" $ do
+  it "reports a connection failure once for all registrants" $ do
     listener <- Listen.newPoolListener (const (throwIO (ErrorCall "connect failed")))
     first <- newTVarIO ([] :: [Text])
     second <- newTVarIO ([] :: [Text])
@@ -46,7 +46,7 @@ listenerSpec = describe "Listener logging" $
         heard first
         readTVarIO second `shouldReturn` []
   where
-    -- Every attempt reports, so a registrant that hears the hub hears repeats.
+    -- Every attempt reports. A registrant that hears the hub hears repeats.
     heard seen =
       timeout reportWaitMicros (atomically (readTVar seen >>= checkSTM . (>= 2) . length))
         `shouldNotReturn` Nothing
@@ -131,10 +131,10 @@ gateSpec = describe "Failure gates" $ do
             , additionalContext = pure ["service" .= ("checkout" :: Text)]
             , identityContext = ["pool" .= ("email_queue" :: Text)]
             }
-        lg = hubLogFor cfg
-    hubError lg "arbiter listener: connect failed"
-    hubRecovered lg "arbiter listener: reconnected"
-    hubWarn lg "channel handler exception: boom"
+        hubLog = hubLogFor cfg
+    hubError hubLog "arbiter listener: connect failed"
+    hubRecovered hubLog "arbiter listener: reconnected"
+    hubWarn hubLog "channel handler exception: boom"
     (reverse <$> readIORef ref)
       `shouldReturn` [["service"], ["service"], ["pool", "service"]]
 
@@ -170,4 +170,4 @@ capturingConfig = do
   pure (cfg, reverse <$> readIORef ref)
 
 append :: IORef [a] -> a -> IO ()
-append ref x = atomicModifyIORef' ref $ \xs -> (x : xs, ())
+append ref item = atomicModifyIORef' ref $ \items -> (item : items, ())

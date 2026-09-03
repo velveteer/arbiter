@@ -85,8 +85,7 @@ testLogConfig =
     , logDestination = LogStdout
     }
 
--- | 'processCronCatchUp' under a fresh gate store, so one case never suppresses
--- the next one's log line.
+-- | 'processCronCatchUp' under a fresh gate store.
 catchUpAt
   :: Text
   -> Text
@@ -110,9 +109,9 @@ runRequestsAt schema jobs now = do
 -- | Helper to build a UTCTime from components.
 mkTime :: Integer -> Int -> Int -> Int -> Int -> Int -> UTCTime
 mkTime year month day hour minute second =
-  let d = fromGregorian year month day
-      s = secondsToDiffTime (fromIntegral $ hour * 3600 + minute * 60 + second)
-   in UTCTime d s
+  let calendarDay = fromGregorian year month day
+      secs = secondsToDiffTime (fromIntegral $ hour * 3600 + minute * 60 + second)
+   in UTCTime calendarDay secs
 
 spec :: ByteString -> Spec
 spec connStr = do
@@ -147,28 +146,28 @@ spec connStr = do
       truncateToMinute input `shouldBe` input
 
     it "handles sub-second precision (fractional seconds become 0)" $ do
-      let d = fromGregorian 2025 6 15
+      let day = fromGregorian 2025 6 15
           -- 12:34:56.789
-          s = 12 * 3600 + 34 * 60 + 56.789
-          input = UTCTime d s
+          secs = 12 * 3600 + 34 * 60 + 56.789
+          input = UTCTime day secs
           expected = mkTime 2025 6 15 12 34 0
       truncateToMinute input `shouldBe` expected
 
   describe "formatMinute" $ do
     it "produces YYYY-MM-DDTHH:MM format" $ do
-      let t = mkTime 2025 1 9 8 5 0
-      formatMinute t `shouldBe` "2025-01-09T08:05"
+      let tick = mkTime 2025 1 9 8 5 0
+      formatMinute tick `shouldBe` "2025-01-09T08:05"
 
   describe "makeDedupKey" $ do
     it "SkipOverlap produces arbiter_cron:<name> (no time)" $ do
-      let Right cj = cronJob "nightly" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+      let Right cron = cronJob "nightly" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "x"))
           tick = mkTime 2025 6 15 3 0 0
-      makeDedupKey cj tick `shouldBe` "arbiter_cron:nightly"
+      makeDedupKey cron tick `shouldBe` "arbiter_cron:nightly"
 
     it "AllowOverlap produces arbiter_cron:<name>:<time>" $ do
-      let Right cj = cronJob "nightly" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+      let Right cron = cronJob "nightly" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
           tick = mkTime 2025 6 15 3 0 0
-      makeDedupKey cj tick `shouldBe` "arbiter_cron:nightly:2025-06-15T03:00"
+      makeDedupKey cron tick `shouldBe` "arbiter_cron:nightly:2025-06-15T03:00"
 
   describe "timezone handling" $ do
     it "cronJobInTimezone rejects an unknown Olson name" $ do
@@ -192,7 +191,7 @@ spec connStr = do
               SkipOverlap
               (\_ _ -> defaultJob (SimpleTask "x"))
       case result of
-        Right cj -> timezone cj `shouldBe` Just "America/New_York"
+        Right cron -> timezone cron `shouldBe` Just "America/New_York"
         Left err -> expectationFailure $ "Expected Right, got: " <> err
 
     it "resolveTZ knows UTC and Etc/UTC" $ do
@@ -210,81 +209,80 @@ spec connStr = do
 
     it "DST spring-forward: '30 2 * * *' in America/New_York does not fire on the gap day" $ do
       -- On 2025-03-09 in NY, clocks jump 02:00 EST -> 03:00 EDT. Local 02:30
-      -- does not exist that day. The UTC minute that would correspond to
-      -- 02:30 local maps to 03:30 EDT instead. Cron must not fire.
+      -- does not exist that day. Cron does not fire.
       let Right sched = parseCronSchedule "30 2 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           -- Walk every UTC minute on 2025-03-09 (and a buffer on either
           -- side) checking that none match locally to 02:30 NY.
           ticks =
-            [ mkTime 2025 3 9 h m 0
-            | h <- [0 .. 23]
-            , m <- [0 .. 59]
+            [ mkTime 2025 3 9 hour minute 0
+            | hour <- [0 .. 23]
+            , minute <- [0 .. 59]
             ]
-          matches = filter (matchesInTimezone tz sched) ticks
+          matches = filter (matchesInTimezone zone sched) ticks
       matches `shouldBe` []
 
     it "DST spring-forward: same expression fires normally on a non-DST day" $ do
       -- Sanity check that the matcher fires on a normal day.
       let Right sched = parseCronSchedule "30 2 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           ticks =
-            [ mkTime 2025 3 10 h m 0
-            | h <- [0 .. 23]
-            , m <- [0 .. 59]
+            [ mkTime 2025 3 10 hour minute 0
+            | hour <- [0 .. 23]
+            , minute <- [0 .. 59]
             ]
-          matches = filter (matchesInTimezone tz sched) ticks
+          matches = filter (matchesInTimezone zone sched) ticks
       length matches `shouldBe` 1
 
     it "nextRunInTimezone reports the tick the scheduler fires across a fall-back" $ do
       -- 01:30 NY runs at 05:30 and 06:30 UTC. The scheduler fires the first.
       let Right sched = parseCronSchedule "30 1 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           now = mkTime 2025 11 2 5 20 0
-      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 5 30 0)
+      nextRunInTimezone zone sched now `shouldBe` Just (mkTime 2025 11 2 5 30 0)
 
-    it "nextRunInTimezone skips a spring-forward gap instead of naming a tick in it" $ do
+    it "nextRunInTimezone skips a spring-forward gap" $ do
       -- Local 02:30 does not exist on 2025-03-09 in NY.
       let Right sched = parseCronSchedule "30 2 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           now = mkTime 2025 3 9 6 0 0
-      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 3 10 6 30 0)
+      nextRunInTimezone zone sched now `shouldBe` Just (mkTime 2025 3 10 6 30 0)
 
     it "nextRunInTimezone agrees with matchesInTimezone on an ordinary day" $ do
       let Right sched = parseCronSchedule "30 2 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           now = mkTime 2025 6 15 0 0 0
-          next = nextRunInTimezone tz sched now
+          next = nextRunInTimezone zone sched now
       next `shouldBe` Just (mkTime 2025 6 15 6 30 0)
-      fmap (matchesInTimezone tz sched) next `shouldBe` Just True
+      fmap (matchesInTimezone zone sched) next `shouldBe` Just True
 
     it "nextRunInTimezone names no tick an earlier one beats" $ do
       -- Nothing before the reported tick may match.
       let Right sched = parseCronSchedule "30 1 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           starts = [mkTime 2025 11 2 0 0 0, mkTime 2025 3 9 0 0 0, mkTime 2025 6 15 0 0 0]
           earlierMatch now =
-            case nextRunInTimezone tz sched now of
+            case nextRunInTimezone zone sched now of
               Nothing -> Just now
               Just next ->
                 find
-                  (matchesInTimezone tz sched)
+                  (matchesInTimezone zone sched)
                   (takeWhile (< next) (iterate (addUTCTime 60) (addUTCTime 60 now)))
       map earlierMatch starts `shouldBe` [Nothing, Nothing, Nothing]
 
     it "nextRunInTimezone keeps the replayed hour's second pass" $ do
-      -- 01:30 EST is a later tick than 01:35 EDT, so a local-minute walk alone misses it.
+      -- 01:30 EST is a later tick than 01:35 EDT. A local-minute walk alone misses it.
       let Right sched = parseCronSchedule "30 1 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           now = mkTime 2025 11 2 5 35 0
-      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 6 30 0)
+      nextRunInTimezone zone sched now `shouldBe` Just (mkTime 2025 11 2 6 30 0)
 
-    it "nextRunInTimezone reports a replayed minute rather than skipping the day" $ do
+    it "nextRunInTimezone reports a replayed minute" $ do
       -- 01:45 EDT ran at 05:45. 01:45 EST is a separate tick and fires once the first is gone.
       let Right sched = parseCronSchedule "45 1 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           now = mkTime 2025 11 2 6 0 0
-      nextRunInTimezone tz sched now `shouldBe` Just (mkTime 2025 11 2 6 45 0)
+      nextRunInTimezone zone sched now `shouldBe` Just (mkTime 2025 11 2 6 45 0)
 
     it "DST fall-back: '30 1 * * *' in America/New_York matches twice in UTC" $ do
       -- On 2025-11-02 in NY, clocks fall back 02:00 EDT -> 01:00 EST. Local
@@ -292,24 +290,24 @@ spec connStr = do
       -- (06:30 UTC). Both UTC ticks should match locally, and the local-minute
       -- dedup key collapses them to a single fire.
       let Right sched = parseCronSchedule "30 1 * * *"
-          tz = Just "America/New_York"
+          zone = Just "America/New_York"
           ticks =
-            [ mkTime 2025 11 2 h m 0
-            | h <- [0 .. 23]
-            , m <- [0 .. 59]
+            [ mkTime 2025 11 2 hour minute 0
+            | hour <- [0 .. 23]
+            , minute <- [0 .. 59]
             ]
-          matches = filter (matchesInTimezone tz sched) ticks
+          matches = filter (matchesInTimezone zone sched) ticks
       length matches `shouldBe` 2
-      -- Both matches format to the same local minute, so AllowOverlap dedup
-      -- blocks the second insert.
-      map (formatMinuteInTimezone tz) matches
+      -- Both matches format to the same local minute. AllowOverlap dedup blocks
+      -- the second insert.
+      map (formatMinuteInTimezone zone) matches
         `shouldBe` ["2025-11-02T01:30", "2025-11-02T01:30"]
 
     it "two schedules in different zones produce different UTC fire times" $ do
       let Right sched = parseCronSchedule "0 9 * * *"
           tzNy = Just "America/New_York"
           tzBerlin = Just "Europe/Berlin"
-          day = [mkTime 2025 6 15 h m 0 | h <- [0 .. 23], m <- [0 .. 59]]
+          day = [mkTime 2025 6 15 hour minute 0 | hour <- [0 .. 23], minute <- [0 .. 59]]
           fireNy = filter (matchesInTimezone tzNy sched) day
           fireBerlin = filter (matchesInTimezone tzBerlin sched) day
       length fireNy `shouldBe` 1
@@ -325,44 +323,44 @@ spec connStr = do
       matchesInTimezone Nothing sched nonMatch `shouldBe` False
 
     it "formatMinuteInTimezone with Nothing == formatMinute" $ do
-      let t = mkTime 2025 6 15 12 30 0
-      formatMinuteInTimezone Nothing t `shouldBe` formatMinute t
+      let tick = mkTime 2025 6 15 12 30 0
+      formatMinuteInTimezone Nothing tick `shouldBe` formatMinute tick
 
     it "formatMinuteInTimezone formats the local minute" $ do
       -- 2025-06-15T12:30 UTC = 08:30 in America/New_York (EDT, UTC-4)
-      let t = mkTime 2025 6 15 12 30 0
-      formatMinuteInTimezone (Just "America/New_York") t
+      let tick = mkTime 2025 6 15 12 30 0
+      formatMinuteInTimezone (Just "America/New_York") tick
         `shouldBe` "2025-06-15T08:30"
 
   describe "computeDelayMicros" $ do
     it "normal case: 15s before next minute" $ do
       -- 12:34:45 → next minute is 12:35:00 → 15s = 15_000_000 µs
-      let t = mkTime 2025 6 15 12 34 45
-      computeDelayMicros t `shouldBe` 15_000_000
+      let tick = mkTime 2025 6 15 12 34 45
+      computeDelayMicros tick `shouldBe` 15_000_000
 
     it "on a minute boundary: returns 60s" $ do
       -- 12:34:00 → next minute is 12:35:00 → 60s = 60_000_000 µs
-      let t = mkTime 2025 6 15 12 34 0
-      computeDelayMicros t `shouldBe` 60_000_000
+      let tick = mkTime 2025 6 15 12 34 0
+      computeDelayMicros tick `shouldBe` 60_000_000
 
     it "just past a minute: returns ~60s" $ do
       -- 12:34:01 → next minute is 12:35:00 → 59s = 59_000_000 µs
-      let t = mkTime 2025 6 15 12 34 1
-      computeDelayMicros t `shouldBe` 59_000_000
+      let tick = mkTime 2025 6 15 12 34 1
+      computeDelayMicros tick `shouldBe` 59_000_000
 
     it "near next minute: returns ~0s" $ do
       -- 12:34:59 → next minute is 12:35:00 → 1s = 1_000_000 µs
-      let t = mkTime 2025 6 15 12 34 59
-      computeDelayMicros t `shouldBe` 1_000_000
+      let tick = mkTime 2025 6 15 12 34 59
+      computeDelayMicros tick `shouldBe` 1_000_000
 
     it "half-minute mark: returns 30s" $ do
-      let t = mkTime 2025 6 15 12 34 30
-      computeDelayMicros t `shouldBe` 30_000_000
+      let tick = mkTime 2025 6 15 12 34 30
+      computeDelayMicros tick `shouldBe` 30_000_000
 
     it "midnight boundary: 23:59:59 returns 1s" $ do
       -- 23:59:59 → next minute is 00:00:00 next day → 1s = 1_000_000 µs
-      let t = mkTime 2025 6 15 23 59 59
-      computeDelayMicros t `shouldBe` 1_000_000
+      let tick = mkTime 2025 6 15 23 59 59
+      computeDelayMicros tick `shouldBe` 1_000_000
 
   describe "enumMinutes" $ do
     it "returns empty list when start > end" $ do
@@ -371,8 +369,8 @@ spec connStr = do
       enumMinutes start end `shouldBe` []
 
     it "returns single element when start == end" $ do
-      let t = mkTime 2025 6 15 12 0 0
-      enumMinutes t t `shouldBe` [t]
+      let tick = mkTime 2025 6 15 12 0 0
+      enumMinutes tick tick `shouldBe` [tick]
 
     it "enumerates consecutive minutes" $ do
       let start = mkTime 2025 6 15 12 0 0
@@ -394,7 +392,7 @@ spec connStr = do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
       it "inserts a job when the schedule matches the tick time" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "every-min"
                 "* * * * *"
@@ -402,8 +400,8 @@ spec connStr = do
                 (\_ _ -> defaultJob (SimpleTask "cron-fired"))
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
@@ -412,22 +410,22 @@ spec connStr = do
 
       it "does not insert a job when the schedule does not match" $ \env -> do
         -- "0 3 * * *" matches only at 03:00
-        let Right cj =
+        let Right cron =
               cronJob
                 "nightly"
                 "0 3 * * *"
                 SkipOverlap
                 (\_ _ -> defaultJob (SimpleTask "should-not-fire"))
-            tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
+            tick = mkTime 2025 6 15 12 0 0 -- 12:00
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
       it "SkipOverlap: two ticks at different times produce only 1 job" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "every-min"
                 "* * * * *"
@@ -436,16 +434,16 @@ spec connStr = do
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick1
-          catchUpAt testSchema testTable [cj] tick2
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick1
+          catchUpAt testSchema testTable [cron] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
-        -- Both ticks produce the same dedup key "arbiter_cron:every-min", so only 1 job
+        -- Both ticks produce the same dedup key "arbiter_cron:every-min". One job results.
         length jobs `shouldBe` 1
 
       it "AllowOverlap: two ticks at different times produce 2 jobs" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "every-min"
                 "* * * * *"
@@ -454,9 +452,9 @@ spec connStr = do
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick1
-          catchUpAt testSchema testTable [cj] tick2
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick1
+          catchUpAt testSchema testTable [cron] tick2
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 2
@@ -474,7 +472,7 @@ spec connStr = do
                 "0 3 * * *"
                 AllowOverlap
                 (\_ _ -> defaultJob (SimpleTask "should-not-fire"))
-            tick = mkTime 2025 6 15 12 0 0 -- 12:00, not 03:00
+            tick = mkTime 2025 6 15 12 0 0 -- 12:00
         runSimpleDb env $ do
           initCronSchedules testSchema testTable [cjAlways, cjNever] testLogConfig
           catchUpAt testSchema testTable [cjAlways, cjNever] tick
@@ -484,24 +482,23 @@ spec connStr = do
         payload (head jobs) `shouldBe` SimpleTask "always-fires"
 
       it "cronJobMake receives the tick time" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "time-check"
                 "* * * * *"
                 AllowOverlap
-                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
+                (\_ tickAt -> defaultJob (SimpleTask (formatMinute tickAt)))
             tick = mkTime 2025 6 15 14 30 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` SimpleTask "2025-06-15T14:30"
 
       it "advances last_checked_at for all schedules, including failed inserts" $ \env -> do
-        -- Failed inserts are logged but not retried. Watermark moves forward
-        -- so the next iteration doesn't re-fire siblings that succeeded.
+        -- Failed inserts are logged. The watermark moves forward for every schedule.
         let Right good =
               cronJob
                 "good-1"
@@ -520,7 +517,7 @@ spec connStr = do
           catchUpAt testSchema testTable [good, bad] tick
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
-        let getRow n = lookup n [(CS.name r, r) | r <- rows]
+        let getRow scheduleName = lookup scheduleName [(CS.name row, row) | row <- rows]
         case getRow "good-1" of
           Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "good-1 schedule missing"
@@ -528,7 +525,7 @@ spec connStr = do
           Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "bad-1 schedule missing"
 
-        -- The good cron's job was actually inserted, not just watermarked.
+        -- The good cron's job was inserted.
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "ok"]
 
@@ -536,7 +533,7 @@ spec connStr = do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
       it "fires a requested schedule the tick would not match" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "run-nightly"
                 "0 3 * * *"
@@ -544,9 +541,9 @@ spec connStr = do
                 (\_ _ -> defaultJob (SimpleTask "manual"))
             now = mkTime 2025 6 15 12 30 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-nightly"
-          runRequestsAt testSchema [cj] now
+          runRequestsAt testSchema [cron] now
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "manual"]
@@ -555,7 +552,7 @@ spec connStr = do
         CS.runRequestedAt row `shouldBe` Nothing
 
       it "keeps the request pending when the insert fails" $ \env -> do
-        -- The claim rolls back with the insert, so a later pass still fires it.
+        -- The claim rolls back with the insert. A later pass fires it.
         let failing :: CronJob WorkerTestPayload
             Right failing =
               cronJob
@@ -581,33 +578,33 @@ spec connStr = do
         CS.runRequestedAt firedRow `shouldBe` Nothing
 
       it "records the manual run at the tick without advancing the gate" $ \env -> do
-        let Right cj = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "gate"))
+        let Right cron = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "gate"))
             now = mkTime 2025 6 15 12 30 45
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-gate"
-          runRequestsAt testSchema [cj] now
+          runRequestsAt testSchema [cron] now
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-gate"
         CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
         CS.lastFiredAt row `shouldBe` Nothing
 
       it "leaves last_manual_run_at alone when the run is skipped" $ \env -> do
-        let Right cj = cronJob "run-skipmark" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
+        let Right cron = cronJob "run-skipmark" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-skipmark"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun testSchema "run-skipmark"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 31 0)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 31 0)
 
         Just row <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "run-skipmark"
         CS.lastManualRunAt row `shouldBe` Just (mkTime 2025 6 15 12 30 0)
 
       it "expires a request no pool claimed in time" $ \env -> do
-        let Right cj = cronJob "run-expire" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "expire"))
+        let Right cron = cronJob "run-expire" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "expire"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           void $ Ops.requestCronRun testSchema "run-expire"
 
         withResource sharedPool $ \conn ->
@@ -618,7 +615,7 @@ spec connStr = do
               (PG.Only ("run-expire" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ runRequestsAt testSchema [cj] now
+        runSimpleDb env $ runRequestsAt testSchema [cron] now
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` []
 
@@ -634,17 +631,17 @@ spec connStr = do
                 "run-backfill"
                 "0 * * * *"
                 AllowOverlap
-                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
-            cj = base {backfill = Backfill 86400}
+                (\_ tickAt -> defaultJob (SimpleTask (formatMinute tickAt)))
+            cron = base {backfill = Backfill 86400}
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-backfill"]
           _ <- Ops.requestCronRun testSchema "run-backfill"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
-          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 45)
+          catchUpAt testSchema testTable [cron] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
-        sort [t | SimpleTask t <- map payload jobs]
+        sort [label | SimpleTask label <- map payload jobs]
           `shouldBe` ["2025-06-15T10:00", "2025-06-15T11:00", "2025-06-15T12:00", "2025-06-15T12:30"]
 
       it "SkipOverlap: a manual run's active job dedups a Backfill replay" $ \env -> do
@@ -653,64 +650,64 @@ spec connStr = do
                 "run-skipbf"
                 "0 * * * *"
                 SkipOverlap
-                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
-            cj = base {backfill = Backfill 86400}
+                (\_ tickAt -> defaultJob (SimpleTask (formatMinute tickAt)))
+            cron = base {backfill = Backfill 86400}
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           void $ Ops.touchCronChecked testSchema (mkTime 2025 6 15 9 0 0) ["run-skipbf"]
           _ <- Ops.requestCronRun testSchema "run-skipbf"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
-          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 45)
+          catchUpAt testSchema testTable [cron] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask "2025-06-15T12:30"]
 
       it "does nothing without a pending request" $ \env -> do
-        let Right cj = cronJob "run-none" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
+        let Right cron = cronJob "run-none" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
       it "passes the builder a minute-truncated Live tick" $ \env -> do
-        let Right cj =
+        let Right cron =
               cronJob
                 "run-tick"
                 "0 3 * * *"
                 AllowOverlap
-                (\_ t -> defaultJob (SimpleTask (T.pack (show t))))
+                (\_ tickAt -> defaultJob (SimpleTask (T.pack (show tickAt))))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-tick"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 45)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 45)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         map payload jobs `shouldBe` [SimpleTask (T.pack (show (mkTime 2025 6 15 12 30 0)))]
 
       it "refuses a second request while one is still pending" $ \env -> do
-        let Right cj = cronJob "run-coalesce" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
+        let Right cron = cronJob "run-coalesce" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
         outcomes <- runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           first <- Ops.requestCronRun testSchema "run-coalesce"
           second <- Ops.requestCronRun testSchema "run-coalesce"
           pure (first, second)
         outcomes `shouldBe` (Ops.RunReqStamped, Ops.RunReqPending)
 
       it "accepts a fresh request once the pending one is claimed" $ \env -> do
-        let Right cj = cronJob "run-again" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "again"))
+        let Right cron = cronJob "run-again" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "again"))
         outcome <- runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-again"
           _ <- Ops.claimCronRun testSchema "run-again"
           Ops.requestCronRun testSchema "run-again"
         outcome `shouldBe` Ops.RunReqStamped
 
       it "claims a request exactly once across pools" $ \env -> do
-        let Right cj = cronJob "run-once" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
+        let Right cron = cronJob "run-once" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "once"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           void $ Ops.requestCronRun testSchema "run-once"
 
         won <- runSimpleDb env $ Ops.claimCronRun testSchema "run-once"
@@ -719,21 +716,21 @@ spec connStr = do
         fmap CS.name lost `shouldBe` Nothing
 
       it "SkipOverlap: a request is skipped while a job is already active" $ \env -> do
-        let Right cj = cronJob "run-skip" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
+        let Right cron = cronJob "run-skip" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "skip"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-skip"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun testSchema "run-skip"
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 31 0)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 31 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
       it "disabling a schedule drops its pending request" $ \env -> do
-        let Right cj = cronJob "run-off" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
+        let Right cron = cronJob "run-off" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "nope"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <- Ops.requestCronRun testSchema "run-off"
           _ <-
             Ops.updateCronSchedule
@@ -745,7 +742,7 @@ spec connStr = do
                 , overrideTimezone = Nothing
                 , enabled = Just False
                 }
-          runRequestsAt testSchema [cj] (mkTime 2025 6 15 12 30 0)
+          runRequestsAt testSchema [cron] (mkTime 2025 6 15 12 30 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
@@ -766,7 +763,7 @@ spec connStr = do
         map CS.name rows `shouldBe` ["test-a", "test-b"]
         map CS.defaultExpression rows `shouldBe` ["0 3 * * *", "*/5 * * * *"]
 
-        -- Phase 2: Re-upsert with modified expression - should update, not duplicate
+        -- Phase 2: Re-upsert with a modified expression. The row is updated in place.
         let Right cj1' = cronJob "test-a" "*/10 * * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "a"))
         runSimpleDb env $ initCronSchedules testSchema testTable [cj1', cj2] testLogConfig
         rows2 <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
@@ -774,9 +771,9 @@ spec connStr = do
         map CS.defaultExpression rows2 `shouldBe` ["*/10 * * * *", "*/5 * * * *"]
 
       it "skips disabled schedules" $ \env -> do
-        let Right cj = cronJob "disabled-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "should-skip"))
+        let Right cron = cronJob "disabled-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "should-skip"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <-
             Ops.updateCronSchedule
               testSchema
@@ -787,16 +784,16 @@ spec connStr = do
                 , overrideTimezone = Nothing
                 , enabled = Just False
                 }
-          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          catchUpAt testSchema testTable [cron] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
       it "uses DB expression override over default" $ \env -> do
         -- Create a schedule that fires every minute
-        let Right cj = cronJob "override-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "override"))
+        let Right cron = cronJob "override-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "override"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
+          initCronSchedules testSchema testTable [cron] testLogConfig
           _ <-
             Ops.updateCronSchedule
               testSchema
@@ -807,17 +804,17 @@ spec connStr = do
                 , overrideTimezone = Nothing
                 , enabled = Nothing
                 }
-          -- Tick at 12:00 should NOT fire (overridden to 3am only)
-          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          -- A tick at 12:00 does not fire under the 3am override.
+          catchUpAt testSchema testTable [cron] (mkTime 2025 6 15 12 0 0)
 
         jobs <- runSimpleDb env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
       it "updates last_fired_at on successful fire" $ \env -> do
-        let Right cj = cronJob "fire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "fire"))
+        let Right cron = cronJob "fire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "fire"))
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] (mkTime 2025 6 15 12 0 0)
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] (mkTime 2025 6 15 12 0 0)
 
         mRow <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "fire-test"
         case mRow of
@@ -839,15 +836,15 @@ spec connStr = do
     it "Backfill includes the window cutoff minute when lastChecked predates the window" $ do
       -- currentTick = 12:00, window = 60s. Window cutoff = 11:59.
       -- lastChecked is 3 hours ago (way before the window). The 11:59
-      -- minute has never been processed, so it must be included.
+      -- minute has never been processed and is included.
       let currentTick = mkTime 2025 6 15 12 0 0
           lastChecked = mkTime 2025 6 15 9 0 0
       enumerateCatchUpTicks (Backfill 60) (Just lastChecked) currentTick
         `shouldSatisfy` elem (mkTime 2025 6 15 11 59 0)
 
     it "Backfill skips lastChecked itself when it is inside the window" $ do
-      -- lastChecked is inside the window. We already processed lastChecked,
-      -- so the catch-up starts at lastChecked + 1.
+      -- lastChecked is inside the window and already processed. The catch-up
+      -- starts at lastChecked + 1.
       let currentTick = mkTime 2025 6 15 12 0 0
           lastChecked = mkTime 2025 6 15 11 59 0
           ticks = enumerateCatchUpTicks (Backfill 120) (Just lastChecked) currentTick
@@ -868,16 +865,15 @@ spec connStr = do
       it "fires every missed minute for schedules with Backfill policy" $ \env -> do
         -- Simulate a scheduler wake-up after a 5-minute gap. last_checked_at
         -- is 5 minutes in the past. With Backfill 600 (10 min window) the
-        -- catch-up must fire a job for each missed minute so we do not
-        -- silently drop ticks during GC pauses or scheduler delays.
+        -- catch-up fires a job for each missed minute.
         let Right base =
               cronJob
                 "catchup-backfill"
                 "* * * * *"
                 AllowOverlap
-                (\_ t -> defaultJob (SimpleTask (formatMinute t)))
-            cj = base {backfill = Backfill 600}
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+                (\_ tickAt -> defaultJob (SimpleTask (formatMinute tickAt)))
+            cron = base {backfill = Backfill 600}
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
 
         withResource sharedPool $ \conn ->
           void $
@@ -887,23 +883,22 @@ spec connStr = do
               (PG.Only ("catchup-backfill" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         -- Expect at least 5 missed minutes plus the current one.
         length jobs `shouldSatisfy` (>= 5)
 
       it "does not replay missed minutes for NoBackfill schedules" $ \env -> do
-        -- NoBackfill is the user's declaration that stale ticks should not
-        -- be replayed. Even with a stale last_checked_at, only the current
-        -- minute fires.
-        let Right cj =
+        -- NoBackfill replays no stale ticks. With a stale last_checked_at, only
+        -- the current minute fires.
+        let Right cron =
               cronJob
                 "catchup-nobackfill"
                 "* * * * *"
                 AllowOverlap
                 (\_ _ -> defaultJob (SimpleTask "no-replay"))
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
 
         withResource sharedPool $ \conn ->
           void $
@@ -913,64 +908,64 @@ spec connStr = do
               (PG.Only ("catchup-nobackfill" :: Text))
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
       it "fires only the current minute when last_checked_at is null" $ \env -> do
-        -- Fresh schedule with no last_checked_at must not retroactively
-        -- replay ticks from before it existed, regardless of policy.
+        -- A fresh schedule with no last_checked_at replays no earlier ticks,
+        -- whatever the policy.
         let Right base =
               cronJob
                 "fresh"
                 "* * * * *"
                 AllowOverlap
                 (\_ _ -> defaultJob (SimpleTask "fresh"))
-            cj = base {backfill = Backfill 3600}
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+            cron = base {backfill = Backfill 3600}
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
 
         now <- runSimpleDb env $ liftIO getCurrentTime
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] now
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] now
 
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
-      it "sets last_checked_at to currentTick, not wall-clock NOW()" $ \env -> do
+      it "sets last_checked_at to currentTick" $ \env -> do
         -- Slow-processing regression. Watermark must equal the 'now' passed in.
-        let Right cj =
+        let Right cron =
               cronJob "watermark" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
             currentTickPast = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] currentTickPast
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] currentTickPast
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
-        case lookup "watermark" [(CS.name r, r) | r <- rows] of
+        case lookup "watermark" [(CS.name row, row) | row <- rows] of
           Just row -> CS.lastCheckedAt row `shouldBe` Just currentTickPast
           Nothing -> expectationFailure "watermark schedule missing"
 
       it "does not advance last_checked_at backwards" $ \env -> do
         -- GREATEST guard for concurrent pools with skewed clocks.
-        let Right cj =
+        let Right cron =
               cronJob "monotonic" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
             later = mkTime 2025 6 15 12 5 0
             earlier = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] later
-          catchUpAt testSchema testTable [cj] earlier
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] later
+          catchUpAt testSchema testTable [cron] earlier
 
         rows <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
-        case lookup "monotonic" [(CS.name r, r) | r <- rows] of
+        case lookup "monotonic" [(CS.name row, row) | row <- rows] of
           Just row -> CS.lastCheckedAt row `shouldBe` Just later
           Nothing -> expectationFailure "monotonic schedule missing"
 
       it "does not re-fire ticks whose jobs were already processed" $ \env -> do
         -- After firing and processing the live tick, a second call at the
-        -- same minute must not produce a duplicate (the dedup row is gone
-        -- once the job is acked, so the watermark is what protects us).
-        let Right cj =
+        -- same minute produces no duplicate. The dedup row is gone once the
+        -- job is acked. The watermark blocks the re-fire.
+        let Right cron =
               cronJob
                 "no-duplicate"
                 "* * * * *"
@@ -978,45 +973,45 @@ spec connStr = do
                 (\_ _ -> defaultJob (SimpleTask "once"))
             tick = mkTime 2025 6 15 12 0 0
         runSimpleDb env $ do
-          initCronSchedules testSchema testTable [cj] testLogConfig
-          catchUpAt testSchema testTable [cj] tick
+          initCronSchedules testSchema testTable [cron] testLogConfig
+          catchUpAt testSchema testTable [cron] tick
 
         claimed <- runSimpleDb env $ HL.claimNextVisibleJobs 100 60 :: IO [JobRead WorkerTestPayload]
         length claimed `shouldBe` 1
-        runSimpleDb env $ forM_ claimed $ \j -> void $ HL.ackJob j
+        runSimpleDb env $ forM_ claimed $ \job -> void $ HL.ackJob job
 
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] tick
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] tick
         afterRetry <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         afterRetry `shouldBe` []
 
       it "gate prevents double-fire when last_fired_at already covers the minute" $ \env -> do
-        -- Simulates a fast pool that already fired and acked 12:00.
-        -- A slow pool retrying the same minute would double-fire without the gate.
-        let Right cj = cronJob "skew-race" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "skew"))
+        -- Simulates a fast pool that already fired and acked 12:00. The gate
+        -- blocks a slow pool retrying the same minute.
+        let Right cron = cronJob "skew-race" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "skew"))
             tick = mkTime 2025 6 15 12 0 0
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
         withResource sharedPool $ \conn ->
           void $
             PG.execute
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
               (tick, "skew-race" :: Text)
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] tick
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] tick
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 0
 
       it "gate lets the next minute through after firing the previous one" $ \env -> do
-        let Right cj = cronJob "skew-advance" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "advance"))
+        let Right cron = cronJob "skew-advance" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "advance"))
             tickPrev = mkTime 2025 6 15 12 0 0
             tickNext = mkTime 2025 6 15 12 1 0
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
         withResource sharedPool $ \conn ->
           void $
             PG.execute
               conn
               "UPDATE arbiter_cron_test.cron_schedules SET last_fired_at = ? WHERE name = ?"
               (tickPrev, "skew-advance" :: Text)
-        runSimpleDb env $ catchUpAt testSchema testTable [cj] tickNext
+        runSimpleDb env $ catchUpAt testSchema testTable [cron] tickNext
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         length jobs `shouldBe` 1
 
@@ -1024,17 +1019,17 @@ spec connStr = do
     sharedPool <- runIO (createSharedPool connStr)
     around (withPool sharedPool) $ do
       it "touchCronChecked advances last_checked_at monotonically and matches by name" $ \env -> do
-        let Right cj = cronJob "touch-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+        let Right cron = cronJob "touch-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
             tEarly = mkTime 2025 6 15 12 0 0
             tLate = mkTime 2025 6 15 12 5 0
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
 
         nLate <- runSimpleDb env $ Ops.touchCronChecked testSchema tLate ["touch-test"]
         nLate `shouldBe` 1
         Just rowLate <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "touch-test"
         CS.lastCheckedAt rowLate `shouldBe` Just tLate
 
-        -- An earlier watermark still matches the row but never moves it backwards.
+        -- An earlier watermark matches the row and leaves it in place.
         nEarly <- runSimpleDb env $ Ops.touchCronChecked testSchema tEarly ["touch-test"]
         nEarly `shouldBe` 1
         Just rowEarly <- runSimpleDb env $ Ops.getCronScheduleByName testSchema "touch-test"
@@ -1045,18 +1040,18 @@ spec connStr = do
         nMiss `shouldBe` 0
 
       it "tryFireCronGate fires once per minute floor" $ \env -> do
-        let Right cj = cronJob "gate-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
-            m0 = mkTime 2025 6 15 12 0 0
-            m1 = mkTime 2025 6 15 12 1 0
-        runSimpleDb env $ initCronSchedules testSchema testTable [cj] testLogConfig
+        let Right cron = cronJob "gate-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
+            minuteZero = mkTime 2025 6 15 12 0 0
+            minuteOne = mkTime 2025 6 15 12 1 0
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
 
-        firstFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m0
+        firstFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" minuteZero
         firstFire `shouldBe` True
         -- The same minute floor cannot fire twice.
-        secondFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m0
+        secondFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" minuteZero
         secondFire `shouldBe` False
         -- A later minute floor fires again.
-        nextFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" m1
+        nextFire <- runSimpleDb env $ Ops.tryFireCronGate testSchema "gate-test" minuteOne
         nextFire `shouldBe` True
 
       it "tryAcquireCronLeader is mutually exclusive per (schema, queue, name) and releases on commit" $ \_env ->
@@ -1065,13 +1060,13 @@ spec connStr = do
             let acquire conn name =
                   inTransaction @WorkerTestRegistry conn testSchema (Ops.tryAcquireCronLeader testSchema testTable name)
 
-            -- The advisory lock is transaction-scoped, so conn1 must stay open to hold it.
+            -- The advisory lock is transaction-scoped. conn1 stays open to hold it.
             PG.begin conn1
             got1 <- acquire conn1 "leader"
             got1 `shouldBe` True
 
             PG.begin conn2
-            -- conn1 still holds "leader", so conn2 loses on the same key.
+            -- conn1 still holds "leader". conn2 loses on the same key.
             got2 <- acquire conn2 "leader"
             got2 `shouldBe` False
             -- A different schedule name is independent.

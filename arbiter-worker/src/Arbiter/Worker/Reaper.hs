@@ -66,7 +66,7 @@ data MaintenancePace = MaintenancePace
 
 -- | One pass of the maintenance the reaper runs, with each operation independently
 -- gated across all callers. An operation whose window has not elapsed is skipped.
--- Returns the operations that failed, which never stop the pass.
+-- Returns the operations that failed. A failure does not stop the pass.
 runMaintenancePass
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
@@ -79,23 +79,23 @@ runMaintenancePass
   -> NominalDiffTime
   -> m [MaintenanceOp]
 runMaintenancePass logCfg report pace stmtTimeout = do
-  let reaped op n = runHook logCfg "onMaintenance" $ report op n
+  let reaped operation count = runHook logCfg "onMaintenance" $ report operation count
       queues = registryTableNames (Proxy @(RegistryOf m))
       window = paceWindow pace
       sparseWindow = paceSparseWindow pace
       hasConcurrency = not (Set.null (registryConcurrencyPolicies @(RegistryOf m)))
       hasRateLimit = not (Set.null (registryRateLimitPolicies @(RegistryOf m)))
   schema <- Arb.getSchema
-  let gatedCount op every work =
-        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
-          >>= reportOutcome op (traverse_ (reaped op))
-      reportFailed op =
-        traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName op <> " failed for queue: " <> queue)
-      reportSwept op done =
-        traverse_ (\(n, failed) -> reaped op n >> reportFailed op failed >> when (n > 0) (done n))
-      sweep op every done work =
-        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName op) every work
-          >>= reportOutcome op (reportSwept op done)
+  let gatedCount operation every work =
+        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
+          >>= reportOutcome operation (traverse_ (reaped operation))
+      reportFailed operation =
+        traverse_ (\queue -> tryLog logCfg Warning $ maintenanceOpName operation <> " failed for queue: " <> queue)
+      reportSwept operation done =
+        traverse_ (\(count, failed) -> reaped operation count >> reportFailed operation failed >> when (count > 0) (done count))
+      sweep operation every done work =
+        tryReaperOp logCfg schema stmtTimeout (maintenanceOpName operation) every work
+          >>= reportOutcome operation (reportSwept operation done)
       refreshGroups =
         runReaperStateOp
           logCfg
@@ -111,12 +111,12 @@ runMaintenancePass logCfg report pace stmtTimeout = do
     , sweep
         SweepExhaustedJobs
         window
-        (\n -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show n) <> " exhausted job(s) to the DLQ")
+        (\count -> tryLog logCfg Warning $ "Reaper moved " <> T.pack (show count) <> " exhausted job(s) to the DLQ")
         $ Ops.sweepExhaustedJobs schema queues
     , sweep
         SweepCancelledJobs
         window
-        (\n -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show n) <> " orphaned cancelled job(s)")
+        (\count -> tryLog logCfg Info $ "Reaper deleted " <> T.pack (show count) <> " orphaned cancelled job(s)")
         $ Ops.sweepCancelledJobs schema queues
     ]
       <> [gatedCount PruneRateLimitBuckets sparseWindow (Arb.pruneRateLimitBuckets @m (paceBucketIdle pace)) | hasRateLimit]
@@ -125,18 +125,18 @@ runMaintenancePass logCfg report pace stmtTimeout = do
       <> [ sweep
              PurgeArchives
              window
-             (\n -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show n) <> " archived job(s)")
+             (\count -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show count) <> " archived job(s)")
              $ Ops.purgeArchives schema queues
          ]
 
--- | Name the operation when it failed, otherwise report it through @emit@.
+-- | Name a failed operation. Report a completed one through @emit@.
 reportOutcome
   :: (Monad m)
   => MaintenanceOp
   -> (a -> m ())
   -> Either SomeException a
   -> m (Maybe MaintenanceOp)
-reportOutcome op emit = either (const (pure (Just op))) (\ran -> Nothing <$ emit ran)
+reportOutcome operation emit = either (const (pure (Just operation))) (\ran -> Nothing <$ emit ran)
 
 -- | Run one gated maintenance operation. Database statement timeouts bound
 -- individual statements. Failures are logged and do not stop the loop.
@@ -181,4 +181,5 @@ runReaperStateOp logCfg schema stmtTimeout task every work =
 
 reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m (Either SomeException a)
 reaperGate logCfg task action =
-  tryAny action >>= either (\e -> Left e <$ warnEx logCfg ("Reaper op failed: " <> task) e) (pure . Right)
+  tryAny action
+    >>= either (\exception -> Left exception <$ warnEx logCfg ("Reaper op failed: " <> task) exception) (pure . Right)

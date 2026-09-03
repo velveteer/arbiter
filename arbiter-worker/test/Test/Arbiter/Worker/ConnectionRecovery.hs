@@ -63,15 +63,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = do
-              liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
+              liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
 
         -- Insert 3 jobs before the kill
-        forM_ [1 :: Int .. 3] $ \i ->
+        forM_ [1 :: Int .. 3] $ \jobIndex ->
           runSimpleDb env
             $ void
             $ HL.insertJob
             $ setGroupKey (Just "g1")
-            $ defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show i))
+            $ defaultJob (SimpleTask (T.pack $ "Pre-kill " <> show jobIndex))
 
         config <- transactionalWorkerConfig 10 handler
         let workerConfig =
@@ -94,8 +94,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           -- Wait for retryOnException to reconnect (5s delay + reconnect)
           threadDelay 7_000_000
 
-          -- Insert more jobs using a fresh connection (bypasses the pool
-          -- which may still hold dead connections)
+          -- Insert more jobs on a fresh connection. The pool may still hold
+          -- dead connections.
           insertJobsDirect
             env
             connStr
@@ -118,17 +118,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             handler conn job = do
               case payload job of
                 SlowTask _ -> do
-                  shouldKill <- liftIO $ atomicModifyIORef' killOnceRef $ \b -> (False, b)
+                  shouldKill <- liftIO $ atomicModifyIORef' killOnceRef $ \armed -> (False, armed)
                   when shouldKill $ liftIO $ do
-                    -- Kill just this handler's own connection by running a
-                    -- query on it after terminating it from another connection
+                    -- Terminate this handler's own connection from another connection.
                     myPid <- PG.query_ @(Only Int) conn "SELECT pg_backend_pid()"
                     case myPid of
                       [Only pid] -> terminatePid connStr pid
                       _ -> pure ()
                 -- The next DB operation on conn will fail
                 _ -> pure ()
-              liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
+              liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
 
         -- Insert the slow job that will get its connection killed
         runSimpleDb env
@@ -150,13 +149,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 15_000 $ (== 2) <$> readIORef completedRef
 
           completed <- readIORef completedRef
-          -- Handler runs twice: first attempt (connection killed after increment),
-          -- second attempt (succeeds normally)
+          -- The handler runs twice. The first attempt loses its connection after
+          -- the increment. The second attempt succeeds.
           completed `shouldBe` 2
 
-          -- Verify job was eventually acked and removed from queue.
-          -- The handler increments before its transaction commits, so poll
-          -- rather than reading the queue immediately.
+          -- Verify the job was acked and removed from the queue. The handler
+          -- increments before its transaction commits. Poll for the removal.
           let remainingCount =
                 length <$> runSimpleDb env (HL.listJobs @WorkerTestPayload 10 0)
           waitUntil 10_000 $ (== 0) <$> remainingCount
@@ -186,16 +184,16 @@ terminatePid connStr pid = do
   _ <- PG.query @_ @(Only Bool) conn "SELECT pg_terminate_backend(?)" (Only pid)
   close conn
 
--- | Insert jobs using a fresh connection, bypassing the pool
--- (which may still hold dead connections after a kill).
+-- | Insert jobs on a fresh connection. The pool may still hold dead
+-- connections after a kill.
 insertJobsDirect :: SimpleEnv WorkerTestRegistry -> ByteString -> [WorkerTestPayload] -> IO ()
 insertJobsDirect _env connStr payloads = do
   conn <- connectPostgreSQL connStr
   PG.withTransaction conn $
-    forM_ payloads $ \p ->
+    forM_ payloads $ \task ->
       inTransaction @WorkerTestRegistry conn testSchema
         $ void
         $ HL.insertJob
         $ setGroupKey (Just "g1")
-        $ defaultJob p
+        $ defaultJob task
   close conn

@@ -83,8 +83,8 @@ overlapPolicyFromText "SkipOverlap" = Just SkipOverlap
 overlapPolicyFromText "AllowOverlap" = Just AllowOverlap
 overlapPolicyFromText _ = Nothing
 
--- | Check a cron patch before it is written. The scheduler does not reject a
--- bad override at tick time: it stops firing, or falls back to the default.
+-- | Check a cron patch before it is written. At tick time a bad override stops
+-- firing or falls back to the default.
 validateCronScheduleUpdate :: CS.CronScheduleUpdate -> Either Text ()
 validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
   check mExpr (isRight . parseCronSchedule) "Invalid cron expression"
@@ -123,9 +123,9 @@ data CronJob payload = CronJob
   }
   deriving stock (Generic)
 
--- | Build a 'CronJob', parsing the expression eagerly and returning @Left@ on a bad one.
--- The expression is evaluated in UTC, whatever the server's own timezone.
--- 'cronJobInTimezone' is the local-time form, and 'backfill' is set by record update.
+-- | Build a 'CronJob'. A bad expression returns @Left@. The expression is
+-- evaluated in UTC. 'cronJobInTimezone' is the local-time form. Set 'backfill'
+-- by record update.
 --
 -- @
 -- cronJob "nightly-report" "0 3 * * *" SkipOverlap
@@ -140,14 +140,14 @@ cronJob
   -> (TickKind -> UTCTime -> JobWrite payload)
   -- ^ Job builder. Receives the tick kind and the tick time.
   -> Either String (CronJob payload)
-cronJob cronName expr ov mk =
+cronJob cronName expr overlapPolicy build =
   CronJob
     { name = cronName
     , cronExpression = expr
-    , overlap = ov
+    , overlap = overlapPolicy
     , backfill = NoBackfill
     , timezone = Nothing
-    , builder = mk
+    , builder = build
     }
     <$ parseCronSchedule expr
 
@@ -163,10 +163,10 @@ cronJobInTimezone
   -> OverlapPolicy
   -> (TickKind -> UTCTime -> JobWrite payload)
   -> Either String (CronJob payload)
-cronJobInTimezone cronName tzName expr ov mk =
+cronJobInTimezone cronName tzName expr overlapPolicy build =
   case resolveTZ tzName of
     Nothing -> Left $ "Unknown timezone: " <> T.unpack tzName
-    Just _ -> fmap (\cj -> cj {timezone = Just tzName}) (cronJob cronName expr ov mk)
+    Just _ -> fmap (\job -> job {timezone = Just tzName}) (cronJob cronName expr overlapPolicy build)
 
 -- | Look up an IANA tz name in the bundled @tzdata@ database.
 resolveTZ :: Text -> Maybe TZ
@@ -175,43 +175,43 @@ resolveTZ name = fmap tzByLabel (fromTZName (encodeUtf8 name))
 -- | Match a cron schedule against a UTC tick, evaluated in @tz@.
 -- 'Nothing' means UTC. An unknown tz name returns 'False'.
 matchesInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Bool
-matchesInTimezone Nothing sched t = scheduleMatches sched t
-matchesInTimezone (Just tzName) sched t =
+matchesInTimezone Nothing sched tick = scheduleMatches sched tick
+matchesInTimezone (Just tzName) sched tick =
   case resolveTZ tzName of
     Nothing -> False
-    Just tz ->
-      let local = utcToLocalTimeTZ tz t
+    Just zone ->
+      let local = utcToLocalTimeTZ zone tick
           asUtc = localTimeToUTC utc local
        in scheduleMatches sched asUtc
 
 -- | The first tick after @now@ that @sched@ matches, evaluated in @tz@.
 -- 'Nothing' means UTC. An unknown tz name returns 'Nothing'.
 --
--- A replayed local minute is reported, though its insert is deduped while the earlier run
+-- A replayed local minute is reported. Its insert is deduped while the earlier run
 -- is still live.
 nextRunInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Maybe UTCTime
 nextRunInTimezone Nothing sched now = nextMatch sched now
 nextRunInTimezone (Just tzName) sched now = do
-  tz <- resolveTZ tzName
-  replayed tz <|> seek tz (localTimeToUTC utc (utcToLocalTimeTZ tz now))
+  zone <- resolveTZ tzName
+  replayed zone <|> seek zone (localTimeToUTC utc (utcToLocalTimeTZ zone now))
   where
     -- A replayed minute runs ahead of @now@ in UTC while reading behind it locally.
-    replayed tz = do
-      endsAt <- replayEnd tz now
+    replayed zone = do
+      endsAt <- replayEnd zone now
       find (matchesInTimezone (Just tzName) sched) (enumMinutes (addUTCTime 60 (truncateToMinute now)) endsAt)
-    seek tz from = do
+    seek zone from = do
       localMinute <- nextMatch sched from
-      find (> now) (ticksWearing tz (utcToLocalTime utc localMinute)) <|> seek tz localMinute
+      find (> now) (ticksWearing zone (utcToLocalTime utc localMinute)) <|> seek zone localMinute
 
--- | When @t@ is in the first pass of a repeated local hour, when that hour reads again.
+-- | When @tick@ is in the first pass of a repeated local hour, when that hour reads again.
 replayEnd :: TZ -> UTCTime -> Maybe UTCTime
-replayEnd tz t = case localTimeToUTCFull tz (utcToLocalTimeTZ tz t) of
-  LTUAmbiguous _ second _ _ | t < second -> Just second
+replayEnd zone tick = case localTimeToUTCFull zone (utcToLocalTimeTZ zone tick) of
+  LTUAmbiguous _ second _ _ | tick < second -> Just second
   _ -> Nothing
 
 -- | Every UTC tick whose local clock in @tz@ reads @local@, earliest first.
 ticksWearing :: TZ -> LocalTime -> [UTCTime]
-ticksWearing tz local = case localTimeToUTCFull tz local of
+ticksWearing zone local = case localTimeToUTCFull zone local of
   LTUUnique tick _ -> [tick]
   LTUAmbiguous first second _ _ -> [first, second]
   LTUNone _ _ -> []
@@ -222,20 +222,20 @@ nextRunFromExpression tzName expr now =
   either (const Nothing) (\sched -> nextRunInTimezone tzName sched now) (parseCronSchedule expr)
 
 -- | Format a UTC tick as @YYYY-MM-DDTHH:MM@ in the given timezone.
--- DST fall-back maps two UTC instants to the same local minute, so dedup
--- keys built from this collapse to a single fire.
+-- DST fall-back maps two UTC instants to the same local minute. Dedup keys
+-- built from it collapse those to a single fire.
 formatMinuteInTimezone :: Maybe Text -> UTCTime -> Text
-formatMinuteInTimezone tzName t =
-  maybe (formatMinute t) localMinute (tzName >>= resolveTZ)
+formatMinuteInTimezone tzName tick =
+  maybe (formatMinute tick) localMinute (tzName >>= resolveTZ)
   where
-    localMinute tz = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" (utcToLocalTimeTZ tz t))
+    localMinute zone = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" (utcToLocalTimeTZ zone tick))
 
 -- | Truncate a 'UTCTime' to the current minute (zero out seconds).
 truncateToMinute :: UTCTime -> UTCTime
-truncateToMinute t =
-  let secs = utctDayTime t
+truncateToMinute tick =
+  let secs = utctDayTime tick
       truncated = secondsToDiffTime (floor secs `div` 60 * 60)
-   in t {utctDayTime = truncated}
+   in tick {utctDayTime = truncated}
 
 -- | Format a 'UTCTime' as @YYYY-MM-DDTHH:MM@ for dedup key buckets.
 formatMinute :: UTCTime -> Text
@@ -246,5 +246,5 @@ formatMinute = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M"
 enumMinutes :: UTCTime -> UTCTime -> [UTCTime]
 enumMinutes start end =
   unfoldr
-    (\t -> if t > end then Nothing else Just (t, addUTCTime 60 t))
+    (\minute -> if minute > end then Nothing else Just (minute, addUTCTime 60 minute))
     start

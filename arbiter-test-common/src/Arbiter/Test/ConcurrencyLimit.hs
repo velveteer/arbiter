@@ -74,19 +74,20 @@ newtype CLPayload = CLPayload Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | A finite tag per payload: "mx"/"my"/"mz" select those pools, else "declpool" keyed by the payload text.
+-- | A finite tag per payload. "mx", "my", and "mz" select those pools. Any other
+-- text selects "declpool", keyed by the payload text.
 data CLTag = CLDecl | CLMx | CLMy | CLMz
   deriving stock (Bounded, Enum, Eq)
 
 instance HasConcurrency CLPayload where
   concurrencyFor = concurrencyByCase tagOf sel
     where
-      tagOf (CLPayload t)
-        | t == "mx" = CLMx
-        | t == "my" = CLMy
-        | t == "mz" = CLMz
+      tagOf (CLPayload text)
+        | text == "mx" = CLMx
+        | text == "my" = CLMy
+        | text == "mz" = CLMz
         | otherwise = CLDecl
-      sel CLDecl = concurrencyBy (concurrencyPool "declpool" 2) (\(CLPayload t) -> t)
+      sel CLDecl = concurrencyBy (concurrencyPool "declpool" 2) (\(CLPayload text) -> text)
       sel CLMx = concurrencyBy (concurrencyPool "mx" 1) (const "k")
       sel CLMy = concurrencyBy (concurrencyPool "my" 2) (const "k")
       sel CLMz = concurrencyBy (concurrencyPool "mz" 3) (const "k")
@@ -94,18 +95,17 @@ instance HasConcurrency CLPayload where
 -- | A one-queue registry over 'CLPayload'.
 type CLReg = '[Queue "arbiter_concurrency_test" CLPayload]
 
--- | A second payload declaring a different pool, with a two-payload registry, so the
--- registry-collection test exercises the cross-payload union.
+-- | A second payload declaring a different pool, with a two-payload registry.
 newtype CLPayload2 = CLPayload2 Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
 instance HasConcurrency CLPayload2 where
-  concurrencyFor = concurrencyBy (concurrencyPool "declpool2" 5) (\(CLPayload2 t) -> t)
+  concurrencyFor = concurrencyBy (concurrencyPool "declpool2" 5) (\(CLPayload2 text) -> text)
 
 type CLReg2 = '[Queue "clq1" CLPayload, Queue "clq2" CLPayload2]
 
--- | Table name for 'CLReg', shared across backends (each in its own schema).
+-- | Table name for 'CLReg', shared across backends.
 concurrencyTable :: Text
 concurrencyTable = "arbiter_concurrency_test"
 
@@ -116,7 +116,7 @@ job :: Text -> Text -> JobWrite CLPayload
 job pool suffix = defaultJob (CLPayload (pool <> ":" <> suffix))
 
 groupedJob :: Text -> Text -> Text -> JobWrite CLPayload
-groupedJob gk pool suffix = defaultGroupedJob gk (CLPayload (pool <> ":" <> suffix))
+groupedJob groupKey pool suffix = defaultGroupedJob groupKey (CLPayload (pool <> ":" <> suffix))
 
 -- | The concurrency-limit suite, run against any backend.
 concurrencyLimitSpec
@@ -127,12 +127,12 @@ concurrencyLimitSpec
 concurrencyLimitSpec runM = do
   let wid = UUID.nil
       tshow = T.pack . show :: Int -> Text
-      enqueue env js = void (runM env (HL.insertJobsBatch js) :: IO [JobRead CLPayload])
-      -- Concurrency counts off claimed_by, so claims must be attributed.
+      enqueue env jobs = void (runM env (HL.insertJobsBatch jobs) :: IO [JobRead CLPayload])
+      -- Claims are attributed.
       claimAs env = runM env (HL.claimNextVisibleJobsAs 100 60 wid) :: IO [JobRead CLPayload]
-      ackAll env js = runM env (traverse_ HL.ackJob js)
-      retryAll env js = runM env (traverse_ (HL.updateJobForRetry 60 "boom") js)
-      nackAll env js = runM env (traverse_ HL.nackJob js)
+      ackAll env jobs = runM env (traverse_ HL.ackJob jobs)
+      retryAll env jobs = runM env (traverse_ (HL.updateJobForRetry 60 "boom") jobs)
+      nackAll env jobs = runM env (traverse_ HL.nackJob jobs)
       overridePool env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpool" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
       prune env = runM env HL.pruneConcurrencyKeys :: IO Int64
       reconcile env = void (runM env HL.reconcileConcurrencyCounts :: IO Int64)
@@ -142,19 +142,21 @@ concurrencyLimitSpec runM = do
         runM env $ do
           schema <- getSchema
           void $ execStatement ("DELETE FROM " <> arbiterConcurrencyTable schema) []
-      -- Seed the declpool default limit and clear any override (all example tests share this prefix).
+      -- Seed the declpool default limit and clear any override.
       seed env (lim :: Int) =
         runM env $ do
           schema <- getSchema
-          traverse_ (\s -> void (execStatement s [])) (seedConcurrencyPoolSQL schema "declpool" (fromIntegral lim))
-      corrupt env key n =
+          traverse_
+            (\statement -> void (execStatement statement []))
+            (seedConcurrencyPoolSQL schema "declpool" (fromIntegral lim))
+      corrupt env key count =
         runM env $ do
           schema <- getSchema
           void $
             execStatement
-              ("UPDATE " <> arbiterConcurrencyTable schema <> " SET in_flight = " <> tshow n <> " WHERE concurrency_key = ?")
+              ("UPDATE " <> arbiterConcurrencyTable schema <> " SET in_flight = " <> tshow count <> " WHERE concurrency_key = ?")
               [pval CText key]
-      -- A job that has already failed, so it keeps the head of its group's line.
+      -- Mark a grouped job as already failed.
       markAttempted env key =
         runM env $ do
           schema <- getSchema
@@ -181,8 +183,7 @@ concurrencyLimitSpec runM = do
               [pval CText key]
               (col "in_flight" CInt4)
           pure (listToMaybe rows :: Maybe Int32)
-      -- Backdate every job's visibility so claimed jobs time out and become
-      -- reclaimable, deterministically instead of sleeping.
+      -- Backdate every job's visibility. Claimed jobs time out and become reclaimable.
       timeOut env secs = runM env $ do
         schema <- getSchema
         void $
@@ -204,7 +205,7 @@ concurrencyLimitSpec runM = do
     length again `shouldBe` 0
 
   it "an undeclared pool runs uncapped (fail open)" $ \env -> do
-    -- Claim well above any seeded limit to prove it is truly uncapped, not just >= N.
+    -- Claim well above any seeded limit.
     enqueue env (replicate 20 (job "undeclared" "a"))
     claimed <- claimAs env
     length claimed `shouldBe` 20
@@ -217,7 +218,6 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "declpool" "tx") `shouldReturn` Just 2
 
   it "the registry collects the declared pool for migration seeding" $ \_ ->
-    -- The production seed path (registryConcurrencyPolicies -> upsert) reflects this.
     registryConcurrencyPolicies @CLReg
       `shouldBe` Set.fromList
         [ ConcurrencyPolicy "declpool" 2
@@ -227,7 +227,7 @@ concurrencyLimitSpec runM = do
         ]
 
   it "the registry unions declared pools across all payloads" $ \_ ->
-    -- Two payloads, two pools: exercises the cross-payload fold, not just one entry.
+    -- Two payloads, two pools.
     registryConcurrencyPolicies @CLReg2
       `shouldBe` Set.fromList
         [ ConcurrencyPolicy "declpool" 2
@@ -242,11 +242,11 @@ concurrencyLimitSpec runM = do
     cpLimit (concurrencyPool "p" (-5)) `shouldBe` 1
 
   it "chooseWhen collects both concurrency branches and runs the chosen one" $ \_ -> do
-    let pa = concurrencyPool "ca" 1
-        pb = concurrencyPool "cb" 2
+    let policyA = concurrencyPool "ca" 1
+        policyB = concurrencyPool "cb" 2
         sel :: ConcurrencyFor Bool
-        sel = chooseWhen id (concurrencyBy pa (const "x")) (concurrencyBy pb (const "y"))
-    Set.toList (collectPolicies sel) `shouldMatchList` [pa, pb]
+        sel = chooseWhen id (concurrencyBy policyA (const "x")) (concurrencyBy policyB (const "y"))
+    Set.toList (collectPolicies sel) `shouldMatchList` [policyA, policyB]
     (ckPrefix <$> runConcurrencyFor True sel) `shouldBe` Just "ca"
     (ckPrefix <$> runConcurrencyFor False sel) `shouldBe` Just "cb"
 
@@ -338,14 +338,13 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "track" "a") `shouldReturn` Just 1
 
   it "floors in_flight at zero when a decrement would underflow a drifted count" $ \env -> do
-    -- The delete trigger's GREATEST(0, ...) guard. If drift leaves a count row below
-    -- its live claimed jobs (a lost increment, a double decrement), acking one must
-    -- clamp at 0, never go negative and permanently over-admit the pool.
+    -- Drift can leave a count row below its live claimed jobs. Acking one clamps
+    -- the count at 0.
     seed env 3
     enqueue env [job "floor" "a"]
     claimed <- claimAs env
     length claimed `shouldBe` 1
-    -- One claimed job, but force the count to read 0 (below the truth).
+    -- One claimed job. Force the count to read 0.
     corrupt env (fullKey "floor" "a") 0
     ackAll env claimed
     inFlight env (fullKey "floor" "a") `shouldReturn` Just 0
@@ -358,24 +357,24 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "drain" "x") `shouldReturn` Nothing
     inFlight env (fullKey "drain" "y") `shouldReturn` Nothing
 
-  it "prune skips a key held by an open enqueue transaction instead of waiting, and the job is never stranded" $ \env -> do
+  it "prune skips a key held by an open enqueue transaction and the job still runs" $ \env -> do
     seed env 2
     enqueue env [job "skip" "a"]
     claimAs env >>= ackAll env
     inFlight env (fullKey "skip" "a") `shouldReturn` Just 0
     entered <- newEmptyMVar
     release <- newEmptyMVar
-    a <- async $ runM env $ withDbTransaction $ do
+    enqueuer <- async $ runM env $ withDbTransaction $ do
       _ <- HL.insertJobsBatch [job "skip" "a"] :: m [JobRead CLPayload]
       liftIO $ putMVar entered ()
       liftIO $ takeMVar release
     takeMVar entered
-    -- The open enqueue holds the key's shared advisory lock. Prune must return without it, not block.
+    -- The open enqueue holds the key's shared advisory lock. Prune returns without it.
     pruned <- timeout 5000000 (prune env)
     pruned `shouldBe` Just 0
     inFlight env (fullKey "skip" "a") `shouldReturn` Just 0
     putMVar release ()
-    wait a
+    wait enqueuer
     claimed <- claimAs env
     length claimed `shouldBe` 1
     ackAll env claimed
@@ -388,19 +387,19 @@ concurrencyLimitSpec runM = do
     claimAs env >>= ackAll env
     entered <- newEmptyMVar
     pruneDone <- newEmptyMVar
-    a <- async $ runM env $ withDbTransaction $ do
+    enqueuer <- async $ runM env $ withDbTransaction $ do
       _ <- HL.insertJobsBatch [job "dk" "b"] :: m [JobRead CLPayload]
       liftIO $ putMVar entered ()
       liftIO $ takeMVar pruneDone
       _ <- HL.insertJobsBatch [job "dk" "a"] :: m [JobRead CLPayload]
       pure ()
     takeMVar entered
-    -- Prune sees both keys dead, must take a and skip the held b without waiting.
+    -- Prune sees both keys dead. It takes a and skips the held b.
     pruned <- timeout 5000000 (prune env)
     pruned `shouldBe` Just 1
     inFlight env (fullKey "dk" "a") `shouldReturn` Nothing
     putMVar pruneDone ()
-    wait a
+    wait enqueuer
     -- The second insert reseeds the pruned key. Both jobs stay claimable.
     claimed <- claimAs env
     length claimed `shouldBe` 2
@@ -411,7 +410,9 @@ concurrencyLimitSpec runM = do
     claimed <- claimAs env
     runM env (traverse_ (void . HL.moveToDLQ "boom") claimed)
     dlqs <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob CLPayload]
-    runM env (traverse_ (\d -> void (HL.retryFromDLQ (DLQ.dlqPrimaryKey d) :: m (Maybe (JobRead CLPayload)))) dlqs)
+    runM
+      env
+      (traverse_ (\dlqJob -> void (HL.retryFromDLQ (DLQ.dlqPrimaryKey dlqJob) :: m (Maybe (JobRead CLPayload)))) dlqs)
     reclaimed <- claimAs env
     length reclaimed `shouldBe` 1
     inFlight env (fullKey "dlq" "a") `shouldReturn` Just 1
@@ -431,9 +432,9 @@ concurrencyLimitSpec runM = do
     enqueue env (replicate 2 (job "draincon" "a"))
     claimed <- claimAs env
     length claimed `shouldBe` 2
-    -- Ack deletes the jobs. The count row drains to job_count 0 but is not pruned.
+    -- Ack deletes the jobs. The count row drains and stays unpruned.
     ackAll env claimed
-    -- Reconcile must repair such a key (no live jobs) without a NOT NULL violation.
+    -- Reconcile repairs a key with no live jobs.
     reconcile env
     inFlight env (fullKey "draincon" "a") `shouldReturn` Just 0
 
@@ -448,33 +449,33 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "reconm" "a") `shouldReturn` Just 3
 
   it "reconcile against an in-flight claim does not overwrite the count below the truth" $ \env -> do
-    -- Reconcile runs while J2 is claimed in an open transaction. It must count J2, not the pre-claim snapshot.
+    -- Reconcile runs while the second job is claimed in an open transaction. It counts that job.
     seed env 5
     enqueue env [job "recrace" "a"]
-    c1 <- claimAs env
-    length c1 `shouldBe` 1
+    firstClaim <- claimAs env
+    length firstClaim `shouldBe` 1
     enqueue env [job "recrace" "a"]
     claimed <- newEmptyMVar
     release <- newEmptyMVar
-    a <- async $ runM env $ withDbTransaction $ do
-      c <- HL.claimNextVisibleJobsAs 100 60 wid :: m [JobRead CLPayload]
-      liftIO $ putMVar claimed (length c)
+    claimer <- async $ runM env $ withDbTransaction $ do
+      claimedJobs <- HL.claimNextVisibleJobsAs 100 60 wid :: m [JobRead CLPayload]
+      liftIO $ putMVar claimed (length claimedJobs)
       liftIO $ takeMVar release
     takeMVar claimed `shouldReturn` 1
-    b <- async (reconcile env)
+    reconciler <- async (reconcile env)
     threadDelay 200000
     putMVar release ()
-    wait a
-    wait b
+    wait claimer
+    wait reconciler
     inFlight env (fullKey "recrace" "a") `shouldReturn` Just 2
 
   it "reconcile does not overwrite a claim on a key seeded after its lock pass" $ \env -> do
-    -- The key is born between the lock pass and the recount, so the recount must
-    -- leave it to its triggers instead of writing a count from a pre-claim snapshot.
+    -- The key is born between the lock pass and the recount. The recount leaves
+    -- it to its triggers.
     seed env 5
     lockTaken <- newEmptyMVar
     resume <- newEmptyMVar
-    a <- async $ runM env $ withDbTransaction $ do
+    reconciler <- async $ runM env $ withDbTransaction $ do
       schema <- getSchema
       held <- MA.executeQuery (Tmpl.lockConcurrencyCountsSQL schema)
       liftIO $ putMVar lockTaken ()
@@ -486,16 +487,16 @@ concurrencyLimitSpec runM = do
     enqueue env [job "lateseed" "a"]
     claimed <- newEmptyMVar
     release <- newEmptyMVar
-    b <- async $ runM env $ withDbTransaction $ do
-      c <- HL.claimNextVisibleJobsAs 100 60 wid :: m [JobRead CLPayload]
-      liftIO $ putMVar claimed (length c)
+    claimer <- async $ runM env $ withDbTransaction $ do
+      claimedJobs <- HL.claimNextVisibleJobsAs 100 60 wid :: m [JobRead CLPayload]
+      liftIO $ putMVar claimed (length claimedJobs)
       liftIO $ takeMVar release
     takeMVar claimed `shouldReturn` 1
     putMVar resume ()
     threadDelay 200000
     putMVar release ()
-    wait b
-    wait a
+    wait claimer
+    wait reconciler
     inFlight env (fullKey "lateseed" "a") `shouldReturn` Just 1
 
   it "a stale rebuild restores counts a crash truncated, so keyed jobs stay claimable" $ \env -> do
@@ -518,7 +519,7 @@ concurrencyLimitSpec runM = do
     claimed <- claimAs env
     length claimed `shouldBe` 2
     truncateCounts env
-    -- A fresh enqueue seeds its own count row, which must not mask the truncation.
+    -- A fresh enqueue seeds its own count row. The truncation is still detected.
     enqueue env [job "stale" "b"]
     reconcileIfStale env
     inFlight env (fullKey "stale" "a") `shouldReturn` Just 2
@@ -528,16 +529,16 @@ concurrencyLimitSpec runM = do
     enqueue env (replicate 3 (job "healthy" "a"))
     claimed <- claimAs env
     length claimed `shouldBe` 3
-    -- The table is non-empty, so the stale check must not run the full reconcile.
+    -- The table is non-empty. The stale check skips the full reconcile.
     corrupt env (fullKey "healthy" "a") 99
     reconcileIfStale env
     inFlight env (fullKey "healthy" "a") `shouldReturn` Just 99
 
   it "moves the count row when a dedup replace changes the concurrency key" $ \env -> do
     seed env 1
-    let mk suffix = setDedupKey (Just (ReplaceDuplicate "movekey")) $ job "ck" suffix
-    enqueue env [mk "old"]
-    enqueue env [mk "new"]
+    let mkJob suffix = setDedupKey (Just (ReplaceDuplicate "movekey")) $ job "ck" suffix
+    enqueue env [mkJob "old"]
+    enqueue env [mkJob "new"]
     inFlight env (fullKey "ck" "old") `shouldReturn` Just 0
     claimed <- claimAs env
     length claimed `shouldBe` 1
@@ -547,12 +548,12 @@ concurrencyLimitSpec runM = do
 
   it "caps across groups sharing one key" $ \env -> do
     seed env 2
-    enqueue env [groupedJob ("g-" <> tshow i) "shared" "c" | i <- [1 .. 5]]
+    enqueue env [groupedJob ("g-" <> tshow index) "shared" "c" | index <- [1 .. 5]]
     claimed <- claimAs env
     length claimed `shouldBe` 2
 
   it "stalls a concurrency-blocked grouped head over a free-key sibling in batched mode" $ \env -> do
-    -- With the head's key at its cap, a batched claim must defer the whole group, not run the free-key sibling first.
+    -- With the head's key at its cap, a batched claim defers the whole group.
     seed env 1
     enqueue env [job "bh" "head"]
     filled <- claimAs env
@@ -566,20 +567,19 @@ concurrencyLimitSpec runM = do
     enqueue env (replicate 40 (job "race" "a"))
     results <- mapConcurrently (const (claimAs env)) [1 .. 8 :: Int]
     let total = sum (map length results)
-    -- At least one claimer makes progress (catches a contended deadlock) and none
-    -- pushes the key over the cap.
-    total `shouldSatisfy` (\t -> t >= 1 && t <= 5)
-    -- An uncontended follow-up fills the key to exactly the cap (the contended total
-    -- is not deterministic: the count-row-lock winner admits only its SKIP-LOCKED share).
+    -- At least one claimer makes progress. None pushes the key over the cap.
+    total `shouldSatisfy` (\count -> count >= 1 && count <= 5)
+    -- An uncontended follow-up fills the key to the cap. The contended total is
+    -- not deterministic.
     more <- claimAs env
     (total + length more) `shouldBe` 5
     inFlight env (fullKey "race" "a") `shouldReturn` Just 5
 
   it "concurrent claimers across many keys never exceed any cap" $ \env -> do
-    -- Many distinct keys at once, surfacing cross-key lock-ordering the single-key race cannot.
+    -- Many distinct keys at once.
     seed env 2
-    let keys = [tshow i | i <- [1 .. 12]]
-    enqueue env (concat [replicate 6 (job "declpool" k) | k <- keys])
+    let keys = [tshow index | index <- [1 .. 12]]
+    enqueue env (concat [replicate 6 (job "declpool" suffix) | suffix <- keys])
     _ <- mapConcurrently (const (claimAs env)) [1 .. 8 :: Int]
     overCap <- runM env $ do
       schema <- getSchema
@@ -592,13 +592,13 @@ concurrencyLimitSpec runM = do
         []
         (col "concurrency_key" CText)
     (overCap :: [Text]) `shouldBe` []
-    -- An uncontended drain fills every key to exactly the cap (no spurious starvation).
+    -- An uncontended drain fills every key to the cap.
     void (drainWith (claimAs env))
-    traverse_ (\k -> inFlight env (fullKey "declpool" k) `shouldReturn` Just 2) keys
+    traverse_ (\suffix -> inFlight env (fullKey "declpool" suffix) `shouldReturn` Just 2) keys
 
   it "a full concurrency key does not starve admissible ungrouped jobs behind it" $ \env -> do
     -- Fill the hot key to its cap, then flood it past the bounded candidate window.
-    -- The ccGate pre-filter must keep it from crowding out the cold job on another key.
+    -- The cold job on another key still claims.
     seed env 2
     enqueue env (replicate 150 (job "declpool" "hot"))
     filled <- claimAs env
@@ -608,19 +608,19 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "declpool" "cold") `shouldReturn` Just 1
 
   it "a full concurrency key does not starve admissible grouped jobs behind it" $ \env -> do
-    -- The grouped analog: each blocked group takes a slot in the bounded window,
-    -- so a flood of groups on one full key must not crowd out a cold group behind them.
+    -- Each blocked group takes a slot in the bounded window. A flood of groups on
+    -- one full key leaves room for a cold group behind them.
     seed env 2
-    enqueue env [groupedJob ("hotg-" <> tshow i) "declpool" "ghot" | i <- [1 .. 150]]
+    enqueue env [groupedJob ("hotg-" <> tshow index) "declpool" "ghot" | index <- [1 .. 150]]
     filled <- claimAs env
     length filled `shouldBe` 2
     enqueue env [groupedJob "coldg" "declpool" "gcold"]
     _ <- claimAs env
     inFlight env (fullKey "declpool" "gcold") `shouldReturn` Just 1
 
-  it "gates a group on the row it would claim, not its lowest-id sibling" $ \env -> do
-    -- attempts DESC keeps a failed job at the head of its group's line, so the head
-    -- gate must judge that row. Here the fresh low-id sibling sits on a full key.
+  it "gates a group on the row it would claim" $ \env -> do
+    -- A failed job keeps the head of its group's line. The head gate judges that
+    -- row. Here the fresh low-id sibling sits on a full key.
     seed env 1
     enqueue env [job "declpool" "gfresh"]
     filled <- claimAs env
@@ -632,8 +632,8 @@ concurrencyLimitSpec runM = do
     inFlight env (fullKey "declpool" "gretry") `shouldReturn` Just 1
 
   it "keeps a group whose batch still has a claimable row under a blocked retry" $ \env -> do
-    -- The batch is taken attempts-first but cut by (priority, id), so it yields a claim
-    -- whenever its lowest-id row is admissible. The gate must judge that row.
+    -- The batch is taken attempts-first and cut by (priority, id). It yields a
+    -- claim when its lowest-id row is admissible. The gate judges that row.
     seed env 1
     enqueue env [job "declpool" "bhot"]
     filled <- claimAs env

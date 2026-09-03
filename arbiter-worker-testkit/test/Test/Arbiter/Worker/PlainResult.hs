@@ -3,9 +3,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Covers the two paths 'Arbiter.Worker.TestKit.workerSpec' cannot reach,
--- because its registry declares a @Maybe@ result: a plain non-@Maybe@ result
--- type, and a @Queue@ entry, whose 'Arbiter.Core.ResultOf' is @()@.
+-- | Covers two paths 'Arbiter.Worker.TestKit.workerSpec' cannot reach. One is a
+-- plain non-@Maybe@ result type. The other is a @Queue@ entry whose
+-- 'Arbiter.Core.ResultOf' is @()@.
 module Test.Arbiter.Worker.PlainResult (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
@@ -94,14 +94,14 @@ spec connStr =
                 -> SimpleDb PlainRegistry IO ()
               handler jobs cbs = case toList jobs of
                 [] -> pure ()
-                (j : rest) -> do
-                  ack cbs j
+                (firstJob : rest) -> do
+                  ack cbs firstJob
                   ackAll cbs rest
-                  liftIO $ atomicModifyIORef' ackedRef $ \n -> (n + 1 + length rest, ())
+                  liftIO $ atomicModifyIORef' ackedRef $ \count -> (count + 1 + length rest, ())
           cfg <- defaultBatchedWorkerConfig 1 10 handler
           runSimpleDb env $
             traverse_
-              (\i -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (NoResultTask i)))
+              (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (NoResultTask name)))
               ["a", "b", "c"]
           withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ (== 3) <$> readIORef ackedRef
@@ -151,7 +151,7 @@ spec connStr =
         cleanup connStr
         withEnv $ \env -> do
           mergedRef <- newIORef (Nothing :: Maybe [Text])
-          let taskName j = case payload j of PlainResultTask t -> t
+          let taskName job = case payload job of PlainResultTask name -> name
               handler
                 :: NonEmpty (JobRead PlainResultPayload)
                 -> BatchCallbacks (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
@@ -160,14 +160,14 @@ spec connStr =
                 let (parents, children) = partition isRollup (toList jobs)
                 case children of
                   [] -> pure ()
-                  (c : rest) -> do
-                    ackWith cbs c ["from-" <> taskName c]
-                    ackAllWith cbs (map (\r -> (r, ["from-" <> taskName r])) rest)
+                  (firstChild : rest) -> do
+                    ackWith cbs firstChild ["from-" <> taskName firstChild]
+                    ackAllWith cbs (map (\child -> (child, ["from-" <> taskName child])) rest)
                 traverse_
-                  ( \p -> do
-                      (merged, _) <- mergedChildResults p
+                  ( \parent -> do
+                      (merged, _) <- mergedChildResults parent
                       liftIO $ writeIORef mergedRef (Just merged)
-                      ack cbs p
+                      ack cbs parent
                   )
                   parents
           cfg <- defaultBatchedWorkerConfig 1 10 handler

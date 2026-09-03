@@ -2,12 +2,12 @@
 
 -- | Typed encoding and decoding for PostgreSQL queries.
 --
---   * 'RowCodec' - free applicative for decoding result rows. Each backend
---     (postgresql-simple, hasql, orville) interprets it natively.
+--   * 'RowCodec' decodes result rows. It is a free applicative that each backend
+--     (postgresql-simple, hasql, orville) interprets natively.
 --
---   * 'Params' - typed parameter list for query execution.
+--   * 'Params' is the typed parameter list for query execution.
 --
--- Both use the same 'Col' GADT, keeping encode and decode types in sync.
+-- Both use the same 'Col' GADT.
 module Arbiter.Core.Codec
   ( -- * Column types
     Col (..)
@@ -111,11 +111,11 @@ type RowCodec = Ap NullCol
 
 -- | A non-nullable column.
 col :: Text -> Col a -> RowCodec a
-col name c = liftAp (NotNull name c)
+col name colType = liftAp (NotNull name colType)
 
 -- | A nullable column.
 ncol :: Text -> Col a -> RowCodec (Maybe a)
-ncol name c = liftAp (Nullable name c)
+ncol name colType = liftAp (Nullable name colType)
 
 -- | Interpret a 'RowCodec' by providing a natural transformation
 -- from 'NullCol' to some 'Applicative'.
@@ -137,7 +137,7 @@ data ParamType a where
   PArray :: Col a -> ParamType [a]
   PNullArray :: Col a -> ParamType [Maybe a]
 
--- | An existentially-typed parameter: a 'ParamType' paired with its value.
+-- | An existentially-typed parameter. A 'ParamType' paired with its value.
 data SomeParam where
   SomeParam :: ParamType a -> a -> SomeParam
 
@@ -146,25 +146,25 @@ type Params = [SomeParam]
 
 -- | A non-null scalar parameter.
 pval :: Col a -> a -> SomeParam
-pval c v = SomeParam (PScalar c) v
+pval colType value = SomeParam (PScalar colType) value
 
 -- | A nullable scalar parameter.
 pnul :: Col a -> Maybe a -> SomeParam
-pnul c v = SomeParam (PNullable c) v
+pnul colType value = SomeParam (PNullable colType) value
 
 -- | A non-null array parameter.
 parr :: Col a -> [a] -> SomeParam
-parr c v = SomeParam (PArray c) v
+parr colType value = SomeParam (PArray colType) value
 
 -- | An array parameter with nullable elements.
 pnarr :: Col a -> [Maybe a] -> SomeParam
-pnarr c v = SomeParam (PNullArray c) v
+pnarr colType value = SomeParam (PNullArray colType) value
 
 -- ---------------------------------------------------------------------------
 -- Bidirectional (profunctor) codec
 -- ---------------------------------------------------------------------------
 
--- | A profunctor codec: write source @s@ to INSERT columns/params, decoded value @a@ back.
+-- | A profunctor codec. Writes source @s@ to INSERT columns and params, decodes value @a@ back.
 data Codec s a = Codec
   { cDecode :: RowCodec a
   -- ^ The read side.
@@ -180,52 +180,52 @@ data WriteCol s where
 cColumns :: Codec s a -> [(Text, Text)]
 cColumns codec = map nameType (cWrite codec)
   where
-    nameType (WCol name c _) = (name, pgType c)
-    nameType (WNCol name c _) = (name, pgType c)
+    nameType (WCol name colType _) = (name, pgType colType)
+    nameType (WNCol name colType _) = (name, pgType colType)
 
 -- | Single-row parameters, one per column.
 cScalar :: Codec s a -> s -> Params
-cScalar codec s = map param (cWrite codec)
+cScalar codec source = map param (cWrite codec)
   where
-    param (WCol _ c get) = pval c (get s)
-    param (WNCol _ c get) = pnul c (get s)
+    param (WCol _ colType get) = pval colType (get source)
+    param (WNCol _ colType get) = pnul colType (get source)
 
 -- | Batch parameters, one array per column.
 cArray :: Codec s a -> [s] -> Params
 cArray codec rows = map param (cWrite codec)
   where
-    param (WCol _ c get) = parr c (map get rows)
-    param (WNCol _ c get) = pnarr c (map get rows)
+    param (WCol _ colType get) = parr colType (map get rows)
+    param (WNCol _ colType get) = pnarr colType (map get rows)
 
 -- | Retarget a codec's write source.
 lmap :: (t -> s) -> Codec s a -> Codec t a
-lmap f (Codec d w) = Codec d (map retarget w)
+lmap project (Codec decode writes) = Codec decode (map retarget writes)
   where
-    retarget (WCol name c get) = WCol name c (get . f)
-    retarget (WNCol name c get) = WNCol name c (get . f)
+    retarget (WCol name colType get) = WCol name colType (get . project)
+    retarget (WNCol name colType get) = WNCol name colType (get . project)
 
 instance Functor (Codec s) where
-  fmap g (Codec d w) = Codec (fmap g d) w
+  fmap mapper (Codec decode writes) = Codec (fmap mapper decode) writes
 
 instance Applicative (Codec s) where
-  pure a = Codec (pure a) []
-  Codec df w1 <*> Codec dx w2 = Codec (df <*> dx) (w1 <> w2)
+  pure value = Codec (pure value) []
+  Codec decodeFn writesFn <*> Codec decodeArg writesArg = Codec (decodeFn <*> decodeArg) (writesFn <> writesArg)
 
 -- | A read-write column bound to its own value.
 rw :: Text -> Col a -> Codec a a
-rw name c = Codec (col name c) [WCol name c id]
+rw name colType = Codec (col name colType) [WCol name colType id]
 
 -- | A nullable read-write column bound to its own value.
 rwN :: Text -> Col a -> Codec (Maybe a) (Maybe a)
-rwN name c = Codec (ncol name c) [WNCol name c id]
+rwN name colType = Codec (ncol name colType) [WNCol name colType id]
 
--- | A read-only column: decoded, never written.
+-- | A column that is only decoded.
 ro :: RowCodec a -> Codec s a
-ro d = Codec d []
+ro decode = Codec decode []
 
--- | A write-only column: emits a parameter, reads no column. Attach with '<*'.
+-- | A column that is only written. Attach with '<*'.
 wo :: Text -> Col a -> (s -> a) -> Codec s ()
-wo name c f = Codec (pure ()) [WCol name c f]
+wo name colType get = Codec (pure ()) [WCol name colType get]
 
 -- | PostgreSQL type name for a scalar column, used for @unnest@ array casts.
 pgType :: Col a -> Text
@@ -305,8 +305,8 @@ dedupCodec =
     <*> lmap (snd . dedupParts . JT.dedupKey . sourceJob) (rwN "dedup_strategy" CText)
   where
     toDedupKey Nothing _ = Nothing
-    toDedupKey (Just k) (Just "replace") = Just (ReplaceDuplicate k)
-    toDedupKey (Just k) _ = Just (IgnoreDuplicate k)
+    toDedupKey (Just key) (Just "replace") = Just (ReplaceDuplicate key)
+    toDedupKey (Just key) _ = Just (IgnoreDuplicate key)
 
 payloadCodec :: Codec PayloadColumns PayloadKeys
 payloadCodec =
@@ -317,8 +317,8 @@ payloadCodec =
     <* wo "rate_limit_cost" CFloat8 JT.pcRateLimitCost
 
 -- | Reconstruct a structured @prefix:suffix@ key from its stored full-key and
--- prefix columns, recovering the suffix by dropping the @prefix:@ part (so suffixes
--- containing @:@ survive). @keyOf@ and @prefixOf@ project the two columns for writes.
+-- prefix columns. The suffix is the key with the @prefix:@ part dropped. @keyOf@
+-- and @prefixOf@ project the two columns for writes.
 prefixedKeyCodec :: Text -> Text -> (Text -> Text -> k) -> (s -> Maybe Text) -> (s -> Maybe Text) -> Codec s (Maybe k)
 prefixedKeyCodec keyCol prefixCol ctor keyOf prefixOf =
   toKey
@@ -344,14 +344,14 @@ jobEnvelopeCodec tsColumn queueName =
     <*> col tsColumn CTimestamptz
     <*> cDecode (jobCodecWith "job_id" queueName :: JobCodec (JobRead Value))
 
--- | DLQ envelope: the shared job snapshot plus its DLQ id and failure time.
+-- | DLQ envelope. The shared job snapshot plus its DLQ id and failure time.
 dlqRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value)
 dlqRowCodec = jobEnvelopeCodec "failed_at"
 
--- | Archive envelope: the shared job snapshot plus the @result@ a completed root job stored.
+-- | Archive envelope. The shared job snapshot plus the @result@ a completed root job stored.
 archiveRowCodec :: Text -> RowCodec (Int64, UTCTime, JobRead Value, Maybe Value)
 archiveRowCodec queueName =
-  (\(i, t, j) r -> (i, t, j, r))
+  (\(envelopeId, completed, job) result -> (envelopeId, completed, job, result))
     <$> jobEnvelopeCodec "completed_at" queueName
     <*> ncol "result" CJsonb
 

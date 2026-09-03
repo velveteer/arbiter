@@ -39,7 +39,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
           _ <- HL.insertJob job
           pure ()
 
-      -- Job should be in the queue (transaction committed)
+      -- The committed transaction leaves the job in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
       length claimed `shouldBe` 1
       payload (head claimed) `shouldBe` TestMessage "InTx"
@@ -55,11 +55,11 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
               -- Force a rollback by throwing an error
               liftIO $ throwIO (userError "Intentional rollback")
         )
-          `catch` \(e :: SomeException) -> pure (show e)
+          `catch` \(exception :: SomeException) -> pure (show exception)
 
       result `shouldContain` "Intentional rollback"
 
-      -- Job should NOT be in the queue (transaction rolled back)
+      -- The rolled-back transaction leaves no job in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
       length claimed `shouldBe` 0
 
@@ -79,7 +79,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
       length claimed `shouldBe` 2
 
-      -- Verify both were inserted (user's DLQ marker and the main job)
+      -- Both the DLQ marker and the main job were inserted.
       map payload claimed `shouldMatchList` [TestMessage "SharedTx", TestMessage "TestDLQ"]
 
     it "rolls back both user operations and job when transaction fails" $ \env -> do
@@ -96,10 +96,10 @@ spec connStr = beforeAll (setupOrvilleTest connStr testSchema testTable 5) $ bef
               -- Force rollback
               liftIO $ throwIO (userError "Force rollback")
         )
-          `catch` \(e :: SomeException) -> pure (show e)
+          `catch` \(exception :: SomeException) -> pure (show exception)
 
       result `shouldContain` "Force rollback"
 
-      -- Both jobs should NOT be in queue (transaction rolled back)
+      -- The rolled-back transaction leaves no jobs in the queue.
       claimed <- runOrvilleTest env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead TestPayload]
       length claimed `shouldBe` 0

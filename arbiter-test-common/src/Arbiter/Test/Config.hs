@@ -12,12 +12,8 @@ import System.Environment (lookupEnv)
 
 -- | Get the test database connection string.
 --
--- Reads from @ARBITER_TEST_CONN_STRING@ environment variable if set,
--- otherwise falls back to the local compose.yml configuration.
---
--- The default carries a @connect_timeout@ because libpq waits forever without one.
--- A host that resolves to an address nothing answers on then hangs the suite with
--- no output and does not expose the host in an error message.
+-- Reads @ARBITER_TEST_CONN_STRING@ when set. The default matches the local
+-- compose.yml and sets a connect timeout.
 getTestConnectionString :: IO ByteString
 getTestConnectionString = do
   mConnStr <- lookupEnv "ARBITER_TEST_CONN_STRING"

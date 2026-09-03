@@ -66,8 +66,8 @@ simpleExecuteStatement (MA.Query sqlTemplate params _) = do
     _ -> PG.execute conn sql (map someParamToAction params)
 
 interpretNullCol :: NullCol a -> RowParser a
-interpretNullCol (NotNull _ c) = colField c
-interpretNullCol (Nullable _ c) = colFieldNullable c
+interpretNullCol (NotNull _ col) = colField col
+interpretNullCol (Nullable _ col) = colFieldNullable col
 
 colField :: Col a -> RowParser a
 colField CInt4 = field
@@ -100,23 +100,23 @@ simpleWithDbTransaction action = do
   case (activeConn pool, depth) of
     (Nothing, _) -> case connectionPool pool of
       Nothing -> throwInternal "No active connection and no connection pool available"
-      Just p -> withRunInIO $ \run ->
-        withResource p $ \conn ->
+      Just connPool -> withRunInIO $ \run ->
+        withResource connPool $ \conn ->
           PG.withTransaction conn
             $ run
-            $ localSimplePool (\sp -> sp {activeConn = Just conn, transactionDepth = 1}) action
+            $ localSimplePool (\spool -> spool {activeConn = Just conn, transactionDepth = 1}) action
     (Just conn, 0) -> withRunInIO $ \run ->
       PG.withTransaction conn
         $ run
-        $ localSimplePool (\p -> p {transactionDepth = 1}) action
+        $ localSimplePool (\spool -> spool {transactionDepth = 1}) action
     (Just conn, _) -> mask $ \restore -> do
       let spName = Query $ "arbiter_sp_" <> BSC.pack (show depth)
       void . liftIO $ PG.execute_ conn $ "SAVEPOINT " <> spName
-      a <-
-        restore (localSimplePool (\p -> p {transactionDepth = depth + 1}) action)
+      result <-
+        restore (localSimplePool (\spool -> spool {transactionDepth = depth + 1}) action)
           `onException` liftIO (PG.execute_ conn $ "ROLLBACK TO SAVEPOINT " <> spName)
       void . liftIO $ PG.execute_ conn $ "RELEASE SAVEPOINT " <> spName
-      pure a
+      pure result
 
 -- | Pin one pooled connection for the action.
 simpleWithConnection
@@ -127,9 +127,9 @@ simpleWithConnection action = do
   pool <- getSimplePool
   case (activeConn pool, connectionPool pool) of
     (Just _, _) -> action
-    (Nothing, Just p) -> withRunInIO $ \run ->
-      withResource p $ \conn ->
-        run $ localSimplePool (\sp -> sp {activeConn = Just conn}) action
+    (Nothing, Just connPool) -> withRunInIO $ \run ->
+      withResource connPool $ \conn ->
+        run $ localSimplePool (\spool -> spool {activeConn = Just conn}) action
     (Nothing, Nothing) -> throwInternal "No active connection and no connection pool available"
 
 -- | Run a handler on the pinned connection.
@@ -145,28 +145,28 @@ withConn
   :: (HasSimplePool m, MonadUnliftIO m)
   => (Connection -> m a)
   -> m a
-withConn f = do
+withConn action = do
   pool <- getSimplePool
   case (activeConn pool, connectionPool pool) of
-    (Just conn, _) -> f conn
-    (Nothing, Just p) -> withRunInIO $ \run ->
-      withResource p $ \conn -> run $ f conn
+    (Just conn, _) -> action conn
+    (Nothing, Just connPool) -> withRunInIO $ \run ->
+      withResource connPool $ \conn -> run $ action conn
     (Nothing, Nothing) -> throwInternal "No active connection and no connection pool available"
 
 someParamToAction :: SomeParam -> Action
-someParamToAction (SomeParam (PScalar CJsonb) v) = toJSONField v
-someParamToAction (SomeParam (PScalar c) v) = withColToField c (toField v)
-someParamToAction (SomeParam (PNullable CJsonb) v) = maybe (toField (Nothing :: Maybe Int)) toJSONField v
-someParamToAction (SomeParam (PNullable c) v) = withColToField c (toField v)
-someParamToAction (SomeParam (PArray c) v) = withColToField c (toField (PGArray v))
-someParamToAction (SomeParam (PNullArray c) v) = withColToField c (toField (PGArray v))
+someParamToAction (SomeParam (PScalar CJsonb) value) = toJSONField value
+someParamToAction (SomeParam (PScalar col) value) = withColToField col (toField value)
+someParamToAction (SomeParam (PNullable CJsonb) value) = maybe (toField (Nothing :: Maybe Int)) toJSONField value
+someParamToAction (SomeParam (PNullable col) value) = withColToField col (toField value)
+someParamToAction (SomeParam (PArray col) value) = withColToField col (toField (PGArray value))
+someParamToAction (SomeParam (PNullArray col) value) = withColToField col (toField (PGArray value))
 
 withColToField :: Col a -> ((ToField a) => r) -> r
-withColToField CInt4 r = r
-withColToField CInt8 r = r
-withColToField CText r = r
-withColToField CBool r = r
-withColToField CTimestamptz r = r
-withColToField CJsonb r = r
-withColToField CFloat8 r = r
-withColToField CUuid r = r
+withColToField CInt4 continuation = continuation
+withColToField CInt8 continuation = continuation
+withColToField CText continuation = continuation
+withColToField CBool continuation = continuation
+withColToField CTimestamptz continuation = continuation
+withColToField CJsonb continuation = continuation
+withColToField CFloat8 continuation = continuation
+withColToField CUuid continuation = continuation

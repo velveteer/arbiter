@@ -68,7 +68,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
               Compat.runSQL conn "ROLLBACK"
               pure ("rolled back" :: String)
           )
-            `catch` \(e :: SomeException) -> pure (show e)
+            `catch` \(exception :: SomeException) -> pure (show exception)
 
         result `shouldContain` "rolled back"
 
@@ -100,7 +100,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
                 _ <- HL.insertJob job2
                 liftIO $ throwIO (userError "Force rollback")
           )
-            `catch` \(e :: SomeException) -> pure (show e)
+            `catch` \(exception :: SomeException) -> pure (show exception)
 
         result `shouldContain` "Force rollback"
 

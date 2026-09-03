@@ -58,7 +58,7 @@ spec connStr =
       (cleanup connStr >> createSimpleEnv (Proxy @ListenTestRegistry) connStr testSchema)
       (cleanup connStr >> (disableListener <$> createSimpleEnv (Proxy @ListenTestRegistry) connStr testSchema))
       destroySimpleEnv
-      (\f _conn job -> f job)
+      (\handler _conn job -> handler job)
       runSimpleDb
     dedicatedListenerSpec connStr
 
@@ -71,7 +71,7 @@ dedicatedListenerSpec connStr =
       env <- useDedicatedListener connStr =<< createSimpleEnvWithPool (Proxy @ListenTestRegistry) pool testSchema
       ref <- newIORef (0 :: Int)
       let handler :: JobHandler (SimpleDb ListenTestRegistry IO) WorkerTestPayload ()
-          handler _conn _job = liftIO $ atomicModifyIORef' ref $ \n -> (n + 1, ())
+          handler _conn _job = liftIO $ atomicModifyIORef' ref $ \count -> (count + 1, ())
       config <- transactionalWorkerConfig 1 handler
       let workerConfig = config {workerCount = 1, pollInterval = 300, jitter = NoJitter}
       withLinkedAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do

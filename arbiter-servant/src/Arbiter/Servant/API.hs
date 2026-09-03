@@ -3,8 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
--- | The admin API's route types, generated from the registry so each queue gets its own
--- endpoints.
+-- | The admin API's route types, generated from the registry.
 module Arbiter.Servant.API
   ( ArbiterAPI
   , RegistryToAPI
@@ -49,10 +48,10 @@ import Arbiter.Servant.Types
 
 -- | Case-insensitive lookup of an enum value by its canonical name.
 parseEnum :: (Bounded a, Enum a) => (a -> Text) -> Text -> Either Text a
-parseEnum toName t =
-  maybe (Left $ "unknown value: " <> t) Right (lookup (T.toLower t) table)
+parseEnum toName input =
+  maybe (Left $ "unknown value: " <> input) Right (lookup (T.toLower input) table)
   where
-    table = [(T.toLower (toName x), x) | x <- [minBound .. maxBound]]
+    table = [(T.toLower (toName value), value) | value <- [minBound .. maxBound]]
 
 instance FromHttpApiData JobSortColumn where
   parseQueryParam = parseEnum jobSortColumnName
@@ -270,7 +269,7 @@ data StatsAPI mode = StatsAPI
   }
   deriving stock (Generic)
 
--- | Schema-wide maintenance, the work a running worker pool would otherwise do.
+-- | Schema-wide maintenance. A running worker pool does the same work.
 newtype MaintenanceAPI mode = MaintenanceAPI
   { -- POST /maintenance (run one gated maintenance pass)
     runMaintenance
@@ -362,8 +361,8 @@ data WorkersAPI mode = WorkersAPI
   { -- GET /workers
     --
     -- Optional @?queue=name@ scopes the result to a single queue.
-    -- Optional @?live=seconds@ filters to workers whose last_heartbeat is
-    -- within the given threshold (otherwise all rows are returned).
+    -- Optional @?live=seconds@ filters to workers with a heartbeat inside the
+    -- threshold. Without it all rows are returned.
     listWorkers
       :: mode
         :- QueryParam "queue" Text
@@ -386,7 +385,7 @@ data WorkersAPI mode = WorkersAPI
   }
   deriving stock (Generic)
 
--- | Rate limits API routes. Global (not queue-scoped).
+-- | Rate limits API routes, schema-wide.
 data RateLimitsAPI mode = RateLimitsAPI
   { listRateLimits
       :: mode
@@ -411,7 +410,7 @@ data RateLimitsAPI mode = RateLimitsAPI
   }
   deriving stock (Generic)
 
--- | Concurrency API routes. Global (not queue-scoped).
+-- | Concurrency API routes, schema-wide.
 data ConcurrencyAPI mode = ConcurrencyAPI
   { listConcurrency
       :: mode
@@ -440,13 +439,14 @@ data HealthAPI mode = HealthAPI
   { -- GET /health
     --
     -- Readiness. Reaches the database and reports its connection counters.
-    -- 200 when reachable, 503 when not, carrying the same body either way.
+    -- Returns 200 when the database is reachable and 503 when it is down.
+    -- Both carry the same body.
     getHealth
       :: mode
         :- Get '[JSON] HealthResponse
   , -- GET /health/live
     --
-    -- Liveness. Never touches the database.
+    -- Liveness. Does not touch the database.
     getLiveness
       :: mode
         :- "live"

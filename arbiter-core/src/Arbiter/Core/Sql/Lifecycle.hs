@@ -22,8 +22,8 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
--- | Parent-aware ack: delete a childless job, suspend one whose children are still
--- running, and wake a suspended parent whose last child just left the queue. Returns 1,
+-- | Parent-aware ack. Deletes a childless job, suspends one whose children are still
+-- running, and wakes a suspended parent whose last child left the queue. Returns 1,
 -- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
 -- is teed into the archive per-row on @archive_for@.
 smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
@@ -37,7 +37,8 @@ smartAckJobSQL archiveEnabled schema tableName jobId cseq =
           WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
             AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = #{jobId :: CInt8})
           RETURNING ${returning}
-        )${archived},
+        ),
+        ${archived}
         suspend AS (
           UPDATE ${tbl}
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
@@ -52,9 +53,9 @@ smartAckJobSQL archiveEnabled schema tableName jobId cseq =
           WHERE id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
             AND suspended = TRUE
             AND NOT EXISTS (
-              SELECT 1 FROM ${tbl} c
-              WHERE c.parent_id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
-                AND c.id NOT IN (SELECT id FROM ack)
+              SELECT 1 FROM ${tbl} child
+              WHERE child.parent_id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
+                AND child.id NOT IN (SELECT id FROM ack)
             )
           RETURNING id
         )
@@ -62,16 +63,15 @@ smartAckJobSQL archiveEnabled schema tableName jobId cseq =
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS @{result :: CInt8}
       |]
 
--- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays: deletes leaves,
+-- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays. Deletes leaves,
 -- suspends finalizers that still have children, and wakes parents whose last
--- child completed. The wake check excludes acked children explicitly, since a
--- sibling CTE's deletes are not visible within the same statement. Returns the
--- acked ids. Reclaimed jobs (a different claim) are absent. Locks children-first
--- to match nack and force-cancel. The caller holds the parent locks.
+-- child completed. The wake check excludes acked children explicitly. Returns the
+-- acked ids. Reclaimed jobs are absent. Locks children-first to match nack and
+-- force-cancel. The caller holds the parent locks.
 smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
 smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
   let tbl = jobQueueTable schema tableName
-      returning = if archiveEnabled then "j.*" else "j.id, j.parent_id" :: Text
+      returning = if archiveEnabled then "job.*" else "job.id, job.parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
       locked = lockedByIdsCte tbl ids
    in [sql|
@@ -80,48 +80,51 @@ smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
         ),
         ${locked},
         ack AS (
-          DELETE FROM ${tbl} j
-          USING input i
-          WHERE j.id = i.id AND j.claim_seq = i.cseq
-            AND j.id IN (SELECT id FROM locked)
-            AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
+          DELETE FROM ${tbl} job
+          USING input input_row
+          WHERE job.id = input_row.id AND job.claim_seq = input_row.cseq
+            AND job.id IN (SELECT id FROM locked)
+            AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = job.id)
           RETURNING ${returning}
-        )${archived},
+        ),
+        ${archived}
         suspend AS (
-          UPDATE ${tbl} j
+          UPDATE ${tbl} job
           SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
-          FROM input i
-          WHERE j.id = i.id AND j.claim_seq = i.cseq
-            AND j.id IN (SELECT id FROM locked)
-            AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = j.id)
-            AND EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = j.id)
-          RETURNING j.id
+          FROM input input_row
+          WHERE job.id = input_row.id AND job.claim_seq = input_row.cseq
+            AND job.id IN (SELECT id FROM locked)
+            AND NOT EXISTS (SELECT 1 FROM ack acked WHERE acked.id = job.id)
+            AND EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = job.id)
+          RETURNING job.id
         ),
         wake_parent AS (
-          UPDATE ${tbl} p
+          UPDATE ${tbl} parent
           SET suspended = FALSE, updated_at = NOW()
-          WHERE p.id IN (SELECT DISTINCT parent_id FROM ack WHERE parent_id IS NOT NULL)
-            AND p.suspended = TRUE
+          WHERE parent.id IN (SELECT DISTINCT parent_id FROM ack WHERE parent_id IS NOT NULL)
+            AND parent.suspended = TRUE
             AND NOT EXISTS (
-              SELECT 1 FROM ${tbl} c
-              WHERE c.parent_id = p.id
-                AND NOT EXISTS (SELECT 1 FROM ack a WHERE a.id = c.id)
+              SELECT 1 FROM ${tbl} child
+              WHERE child.parent_id = parent.id
+                AND NOT EXISTS (SELECT 1 FROM ack acked WHERE acked.id = child.id)
             )
-          RETURNING p.id
+          RETURNING parent.id
         )
         SELECT @{id :: CInt8} FROM ack
         UNION
         SELECT id FROM suspend
       |]
 
--- | Extend a job's visibility timeout. Matches on the claim token, so a job another
--- worker reclaimed is left alone. Suspended rows hold no lease.
+-- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows
+-- hold no lease.
 setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
-        SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
+        SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0
+                                     THEN NULL
+                                     ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
@@ -136,34 +139,37 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
       locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input_jobs AS (
-          SELECT v.id::bigint AS id, v.expected_claim_seq::bigint AS expected_claim_seq, v.expected_claimed_by::uuid AS expected_claimed_by
-          FROM (VALUES ${valuesFrag}) AS v(id, expected_claim_seq, expected_claimed_by)
+          SELECT input_values.id::bigint AS id,
+                 input_values.expected_claim_seq::bigint AS expected_claim_seq,
+                 input_values.expected_claimed_by::uuid AS expected_claimed_by
+          FROM (VALUES ${valuesFrag}) AS input_values(id, expected_claim_seq, expected_claimed_by)
         ),
         ${locked},
         updated AS (
-          UPDATE ${tbl} j
-          SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0 THEN NULL ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
+          UPDATE ${tbl} job
+          SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0
+                                       THEN NULL
+                                       ELSE NOW() + (#{secs :: CFloat8}::double precision * interval '1 second') END,
               updated_at = NOW()
-          FROM input_jobs ij
-          WHERE j.id = ij.id AND j.id IN (SELECT id FROM locked)
-            AND j.claim_seq = ij.expected_claim_seq AND NOT j.suspended
-            AND j.claimed_by IS NOT DISTINCT FROM ij.expected_claimed_by
-          RETURNING j.id
+          FROM input_jobs input_job
+          WHERE job.id = input_job.id AND job.id IN (SELECT id FROM locked)
+            AND job.claim_seq = input_job.expected_claim_seq AND NOT job.suspended
+            AND job.claimed_by IS NOT DISTINCT FROM input_job.expected_claimed_by
+          RETURNING job.id
         )
         SELECT
-          ij.id,
-          (u.id IS NOT NULL) as was_heartbeated,
-          j.claim_seq as current_db_claim_seq,
-          (j.cancel_requested_at IS NOT NULL) as cancel_requested,
-          (j.suspended IS TRUE) as suspended,
-          j.claimed_by as claimed_by
-        FROM input_jobs ij
-        LEFT JOIN updated u ON u.id = ij.id
-        LEFT JOIN ${tbl} j ON j.id = ij.id
+          input_job.id,
+          (heartbeated.id IS NOT NULL) as was_heartbeated,
+          job.claim_seq as current_db_claim_seq,
+          (job.cancel_requested_at IS NOT NULL) as cancel_requested,
+          (job.suspended IS TRUE) as suspended,
+          job.claimed_by as claimed_by
+        FROM input_jobs input_job
+        LEFT JOIN updated heartbeated ON heartbeated.id = input_job.id
+        LEFT JOIN ${tbl} job ON job.id = input_job.id
       |]
 
--- | Park a failed job for its retry backoff. Matches on the claim token, so a job
--- another worker reclaimed is left alone.
+-- | Park a failed job for its retry backoff. Matches on the claim token.
 updateJobForRetrySQL :: Text -> Text -> Int64 -> Text -> Int64 -> Int64 -> Query ()
 updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -176,8 +182,8 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
--- | Soft nack: release the claim and hand back the attempt it consumed, recording no
--- failure. Leaves @not_visible_until@ as it stands, so the job waits out the lease.
+-- | Soft nack. Releases the claim and hands back the attempt it consumed, recording no
+-- failure. Leaves @not_visible_until@ as it stands.
 nackJobSQL :: Text -> Text -> Int64 -> Int64 -> Int32 -> Query ()
 nackJobSQL schema tableName jobId cseq att =
   let tbl = jobQueueTable schema tableName
@@ -198,17 +204,19 @@ nackJobsBatchSQL schema tableName ids cseqs atts =
       locked = lockedByIdsCte tbl ids
    in [sql|
         WITH input AS (
-          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS in_id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq, unnest(#{atts :: [CInt4]}::int[]) AS att
+          SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS in_id,
+                 unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq,
+                 unnest(#{atts :: [CInt4]}::int[]) AS att
         ),
         ${locked}
-        UPDATE ${tbl} j
-        SET attempts = LEAST(GREATEST(i.att - 1, j.attempts - 1, 0), j.attempts),
+        UPDATE ${tbl} job
+        SET attempts = LEAST(GREATEST(input_row.att - 1, job.attempts - 1, 0), job.attempts),
             claimed_by = NULL,
             updated_at = NOW()
-        FROM input i
-        WHERE j.id = i.in_id AND j.id IN (SELECT id FROM locked)
-          AND j.claim_seq = i.cseq AND NOT j.suspended
-          AND j.claimed_by IS NOT NULL
+        FROM input input_row
+        WHERE job.id = input_row.in_id AND job.id IN (SELECT id FROM locked)
+          AND job.claim_seq = input_row.cseq AND NOT job.suspended
+          AND job.claimed_by IS NOT NULL
         RETURNING @{id :: CInt8}
       |]
 

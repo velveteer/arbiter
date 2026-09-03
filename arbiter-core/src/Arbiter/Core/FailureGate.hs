@@ -14,7 +14,7 @@ import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import GHC.Clock (getMonotonicTime)
 
--- | The failure a repeating action reported last and when, absent while healthy.
+-- | The last failure a repeating action reported and its time. Empty while healthy.
 newtype FailureGate = FailureGate (IORef (Maybe (Text, Double)))
 
 -- | A gate for one repeating action, starting healthy.
@@ -30,7 +30,7 @@ holdFailure :: (MonadIO m) => FailureGate -> NominalDiffTime -> Text -> m Bool
 holdFailure (FailureGate ref) repeatAfter failure = liftIO $ do
   now <- getMonotonicTime
   atomicModifyIORef' ref $ \held ->
-    let worth = maybe True (\(prev, at) -> prev /= failure || now - at >= realToFrac repeatAfter) held
+    let worth = maybe True (\(heldFailure, heldAt) -> heldFailure /= failure || now - heldAt >= realToFrac repeatAfter) held
      in (if worth then Just (failure, now) else held, worth)
 
 -- | Drop whatever the gate holds. True when it held a failure.

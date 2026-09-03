@@ -79,8 +79,8 @@ storeEncodedResult schemaName job mVal =
           void $ Ops.updateArchiveResult schemaName (queueName job) (primaryKey job) val
     _ -> pure ()
 
--- | 'storeEncodedResult' over a batch from one queue: one statement for the
--- child results, one for the archived roots.
+-- | 'storeEncodedResult' over a batch from one queue. One statement stores the
+-- child results and one the archived roots.
 storeEncodedResults
   :: (MonadArbiter m)
   => Text

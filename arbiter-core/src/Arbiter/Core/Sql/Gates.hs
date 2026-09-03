@@ -32,7 +32,7 @@ ensureGateRowSQL schemaName task =
         ON CONFLICT (task_name) DO NOTHING
       |]
 
--- | Cheap read-only pre-transaction check: TRUE if last_run_at is older than the interval.
+-- | Read-only pre-transaction check. TRUE when last_run_at is older than the interval.
 checkGateSQL :: SchemaName -> Double -> Text -> Query Bool
 checkGateSQL schemaName intervalSecs task =
   let tbl = arbiterGatesTable schemaName
@@ -43,8 +43,8 @@ checkGateSQL schemaName intervalSecs task =
         WHERE task_name = #{task :: CText}
       |]
 
--- | Atomically claim the gate row iff the interval elapsed and no concurrent tx holds it,
--- returning the state the last run left. One row back means claimed, NULL payload or not.
+-- | Claim the gate row when the interval elapsed and no concurrent transaction holds it.
+-- Returns the state the last run left. One row back means claimed.
 tryClaimGateSQL :: SchemaName -> Text -> Double -> Query (Maybe Value)
 tryClaimGateSQL schemaName task intervalSecs =
   let tbl = arbiterGatesTable schemaName
@@ -73,11 +73,11 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
           RETURNING NOW() AS claimed_at, '1970-01-01'::timestamptz AS previous_run_at
         ),
         claimed AS (
-          UPDATE ${tbl} g SET last_run_at = NOW()
+          UPDATE ${tbl} gate SET last_run_at = NOW()
           FROM ${tbl} old
-          WHERE g.task_name = #{task :: CText}
-            AND old.task_name = g.task_name
-            AND g.last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
+          WHERE gate.task_name = #{task :: CText}
+            AND old.task_name = gate.task_name
+            AND gate.last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second')
           RETURNING NOW() AS claimed_at, old.last_run_at AS previous_run_at
         ),
         claim AS (
@@ -92,7 +92,8 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
           WHERE task_name = #{task :: CText}
             AND NOT EXISTS (SELECT 1 FROM claim)
             AND metadata -> 'payload' IS NOT NULL
-            AND (metadata ->> 'at')::timestamptz > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
+            AND (metadata ->> 'at')::timestamptz
+                > NOW() - (#{maxAgeSecs :: CFloat8}::double precision * interval '1 second')
         )
         SELECT (SELECT claimed_at FROM claim) AS @{claimed_at :: Maybe CTimestamptz},
                (SELECT previous_run_at FROM claim) AS @{previous_run_at :: Maybe CTimestamptz},
@@ -101,7 +102,7 @@ claimOrReadGateSQL schemaName task intervalSecs maxAgeSecs =
       |]
 
 -- | Put a claim's watermark back, for a winner whose work never published. Scoped to
--- the value that claim wrote, so a later run's bump stands.
+-- the value that claim wrote.
 releaseGateSQL :: SchemaName -> Text -> UTCTime -> UTCTime -> Query ()
 releaseGateSQL schemaName task claimedAt previous =
   let tbl = arbiterGatesTable schemaName
@@ -110,14 +111,13 @@ releaseGateSQL schemaName task claimedAt previous =
         WHERE task_name = #{task :: CText} AND last_run_at = #{claimedAt :: CTimestamptz}
       |]
 
--- | Bump last_run_at to NOW(), inside the claim transaction so it commits with the task's work.
+-- | Bump last_run_at to NOW() inside the claim transaction.
 bumpGateSQL :: SchemaName -> Text -> Query ()
 bumpGateSQL schemaName task =
   let tbl = arbiterGatesTable schemaName
    in [sql|UPDATE ${tbl} SET last_run_at = NOW() WHERE task_name = #{task :: CText}|]
 
--- | 'bumpGateSQL' carrying the state the task resumes from, written under the claim so
--- it commits with the work that produced it.
+-- | 'bumpGateSQL' carrying the state the task resumes from, written under the claim.
 bumpGateStateSQL :: SchemaName -> Text -> Value -> Query ()
 bumpGateStateSQL schemaName task payload =
   let tbl = arbiterGatesTable schemaName
@@ -128,15 +128,18 @@ bumpGateStateSQL schemaName task payload =
         WHERE task_name = #{task :: CText}
       |]
 
--- | Publish what the task computed, stamped with the claim the work started from, which
--- is what a reader ages the payload by. The gate's interval restarts from the publish.
+-- | Publish what the task computed, stamped with the claim the work started from.
+-- The gate's interval restarts from the publish.
 setGateMetadataSQL :: SchemaName -> Value -> UTCTime -> Text -> Query ()
 setGateMetadataSQL schemaName metadata claimedAt task =
   let tbl = arbiterGatesTable schemaName
    in [sql|
         UPDATE ${tbl}
         SET last_run_at = NOW(),
-            metadata = jsonb_build_object('at', to_jsonb(#{claimedAt :: CTimestamptz}::timestamptz), 'payload', #{metadata :: CJsonb}::jsonb)
+            metadata = jsonb_build_object(
+              'at', to_jsonb(#{claimedAt :: CTimestamptz}::timestamptz),
+              'payload', #{metadata :: CJsonb}::jsonb
+            )
         WHERE task_name = #{task :: CText}
           AND (metadata ->> 'at' IS NULL OR (metadata ->> 'at')::timestamptz < #{claimedAt :: CTimestamptz})
       |]

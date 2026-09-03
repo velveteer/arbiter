@@ -5,7 +5,7 @@
 
 -- | OpenTelemetry for arbiter: traces, metrics and logs.
 --
--- Spans and trace-context propagation are built in, so this module is the SDK side:
+-- Spans and trace-context propagation are built in. This module is the SDK side.
 -- 'runWorkerPools' installs the exporters and instruments the pools. The @With@ variants
 -- take a handle the caller installed itself.
 --
@@ -69,8 +69,7 @@ import Arbiter.Otel.Telemetry
   )
 
 -- | Give a pool consumer spans, lifecycle metrics, and the telemetry log destination.
--- The pool's registry queue name labels its metrics, which is what the gauges are
--- labelled by. Apply it once per pool.
+-- The pool's registry queue name labels its metrics and gauges. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
 instrumentPool tel (NamedWorkerPool queue cfg) =
   NamedWorkerPool queue (labelledConfig tel queue cfg)
@@ -117,7 +116,7 @@ runSelectedWorkerPools enabled pools =
   let baseLog = poolsLogConfig pools
    in withTelemetryHere baseLog $ \tel -> runSelectedWorkerPoolsWith tel baseLog enabled pools
 
--- | The gauge loop's base log config: the first pool's.
+-- | The first pool's log config, used as the gauge loop's base.
 poolsLogConfig :: [NamedWorkerPool m] -> LogConfig
 poolsLogConfig (NamedWorkerPool _ cfg : _) = logConfig cfg
 poolsLogConfig [] = defaultLogConfig
@@ -170,4 +169,4 @@ labelledConfig
 labelledConfig tel queue cfg =
   maybe id instrument (meters tel) $ cfg {logConfig = telemetryLogConfig tel (logConfig cfg)}
   where
-    instrument ms = withHooks (otelHooks ms queue <>) . withMaintenance (otelMaintenance ms)
+    instrument meterSet = withHooks (otelHooks meterSet queue <>) . withMaintenance (otelMaintenance meterSet)

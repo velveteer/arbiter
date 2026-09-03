@@ -1,8 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Every hasql version difference arbiter-hasql depends on, so no other module needs
--- CPP.
+-- | Every hasql version difference that arbiter-hasql depends on.
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
@@ -43,21 +42,20 @@ runScript :: T.Text -> Session.Session ()
 runScript = Session.sql
 #endif
 
--- | Whether the connection is in a transaction block, valid or aborted. An idle one
--- needs no @ROLLBACK@, hasql having already cleaned up after the interrupted session.
+-- | Whether the connection is in a transaction block, valid or aborted.
 connectionInTransaction :: Hasql.Connection -> IO Bool
 #if MIN_VERSION_hasql(1,10,0)
 connectionInTransaction conn = do
-  result <- Hasql.use conn $ Session.onLibpqConnection $ \pq -> do
-    status <- LibPQ.transactionStatus pq
-    pure (Right (txStatusNeedsRollback status), pq)
+  result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> do
+    status <- LibPQ.transactionStatus libpq
+    pure (Right (txStatusNeedsRollback status), libpq)
   case result of
     Right inTx -> pure inTx
     Left _ -> pure False
 #else
 connectionInTransaction conn =
-  Hasql.withLibPQConnection conn $ \pq -> do
-    status <- LibPQ.transactionStatus pq
+  Hasql.withLibPQConnection conn $ \libpq -> do
+    status <- LibPQ.transactionStatus libpq
     pure (txStatusNeedsRollback status)
 #endif
 
@@ -65,15 +63,15 @@ connectionInTransaction conn =
 withHasqlLibPQConnection :: Hasql.Connection -> (LibPQ.Connection -> IO a) -> IO a
 #if MIN_VERSION_hasql(1,10,0)
 withHasqlLibPQConnection conn action = do
-  result <- Hasql.use conn $ Session.onLibpqConnection $ \pq -> do
-    a <- action pq
-    pure (Right a, pq)
+  result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> do
+    actionResult <- action libpq
+    pure (Right actionResult, libpq)
   either (const (throwInternal "connection lost")) pure result
 #else
 withHasqlLibPQConnection = Hasql.withLibPQConnection
 #endif
 
--- | Only @TransInTrans@ and @TransInError@ accept a @ROLLBACK@ without warning.
+-- | @TransInTrans@ and @TransInError@ accept a @ROLLBACK@ without warning.
 txStatusNeedsRollback :: LibPQ.TransactionStatus -> Bool
 txStatusNeedsRollback LibPQ.TransInTrans = True
 txStatusNeedsRollback LibPQ.TransInError = True

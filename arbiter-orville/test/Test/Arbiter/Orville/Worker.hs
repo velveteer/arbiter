@@ -99,7 +99,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
             setMaxAttempts (Just 1) $ setGroupKey (Just "g1") $ defaultJob (SimpleTask "WillFail")
       void $ runOrvilleTest env $ HL.insertJob job
 
-      -- Start worker pool with max 1 attempt so it goes to DLQ
+      -- Start a worker pool. One attempt sends the job to the DLQ.
       config <- transactionalWorkerConfig 10 handler
       runOrvilleTest env
         $ withAsync
@@ -183,7 +183,7 @@ spec connStr = beforeAll (setupOrvilleTest connStr workerTestSchemaName testTabl
             jobs <- runOrvilleTest env $ HL.listJobs @OrvilleWorkerTestPayload 10 0
             pure (null jobs)
 
-          -- Verify the job is NOT in the queue anymore
+          -- Verify the queue is empty
           O.withConnection $ \conn -> do
             let countSql = RawSql.fromText $ "SELECT COUNT(*) FROM " <> Schema.jobQueueTable workerTestSchemaName testTable
             result <- liftIO $ RawSql.execute conn countSql

@@ -105,7 +105,7 @@ import Arbiter.Worker.TestKit (workerSpec)
 type WorkerTestRegistry = '[QueueWithResult "arbiter_worker_test" WorkerTestPayload (Maybe [Text])]
 
 noResult :: (Monad n, Monoid r) => (c -> j -> n ()) -> c -> j -> n r
-noResult h conn job = h conn job >> pure mempty
+noResult handler conn job = handler conn job >> pure mempty
 
 testSchema :: Text
 testSchema = "arbiter_worker_test"
@@ -127,26 +127,26 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
     workerSpec @WorkerTestPayload
       SimpleTask
       FailingTask
-      (\f _conn job -> f job)
+      (\handler _conn job -> handler job)
       runSimpleDb
 
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do
         let sleep = void $ executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$")
-        r <-
+        result <-
           runSimpleDb env $
             runReaperOp silentLogConfig testSchema 1 "test-reaper-slow-op" 0 $ do
               sleep
               sleep
               sleep
               pure (42 :: Int)
-        r `shouldBe` Just 42
+        result `shouldBe` Just 42
       it "aborts a stuck statement at the timeout without killing the caller" $ \env -> do
-        r <-
+        result <-
           runSimpleDb env
             $ runReaperOp silentLogConfig testSchema 0.5 "test-reaper-stuck-op" 0
             $ executeStatement (raw "DO $$ BEGIN PERFORM pg_sleep(5); END $$")
-        r `shouldBe` Nothing
+        result `shouldBe` Nothing
 
     describe "Transactional Atomicity" $ do
       it "rolls back user operations when handler fails" $ \env -> withTestOpsTable env $ do
@@ -315,20 +315,20 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 }
 
         withLinkedAsync (runSimpleDb env $ runWorkerPool configWithShortTimeout) $ \worker -> do
-          -- Wait for job to actually start processing
+          -- Wait for the job to start processing
           waitUntil 10_000 $ readIORef startedRef
 
-          -- Measure just the shutdown duration, not startup/claim overhead
+          -- Measure the shutdown duration.
           startTime <- liftIO getCurrentTime
           shutdownWorker configWithShortTimeout
           Async.wait worker
           endTime <- liftIO getCurrentTime
 
           let elapsed = diffUTCTime endTime startTime
-          -- Shutdown should take ~1s (the graceful timeout), not 10s (the job duration)
+          -- Shutdown takes about 1s, the graceful timeout.
           elapsed `shouldSatisfy` (< 5)
 
-        -- Job should NOT have completed (we timed out and cancelled it)
+        -- The job did not complete. The timeout cancelled it.
         completed <- readIORef completedRef
         completed `shouldBe` False
 
@@ -370,15 +370,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         successRef <- newIORef ([] :: [WorkerTestPayload])
         let hooks =
               defaultObservabilityHooks
-                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+                { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
                 }
         let batchHandler jobs cbs = do
-              let js = toList jobs
-              -- Simulate a reclaim of "ca-stolen": a claim bumps both counters, so the bulk ack won't match it.
+              let batchJobs = toList jobs
+              -- Simulate a reclaim of "ca-stolen". A claim bumps both counters. The bulk ack skips it.
               liftIO $
                 traverse_
-                  ( \j ->
-                      when (payload j == SimpleTask "ca-stolen") $ do
+                  ( \job ->
+                      when (payload job == SimpleTask "ca-stolen") $ do
                         let pool = fromJust (connectionPool (simplePool env))
                         withResource pool $ \conn ->
                           void $
@@ -389,10 +389,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                                     <> Schema.jobQueueTable testSchema testTable
                                     <> " SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"
                               )
-                              (Only (primaryKey j))
+                              (Only (primaryKey job))
                   )
-                  js
-              ackAll cbs js
+                  batchJobs
+              ackAll cbs batchJobs
         let jobs =
               [ setGroupKey (Just "ca") $ defaultJob (SimpleTask "ca-keep1")
               , setGroupKey (Just "ca") $ defaultJob (SimpleTask "ca-stolen")
@@ -410,22 +410,22 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "rollup ackAllWith stores each job's result for the parent" $ \env -> do
         finalRef <- newIORef ([] :: [Text])
         let resultFor :: WorkerTestPayload -> Maybe [Text]
-            resultFor p = case p of
+            resultFor task = case task of
               SimpleTask "rb-ca" -> Just ["alpha"]
               SimpleTask "rb-cb" -> Just ["beta"]
               _ -> Nothing
-            isReducer p = case p of SimpleTask "rb-reducer" -> True; _ -> False
+            isReducer task = case task of SimpleTask "rb-reducer" -> True; _ -> False
             handler jobs cbs =
               if all (isReducer . payload) jobs
                 then
                   traverse_
-                    ( \j -> do
-                        (merged, _dlq) <- mergedChildResults j
+                    ( \parent -> do
+                        (merged, _dlq) <- mergedChildResults parent
                         liftIO $ atomicModifyIORef' finalRef $ \_ -> (fromMaybe [] merged, ())
-                        ackWith cbs j merged
+                        ackWith cbs parent merged
                     )
                     (toList jobs)
-                else ackAllWith cbs (map (\j -> (j, resultFor (payload j))) (toList jobs))
+                else ackAllWith cbs (map (\job -> (job, resultFor (payload job))) (toList jobs))
         runSimpleDb env
           $ void
           $ HL.insertJobTree
@@ -578,18 +578,18 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       it "batched mode: two rollup parents claimed in one batch each get their own child results" $ \env -> do
         -- Two ungrouped rollup parents are batched together once their children
-        -- complete. Each parent must receive only its own merged children, keyed by
-        -- primary key, not a mix across the batch. No group keys are needed.
+        -- complete. Each parent receives its own merged children, keyed by primary
+        -- key. No group keys are needed.
         receivedRef <- newIORef (Map.empty :: Map.Map Text [Text])
         batchSizeRef <- newIORef (0 :: Int)
 
-        let isReducer p = case p of SimpleTask n -> "reducer" `T.isPrefixOf` n; _ -> False
+        let isReducer task = case task of SimpleTask name -> "reducer" `T.isPrefixOf` name; _ -> False
             handler jobs cbs = do
               let reducerCount = length (filter (isReducer . payload) (toList jobs))
               when (reducerCount > 0) $
                 liftIO $
                   atomicModifyIORef' batchSizeRef $
-                    \n -> (max n reducerCount, ())
+                    \largest -> (max largest reducerCount, ())
               for_ jobs $ \job -> case payload job of
                 SimpleTask "child-1a" -> ackWith cbs job (Just ["a1"])
                 SimpleTask "child-1b" -> ackWith cbs job (Just ["b1"])
@@ -597,7 +597,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
                 SimpleTask "child-2b" -> ackWith cbs job (Just ["b2"])
                 SimpleTask name -> do
                   (merged, _dlq) <- mergedChildResults job
-                  liftIO $ atomicModifyIORef' receivedRef $ \m -> (Map.insert name (fromMaybe [] merged) m, ())
+                  liftIO $ atomicModifyIORef' receivedRef $ \collected -> (Map.insert name (fromMaybe [] merged) collected, ())
                   ackWith cbs job merged
                 _ -> ackWith cbs job Nothing
 
@@ -640,7 +640,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               SimpleTask "dlq-child-a" -> pure (Just ["x"])
               SimpleTask "dlq-child-b" -> pure (Just ["y", "z"])
               SimpleTask "dlq-reducer" -> do
-                attempt <- liftIO $ atomicModifyIORef' attemptRef $ \n -> (n + 1, n + 1)
+                attempt <- liftIO $ atomicModifyIORef' attemptRef $ \count -> (count + 1, count + 1)
                 if attempt == 1
                   then throwRetryable "Intentional failure on first attempt"
                   else do
@@ -671,11 +671,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         withLinkedAsync (runSimpleDb env $ runWorkerPool cfg) $ \_ ->
           waitUntil 10_000 $ do
             dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
-            pure $ any (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "dlq-reducer") dlqJobs
+            pure $ any (\dlqJob -> payload (DLQ.jobSnapshot dlqJob) == SimpleTask "dlq-reducer") dlqJobs
 
         -- Verify reducer is in DLQ with snapshot
         dlqJobs <- runSimpleDb env $ HL.listDLQJobs @WorkerTestPayload 10 0
-        let reducerDlq = filter (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "dlq-reducer") dlqJobs
+        let reducerDlq = filter (\dlqJob -> payload (DLQ.jobSnapshot dlqJob) == SimpleTask "dlq-reducer") dlqJobs
         length reducerDlq `shouldBe` 1
 
         -- Phase 2: Retry from DLQ - reducer should see preserved results from snapshot
@@ -701,7 +701,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               SimpleTask "recover-child-ok" -> pure (Just ["alpha"])
               SimpleTask "recover-child-fail" -> throwRetryable "Permanent child failure"
               SimpleTask "recover-reducer" -> do
-                attempt <- liftIO $ atomicModifyIORef' attemptRef $ \n -> (n + 1, n + 1)
+                attempt <- liftIO $ atomicModifyIORef' attemptRef $ \count -> (count + 1, count + 1)
                 if attempt == 1
                   then throwRetryable "Reducer fails first time"
                   else do
@@ -741,7 +741,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         dlqPayloads `shouldContain` [SimpleTask "recover-reducer"]
 
         -- Phase 2: Retry child-fail from DLQ → auto-retries reducer (suspended)
-        let childDlq = head $ filter (\d -> payload (DLQ.jobSnapshot d) == SimpleTask "recover-child-fail") dlqJobs
+        let childDlq = head $ filter (\dlqJob -> payload (DLQ.jobSnapshot dlqJob) == SimpleTask "recover-child-fail") dlqJobs
         mRetried <- runSimpleDb env $ HL.retryFromDLQ @WorkerTestPayload (DLQ.dlqPrimaryKey childDlq)
         case mRetried of
           Nothing -> expectationFailure "retryFromDLQ returned Nothing"
@@ -761,7 +761,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         processedRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job =
-              liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
+              liftIO $ atomicModifyIORef' processedRef $ \count -> (count + 1, ())
 
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 2 (noResult handler)
@@ -777,7 +777,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           map WR.workerId rows `shouldContain` [wid]
           map WR.queueName rows `shouldContain` [testTable]
 
-          -- Pause so the worker doesn't race us for the next claim.
+          -- Pause the worker before the next claim.
           void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
           waitUntil 5_000 $ (== Paused) <$> getWorkerState config
 
@@ -787,7 +787,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             runSimpleDb env $
               Ops.claimNextVisibleJobsAs @_ @WorkerTestPayload testSchema testTable 1 60 wid
           case claimed of
-            (j : _) -> claimedBy j `shouldBe` Just wid
+            (claimedJob : _) -> claimedBy claimedJob `shouldBe` Just wid
             [] -> expectationFailure "expected a job to be claimable for the claimed_by assertion"
 
           void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid False
@@ -816,7 +816,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           rowsAfterDelete <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
           map WR.workerId rowsAfterDelete `shouldNotContain` [wid]
 
-          -- Insert a job so the dispatcher signals the heartbeat MVar.
+          -- Insert a job. The dispatcher then signals the heartbeat.
           void $ runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "wake"))
 
           waitUntil 5_000 $ do
@@ -871,7 +871,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           threadDelay 2_500_000
 
           void $ runSimpleDb env $ Ops.deregisterWorker testSchema wid
-          -- The pause fans out per registry row, so a worker without one hears nothing.
+          -- The pause fans out per registry row. A worker without one hears nothing.
           void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
           threadDelay 300_000
           getWorkerState config `shouldReturn` Running
@@ -922,7 +922,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let original = Q.pausedAt first
         original `shouldSatisfy` isJust
 
-        threadDelay 1_100_000 -- 1.1s so NOW() would differ if the SQL bumped it
+        threadDelay 1_100_000 -- 1.1s, enough for NOW() to differ
         void $ runSimpleDb env $ Ops.setQueuePaused testSchema testTable True
         Just second <- runSimpleDb env $ Ops.getQueue testSchema testTable
         Q.pausedAt second `shouldBe` original
@@ -976,8 +976,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 5.0}
 
-            -- Steady-state toggles must complete via NOTIFY since the next
-            -- heartbeat tick is one pollInterval away.
+            -- Steady-state toggles complete via NOTIFY. The next heartbeat tick
+            -- is one pollInterval away.
             timed paused = do
               let expected = if paused then Paused else Running
               start <- getCurrentTime
@@ -1005,8 +1005,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 10_000 $ (== Running) <$> getWorkerState config
           waitUntil 10_000 $ getListenerReady config
 
-          -- Holding the worker's registry row blocks the pool's next heartbeat,
-          -- whose reading of the queue's pause state predates the pause below.
+          -- Holding the worker's registry row blocks the pool's next heartbeat.
+          -- Its reading of the queue's pause state predates the pause below.
           released <- newEmptyMVar
           let holdRow = runSimpleDb env $ withDbTransaction $ do
                 void $ Ops.heartbeatWorker testSchema (workerId config)
@@ -1024,7 +1024,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         processedRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job =
-              liftIO $ atomicModifyIORef' processedRef $ \n -> (n + 1, ())
+              liftIO $ atomicModifyIORef' processedRef $ \count -> (count + 1, ())
         baseConfig :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
           transactionalWorkerConfig 1 (noResult handler)
         let config = baseConfig {workerCount = 1, pollInterval = 2.0}
@@ -1058,13 +1058,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         withLinkedAsync (runSimpleDb env $ runWorkerPool cfgA) $ \_ ->
           withLinkedAsync (runSimpleDb env $ runWorkerPool cfgB) $ \_ -> do
-            -- Wait on the registry rows. getWorkerState reads only TVars and
-            -- would return Running before the workers have actually registered.
+            -- Wait on the registry rows. getWorkerState reads only TVars.
             waitUntil 10_000 $ do
               rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
               let ids = map WR.workerId rows
               pure (widA `elem` ids && widB `elem` ids)
-            -- And on subscription, so the pause NOTIFY is not sent before LISTEN.
+            -- And on subscription, before the pause NOTIFY is sent.
             waitUntil 10_000 $ getListenerReady cfgA
             waitUntil 10_000 $ getListenerReady cfgB
 
@@ -1095,7 +1094,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
               let ids = map WR.workerId rows
               pure (widA `elem` ids && widB `elem` ids)
-            -- And on subscription, so the pause NOTIFY is not sent before LISTEN.
+            -- And on subscription, before the pause NOTIFY is sent.
             waitUntil 10_000 $ getListenerReady cfgA
             waitUntil 10_000 $ getListenerReady cfgB
 
@@ -1126,8 +1125,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 5_000 $ readIORef startedRef
 
           start <- getCurrentTime
-          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
-          n `shouldBe` 1
+          cancelled <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          cancelled `shouldBe` 1
 
           -- Handler should be interrupted well before its 30s sleep finishes.
           waitUntil 5_000 $ do
@@ -1136,27 +1135,25 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           elapsed <- (`diffUTCTime` start) <$> getCurrentTime
           elapsed `shouldSatisfy` (< 3.0)
 
-          -- The handler must not have run to completion.
+          -- The handler did not run to completion.
           completed <- readIORef completedRef
           completed `shouldBe` False
 
-          -- And it should not have produced a DLQ entry.
+          -- The cancel produced no DLQ entry.
           dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
           dlqJobs `shouldBe` []
 
       it "interrupts a CPU-bound handler (no DB I/O)" $ \env -> do
-        -- Handler runs a tight IORef-bumping loop with NO blocking I/O. We
-        -- probe whether the loop stops after force-cancel by sampling the
-        -- counter twice. Under a masked child, async exceptions only land at
-        -- interruptible points (STM retry, threadDelay, libpq) - the loop
-        -- below has none, so a masked child keeps incrementing forever.
+        -- The handler runs a tight IORef-bumping loop with no blocking I/O. The
+        -- test samples the counter twice after the force-cancel. The loop has no
+        -- interruptible point. A masked child keeps incrementing.
         startedRef <- newIORef False
         counterRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = do
               liftIO $ writeIORef startedRef True
               let go = do
-                    atomicModifyIORef' counterRef (\n -> (n + 1, ()))
+                    atomicModifyIORef' counterRef (\count -> (count + 1, ()))
                     go
               liftIO go
 
@@ -1168,21 +1165,20 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
         withLinkedAsync (runSimpleDb env $ runWorkerPool config) $ \_ -> do
           waitUntil 5_000 $ readIORef startedRef
-          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
-          n `shouldBe` 1
+          cancelled <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          cancelled `shouldBe` 1
           -- Let cancellation propagate.
           threadDelay 500_000
-          c1 <- readIORef counterRef
+          before <- readIORef counterRef
           threadDelay 500_000
-          c2 <- readIORef counterRef
-          -- Counter must freeze: if the handler is still alive, it would
-          -- bump millions of times in 500ms.
-          c2 `shouldBe` c1
+          after <- readIORef counterRef
+          -- The counter freezes. A live handler bumps it millions of times in 500ms.
+          after `shouldBe` before
 
       it "cancelling one job of a batch interrupts the whole batch handler" $ \env -> do
-        -- A batch runs in a single handler thread, so all its job ids point at
-        -- the same async. Targeting one job throws into that thread and tears
-        -- down the in-flight batch.
+        -- A batch runs in a single handler thread. All its job ids point at the
+        -- same async. Targeting one job throws into that thread and tears down
+        -- the in-flight batch.
         startedRef <- newIORef False
         completedRef <- newIORef False
         let batchHandler _jobs _cbs = do
@@ -1206,23 +1202,23 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
           start <- getCurrentTime
           -- Cancel only the first job. The whole batch thread unwinds.
-          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable firstId
-          n `shouldBe` 1
+          cancelled <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable firstId
+          cancelled `shouldBe` 1
           waitUntil 5_000 $ do
             mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload firstId
             pure (isNothing mJob)
           elapsed <- (`diffUTCTime` start) <$> getCurrentTime
           elapsed `shouldSatisfy` (< 3.0)
 
-          -- The handler was interrupted, not run to completion.
+          -- The handler was interrupted.
           readIORef completedRef `shouldReturn` False
           -- No DLQ entries from the cancel.
           dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
           dlqJobs `shouldBe` []
 
       it "interrupts a running handler in poll-only mode via the flag" $ \env -> do
-        -- No listener, so the only path to interruption is the heartbeat
-        -- polling cancel_requested_at and throwing into the handler.
+        -- With no listener, the heartbeat polls cancel_requested_at and throws
+        -- into the handler.
         startedRef <- newIORef False
         completedRef <- newIORef False
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
@@ -1247,8 +1243,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 5_000 $ readIORef startedRef
 
           start <- getCurrentTime
-          n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
-          n `shouldBe` 1
+          cancelled <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable (primaryKey job)
+          cancelled `shouldBe` 1
 
           waitUntil 5_000 $ do
             mJob <- runSimpleDb env $ HL.getJobById @WorkerTestPayload (primaryKey job)
@@ -1278,17 +1274,17 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ PG.execute connB claimSql (Only jid)
 
         cancelledCount <-
-          withAsync (runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid) $ \fc -> do
+          withAsync (runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid) $ \cancelAsync -> do
             threadDelay 300_000
             void $ PG.execute_ connB "COMMIT"
             PG.close connB
-            Async.wait fc
+            Async.wait cancelAsync
 
         cancelledCount `shouldBe` 1
         [Only flagged] <-
-          withResource pool $ \c ->
+          withResource pool $ \conn ->
             PG.query
-              c
+              conn
               ( fromString . T.unpack $
                   "SELECT cancel_requested_at IS NOT NULL FROM " <> testSchema <> "." <> testTable <> " WHERE id = ?"
               )
@@ -1305,9 +1301,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         length claimed `shouldBe` 1
 
         void $
-          withResource pool $ \c ->
+          withResource pool $ \conn ->
             PG.execute
-              c
+              conn
               ( fromString . T.unpack $
                   "UPDATE " <> testSchema <> "." <> testTable <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
               )
@@ -1317,8 +1313,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         let chan = Schema.cancelNotifyChannel testSchema testTable
         void $ PG.execute_ lconn (fromString . T.unpack $ "LISTEN \"" <> chan <> "\"")
 
-        n <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid
-        n `shouldBe` 1
+        cancelled <- runSimpleDb env $ Ops.forceCancelJob testSchema testTable jid
+        cancelled `shouldBe` 1
 
         runSimpleDb env (HL.getJobById @WorkerTestPayload jid)
           >>= (`shouldSatisfy` isNothing)
@@ -1344,11 +1340,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ lockJobRow connA cid
 
         (efc, epA) <-
-          withAsync (try (runSimpleDb env $ Ops.forceCancelJob testSchema testTable pid) :: IO (Either SomeException Int64)) $ \fc -> do
+          withAsync (try (runSimpleDb env $ Ops.forceCancelJob testSchema testTable pid) :: IO (Either SomeException Int64)) $ \cancelAsync -> do
             threadDelay 300_000
             epA <- lockJobRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
-            efc <- Async.wait fc
+            efc <- Async.wait cancelAsync
             pure (efc, epA)
         PG.close connA
 
@@ -1382,7 +1378,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             void $ lockJobRow connA (maximum ids)
             putMVar goVar ()
             threadDelay 300_000
-            -- The failure transaction must not already hold the lower id.
+            -- The failure transaction does not yet hold the lower id.
             eLo <- lockJobRow connA (minimum ids)
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
             PG.close connA
@@ -1393,7 +1389,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               pure (length dlqJobs == 2)
 
       it "deletes a flagged job the handler already nacked" $ \env -> do
-        -- A nack keeps the claim, so a later cancel flags the row rather than deleting it.
+        -- A nack keeps the claim. A later cancel flags the row.
         nackedRef <- newIORef False
         let jobs =
               [ setGroupKey (Just "fcn") $ defaultJob (SimpleTask "fcn-1")
@@ -1402,7 +1398,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         inserted <- runSimpleDb env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
             batchHandler batch cbs = do
-              traverse_ (\j -> when (primaryKey j == firstId) (nack cbs j)) batch
+              traverse_ (\job -> when (primaryKey job == firstId) (nack cbs job)) batch
               liftIO $ writeIORef nackedRef True
               liftIO $ threadDelay 30_000_000
 
@@ -1423,9 +1419,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           dlqJobs `shouldBe` []
 
       it "refuses a stale worker's ack after a reclaim and nack restored attempts" $ \env -> do
-        -- A nack restores the attempt it consumed, so attempts alone repeats across claims.
-        w1 <- UUID.nextRandom
-        w2 <- UUID.nextRandom
+        -- A nack restores the attempt it consumed. The attempts value repeats across claims.
+        staleWorker <- UUID.nextRandom
+        holdingWorker <- UUID.nextRandom
         Just job <- runSimpleDb env $ HL.insertJob (defaultJob (SimpleTask "aba"))
         let jid = primaryKey job
             pool = fromJust (connectionPool (simplePool env))
@@ -1433,27 +1429,27 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               fromString . T.unpack $
                 "UPDATE " <> testSchema <> "." <> testTable <> " SET not_visible_until = NOW() - interval '1 second' WHERE id = ?"
 
-        [stale] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w1) :: IO [JobRead WorkerTestPayload]
+        [stale] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 staleWorker) :: IO [JobRead WorkerTestPayload]
         primaryKey stale `shouldBe` jid
-        void $ withResource pool $ \c -> PG.execute c expire (Only jid)
+        void $ withResource pool $ \conn -> PG.execute conn expire (Only jid)
 
-        [held] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 w2) :: IO [JobRead WorkerTestPayload]
+        [held] <- runSimpleDb env (HL.claimNextVisibleJobsAs 1 60 holdingWorker) :: IO [JobRead WorkerTestPayload]
         primaryKey held `shouldBe` jid
         runSimpleDb env (HL.nackJob held) `shouldReturn` 1
 
-        -- The nack put attempts back to what w1 recorded, so an attempts-keyed
-        -- predicate would match here.
+        -- The nack put attempts back to what the stale worker recorded. An
+        -- attempts-keyed predicate would match here.
         reread <- runSimpleDb env $ HL.getJobById @WorkerTestPayload jid
         fmap attempts reread `shouldBe` Just (attempts stale)
 
-        -- w1 is stale: every finalize it can still issue must match no row.
+        -- Every finalize the stale worker can still issue matches no row.
         runSimpleDb env (HL.setVisibilityTimeoutBatch 60 [stale])
           `shouldReturn` [HL.JobReclaimed jid (claimSeq stale) (claimSeq held)]
         runSimpleDb env (HL.nackJob stale) `shouldReturn` 0
         runSimpleDb env (HL.ackJob stale) `shouldReturn` 0
         runSimpleDb env (HL.getJobById @WorkerTestPayload jid) >>= (`shouldSatisfy` isJust)
 
-        -- w2 still owns it and can finish.
+        -- The holding worker still owns it and can finish.
         runSimpleDb env (HL.ackJob held) `shouldReturn` 1
 
       it "does not deadlock a tree cancel against a concurrent lock walk" $ \env -> do
@@ -1472,11 +1468,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         void $ lockJobRow connA cid
 
         (etc, epA) <-
-          withAsync (try (runSimpleDb env $ Ops.cancelJobTree testSchema testTable cid) :: IO (Either SomeException Int64)) $ \tc -> do
+          withAsync (try (runSimpleDb env $ Ops.cancelJobTree testSchema testTable cid) :: IO (Either SomeException Int64)) $ \cancelAsync -> do
             threadDelay 300_000
             epA <- lockJobRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))
-            etc <- Async.wait tc
+            etc <- Async.wait cancelAsync
             pure (etc, epA)
         PG.close connA
 
@@ -1490,8 +1486,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           $ runSimpleDb env
           $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         threadDelay 1_500_000
-        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
-        n `shouldSatisfy` (>= 1)
+        swept <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        swept `shouldSatisfy` (>= 1)
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         map WR.workerId rows `shouldNotContain` [wid]
 
@@ -1502,8 +1498,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         void $ runSimpleDb env $ Ops.setWorkerPaused testSchema wid True
         threadDelay 1_500_000
-        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
-        n `shouldSatisfy` (>= 1)
+        swept <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        swept `shouldSatisfy` (>= 1)
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         map WR.workerId rows `shouldNotContain` [wid]
 
@@ -1514,8 +1510,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           $ Ops.registerWorker testSchema wid testTable Nothing (Just 1) 1 Nothing
         void $ runSimpleDb env $ Ops.markWorkerShuttingDown testSchema wid
         threadDelay 1_500_000
-        n <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
-        n `shouldSatisfy` (>= 1)
+        swept <- runSimpleDb env $ Ops.sweepStaleWorkers testSchema
+        swept `shouldSatisfy` (>= 1)
         rows <- runSimpleDb env $ Ops.listWorkers testSchema (Just testTable) Nothing
         map WR.workerId rows `shouldNotContain` [wid]
 
@@ -1598,13 +1594,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         map CS.name elsewhereOnly `shouldNotContain` ["cron-here"]
 
         all_ <- runSimpleDb env $ Ops.listCronSchedules testSchema Nothing
-        map CS.name all_ `shouldSatisfy` (\ns -> "cron-here" `elem` ns && "cron-elsewhere" `elem` ns)
+        map CS.name all_ `shouldSatisfy` (\names -> "cron-here" `elem` names && "cron-elsewhere" `elem` names)
 
--- Helper to create a connection with data cleanup
-
--- | Clean the queue for one test. The env is built once for the suite: its LISTEN
+-- | Clean the queue for one test. The env is built once for the suite. Its LISTEN
 -- hub holds a pool connection for as long as the env lives, and the shared pool
--- only has five.
+-- has five.
 withPool :: SimpleEnv WorkerTestRegistry -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool env action = do
   let pool = fromJust (connectionPool (simplePool env))

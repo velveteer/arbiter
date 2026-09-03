@@ -30,11 +30,11 @@ import Arbiter.Worker.Logger.Internal (runHook, withJobContext, withJobContextOn
 import Arbiter.Worker.Retry (isJobSignal)
 import Arbiter.Worker.Settle (hasIdIn)
 
--- | Shortest gap between failed extends. Bounds how many fit, not whether they land.
+-- | Shortest gap between failed extends.
 minRetryPause :: Double
 minRetryPause = 0.25
 
--- | Wait before the next extend: a beat at most, 'minRetryPause' at least.
+-- | Wait before the next extend. At most a beat and at least 'minRetryPause'.
 heartbeatWait :: NominalDiffTime -> Bool -> Double -> Double
 heartbeatWait intervalSecs extended remaining
   | extended, remaining > beat = beat
@@ -44,8 +44,8 @@ heartbeatWait intervalSecs extended remaining
 
 -- | Run an action with a heartbeat thread that extends job visibility at each
 -- interval. Skip jobs that the handler finalized. An absent job is a normal
--- condition. A reclaimed job causes an exception because all jobs in a batch
--- share one deadline. Call the heartbeat hook after each successful extension.
+-- condition. A reclaimed job causes an exception. Call the heartbeat hook after
+-- each successful extension.
 withJobsHeartbeat
   :: forall payload m a
    . (JobOperation m payload)
@@ -71,16 +71,16 @@ withJobsHeartbeat
   -- ^ Action to run with heartbeat protection
   -> m a
 withJobsHeartbeat hooks intervalSecs timeoutSecs maxDuration startTime jobs pending logCfg signal action = do
-  -- 'race' forks each side, so the handler and both guards need the job span reattached.
+  -- 'race' forks each side. The handler and both guards reattach the job span.
   inherited <- capturingContext
   wallNow <- liftIO getCurrentTime
   monoNow <- liftIO getMonotonicTime
   let elapsed = diffUTCTime wallNow startTime
       durationDeadline = (\limit -> monoNow + realToFrac limit) <$> maxDuration
   lease <- STM.newTVarIO (monoNow + realToFrac (timeoutSecs - elapsed))
-  -- Renewing a claim the fence gave up would re-hide the row for another timeout.
+  -- Set when the fence gives up the claim.
   abandoned <- STM.newTVarIO False
-  -- The heartbeat sits outside the fence, so a fenced handler keeps its lease while it unwinds.
+  -- The heartbeat sits outside the fence. A fenced handler keeps its lease while it unwinds.
   outcome <-
     race
       (inherited (absurd <$> heartbeatThread lease abandoned))
@@ -93,7 +93,7 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs maxDuration startTime jobs pend
           leaseUntil <- STM.readTVarIO lease
           now <- liftIO getMonotonicTime
           threadDelay (ceiling (heartbeatWait intervalSecs extended (leaseUntil - now) * 1_000_000))
-          -- Read after the wait, so a fence that gave up during it stops the next extend.
+          -- Read after the wait. A fence that gave up during the wait stops the next extend.
           givenUp <- STM.readTVarIO abandoned
           if givenUp then idle >> beat extended else attempt
         idle = threadDelay (ceiling (intervalSecs * 1_000_000))
@@ -101,18 +101,18 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs maxDuration startTime jobs pend
           outcome <- tryAny (tick lease)
           case outcome of
             Right () -> beat True
-            Left e
-              | isJobSignal e -> liftIO (throwIO e)
+            Left exception
+              | isJobSignal exception -> liftIO (throwIO exception)
               | otherwise -> do
-                  tryLog (withJobContext logCfg jobs) Error ("Heartbeat error (retrying): " <> displayEx e)
+                  tryLog (withJobContext logCfg jobs) Error ("Heartbeat error (retrying): " <> displayEx exception)
                   beat False
 
     tick lease = do
       live <- pending
-      -- Read before the extend, so the tracked deadline never outlasts the row's.
+      -- Read before the extend. The tracked deadline stays inside the row's.
       issuedAt <- liftIO getMonotonicTime
       results <- Arb.setVisibilityTimeoutBatch timeoutSecs live
-      -- A row this worker settled while the statement ran says nothing about its lease.
+      -- Rows this worker settled during the statement do not count.
       stillPending <- Set.fromList . map primaryKey <$> pending
       let cancelledJobs = [jobId | Arb.JobCancelled jobId <- results]
           stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]

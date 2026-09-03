@@ -17,8 +17,8 @@ import Hasql.Statement qualified as S
 
 -- | Unprepared statement over numbered placeholders, returning rows affected.
 buildStatementRowCount :: Text -> Params -> S.Statement () Int64
-buildStatementRowCount sql ps =
-  S.unpreparable (numberPlaceholders sql) (buildEncoder ps) D.rowsAffected
+buildStatementRowCount sql params =
+  S.unpreparable (numberPlaceholders sql) (buildEncoder params) D.rowsAffected
 
 -- | A parameter list as one positional encoder.
 buildEncoder :: Params -> E.Params ()
@@ -26,12 +26,15 @@ buildEncoder = mconcat . map encodeSomeParam
 
 -- | Encode one parameter at its declared nullability.
 encodeSomeParam :: SomeParam -> E.Params ()
-encodeSomeParam (SomeParam pt v) = case pt of
-  PScalar c -> contramap (const v) $ E.param (E.nonNullable (colEncoder c))
-  PNullable c -> contramap (const v) $ E.param (E.nullable (colEncoder c))
-  PArray c ->
-    contramap (const v) $ E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable (colEncoder c))))))
-  PNullArray c -> contramap (const v) $ E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nullable (colEncoder c))))))
+encodeSomeParam (SomeParam paramType value) = case paramType of
+  PScalar col -> contramap (const value) $ E.param (E.nonNullable (colEncoder col))
+  PNullable col -> contramap (const value) $ E.param (E.nullable (colEncoder col))
+  PArray col ->
+    contramap (const value) $
+      E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable (colEncoder col))))))
+  PNullArray col ->
+    contramap (const value) $
+      E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nullable (colEncoder col))))))
 
 -- | Encoder for a column type.
 colEncoder :: Col a -> E.Value a

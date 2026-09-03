@@ -1,8 +1,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Postgres health snapshots from the stats and catalog views. Arbiter's own tables are
--- named but never scanned.
+-- | Postgres health snapshots from the stats and catalog views. The queries name Arbiter's
+-- own tables and do not scan them.
 module Arbiter.Core.Health
   ( PgDbHealth (..)
   , PgTableHealth (..)
@@ -56,7 +56,7 @@ data PgTableHealth = PgTableHealth
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Column order must match the SELECT lists ('RowCodec' is positional).
+-- | Column order matches the SELECT lists. 'RowCodec' is positional.
 pgDbHealthCodec :: RowCodec PgDbHealth
 pgDbHealthCodec =
   PgDbHealth
@@ -95,6 +95,6 @@ getPgHealth schemaName queueTables = do
   where
     scanned = allSchemaTables queueTables
 
--- | The database-wide half on its own, for callers with no use for per-table churn.
+-- | The database-wide half on its own.
 getPgDbHealth :: (MonadArbiter m) => m (Maybe PgDbHealth)
 getPgDbHealth = listToMaybe <$> executeQuery (rows pgDbHealthCodec Sql.pgDbHealthSQL)

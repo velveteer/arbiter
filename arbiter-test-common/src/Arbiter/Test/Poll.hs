@@ -1,7 +1,4 @@
 -- | Polling helpers for tests.
---
--- Replace fixed @threadDelay@ waits with polling that completes as soon as
--- the condition is met, falling back to a timeout.
 module Arbiter.Test.Poll
   ( waitUntil
   , withLinkedAsync
@@ -21,11 +18,11 @@ waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
   where
     go :: (HasCallStack) => Int -> IO ()
     go 0 = expectationFailure "waitUntil: timed out waiting for condition"
-    go n = do
-      ok <- check
-      unless ok $ do
+    go remaining = do
+      satisfied <- check
+      unless satisfied $ do
         threadDelay 100_000
-        go (n - 1)
+        go (remaining - 1)
 
 -- | Run 'withAsync' with a linked handle. Raise a child-thread failure in the
 -- caller and stop the associated 'waitUntil'.

@@ -63,15 +63,15 @@ prepareRefreshSource logCfg runDb schema queueKinds refreshInterval freshnessWin
     sharedScan gate =
       bounded (runDb (runGatedShared schema gate gateInterval freshnessWindow scan)) >>= \case
         Right (Just (Unreadable why)) -> localScan why
-        r -> pure r
+        outcome -> pure outcome
 
-    -- Fixed for the registration, and a query of its own when it is long.
+    -- Fixed for the registration. A long name takes a query of its own.
     resolveGate gateCache =
       readIORef gateCache
         >>= maybe (runDb (gateNameFor "refresh-gauges" queueTables) >>= \gate -> gate <$ writeIORef gateCache (Just gate)) pure
 
-    -- A scan that outlives the freshness window is abandoned, so long as a fresh
-    -- reading stands in for it. Only unblocks a driver that yields to the runtime.
+    -- A scan that outlives the freshness window is abandoned when a fresh reading
+    -- stands in for it. Only unblocks a driver that yields to the runtime.
     bounded :: IO (Maybe (Shared Snapshot)) -> IO (Either SomeException (Maybe (Shared Snapshot)))
     bounded act = do
       stale <- cacheIsStale
@@ -79,7 +79,7 @@ prepareRefreshSource logCfg runDb schema queueKinds refreshInterval freshnessWin
         >>= traverse (maybe (Nothing <$ tryLog logCfg Warning abandoned) pure)
     abandoned = "Gauge scan outlived the freshness window, abandoned"
 
-    -- Only an unreadable payload falls back, and only with nothing fresh of its own.
+    -- An unreadable payload falls back to a local scan when the cache is stale.
     localScan why = do
       tryLog logCfg Warning ("Shared gauge payload unreadable, scanning locally: " <> why)
       stale <- cacheIsStale
