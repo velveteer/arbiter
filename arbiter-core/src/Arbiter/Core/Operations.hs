@@ -833,9 +833,7 @@ claimAdmissionFor =
     , Claim.admitConcurrent = usesAnyPolicy (concurrencyFor @payload)
     }
 
--- | The claimant stamped by the claim variants that take no worker id. Those are a
--- test affordance, and a claim that left @claimed_by@ null would be indistinguishable
--- from a retry backoff.
+-- | The claimant stamped by the claim variants that take no worker id.
 anonymousClaimant :: UUID
 anonymousClaimant = UUID.fromWords 0xa4b17e40 0 0 1
 
@@ -927,7 +925,7 @@ claimJobsCached cs maxJobs = withDbTransaction $ do
   traverse decodePayload rawJobs
 
 -- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each of @maxBatches@
--- groups. Leaves @claimed_by@ NULL.
+-- groups. Stamps 'anonymousClaimant'.
 claimNextVisibleJobsBatched
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -1930,7 +1928,7 @@ data QueueStats = QueueStats
   , scheduledJobs :: Int64
   -- ^ Jobs delayed until a future @not_visible_until@ (never yet attempted)
   , backoffJobs :: Int64
-  -- ^ Failed jobs waiting out a retry backoff delay
+  -- ^ Unclaimed jobs with an attempt spent, waiting out a delay
   , throttledJobs :: Int64
   -- ^ Jobs parked by a rate limit until tokens refill
   , suspendedJobs :: Int64

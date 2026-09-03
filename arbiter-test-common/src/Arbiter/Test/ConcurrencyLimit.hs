@@ -132,6 +132,7 @@ concurrencyLimitSpec runM = do
       claimAs env = runM env (HL.claimNextVisibleJobsAs 100 60 wid) :: IO [JobRead CLPayload]
       ackAll env js = runM env (traverse_ HL.ackJob js)
       retryAll env js = runM env (traverse_ (HL.updateJobForRetry 60 "boom") js)
+      nackAll env js = runM env (traverse_ HL.nackJob js)
       overridePool env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpool" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
       prune env = runM env HL.pruneConcurrencyKeys :: IO Int64
       reconcile env = void (runM env HL.reconcileConcurrencyCounts :: IO Int64)
@@ -264,6 +265,15 @@ concurrencyLimitSpec runM = do
     claimed <- claimAs env
     length claimed `shouldBe` 3
     retryAll env (take 2 claimed)
+    refilled <- claimAs env
+    length refilled `shouldBe` 2
+
+  it "frees a slot on nack" $ \env -> do
+    seed env 3
+    enqueue env (replicate 5 (job "freenack" "a"))
+    claimed <- claimAs env
+    length claimed `shouldBe` 3
+    nackAll env (take 2 claimed)
     refilled <- claimAs env
     length refilled `shouldBe` 2
 

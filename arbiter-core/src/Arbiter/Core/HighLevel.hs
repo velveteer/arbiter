@@ -267,8 +267,8 @@ insertJobsBatch_ [] = pure 0
 insertJobsBatch_ jobs = publishSpan @payload jobs $ onQueue @payload $ \s t -> Ops.insertJobsBatch_ s t jobs
 
 -- | Claim visible jobs, at most one per group, and fewer than the limit once the groups
--- run out. Leaves @claimed_by@ NULL, so no concurrency pool caps this path.
--- 'claimNextVisibleJobsAs' is the capped one.
+-- run out. Stamps the anonymous claimant, so a concurrency pool caps this path as it
+-- caps any other claim.
 claimNextVisibleJobs
   :: forall payload m
    . (QueueOperation m payload)

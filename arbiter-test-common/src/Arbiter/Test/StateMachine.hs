@@ -656,8 +656,7 @@ isLiveInFlight schema table withConn jid = withConn $ \conn -> do
         <> table
         <> " WHERE id = ? AND not_visible_until > NOW() AND NOT suspended AND attempts > 0"
 
--- | @(leased, suspended, nvu)@ for one row. Leased is a live claim: a worker holds
--- the row and its window has not lapsed.
+-- | @(leased, suspended, nvu)@ for one row.
 leaseState
   :: Text
   -> Text
@@ -671,7 +670,7 @@ leaseState schema table withConn jid = withConn $ \conn -> do
     _ -> (False, False, Nothing)
   where
     sql =
-      "SELECT claimed_by IS NOT NULL AND NOT suspended AND not_visible_until > NOW(), suspended, not_visible_until FROM "
+      "SELECT claimed_by IS NOT NULL AND NOT suspended AND not_visible_until IS NOT NULL AND not_visible_until > NOW(), suspended, not_visible_until FROM "
         <> schema
         <> "."
         <> table
@@ -692,8 +691,7 @@ newtype JobRef (v :: Type -> Type) = JobRef (Var Int64 v)
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
 
--- | @Retry job backoff@. The backoff decides whether the job returns to the claim
--- pool inside this run or sits out the rest of it.
+-- | @Retry job backoff@. A zero backoff returns the job to the claim pool at once.
 data Retry (v :: Type -> Type) = Retry (Var Int64 v) NominalDiffTime
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
@@ -777,10 +775,7 @@ cPromote run schema table withConn =
     gen m
       | Map.null (mLive m) = Nothing
       | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
-    -- Promote holds no claim, so it must leave a leased or suspended row as it found
-    -- it. Clearing a live lease hands the job to a second worker while the first is
-    -- still running it, and clearing a suspended row's window drops the schedule a
-    -- pause is holding for its resume.
+    -- Promote holds no claim, so a leased or suspended row must come back untouched.
     exec (JobRef v) = do
       let jid = concrete v
       (leased, susp, nvu) <- evalIO (leaseState schema table withConn jid)
@@ -821,8 +816,7 @@ mkAck
     -> sm ()
 mkAck jid = fetchJob @sm jid >>= traverse_ (void . HL.ackJob)
 
--- | Park a leased job for @backoff@ seconds. A zero backoff leaves the job claimable
--- at once, which is the only route to a second attempt inside one test run.
+-- | Park a leased job for @backoff@ seconds.
 mkRetry :: forall sm. (ArbiterC sm) => Int64 -> NominalDiffTime -> sm ()
 mkRetry jid backoff = fetchJob @sm jid >>= traverse_ (\j -> whenLeased j (void (HL.updateJobForRetry backoff "sm retry" j)))
 
@@ -1748,10 +1742,9 @@ dedupReplaceStaleLeaseGuard run schema table withConn reset = do
       "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE dedup_key = 'drsl-key' AND claimed_by IS NOT NULL"
   stale `shouldBe` 0
 
--- | Deterministic guard for the lease a promote must not clear. Promote carries no
--- claim, so a job back in flight on a second attempt must come back untouched, and so
--- must the schedule a pause is holding for its resume. The random sequences reach the
--- second attempt only by coincidence, so it gets its own guard.
+-- | Deterministic guard for the two rows promote must refuse: one back in flight on a
+-- second attempt, one suspended with a schedule. The random sequences reach the second
+-- attempt only by coincidence.
 promoteLeaseGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1762,8 +1755,7 @@ promoteLeaseGuard
   -> IO ()
   -> IO ()
 promoteLeaseGuard run schema table withConn reset = do
-  -- Back in flight on a second attempt. The retry leaves a last_error that the
-  -- re-claim does not clear, which is what made this row read as merely delayed.
+  -- Back in flight on a second attempt.
   reset
   jid <- run (mkInsert @sm id Nothing Nothing 0 Nothing)
   _ <- run (HL.claimNextVisibleJobsAs 1 60 smWorker :: sm [JobRead SMPayload])
@@ -1772,7 +1764,15 @@ promoteLeaseGuard run schema table withConn reset = do
   map primaryKey attempt2 `shouldBe` [jid]
   run (HL.promoteJob @SMPayload jid) >>= (`shouldBe` 0)
   isLiveInFlight schema table withConn jid >>= (`shouldBe` True)
-  -- Suspended with a schedule the resume is meant to restore.
+  -- Released with setVisibilityTimeout 0: still claimed, no window left.
+  reset
+  rid <- run (mkInsert @sm id Nothing Nothing 0 Nothing)
+  released <- run (HL.claimNextVisibleJobsAs 1 60 smWorker :: sm [JobRead SMPayload])
+  map primaryKey released `shouldBe` [rid]
+  run (HL.setVisibilityTimeout 0 (head released)) >>= (`shouldBe` 1)
+  leaseState schema table withConn rid >>= (`shouldBe` (False, False, Nothing))
+  run (HL.promoteJob @SMPayload rid) >>= (`shouldBe` 0)
+  -- Suspended with a schedule its resume restores.
   reset
   sid <- run (mkInsert @sm id Nothing (Just 30) 0 Nothing)
   run (HL.suspendJob @SMPayload sid) >>= (`shouldBe` 1)

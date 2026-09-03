@@ -176,17 +176,15 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
       |]
 
--- | Soft nack: hand back the attempt the claim consumed, recording no failure. The
--- visibility timeout is left as it stands, so the job becomes claimable again when the
--- claim's own lease lapses. Matches on the claim token, so a job another worker
--- reclaimed is left alone. @att@ is the claim's attempt count, clamped to the row so
--- repeated nacks on one claim settle at a single refund.
+-- | Soft nack: release the claim and hand back the attempt it consumed, recording no
+-- failure. Leaves @not_visible_until@ as it stands, so the job waits out the lease.
 nackJobSQL :: Text -> Text -> Int64 -> Int64 -> Int32 -> Query ()
 nackJobSQL schema tableName jobId cseq att =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
         SET attempts = LEAST(GREATEST(#{att :: CInt4} - 1, attempts - 1, 0), attempts),
+            claimed_by = NULL,
             updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8} AND NOT suspended
           AND claimed_by IS NOT NULL
@@ -205,6 +203,7 @@ nackJobsBatchSQL schema tableName ids cseqs atts =
         ${locked}
         UPDATE ${tbl} j
         SET attempts = LEAST(GREATEST(i.att - 1, j.attempts - 1, 0), j.attempts),
+            claimed_by = NULL,
             updated_at = NOW()
         FROM input i
         WHERE j.id = i.in_id AND j.id IN (SELECT id FROM locked)

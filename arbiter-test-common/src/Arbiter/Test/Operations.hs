@@ -340,10 +340,23 @@ operationsSpec mkMessage mkResult runM = do
       map attempts held `shouldBe` [2]
 
       runM env (HL.nackJob (head held)) `shouldReturn` 1
-      runM env (HL.nackJob (head held)) `shouldReturn` 1
+      runM env (HL.nackJob (head held)) `shouldReturn` 0
 
       Just reread <- getJob env (primaryKey inserted)
       attempts reread `shouldBe` 1
+      claimedBy reread `shouldBe` Nothing
+
+    it "a nacked job is not counted in flight" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-status")))
+      firstClaim <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 (head firstClaim))
+      held <- claimJobsAs env 1 UUID.nil
+      map attempts held `shouldBe` [2]
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+
+      stats <- runM env (HL.getQueueStats @payload)
+      HL.inFlightJobs stats `shouldBe` 0
+      HL.backoffJobs stats `shouldBe` 1
 
     it "settles two batches over the same parents concurrently without deadlocking" $ \env -> do
       -- A bulk ack and a bulk DLQ move, each holding one parent and wanting the
@@ -1289,9 +1302,8 @@ operationsSpec mkMessage mkResult runM = do
       map attempts claimed `shouldBe` [1]
       runM env (HL.nackJob (head claimed)) `shouldReturn` 1
 
-      -- Release the nack's remaining wait, so only the attempt budget can refuse the
-      -- move. Promote refuses a nacked job, which keeps its claim.
-      runM env (HL.setVisibilityTimeout 0 (head claimed)) `shouldReturn` 1
+      -- Make the job visible, so only the attempt budget can refuse the move.
+      runM env (HL.promoteJob @payload (primaryKey inserted)) `shouldReturn` 1
 
       -- The sweep's snapshot, taken while the job was still out of attempts.
       moved <- runM env $ do
@@ -2852,10 +2864,7 @@ operationsSpec mkMessage mkResult runM = do
     it "promoteJob refuses to promote a retried job back in flight" $ \env -> do
       Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "PromoteRetriedInFlight")))
       [attempt1] <- claimJobsAs env 1 UUID.nil
-      -- Zero backoff so the retry is immediately re-claimable. The retry leaves last_error set.
       void $ runM env (HL.updateJobForRetry 0 "fail 1" attempt1)
-
-      -- Second attempt. Nothing clears last_error on a re-claim.
       [attempt2] <- claimJobsAs env 1 UUID.nil
       attempts attempt2 `shouldBe` 2
 
