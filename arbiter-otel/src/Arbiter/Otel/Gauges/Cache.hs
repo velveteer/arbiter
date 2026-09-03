@@ -1,25 +1,28 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
--- | The state the gauge instruments read, one set per registration.
-module Arbiter.Otel.Gauges.Cells
+-- | Shared state for gauge instruments and the refresh loop.
+module Arbiter.Otel.Gauges.Cache
   ( Snapshot (..)
   , Cached (..)
   , Export (..)
   , live
   , lastScan
   , retire
-  , GaugeCells (..)
+  , GaugeCache (..)
   , Baseline
   , SeriesKey
-  , newGaugeCells
+  , newGaugeCache
+  , publishSnapshot
+  , setReachable
+  , retireCache
   , riseSince
   ) where
 
-import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView (..))
+import Arbiter.Core.Concurrency.Stats qualified as Conc (ConcurrencyPolicyView)
 import Arbiter.Core.Health qualified as Health
-import Arbiter.Core.Operations (QueueOverview (..))
-import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView (..))
-import Control.Concurrent.STM (TVar, newTVarIO)
+import Arbiter.Core.Operations (QueueOverview)
+import Arbiter.Core.RateLimit.Stats qualified as RL (RateLimitPolicyView)
+import Control.Concurrent.STM (STM, TVar, modifyTVar', newTVarIO, writeTVar)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
@@ -27,7 +30,7 @@ import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
--- | One gauge scan's readings.
+-- | Values from one database scan.
 data Snapshot = Snapshot
   { queues :: [QueueOverview]
   , db :: Maybe Health.PgDbHealth
@@ -38,7 +41,7 @@ data Snapshot = Snapshot
   deriving stock (Generic)
   deriving anyclass (FromJSON, ToJSON)
 
--- | A snapshot and the monotonic time its scan started.
+-- | A snapshot and the monotonic time at which its scan started.
 data Cached = Cached
   { takenAt :: Double
   , reading :: Snapshot
@@ -73,16 +76,34 @@ data Baseline = Baseline
   , countedTotal :: !Double
   }
 
--- | What the registered callbacks read.
-data GaugeCells = GaugeCells
-  { cache :: TVar Export
+-- | Mutable gauge state and its registration time.
+data GaugeCache = GaugeCache
+  { export :: TVar Export
+  , databaseReachable :: TVar (Maybe Bool)
   , counterBaselines :: IORef (HashMap SeriesKey Baseline)
   , registeredAt :: Double
   }
 
--- | Cells for a registration starting at @now@.
-newGaugeCells :: Double -> IO GaugeCells
-newGaugeCells now = GaugeCells <$> newTVarIO (Idle Nothing) <*> newIORef HM.empty <*> pure now
+-- | Create an empty gauge cache for a registration starting at @now@.
+newGaugeCache :: Double -> IO GaugeCache
+newGaugeCache now =
+  GaugeCache
+    <$> newTVarIO (Idle Nothing)
+    <*> newTVarIO Nothing
+    <*> newIORef HM.empty
+    <*> pure now
+
+-- | Publish a snapshot to the observable instruments.
+publishSnapshot :: GaugeCache -> Cached -> STM ()
+publishSnapshot cache = writeTVar (export cache) . Live
+
+-- | Update the result of the last database operation.
+setReachable :: GaugeCache -> Bool -> STM ()
+setReachable cache = writeTVar (databaseReachable cache) . Just
+
+-- | Stop exporting the cached snapshot.
+retireCache :: GaugeCache -> STM ()
+retireCache cache = modifyTVar' (export cache) retire
 
 -- | What a total scanned at @scannedAt@ adds to its series: nothing for the first
 -- reading or one already counted, the whole total for a counter that was reset,

@@ -68,7 +68,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (getCurrentTime)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import GHC.Generics (Generic)
-import OpenTelemetry.Attributes (Attributes, lookupAttributeByKey)
+import OpenTelemetry.Attributes (Attributes, emptyAttributes, lookupAttributeByKey)
 import OpenTelemetry.Attributes.Key (AttributeKey)
 import OpenTelemetry.Context (empty, insertSpan)
 import OpenTelemetry.Context.ThreadLocal (attachContext, detachContext)
@@ -116,8 +116,7 @@ import Test.Hspec
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel qualified as Otel
-import Arbiter.Otel.Gauges.Cells qualified as Cells
-import Arbiter.Otel.Metrics qualified as Metrics
+import Arbiter.Otel.Gauges.Cache qualified as Cache
 
 newtype Greeting = Greeting Text
   deriving stock (Eq, Generic, Show)
@@ -282,18 +281,18 @@ spec = do
       Otel.withExternalTelemetry (Just mp) Nothing $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
-        ms <- orFail "expected metrics on" (Otel.meters tel)
         let noopHandler :: JobHandler (SimpleDb Reg IO) Greeting ()
             noopHandler _conn _job = pure ()
         -- Through the pool's own instrumentation, which is what labels a running pool.
-        hooks <- observabilityHooks . Otel.instrumentConfig tel <$> transactionalWorkerConfig 1 noopHandler
+        instrumented <- Otel.instrumentConfig tel <$> transactionalWorkerConfig 1 noopHandler
+        let hooks = observabilityHooks instrumented
         runSimpleDb plainEnv $ do
           onJobClaimed hooks job now
           onJobSuccess hooks job now now
           onJobFailedAndMovedToDLQ hooks "boom" job
           onJobCancelled hooks job "cancelled"
           onJobUnavailable hooks job "no longer available"
-        Otel.otelMaintenance ms SweepExhaustedJobs 3
+        runSimpleDb plainEnv $ onMaintenance instrumented SweepExhaustedJobs 3
 
         loop <- Otel.startGauges tel defaultLogConfig (runSimpleDb plainEnv) schema [(queue, kindsFor @Greeting)] 1
         withAsync loop $ \_ -> do
@@ -315,22 +314,22 @@ spec = do
 
   -- The one series that tells a stopped refresh loop from a fresh reading.
   describe "reading staleness" $ do
-    let scanned at = Cells.Live (Cells.Cached at (Cells.Snapshot [] Nothing [] [] []))
+    let scanned at = Cache.Live (Cache.Cached at (Cache.Snapshot [] Nothing [] [] []))
 
     it "keeps the scan time a retired reading was taken at" $
-      Cells.lastScan (Cells.retire (scanned 100)) `shouldBe` Just 100
+      Cache.lastScan (Cache.retire (scanned 100)) `shouldBe` Just 100
 
     it "keeps it across a second retire" $
-      Cells.lastScan (Cells.retire (Cells.retire (scanned 100))) `shouldBe` Just 100
+      Cache.lastScan (Cache.retire (Cache.retire (scanned 100))) `shouldBe` Just 100
 
     it "stops exporting the reading it retired" $
-      fmap Cells.takenAt (Cells.live (Cells.retire (scanned 100))) `shouldBe` Nothing
+      fmap Cache.takenAt (Cache.live (Cache.retire (scanned 100))) `shouldBe` Nothing
 
     it "has no scan time before the first reading" $
-      Cells.lastScan (Cells.Idle Nothing) `shouldBe` Nothing
+      Cache.lastScan (Cache.Idle Nothing) `shouldBe` Nothing
 
   describe "counter baselines" $ do
-    let rise = Cells.riseSince ("arbiter.jobs.processed", [("outcome", "success")])
+    let rise = Cache.riseSince ("arbiter.jobs.processed", [("outcome", "success")])
         counted at total = fst (rise at total mempty)
 
     it "counts nothing from the first scan" $
@@ -353,8 +352,8 @@ spec = do
           meter <- getMeter mp "arbiter-otel-test"
           counter <- meterCreateCounterDouble meter name Nothing Nothing defaultAdvisoryParameters
           let count seen (at, total) = do
-                let (seen', rise) = Cells.riseSince key at total seen
-                counterAdd counter rise (Metrics.attrs [])
+                let (seen', rise) = Cache.riseSince key at total seen
+                counterAdd counter rise emptyAttributes
                 pure seen'
           foldM_ count mempty totals
           lookup name <$> collectedSums env

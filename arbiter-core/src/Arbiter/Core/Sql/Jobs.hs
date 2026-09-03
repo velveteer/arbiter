@@ -192,7 +192,7 @@ jobStatusCaseSQL =
       WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
       WHEN suspended THEN 'suspended'
       WHEN ${throttledPredicateSQL} THEN 'throttled'
-      WHEN claimed_by IS NULL AND last_error IS NOT NULL AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'backoff'
+      WHEN claimed_by IS NULL AND attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'backoff'
       WHEN attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'in_flight'
       WHEN not_visible_until IS NOT NULL AND not_visible_until > NOW() THEN 'scheduled'
       ELSE 'ready'
@@ -432,9 +432,9 @@ replaceableGuard :: Text -> Text -> Text
 replaceableGuard tbl dlqTbl =
   [text|
     (${tbl}.attempts = 0
+      OR ${tbl}.claimed_by IS NULL
       OR ${tbl}.not_visible_until IS NULL
-      OR ${tbl}.not_visible_until <= NOW()
-      OR ${tbl}.last_error IS NOT NULL)
+      OR ${tbl}.not_visible_until <= NOW())
       AND ${tbl}.cancel_requested_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM ${tbl} c WHERE c.parent_id = ${tbl}.id)
       AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} d WHERE d.parent_id = ${tbl}.id)

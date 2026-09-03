@@ -340,10 +340,23 @@ operationsSpec mkMessage mkResult runM = do
       map attempts held `shouldBe` [2]
 
       runM env (HL.nackJob (head held)) `shouldReturn` 1
-      runM env (HL.nackJob (head held)) `shouldReturn` 1
+      runM env (HL.nackJob (head held)) `shouldReturn` 0
 
       Just reread <- getJob env (primaryKey inserted)
       attempts reread `shouldBe` 1
+      claimedBy reread `shouldBe` Nothing
+
+    it "a nacked job is not counted in flight" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "nack-status")))
+      firstClaim <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 (head firstClaim))
+      held <- claimJobsAs env 1 UUID.nil
+      map attempts held `shouldBe` [2]
+      runM env (HL.nackJob (head held)) `shouldReturn` 1
+
+      stats <- runM env (HL.getQueueStats @payload)
+      HL.inFlightJobs stats `shouldBe` 0
+      HL.backoffJobs stats `shouldBe` 1
 
     it "settles two batches over the same parents concurrently without deadlocking" $ \env -> do
       -- A bulk ack and a bulk DLQ move, each holding one parent and wanting the
@@ -927,6 +940,23 @@ operationsSpec mkMessage mkResult runM = do
       attempts replaced `shouldBe` 0
       lastError replaced `shouldBe` Nothing
 
+    it "ReplaceDuplicate returns Nothing when a retried job is running its next attempt" $ \env -> do
+      let job1 =
+            setDedupKey (Just (ReplaceDuplicate "retry-live-key")) $
+              defaultGroupedJob "dedup-retry-live-1" (mkMessage "Original")
+      Just _ <- runM env (HL.insertJob job1)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.updateJobForRetry 0 "Simulated failure" (head claimed))
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
+      lastError (head reclaimed) `shouldBe` Just "Simulated failure"
+
+      let job2 =
+            setDedupKey (Just (ReplaceDuplicate "retry-live-key")) $
+              defaultGroupedJob "dedup-retry-live-2" (mkMessage "Replacement")
+      replaced <- runM env (HL.insertJob job2)
+      replaced `shouldBe` Nothing
+
     it "Dedup key only applies to jobs in queue (not after ack)" $ \env -> do
       let job1 =
             setDedupKey (Just (IgnoreDuplicate "ack-test-key")) $ defaultGroupedJob "dedup-ack-test-1" (mkMessage "First")
@@ -1159,6 +1189,22 @@ operationsSpec mkMessage mkResult runM = do
       payload (head inserted) `shouldBe` mkMessage "FreshReplacement"
       attempts (head inserted) `shouldBe` 0
       lastError (head inserted) `shouldBe` Nothing
+
+    it "batch ReplaceDuplicate does not replace a retried job running its next attempt" $ \env -> do
+      let existingJob =
+            setDedupKey (Just (ReplaceDuplicate "batch-retry-live-key")) $ defaultJob (mkMessage "Original")
+      Just _ <- runM env (HL.insertJob existingJob)
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      void $ runM env (HL.updateJobForRetry 0 "Simulated failure" (head claimed))
+      reclaimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length reclaimed `shouldBe` 1
+
+      let batchJobs =
+            [ setDedupKey (Just (ReplaceDuplicate "batch-retry-live-key")) $ defaultJob (mkMessage "Replacement")
+            , defaultJob (mkMessage "Other")
+            ]
+      inserted <- runM env (HL.insertJobsBatch batchJobs)
+      map payload inserted `shouldBe` [mkMessage "Other"]
 
   describe "updateJobForRetry" $ do
     it "updates job with error message and visibility timeout" $ \env -> do
@@ -1758,6 +1804,27 @@ operationsSpec mkMessage mkResult runM = do
       let idsToCancel = [primaryKey job1, 999999, primaryKey job2, 888888]
       deleted <- runM env (HL.cancelJobsBatch @payload idsToCancel)
       deleted `shouldBe` 2
+
+    it "cancels two batches over the same parents concurrently without deadlocking" $ \env -> do
+      forM_ [1 .. 8 :: Int] $ \round' -> do
+        let name side = mkMessage ("cancel-lockorder-" <> T.pack (show round') <> "-" <> side)
+            tree side =
+              JT.rollup
+                (defaultJob (name (side <> "-parent")))
+                (JT.leaf (defaultJob (name (side <> "-x"))) :| [JT.leaf (defaultJob (name (side <> "-y")))])
+        Right (_ :| [ax, ay]) <- runM env (HL.insertJobTree (tree "a"))
+        Right (_ :| [bx, by]) <- runM env (HL.insertJobTree (tree "b"))
+        -- Opposite parent order on each side, so an unordered lock pass cycles.
+        (left, right) <-
+          concurrently
+            (runM env (HL.cancelJobsBatch @payload [primaryKey ax, primaryKey by]))
+            (runM env (HL.cancelJobsBatch @payload [primaryKey bx, primaryKey ay]))
+        left `shouldBe` 2
+        right `shouldBe` 2
+        parents <- claimJobs env 2
+        length parents `shouldBe` 2
+        runM env (HL.ackJobsBatch parents) >>= ((`shouldBe` 2) . length)
+        runM env (HL.listJobs @payload 100 0) >>= (`shouldBe` [])
 
     it "moveToDLQBatch moves multiple jobs with individual error messages" $ \env -> do
       -- Insert and claim 3 jobs
@@ -2820,6 +2887,17 @@ operationsSpec mkMessage mkResult runM = do
       Just found <- runM env (HL.getJobById @payload (primaryKey inserted))
       suspended found `shouldBe` True
 
+    it "promoteJob leaves a suspended scheduled job's delay alone" $ \env -> do
+      now <- getCurrentTime
+      let futureTime = truncateToMicros (addUTCTime 3600 now)
+          job = setNotVisibleUntil (Just futureTime) $ defaultJob (mkMessage "PromoteSuspSched")
+      Just inserted <- runM env (HL.insertJob job)
+      runM env (HL.suspendJob @payload (primaryKey inserted)) `shouldReturn` 1
+      promoted <- runM env (HL.promoteJob @payload (primaryKey inserted))
+      promoted `shouldBe` 0
+      Just found <- runM env (HL.getJobById @payload (primaryKey inserted))
+      notVisibleUntil found `shouldBe` Just futureTime
+
     it "promoteJob refuses to promote in-flight job" $ \env -> do
       -- Insert and claim a job (claiming sets not_visible_until to a future time)
       Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "PromoteInFlight")))
@@ -2836,6 +2914,19 @@ operationsSpec mkMessage mkResult runM = do
       -- Job should still not be claimable
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed2 `shouldBe` 0
+
+    it "promoteJob refuses to promote a retried job back in flight" $ \env -> do
+      Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "PromoteRetriedInFlight")))
+      [attempt1] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.updateJobForRetry 0 "fail 1" attempt1)
+      [attempt2] <- claimJobsAs env 1 UUID.nil
+      attempts attempt2 `shouldBe` 2
+
+      promotedAgain <- runM env (HL.promoteJob @payload (primaryKey attempt2))
+      promotedAgain `shouldBe` 0
+
+      claimed3 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      length claimed3 `shouldBe` 0
 
     it "cancelJobsBatch partial cancel does not wake parent" $ \env -> do
       Right (parent :| children) <-

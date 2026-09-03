@@ -267,8 +267,8 @@ insertJobsBatch_ [] = pure 0
 insertJobsBatch_ jobs = publishSpan @payload jobs $ onQueue @payload $ \s t -> Ops.insertJobsBatch_ s t jobs
 
 -- | Claim visible jobs, at most one per group, and fewer than the limit once the groups
--- run out. Leaves @claimed_by@ NULL, so no concurrency pool caps this path.
--- 'claimNextVisibleJobsAs' is the capped one.
+-- run out. Stamps the anonymous claimant, so a concurrency pool caps this path as it
+-- caps any other claim.
 claimNextVisibleJobs
   :: forall payload m
    . (QueueOperation m payload)
@@ -501,14 +501,13 @@ mkClaimSql
   => Int
   -> Int
   -> NominalDiffTime
-  -> Maybe UUID
+  -> UUID
   -> m Ops.ClaimSql
-mkClaimSql batchSize poolSize timeout mWorkerId =
+mkClaimSql batchSize poolSize timeout workerId =
   onQueue @payload $ \s t ->
-    pure $ Ops.mkClaimSql (Proxy @payload) s t batchSize poolSize timeout mWorkerId
+    pure $ Ops.mkClaimSql (Proxy @payload) s t batchSize poolSize timeout workerId
 
--- | 'claimNextVisibleJobs' stamping @claimed_by@ on every row it claims, which is how
--- the dispatcher attributes a claim.
+-- | 'claimNextVisibleJobs' under a given worker id, which is how the dispatcher claims.
 claimNextVisibleJobsAs
   :: forall payload m
    . (QueueOperation m payload)

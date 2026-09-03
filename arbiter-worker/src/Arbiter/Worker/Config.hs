@@ -30,6 +30,11 @@ module Arbiter.Worker.Config
   , readEffectiveState
   , writePause
   , writePauseIfCurrent
+  , workerStateVar
+  , pauseVar
+  , pauseEpoch
+  , heartbeatSignal
+  , listenerReadyVar
   ) where
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
@@ -87,6 +92,15 @@ newtype WorkerConfigException = WorkerConfigException Text
   deriving stock (Eq, Show)
   deriving anyclass (Exception)
 
+-- | Mutable state owned by one worker pool.
+data WorkerRuntime = WorkerRuntime
+  { runtimeStateVar :: TVar WorkerState
+  , runtimePauseVar :: TVar Bool
+  , runtimePauseEpoch :: TVar Word64
+  , runtimeHeartbeatSignal :: TMVar ()
+  , runtimeListenerReadyVar :: TVar Bool
+  }
+
 -- | Configuration for a worker pool.
 data WorkerConfig m payload = WorkerConfig
   { workerCount :: Int
@@ -117,12 +131,8 @@ data WorkerConfig m payload = WorkerConfig
   , onMaintenance :: MaintenanceOp -> Int64 -> m ()
   -- ^ Called after a reaper op this pool won the gate for, with the rows it touched.
   -- Reaper work is schema-wide, so it carries no queue. Default: no-op.
-  , workerStateVar :: TVar WorkerState
-  -- ^ Run/shutdown lifecycle. Pause is tracked separately in 'pauseVar'.
-  , pauseVar :: TVar Bool
-  -- ^ Per-pool pause flag. Write it through 'writePause'.
-  , pauseEpoch :: TVar Word64
-  -- ^ Incremented by each 'pauseVar' write. Discard a read with an older epoch.
+  , workerRuntime :: WorkerRuntime
+  -- ^ Mutable lifecycle state allocated for this pool.
   , livenessFile :: Maybe FilePath
   -- ^ When set, the heartbeat loop touches this file at the
   -- 'workerHeartbeatInterval' cadence, for a file-based liveness probe.
@@ -157,11 +167,6 @@ data WorkerConfig m payload = WorkerConfig
   -- runtime registry by 'reaperInterval'. Must be well above the heartbeat cadence
   -- ('workerHeartbeatInterval', or 'jobHeartbeatInterval' while busy).
   -- Default: @300@ (5 minutes).
-  , heartbeatSignal :: TMVar ()
-  -- ^ Worker-level proof-of-work signal pulsed by the dispatcher and per-job heartbeats.
-  , listenerReadyVar :: TVar Bool
-  -- ^ True once this pool's LISTEN channels are subscribed, or immediately when
-  -- there is no listener. Observability only, startup never blocks on it.
   }
 
 -- | Per-job finalizers handed to a batched handler. Untouched jobs are
@@ -244,9 +249,7 @@ fieldInvariants config =
     <*> waived (jitter config)
     <*> waived (observabilityHooks config)
     <*> waived (onMaintenance config)
-    <*> waived (workerStateVar config)
-    <*> waived (pauseVar config)
-    <*> waived (pauseEpoch config)
+    <*> waived (workerRuntime config)
     <*> waived (livenessFile config)
     <*> traverse (nonNegative "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
     <*> waived (logConfig config)
@@ -259,8 +262,6 @@ fieldInvariants config =
     <*> waived (workerHost config)
     <*> waived (workerMetadata config)
     <*> positive "workerStaleThreshold" (workerStaleThreshold config)
-    <*> waived (heartbeatSignal config)
-    <*> waived (listenerReadyVar config)
 
 -- | Invariants spanning more than one field.
 crossFieldInvariants :: WorkerConfig m payload -> Validation ()
@@ -383,9 +384,14 @@ mkDefaultConfig workerCnt mode = do
       , jitter = EqualJitter
       , observabilityHooks = defaultObservabilityHooks
       , onMaintenance = \_ _ -> pure ()
-      , workerStateVar = shutdownTVar
-      , pauseVar = pauseTVar
-      , pauseEpoch = pauseEpochTVar
+      , workerRuntime =
+          WorkerRuntime
+            { runtimeStateVar = shutdownTVar
+            , runtimePauseVar = pauseTVar
+            , runtimePauseEpoch = pauseEpochTVar
+            , runtimeHeartbeatSignal = heartbeatTMVar
+            , runtimeListenerReadyVar = listenerReadyTVar
+            }
       , livenessFile = Just livenessPath
       , gracefulShutdownTimeout = Just 30
       , logConfig = withWorkerIdContext uuid defaultLogConfig
@@ -398,13 +404,31 @@ mkDefaultConfig workerCnt mode = do
       , workerHost = Just (T.pack host)
       , workerMetadata = Nothing
       , workerStaleThreshold = 300
-      , heartbeatSignal = heartbeatTMVar
-      , listenerReadyVar = listenerReadyTVar
       }
 
 withWorkerIdContext :: UUID -> LogConfig -> LogConfig
 withWorkerIdContext workerId lc =
   lc {identityContext = identityContext lc <> ["worker_id" .= workerId]}
+
+-- | Run/shutdown state for a pool.
+workerStateVar :: WorkerConfig n payload -> TVar WorkerState
+workerStateVar = runtimeStateVar . workerRuntime
+
+-- | Pause state for a pool.
+pauseVar :: WorkerConfig n payload -> TVar Bool
+pauseVar = runtimePauseVar . workerRuntime
+
+-- | Version of the current pause state.
+pauseEpoch :: WorkerConfig n payload -> TVar Word64
+pauseEpoch = runtimePauseEpoch . workerRuntime
+
+-- | Signal used to coordinate worker heartbeats.
+heartbeatSignal :: WorkerConfig n payload -> TMVar ()
+heartbeatSignal = runtimeHeartbeatSignal . workerRuntime
+
+-- | State of the pool's notification listener.
+listenerReadyVar :: WorkerConfig n payload -> TVar Bool
+listenerReadyVar = runtimeListenerReadyVar . workerRuntime
 
 -- | Initiate graceful shutdown of the worker pool
 --

@@ -41,9 +41,9 @@ machine. Use **concurrency 1** as a mutex, such as one synchronization per
 tenant. A job can use both features.
 
 > [!IMPORTANT]
-> The limit counts claims. A job occupies a slot until Arbiter acks, retries, or
-> reclaims it. An unacked job continues to occupy a slot after its handler times
-> out.
+> The limit counts claims. A job occupies a slot until Arbiter acks, retries,
+> nacks, or reclaims it. An unacked job continues to occupy a slot after its
+> handler times out.
 >
 > Arbiter periodically removes inactive keys. It also reconstructs in-flight
 > counts after a restart or failover.

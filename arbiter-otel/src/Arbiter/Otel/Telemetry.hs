@@ -236,9 +236,8 @@ withTelemetryFromEnv action = do
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . logDestination
 
--- | Build 'Telemetry' over providers the caller installed itself, which the meters and
--- the log destination bind to here. A 'Nothing' provider leaves that signal off, as
--- does a provider whose instruments fail to build.
+-- | Run an action with application-owned providers. Missing providers disable
+-- their applicable signals.
 withExternalTelemetry :: Maybe MeterProvider -> Maybe LoggerProvider -> (Telemetry -> IO a) -> IO a
 withExternalTelemetry mmp mlp action = do
   tracing <- isJust <$> resolveTracer

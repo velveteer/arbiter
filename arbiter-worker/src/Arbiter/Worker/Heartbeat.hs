@@ -112,10 +112,12 @@ withJobsHeartbeat hooks intervalSecs timeoutSecs maxDuration startTime jobs pend
       -- Read before the extend, so the tracked deadline never outlasts the row's.
       issuedAt <- liftIO getMonotonicTime
       results <- Arb.setVisibilityTimeoutBatch timeoutSecs live
+      -- A row this worker settled while the statement ran says nothing about its lease.
+      stillPending <- Set.fromList . map primaryKey <$> pending
       let cancelledJobs = [jobId | Arb.JobCancelled jobId <- results]
           stolenJobs = [jobId | Arb.JobReclaimed jobId _ _ <- results]
           goneJobs = [jobId | Arb.JobGone jobId <- results]
-          unmoved = [() | Arb.VisibilityUnchanged _ <- results]
+          unmoved = [() | Arb.VisibilityUnchanged jobId <- results, Set.member jobId stillPending]
       atomically $ do
         when (null unmoved) $ STM.writeTVar lease (issuedAt + realToFrac timeoutSecs)
         void $ STM.tryPutTMVar signal ()

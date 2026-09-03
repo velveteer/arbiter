@@ -874,6 +874,21 @@ spec connStr = do
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId) <> "/promote") ""
         `shouldRespondWith` 409
 
+    it "POST /:id/promote on an in-flight job says so" $ do
+      jobId <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "promote in-flight"))
+        _ <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
+        pure $ primaryKey jobRead
+
+      post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId) <> "/promote") ""
+        `shouldRespondWith` 409
+          { matchBody =
+              MatchBody
+                ( \_ body ->
+                    if body == "Job is in flight - wait for its lease to lapse" then Nothing else Just ("unexpected body: " <> show body)
+                )
+          }
+
     it "POST /:id/suspend on already-suspended job returns 409" $ do
       jobId <- liftIO $ do
         Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "double suspend"))

@@ -302,7 +302,7 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
       js = [setMaxAttempts (Just 1000) (defaultGroupedJob g (CLPayload k)) | (g, k) <- tagged]
       -- A group with no job on the pinned key has nothing legitimately blocking it.
       cold = [g | g <- Set.toList (Set.fromList (map fst tagged)), all ((/= hotPool) . snd) (filter ((== g) . fst) tagged)]
-      cs = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 (Just worker)
+      cs = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 worker
       round_ =
         run
           ( do

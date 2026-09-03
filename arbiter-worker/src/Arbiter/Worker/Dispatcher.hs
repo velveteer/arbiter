@@ -14,7 +14,13 @@ import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import UnliftIO.STM qualified as STM
 
-import Arbiter.Worker.Config (HandlerMode (..), WorkerConfig (..), handlerBatchSize, readEffectiveState)
+import Arbiter.Worker.Config
+  ( HandlerMode (..)
+  , WorkerConfig (..)
+  , handlerBatchSize
+  , heartbeatSignal
+  , readEffectiveState
+  )
 import Arbiter.Worker.Logger (LogLevel (..), newFailureGate, tryReported)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
 
@@ -33,7 +39,7 @@ runDispatcher
 runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
   -- The claim statement only varies with free capacity, so render every variant once.
   claimSql <-
-    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (Just (workerId config))
+    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (workerId config)
   claimGate <- newFailureGate
   let
     calcFreeWorkers :: STM.STM Int

@@ -36,10 +36,12 @@ import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Migration (MigrationCommand (..))
+import Database.PostgreSQL.Simple.Notification (Notification (..), getNotification)
 import Database.PostgreSQL.Simple.Types (Query (..))
 import GHC.Generics (Generic)
 import System.Environment (lookupEnv)
 import System.FilePath ((<.>), (</>))
+import System.Timeout (timeout)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Golden (goldenVsString)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -298,6 +300,41 @@ migrationReconciliationTests connStr =
           migrate triggerOn
           definitions <- eventTriggerDefinitionsFor conn "notify_job_event_migration_reconciliation_q"
           length (filter (T.isInfixOf "('migration_reconciliation_q', 'false')") definitions) @?= 1
+    , testCase "does not stream a lease extension as a job event" $
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
+          migrate triggerOn
+          let tbl = reconciliationSchema <> ".migration_reconciliation_q"
+          bracket (PG.connectPostgreSQL connStr) PG.close $ \lconn -> do
+            _ <- PG.execute_ lconn "LISTEN arbiter_job_events"
+            _ <-
+              PG.execute_
+                conn
+                ( sql
+                    ( "INSERT INTO "
+                        <> tbl
+                        <> " (payload, attempts, claimed_by, not_visible_until) VALUES ('{}', 1, gen_random_uuid(), NOW() + interval '60 seconds')"
+                    )
+                )
+            nextEvent lconn >>= assertEvent "job_inserted"
+            _ <-
+              PG.execute_
+                conn
+                (sql ("UPDATE " <> tbl <> " SET not_visible_until = NOW() + interval '120 seconds', updated_at = NOW()"))
+            nextEvent lconn >>= (@?= Nothing)
+            _ <-
+              PG.execute_
+                conn
+                ( sql
+                    ( "UPDATE "
+                        <> tbl
+                        <> " SET attempts = attempts + 1, claim_seq = claim_seq + 1, not_visible_until = NOW() + interval '60 seconds'"
+                    )
+                )
+            nextEvent lconn >>= assertEvent "job_updated"
+            _ <- PG.execute_ conn (sql ("UPDATE " <> tbl <> " SET not_visible_until = NULL, updated_at = NOW()"))
+            nextEvent lconn >>= assertEvent "job_updated"
+            _ <- PG.execute_ conn (sql ("UPDATE " <> tbl <> " SET last_error = 'boom', claimed_by = NULL"))
+            nextEvent lconn >>= assertEvent "job_updated"
     , testCase "preserves queue names ending in the DLQ suffix" $
         withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
@@ -352,6 +389,13 @@ appliedTwice conn =
 timedOut :: MigrationResult String -> Bool
 timedOut (MigrationError e) = "Timed out waiting on the arbiter migration lock" `isInfixOf` e
 timedOut MigrationSuccess = False
+
+-- | The next event-stream payload, or 'Nothing' when none lands within a second.
+nextEvent :: PG.Connection -> IO (Maybe ByteString)
+nextEvent lconn = fmap notificationData <$> timeout 1_000_000 (getNotification lconn)
+
+assertEvent :: ByteString -> Maybe ByteString -> IO ()
+assertEvent event = assertBool ("expected a " <> BS8.unpack event <> " event") . maybe False (BS.isInfixOf event)
 
 withFreshSchema :: ByteString -> Text -> (PG.Connection -> IO a) -> IO a
 withFreshSchema connStr schemaName action =

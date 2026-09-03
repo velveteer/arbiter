@@ -37,15 +37,7 @@ module Arbiter.Otel
   , withGauges
   , startGauges
 
-    -- * Metrics
-  , ArbiterMeters
-  , arbiterMeter
-  , newArbiterMeters
-  , otelHooks
-  , otelMaintenance
-  , otelLogs
-  , loggerDestination
-  , attrs
+    -- * Metric names
   , arbiterMetricNames
   ) where
 
@@ -65,16 +57,8 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
-import Arbiter.Otel.Logs (loggerDestination, otelLogs)
 import Arbiter.Otel.MetricNames (arbiterMetricNames)
-import Arbiter.Otel.Metrics
-  ( ArbiterMeters
-  , arbiterMeter
-  , attrs
-  , newArbiterMeters
-  , otelHooks
-  , otelMaintenance
-  )
+import Arbiter.Otel.Metrics (otelHooks, otelMaintenance)
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
   , telemetryLogConfig
