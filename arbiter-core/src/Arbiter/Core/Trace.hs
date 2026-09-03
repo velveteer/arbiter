@@ -3,8 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | W3C trace context carried on enqueued jobs, and the producer and consumer spans
--- around them. The OpenTelemetry API is inert until an SDK installs a provider, so
--- an untraced deployment pays for none of this.
+-- around them. The OpenTelemetry API is inert until an SDK installs a provider.
 module Arbiter.Core.Trace
   ( -- * Job trace context
     TraceContext (..)
@@ -93,29 +92,29 @@ import Arbiter.Core.Job.Types qualified as JT
 -- $enrichment
 -- Reach for @hs-opentelemetry-api@ directly for custom spans and attributes.
 
--- | Fill a job's trace context, leaving a job that carries one of its own alone.
+-- | Fill a job's trace context. A job that carries one of its own keeps it.
 stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
 stampTraceContext Nothing job = job
 stampTraceContext ctx job = JT.setTraceContext (JT.traceContext job <|> ctx) job
 
 -- | The ambient span's trace context, or 'Nothing' when no span is active. Read from
--- thread-local context, so it answers for the thread that enqueues.
+-- the thread-local context of the enqueuing thread.
 currentTraceContext :: IO (Maybe TraceContext)
 currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
   where
-    encoded sp = do
-      valid <- isValid <$> getSpanContext sp
+    encoded activeSpan = do
+      valid <- isValid <$> getSpanContext activeSpan
       if not valid
         then pure Nothing
         else do
-          (tp, ts) <- encodeSpanContext sp
-          pure (Just (TraceContext (decodeUtf8 tp) (decodeUtf8 ts <$ guard (not (BS.null ts)))))
+          (parent, state) <- encodeSpanContext activeSpan
+          pure (Just (TraceContext (decodeUtf8 parent) (decodeUtf8 state <$ guard (not (BS.null state)))))
 
 -- | Resolve the arbiter tracer once, or 'Nothing' when nothing is collecting.
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)
 resolveTracer = do
-  tp <- getGlobalTracerProvider
-  let tracer = makeTracer tp "arbiter" arbiterTracerOptions
+  provider <- getGlobalTracerProvider
+  let tracer = makeTracer provider "arbiter" arbiterTracerOptions
   pure (if tracerIsEnabled tracer then Just tracer else Nothing)
 
 arbiterTracerOptions :: TracerOptions
@@ -124,11 +123,11 @@ arbiterTracerOptions = tracerOptions {tracerExceptionHandlerOptions = [routineCo
 -- | Record control-flow exceptions for nacks, reclaims, and job cancellations
 -- without an error status. Ignore worker cancellation exceptions.
 routineControlFlow :: ExceptionHandler
-routineControlFlow e
-  | Just JobNackException <- fromException e = recorded
-  | Just (JobGoneException _ _) <- fromException e = recorded
-  | Just (JobForceCancelled _ _) <- fromException e = recorded
-  | Just AsyncCancelled <- fromException e = Just (ExceptionResponse IgnoredException mempty)
+routineControlFlow exception
+  | Just JobNackException <- fromException exception = recorded
+  | Just (JobGoneException _ _) <- fromException exception = recorded
+  | Just (JobForceCancelled _ _) <- fromException exception = recorded
+  | Just AsyncCancelled <- fromException exception = Just (ExceptionResponse IgnoredException mempty)
   | otherwise = Nothing
   where
     recorded = Just (ExceptionResponse RecordedException mempty)
@@ -145,10 +144,10 @@ withPublishSpan queue jobs action =
 
 -- | Mark the currently active span failed.
 markSpanError :: (MonadIO m) => Text -> m ()
-markSpanError msg = withActiveSpan (\sp -> setStatus sp (Error msg))
+markSpanError msg = withActiveSpan (\activeSpan -> setStatus activeSpan (Error msg))
 
--- | Record one job's failure as an event on the active span, a no-op when none is active.
--- A batch span also covers the jobs that succeeded, so this leaves its status alone.
+-- | Record one job's failure as an event on the active span. A no-op when none is active.
+-- The span status is left alone.
 recordJobFailure :: (MonadIO m) => JobRead payload -> Text -> m ()
 recordJobFailure = jobEvent "job.failed" "arbiter.job.failure_reason"
 
@@ -194,13 +193,13 @@ consumeSpanFor queue shape =
 -- | Run a job handler inside a @process \<queue\>@ consumer span linked to its producer.
 withConsumeSpan
   :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
-withConsumeSpan mTracer cs jobs =
-  spanning mTracer (consumeName cs) args
+withConsumeSpan mTracer consumeSpan jobs =
+  spanning mTracer (consumeName consumeSpan) args
   where
     (firstJob :| _) = jobs
-    args = case consumeShape cs of
-      PerBatch -> batchConsumerArgs cs jobs
-      PerJob -> consumerArgs cs firstJob
+    args = case consumeShape consumeSpan of
+      PerBatch -> batchConsumerArgs consumeSpan jobs
+      PerJob -> consumerArgs consumeSpan firstJob
 
 -- | Capture the caller context for an action on a child thread. Return the
 -- unchanged action if the context has no span.
@@ -211,25 +210,24 @@ capturingContext = (\ctx -> maybe id (const (withContext ctx)) (lookupSpan ctx))
 withContext :: (MonadUnliftIO m) => Context -> m a -> m a
 withContext ctx action = bracket (attachContext ctx) detachContext (const action)
 
--- | Run an action with the job's stored trace context as the ambient parent, where the
--- consumer spans link to it instead.
+-- | Run an action with the job's stored trace context as the ambient parent.
 withJobParent :: (MonadUnliftIO m) => JobRead payload -> m a -> m a
 withJobParent job action = maybe action attached (spanContextForJob job)
   where
-    attached sc = flip withContext action . insertSpan (wrapSpanContext sc) =<< getContext
+    attached spanContext = flip withContext action . insertSpan (wrapSpanContext spanContext) =<< getContext
 
 -- | A span link reconstructed from a job's stored W3C trace context.
 spanLinkForJob :: JobRead payload -> Maybe NewLink
 spanLinkForJob job =
-  (\sc -> NewLink {linkContext = sc, linkAttributes = mempty}) <$> spanContextForJob job
+  (\spanContext -> NewLink {linkContext = spanContext, linkAttributes = mempty}) <$> spanContextForJob job
 
 spanContextForJob :: JobRead payload -> Maybe SpanContext
 spanContextForJob job = do
   ctx <- JT.traceContext job
   decodeSpanContext (Just (encodeUtf8 (traceparent ctx))) (encodeUtf8 <$> tracestate ctx)
 
--- | A lone job contributes its own attributes. A batch reports its size instead, per
--- the messaging conventions, since the jobs in it need not agree.
+-- | A lone job contributes its own attributes. A batch reports its size, per the
+-- messaging conventions.
 producerArgs :: (HasKind payload) => TableName -> [JobWrite payload] -> SpanArguments
 producerArgs queue jobs =
   defaultSpanArguments {kind = Producer, attributes = messagingAttrs queue "publish" <> published}
@@ -242,29 +240,29 @@ producerArgs queue jobs =
 jobShapeAttrs :: Job payload key q ins adm -> [(Text, Attribute)]
 jobShapeAttrs job =
   ("arbiter.priority", toAttribute (fromIntegral (JT.priority job) :: Int))
-    : foldMap (\g -> [("arbiter.group_key", toAttribute g)]) (JT.groupKey job)
+    : foldMap (\group -> [("arbiter.group_key", toAttribute group)]) (JT.groupKey job)
 
 writeAttrs :: (HasKind payload) => JobWrite payload -> AttributeMap
 writeAttrs job = HM.fromList (kindAttr (kindOf (JT.payload job)) <> jobShapeAttrs job)
 
 -- | The payload's variant label, absent for a payload that declares none.
 kindAttr :: Maybe Text -> [(Text, Attribute)]
-kindAttr k = [("arbiter.kind", toAttribute v) | v <- maybeToList k]
+kindAttr label = [("arbiter.kind", toAttribute value) | value <- maybeToList label]
 
 consumerArgs :: ConsumeSpan -> JobRead payload -> SpanArguments
-consumerArgs cs job =
+consumerArgs consumeSpan job =
   defaultSpanArguments
     { kind = Consumer
     , links = maybeToList (spanLinkForJob job)
-    , attributes = consumeAttrs cs <> jobAttrs job
+    , attributes = consumeAttrs consumeSpan <> jobAttrs job
     }
 
 batchConsumerArgs :: ConsumeSpan -> NonEmpty (JobRead payload) -> SpanArguments
-batchConsumerArgs cs jobs =
+batchConsumerArgs consumeSpan jobs =
   defaultSpanArguments
     { kind = Consumer
     , links = kept
-    , attributes = consumeAttrs cs <> HM.fromList (count : droppedAttr)
+    , attributes = consumeAttrs consumeSpan <> HM.fromList (count : droppedAttr)
     }
   where
     (kept, over) = splitAt maxSpanLinks (mapMaybe spanLinkForJob (NE.toList jobs))
@@ -276,15 +274,15 @@ maxSpanLinks :: Int
 maxSpanLinks = 128
 
 messagingAttrs :: Text -> Text -> AttributeMap
-messagingAttrs queue op =
+messagingAttrs queue operation =
   HM.fromList
     [ ("messaging.system", toAttribute ("arbiter" :: Text))
     , ("messaging.destination.name", toAttribute queue)
-    , ("messaging.operation.type", toAttribute op)
-    , ("messaging.operation.name", toAttribute op)
+    , ("messaging.operation.type", toAttribute operation)
+    , ("messaging.operation.name", toAttribute operation)
     ]
 
--- | Textual per the messaging semantic conventions, not the raw key.
+-- | Textual, per the messaging semantic conventions.
 messageId :: JobRead payload -> Attribute
 messageId = toAttribute . toStrict . toLazyText . decimal . JT.primaryKey
 

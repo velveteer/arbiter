@@ -54,8 +54,8 @@ data PolicyRow = PolicyRow
 
 -- | A policy in its stored form.
 toPolicyRow :: Policy -> PolicyRow
-toPolicyRow (Policy prefix mx rf iv) =
-  PolicyRow {prefixId = prefix, maxTokens = mx, refillAmt = rf, interval = realToFrac iv}
+toPolicyRow (Policy prefix burst refill period) =
+  PolicyRow {prefixId = prefix, maxTokens = burst, refillAmt = refill, interval = realToFrac period}
 
 -- | Qualified name of the app-global policies table.
 arbiterRateLimitPoliciesTable :: SchemaName -> Text
@@ -76,7 +76,8 @@ arbiterRateLimitsTable :: SchemaName -> Text
 arbiterRateLimitsTable schemaName =
   quoteIdentifier schemaName <> "." <> arbiterRateLimitsTableName
 
--- | DDL for the policies table. @default_*@ is migration-owned, @override_*@ management-owned, effective params @COALESCE(override, default)@.
+-- | DDL for the policies table. @default_*@ is migration-owned. @override_*@ is
+-- management-owned. The effective params are @COALESCE(override, default)@.
 createRateLimitPoliciesTableSQL :: SchemaName -> Text
 createRateLimitPoliciesTableSQL schemaName =
   T.unlines
@@ -104,8 +105,8 @@ createRateLimitsTableSQL schemaName =
     ]
 
 -- | Converge the bucket table's WAL persistence to a durability. Rewrites the
--- table under @ACCESS EXCLUSIVE@, so callers issue it only when it differs from
--- the current state.
+-- table under @ACCESS EXCLUSIVE@. Callers issue it when the durability differs
+-- from the current state.
 alterRateLimitsDurabilitySQL :: Durability -> SchemaName -> Text
 alterRateLimitsDurabilitySQL dur schemaName =
   "ALTER TABLE " <> arbiterRateLimitsTable schemaName <> set <> ";"
@@ -114,8 +115,7 @@ alterRateLimitsDurabilitySQL dur schemaName =
       Durable -> " SET LOGGED"
       Unlogged -> " SET UNLOGGED"
 
--- | Upsert a policy's @default_*@ params, leaving any operator @override_*@
--- untouched so a hand-tuned override survives every deploy.
+-- | Upsert a policy's @default_*@ params. Any operator @override_*@ is left untouched.
 upsertPolicyRowSQL :: SchemaName -> PolicyRow -> Text
 upsertPolicyRowSQL schemaName row =
   policyUpsertSQL
@@ -128,7 +128,7 @@ upsertPolicyRowSQL schemaName row =
 
 -- | Migration adding the rate-limit columns to a queue's job and DLQ tables. All
 -- nullable. @throttled_until@ (job table only) marks a throttle-deferred grouped
--- head in-flight so its group stays stalled without spending an attempt.
+-- head in-flight. Its group stays stalled and spends no attempt.
 addRateLimitColumnsSQL :: SchemaName -> TableName -> Text
 addRateLimitColumnsSQL schemaName tableName =
   T.unlines
@@ -139,9 +139,9 @@ addRateLimitColumnsSQL schemaName tableName =
     , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS rate_limit_prefix TEXT;"
     ]
 
--- | Add the per-job token cost column to a queue's job and DLQ tables. Defaulted so
--- old binaries that omit it on insert still succeed, and existing rows backfill to a
--- unit cost. The DLQ stores it and a retried job retains its cost.
+-- | Add the per-job token cost column to a queue's job and DLQ tables. Defaulted to
+-- a unit cost. Existing rows backfill to it. The DLQ stores it and a retried job
+-- retains its cost.
 addRateLimitCostColumnSQL :: SchemaName -> TableName -> Text
 addRateLimitCostColumnSQL schemaName tableName =
   T.unlines
@@ -153,21 +153,20 @@ addRateLimitCostColumnSQL schemaName tableName =
         <> " ADD COLUMN IF NOT EXISTS rate_limit_cost DOUBLE PRECISION NOT NULL DEFAULT 1;"
     ]
 
--- | Statement-level triggers that ensure a token bucket row exists (seeded full)
--- for every rate-limited job's key whose prefix has a policy, so the claim can lock
--- a guaranteed-present row. Buckets are never decremented on job completion (tokens
--- are spent at claim and refill over time), so the delete trigger is a no-op and
--- only key creation or a dedup-replace key move seeds a row.
+-- | Statement-level triggers that ensure a full token bucket row exists for every
+-- rate-limited job's key whose prefix has a policy. Tokens are spent at claim and
+-- refill over time. There is no delete trigger. Key creation or a dedup-replace key
+-- move seeds a row.
 createRateLimitBucketTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createRateLimitBucketTriggerFunctionsSQL schemaName tableName =
   let buckets = arbiterRateLimitsTable schemaName
       policies = arbiterRateLimitPoliciesTable schemaName
       baseName = "ensure_" <> tableName <> "_rate_limit_buckets"
       (funcInsert, _funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dd = "$$"
+      dollarQuote = "$$"
    in T.unlines
-        [ bucketInsertFunction funcInsert buckets policies dd
-        , bucketUpdateFunction funcUpdate buckets policies dd
+        [ bucketInsertFunction funcInsert buckets policies dollarQuote
+        , bucketUpdateFunction funcUpdate buckets policies dollarQuote
         ]
 
 -- | The seed INSERT shared by the trigger functions and the claim's @rl_seed@ CTE,
@@ -189,14 +188,13 @@ bucketSeedInsert buckets policies source match =
       |]
 
 -- | Seed a full bucket for each fresh inserted key whose prefix has a policy. The NOT
--- EXISTS guard skips the speculative insert for an already-present key, so a
--- steady-state enqueue pays only a shared index probe, not page contention.
+-- EXISTS guard skips the insert for an already-present key.
 bucketInsertFunction :: Text -> Text -> Text -> Text -> Text
-bucketInsertFunction funcName buckets policies dd =
+bucketInsertFunction funcName buckets policies dollarQuote =
   let seed = bucketSeedInsert buckets policies "new_table n" "n.rate_limit_key IS NOT NULL"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM new_table WHERE rate_limit_key IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
@@ -206,13 +204,13 @@ bucketInsertFunction funcName buckets policies dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
--- | Seed a bucket only for a key a dedup-replace moved onto. A claim or heartbeat
--- leaves the key unchanged, so skip before any work.
+-- | Seed a bucket for a key a dedup-replace moved onto. A claim or heartbeat
+-- leaves the key unchanged and returns early.
 bucketUpdateFunction :: Text -> Text -> Text -> Text -> Text
-bucketUpdateFunction funcName buckets policies dd =
+bucketUpdateFunction funcName buckets policies dollarQuote =
   let seed =
         bucketSeedInsert
           buckets
@@ -221,7 +219,7 @@ bucketUpdateFunction funcName buckets policies dd =
           "n.rate_limit_key IS NOT NULL AND n.rate_limit_key IS DISTINCT FROM o.rate_limit_key"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (
         SELECT 1 FROM new_table n JOIN old_table o ON o.id = n.id
@@ -235,12 +233,11 @@ bucketUpdateFunction funcName buckets policies dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 -- | The statement-level AFTER INSERT and AFTER UPDATE triggers backing
--- 'createRateLimitBucketTriggerFunctionsSQL'. There is no delete trigger: a bucket
--- is never decremented on job completion.
+-- 'createRateLimitBucketTriggerFunctionsSQL'. There is no delete trigger.
 createRateLimitBucketTriggersSQL :: SchemaName -> TableName -> Text
 createRateLimitBucketTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
@@ -253,8 +250,7 @@ createRateLimitBucketTriggersSQL schemaName tableName =
         <> "\n"
 
 -- | Index backing the throttle wake and per-prefix count, in its own migration. The
--- prefix leads (per-prefix count and wake use it), and rate_limit_key trails so the
--- each per-key wake uses a point lookup.
+-- prefix leads and @rate_limit_key@ trails.
 createThrottledIndexSQL :: SchemaName -> TableName -> Text
 createThrottledIndexSQL schemaName tableName =
   T.unlines

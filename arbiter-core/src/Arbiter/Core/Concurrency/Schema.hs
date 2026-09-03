@@ -63,8 +63,8 @@ concurrencyAdvisoryLockExpr :: Text -> Text
 concurrencyAdvisoryLockExpr key =
   "hashtextextended('arbiter_conc:' || " <> key <> ", 0)"
 
--- | DDL for the pool policies table. @default_limit@ is migration-owned,
--- @override_limit@ management-owned. Effective cap @COALESCE(override, default)@.
+-- | DDL for the pool policies table. @default_limit@ is migration-owned.
+-- @override_limit@ is management-owned. The effective cap is @COALESCE(override, default)@.
 createConcurrencyPoliciesTableSQL :: SchemaName -> Text
 createConcurrencyPoliciesTableSQL schemaName =
   T.unlines
@@ -97,7 +97,7 @@ addConcurrencyColumnsSQL schemaName tableName =
     , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS concurrency_prefix TEXT;"
     ]
 
--- | Index backing the per-key in-flight recount, over claimed jobs only.
+-- | Index backing the per-key in-flight recount, over claimed jobs.
 createConcurrencyIndexSQL :: SchemaName -> TableName -> Text
 createConcurrencyIndexSQL schemaName tableName =
   T.unlines
@@ -112,20 +112,21 @@ createConcurrencyTriggerFunctionsSQL schemaName tableName =
   let concTbl = arbiterConcurrencyTable schemaName
       baseName = "maintain_" <> tableName <> "_concurrency"
       (funcInsert, funcDelete, funcUpdate) = maintenanceFunctionNames schemaName baseName
-      dd = "$$"
+      dollarQuote = "$$"
    in T.unlines
-        [ concurrencyInsertFunction funcInsert concTbl dd
-        , concurrencyDeleteFunction funcDelete concTbl dd
-        , concurrencyUpdateFunction funcUpdate concTbl dd
+        [ concurrencyInsertFunction funcInsert concTbl dollarQuote
+        , concurrencyDeleteFunction funcDelete concTbl dollarQuote
+        , concurrencyUpdateFunction funcUpdate concTbl dollarQuote
         ]
 
--- | Seed a count row only for a fresh key. A per-key shared advisory lock makes a concurrent prune skip the key, touching no count tuple on a steady-state enqueue.
+-- | Seed a count row for a fresh key. A per-key shared advisory lock makes a
+-- concurrent prune skip the key.
 concurrencyInsertFunction :: Text -> Text -> Text -> Text
-concurrencyInsertFunction funcName concTbl dd =
+concurrencyInsertFunction funcName concTbl dollarQuote =
   let lockExpr = concurrencyAdvisoryLockExpr "t.k"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM new_table WHERE concurrency_key IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
@@ -145,14 +146,14 @@ concurrencyInsertFunction funcName concTbl dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 concurrencyDeleteFunction :: Text -> Text -> Text -> Text
-concurrencyDeleteFunction funcName concTbl dd =
+concurrencyDeleteFunction funcName concTbl dollarQuote =
   [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM old_table WHERE concurrency_key IS NOT NULL AND claimed_by IS NOT NULL LIMIT 1) THEN
         RETURN NULL;
@@ -179,14 +180,14 @@ concurrencyDeleteFunction funcName concTbl dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 concurrencyUpdateFunction :: Text -> Text -> Text -> Text
-concurrencyUpdateFunction funcName concTbl dd =
+concurrencyUpdateFunction funcName concTbl dollarQuote =
   [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
-    RETURNS TRIGGER AS ${dd}
+    RETURNS TRIGGER AS ${dollarQuote}
     BEGIN
       -- Only a claimed_by flip (shifts in_flight) or a concurrency_key move (a dedup
       -- replace, shifts in_flight between keys) touches in_flight. A heartbeat or other
@@ -271,7 +272,7 @@ concurrencyUpdateFunction funcName concTbl dd =
 
       RETURN NULL;
     END;
-    ${dd} LANGUAGE plpgsql;
+    ${dollarQuote} LANGUAGE plpgsql;
   |]
 
 -- | The three statement-level AFTER triggers on a queue's job table.
@@ -282,8 +283,7 @@ createConcurrencyTriggersSQL schemaName tableName =
     (jobQueueTable schemaName tableName)
     ("maintain_" <> tableName <> "_concurrency")
 
--- | Upsert a pool's @default_limit@, leaving any operator @override_limit@ untouched
--- so a hand-tuned override survives every deploy.
+-- | Upsert a pool's @default_limit@. Any operator @override_limit@ is left untouched.
 upsertConcurrencyPolicyRowSQL :: SchemaName -> ConcurrencyPolicy -> Text
 upsertConcurrencyPolicyRowSQL schemaName policy =
   policyUpsertSQL

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Versioned, tracked migrations for job queue schemas, run in order and never rerun.
+-- | Versioned, tracked migrations for job queue schemas, run once in order.
 -- History lives in a @schema_migrations@ table inside the target schema.
 module Arbiter.Migrations
   ( -- * Registry
@@ -177,7 +177,7 @@ data MigrationConfig = MigrationConfig
   -- (default) resets buckets on crash\/failover. 'Durable' preserves them at a
   -- throughput cost.
   , migrationLockTimeout :: Maybe NominalDiffTime
-  -- ^ How many seconds to wait for the schema's migration lock, which serializes
+  -- ^ How many seconds to wait for the schema's migration lock. The lock serializes
   -- replicas that migrate at the same time. 'Nothing' (default) waits indefinitely.
   }
   deriving stock (Eq, Show)
@@ -227,14 +227,13 @@ runMigrationsForRegistry
 runMigrationsForRegistry proxy connStr schemaName config = do
   let ccTables = Map.fromList (registryConcurrencyTables @registry)
       rlTables = Map.fromList (registryRateLimitTables @registry)
-      admissionFor t =
+      admissionFor table =
         TableAdmission
-          { tableConcurrency = Map.findWithDefault False t ccTables
-          , tableRateLimit = Map.findWithDefault False t rlTables
+          { tableConcurrency = Map.findWithDefault False table ccTables
+          , tableRateLimit = Map.findWithDefault False table rlTables
           }
-      tables = [(t, admissionFor t) | t <- registryTableNames proxy]
-      -- Policies are collected from each payload's 'rateLimitFor' selector, so a
-      -- referenced policy is always seeded.
+      tables = [(table, admissionFor table) | table <- registryTableNames proxy]
+      -- Policies are collected from each payload's 'rateLimitFor' selector.
       seeds =
         AdmissionSeeds
           { seedRateLimitPolicies = map toPolicyRow (Set.toList (registryRateLimitPolicies @registry))
@@ -255,8 +254,7 @@ noAdmissionSeeds :: AdmissionSeeds
 noAdmissionSeeds = AdmissionSeeds [] [] Unlogged
 
 -- | Which admission trigger kinds a table's payload declares. Trigger migrations
--- are install-only: once recorded they are never dropped, so a kind removed from
--- a payload keeps its triggers (rolling deploys may still enqueue keyed jobs).
+-- are install-only. A kind removed from a payload keeps its triggers.
 data TableAdmission = TableAdmission
   { tableConcurrency :: Bool
   , tableRateLimit :: Bool
@@ -268,15 +266,13 @@ allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission True True
 
 -- | The longest queue name whose generated identifiers survive PostgreSQL's 63-byte
--- truncation distinct. Derived by rendering a probe queue's own DDL at each length, so
--- an object added with a name that truncates into a sibling's lowers this on its own.
+-- truncation distinct. Derived by rendering a probe queue's own DDL at each length.
 maxQueueNameBytes :: Int
 maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. 63])
   where
-    identifiersDistinct n = null (conflictingPrefixes (T.take 63) id (renderedIdentifiers (T.replicate n "q")))
+    identifiersDistinct len = null (conflictingPrefixes (T.take 63) id (renderedIdentifiers (T.replicate len "q")))
 
--- | All identifiers in a queue's rendered DDL. This derives the set directly
--- from the SQL and includes newly added objects.
+-- | All identifiers in a queue's rendered DDL.
 renderedIdentifiers :: TableName -> [Text]
 renderedIdentifiers table =
   concatMap quoted $
@@ -292,8 +288,8 @@ renderedIdentifiers table =
     everyOther _ = []
 
 -- | Reject queue names that generate a schema-wide arbiter table, or that generate
--- object or channel names PostgreSQL truncates into each other. Truncation itself is
--- harmless, so the length limit is where two of a queue's generated names collide.
+-- object or channel names PostgreSQL truncates into each other. The length limit is
+-- where two of a queue's generated names collide.
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
@@ -331,8 +327,8 @@ validateRegistryNames schemaName tables
 -- | Run migrations for multiple tables within a single schema, seeding the given
 -- rate-limit policies. On migration success, reconciles the policy and bucket
 -- tables on the same connection. The table list must be the schema's whole queue
--- set. Reconciliation reads it as authoritative and treats an omitted queue as
--- removed, dropping its notify and event-streaming objects.
+-- set. Reconciliation treats an omitted queue as removed and drops its notify and
+-- event-streaming objects.
 runMigrationsTrackedForTables
   :: ByteString
   -> SchemaName
@@ -347,9 +343,9 @@ runMigrationsTrackedForTables connStr schemaName tableNames config seeds =
       withMigrationLock conn schemaName (migrationLockTimeout config) $
         migrateSchema conn schemaName tableNames config seeds
 
--- | Hold the schema's migration lock for the whole session, so replicas that migrate
--- at the same time run one after another. A session lock is what spans the reconciles,
--- which run after the tracked migrations commit.
+-- | Hold the schema's migration lock for the whole session. Replicas that migrate at
+-- the same time run one after another. A session lock spans the reconciles, which run
+-- after the tracked migrations commit.
 withMigrationLock
   :: PG.Connection
   -> SchemaName
@@ -362,15 +358,15 @@ withMigrationLock conn schemaName timeout act = bracket acquire release run
     acquire =
       try (PG.withTransaction conn (setTimeouts >> lock)) >>= \case
         Right () -> pure True
-        Left e
-          | isJust timeout, PG.sqlState e == "55P03" -> pure False
-          | otherwise -> throwIO e
+        Left sqlError
+          | isJust timeout, PG.sqlState sqlError == "55P03" -> pure False
+          | otherwise -> throwIO sqlError
     lock = void (query conn "SELECT pg_advisory_lock(hashtextextended(?, 0))::text" lockName :: IO [Only (Maybe Text)])
-    -- Pinned for this transaction only, so an inherited timeout cannot cut the wait short.
+    -- Pinned for this transaction.
     setTimeouts = traverse_ setLocal [("lock_timeout", maybe "0" millis timeout), ("statement_timeout", "0")]
     setLocal (name, value) =
       void (query conn "SELECT set_config(?, ?, TRUE)" (name :: Text, value :: Text) :: IO [Only Text])
-    millis t = T.pack (show (max 1 (min maxLockTimeoutMillis (ceiling (t * 1000) :: Int))))
+    millis seconds = T.pack (show (max 1 (min maxLockTimeoutMillis (ceiling (seconds * 1000) :: Int))))
     maxLockTimeoutMillis = 2147483647
     release locked =
       when locked $
@@ -393,12 +389,12 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
   withConnection conn $ \libpqConn ->
     LibPQ.disableNoticeReporting libpqConn
 
-  -- A CREATE that fails for want of privilege is fine if someone made the schema by hand.
+  -- A CREATE that fails for want of privilege is fine when the schema exists.
   let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
   result <- try $ execute_ conn schemaSQL
   case result of
     Right _ -> pure ()
-    Left (e :: PG.SqlError) -> do
+    Left (createError :: PG.SqlError) -> do
       exists <- schemaExists conn schemaName
       unless exists $
         ioError
@@ -410,7 +406,7 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
                 <> T.unpack schemaName
                 <> ";"
                 <> "\nOriginal error: "
-                <> show e
+                <> show createError
           )
 
   withConnection conn $ \libpqConn ->
@@ -439,14 +435,13 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
       case reconciled of
         Right () -> pure MigrationSuccess
         -- A reconcile throws on a conflicting prefix or a failed ALTER. Async exceptions propagate.
-        Left (e :: SomeException)
-          | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
-          | otherwise -> pure (MigrationError (T.unpack (displayEx e)))
+        Left (exception :: SomeException)
+          | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
+          | otherwise -> pure (MigrationError (T.unpack (displayEx exception)))
     other -> pure other
 
--- | Upsert each policy's @default_*@ params into the policies table (created
--- unconditionally by the schema migrations), leaving operator @override_*@
--- intact. Idempotent and never deletes, so overrides and removed prefixes survive
+-- | Upsert each policy's @default_*@ params into the policies table. Operator
+-- @override_*@ values stay intact. Idempotent. Overrides and removed prefixes survive
 -- a deploy.
 reconcileRateLimitPolicies :: PG.Connection -> SchemaName -> [PolicyRow] -> IO ()
 reconcileRateLimitPolicies =
@@ -456,10 +451,10 @@ reconcileRateLimitPolicies =
 conflictingPolicyPrefixes :: [PolicyRow] -> [Text]
 conflictingPolicyPrefixes = conflictingPrefixes prefixId policyParamsKey
 
--- | A canonical conflict key for a policy's params. Rendered so a non-finite value
--- (NaN) compares equal to itself and identical declarations dedup.
+-- | A canonical conflict key for a policy's params, rendered as text. A NaN compares
+-- equal to itself.
 policyParamsKey :: PolicyRow -> String
-policyParamsKey r = show (maxTokens r, refillAmt r, interval r)
+policyParamsKey row = show (maxTokens row, refillAmt row, interval row)
 
 -- | Upsert each pool's @default_limit@, leaving operator overrides intact. Two pools
 -- with the same prefix but different limits fail the migration.
@@ -467,9 +462,9 @@ reconcileConcurrencyPolicies :: PG.Connection -> SchemaName -> [ConcurrencyPolic
 reconcileConcurrencyPolicies =
   reconcilePolicyRows "concurrency pool" "limits" cpPrefix cpLimit upsertConcurrencyPolicyRowSQL
 
--- | Upsert each policy row's @default_*@ params, after failing on any prefix that
--- contains the @:@ key separator or is declared with conflicting params. Idempotent
--- and never deletes, so operator overrides and removed prefixes survive a deploy.
+-- | Upsert each policy row's @default_*@ params. Fails on a prefix that contains the
+-- @:@ key separator or is declared with conflicting params. Idempotent. Operator
+-- overrides and removed prefixes survive a deploy.
 reconcilePolicyRows
   :: (Ord params)
   => String
@@ -482,43 +477,43 @@ reconcilePolicyRows
   -> [row]
   -> IO ()
 reconcilePolicyRows label noun prefixOf paramsOf upsertSQL conn schemaName rows
-  | Just p <- find (T.isInfixOf ":") (map prefixOf rows) =
+  | Just prefix <- find (T.isInfixOf ":") (map prefixOf rows) =
       ioError
         ( userError $
             label
               <> " prefix "
-              <> T.unpack p
+              <> T.unpack prefix
               <> " contains ':', the key separator, so its keys would alias another prefix's. Use a colon-free prefix."
         )
-  | (p : _) <- conflictingPrefixes prefixOf paramsOf rows =
+  | (prefix : _) <- conflictingPrefixes prefixOf paramsOf rows =
       ioError
         ( userError $
-            label <> " prefix " <> T.unpack p <> " is declared with conflicting " <> noun <> ". Give each a unique prefix."
+            label <> " prefix " <> T.unpack prefix <> " is declared with conflicting " <> noun <> ". Give each a unique prefix."
         )
   | otherwise =
       PG.withTransaction conn $
         traverse_ (\row -> void $ execute_ conn (Query (encodeUtf8 (upsertSQL schemaName row)))) rows
 
--- | Prefixes declared with more than one distinct parameter set, which would clobber on the prefix primary key.
+-- | Prefixes declared with more than one distinct parameter set.
 conflictingPrefixes :: (Ord params) => (row -> Text) -> (row -> params) -> [row] -> [Text]
 conflictingPrefixes prefixOf paramsOf rows =
   Map.keys (Map.filter ((> 1) . Set.size) paramsByPrefix)
   where
     paramsByPrefix =
-      Map.fromListWith Set.union [(prefixOf r, Set.singleton (paramsOf r)) | r <- rows]
+      Map.fromListWith Set.union [(prefixOf row, Set.singleton (paramsOf row)) | row <- rows]
 
 -- | Converge the bucket table's WAL persistence to the declared durability. Reads
--- the current @pg_class.relpersistence@ and issues @SET LOGGED@/@SET UNLOGGED@
--- only on a change. The ALTER rewrites the table under @ACCESS EXCLUSIVE@, so
--- token consumes block briefly while a switch runs.
+-- the current @pg_class.relpersistence@ and issues @SET LOGGED@/@SET UNLOGGED@ on a
+-- change. The ALTER rewrites the table under @ACCESS EXCLUSIVE@. Token consumes block
+-- briefly while a switch runs.
 reconcileRateLimitDurability :: PG.Connection -> SchemaName -> Durability -> IO ()
 reconcileRateLimitDurability conn schemaName durability = do
   rows <-
     query
       conn
-      "SELECT c.relpersistence::text FROM pg_class c \
-      \JOIN pg_namespace n ON n.oid = c.relnamespace \
-      \WHERE n.nspname = ? AND c.relname = ?"
+      "SELECT relation.relpersistence::text FROM pg_class relation \
+      \JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+      \WHERE namespace.nspname = ? AND relation.relname = ?"
       (schemaName, arbiterRateLimitsTableName)
   let target = case durability of
         Durable -> "p" :: Text
@@ -529,11 +524,10 @@ reconcileRateLimitDurability conn schemaName durability = do
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
     _ -> pure ()
 
--- | Converge the optional triggers after the tracked migrations, restoring what an
--- earlier disabled configuration removed without touching migration history. The sweep is
--- schema-wide by design: the table list is the schema's whole queue set, so an object
--- belonging to a queue outside it is left over from a registry that shrank, and is
--- dropped.
+-- | Converge the optional triggers after the tracked migrations. This restores what an
+-- earlier disabled configuration removed and leaves migration history alone. The sweep
+-- is schema-wide. The table list is the schema's whole queue set. An object that
+-- belongs to a queue outside it is dropped.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do
@@ -551,13 +545,12 @@ reconcileOptionalTriggers conn schemaName tables config =
       else do
         dropEventTriggersExcept []
         ours <- eventFunctionIsMarked
-        -- Triggers left after the sweep are not ours, so the function they depend on stays.
+        -- The function stays while foreign triggers depend on it.
         depended <- eventFunctionHasTriggers
         when (ours && not depended) $ executeSQL (dropEventStreamingFunctionSQL schemaName)
   where
-    -- Functions are replaced in place, which takes no lock on the queue table. Triggers
-    -- are rebuilt only when their marker is off the current version, so an unchanged
-    -- deploy never blocks claims.
+    -- Functions are replaced in place. That takes no lock on the queue table. Triggers
+    -- are rebuilt when their marker is off the current version.
     installNotify table = do
       executeSQL (createNotifyFunctionSQL schemaName table)
       current <- triggerIsCurrent table (notifyTriggerName table) notifyObjectComment
@@ -573,23 +566,23 @@ reconcileOptionalTriggers conn schemaName tables config =
       exists
         ( "SELECT EXISTS (SELECT 1 "
             <> triggerJoins
-            <> "WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? \
-               \AND obj_description(t.oid, 'pg_trigger') = ?)"
+            <> "WHERE namespace.nspname = ? AND relation.relname = ? AND trigger.tgname = ? \
+               \AND obj_description(trigger.oid, 'pg_trigger') = ?)"
         )
         (schemaName, table, trigger, marker)
 
     eventFunctionIsMarked =
       exists
-        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-        \WHERE n.nspname = ? AND p.proname = ? AND p.pronargs = 0 \
-        \AND obj_description(p.oid, 'pg_proc') LIKE ?)"
+        "SELECT EXISTS (SELECT 1 FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
+        \WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
+        \AND obj_description(function.oid, 'pg_proc') LIKE ?)"
         (schemaName, eventStreamingFunctionName, eventStreamingObjectCommentPrefix <> "%")
 
     eventFunctionHasTriggers =
       exists
-        "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid \
-        \JOIN pg_namespace n ON n.oid = p.pronamespace \
-        \WHERE n.nspname = ? AND p.proname = ? AND NOT t.tgisinternal)"
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger trigger JOIN pg_proc function ON function.oid = trigger.tgfoid \
+        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
+        \WHERE namespace.nspname = ? AND function.proname = ? AND NOT trigger.tgisinternal)"
         (schemaName, eventStreamingFunctionName)
 
     exists :: (PG.ToRow params) => Query -> params -> IO Bool
@@ -601,8 +594,8 @@ reconcileOptionalTriggers conn schemaName tables config =
       executeRendered
         ( dropTriggerSelect
             <> triggerJoins
-            <> "WHERE n.nspname = ? AND obj_description(t.oid, 'pg_trigger') LIKE ? \
-               \AND NOT (c.relname::text = ANY(?::text[]))"
+            <> "WHERE namespace.nspname = ? AND obj_description(trigger.oid, 'pg_trigger') LIKE ? \
+               \AND NOT (relation.relname::text = ANY(?::text[]))"
         )
         (schemaName, marker <> "%", PGArray keep)
 
@@ -610,39 +603,39 @@ reconcileOptionalTriggers conn schemaName tables config =
 
     dropNotifyObjectsExcept keep = do
       dropTriggersMarked notifyObjectCommentPrefix keep
-      -- A function still carrying a trigger is one the sweep spared, so it stays.
+      -- A function that still carries a trigger stays.
       executeRendered
-        "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', n.nspname, p.proname) \
-        \FROM pg_proc p \
-        \JOIN pg_namespace n ON n.oid = p.pronamespace \
-        \WHERE n.nspname = ? AND obj_description(p.oid, 'pg_proc') LIKE ? AND p.pronargs = 0 \
-        \AND NOT (p.proname::text = ANY(?::text[])) \
-        \AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid AND NOT t.tgisinternal)"
+        "SELECT format('DROP FUNCTION IF EXISTS %I.%I();', namespace.nspname, function.proname) \
+        \FROM pg_proc function \
+        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
+        \WHERE namespace.nspname = ? AND obj_description(function.oid, 'pg_proc') LIKE ? AND function.pronargs = 0 \
+        \AND NOT (function.proname::text = ANY(?::text[])) \
+        \AND NOT EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal)"
         (schemaName, notifyObjectCommentPrefix <> "%", PGArray (map notifyFunctionName keep))
 
-    -- Objects installed before arbiter stamped markers carry no comment, so both
-    -- sweeps miss them. Adoption stamps a marker no install ever writes, which the
-    -- sweeps match and the currency probe never accepts. Only the names this registry
-    -- generates are adopted, so an unmarked lookalike stays foreign.
+    -- Objects installed before arbiter stamped markers carry no comment. Adoption
+    -- stamps a marker that no install writes. The sweeps match it. The currency probe
+    -- rejects it. Adoption covers the names this registry generates. An unmarked
+    -- lookalike stays foreign.
     adoptUnmarkedObjects = do
       executeRendered
-        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', n.nspname, p.proname, ?::text) \
-        \FROM pg_proc p \
-        \JOIN pg_namespace n ON n.oid = p.pronamespace \
-        \WHERE n.nspname = ? AND p.proname = ANY(?::text[]) AND p.pronargs = 0 \
-        \AND obj_description(p.oid, 'pg_proc') IS NULL"
+        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', namespace.nspname, function.proname, ?::text) \
+        \FROM pg_proc function \
+        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
+        \WHERE namespace.nspname = ? AND function.proname = ANY(?::text[]) AND function.pronargs = 0 \
+        \AND obj_description(function.oid, 'pg_proc') IS NULL"
         (notifyAdoptedObjectComment, schemaName, PGArray (map notifyFunctionName tables))
       adoptTriggers notifyAdoptedObjectComment (map notifyTriggerName tables) tables
       adoptTriggers eventStreamingAdoptedObjectComment eventTriggerNames eventTables
-      -- The shared function is ours only once one of its triggers is.
+      -- The shared function is adopted when one of its triggers is.
       executeRendered
-        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', n.nspname, p.proname, ?::text) \
-        \FROM pg_proc p \
-        \JOIN pg_namespace n ON n.oid = p.pronamespace \
-        \WHERE n.nspname = ? AND p.proname = ? AND p.pronargs = 0 \
-        \AND obj_description(p.oid, 'pg_proc') IS NULL \
-        \AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid AND NOT t.tgisinternal \
-        \AND obj_description(t.oid, 'pg_trigger') LIKE ?)"
+        "SELECT format('COMMENT ON FUNCTION %I.%I() IS %L;', namespace.nspname, function.proname, ?::text) \
+        \FROM pg_proc function \
+        \JOIN pg_namespace namespace ON namespace.oid = function.pronamespace \
+        \WHERE namespace.nspname = ? AND function.proname = ? AND function.pronargs = 0 \
+        \AND obj_description(function.oid, 'pg_proc') IS NULL \
+        \AND EXISTS (SELECT 1 FROM pg_trigger trigger WHERE trigger.tgfoid = function.oid AND NOT trigger.tgisinternal \
+        \AND obj_description(trigger.oid, 'pg_trigger') LIKE ?)"
         ( eventStreamingAdoptedObjectComment
         , schemaName
         , eventStreamingFunctionName
@@ -653,8 +646,8 @@ reconcileOptionalTriggers conn schemaName tables config =
       executeRendered
         ( commentTriggerSelect
             <> triggerJoins
-            <> "WHERE n.nspname = ? AND NOT t.tgisinternal AND t.tgname = ANY(?::text[]) \
-               \AND c.relname = ANY(?::text[]) AND obj_description(t.oid, 'pg_trigger') IS NULL"
+            <> "WHERE namespace.nspname = ? AND NOT trigger.tgisinternal AND trigger.tgname = ANY(?::text[]) \
+               \AND relation.relname = ANY(?::text[]) AND obj_description(trigger.oid, 'pg_trigger') IS NULL"
         )
         (marker, schemaName, PGArray triggerNames, PGArray relNames)
 
@@ -674,21 +667,22 @@ reconcileOptionalTriggers conn schemaName tables config =
 -- | The catalog joins the trigger sweeps share.
 triggerJoins :: Query
 triggerJoins =
-  "FROM pg_trigger t \
-  \JOIN pg_class c ON c.oid = t.tgrelid \
-  \JOIN pg_namespace n ON n.oid = c.relnamespace "
+  "FROM pg_trigger trigger \
+  \JOIN pg_class relation ON relation.oid = trigger.tgrelid \
+  \JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace "
 
 -- | A @DROP TRIGGER@ statement per matched row.
 dropTriggerSelect :: Query
-dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', t.tgname, n.nspname, c.relname) "
+dropTriggerSelect = "SELECT format('DROP TRIGGER IF EXISTS %I ON %I.%I;', trigger.tgname, namespace.nspname, relation.relname) "
 
 -- | A @COMMENT ON TRIGGER@ statement per matched row, stamping the first parameter.
 commentTriggerSelect :: Query
-commentTriggerSelect = "SELECT format('COMMENT ON TRIGGER %I ON %I.%I IS %L;', t.tgname, n.nspname, c.relname, ?::text) "
+commentTriggerSelect =
+  "SELECT format('COMMENT ON TRIGGER %I ON %I.%I IS %L;', trigger.tgname, namespace.nspname, relation.relname, ?::text) "
 
--- | The schema-level (non-per-table) migrations, run once per schema. Exposed so
--- the golden suite can pin every shipped migration body. Optional notification and
--- event-streaming objects are not tracked here, 'reconcileOptionalTriggers' owns them.
+-- | The schema-level migrations, run once per schema. Exposed for the golden suite.
+-- 'reconcileOptionalTriggers' owns the optional notification and event-streaming
+-- objects.
 schemaLevelMigrations :: SchemaName -> [MigrationCommand]
 schemaLevelMigrations schemaName =
   [ MigrationScript "create-cron-schedules" (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
@@ -706,9 +700,8 @@ schemaLevelMigrations schemaName =
   , MigrationScript "create-arbiter-concurrency" (encodeUtf8 $ createConcurrencyTableSQL schemaName)
   ]
 
--- | One queue's tracked migrations, each under its own version identifier. The optional
--- notify and event-streaming objects are not tracked here, 'reconcileOptionalTriggers'
--- owns them.
+-- | One queue's tracked migrations, each under its own version identifier.
+-- 'reconcileOptionalTriggers' owns the optional notify and event-streaming objects.
 jobQueueMigrationsForTable
   :: SchemaName
   -- ^ Schema name
@@ -718,7 +711,7 @@ jobQueueMigrationsForTable
   -- ^ Which admission trigger kinds to install
   -> [MigrationCommand]
   -- ^ List of migration commands
-jobQueueMigrationsForTable schemaName tableName adm =
+jobQueueMigrationsForTable schemaName tableName admission =
   let prefix = T.unpack tableName <> "-"
       script name sql = MigrationScript (prefix <> name) (encodeUtf8 sql)
 
@@ -752,7 +745,7 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "create-archive-job-id-index" $ createArchiveJobIdIndexSQL schemaName tableName
         , script "create-archive-parent-id-index" $ createArchiveParentIdIndexSQL schemaName tableName
         , script "create-archive-group-key-index" $ createArchiveGroupKeyIndexSQL schemaName tableName
-        , -- After the archive table exists, since it alters that too.
+        , -- Runs after the archive table exists. It alters that table too.
           script "add-trace-context-column" $ addTraceContextColumnSQL schemaName tableName
         , script "add-claim-seq-column" $ addClaimSeqColumnSQL schemaName tableName
         , script "create-groups-emptied-index" $ createGroupsEmptiedIndexSQL schemaName tableName
@@ -764,13 +757,13 @@ jobQueueMigrationsForTable schemaName tableName adm =
         , script "add-kind-column" $ addKindColumnSQL schemaName tableName
         ]
       concurrencyTriggers
-        | tableConcurrency adm =
+        | tableConcurrency admission =
             [ script "create-concurrency-trigger-functions" $ createConcurrencyTriggerFunctionsSQL schemaName tableName
             , script "create-concurrency-triggers" $ createConcurrencyTriggersSQL schemaName tableName
             ]
         | otherwise = []
       rateLimitTriggers
-        | tableRateLimit adm =
+        | tableRateLimit admission =
             [ script "create-rate-limit-bucket-trigger-functions" $ createRateLimitBucketTriggerFunctionsSQL schemaName tableName
             , script "create-rate-limit-bucket-triggers" $ createRateLimitBucketTriggersSQL schemaName tableName
             ]

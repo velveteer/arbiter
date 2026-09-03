@@ -1,7 +1,6 @@
 {-# LANGUAGE TypeFamilies #-}
 
--- | The postgresql-simple database monad. Its 'MonadArbiter' instance is built in, so it
--- is usable directly:
+-- | The postgresql-simple database monad with a built-in 'MonadArbiter' instance:
 --
 -- @
 -- import Arbiter.Core
@@ -80,7 +79,7 @@ newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: 
 
 instance (Monad m) => HasSimplePool (SimpleDb registry m) where
   getSimplePool = asks simplePool
-  localSimplePool f = local (\env -> env {simplePool = f (simplePool env)})
+  localSimplePool adjust = local (\env -> env {simplePool = adjust (simplePool env)})
 
 instance (MonadUnliftIO m) => MonadArbiter (SimpleDb registry m) where
   type RegistryOf (SimpleDb registry m) = registry
@@ -101,12 +100,12 @@ destroySimpleEnv env =
 disableListener :: SimpleEnv registry -> SimpleEnv registry
 disableListener env = env {listener = Nothing}
 
--- | Give the env a dedicated LISTEN connection opened from a connection string,
--- and does not use a slot from the pool.
+-- | Give the env a dedicated LISTEN connection opened from a connection string.
+-- The listener takes no pool slot.
 useDedicatedListener :: (MonadIO m) => ByteString -> SimpleEnv registry -> m (SimpleEnv registry)
 useDedicatedListener connStr env = do
-  d <- newDedicatedListen connStr
-  pure env {listener = Just (dedicatedListener d)}
+  dedicated <- newDedicatedListen connStr
+  pure env {listener = Just (dedicatedListener dedicated)}
 
 -- | A listener that borrows one pool connection for the hub's lifetime.
 poolListener :: Pool Connection -> IO Listener
@@ -116,9 +115,9 @@ poolListener pool = newPoolListener (\action -> withResource pool (`withConnecti
 runSimpleDb :: SimpleEnv registry -> SimpleDb registry m a -> m a
 runSimpleDb env action = runReaderT (unSimpleDb action) env
 
--- | Run a 'SimpleDb' action on one connection, no pool or env involved. It is pinned as
--- though a transaction were already open, so 'Arbiter.Core.MonadArbiter.withDbTransaction'
--- nests through savepoints and the caller keeps ownership of the transaction itself.
+-- | Run a 'SimpleDb' action on one connection without a pool or env. The connection is
+-- pinned as an open transaction. 'Arbiter.Core.MonadArbiter.withDbTransaction' nests
+-- through savepoints. The caller owns the transaction.
 --
 -- @
 -- PG.withTransaction conn $ do
@@ -147,8 +146,8 @@ inTransaction conn schemaName action =
           }
    in runSimpleDb env action
 
--- | Create a 'SimpleEnv' with default pool settings.
--- For workers, use 'createSimpleEnvWithConfig' with @poolConfigForWorkers@ instead.
+-- | Create a 'SimpleEnv' with default pool settings. Size worker pools with
+-- 'createSimpleEnvWithConfig' and @poolConfigForWorkers@.
 createSimpleEnv
   :: forall registry m
    . (MonadIO m)
@@ -202,11 +201,10 @@ createSimpleEnvWithConfig _proxy connStr schemaName config = liftIO $ do
       , listener = Just lstn
       }
 
--- | Create a 'SimpleEnv' over a caller's own connection pool. The shared
--- listener borrows one connection from that pool and holds it for the env's
--- lifetime, so size the pool for the worker load plus one. Use 'disableListener'
--- to run poll-only and reclaim that slot, or 'useDedicatedListener' to give the
--- listener its own connection.
+-- | Create a 'SimpleEnv' over a caller's own connection pool. The shared listener
+-- holds one pool connection for the env's lifetime. Size the pool for the worker
+-- load plus one. 'disableListener' runs poll-only and frees that slot.
+-- 'useDedicatedListener' gives the listener its own connection.
 createSimpleEnvWithPool
   :: forall registry m
    . (MonadIO m)

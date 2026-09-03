@@ -80,9 +80,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
-              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
-              , onJobUnavailable = \_ _ -> liftIO $ atomicModifyIORef' unavailableCalls (\n -> (n + 1, ()))
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\count -> (count + 1, ()))
+              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\count -> (count + 1, ()))
+              , onJobUnavailable = \_ _ -> liftIO $ atomicModifyIORef' unavailableCalls (\count -> (count + 1, ()))
               }
 
       -- Insert a job
@@ -90,9 +90,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Just job <- Ops.insertJob testSchema testTable (defaultJob (SlowTask 1))
         pure (primaryKey job)
 
-      -- Handler completes successfully, but another worker has reclaimed the job
-      -- so the ack will fail (claim token mismatch). The worker should detect this
-      -- as a "job gone" situation and skip retry/DLQ entirely.
+      -- Another worker reclaims the job during the handler. The ack fails on the
+      -- claim token. The worker treats this as a gone job and skips retry and DLQ.
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
           jobHandler _conn _job = do
             -- Simulate another worker claiming the job (a claim bumps both counters)
@@ -115,7 +114,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           -- Allow time for ack failure and the job-gone path to complete
           threadDelay 500_000
 
-      -- Verify: neither hook was called (job-gone path skips both)
+      -- Verify: the job-gone path fired neither hook
       failureCount <- readIORef failureCalls
       successCount <- readIORef successCalls
       failureCount `shouldBe` 0
@@ -137,8 +136,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\n -> (n + 1, ()))
-              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\n -> (n + 1, ()))
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successCalls (\count -> (count + 1, ()))
+              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' failureCalls (\count -> (count + 1, ()))
               }
 
       -- Insert a job
@@ -146,7 +145,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         $ runSimpleDb env
         $ Ops.insertJob testSchema testTable (setMaxAttempts (Just 1) $ defaultJob (SimpleTask "will-fail"))
 
-      -- Handler that always throws (retryable exception, not job-gone)
+      -- Handler that always throws a retryable exception
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
           jobHandler _conn _job = error "intentional failure"
 
@@ -163,7 +162,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         $ \_ ->
           waitUntil 10_000 $ (== 1) <$> readIORef failureCalls
 
-      -- Verify: onJobFailure was called, not onJobSuccess
+      -- Verify: only onJobFailure fired
       failureCount <- readIORef failureCalls
       successCount <- readIORef successCalls
       failureCount `shouldBe` 1
@@ -186,7 +185,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
             threadDelay 200_000
             simulateAnotherWorkerClaim connStr jobId
             threadDelay 5_000_000
-            -- Should never reach here: heartbeat detects theft and cancels via race
+            -- Unreachable. The heartbeat detects the theft and cancels the handler.
             atomicModifyIORef' handlerCompleted (\_ -> (True, ()))
 
       config <- transactionalWorkerConfig 10 jobHandler
@@ -202,7 +201,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         $ \_ ->
           waitUntil 10_000 $ readIORef handlerStarted
 
-      -- Verify the handler actually started (not vacuously passing)
+      -- Verify the handler started
       started <- readIORef handlerStarted
       started `shouldBe` True
 
@@ -222,8 +221,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
-              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' processedCount (\n -> (n + 1, ()))
+              { onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' processedCount (\count -> (count + 1, ()))
+              , onJobFailure = \_ _ _ _ -> liftIO $ atomicModifyIORef' processedCount (\count -> (count + 1, ()))
               }
 
       -- Insert jobs that always fail (FailingTask 999 means fail 999 times)
@@ -236,7 +235,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       let jobHandler :: JobHandler (SimpleDb WorkerConcurrencyTestRegistry IO) WorkerConcurrencyTestPayload ()
           jobHandler _conn job = do
             case payload job of
-              FailingTask n | n > 0 -> error "Failing task"
+              FailingTask remaining | remaining > 0 -> error "Failing task"
               _ -> pure ()
 
       config <- transactionalWorkerConfig 10 jobHandler
@@ -257,9 +256,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       processed <- readIORef processedCount
       processed `shouldBe` 3
 
--- | Helper: Simulate another worker claiming a job by incrementing attempts.
--- This opens a fresh connection (outside any worker transaction) to increment
--- the attempts counter, causing the worker's ack to fail due to attempts mismatch.
+-- | Simulate another worker claiming a job. A fresh connection bumps the attempts
+-- and claim counters. The worker's ack then fails.
 simulateAnotherWorkerClaim :: ByteString -> Int64 -> IO ()
 simulateAnotherWorkerClaim connStr jobId = do
   conn <- PG.connectPostgreSQL connStr

@@ -21,13 +21,13 @@ data DedupKey
   deriving stock (Eq, Generic, Show)
 
 instance ToJSON DedupKey where
-  toJSON (IgnoreDuplicate k) = object ["key" .= k, "strategy" .= ("ignore" :: Text)]
-  toJSON (ReplaceDuplicate k) = object ["key" .= k, "strategy" .= ("replace" :: Text)]
+  toJSON (IgnoreDuplicate key) = object ["key" .= key, "strategy" .= ("ignore" :: Text)]
+  toJSON (ReplaceDuplicate key) = object ["key" .= key, "strategy" .= ("replace" :: Text)]
 
 instance FromJSON DedupKey where
-  parseJSON = withObject "DedupKey" $ \v -> do
-    key <- v .: "key"
-    strategy <- v .: "strategy" :: Parser Text
+  parseJSON = withObject "DedupKey" $ \obj -> do
+    key <- obj .: "key"
+    strategy <- obj .: "strategy" :: Parser Text
     case strategy of
       "ignore" -> pure $ IgnoreDuplicate key
       "replace" -> pure $ ReplaceDuplicate key
@@ -36,5 +36,5 @@ instance FromJSON DedupKey where
 -- | The @dedup_key@ and @dedup_strategy@ column values for a 'DedupKey'.
 dedupParts :: Maybe DedupKey -> (Maybe Text, Maybe Text)
 dedupParts Nothing = (Nothing, Nothing)
-dedupParts (Just (IgnoreDuplicate k)) = (Just k, Just "ignore")
-dedupParts (Just (ReplaceDuplicate k)) = (Just k, Just "replace")
+dedupParts (Just (IgnoreDuplicate key)) = (Just key, Just "ignore")
+dedupParts (Just (ReplaceDuplicate key)) = (Just key, Just "replace")

@@ -51,7 +51,7 @@ spec connStr =
       QueueBPayload
       mkEnv
       destroySimpleEnv
-      (\f _conn job -> f job)
+      (\handler _conn job -> handler job)
       runSimpleDb
   where
     mkEnv = do

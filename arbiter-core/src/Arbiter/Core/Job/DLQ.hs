@@ -18,7 +18,7 @@ type JobSnapshot payload = JobRead payload
 -- | A job in the dead-letter queue.
 data DLQJob payload = DLQJob
   { dlqPrimaryKey :: Int64
-  -- ^ DLQ table primary key, distinct from the snapshot's own job id
+  -- ^ DLQ table primary key. The snapshot keeps its own job id.
   , failedAt :: UTCTime
   -- ^ When the job was moved to the DLQ
   , jobSnapshot :: JobSnapshot payload

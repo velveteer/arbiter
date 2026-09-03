@@ -45,9 +45,9 @@ handlePauseNotif
   -> m ()
 handlePauseNotif config notif =
   case Aeson.decodeStrict (notificationData notif) :: Maybe PausePayload of
-    Just (PausePayload wid p) | wid == workerId config -> atomically $ do
-      st <- STM.readTVar (workerStateVar config)
-      unless (st == ShuttingDown) $ writePause config p
+    Just (PausePayload wid paused) | wid == workerId config -> atomically $ do
+      state <- STM.readTVar (workerStateVar config)
+      unless (state == ShuttingDown) $ writePause config paused
     _ -> pure ()
 
 -- | If the cancel payload targets a job on this worker, 'throwTo'
@@ -65,13 +65,11 @@ handleCancelNotif config runningJobs notif =
       traverse_ (fireCancel jid) mAsync
     _ -> pure ()
   where
-    -- Fork so throwTo can't block the listener on the target unwinding.
-    fireCancel jid a =
-      liftIO . void . forkIO $ throwTo (Async.asyncThreadId a) (JobForceCancelled [jid] [])
+    -- Fork the throwTo off the listener thread.
+    fireCancel jid handlerAsync =
+      liftIO . void . forkIO $ throwTo (Async.asyncThreadId handlerAsync) (JobForceCancelled [jid] [])
 
 -- | Signal the scheduler when a run-now NOTIFY names a schedule this pool owns.
--- The cron-run channel is per-schema, so pools that do not own the named
--- schedule ignore the wake and do not issue a pending-runs scan.
 handleCronRunNotif
   :: (MonadUnliftIO m)
   => Set Text
@@ -84,8 +82,8 @@ handleCronRunNotif ownNames runNowVar notif =
     $ atomically
     $ STM.writeTVar runNowVar True
 
--- | Run @work@ as an async registered in 'RunningJobs' for its lifetime, dropping
--- only the entries this call made.
+-- | Run @work@ as an async registered in 'RunningJobs' for its lifetime. Cleanup
+-- removes the entries this call made.
 withRegisteredJobs
   :: forall m
    . (MonadUnliftIO m)
@@ -99,26 +97,29 @@ withRegisteredJobs runningJobs jobIds work = do
       gated unmask = unmask $ do
         atomically (STM.readTMVar startGate)
         work
-      unregister a =
+      unregister handlerAsync =
         atomically $
-          STM.modifyTVar' runningJobs $ \m ->
-            foldl' (\acc jid -> Map.update (\b -> if b == a then Nothing else Just b) jid acc) m jobIds
-  Async.withAsyncWithUnmask gated $ \a ->
-    flip finally (unregister a) $ do
+          STM.modifyTVar' runningJobs $ \running ->
+            foldl'
+              (\acc jid -> Map.update (\registered -> if registered == handlerAsync then Nothing else Just registered) jid acc)
+              running
+              jobIds
+  Async.withAsyncWithUnmask gated $ \handlerAsync ->
+    flip finally (unregister handlerAsync) $ do
       atomically $ do
-        STM.modifyTVar' runningJobs $ \m ->
-          foldl' (\acc jid -> Map.insert jid a acc) m jobIds
+        STM.modifyTVar' runningJobs $ \running ->
+          foldl' (\acc jid -> Map.insert jid handlerAsync acc) running jobIds
         STM.putTMVar startGate ()
-      Async.waitCatch a
+      Async.waitCatch handlerAsync
 
 data PausePayload = PausePayload UUID Bool
 
 instance Aeson.FromJSON PausePayload where
-  parseJSON = Aeson.withObject "PausePayload" $ \o ->
-    PausePayload <$> o Aeson..: "worker_id" <*> o Aeson..: "paused"
+  parseJSON = Aeson.withObject "PausePayload" $ \obj ->
+    PausePayload <$> obj Aeson..: "worker_id" <*> obj Aeson..: "paused"
 
 data CancelPayload = CancelPayload UUID Int64
 
 instance Aeson.FromJSON CancelPayload where
-  parseJSON = Aeson.withObject "CancelPayload" $ \o ->
-    CancelPayload <$> o Aeson..: "worker_id" <*> o Aeson..: "job_id"
+  parseJSON = Aeson.withObject "CancelPayload" $ \obj ->
+    CancelPayload <$> obj Aeson..: "worker_id" <*> obj Aeson..: "job_id"

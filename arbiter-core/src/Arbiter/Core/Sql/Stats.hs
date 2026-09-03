@@ -14,7 +14,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (RowCodec, codecColumns)
+import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.Sql.Jobs (jobStatusCaseSQL, unionAllOverQueueTables)
@@ -24,80 +24,83 @@ import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
 -- | Per-status queue counts plus the age of the oldest @ready@ and @in_flight@ job.
---
--- Counts are broken down by the canonical 'jobStatusCaseSQL' taxonomy so the
--- UI can distinguish actively-leased (@in_flight@) jobs from merely delayed
--- (@scheduled@/@backoff@/@throttled@) or @suspended@ ones. The status counts
--- sum to @total_jobs@. @oldest_ready_age_seconds@ measures only @ready@ rows so a
--- far-future scheduled job does not skew the queue's backlog latency.
--- @oldest_in_flight_age_seconds@ measures from the claim that leased each row, so a
--- an active handler continues to increase until it returns.
---
--- The select list is rendered from the decoder's own columns.
+-- Counts follow the 'jobStatusCaseSQL' taxonomy and sum to @total_jobs@.
 getQueueStatsSQL :: RowCodec a -> SchemaName -> TableName -> [Text] -> Query a
 getQueueStatsSQL codec schema tableName kinds =
-  let cols = codecColumns codec
-      rollup = kindRollupSQL (jobQueueTable schema tableName) kinds cols
-      selected = statsColumnList schema tableName cols
-   in rows codec [sql|SELECT ${selected} FROM ${rollup} rollup|]
+  let stats = queueStatsSelect schema tableName kinds
+   in rows codec [sql|${stats}|]
 
--- | The classified rows aggregated once per kind and once over the whole table, in
--- one pass. @total_row@ marks the whole-table row.
-kindRollupSQL :: Text -> [Text] -> [Text] -> Text
-kindRollupSQL tbl kinds cols =
-  "(SELECT kind, GROUPING(kind) AS total_row, "
-    <> T.intercalate ", " (map aggregate (filter rolledUp cols))
-    <> " FROM (SELECT inserted_at, last_attempted_at, "
-    <> declaredKindSQL kinds
-    <> " AS kind, "
-    <> jobStatusCaseSQL
-    <> " AS status FROM "
-    <> tbl
-    <> ") classified GROUP BY GROUPING SETS ((), (kind)))"
-  where
-    rolledUp c = c /= "dlq_jobs" && c /= "kind_counts"
-    aggregate "total_jobs" = "COUNT(*)::int8 AS total_jobs"
-    aggregate "oldest_ready_age_seconds" = age "inserted_at" "ready" <> " AS oldest_ready_age_seconds"
-    aggregate "oldest_in_flight_age_seconds" = age "last_attempted_at" "in_flight" <> " AS oldest_in_flight_age_seconds"
-    aggregate c = "COUNT(*) FILTER (WHERE status = '" <> T.dropEnd (T.length "_jobs") c <> "') AS " <> c
-    age column status =
-      "EXTRACT(EPOCH FROM (clock_timestamp() - MIN(" <> column <> ") FILTER (WHERE status = '" <> status <> "')))::float8"
+-- | One queue's stats row. The classified rows are aggregated once per kind and once
+-- over the whole table in one pass. @total_row@ marks the whole-table row.
+queueStatsSelect :: SchemaName -> TableName -> [Text] -> Text
+queueStatsSelect schema tableName kinds =
+  let tbl = jobQueueTable schema tableName
+      dlqTbl = jobQueueDLQTable schema tableName
+      kindExpr = declaredKindSQL kinds
+   in [text|
+        SELECT MAX(total_jobs) FILTER (WHERE total_row = 1) AS total_jobs,
+               MAX(ready_jobs) FILTER (WHERE total_row = 1) AS ready_jobs,
+               MAX(in_flight_jobs) FILTER (WHERE total_row = 1) AS in_flight_jobs,
+               MAX(scheduled_jobs) FILTER (WHERE total_row = 1) AS scheduled_jobs,
+               MAX(backoff_jobs) FILTER (WHERE total_row = 1) AS backoff_jobs,
+               MAX(throttled_jobs) FILTER (WHERE total_row = 1) AS throttled_jobs,
+               MAX(suspended_jobs) FILTER (WHERE total_row = 1) AS suspended_jobs,
+               MAX(cancelled_jobs) FILTER (WHERE total_row = 1) AS cancelled_jobs,
+               MAX(oldest_ready_age_seconds) FILTER (WHERE total_row = 1) AS oldest_ready_age_seconds,
+               MAX(oldest_in_flight_age_seconds) FILTER (WHERE total_row = 1) AS oldest_in_flight_age_seconds,
+               (SELECT COUNT(*)::int8 FROM ${dlqTbl}) AS dlq_jobs,
+               jsonb_object_agg(kind, total_jobs) FILTER (WHERE total_row = 0 AND kind IS NOT NULL) AS kind_counts
+        FROM (
+          SELECT kind, GROUPING(kind) AS total_row,
+                 COUNT(*)::int8 AS total_jobs,
+                 COUNT(*) FILTER (WHERE status = 'ready') AS ready_jobs,
+                 COUNT(*) FILTER (WHERE status = 'in_flight') AS in_flight_jobs,
+                 COUNT(*) FILTER (WHERE status = 'scheduled') AS scheduled_jobs,
+                 COUNT(*) FILTER (WHERE status = 'backoff') AS backoff_jobs,
+                 COUNT(*) FILTER (WHERE status = 'throttled') AS throttled_jobs,
+                 COUNT(*) FILTER (WHERE status = 'suspended') AS suspended_jobs,
+                 COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_jobs,
+                 EXTRACT(EPOCH FROM (
+                   clock_timestamp() - MIN(inserted_at) FILTER (WHERE status = 'ready')
+                 ))::float8 AS oldest_ready_age_seconds,
+                 EXTRACT(EPOCH FROM (
+                   clock_timestamp() - MIN(last_attempted_at) FILTER (WHERE status = 'in_flight')
+                 ))::float8 AS oldest_in_flight_age_seconds
+          FROM (
+            SELECT inserted_at, last_attempted_at, ${kindExpr} AS kind, ${jobStatusCaseSQL} AS status
+            FROM ${tbl}
+          ) classified
+          GROUP BY GROUPING SETS ((), (kind))
+        ) rollup
+      |]
 
 -- | A stored label the payload declares, and NULL for anything else.
 declaredKindSQL :: [Text] -> Text
 declaredKindSQL [] = "NULL::text"
-declaredKindSQL kinds = "CASE WHEN kind IN (" <> T.intercalate ", " (map textLiteral kinds) <> ") THEN kind END"
-
--- | The stats select list: each decoder column read off the rollup rows.
-statsColumnList :: SchemaName -> TableName -> [Text] -> Text
-statsColumnList schema tableName = T.intercalate ", " . map render
-  where
-    dlqTbl = jobQueueDLQTable schema tableName
-    render "dlq_jobs" = "(SELECT COUNT(*)::int8 FROM " <> dlqTbl <> ") AS dlq_jobs"
-    render "kind_counts" = kindCounts <> " AS kind_counts"
-    render c = "MAX(" <> c <> ") FILTER (WHERE total_row = 1) AS " <> c
-    kindCounts = "jsonb_object_agg(kind, total_jobs) FILTER (WHERE total_row = 0 AND kind IS NOT NULL)"
+declaredKindSQL kinds =
+  let literals = T.intercalate ", " (map textLiteral kinds)
+   in [text|CASE WHEN kind IN (${literals}) THEN kind END|]
 
 -- | Every queue's stats in one query, tagged by name. Caller guards the empty list.
--- @statsCols@ are the per-queue stats columns, which sit inside the overview row.
-allQueueStatsSQL :: RowCodec a -> [Text] -> SchemaName -> [(TableName, [Text])] -> Query a
-allQueueStatsSQL codec statsCols schema queueKinds =
-  let qTbl = arbiterQueuesTable schema
-      wTbl = arbiterWorkersTable schema
-      -- Live = heartbeat within the stale threshold and not draining, matching the worker health CASE.
-      liveWorker = "last_heartbeat >= NOW() - stale_threshold_secs * interval '1 second' AND NOT shutting_down" :: Text
-   in rawRows codec $ unionAllOverQueueTables schema (map fst queueKinds) $ \tableName tbl ->
-        let selected = statsColumnList schema tableName statsCols
-            rollup = kindRollupSQL tbl (fromMaybe [] (lookup tableName queueKinds)) statsCols
+allQueueStatsSQL :: RowCodec a -> SchemaName -> [(TableName, [Text])] -> Query a
+allQueueStatsSQL codec schema queueKinds =
+  let queuesTbl = arbiterQueuesTable schema
+      workersTbl = arbiterWorkersTable schema
+   in rawRows codec $ unionAllOverQueueTables schema (map fst queueKinds) $ \tableName _ ->
+        let stats = queueStatsSelect schema tableName (fromMaybe [] (lookup tableName queueKinds))
          in [text|
-          SELECT '${tableName}' AS queue, s.*,
-                 COALESCE((SELECT paused FROM ${qTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
-                 w.workers_live, w.workers_paused
-          FROM (SELECT ${selected} FROM ${rollup} rollup) s
+          SELECT '${tableName}' AS queue, stats.*,
+                 COALESCE((SELECT paused FROM ${queuesTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
+                 worker_counts.workers_live, worker_counts.workers_paused
+          FROM (${stats}) stats
           CROSS JOIN (
+            -- Live matches the worker health CASE: a fresh heartbeat and not draining.
             SELECT COUNT(*)::int8 AS workers_live, COUNT(*) FILTER (WHERE paused)::int8 AS workers_paused
-            FROM ${wTbl} WHERE queue_name = '${tableName}' AND ${liveWorker}
-          ) w
+            FROM ${workersTbl}
+            WHERE queue_name = '${tableName}'
+              AND last_heartbeat >= NOW() - stale_threshold_secs * interval '1 second'
+              AND NOT shutting_down
+          ) worker_counts
         |]
 
 -- ---------------------------------------------------------------------------

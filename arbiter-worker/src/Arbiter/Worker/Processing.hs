@@ -99,16 +99,16 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
           processJobsWithRetry config consumeSpan handoff jobBatch
       case result of
         Right () -> pure ()
-        Left e
-          -- Finalized inside the job span, so the trace carries the cancel. One
-          -- delivered before that catch, or interrupting it, arrives here undone.
-          | Just (JobForceCancelled cancelledIds reclaimedIds) <- fromException e -> do
+        Left exception
+          -- Finalized inside the job span. A cancel delivered before that catch, or
+          -- one that interrupts it, arrives here undone.
+          | Just (JobForceCancelled cancelledIds reclaimedIds) <- fromException exception -> do
               alreadyFinalized <- cancelFinalized handoff
               unless alreadyFinalized $
                 finalizeForceCancelled config jobBatch cancelledIds reclaimedIds handoff
-          | Just Async.AsyncCancelled <- fromException e -> liftIO (E.throwIO e)
+          | Just Async.AsyncCancelled <- fromException exception -> liftIO (E.throwIO exception)
           | otherwise -> do
-              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx e
+              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
               threadDelay 2_000_000
 
 processJobsWithRetry
@@ -127,8 +127,8 @@ processJobsWithRetry config consumeSpan handoff jobs = do
   schemaName <- Arb.getSchema
   tracer <- resolveTracer
   let (firstJob :| _) = jobs
-      -- Rethrown with base throwIO, UnliftIO's wrapping it as synchronous. The flag
-      -- is set last, so an interrupted finalizer leaves the rest to 'workerLoop'.
+      -- Rethrown with base throwIO. The flag is set last. An interrupted finalizer
+      -- leaves the rest to 'workerLoop'.
       onForceCancel exc@(JobForceCancelled cancelledIds goneIds) = do
         finalizeForceCancelled config jobs cancelledIds goneIds handoff
         markCancelFinalized handoff
@@ -137,7 +137,7 @@ processJobsWithRetry config consumeSpan handoff jobs = do
         runHook (jobLog config job) "onJobClaimed" $
           Job.onJobClaimed (observabilityHooks config) job startTime
   -- The span covers the claim hooks, the outcome report and the force-cancel
-  -- finalizer, so every terminal hook fires while it is open.
+  -- finalizer.
   withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
     traverse_ claimHook jobs
     result <-

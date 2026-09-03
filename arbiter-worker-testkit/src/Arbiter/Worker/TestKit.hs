@@ -135,14 +135,14 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       maxActiveRef <- newIORef (0 :: Int)
       completedRef <- newIORef (0 :: Int)
       config <- mkConfig $ \_job -> do
-        active <- liftIO $ atomicModifyIORef' activeRef $ \n -> let n' = n + 1 in (n', n')
+        active <- liftIO $ atomicModifyIORef' activeRef $ \count -> let count' = count + 1 in (count', count')
         liftIO $ atomicModifyIORef' maxActiveRef $ \maxN -> (max maxN active, ())
         liftIO $ threadDelay 500_000
-        liftIO $ atomicModifyIORef' activeRef $ \n -> (n - 1, ())
-        liftIO $ atomicModifyIORef' completedRef $ \n -> (n + 1, ())
+        liftIO $ atomicModifyIORef' activeRef $ \count -> (count - 1, ())
+        liftIO $ atomicModifyIORef' completedRef $ \count -> (count + 1, ())
       let jobs =
             map
-              (\i -> setGroupKey (Just (T.pack $ "g" <> show i)) $ defaultJob (mkSimple (T.pack $ "Job " <> show @Int i)))
+              (\index -> setGroupKey (Just (T.pack $ "g" <> show index)) $ defaultJob (mkSimple (T.pack $ "Job " <> show @Int index)))
               [1 .. 10]
 
       runM env $ traverse_ HL.insertJob jobs
@@ -159,8 +159,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       attemptsRef <- newIORef (0 :: Int)
       -- mkFailing 3 marks a job that throws on its first two attempts.
       config <- mkConfig $ \_job -> do
-        n <- liftIO $ atomicModifyIORef' attemptsRef $ \k -> (k + 1, k + 1)
-        when (n < 3) $ throwRetryable "Not yet!"
+        attempt <- liftIO $ atomicModifyIORef' attemptsRef $ \count -> (count + 1, count + 1)
+        when (attempt < 3) $ throwRetryable "Not yet!"
       let job = setMaxAttempts (Just 5) $ setGroupKey (Just "g1") $ defaultJob (mkFailing 3)
 
       void $ runM env $ HL.insertJob job
@@ -272,8 +272,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           arch <- runM env $ HL.listArchiveJobs @payload 100 0
           pure (countReJob arch == 1)
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
-        let pk = Archive.archivePrimaryKey (head arch)
-        reEnq <- runM env $ HL.reEnqueueFromArchive @payload pk
+        let archiveId = Archive.archivePrimaryKey (head arch)
+        reEnq <- runM env $ HL.reEnqueueFromArchive @payload archiveId
         (payload <$> reEnq) `shouldBe` Just (mkSimple "re-job")
         -- Original archive row is kept. The re-run is processed and archived too.
         waitUntil 10_000 $ do
@@ -291,8 +291,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           arch <- runM env $ HL.listArchiveJobs @payload 100 0
           pure (any ((== mkSimple "purge-one") . payload . Archive.jobSnapshot) arch)
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
-        let pk = Archive.archivePrimaryKey (head arch)
-        deleted <- runM env $ HL.deleteArchiveJob @payload pk
+        let archiveId = Archive.archivePrimaryKey (head arch)
+        deleted <- runM env $ HL.deleteArchiveJob @payload archiveId
         deleted `shouldBe` 1
         arch2 <- runM env $ HL.listArchiveJobs @payload 100 0
         map (payload . Archive.jobSnapshot) arch2 `shouldBe` []
@@ -319,8 +319,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "DLQ-retried job retains archiveFor and is archived on later success" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       config <- mkConfig $ \_job -> do
-        n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-        when (n == 1) $ throwPermanent "fail first time"
+        call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+        when (call == 1) $ throwPermanent "fail first time"
       void
         $ runM env
         $ HL.insertJob
@@ -333,7 +333,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
         let dlqId = DLQ.dlqPrimaryKey (head dlq)
         void $ runM env $ HL.retryFromDLQ @payload dlqId
-        -- On the retry it succeeds. archive_for survived the DLQ round-trip, so it is archived.
+        -- On the retry it succeeds. archive_for survived the DLQ round-trip. The job is archived.
         waitUntil 10_000 $ do
           arch <- runM env $ HL.listArchiveJobs @payload 100 0
           pure (any ((== mkSimple "dlq-arch") . payload . Archive.jobSnapshot) arch)
@@ -378,7 +378,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
         map (payload . Archive.jobSnapshot) arch `shouldBe` []
 
-    it "stores a child's result in the tree, not on its archive row" $ \env -> do
+    it "stores a child's result in the tree and leaves its archive row bare" $ \env -> do
       cfg :: WorkerConfig m payload <-
         transactionalWorkerConfig 1 (mkHandler (\_job -> pure (Just ["child-result"] :: Maybe [Text])))
       let child = setArchiveFor (Just dayRetention) $ defaultJob (mkSimple "arch-child")
@@ -395,8 +395,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "preserves the attempt count on the archived row" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       config <- mkConfig $ \_job -> do
-        n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-        when (n == 1) $ throwRetryable "fail once"
+        call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+        when (call == 1) $ throwRetryable "fail once"
       void
         $ runM env
         $ HL.insertJob
@@ -412,8 +412,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           pure (any ((== mkSimple "arch-attempts") . payload . Archive.jobSnapshot) arch)
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
         let mine = find ((== mkSimple "arch-attempts") . payload . Archive.jobSnapshot) arch
-        -- Claimed twice (one retryable failure, then success), so the ack-copy
-        -- must carry attempts = 2, not reset it to 0.
+        -- Claimed twice, one retryable failure and then success. The ack-copy
+        -- carries attempts = 2.
         fmap (attempts . Archive.jobSnapshot) mine `shouldBe` Just 2
 
     it "preserves a child's parent linkage on its archived row" $ \env -> do
@@ -424,12 +424,12 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       void $ runM env $ HL.insertJobTree $ root <~~ (child :| [])
 
       withAsync (runM env $ runWorkerPool cfg {workerCount = 2, pollInterval = 0.1}) $ \_ -> do
-        let snap p arch = Archive.jobSnapshot <$> find ((== mkSimple p) . payload . Archive.jobSnapshot) arch
+        let snap name arch = Archive.jobSnapshot <$> find ((== mkSimple name) . payload . Archive.jobSnapshot) arch
         waitUntil 10_000 $ do
           arch <- runM env $ HL.listArchiveJobs @payload 100 0
           pure (isJust (snap "pl-child" arch) && isJust (snap "pl-root" arch))
         arch <- runM env $ HL.listArchiveJobs @payload 100 0
-        -- The child's archived parent_id must point at the root's original job id.
+        -- The child's archived parent_id points at the root's original job id.
         (parentId =<< snap "pl-child" arch) `shouldBe` (primaryKey <$> snap "pl-root" arch)
 
     it "reaper purges only expired archived rows, keeping live ones" $ \env -> do
@@ -442,7 +442,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           ]
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1, reaperInterval = 0.5}) $ \_ -> do
-        let has p arch = any ((== mkSimple p) . payload . Archive.jobSnapshot) arch
+        let has name arch = any ((== mkSimple name) . payload . Archive.jobSnapshot) arch
         waitUntil 10_000 $ do
           arch <- runM env $ HL.listArchiveJobs @payload 100 0
           pure (has "purge-expired" arch && has "purge-kept" arch)
@@ -488,11 +488,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       dlqRef <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryRef (\n -> (n + 1, ()))
-              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqRef (\n -> (n + 1, ()))
+              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryRef (\count -> (count + 1, ()))
+              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqRef (\count -> (count + 1, ()))
               }
       config <- mkConfig $ \_job -> do
-        liftIO $ atomicModifyIORef' attemptsRef (\n -> (n + 1, ()))
+        liftIO $ atomicModifyIORef' attemptsRef (\count -> (count + 1, ()))
         throwRetryable "always fails"
 
       let job = setMaxAttempts (Just 2) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "Boundary")
@@ -517,8 +517,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       dlqCalls <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryCalls (\n -> (n + 1, ()))
-              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqCalls (\n -> (n + 1, ()))
+              { onJobRetry = \_ _ -> liftIO $ atomicModifyIORef' retryCalls (\count -> (count + 1, ()))
+              , onJobFailedAndMovedToDLQ = \_ _ -> liftIO $ atomicModifyIORef' dlqCalls (\count -> (count + 1, ()))
               }
       config <- mkConfig $ \_job -> throwPermanent "Unrecoverable error"
 
@@ -534,10 +534,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         attempts (DLQ.jobSnapshot (head dlqJobs)) `shouldBe` 1
 
     it "heartbeat keeps leases alive when every worker holds a long transaction" $ \env -> do
-      -- workerCnt held below the shared pool size so heartbeat queries are not
-      -- starved by the long-held handler transactions.
+      -- workerCnt stays below the shared pool size, leaving connections for
+      -- heartbeat queries.
       let workerCnt = 3
-      let jobNames = ["long-" <> T.pack (show @Int i) | i <- [1 .. workerCnt]]
+      let jobNames = ["long-" <> T.pack (show @Int index) | index <- [1 .. workerCnt]]
       runM env $ traverse_ (\name -> void $ HL.insertJob (defaultJob (mkSimple name))) jobNames
       config <- mkConfig $ \_job -> liftIO $ threadDelay 10_000_000
 
@@ -564,7 +564,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let handler (job :| _) cbs = ack cbs job
           hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (primaryKey job : seen, ())
               }
       void $ runM env $ HL.insertJob (defaultJob (mkSimple "ManualAckSuccess"))
       config <- mkBatchedConfig 1 1 handler
@@ -584,7 +584,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             ack cbs job
           hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (primaryKey job : seen, ())
               }
       void $ runM env $ HL.insertJob (defaultJob (mkSimple "ManualReclaimed"))
       config <- mkBatchedConfig 1 1 handler
@@ -600,11 +600,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "ackWith and ackAllWith store each job's result on its archive row" $ \env -> do
       let handler jobs cbs = do
             let (single, batch) = partition ((== mkSimple "aw-1") . payload) (toList jobs)
-            traverse_ (\j -> ackWith cbs j (Just ["first"])) single
-            ackAllWith cbs (map (\j -> (j, Just ["rest"])) batch)
+            traverse_ (\job -> ackWith cbs job (Just ["first"])) single
+            ackAllWith cbs (map (\job -> (job, Just ["rest"])) batch)
       runM env $
         traverse_
-          (\n -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "aw") $ defaultJob (mkSimple n)))
+          (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ setGroupKey (Just "aw") $ defaultJob (mkSimple name)))
           ["aw-1", "aw-2", "aw-3"]
       config <- mkBatchedConfig 1 3 handler
 
@@ -612,7 +612,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         waitUntil 10_000 $ (== 0) <$> runM env (HL.countJobs @payload)
 
       arch <- runM env $ HL.listArchiveJobs @payload 100 0
-      let resultFor p = Archive.archivedResult =<< find ((== mkSimple p) . payload . Archive.jobSnapshot) arch
+      let resultFor name = Archive.archivedResult =<< find ((== mkSimple name) . payload . Archive.jobSnapshot) arch
       resultFor "aw-1" `shouldBe` Just (toJSON ["first" :: Text])
       resultFor "aw-2" `shouldBe` Just (toJSON ["rest" :: Text])
       resultFor "aw-3" `shouldBe` Just (toJSON ["rest" :: Text])
@@ -623,11 +623,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       activeRef <- newIORef (0 :: Int)
       maxActiveRef <- newIORef (0 :: Int)
       config <- mkConfig $ \job -> do
-        active <- liftIO $ atomicModifyIORef' activeRef $ \n -> let n' = n + 1 in (n', n')
+        active <- liftIO $ atomicModifyIORef' activeRef $ \count -> let count' = count + 1 in (count', count')
         liftIO $ atomicModifyIORef' maxActiveRef $ \maxN -> (max maxN active, ())
         liftIO $ threadDelay 200_000
         liftIO $ atomicModifyIORef' orderRef $ \order -> (payload job : order, ())
-        liftIO $ atomicModifyIORef' activeRef $ \n -> (n - 1, ())
+        liftIO $ atomicModifyIORef' activeRef $ \count -> (count - 1, ())
       let jobs =
             [ setGroupKey (Just "g1") $ defaultJob (mkSimple "First")
             , setGroupKey (Just "g1") $ defaultJob (mkSimple "Second")
@@ -651,7 +651,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobClaimed = \job startTime -> liftIO $ atomicModifyIORef' claimedRef $ \jobs -> ((primaryKey job, startTime) : jobs, ())
-              , onJobSuccess = \_ startTime _ -> liftIO $ atomicModifyIORef' successRef $ \ts -> (startTime : ts, ())
+              , onJobSuccess = \_ startTime _ -> liftIO $ atomicModifyIORef' successRef $ \times -> (startTime : times, ())
               }
       config <- mkConfig $ \_job -> pure ()
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
@@ -697,7 +697,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             defaultObservabilityHooks
               { onJobFailure = \job _err startTime endTime ->
                   liftIO $ atomicModifyIORef' failureRef $ \results -> ((primaryKey job, startTime, endTime) : results, ())
-              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successRef (\n -> (n + 1, ()))
+              , onJobSuccess = \_ _ _ -> liftIO $ atomicModifyIORef' successRef (\count -> (count + 1, ()))
               }
       config <- mkConfig $ \_job -> do
         liftIO $ threadDelay 200_000
@@ -745,7 +745,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobRetry = \job backoff ->
-                  liftIO $ atomicModifyIORef' retryRef $ \rs -> ((primaryKey job, backoff) : rs, ())
+                  liftIO $ atomicModifyIORef' retryRef $ \seen -> ((primaryKey job, backoff) : seen, ())
               }
       config <- mkConfig $ \_job -> throwRetryable "retry me"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
@@ -764,7 +764,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobFailedAndMovedToDLQ = \errMsg job ->
-                  liftIO $ atomicModifyIORef' dlqRef $ \rs -> ((errMsg, primaryKey job) : rs, ())
+                  liftIO $ atomicModifyIORef' dlqRef $ \seen -> ((errMsg, primaryKey job) : seen, ())
               }
       config <- mkConfig $ \_job -> throwRetryable "always fails"
       let configWithHooks = config {observabilityHooks = hooks, workerCount = 1, pollInterval = 0.1}
@@ -851,7 +851,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "retries entire batch on failure" $ \env -> do
       attemptsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            atts <- liftIO $ atomicModifyIORef' attemptsRef $ \n -> (n + 1, n + 1)
+            atts <- liftIO $ atomicModifyIORef' attemptsRef $ \count -> (count + 1, count + 1)
             if atts < 2 then throwRetryable "Batch failed!" else traverse_ (ack cbs) jobs
       let jobs =
             [ setMaxAttempts (Just 3) $ setGroupKey (Just "g1") $ defaultJob (mkSimple "G1-1")
@@ -912,12 +912,12 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       seenRef <- newIORef ([] :: [[payload]])
       completedRef <- newIORef ([] :: [payload])
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callCountRef $ \c -> (c + 1, c + 1)
-            liftIO $ atomicModifyIORef' seenRef $ \bs -> (map payload (toList jobs) : bs, ())
-            let finish j = do
-                  ack cbs j
-                  liftIO $ atomicModifyIORef' completedRef $ \xs -> (payload j : xs, ())
-            if n == 1
+            call <- liftIO $ atomicModifyIORef' callCountRef $ \count -> (count + 1, count + 1)
+            liftIO $ atomicModifyIORef' seenRef $ \batches -> (map payload (toList jobs) : batches, ())
+            let finish job = do
+                  ack cbs job
+                  liftIO $ atomicModifyIORef' completedRef $ \seen -> (payload job : seen, ())
+            if call == 1
               then do
                 traverse_ finish (filter ((== mkSimple "G1-1") . payload) (toList jobs))
                 throwNack
@@ -938,7 +938,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           completed <- readIORef completedRef
           pure $ all (`elem` completed) names
         seen <- readIORef seenRef
-        let occurrences p = length (filter (p `elem`) seen)
+        let occurrences name = length (filter (name `elem`) seen)
         occurrences (mkSimple "G1-1") `shouldBe` 1
         occurrences (mkSimple "G1-2") `shouldSatisfy` (>= 2)
         occurrences (mkSimple "G1-3") `shouldSatisfy` (>= 2)
@@ -946,8 +946,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "throwNack in single-job mode reprocesses without recording a failure" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       config <- mkConfig $ \_job -> do
-        n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-        when (n == 1) throwNack
+        call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+        when (call == 1) throwNack
       void $ runM env $ HL.insertJob (defaultJob (mkSimple "tn-single"))
 
       withAsync
@@ -996,9 +996,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobFailure = \job _ _ _ ->
-                  liftIO $ atomicModifyIORef' failuresRef $ \fs -> (primaryKey job : fs, ())
+                  liftIO $ atomicModifyIORef' failuresRef $ \seen -> (primaryKey job : seen, ())
               , onJobSuccess = \job _ _ ->
-                  liftIO $ atomicModifyIORef' successRef $ \ss -> (primaryKey job : ss, ())
+                  liftIO $ atomicModifyIORef' successRef $ \seen -> (primaryKey job : seen, ())
               }
       let batchHandler jobs cbs = do
             traverse_ (ack cbs) (take 2 (toList jobs))
@@ -1045,7 +1045,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       successRef <- newIORef ([] :: [Int64])
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (primaryKey job : seen, ())
               }
       let batchHandler jobs cbs = ackAll cbs (toList jobs)
       let jobs =
@@ -1068,11 +1068,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       successRef <- newIORef ([] :: [payload])
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
               }
       let batchHandler jobs cbs =
             traverse_
-              (\j -> if payload j == mkSimple "fp-bad" then failPermanent cbs j "bad input" else ack cbs j)
+              (\job -> if payload job == mkSimple "fp-bad" then failPermanent cbs job "bad input" else ack cbs job)
               (toList jobs)
       let jobs =
             [ setGroupKey (Just "fp") $ defaultJob (mkSimple "fp-good1")
@@ -1092,8 +1092,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "failRetry callback retries a job and DLQs it at its maxAttempts" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
-            traverse_ (\j -> failRetry cbs j "transient") (toList jobs)
+            liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, ()))
+            traverse_ (\job -> failRetry cbs job "transient") (toList jobs)
       let jobs = [setMaxAttempts (Just 2) $ setGroupKey (Just "fr") $ defaultJob (mkSimple "fr-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1111,8 +1111,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "nack callback leaves a job to be reprocessed with no failure" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-            if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            if call == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
       let jobs = [setGroupKey (Just "nk") $ defaultJob (mkSimple "nk-job")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1128,12 +1128,12 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       callsRef <- newIORef (0 :: Int)
       seenAttemptsRef <- newIORef (Nothing :: Maybe Int)
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-            let (j :| _) = jobs
-            if n == 1
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            let (firstJob :| _) = jobs
+            if call == 1
               then traverse_ (nack cbs) (toList jobs)
               else do
-                liftIO $ writeIORef seenAttemptsRef (Just (fromIntegral (attempts j)))
+                liftIO $ writeIORef seenAttemptsRef (Just (fromIntegral (attempts firstJob)))
                 traverse_ (ack cbs) (toList jobs)
       let jobs = [setGroupKey (Just "nka") $ defaultJob (mkSimple "nk-attempts")]
       runM env $ traverse_ HL.insertJob jobs
@@ -1144,7 +1144,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         $ \_ -> do
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           -- The claim on call 1 set attempts to 1. The nack gave that attempt
-          -- back, so the reclaim on call 2 sees attempts == 1 again, not 2.
+          -- back. The reclaim on call 2 sees attempts == 1 again.
           seen <- readIORef seenAttemptsRef
           seen `shouldBe` Just 1
 
@@ -1153,11 +1153,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       callsRef <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \js -> (primaryKey job : js, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (primaryKey job : seen, ())
               }
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-            if n == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            if call == 1 then traverse_ (nack cbs) (toList jobs) else traverse_ (ack cbs) (toList jobs)
       let jobs = [setGroupKey (Just "nks") $ defaultJob (mkSimple "nk-success")]
       runM env $ traverse_ HL.insertJob jobs
       config <- mkBatchedConfig 1 10 batchHandler
@@ -1178,13 +1178,13 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       callsRef <- newIORef (0 :: Int)
       let hooks =
             defaultObservabilityHooks
-              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+              { onJobSuccess = \job _ _ -> liftIO $ atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
               }
-      let isNacked j = payload j == mkSimple "hb-nacked"
+      let isNacked job = payload job == mkSimple "hb-nacked"
           batchHandler jobs cbs = do
-            liftIO $ atomicModifyIORef' callsRef (\n -> (n + 1, ()))
+            liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, ()))
             traverse_ (nack cbs) (filter isNacked (toList jobs))
-            -- Outlast a heartbeat tick, which the nack's given-back attempt reads as a steal.
+            -- Outlast a heartbeat tick. The tick reads the nack's given-back attempt as a steal.
             liftIO $ threadDelay 1_500_000
             traverse_ (ack cbs) (filter (not . isNacked) (toList jobs))
       let jobs =
@@ -1210,7 +1210,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         readIORef callsRef `shouldReturn` 1
 
     it "keeps a bulk-acked batch successful across a heartbeat tick" $ \env -> do
-      -- Window 1. ackAll deletes every row at once, so a tick during the success
+      -- Window 1. ackAll deletes every row at once. A tick during the success
       -- hooks finds them gone.
       successRef <- newIORef ([] :: [payload])
       unavailableRef <- newIORef ([] :: [payload])
@@ -1218,9 +1218,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             defaultObservabilityHooks
               { onJobSuccess = \job _ _ -> liftIO $ do
                   threadDelay 400_000
-                  atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+                  atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
               , onJobUnavailable = \job _ ->
-                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
               }
           batchHandler jobs cbs = ackAll cbs (toList jobs)
       let jobs =
@@ -1256,11 +1256,11 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobSuccess = \job _ _ ->
-                  liftIO $ atomicModifyIORef' successRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' successRef $ \seen -> (payload job : seen, ())
               , onJobUnavailable = \job _ ->
-                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
               , onJobCancelled = \job _ ->
-                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' cancelledRef $ \seen -> (payload job : seen, ())
               }
           batchHandler jobs cbs = do
             traverse_ (ack cbs) (find ((== mkSimple "fca-done") . payload) jobs)
@@ -1304,15 +1304,15 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobRetry = \job _ ->
-                  liftIO $ atomicModifyIORef' retriedRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' retriedRef $ \seen -> (payload job : seen, ())
               , onJobUnavailable = \job _ ->
-                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
               , onJobCancelled = \job _ ->
-                  liftIO $ atomicModifyIORef' cancelledRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' cancelledRef $ \seen -> (payload job : seen, ())
               }
           batchHandler jobs cbs = do
             traverse_
-              (\j -> failRetry cbs j "transient")
+              (\job -> failRetry cbs job "transient")
               (find ((== mkSimple "fcr-retried") . payload) jobs)
             liftIO $ atomicModifyIORef' failedRef (const (True, ()))
             liftIO $ threadDelay 10_000_000
@@ -1331,7 +1331,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
                 , visibilityTimeout = 10
                 , jobHeartbeatInterval = 0.2
                 , observabilityHooks = hooks
-                , -- Parks the retry past the test, so the pool cannot take it again.
+                , -- Parks the retry past the test.
                   backoffStrategy = Constant 60
                 , jitter = NoJitter
                 }
@@ -1346,7 +1346,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
 
       readIORef retriedRef >>= (`shouldBe` [mkSimple "fcr-retried"])
       readIORef cancelledRef >>= (`shouldBe` [mkSimple "fcr-cancelled"])
-      -- The retry is written and recorded, so the finalizer has nothing to re-settle.
+      -- The retry is written and recorded. The finalizer has nothing to re-settle.
       readIORef unavailableRef >>= (`shouldBe` [])
 
     it "reports a nack the claim no longer covers" $ \env -> do
@@ -1354,10 +1354,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobUnavailable = \job _ ->
-                  liftIO $ atomicModifyIORef' unavailableRef $ \xs -> (payload job : xs, ())
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
               }
           batchHandler jobs cbs = do
-            -- Lapse the lease and let the next claim take the token, so the nack
+            -- Lapse the lease and let the next claim take the token. The nack then
             -- matches no row.
             traverse_ (void . HL.setVisibilityTimeout 0) (toList jobs)
             void (HL.claimNextVisibleJobs @payload 10 60)
@@ -1376,8 +1376,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "a thrown JobGoneException skips retry and leaves the job to reprocess" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-            if n == 1
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            if call == 1
               then throwJobGone "stolen mid-batch"
               else traverse_ (ack cbs) (toList jobs)
       let jobs = [setGroupKey (Just "st") $ defaultJob (mkSimple "stolen-job")]
@@ -1387,8 +1387,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       withAsync
         (runM env $ runWorkerPool config {pollInterval = 0.1, visibilityTimeout = 2, jobHeartbeatInterval = 1})
         $ \_ -> do
-          -- The steal skips retry, not a failure, so the job reprocesses and the
-          -- second pass acks it. It never lands in the DLQ.
+          -- The steal skips retry. The job reprocesses and the second pass acks
+          -- it. It never lands in the DLQ.
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
           dlq <- runM env (HL.listDLQJobs 100 0) :: IO [DLQ.DLQJob payload]
@@ -1397,8 +1397,8 @@ workerSpec mkSimple mkFailing mkHandler runM = do
     it "an outer rollback after ack reprocesses the job" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       let batchHandler jobs cbs = do
-            n <- liftIO $ atomicModifyIORef' callsRef (\c -> (c + 1, c + 1))
-            if n == 1
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            if call == 1
               then withDbTransaction $ do
                 traverse_ (ack cbs) (toList jobs)
                 throwRetryable "rolling back the ack"
@@ -1420,7 +1420,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           $ defaultJob (mkSimple "ct-root")
             <~~ (defaultJob (mkSimple "ct-c1") :| [defaultJob (mkSimple "ct-c2")])
       let rootId = primaryKey root
-      let batchHandler jobs cbs = traverse_ (\j -> cancelTree cbs j "abort") (toList jobs)
+      let batchHandler jobs cbs = traverse_ (\job -> cancelTree cbs job "abort") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
 
       withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
@@ -1435,7 +1435,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
           $ defaultJob (mkSimple "cb-root")
             <~~ (defaultJob (mkSimple "cb-c1") :| [defaultJob (mkSimple "cb-c2")])
       let rootId = primaryKey root
-      let batchHandler jobs cbs = traverse_ (\j -> cancelBranch cbs j "branch failed") (toList jobs)
+      let batchHandler jobs cbs = traverse_ (\job -> cancelBranch cbs job "branch failed") (toList jobs)
       config <- mkBatchedConfig 1 10 batchHandler
 
       withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
@@ -1509,7 +1509,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         length batches `shouldBe` 3
         let batchSizes = map length batches
         batchSizes `shouldMatchList` [2, 2, 1]
-        let g1Batch = filter (\b -> mkSimple "G1-1" `elem` b) batches
+        let g1Batch = filter (\batch -> mkSimple "G1-1" `elem` batch) batches
         length g1Batch `shouldBe` 1
         head g1Batch `shouldMatchList` [mkSimple "G1-1", mkSimple "G1-2"]
 
@@ -1538,9 +1538,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
             , mkSimple "tc-leaf2"
             ]
       jobs <- runM env $ HL.listJobs @payload 100 0
-      traverse_ (\p -> map payload jobs `shouldNotContain` [p]) treePayloads
+      traverse_ (\treePayload -> map payload jobs `shouldNotContain` [treePayload]) treePayloads
       dlqJobs <- runM env $ HL.listDLQJobs @payload 100 0
-      traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) treePayloads
+      traverse_ (\treePayload -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [treePayload]) treePayloads
 
     it "reports each job of a force-cancelled batch exactly once" $ \env -> do
       cancelledRef <- newIORef ([] :: [Int64])
@@ -1548,7 +1548,7 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       let hooks =
             defaultObservabilityHooks
               { onJobCancelled = \job _ ->
-                  liftIO $ atomicModifyIORef' cancelledRef (\s -> (primaryKey job : s, ()))
+                  liftIO $ atomicModifyIORef' cancelledRef (\seen -> (primaryKey job : seen, ()))
               }
           handler jobs _cbs = do
             liftIO $ atomicModifyIORef' startedRef (\_ -> (length jobs, ()))
@@ -1598,10 +1598,10 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       readIORef rootProcessedRef `shouldReturn` True
       dlqJobs <- runM env $ HL.listDLQJobs @payload 100 0
       let allPayloads = [mkSimple "bc-root", mkSimple "bc-mid", mkSimple "bc-leaf1", mkSimple "bc-leaf2"]
-      traverse_ (\p -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [p]) allPayloads
+      traverse_ (\treePayload -> map (payload . DLQ.jobSnapshot) dlqJobs `shouldNotContain` [treePayload]) allPayloads
   where
     mkConfig :: (JobRead payload -> m ()) -> IO (WorkerConfig m payload)
-    mkConfig h = transactionalWorkerConfig 10 (mkHandler (\job -> h job >> pure (Nothing :: Maybe [Text])))
+    mkConfig action = transactionalWorkerConfig 10 (mkHandler (\job -> action job >> pure (Nothing :: Maybe [Text])))
     mkBatchedConfig
       :: Int
       -> Int
@@ -1609,9 +1609,9 @@ workerSpec mkSimple mkFailing mkHandler runM = do
       -> IO (WorkerConfig m payload)
     mkBatchedConfig = defaultBatchedWorkerConfig
 
--- | Env-owned LISTEN hub test suite, instantiated for each backend. A high
--- @pollInterval@ makes the NOTIFY the only thing that could wake the dispatcher
--- in time, so completion proves the listener fired.
+-- | Env-owned LISTEN hub test suite, instantiated for each backend. Under a high
+-- @pollInterval@ only the NOTIFY can wake the dispatcher in time. Completion
+-- proves the listener fired.
 listenerSpec
   :: forall payload m env
    . ( QueueOperation m payload
@@ -1719,11 +1719,11 @@ listenerSpec schema connStr mkPayload mkEnv mkEnvPollOnly destroyEnv mkHandler r
   where
     counting :: IORef Int -> JobRead payload -> m ()
     counting ref _job = liftIO (bumpRef ref)
-    withSharedListener env k = do
+    withSharedListener env continue = do
       mListener <- runM env getListener
       case mListener of
         Nothing -> expectationFailure "expected a shared listener, got poll-only"
-        Just listener -> k listener
+        Just listener -> continue listener
 
 -- | A hub logger that swallows warn and error output.
 quietHubLog :: Listen.HubLog
@@ -1744,7 +1744,7 @@ bumpNotif :: IORef Int -> Listen.Notification -> IO ()
 bumpNotif ref = const (bumpRef ref)
 
 bumpRef :: IORef Int -> IO ()
-bumpRef ref = atomicModifyIORef' ref (\n -> (n + 1, ()))
+bumpRef ref = atomicModifyIORef' ref (\count -> (count + 1, ()))
 
 -- | Count distinct backends holding a LISTEN on any of this schema's channels.
 listenerConnectionCount :: ByteString -> Text -> IO Int
@@ -1777,8 +1777,8 @@ killListener connStr schema =
 
 -- | Env-owned LISTEN hub test suite for two queues sharing one env, one worker
 -- pool per queue. Each queue's job-arrival channel is derived from its table
--- name, so these check that a shared hub wakes each pool for its own queue and
--- never spuriously for the other's jobs. The registry must map @payloadA@ to the
+-- name. These check that a shared hub wakes each pool for its own queue only.
+-- The registry must map @payloadA@ to the
 -- @tableA@ queue and @payloadB@ to @tableB@.
 multiQueueListenerSpec
   :: forall payloadA payloadB m env
@@ -1870,8 +1870,8 @@ waitUntil timeoutMs check = go (max 1 (timeoutMs `div` 100))
   where
     go :: (HasCallStack) => Int -> IO ()
     go 0 = expectationFailure "waitUntil: timed out waiting for condition"
-    go n = do
-      ok <- check
-      unless ok $ do
+    go remaining = do
+      satisfied <- check
+      unless satisfied $ do
         threadDelay 100_000
-        go (n - 1)
+        go (remaining - 1)

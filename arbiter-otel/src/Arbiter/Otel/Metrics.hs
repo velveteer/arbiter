@@ -61,12 +61,12 @@ data ArbiterMeters = ArbiterMeters
 
 -- | Arbiter's instrumentation scope, shared by every meter the project registers.
 arbiterMeter :: MeterProvider -> IO Meter
-arbiterMeter mp = getMeter mp "arbiter"
+arbiterMeter meterProvider = getMeter meterProvider "arbiter"
 
 -- | Create the instruments on a meter provider.
 newArbiterMeters :: MeterProvider -> IO ArbiterMeters
-newArbiterMeters mp = do
-  meter <- arbiterMeter mp
+newArbiterMeters meterProvider = do
+  meter <- arbiterMeter meterProvider
   let counter name desc =
         meterCreateCounterInt64 meter (Name.metricName name) Nothing (Just desc) defaultAdvisoryParameters
   ArbiterMeters
@@ -82,7 +82,7 @@ newArbiterMeters mp = do
       (Just "Seconds a job spent in the handler (a batched pool records its batch's span for each job)")
       durationBuckets
 
--- | Second-scale histogram bounds, the SDK default ladder being millisecond-shaped.
+-- | Second-scale histogram bounds.
 durationBuckets :: AdvisoryParameters
 durationBuckets =
   defaultAdvisoryParameters
@@ -91,58 +91,56 @@ durationBuckets =
 
 -- | Observability hooks recording one queue's jobs to the instruments.
 otelHooks :: forall m payload. (HasKind payload, MonadIO m) => ArbiterMeters -> Text -> ObservabilityHooks m payload
-otelHooks ms queue =
+otelHooks meterSet queue =
   defaultObservabilityHooks
     { onJobClaimed = \job _ -> liftIO $ do
-        counterAdd (claimed ms) 1 (queueAttr (labelOf job))
+        counterAdd (claimed meterSet) 1 (queueAttr (labelOf job))
         traverse_ (admissionThrough rateLimitKind . rlkPrefix) (jobRateLimitKey (payloadKeys job))
         traverse_ (admissionThrough concurrencyKind . ckPrefix) (jobConcurrencyKey (payloadKeys job))
     , onJobSuccess = \job start end -> liftIO $ do
         let attributes = successAttr (labelOf job)
-        counterAdd (processed ms) 1 attributes
-        histogramRecord (duration ms) (secs start end) attributes
-    , onJobFailure = \job _ start end -> liftIO (histogramRecord (duration ms) (secs start end) (failureAttr (labelOf job)))
-    , onJobRetry = \job _ -> liftIO (counterAdd (retried ms) 1 (queueAttr (labelOf job)))
-    , onJobFailedAndMovedToDLQ = \_ job -> liftIO (counterAdd (processed ms) 1 (dlqAttr (labelOf job)))
-    , onJobCancelled = \job _ -> liftIO (counterAdd (processed ms) 1 (cancelledAttr (labelOf job)))
-    , onJobUnavailable = \job _ -> liftIO (counterAdd (processed ms) 1 (unavailableAttr (labelOf job)))
+        counterAdd (processed meterSet) 1 attributes
+        histogramRecord (duration meterSet) (secs start end) attributes
+    , onJobFailure = \job _ start end -> liftIO (histogramRecord (duration meterSet) (secs start end) (failureAttr (labelOf job)))
+    , onJobRetry = \job _ -> liftIO (counterAdd (retried meterSet) 1 (queueAttr (labelOf job)))
+    , onJobFailedAndMovedToDLQ = \_ job -> liftIO (counterAdd (processed meterSet) 1 (dlqAttr (labelOf job)))
+    , onJobCancelled = \job _ -> liftIO (counterAdd (processed meterSet) 1 (cancelledAttr (labelOf job)))
+    , onJobUnavailable = \job _ -> liftIO (counterAdd (processed meterSet) 1 (unavailableAttr (labelOf job)))
     }
   where
-    -- A clock stepped backwards must not subtract from the histogram's sum.
+    -- A clock stepped backwards records zero.
     secs start end = case nominalDiffTimeToSeconds (diffUTCTime end start) of
-      MkFixed ps -> max 0 (fromInteger ps / 1e12)
-    -- The declared labels, never the stored one on its own: a payload labelling by
-    -- tenant would be unbounded.
+      MkFixed picos -> max 0 (fromInteger picos / 1e12)
+    -- The declared labels.
     declared = Set.fromList (kindsFor @payload)
     labelOf job = mfilter (`Set.member` declared) (jobKind (payloadKeys job))
-    -- One attribute set per label, built once per hook set rather than per job.
+    -- One attribute set per label, built once per hook set.
     byLabel :: (Maybe Text -> Attributes) -> Maybe Text -> Attributes
     byLabel build = \label -> Map.findWithDefault (build Nothing) label table
       where
         table = Map.fromList [(label, build label) | label <- Nothing : map Just (Set.toList declared)]
-    kindPair = foldMap (\k -> [("kind", k)])
+    kindPair = foldMap (\kind -> [("kind", kind)])
     queueAttr = byLabel (\label -> attrs (("queue", queue) : kindPair label))
-    outcomeAttr o = byLabel (\label -> attrs ([("queue", queue), ("outcome", o)] <> kindPair label))
+    outcomeAttr outcome = byLabel (\label -> attrs ([("queue", queue), ("outcome", outcome)] <> kindPair label))
     successAttr = outcomeAttr "success"
     failureAttr = outcomeAttr "failure"
     dlqAttr = outcomeAttr "dlq"
     cancelledAttr = outcomeAttr "cancelled"
     unavailableAttr = outcomeAttr "unavailable"
-    -- The policy prefix, never the key: a per-tenant suffix would be unbounded.
+    -- The policy prefix.
     admissionThrough policyKind prefix =
-      counterAdd (admitted ms) 1 (attrs [("queue", queue), ("policy_kind", policyKind), ("policy", prefix)])
+      counterAdd (admitted meterSet) 1 (attrs [("queue", queue), ("policy_kind", policyKind), ("policy", prefix)])
 
 -- | Record rows affected by a reaper operation. Schema-wide reaper work has no
 -- queue attribute.
 otelMaintenance :: (MonadIO m) => ArbiterMeters -> MaintenanceOp -> Int64 -> m ()
-otelMaintenance ms op n = liftIO (counterAdd (maintained ms) n (attrs [("op", maintenanceOpName op)]))
+otelMaintenance meterSet operation rowCount = liftIO (counterAdd (maintained meterSet) rowCount (attrs [("op", maintenanceOpName operation)]))
 
 -- | Build an OTel attribute set from text key/value pairs.
 attrs :: [(Text, Text)] -> Attributes
-attrs kvs = unsafeAttributesFromListIgnoringLimits [(k, toAttribute v) | (k, v) <- kvs]
+attrs kvs = unsafeAttributesFromListIgnoringLimits [(key, toAttribute value) | (key, value) <- kvs]
 
--- | The @policy_kind@ attribute for an admission metric. Counters and the
--- gauges so a dashboard can join them.
+-- | The @policy_kind@ attribute for an admission metric, shared by counters and gauges.
 rateLimitKind, concurrencyKind :: Text
 rateLimitKind = "rate_limit"
 concurrencyKind = "concurrency"

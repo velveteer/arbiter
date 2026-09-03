@@ -1,8 +1,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Atomic parent-child job trees. Children run before their suspended
--- finalizer, which becomes claimable when no children remain in the main queue.
+-- | Atomic parent-child job trees. Children run first. Their suspended finalizer
+-- becomes claimable when no children remain in the main queue.
 -- Child results are transient and are deleted when the finalizer is acked.
 -- Finalizers must persist any results that need to outlive the tree.
 module Arbiter.Core.JobTree
@@ -58,8 +58,8 @@ leaf :: JobWrite payload -> JobTree payload
 leaf = Leaf
 
 -- | A finalizer running once no child of it is left in the main queue. Nested rollups
--- do not merge on their own: an intermediate finalizer has to return the merged value
--- itself for results to travel upward.
+-- do not merge on their own. An intermediate finalizer returns the merged value for
+-- results to travel upward.
 --
 -- @
 -- rollup (defaultJob root)
@@ -71,8 +71,8 @@ rollup :: JobWrite payload -> NonEmpty (JobTree payload) -> JobTree payload
 rollup = Finalizer
 
 -- | The empty rollup snapshot @{}@ every finalizer is inserted with. A non-null snapshot
--- is what marks a job as a finalizer, and the value is overwritten with the merged child
--- results before a DLQ move.
+-- marks a job as a finalizer. The value is overwritten with the merged child results
+-- before a DLQ move.
 emptyState :: Value
 emptyState = Object (mempty :: Object)
 
@@ -110,8 +110,8 @@ insertJobTree schemaName tableName tree =
     rootSuspended _ = False
 
     treeWrites :: JobTree payload -> [JobWrite payload]
-    treeWrites (Leaf j) = [j]
-    treeWrites (Finalizer j children) = j : foldMap treeWrites children
+    treeWrites (Leaf job) = [job]
+    treeWrites (Finalizer job children) = job : foldMap treeWrites children
 
     go
       :: Ops.TraceStamp payload
@@ -134,7 +134,7 @@ insertJobTree schemaName tableName tree =
           descendants <- insertChildren (primaryKey inserted) (NE.toList children)
           pure (inserted :| descendants)
       where
-        -- Batch adjacent leaves without reordering them around nested trees.
+        -- Batch adjacent leaves. Nested trees keep their position.
         insertChildren _ [] = pure []
         insertChildren parentPK children'@(Leaf _ : _) = do
           let (leaves, rest) = span isLeaf children'

@@ -3,7 +3,7 @@
 -- | Schema-scoped watermark gates for global tasks (refresh groups, sweep stale
 -- workers). One row per task holding @last_run_at@. 'Arbiter.Core.Operations.runGated'
 -- claims the row with @SELECT ... FOR UPDATE SKIP LOCKED@ once the interval has
--- elapsed, so at most one worker pool runs the task per interval.
+-- elapsed. At most one worker pool runs the task per interval.
 module Arbiter.Core.Gates
   ( arbiterGatesTable
   , arbiterGatesTableName

@@ -13,8 +13,7 @@ import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTableName, arbiter
 import Arbiter.Core.Worker (arbiterWorkersTableName)
 
 -- | Unqualified and unquoted, alongside 'Arbiter.Core.Job.Schema.queueTableNames'.
--- Every schema-wide table belongs here, so a caller that sweeps, scans or resets the
--- schema covers all of them.
+-- Every schema-wide table belongs here.
 sharedArbiterTables :: [TableName]
 sharedArbiterTables =
   [ arbiterGatesTableName

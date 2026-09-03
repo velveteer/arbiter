@@ -27,7 +27,7 @@ import GHC.Generics (Generic)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
--- | Heartbeat-derived health of a worker, orthogonal to its 'paused' flag.
+-- | Heartbeat-derived health of a worker. Independent of its 'paused' flag.
 data WorkerHealth
   = Live
   | Stale

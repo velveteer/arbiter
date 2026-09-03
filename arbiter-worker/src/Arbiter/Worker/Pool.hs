@@ -99,7 +99,7 @@ runWorkerPool config = do
   either (liftIO . E.throwIO . WorkerConfigException) pure (validateWorkerConfig config)
   let workerCap = workerCount config
       queueName = Arb.queueTable @payload @m
-      -- Constant for the pool, so a claim never rebuilds the queue-wide attributes.
+      -- Built once for the pool.
       consumeSpan = consumeSpanFor queueName (poolSpanShape config)
 
   schemaName <- getSchema
@@ -110,7 +110,9 @@ runWorkerPool config = do
 
   tryAny (registerSelf config schemaName queueName)
     >>= either
-      ( \e -> warnEx (logConfig config) "Worker registry insert failed, starting paused" e *> atomically (writePause config True)
+      ( \exception ->
+          warnEx (logConfig config) "Worker registry insert failed, starting paused" exception
+            *> atomically (writePause config True)
       )
       (traverse_ (atomically . writePause config))
 
@@ -164,14 +166,14 @@ runWorkerPool config = do
 
     (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
     case res of
-      Left e ->
-        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx e
+      Left exception ->
+        lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx exception
       Right _ -> pure ()
 
     lift $ shutdownPool config schemaName workQueue busyWorkerCount
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
--- alongside the pool and never gates startup.
+-- alongside the pool. Startup does not wait on it.
 publishListenerReady :: (MonadUnliftIO m) => WorkerConfig n payload -> STM Bool -> m ()
 publishListenerReady config ready =
   atomically $ do
@@ -182,7 +184,7 @@ publishListenerReady config ready =
 withLivenessFile :: (MonadUnliftIO m) => WorkerConfig n payload -> ContT r m ()
 withLivenessFile config =
   traverse_
-    (\path -> ContT $ \k -> k () `finally` (void . tryAny . liftIO . removeFile) path)
+    (\path -> ContT $ \continue -> continue () `finally` (void . tryAny . liftIO . removeFile) path)
     (livenessFile config)
 
 -- | Re-insert the worker's registry row, returning the effective paused state for the
@@ -299,11 +301,11 @@ heartbeatLoop config schemaName queueName = do
         tryLog logCfg Warning "Worker registry row missing, re-registering"
         tryWarnWith logCfg "Worker re-registration failed" Nothing (registerSelf config schemaName queueName)
           >>= traverse_ (reconcile epoch)
-    reconcile epoch rp =
+    reconcile epoch registryPaused =
       STM.atomically $ do
         shutting <- readShuttingDown
-        unless shutting $ writePauseIfCurrent config epoch rp
+        unless shutting $ writePauseIfCurrent config epoch registryPaused
 
 -- | @[]@ when the list is empty, else a singleton holding @act@'s result.
 unlessNull :: (Applicative f) => [a] -> f b -> f [b]
-unlessNull xs act = if null xs then pure [] else (: []) <$> act
+unlessNull items act = if null items then pure [] else (: []) <$> act

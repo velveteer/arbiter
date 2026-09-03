@@ -23,9 +23,7 @@ import UnliftIO (MonadUnliftIO, tryAny)
 
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), LogLevel (..), tryLog, warnEx)
 
--- | Augment a 'LogConfig' so every message it emits carries the jobs' fields.
--- The context is folded into 'additionalContext', which is evaluated only when a
--- message is actually emitted, so the happy path pays nothing.
+-- | Add the jobs' fields to every message a 'LogConfig' emits.
 withJobContext :: LogConfig -> NonEmpty (Job.JobRead payload) -> LogConfig
 withJobContext config jobs
   | loggingActive config = config {additionalContext = (buildJobContext jobs <>) <$> additionalContext config}
@@ -39,7 +37,7 @@ withJobContextOne config job = withJobContext config (job :| [])
 withJobContextList :: LogConfig -> [Job.JobRead payload] -> LogConfig
 withJobContextList config = maybe config (withJobContext config) . nonEmpty
 
--- | Building job context is wasted work when logs are discarded.
+-- | True when some destination emits messages.
 loggingActive :: LogConfig -> Bool
 loggingActive = destinationActive . logDestination
 
@@ -72,7 +70,9 @@ runHook
   -> m ()
 runHook cfg hookName action =
   tryAny action
-    >>= either (\e -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx e) pure
+    >>= either
+      (\exception -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx exception)
+      pure
 
 -- | Run an action and log a warning if it fails.
 tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()
@@ -81,4 +81,4 @@ tryWarn logCfg label act = tryWarnWith logCfg label () (void act)
 -- | Run an action and return a fallback value if it fails.
 tryWarnWith :: (MonadUnliftIO m) => LogConfig -> Text -> a -> m a -> m a
 tryWarnWith logCfg label fallback act =
-  tryAny act >>= either (\e -> fallback <$ warnEx logCfg label e) pure
+  tryAny act >>= either (\exception -> fallback <$ warnEx logCfg label exception) pure

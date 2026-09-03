@@ -42,7 +42,7 @@ claimAckLoop
   -> Int
   -- ^ Max consecutive empty claims before giving up
   -> (a -> IO ())
-  -- ^ Per-job action (typically ack, optionally recording IDs)
+  -- ^ Per-job action
   -> IO ()
 claimAckLoop claim maxStreak onJob = go 0
   where
@@ -63,12 +63,11 @@ findDuplicates :: (Ord a) => [a] -> [a]
 findDuplicates = go Set.empty Set.empty
   where
     go _ dups [] = Set.toList dups
-    go seen dups (x : xs)
-      | Set.member x seen = go seen (Set.insert x dups) xs
-      | otherwise = go (Set.insert x seen) dups xs
+    go seen dups (item : rest)
+      | Set.member item seen = go seen (Set.insert item dups) rest
+      | otherwise = go (Set.insert item seen) dups rest
 
--- | Install the gap-free HOL violation detector on a raw connection. The trigger
--- definition is shared with the state-machine suite.
+-- | Install the gap-free HOL violation detector on a raw connection.
 installHolDetector :: PG.Connection -> Text -> Text -> IO ()
 installHolDetector conn schemaName tableName =
   traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holInstallSql schemaName tableName)
@@ -88,12 +87,8 @@ removeHolDetector :: PG.Connection -> Text -> Text -> IO ()
 removeHolDetector conn schemaName tableName =
   traverse_ (void . PG.execute_ conn . fromString . T.unpack) (holRemoveSql schemaName tableName)
 
--- | Parameterized concurrency test suite.
---
--- IMPORTANT: These tests require a connection pool with multiple connections (at least 10)
--- to properly test concurrent access patterns.
---
--- The payload type must be registered in the registry and satisfy JobPayload constraints.
+-- | Parameterized concurrency test suite. These tests need a connection pool of
+-- at least 10 connections.
 concurrencySpec
   :: forall payload m env
    . ( JobPayload payload
@@ -103,7 +98,7 @@ concurrencySpec
   => (Text -> payload)
   -- ^ Constructor for a simple test message payload
   -> (forall a. env -> m a -> IO a)
-  -- ^ Runner function to execute monad actions (e.g., runSimpleDb env or runOrvilleTest env)
+  -- ^ Runner for monad actions
   -> SpecWith env
 concurrencySpec mkMessage runM = do
   describe "Heartbeat Visibility Across Connections" $ do
@@ -116,13 +111,11 @@ concurrencySpec mkMessage runM = do
       length claimed1 `shouldBe` 1
       let job = head claimed1
 
-      -- Worker A extends visibility to 60 seconds (simulating heartbeat)
-      -- This happens on a connection from the pool
+      -- Worker A extends visibility to 60 seconds, as a heartbeat.
       rowsUpdated <- runM env (HL.setVisibilityTimeout 60 job)
       rowsUpdated `shouldBe` 1
 
-      -- CRITICAL: Worker B tries to claim immediately after (on different connection from pool)
-      -- This should NOT claim the job because visibility was extended
+      -- Worker B claims on a different pool connection and gets nothing.
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 5) :: IO [JobRead payload]
 
       length claimed2 `shouldBe` 0
@@ -131,7 +124,7 @@ concurrencySpec mkMessage runM = do
       -- Insert a job
       void $ runM env $ HL.insertJob (setGroupKey (Just "heartbeat-timeout-test") $ defaultJob (mkMessage "Timeout"))
 
-      -- Claim with SHORT visibility (2 seconds)
+      -- Claim with a 2 second visibility.
       claimed1 <- runM env (HL.claimNextVisibleJobs 1 2) :: IO [JobRead payload]
       length claimed1 `shouldBe` 1
       let job = head claimed1
@@ -140,10 +133,10 @@ concurrencySpec mkMessage runM = do
       threadDelay 1_000_000
       void $ runM env (HL.setVisibilityTimeout 10 job)
 
-      -- Wait another 2 seconds (now 3 seconds total - past original 2s timeout)
+      -- Wait 2 more seconds, past the original timeout.
       threadDelay 2_000_000
 
-      -- Try to claim - should FAIL because visibility was extended
+      -- The extended visibility blocks a claim.
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 2) :: IO [JobRead payload]
       length claimed2 `shouldBe` 0
 
@@ -154,10 +147,10 @@ concurrencySpec mkMessage runM = do
       length claimed1 `shouldBe` 1
       let job = head claimed1
 
-      -- Set visibility to 0 (make immediately visible)
+      -- Set visibility to 0.
       void $ runM env (HL.setVisibilityTimeout 0 job)
 
-      -- Should be able to claim immediately
+      -- The job is claimable at once.
       claimed2 <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       length claimed2 `shouldBe` 1
 
@@ -167,29 +160,27 @@ concurrencySpec mkMessage runM = do
       inserted <- runM env $ HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))
       let insertedIds = Set.fromList (map primaryKey inserted)
 
-      [c1, c2, c3] <-
+      [claimsA, claimsB, claimsC] <-
         mapConcurrently
           (\_ -> runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload])
           [1 :: Int, 2, 3]
 
-      let raced = map primaryKey (c1 <> c2 <> c3)
+      let raced = map primaryKey (claimsA <> claimsB <> claimsC)
       -- No job claimed twice in the racy pass.
       raced `shouldBe` nub raced
-      -- Drive any jobs missed by the race to completion (claimed jobs hold a
-      -- 60s lease, so a follow-up claim only surfaces the still-unclaimed ones).
+      -- Drain the jobs the race missed. A follow-up claim surfaces the unclaimed ones.
       drainedRef <- newIORef ([] :: [Int64])
-      drainAll (runM env (HL.claimNextVisibleJobs 6 60) :: IO [JobRead payload]) $ \j ->
-        atomicModifyIORef' drainedRef (\acc -> (primaryKey j : acc, ()))
+      drainAll (runM env (HL.claimNextVisibleJobs 6 60) :: IO [JobRead payload]) $ \job ->
+        atomicModifyIORef' drainedRef (\acc -> (primaryKey job : acc, ()))
       drained <- readIORef drainedRef
-      -- Real progress: every inserted job was claimed exactly once across the
-      -- racing workers and the drain.
+      -- Every inserted job was claimed exactly once across the racing workers and the drain.
       let allClaimed = raced <> drained
       allClaimed `shouldBe` nub allClaimed
       Set.fromList allClaimed `shouldBe` insertedIds
 
     it "concurrent workers respect per-group ordering for grouped jobs" $ \env -> do
-      -- 500 iterations: seed a group, race 10 workers to claim + concurrent
-      -- inserts to the same group. Per-group ordering means exactly 1 claim per round.
+      -- Each round seeds a group and races 10 claimers with 2 inserters on the
+      -- same group. Per-group ordering allows at most 1 claim per round.
       let numIterations = 500
           numWorkers = 10
           seedPerRound = 5
@@ -203,11 +194,9 @@ concurrencySpec mkMessage runM = do
         void
           $ runM env
           $ HL.insertJobsBatch (replicate seedPerRound $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "Grouped"))
-        atomicModifyIORef' insertedRef (\n -> (n + seedPerRound + insertersPerRound, ()))
+        atomicModifyIORef' insertedRef (\count -> (count + seedPerRound + insertersPerRound, ()))
 
-        -- Race N workers to claim + 2 concurrent inserters to the same group.
-        -- The INSERT triggers fire concurrently with the claim CTEs,
-        -- exercising the groups row lock contention path.
+        -- Race the claimers and inserters on the same group.
         results <-
           mapConcurrently
             id
@@ -218,24 +207,21 @@ concurrencySpec mkMessage runM = do
                 insertersPerRound
                 (void (runM env $ HL.insertJob $ setGroupKey (Just "hol-stress") $ defaultJob (mkMessage "concurrent")) >> pure [])
 
-        -- Ordering invariant: at most 1 claim per group. totalClaimed == 0 is
-        -- normal when the INSERT trigger's groups row lock causes claims to
-        -- skip the group (FOR UPDATE SKIP LOCKED). totalClaimed > 1 is a
-        -- real ordering violation.
+        -- At most 1 claim per group. A round with no claim is normal when the
+        -- insert trigger holds the groups row lock.
         let totalClaimed = sum (map length results)
         when (totalClaimed > 1) $
-          atomicModifyIORef' violationRef (\n -> (n + 1, ()))
+          atomicModifyIORef' violationRef (\count -> (count + 1, ()))
 
         -- Ack the racy claims, then drain the rest, recording every processed id.
-        let record j = atomicModifyIORef' processedRef (\s -> (Set.insert (primaryKey j) s, ()))
-        forM_ (concat results) $ \j -> record j >> void (runM env (HL.ackJob j))
+        let record job = atomicModifyIORef' processedRef (\acc -> (Set.insert (primaryKey job) acc, ()))
+        forM_ (concat results) $ \job -> record job >> void (runM env (HL.ackJob job))
         drainAll (runM env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead payload]) $
-          \j -> record j >> void (runM env (HL.ackJob j))
+          \job -> record job >> void (runM env (HL.ackJob job))
 
       violations <- readIORef violationRef
       violations `shouldBe` 0
-      -- Total progress: every job inserted across all rounds was claimed and
-      -- acked exactly once, so a zero-progress (nothing ever claimed) run fails.
+      -- Every job inserted across all rounds was claimed and acked exactly once.
       inserted <- readIORef insertedRef
       processed <- readIORef processedRef
       Set.size processed `shouldBe` inserted
@@ -244,27 +230,18 @@ concurrencySpec mkMessage runM = do
       -- Insert a single job
       void $ runM env $ HL.insertJob (setGroupKey (Just "skip-locked-test") $ defaultJob (mkMessage "Single"))
 
-      -- Three workers racing to claim the same job CONCURRENTLY
-      -- This tests that SKIP LOCKED allows workers to skip locked rows without blocking
-      [c1, c2, c3] <-
+      -- Three workers race to claim the same job.
+      [claimsA, claimsB, claimsC] <-
         mapConcurrently
           (\_ -> runM env (HL.claimNextVisibleJobs 2 60) :: IO [JobRead payload])
           [1 :: Int, 2, 3]
 
-      -- CRITICAL: Exactly ONE worker should have claimed it
-      -- Without SKIP LOCKED, workers would block waiting for the lock
-      -- With SKIP LOCKED, workers skip the locked row and return empty
-      let totalClaimed = length c1 + length c2 + length c3
+      -- Exactly one worker claims it.
+      let totalClaimed = length claimsA + length claimsB + length claimsC
       totalClaimed `shouldBe` 1
 
--- | High-contention tests for concurrency defects.
---
--- These tests use high contention and many iterations to maximize the
--- probability of hitting race windows. They stress the system with:
--- - Many concurrent workers (40+)
--- - Large job counts (500+)
--- - Tight timing windows
--- - Real database contention
+-- | High-contention tests for concurrency defects. Many workers, large job
+-- counts, and tight timing windows.
 raceConditionSpec
   :: forall payload m env
    . ( JobPayload payload
@@ -299,8 +276,8 @@ raceConditionSpec mkMessage runM = do
             jobsPerGroup = 10
             numWorkers = 40
 
-        forM_ [1 .. numGroups] $ \(g :: Int) -> do
-          let groupName = "stress-group-" <> T.pack (show g)
+        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+          let groupName = "stress-group-" <> T.pack (show groupIndex)
           void
             $ runM env
             $ HL.insertJobsBatch
@@ -358,7 +335,7 @@ raceConditionSpec mkMessage runM = do
         inserted <- readIORef insertedRef
         claimed <- readIORef claimedRef
 
-        -- No jobs should be lost
+        -- No job is lost.
         Set.size inserted `shouldBe` (numRounds * jobsPerRound)
         claimed `shouldBe` inserted
 
@@ -366,15 +343,14 @@ raceConditionSpec mkMessage runM = do
       it "no duplicate processing with aggressive visibility expiration" $ \env -> do
         let numJobs = 50
             numWorkers = 20
-            visibilityMs = 100 -- 100ms visibility - very aggressive
+            visibilityMs = 100 -- 100ms visibility
         void $ runM env $ HL.insertJobsBatch (replicate numJobs $ defaultJob (mkMessage "timeout-race"))
 
         -- Track which jobs were successfully acked
         ackedRef <- newIORef Set.empty
 
         replicateConcurrently_ numWorkers $
-          -- 50 empty-streak limit (500ms at 10ms each) so workers retry while
-          -- jobs are in-flight with 100ms visibility instead of exiting immediately.
+          -- A 50 empty-streak limit keeps workers retrying while jobs are in flight.
           claimAckLoop (runM env (HL.claimNextVisibleJobs 2 (fromIntegral visibilityMs / 1000)) :: IO [JobRead payload]) 50 $
             \job -> do
               threadDelay (visibilityMs * 500) -- Half the visibility time
@@ -383,14 +359,14 @@ raceConditionSpec mkMessage runM = do
                 atomicModifyIORef' ackedRef (\acc -> (Set.insert (primaryKey job) acc, ()))
 
         acked <- readIORef ackedRef
-        -- All jobs should eventually be acked exactly once
+        -- Every job is acked exactly once.
         Set.size acked `shouldBe` numJobs
 
       it "exactly one ack succeeds per job under reclaim pressure" $ \env -> do
         let numAttempts = 50
             numWorkersPerAttempt = 5
 
-        -- Insert a fresh job per iteration so every round has a real race
+        -- Insert a fresh job per iteration.
         successCounts <- replicateM numAttempts $ do
           void $ runM env $ HL.insertJob (defaultJob (mkMessage "single-race"))
 
@@ -403,13 +379,13 @@ raceConditionSpec mkMessage runM = do
                 case claimed of
                   [] -> pure 0
                   (job : _) -> do
-                    threadDelay 50_000 -- 50ms
+                    threadDelay 50_000
                     rows <- runM env (HL.ackJob job)
                     pure (fromIntegral rows :: Int)
 
           pure (sum results)
 
-        -- Each iteration should have exactly 1 successful ack
+        -- Each iteration has exactly 1 successful ack.
         successCounts `shouldBe` replicate numAttempts 1
 
     describe "Batched Mode Stress" $ do
@@ -418,8 +394,8 @@ raceConditionSpec mkMessage runM = do
             jobsPerGroup = 20
             numWorkers = 25
 
-        forM_ [1 .. numGroups] $ \(g :: Int) -> do
-          let groupName = "batch-stress-" <> T.pack (show g)
+        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+          let groupName = "batch-stress-" <> T.pack (show groupIndex)
           void
             $ runM env
             $ HL.insertJobsBatch
@@ -446,45 +422,45 @@ raceConditionSpec mkMessage runM = do
         gapCount <- newIORef (0 :: Int)
 
         replicateM_ numRounds $ do
-          forM_ [1 .. numGroups] $ \(g :: Int) ->
+          forM_ [1 .. numGroups] $ \(groupIndex :: Int) ->
             void
               $ runM env
               $ HL.insertJobsBatch
-                (replicate jobsPerGroup $ setGroupKey (Just ("split-" <> T.pack (show g))) $ defaultJob (mkMessage "split"))
+                (replicate jobsPerGroup $ setGroupKey (Just ("split-" <> T.pack (show groupIndex))) $ defaultJob (mkMessage "split"))
 
           resultsRef <- newIORef ([] :: [(Int, [(Maybe Text, Int64)])])
           _ <-
             mapConcurrently
-              ( \wid -> do
+              ( \workerId -> do
                   claimed <- concatMap NE.toList <$> runM env (HL.claimNextVisibleJobsBatched 10 3 60) :: IO [JobRead payload]
-                  atomicModifyIORef' resultsRef (\acc -> ((wid, map (\j -> (groupKey j, primaryKey j)) claimed) : acc, ()))
+                  atomicModifyIORef' resultsRef (\acc -> ((workerId, map (\job -> (groupKey job, primaryKey job)) claimed) : acc, ()))
                   forM_ claimed $ \job -> runM env (HL.ackJob job)
               )
               [1 .. numWorkers]
 
-          -- For each group, check that per-worker IDs are contiguous (no gaps).
-          -- Gaps mean another worker interleaved claims from the same group.
+          -- Per-worker ids in each group are contiguous. A gap means another
+          -- worker interleaved claims from the same group.
           results <- readIORef resultsRef
-          let perGroup gk =
+          let perGroup wantedGroup =
                 [ sort ids
                 | (_, jobs) <- results
-                , let ids = [jid | (Just g, jid) <- jobs, g == gk]
+                , let ids = [jobId | (Just groupName, jobId) <- jobs, groupName == wantedGroup]
                 , not (null ids)
                 ]
-              allGks = nub [gk | (_, jobs) <- results, (Just gk, _) <- jobs]
-              hasGaps ids = any (\(a, b) -> b - a /= 1) $ zip ids (drop 1 ids)
+              allGroupKeys = nub [groupName | (_, jobs) <- results, (Just groupName, _) <- jobs]
+              hasGaps ids = any (\(prev, next) -> next - prev /= 1) $ zip ids (drop 1 ids)
               gappedGroups =
-                [ gk
-                | gk <- allGks
-                , any hasGaps (perGroup gk)
+                [ groupName
+                | groupName <- allGroupKeys
+                , any hasGaps (perGroup groupName)
                 ]
 
           when (not (null gappedGroups)) $
-            atomicModifyIORef' gapCount (\n -> (n + length gappedGroups, ()))
+            atomicModifyIORef' gapCount (\count -> (count + length gappedGroups, ()))
 
           -- Drain remaining
           drainAll (concatMap NE.toList <$> runM env (HL.claimNextVisibleJobsBatched 100 20 60) :: IO [JobRead payload]) $
-            \j -> void $ runM env (HL.ackJob j)
+            \job -> void $ runM env (HL.ackJob job)
 
         readIORef gapCount >>= (`shouldBe` 0)
 
@@ -495,8 +471,8 @@ raceConditionSpec mkMessage runM = do
             numBatchedWorkers = 10
             numSingleWorkers = 10
 
-        forM_ [1 .. numGroups] $ \(g :: Int) -> do
-          let groupName = "mixed-mode-" <> T.pack (show g)
+        forM_ [1 .. numGroups] $ \(groupIndex :: Int) -> do
+          let groupName = "mixed-mode-" <> T.pack (show groupIndex)
           void
             $ runM env
             $ HL.insertJobsBatch
@@ -546,5 +522,5 @@ raceConditionSpec mkMessage runM = do
                     pure (fromIntegral rows :: Int)
               pure (sum results)
 
-        -- Each iteration should have exactly 1 successful ack
+        -- Each iteration has exactly 1 successful ack.
         successCounts `shouldBe` replicate numIterations 1

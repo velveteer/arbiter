@@ -43,23 +43,23 @@ data ConcurrencyKeyView = ConcurrencyKeyView
   deriving stock (Eq, Generic, Show)
 
 instance ToJSON ConcurrencyKeyView where
-  toJSON v =
+  toJSON view =
     object
-      [ "key" .= concurrencyKey v
-      , "prefix" .= concurrencyPrefix v
-      , "inFlight" .= inFlight v
-      , "effectiveLimit" .= effectiveLimit v
-      , "fillFraction" .= fillFraction v
+      [ "key" .= concurrencyKey view
+      , "prefix" .= concurrencyPrefix view
+      , "inFlight" .= inFlight view
+      , "effectiveLimit" .= effectiveLimit view
+      , "fillFraction" .= fillFraction view
       ]
 
 instance FromJSON ConcurrencyKeyView where
-  parseJSON = withObject "ConcurrencyKeyView" $ \o ->
+  parseJSON = withObject "ConcurrencyKeyView" $ \obj ->
     ConcurrencyKeyView
-      <$> o .: "key"
-      <*> o .: "prefix"
-      <*> o .: "inFlight"
-      <*> o .: "effectiveLimit"
-      <*> o .:? "fillFraction"
+      <$> obj .: "key"
+      <*> obj .: "prefix"
+      <*> obj .: "inFlight"
+      <*> obj .: "effectiveLimit"
+      <*> obj .:? "fillFraction"
 
 -- | A patch over a pool's override limit. 'Nothing' leaves it unchanged, @Just
 -- Nothing@ clears the override (reverts to the default), @Just (Just v)@ sets it.
@@ -72,8 +72,8 @@ instance ToJSON ConcurrencyPolicyUpdate where
   toJSON = Aeson.genericToJSON patchOptions
   toEncoding = Aeson.genericToEncoding patchOptions
 
--- | Hand-written so a missing key (leave unchanged) is distinguished from an
--- explicit @null@ (clear the override). Plain @.:?@ collapses the two.
+-- | Hand-written. A missing key leaves the field unchanged. An explicit @null@
+-- clears the override.
 instance FromJSON ConcurrencyPolicyUpdate where
-  parseJSON = withObject "ConcurrencyPolicyUpdate" $ \o ->
-    ConcurrencyPolicyUpdate <$> explicitOptionalField o "overrideLimit"
+  parseJSON = withObject "ConcurrencyPolicyUpdate" $ \obj ->
+    ConcurrencyPolicyUpdate <$> explicitOptionalField obj "overrideLimit"

@@ -8,7 +8,7 @@
 -- sweep over a job lifecycle (insert, claim, ack, retry, override, prune,
 -- reconcile), a concurrent never-over-admit check, and a grouped drain-to-empty
 -- check. Each model key is a seeded pool driven through a single suffix. Claims
--- are attributed so the gate engages.
+-- are attributed.
 module Arbiter.Test.ConcurrencyModel
   ( concurrencyModelSpec
   ) where
@@ -51,7 +51,7 @@ import UnliftIO.Async (mapConcurrently)
 import Arbiter.Test.ConcurrencyLimit (CLPayload (..), CLReg, concurrencyTable)
 import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
 
--- A worker id so claims are attributed (the gate counts off claimed_by).
+-- A worker id that attributes claims.
 worker :: UUID.UUID
 worker = UUID.fromWords 0 0 0 11
 
@@ -59,7 +59,7 @@ worker = UUID.fromWords 0 0 0 11
 modelPools :: [(Text, Int)]
 modelPools = [("mx", 1), ("my", 2), ("mz", 3)]
 
--- A single suffix per pool, so each pool drives one count-row key @prefix:k@.
+-- A single suffix per pool. Each pool drives one count-row key @prefix:k@.
 poolSuffix :: Text
 poolSuffix = "k"
 
@@ -67,9 +67,9 @@ storedKey :: Text -> Text
 storedKey prefix = prefix <> ":" <> poolSuffix
 
 limitOf :: Text -> Int
-limitOf k = fromMaybe 1 (lookup k modelPools)
+limitOf prefix = fromMaybe 1 (lookup prefix modelPools)
 
--- Large enough that the claim batch never binds before the per-key gate.
+-- A claim batch larger than any per-key gate.
 claimBatch :: Int
 claimBatch = 500
 
@@ -100,14 +100,14 @@ data KS = KS
 -- Count rows, keyed by pool prefix.
 type MM = Map Text KS
 
--- Pool overrides (on the policy, not the count row), keyed by prefix.
+-- Pool overrides on the policy, keyed by prefix.
 type Ov = Map Text Int
 
 eff :: Ov -> Text -> KS -> Int
-eff ov k ks = fromMaybe (ksLimit ks) (Map.lookup k ov)
+eff overrides prefix state = fromMaybe (ksLimit state) (Map.lookup prefix overrides)
 
 ensure :: Text -> MM -> MM
-ensure k = Map.insertWith (\_ old -> old) k (KS (limitOf k) 0 0)
+ensure prefix = Map.insertWith (\_ old -> old) prefix (KS (limitOf prefix) 0 0)
 
 data Op
   = OInsert Text Int
@@ -117,9 +117,8 @@ data Op
   | OOverride Text (Maybe Int)
   | OPrune
   | OReconcile
-  | -- | Dedup-replace a fresh job from one pool's key onto another's, firing the
-    -- update trigger's key-move branch. The third field is the dedup key, unique
-    -- per op so an earlier mover is never re-moved.
+  | -- | Dedup-replace a fresh job from one pool's key onto another's. The third
+    -- field is a dedup key that is unique per op.
     OMove Text Text Text
   deriving stock (Show)
 
@@ -142,27 +141,33 @@ genOps =
 
 -- Apply a non-claim op to the pure model. Claim is handled with the live result.
 applyModel :: Op -> (MM, Ov) -> (MM, Ov)
-applyModel op (m, ov) = case op of
-  OInsert k n -> (Map.adjust (\ks -> ks {ksPending = ksPending ks + n}) k (ensure k m), ov)
-  OAck k n -> (Map.adjust (\ks -> ks {ksClaimed = ksClaimed ks - min n (ksClaimed ks)}) k m, ov)
-  ORetry k n ->
+applyModel operation (model, overrides) = case operation of
+  OInsert prefix count -> (Map.adjust (\state -> state {ksPending = ksPending state + count}) prefix (ensure prefix model), overrides)
+  OAck prefix count -> (Map.adjust (\state -> state {ksClaimed = ksClaimed state - min count (ksClaimed state)}) prefix model, overrides)
+  ORetry prefix count ->
     ( Map.adjust
-        (\ks -> let x = min n (ksClaimed ks) in ks {ksClaimed = ksClaimed ks - x, ksPending = ksPending ks + x})
-        k
-        m
-    , ov
+        ( \state ->
+            let moved = min count (ksClaimed state)
+             in state {ksClaimed = ksClaimed state - moved, ksPending = ksPending state + moved}
+        )
+        prefix
+        model
+    , overrides
     )
-  OOverride k mo -> (m, maybe (Map.delete k) (Map.insert k) mo ov)
-  OPrune -> (Map.filter (\ks -> ksPending ks + ksClaimed ks /= 0) m, ov)
-  OReconcile -> (m, ov)
-  OClaim -> (m, ov)
-  -- The moved job is unclaimed (in_flight delta 0 on both keys), so only pending
-  -- shifts: net +1 on the destination, the source left with a drained count row.
-  OMove k1 k2 _ -> (Map.adjust (\ks -> ks {ksPending = ksPending ks + 1}) k2 (ensure k2 (ensure k1 m)), ov)
+  OOverride prefix newLimit -> (model, maybe (Map.delete prefix) (Map.insert prefix) newLimit overrides)
+  OPrune -> (Map.filter (\state -> ksPending state + ksClaimed state /= 0) model, overrides)
+  OReconcile -> (model, overrides)
+  OClaim -> (model, overrides)
+  -- The moved job is unclaimed. Pending gains one on the destination and the
+  -- source keeps a drained count row.
+  OMove source destination _ ->
+    ( Map.adjust (\state -> state {ksPending = ksPending state + 1}) destination (ensure destination (ensure source model))
+    , overrides
+    )
 
--- Per-key admissions a claim grants: min pending (cap - claimed).
+-- Per-key admissions a claim grants.
 claimDeltas :: Ov -> MM -> Map Text Int
-claimDeltas ov = Map.mapWithKey (\k ks -> min (ksPending ks) (max 0 (eff ov k ks - ksClaimed ks)))
+claimDeltas overrides = Map.mapWithKey (\prefix state -> min (ksPending state) (max 0 (eff overrides prefix state - ksClaimed state)))
 
 prop_model
   :: (HasRegistry sm CLReg)
@@ -175,8 +180,7 @@ prop_model run withConn schema = withTests 60 $ property $ do
   evalIO (resetState withConn schema)
   foldM_ (step run withConn schema) (Map.empty, Map.empty, Map.empty) ops
 
--- Threaded state: the pure model, pool overrides, and the live jobs we currently
--- hold claimed, grouped by key, so ack and retry can target real rows.
+-- Live jobs currently held claimed, grouped by key.
 type Held = Map Text [JobRead CLPayload]
 
 step
@@ -187,39 +191,40 @@ step
   -> (MM, Ov, Held)
   -> Op
   -> PropertyT IO (MM, Ov, Held)
-step run withConn schema (m, ov, held) op = do
+step run withConn schema (model, overrides, held) operation = do
   -- Non-claim branches run their effect and defer the model update to applyModel.
-  let done held' = let (m2, ov2) = applyModel op (m, ov) in pure (m2, ov2, held')
-  (m', ov', held') <- case op of
-    OInsert k n -> do
-      let j = setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
-      evalIO (void (run (HL.insertJobsBatch (replicate n j)) :: IO [JobRead CLPayload]))
+  let done held' = let (nextModel, nextOverrides) = applyModel operation (model, overrides) in pure (nextModel, nextOverrides, held')
+  (model', overrides', held') <- case operation of
+    OInsert prefix count -> do
+      let job = setMaxAttempts (Just 1000) $ defaultJob (CLPayload prefix)
+      evalIO (void (run (HL.insertJobsBatch (replicate count job)) :: IO [JobRead CLPayload]))
       done held
     OClaim -> do
       claimed <- evalIO (run (HL.claimNextVisibleJobsAs claimBatch 60 worker) :: IO [JobRead CLPayload])
       let grouped = groupByKey claimed
-          expected = claimDeltas ov m
+          expected = claimDeltas overrides model
       -- The gate admitted exactly the model's per-key free slots.
-      for_ (map fst modelPools) $ \k ->
-        Map.findWithDefault 0 k (Map.map length grouped) === Map.findWithDefault 0 k expected
-      let m2 =
+      for_ (map fst modelPools) $ \prefix ->
+        Map.findWithDefault 0 prefix (Map.map length grouped) === Map.findWithDefault 0 prefix expected
+      let nextModel =
             Map.mapWithKey
-              ( \k ks ->
-                  let a = Map.findWithDefault 0 k expected
-                   in ks {ksClaimed = ksClaimed ks + a, ksPending = ksPending ks - a}
+              ( \prefix state ->
+                  let admitted = Map.findWithDefault 0 prefix expected
+                   in state {ksClaimed = ksClaimed state + admitted, ksPending = ksPending state - admitted}
               )
-              m
-      pure (m2, ov, Map.unionWith (++) held grouped)
-    OAck k n -> do
-      let (toAck, rest) = splitAt n (Map.findWithDefault [] k held)
+              model
+      pure (nextModel, overrides, Map.unionWith (++) held grouped)
+    OAck prefix count -> do
+      let (toAck, rest) = splitAt count (Map.findWithDefault [] prefix held)
       evalIO (run (traverse_ HL.ackJob toAck))
-      done (Map.insert k rest held)
-    ORetry k n -> do
-      let (toRetry, rest) = splitAt n (Map.findWithDefault [] k held)
+      done (Map.insert prefix rest held)
+    ORetry prefix count -> do
+      let (toRetry, rest) = splitAt count (Map.findWithDefault [] prefix held)
       evalIO (run (traverse_ (HL.updateJobForRetry 0 "model retry") toRetry))
-      done (Map.insert k rest held)
-    OOverride k mo -> do
-      evalIO (void (run (HL.updateConcurrencyPolicyOverrides k (ConcurrencyPolicyUpdate (Just (fromIntegral <$> mo))))))
+      done (Map.insert prefix rest held)
+    OOverride prefix newLimit -> do
+      evalIO
+        (void (run (HL.updateConcurrencyPolicyOverrides prefix (ConcurrencyPolicyUpdate (Just (fromIntegral <$> newLimit))))))
       done held
     OPrune -> do
       evalIO (void (run HL.pruneConcurrencyKeys))
@@ -227,21 +232,20 @@ step run withConn schema (m, ov, held) op = do
     OReconcile -> do
       evalIO (void (run HL.reconcileConcurrencyCounts))
       done held
-    OMove k1 k2 d -> do
-      let mk k = setDedupKey (Just (ReplaceDuplicate d)) $ setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
-      -- Seed the source key, then dedup-replace onto the destination, moving the row.
-      evalIO (void (run (HL.insertJobsBatch [mk k1]) :: IO [JobRead CLPayload]))
-      evalIO (void (run (HL.insertJobsBatch [mk k2]) :: IO [JobRead CLPayload]))
+    OMove source destination dedup -> do
+      let mkJob prefix = setDedupKey (Just (ReplaceDuplicate dedup)) $ setMaxAttempts (Just 1000) $ defaultJob (CLPayload prefix)
+      -- Seed the source key, then dedup-replace onto the destination.
+      evalIO (void (run (HL.insertJobsBatch [mkJob source]) :: IO [JobRead CLPayload]))
+      evalIO (void (run (HL.insertJobsBatch [mkJob destination]) :: IO [JobRead CLPayload]))
       done held
-  -- A count row exists once an insert creates it and stays until a prune drops it,
-  -- so a key the model holds has a stored row and one it dropped has none.
+  -- A count row exists from the first insert until a prune drops it.
   stored <- evalIO (readCounts withConn schema)
-  for_ (map fst modelPools) $ \k ->
-    case Map.lookup k m' of
-      Just ks ->
-        Map.lookup (storedKey k) stored === Just (fromIntegral (ksClaimed ks))
-      Nothing -> Map.lookup (storedKey k) stored === Nothing
-  pure (m', ov', held')
+  for_ (map fst modelPools) $ \prefix ->
+    case Map.lookup prefix model' of
+      Just state ->
+        Map.lookup (storedKey prefix) stored === Just (fromIntegral (ksClaimed state))
+      Nothing -> Map.lookup (storedKey prefix) stored === Nothing
+  pure (model', overrides', held')
 
 prop_concurrent
   :: (HasRegistry sm CLReg)
@@ -254,32 +258,29 @@ prop_concurrent run withConn schema = withTests 30 $ property $ do
   extra <- forAll (Gen.int (Range.linear 1 6))
   claimers <- forAll (Gen.int (Range.linear 2 8))
   evalIO (resetState withConn schema)
-  let k = "mx"
-      n = lim + extra
-      j = setMaxAttempts (Just 1000) $ defaultJob (CLPayload k)
-  evalIO (withConn $ \c -> seedPool c schema k lim)
-  evalIO (void (run (HL.insertJobsBatch (replicate n j)) :: IO [JobRead CLPayload]))
+  let prefix = "mx"
+      jobCount = lim + extra
+      job = setMaxAttempts (Just 1000) $ defaultJob (CLPayload prefix)
+  evalIO (withConn $ \conn -> seedPool conn schema prefix lim)
+  evalIO (void (run (HL.insertJobsBatch (replicate jobCount job)) :: IO [JobRead CLPayload]))
   results <-
     evalIO
       (mapConcurrently (const (run (HL.claimNextVisibleJobsAs claimBatch 60 worker) :: IO [JobRead CLPayload])) [1 .. claimers])
   let total = sum (map length results)
-  -- The hard invariant: a key's cap is never breached under contention.
+  -- A key's cap holds under contention.
   assert (total <= lim)
-  -- Liveness: an uncontended follow-up claim fills the key to exactly the cap, so
-  -- the race neither deadlocks nor permanently under-admits. (The contended total
-  -- is not deterministic: the count-row-lock winner admits only its SKIP-LOCKED share.)
+  -- An uncontended follow-up claim fills the key to the cap. The contended total
+  -- is not deterministic.
   more <- evalIO (run (HL.claimNextVisibleJobsAs claimBatch 60 worker) :: IO [JobRead CLPayload])
   let claimed = total + length more
   claimed === lim
   evalIO (void (run HL.reconcileConcurrencyCounts))
   stored <- evalIO (readCounts withConn schema)
-  Map.lookup (storedKey k) stored === Just (fromIntegral claimed)
+  Map.lookup (storedKey prefix) stored === Just (fromIntegral claimed)
 
--- | With one pool's key pinned at its cap by a job that is never acked, every group
--- that has no job on that key still drains, however many pinned-key groups sort ahead
--- of it. This is the general form of the starvation the grouped gate exists to prevent:
--- a blocked group must not hold a candidate slot. Generated over batch size, per-poll
--- slot budget, group size, and key layout.
+-- | One pool's key is pinned at its cap by a job that is never acked. Every group
+-- with no job on that key still drains. Generated over batch size, per-poll slot
+-- budget, group size, and key layout.
 prop_groupedDrain
   :: (HasRegistry sm CLReg)
   => (forall a. sm a -> IO a)
@@ -289,7 +290,7 @@ prop_groupedDrain
 prop_groupedDrain run withConn schema = withTests 40 $ property $ do
   perGroup <- forAll (Gen.int (Range.linear 1 3))
   batchSize <- forAll (Gen.int (Range.linear 1 3))
-  -- Small, so the slot budget actually binds and a blocked group can crowd a cold one out.
+  -- Small enough for the slot budget to bind.
   maxBatches <- forAll (Gen.int (Range.linear 1 3))
   keys <- forAll (Gen.list (Range.linear 2 16) (Gen.element (map fst modelPools)))
   evalIO (resetState withConn schema)
@@ -297,25 +298,29 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
   evalIO (void (run (HL.insertJobsBatch [defaultJob (CLPayload hotPool)]) :: IO [JobRead CLPayload]))
   pinned <- evalIO (run (HL.claimNextVisibleJobsAs claimBatch 600 worker) :: IO [JobRead CLPayload])
   length pinned === limitOf hotPool
-  let gk i = "dg" <> T.pack (show (i `div` perGroup :: Int))
-      tagged = [(gk i, k) | (i, k) <- zip [0 :: Int ..] keys]
-      js = [setMaxAttempts (Just 1000) (defaultGroupedJob g (CLPayload k)) | (g, k) <- tagged]
-      -- A group with no job on the pinned key has nothing legitimately blocking it.
-      cold = [g | g <- Set.toList (Set.fromList (map fst tagged)), all ((/= hotPool) . snd) (filter ((== g) . fst) tagged)]
-      cs = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 worker
+  let groupOf index = "dg" <> T.pack (show (index `div` perGroup :: Int))
+      tagged = [(groupOf index, prefix) | (index, prefix) <- zip [0 :: Int ..] keys]
+      jobs = [setMaxAttempts (Just 1000) (defaultGroupedJob groupKey (CLPayload prefix)) | (groupKey, prefix) <- tagged]
+      -- A group with no job on the pinned key is cold.
+      cold =
+        [ groupKey
+        | groupKey <- Set.toList (Set.fromList (map fst tagged))
+        , all ((/= hotPool) . snd) (filter ((== groupKey) . fst) tagged)
+        ]
+      claimSql = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 worker
       round_ =
         run
           ( do
-              claimed <- Ops.claimJobsBatchedCached cs maxBatches
+              claimed <- Ops.claimJobsBatchedCached claimSql maxBatches
               let got = concatMap NE.toList (claimed :: [NE.NonEmpty (JobRead CLPayload)])
               traverse_ HL.ackJob got
               pure (length got)
           )
-      loop n
-        | n <= (0 :: Int) = pure ()
-        | otherwise = round_ >>= \k -> if k == 0 then pure () else loop (n - 1)
-  evalIO (void (run (HL.insertJobsBatch js) :: IO [JobRead CLPayload]))
-  evalIO (loop (length js + 4))
+      loop remaining
+        | remaining <= (0 :: Int) = pure ()
+        | otherwise = round_ >>= \claimedCount -> if claimedCount == 0 then pure () else loop (remaining - 1)
+  evalIO (void (run (HL.insertJobsBatch jobs) :: IO [JobRead CLPayload]))
+  evalIO (loop (length jobs + 4))
   left <- evalIO (remainingGroups withConn schema)
   filter (`elem` cold) left === []
 
@@ -328,35 +333,35 @@ hotPool = "mx"
 -- | Group keys that still have rows.
 remainingGroups :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO [Text]
 remainingGroups withConn schema =
-  withConn $ \c -> do
+  withConn $ \conn -> do
     rows <-
       PG.query_
-        c
+        conn
         (stmt ("SELECT DISTINCT group_key FROM " <> jobQueueTable schema concurrencyTable <> " WHERE group_key IS NOT NULL"))
     pure (map PG.fromOnly rows)
 
 groupByKey :: [JobRead CLPayload] -> Map Text [JobRead CLPayload]
-groupByKey = foldl' (\acc j -> Map.insertWith (++) (keyOf j) [j] acc) Map.empty
+groupByKey = foldl' (\acc job -> Map.insertWith (++) (keyOf job) [job] acc) Map.empty
   where
-    keyOf j = let CLPayload k = payload j in k
+    keyOf job = let CLPayload prefix = payload job in prefix
 
 resetState :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO ()
 resetState withConn schema =
-  withConn $ \c -> do
-    execute_ c ("DELETE FROM " <> jobQueueTable schema concurrencyTable)
-    execute_ c ("TRUNCATE " <> arbiterConcurrencyTable schema)
-    traverse_ (uncurry (seedPool c schema)) modelPools
+  withConn $ \conn -> do
+    execute_ conn ("DELETE FROM " <> jobQueueTable schema concurrencyTable)
+    execute_ conn ("TRUNCATE " <> arbiterConcurrencyTable schema)
+    traverse_ (uncurry (seedPool conn schema)) modelPools
 
 seedPool :: PG.Connection -> Text -> Text -> Int -> IO ()
-seedPool c schema prefix lim =
-  traverse_ (execute_ c) (seedConcurrencyPoolSQL schema prefix (fromIntegral lim))
+seedPool conn schema prefix lim =
+  traverse_ (execute_ conn) (seedConcurrencyPoolSQL schema prefix (fromIntegral lim))
 
 readCounts :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO (Map Text Int32)
 readCounts withConn schema =
-  withConn $ \c -> do
+  withConn $ \conn -> do
     rows <-
       PG.query_
-        c
+        conn
         (stmt ("SELECT concurrency_key, in_flight FROM " <> arbiterConcurrencyTable schema))
     pure (Map.fromList rows)
 

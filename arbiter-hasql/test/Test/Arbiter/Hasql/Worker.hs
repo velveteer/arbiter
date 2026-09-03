@@ -48,7 +48,7 @@ spec connStr =
       workerSpec @HasqlWorkerTestPayload
         SimpleTask
         FailingTask
-        (\f _conn job -> f job)
+        (\handler _conn job -> handler job)
         runM
 
 listenSchema :: Text
@@ -68,7 +68,7 @@ listenerSpec connStr =
           >> (disableListener <$> createHasqlEnv (Proxy @HasqlListenRegistry) connStr listenSchema)
       )
       destroyHasqlEnv
-      (\f _conn job -> f job)
+      (\handler _conn job -> handler job)
       runHasqlDb
 
 mqSchema :: Text
@@ -104,7 +104,7 @@ multiQueueSpec connStr =
       MqBPayload
       mkEnv
       destroyHasqlEnv
-      (\f _conn job -> f job)
+      (\handler _conn job -> handler job)
       runHasqlDb
   where
     mkEnv = do

@@ -112,9 +112,9 @@ reportSuccess
   -> UTCTime
   -> Job.JobRead payload
   -> m ()
-reportSuccess config startTime j = do
+reportSuccess config startTime job = do
   endT <- liftIO getCurrentTime
-  runHook (jobLog config j) "onJobSuccess" $ Job.onJobSuccess (observabilityHooks config) j startTime endT
+  runHook (jobLog config job) "onJobSuccess" $ Job.onJobSuccess (observabilityHooks config) job startTime endT
 
 -- | The settle operations a batch handler drives its jobs through.
 batchCallbacks
@@ -131,9 +131,9 @@ batchCallbacks
 batchCallbacks config handoff jobs startTime schemaName =
   BatchCallbacks
     { ack = (`ackOneStoring` Nothing)
-    , ackWith = \job r -> ackOneStoring job (encodeJobResult r)
-    , ackAll = \js -> ackBatchStoring (map (\j -> (j, Nothing)) js)
-    , ackAllWith = \prs -> ackBatchStoring (map (second encodeJobResult) prs)
+    , ackWith = \job result -> ackOneStoring job (encodeJobResult result)
+    , ackAll = \toAck -> ackBatchStoring (map (\job -> (job, Nothing)) toAck)
+    , ackAllWith = \resultPairs -> ackBatchStoring (map (second encodeJobResult) resultPairs)
     , failRetry = failAs (Retryable . JobRetryableException)
     , failPermanent = failAs (Permanent . JobPermanentException)
     , cancelBranch = failAs (BranchCancel . BranchCancelException)
@@ -142,36 +142,36 @@ batchCallbacks config handoff jobs startTime schemaName =
     }
   where
     shape = batchSpanShape jobs
-    nackOne j = releaseJobs config handoff [j]
-    failAs mkExc j msg = failWith j (toException (mkExc msg))
-    failWith j exc = do
+    nackOne job = releaseJobs config handoff [job]
+    failAs mkExc job msg = failWith job (toException (mkExc msg))
+    failWith job exc = do
       endT <- liftIO getCurrentTime
       settle
         handoff
-        (finalized [j])
+        (finalized [job])
         ( withDbTransaction $
-            handleJobFailure config Ops.TakeLocks shape (classifyException exc) startTime endT j
+            handleJobFailure config Ops.TakeLocks shape (classifyException exc) startTime endT job
         )
         $ \outcome -> do
           reportWritten outcome
-          settleUnwritten config handoff [(j, outcome)]
-    ackOneStoring j mVal =
+          settleUnwritten config handoff [(job, outcome)]
+    ackOneStoring job mVal =
       settle
         handoff
-        (finalized [j])
+        (finalized [job])
         ( withDbTransaction $ do
-            ackOrGone j
-            storeEncodedResult schemaName j mVal
+            ackOrGone job
+            storeEncodedResult schemaName job mVal
         )
-        (const (reportSuccess config startTime j))
+        (const (reportSuccess config startTime job))
     ackBatchStoring pairs =
-      let js = map fst pairs
+      let jobsToAck = map fst pairs
        in settleBy
             handoff
             ( withDbTransaction $ do
-                acked <- Set.fromList <$> Arb.ackJobsBatch js
+                acked <- Set.fromList <$> Arb.ackJobsBatch jobsToAck
                 storeEncodedResults schemaName (filter (hasIdIn acked . fst) pairs)
-                pure (partition (hasIdIn acked) js)
+                pure (partition (hasIdIn acked) jobsToAck)
             )
             (\(done, reclaimed) -> finalized done <> disowned reclaimed)
             $ \(done, reclaimed) -> do
@@ -200,7 +200,7 @@ finalizeForceCancelled config jobs cancelledIds goneIds handoff = do
   -- The cancel can name a job the handler finalized after the cancel took effect.
   let settling = byIdDesc (hasIdIn (Set.fromList (cancelledIds <> map Job.primaryKey pending))) jobs
       goneSet = Set.fromList goneIds
-      deletable = [Job.primaryKey j | j <- settling, not (hasIdIn goneSet j)]
+      deletable = [Job.primaryKey job | job <- settling, not (hasIdIn goneSet job)]
   deleted <-
     deleteCancelledOrWarn (batchLog config jobs) (workerId config) schemaName (Job.queueName firstJob) deletable
   (fresh, cancelled) <- recordCancelled handoff (deleted <> Set.fromList cancelledIds)
@@ -226,15 +226,15 @@ releaseJobs
   -> [Job.JobRead payload]
   -> m ()
 releaseJobs _ _ [] = pure ()
-releaseJobs config handoff js =
+releaseJobs config handoff jobs =
   settle
     handoff
-    (finalized js)
-    (Set.fromList <$> Arb.nackJobsBatch js)
+    (finalized jobs)
+    (Set.fromList <$> Arb.nackJobsBatch jobs)
     $ \released ->
-      settleUnwritten config handoff [(j, Left unownedReason) | j <- js, not (hasIdIn released j)]
+      settleUnwritten config handoff [(job, Left unownedReason) | job <- jobs, not (hasIdIn released job)]
 
--- | 'releaseJobs' on an unwinding path, which has nothing left to throw to.
+-- | 'releaseJobs' on an unwinding path. A failure is logged as a warning.
 releaseOrWarn
   :: (JobOperation m payload)
   => WorkerConfig m payload
@@ -242,8 +242,8 @@ releaseOrWarn
   -> Text
   -> [Job.JobRead payload]
   -> m ()
-releaseOrWarn config handoff warning js =
-  tryWarn (jobsLog config js) warning (releaseJobs config handoff js)
+releaseOrWarn config handoff warning jobs =
+  tryWarn (jobsLog config jobs) warning (releaseJobs config handoff jobs)
 
 -- | Settle the jobs a failure could not be written for, each under its own reason.
 settleUnwritten
@@ -253,16 +253,16 @@ settleUnwritten
   -> [(Job.JobRead payload, FailureOutcome m)]
   -> m ()
 settleUnwritten config handoff pairs =
-  traverse_ settleOne (Map.toList (Map.fromListWith (<>) [(reason, [j]) | (j, Left reason) <- pairs]))
+  traverse_ settleOne (Map.toList (Map.fromListWith (<>) [(reason, [job]) | (job, Left reason) <- pairs]))
   where
-    settleOne (reason, js) = do
-      cancelled <- settleGoneJobs config handoff reason js
-      let (forced, unavailable) = partition (hasIdIn cancelled) js
+    settleOne (reason, jobs) = do
+      cancelled <- settleGoneJobs config handoff reason jobs
+      let (forced, unavailable) = partition (hasIdIn cancelled) jobs
       unless (null forced) $ tryLog (jobsLog config forced) Info "Job(s) force-cancelled"
       unless (null unavailable) $ tryLog (jobsLog config unavailable) Warning ("Job(s) " <> reason)
 
 -- | Delete whichever of @jobs@ a force-cancel flagged, report them all, return those ids.
--- The delete is recorded, so a cancel signal arriving later does not report them again.
+-- The delete is recorded in the handoff.
 settleGoneJobs
   :: (JobOperation m payload)
   => WorkerConfig m payload
@@ -272,10 +272,11 @@ settleGoneJobs
   -> m (Set.Set Int64)
 settleGoneJobs config handoff reason = \case
   [] -> pure mempty
-  jobs@(j : _) -> do
+  jobs@(firstJob : _) -> do
     schemaName <- getSchema
     let logCfg = jobsLog config jobs
-    cancelled <- deleteCancelledOrWarn logCfg (workerId config) schemaName (Job.queueName j) (map Job.primaryKey jobs)
+    cancelled <-
+      deleteCancelledOrWarn logCfg (workerId config) schemaName (Job.queueName firstJob) (map Job.primaryKey jobs)
     void $ recordCancelled handoff cancelled
     cancelled <$ reportGoneJobs config handoff cancelled reason jobs
 
@@ -294,8 +295,8 @@ deleteCancelledOrWarn logCfg owner schemaName queue jobIds =
   tryWarnWith logCfg "Deleting force-cancelled jobs failed" mempty $
     Set.fromList <$> Ops.deleteCancelledJobs schemaName queue (Just owner) jobIds
 
--- | Interpret a finished batch: warn when the handler left jobs unfinalized,
--- skip retry for gone or nacked jobs, otherwise fail whatever was not finalized.
+-- | Interpret a finished batch. Warn when the handler left jobs unfinalized. Skip
+-- retry for gone or nacked jobs. Fail the rest.
 reportBatchOutcome
   :: forall payload m
    . (JobOperation m payload)
@@ -310,8 +311,8 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
   unhandled <- pendingJobs handoff jobs
   let splitNamed ids = partition (hasIdIn (Set.fromList ids)) unhandled
       reportUnavailable ids reason = do
-        -- An exception naming no job speaks for none of them, so the remainder keeps
-        -- its attempt and reports when it runs.
+        -- An exception naming no job speaks for none of them. The remainder keeps
+        -- its attempt.
         let (jobsGone, siblings) = splitNamed ids
         void $ settleGoneJobs config handoff reason jobsGone
         unless (null ids) $
@@ -327,7 +328,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
           reportUnavailable gone reason
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
-          -- left unfinalized, so the nacked reprocess does not record a failure.
+          -- left unfinalized.
           releaseOrWarn config handoff "Handing back a nacked batch's attempt failed" unhandled
           tryLog (batchLog config jobs) Info "Job(s) nacked, will be reprocessed"
       | otherwise -> do
@@ -337,10 +338,10 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
           when (null unhandled) $
             tryLog (batchLog config jobs) Warning ("Handler stopped with its jobs already finalized: " <> reason)
           schemaName <- getSchema
-          -- A tree or branch cancel acts on the tree, not on this worker's claim.
+          -- A tree or branch cancel acts on the whole tree.
           unowned <- if cancelsTree kind then unownedOf else pure []
-          -- Every row the settles below touch, in one pass. A cancel reaches the whole
-          -- tree, so its pass has to as well.
+          -- Lock every row the settles below touch, in one pass. A cancel's pass
+          -- covers the whole tree.
           let lockTrees
                 | cancelsTree kind = Ops.lockJobTreesFromRoot
                 | otherwise = Ops.lockJobTrees
@@ -350,7 +351,7 @@ reportBatchOutcome config startTime endTime jobs handoff outcome = do
             ( withDbTransaction $ do
                 Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
                 lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
-                outcomes <- traverse (\j -> (j,) <$> failJob failure j) unhandled
+                outcomes <- traverse (\job -> (job,) <$> failJob failure job) unhandled
                 traverse_ (void . cancelJobFor kind) unowned
                 pure outcomes
             )
@@ -373,23 +374,23 @@ jobMaxAtts :: Job.JobRead payload -> Int32
 jobMaxAtts job = fromMaybe Job.defaultMaxAttempts (Job.maxAttempts job)
 
 -- | Classify a handler exception into an error message and failure disposition.
--- 'reportBatchOutcome' intercepts 'JobGoneException' first, so it never arrives here.
+-- 'reportBatchOutcome' intercepts 'JobGoneException' before this.
 classifyException :: SomeException -> (T.Text, FailureKind)
-classifyException e
-  | Just (Retryable (JobRetryableException msg)) <- fromException e = (msg, RetryFailure)
-  | Just (Permanent (JobPermanentException msg)) <- fromException e = (msg, PermanentFailure)
-  | Just (TreeCancel (TreeCancelException msg)) <- fromException e = (msg, TreeCancelFailure)
-  | Just (BranchCancel (BranchCancelException msg)) <- fromException e = (msg, BranchCancelFailure)
-  | Just (ParsingException msg) <- fromException e = (msg, PermanentFailure)
-  | Just (JobDeadlineExceeded msg) <- fromException e = (msg, RetryFailure)
-  | otherwise = (T.pack $ show e, RetryFailure) -- Unknown exception, treat as retryable
+classifyException exception
+  | Just (Retryable (JobRetryableException msg)) <- fromException exception = (msg, RetryFailure)
+  | Just (Permanent (JobPermanentException msg)) <- fromException exception = (msg, PermanentFailure)
+  | Just (TreeCancel (TreeCancelException msg)) <- fromException exception = (msg, TreeCancelFailure)
+  | Just (BranchCancel (BranchCancelException msg)) <- fromException exception = (msg, BranchCancelFailure)
+  | Just (ParsingException msg) <- fromException exception = (msg, PermanentFailure)
+  | Just (JobDeadlineExceeded msg) <- fromException exception = (msg, RetryFailure)
+  | otherwise = (T.pack $ show exception, RetryFailure) -- Unknown exception, treat as retryable
 
 -- | Whether a failure deletes a job tree or updates the job claim.
 cancelsTree :: FailureKind -> Bool
 cancelsTree kind = kind `elem` [TreeCancelFailure, BranchCancelFailure]
 
--- | Report jobs this worker can no longer act on, as cancelled where a force-cancel
--- deleted them, recording each against the handoff.
+-- | Report jobs this worker can no longer act on. A job a force-cancel deleted is
+-- reported as cancelled. Each is recorded against the handoff.
 reportGoneJobs
   :: (JobOperation m payload)
   => WorkerConfig m payload
@@ -399,8 +400,8 @@ reportGoneJobs
   -> Text
   -> [Job.JobRead payload]
   -> m ()
-reportGoneJobs config handoff cancelled reason js =
-  settleInterruptibly handoff (finalized js) (pure ()) (const (traverse_ report js))
+reportGoneJobs config handoff cancelled reason jobs =
+  settleInterruptibly handoff (finalized jobs) (pure ()) (const (traverse_ report jobs))
   where
     report job
       | hasIdIn cancelled job = fireCancelled config job "force-cancelled"
@@ -408,13 +409,12 @@ reportGoneJobs config handoff cancelled reason js =
           runHook (jobLog config job) "onJobUnavailable" $
             Job.onJobUnavailable (observabilityHooks config) job reason
 
--- | What the consumer span over this batch covers, which a pool claiming fewer jobs
--- than it asked for narrows to the one job in hand.
+-- | What the consumer span over this batch covers. A batch of one narrows it to
+-- that job.
 batchSpanShape :: NonEmpty (Job.JobRead payload) -> ConsumeShape
 batchSpanShape = bool PerJob PerBatch . (> 1) . length
 
--- | Report a failed job to its hooks and to the consumer span it ran under. A span
--- covering more than this job also covers the ones that succeeded, so only a
+-- | Report a failed job to its hooks and to the consumer span it ran under. Only a
 -- single-job span takes the error status.
 fireFailure
   :: (JobOperation m payload)
@@ -481,7 +481,7 @@ handleJobFailure
   -> Job.JobRead payload
   -> m (FailureOutcome m)
 handleJobFailure config locks shape (errorMsg, failureKind) startTime endTime job
-  -- A batch sibling's cancel takes out the whole tree, so no rows still means gone.
+  -- A batch sibling's cancel takes out the whole tree. Zero rows still means gone.
   | cancelsTree failureKind =
       Right (fireCancelled config job errorMsg) <$ cancelJobFor failureKind job
   | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
@@ -500,7 +500,7 @@ handleJobFailure config locks shape (errorMsg, failureKind) startTime endTime jo
   where
     cfg = jobLog config job
     hooks = observabilityHooks config
-    -- Nothing written means the job went elsewhere, so the failure is not ours to report.
+    -- Nothing written means the job went elsewhere.
     wrote reason after rowsAffected
       | rowsAffected == 0 = Left reason
       | otherwise = Right (fireFailure config shape job errorMsg startTime endTime >> after)

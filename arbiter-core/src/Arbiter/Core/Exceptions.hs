@@ -2,10 +2,10 @@
 
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
--- 'JobException' is the decision a handler throws to say how its failure should be
--- settled: retry, DLQ, or cancel the tree or branch. 'JobNackException' asks for a
--- reprocess with no failure recorded. The engine's own signals are separate types rather
--- than constructors of that sum, and a user handler never throws them.
+-- 'JobException' is the decision a handler throws to say how its failure is settled.
+-- The options are retry, DLQ, or cancel the tree or branch. 'JobNackException' asks for
+-- a reprocess with no failure recorded. The engine's own signals are separate types. A
+-- user handler does not throw them.
 module Arbiter.Core.Exceptions
   ( -- * User-facing job decisions
     JobException (..)
@@ -59,19 +59,19 @@ data JobException
 instance Exception JobException where
   backtraceDesired _ = False
   displayException = \case
-    Retryable e -> displayException e
-    Permanent e -> displayException e
-    TreeCancel e -> displayException e
-    BranchCancel e -> displayException e
+    Retryable inner -> displayException inner
+    Permanent inner -> displayException inner
+    TreeCancel inner -> displayException inner
+    BranchCancel inner -> displayException inner
 
--- | Transient failure - the job will be retried with backoff.
+-- | Transient failure. The job is retried with backoff.
 newtype JobRetryableException = JobRetryableException Text
   deriving stock (Eq, Generic, Show)
 
 instance Exception JobRetryableException where
   displayException (JobRetryableException msg) = T.unpack msg
 
--- | Permanent failure - the job goes straight to the DLQ, no retries.
+-- | Permanent failure. The job goes straight to the DLQ.
 newtype JobPermanentException = JobPermanentException Text
   deriving stock (Eq, Generic, Show)
 
@@ -85,7 +85,7 @@ newtype TreeCancelException = TreeCancelException Text
 instance Exception TreeCancelException where
   displayException (TreeCancelException msg) = T.unpack msg
 
--- | Cancel this branch: the parent and every sibling. A grandparent above it is resumed.
+-- | Cancel this branch, the parent and every sibling. A grandparent above it is resumed.
 newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show)
 
@@ -119,8 +119,8 @@ instance Exception InternalException where
 
 -- | Job was deleted or reclaimed between claim and ack. The worker recognizes this
 -- signal and skips retry/DLQ. The message is the reason reported to
--- 'Arbiter.Core.Job.Types.onJobUnavailable'. The ids are the jobs actually gone,
--- empty when the thrower did not name them.
+-- 'Arbiter.Core.Job.Types.onJobUnavailable'. The ids are the jobs that are gone.
+-- Empty when the thrower did not name them.
 data JobGoneException = JobGoneException Text [Int64]
   deriving stock (Eq, Generic, Show)
 
@@ -174,7 +174,7 @@ throwParsing msg = UE.throwIO (ParsingException msg)
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
--- | Names the jobs that went away, so the worker can tell them from the rest of the batch.
+-- | Names the jobs that went away.
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 
@@ -191,7 +191,6 @@ namedJobIds :: [Int64] -> Text
 namedJobIds [] = ""
 namedJobIds ids = ": " <> T.intercalate ", " (map (T.pack . show) ids)
 
--- | An exception's message. Unwraps first, so the reported text carries none of
--- the backtrace base attaches to 'SomeException'.
+-- | An exception's inner message. It carries no backtrace.
 displayEx :: SomeException -> Text
-displayEx (SomeException e) = T.pack (displayException e)
+displayEx (SomeException inner) = T.pack (displayException inner)

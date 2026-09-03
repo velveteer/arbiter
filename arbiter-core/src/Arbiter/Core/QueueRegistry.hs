@@ -3,10 +3,10 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
--- | The type-level registry and the lookups over it, which resolve a payload's queue
--- name and handler result type at compile time. Queue names and payload types must be
--- unique: 'SpecForPayload' checks the entry it resolves against the whole registry, so
--- any lookup rejects a duplicate, and 'AllQueuesUnique' checks the registry up front.
+-- | The type-level registry and the lookups over it. The lookups resolve a payload's
+-- queue name and handler result type at compile time. Queue names and payload types
+-- must be unique. 'SpecForPayload' checks the entry it resolves against the whole
+-- registry. 'AllQueuesUnique' checks the registry up front.
 module Arbiter.Core.QueueRegistry
   ( -- * Registry type
     JobPayloadRegistry
@@ -37,7 +37,7 @@ import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVa
 import Arbiter.Core.Job.Kind (HasKind (..))
 
 -- | A queue's table name, payload type, and handler result type. A @type data@
--- constructor, so it takes no promotion tick.
+-- constructor. It takes no promotion tick.
 type data QueueSpec = QueueWithResult Symbol Type Type
 
 -- | A queue whose handlers store no result. A module with its own @Queue@ type
@@ -71,8 +71,8 @@ type family SpecResult (spec :: QueueSpec) :: Type where
 type family SpecForPayload (payload :: Type) (registry :: JobPayloadRegistry) :: QueueSpec where
   SpecForPayload payload registry = MatchIn payload '[] registry
 
--- | Walk to the entry for @payload@, carrying the entries already passed over
--- and compares its match with all other entries.
+-- | Walk to the entry for @payload@. Carries the entries already passed over
+-- and compares the match with all other entries.
 type family
   MatchIn (payload :: Type) (seen :: JobPayloadRegistry) (rest :: JobPayloadRegistry)
     :: QueueSpec
@@ -125,7 +125,6 @@ type family ResultFor (payload :: Type) (registry :: JobPayloadRegistry) :: Type
   ResultFor payload registry = SpecResult (SpecForPayload payload registry)
 
 -- | Compile-time check that no two entries share a queue name or a payload type.
--- The payload half matters because 'SpecForPayload' takes the first match.
 type family AllQueuesUnique (registry :: JobPayloadRegistry) :: Constraint where
   AllQueuesUnique '[] = ()
   AllQueuesUnique (spec ': rest) =

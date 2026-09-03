@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | RTS thread labels, so an eventlog, ThreadScope session or @ghc-debug@ dump
--- assigns descriptive names to Arbiter threads.
+-- | RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump.
 module Arbiter.Core.Threads
   ( labelArbiterThread
   ) where
@@ -13,8 +12,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Conc.Sync (labelThread)
 
--- | Label the calling thread @arbiter:role[:queue]@. Long-lived threads only, a
--- per-job label costing an allocation on the claim path.
+-- | Label the calling thread @arbiter:role[:queue]@. For long-lived threads only.
 labelArbiterThread :: (MonadIO m) => Text -> Maybe Text -> m ()
 labelArbiterThread role mQueue = liftIO $ do
   tid <- myThreadId

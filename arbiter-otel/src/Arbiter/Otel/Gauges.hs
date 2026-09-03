@@ -109,21 +109,20 @@ refreshLoop logCfg refreshGate source refreshInterval cache advance = forever $ 
   started <- getMonotonicTime
   refreshed <- runRefresh source
   now <- getMonotonicTime
-  -- A failed scan keeps the last reading, so only the state change is worth a line.
-  for_ (reachabilityOf refreshed) $ \ok -> do
+  -- A failed scan keeps the last reading. A state change gets a log line.
+  for_ (reachabilityOf refreshed) $ \reachable -> do
     reportOutcome logCfg Warning refreshGate "Gauge refresh" refreshed
-    atomically (setReachable cache ok)
+    atomically (setReachable cache reachable)
   traverse_ (traverse_ publish . (>>= stamp started now)) refreshed
   threadDelay (max (micros (minimumDelay source)) (micros (refreshInterval - realToFrac (now - started))))
   where
-    publish c = atomically (publishSnapshot cache c) >> advance c
+    publish cached = atomically (publishSnapshot cache cached) >> advance cached
     stamp started now = \case
       Ran snap -> Just (Cached started snap)
       Published age snap -> Just (Cached (now - age) snap)
       Unreadable _ -> Nothing
 
--- | What a scan says about the database. An abandoned scan says nothing, so the
--- last verdict stands.
+-- | What a scan says about the database. An abandoned scan says nothing.
 reachabilityOf :: Either SomeException (Maybe a) -> Maybe Bool
 reachabilityOf = either (const (Just False)) (True <$)
 
@@ -131,4 +130,4 @@ cacheIsStale :: GaugeCache -> NominalDiffTime -> IO Bool
 cacheIsStale cache maxAge = do
   now <- getMonotonicTime
   cached <- live <$> readTVarIO (export cache)
-  pure (maybe True (\c -> now - takenAt c > realToFrac maxAge) cached)
+  pure (maybe True (\lastCached -> now - takenAt lastCached > realToFrac maxAge) cached)

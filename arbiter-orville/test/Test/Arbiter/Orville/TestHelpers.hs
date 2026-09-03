@@ -54,8 +54,8 @@ newtype TestOrville (registry :: JobPayloadRegistry) a = TestOrville {unTestOrvi
 
 instance O.HasOrvilleState (TestOrville registry) where
   askOrvilleState = TestOrville $ asks testOrvilleState
-  localOrvilleState f (TestOrville action) = TestOrville $ ReaderT $ \env ->
-    runReaderT action (env {testOrvilleState = f (testOrvilleState env)})
+  localOrvilleState adjust (TestOrville action) = TestOrville $ ReaderT $ \env ->
+    runReaderT action (env {testOrvilleState = adjust (testOrvilleState env)})
 
 instance O.MonadOrvilleControl (TestOrville registry) where
   liftWithConnection = O.liftWithConnectionViaUnliftIO

@@ -93,7 +93,7 @@ decodeClaim response = case decode (simpleBody response) of
 leaseBody :: JobRead ServantTestPayload -> LB.ByteString
 leaseBody job = encode (JobLease (claimSeq job) (fromMaybe UUID.nil (claimedBy job)))
 
--- | A worker-pool identity, which the finalize routes refuse to act for.
+-- | A worker-pool identity. The finalize routes refuse to act for it.
 poolWorkerId :: UUID.UUID
 poolWorkerId = UUID.fromWords 0xa1b2c3d4 0xe5f60718 0x293a4b5c 0x6d7e8f90
 
@@ -109,22 +109,22 @@ jobVerbPath verb job =
     "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show (primaryKey job)) <> "/" <> verb
 
 jsonMatch :: Value -> ResponseMatcher
-jsonMatch v = ResponseMatcher 200 [] (MatchBody matcher)
+jsonMatch expected = ResponseMatcher 200 [] (MatchBody matcher)
   where
     matcher _ body = case decode body of
-      Just actual | actual == v -> Nothing
-      Just actual -> Just $ "JSON mismatch:\n  expected: " <> show v <> "\n  actual: " <> show actual
+      Just actual | actual == expected -> Nothing
+      Just actual -> Just $ "JSON mismatch:\n  expected: " <> show expected <> "\n  actual: " <> show actual
       Nothing -> Just "Response body is not valid JSON"
 
 -- Test schema
 testSchema :: Text
 testSchema = "arbiter_servant_test"
 
--- | Its own schema, to keep the maintenance gates clear of the other tests.
+-- | A schema of its own. Its maintenance gates are separate from the other tests.
 pacedSchema :: Text
 pacedSchema = "arbiter_servant_paced_test"
 
--- | A schema nothing created, so every maintenance operation raises.
+-- | A schema nothing created. Every maintenance operation raises in it.
 missingSchema :: Text
 missingSchema = "arbiter_servant_missing"
 
@@ -147,7 +147,7 @@ testTable = "arbiter_servant_test"
 -- | Decode a JSON response body or fail the test
 decodeBody :: (FromJSON a) => SResponse -> IO a
 decodeBody resp = case decode (simpleBody resp) of
-  Just a -> pure a
+  Just decoded -> pure decoded
   Nothing -> fail $ "Failed to decode JSON response: " <> show (simpleBody resp)
 
 spec :: ByteString -> Spec
@@ -196,10 +196,10 @@ spec connStr = do
       -- Verify POST response contains the inserted job
       liftIO $ do
         body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody postResp
-        let j = unApiJob (job body)
-        payload j `shouldBe` TestMessage "test message"
-        groupKey j `shouldBe` Just "group1"
-        dedupKey j `shouldBe` Just (IgnoreDuplicate "test-dedup-1")
+        let returnedJob = unApiJob (job body)
+        payload returnedJob `shouldBe` TestMessage "test message"
+        groupKey returnedJob `shouldBe` Just "group1"
+        dedupKey returnedJob `shouldBe` Just (IgnoreDuplicate "test-dedup-1")
 
       -- Verify job was inserted by checking job count
       resp <- get "/api/v1/arbiter_servant_test/jobs"
@@ -228,9 +228,9 @@ spec connStr = do
 
       liftIO $ do
         body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody postResp
-        let j = unApiJob (job body)
-        payload j `shouldBe` TestMessage "delayed"
-        notVisibleUntil j `shouldBe` Just futureTime
+        let returnedJob = unApiJob (job body)
+        payload returnedJob `shouldBe` TestMessage "delayed"
+        notVisibleUntil returnedJob `shouldBe` Just futureTime
 
     it "POST /api/v1/arbiter_servant_test/jobs returns existing job on IgnoreDuplicate hit" $ do
       firstResp <-
@@ -248,9 +248,9 @@ spec connStr = do
           )
       firstId <- liftIO $ do
         body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody firstResp
-        let j = unApiJob (job body)
-        payload j `shouldBe` TestMessage "first"
-        pure (primaryKey j)
+        let returnedJob = unApiJob (job body)
+        payload returnedJob `shouldBe` TestMessage "first"
+        pure (primaryKey returnedJob)
 
       dupResp <-
         request
@@ -267,9 +267,9 @@ spec connStr = do
           )
       liftIO $ do
         body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody dupResp
-        let j = unApiJob (job body)
-        primaryKey j `shouldBe` firstId
-        payload j `shouldBe` TestMessage "first"
+        let returnedJob = unApiJob (job body)
+        primaryKey returnedJob `shouldBe` firstId
+        payload returnedJob `shouldBe` TestMessage "first"
 
     it "POST /api/v1/arbiter_servant_test/jobs/batch inserts multiple jobs" $ do
       postResp <-
@@ -323,7 +323,7 @@ spec connStr = do
               }|]
           )
 
-      -- Batch insert with same dedup key - should skip the duplicate
+      -- Batch insert with the same dedup key skips the duplicate
       postResp <-
         request
           "POST"
@@ -352,10 +352,10 @@ spec connStr = do
       resp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId))
       liftIO $ do
         body :: JobResponse (ApiJob ServantTestPayload) <- decodeBody resp
-        let j = unApiJob (job body)
-        payload j `shouldBe` TestMessage "get me"
-        groupKey j `shouldBe` Just "group1"
-        primaryKey j `shouldBe` jobId
+        let returnedJob = unApiJob (job body)
+        payload returnedJob `shouldBe` TestMessage "get me"
+        groupKey returnedJob `shouldBe` Just "group1"
+        primaryKey returnedJob `shouldBe` jobId
 
     it "GET /api/v1/arbiter_servant_test/jobs/:id returns 404 for non-existent job" $ do
       get "/api/v1/arbiter_servant_test/jobs/99999" `shouldRespondWith` 404
@@ -368,7 +368,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "g3" (TestMessage "msg3"))
         pure ()
 
-      -- Request with limit=2 - should return 2 jobs but report total of 3
+      -- Request with limit=2 returns 2 jobs and reports a total of 3
       resp <- get "/api/v1/arbiter_servant_test/jobs?limit=2"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
@@ -383,14 +383,14 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "groupB" (TestMessage "msg2"))
         pure ()
 
-      -- Filter by group key - should return only groupA job
+      -- Filter by group key returns the groupA job alone
       resp <- get "/api/v1/arbiter_servant_test/jobs?group_key=groupA"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
         jobsTotal body `shouldBe` 1
         length (jobs body) `shouldBe` 1
-        -- Verify only groupA jobs returned (not groupB)
-        forM_ (jobs body) $ \j -> groupKey (ajwsJob j) `shouldBe` Just "groupA"
+        -- Verify only groupA jobs returned
+        forM_ (jobs body) $ \listed -> groupKey (ajwsJob listed) `shouldBe` Just "groupA"
 
     it "GET /api/v1/arbiter_servant_test/jobs supports kind filter" $ do
       liftIO $ do
@@ -412,10 +412,10 @@ spec connStr = do
 
     it "GET /api/v1/arbiter_servant_test/jobs sort_by/sort_dir changes ordering" $ do
       ids <- liftIO $ do
-        Just j1 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort1"))
-        Just j2 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort2"))
-        Just j3 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort3"))
-        pure $ map primaryKey [j1, j2, j3]
+        Just job1 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort1"))
+        Just job2 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort2"))
+        Just job3 <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "sort3"))
+        pure $ map primaryKey [job1, job2, job3]
       let sorted = [minimum ids, maximum ids]
 
       ascResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=ASC"
@@ -442,7 +442,7 @@ spec connStr = do
               )
         pure (primaryKey parent, map primaryKey children)
 
-      -- roots_only excludes children, keeping only the root parent
+      -- roots_only excludes children
       rootsResp <- get "/api/v1/arbiter_servant_test/jobs?roots_only"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody rootsResp
@@ -454,7 +454,7 @@ spec connStr = do
         body :: JobsResponse ServantTestPayload <- decodeBody childResp
         jobsTotal body `shouldBe` 2
         let returned = map (primaryKey . ajwsJob) (jobs body)
-        forM_ childIds $ \cid -> (cid `elem` returned) `shouldBe` True
+        forM_ childIds $ \childId -> (childId `elem` returned) `shouldBe` True
 
     it "GET /api/v1/arbiter_servant_test/jobs clamps out-of-range limit and offset" $ do
       liftIO $ do
@@ -520,17 +520,17 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "inflight-job"))
         _ <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         -- backoff: insert, claim, then fail into retry backoff
-        Just bj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "backoff-job"))
+        Just backoffJob <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "backoff-job"))
         claimedB <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.updateJobForRetry 60 "boom" (head claimedB)
         -- ready
         _ <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "ready-job"))
-        -- scheduled: future visibility, never attempted
+        -- scheduled: future visibility with zero attempts
         _ <- runSimpleDb mkEnv $ HL.insertJob (setNotVisibleUntil (Just future) $ defaultJob (TestMessage "scheduled-job"))
         -- suspended
-        Just sj <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "suspended-job"))
-        _ <- runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable (primaryKey sj)
-        pure (primaryKey bj)
+        Just suspendedJob <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "suspended-job"))
+        _ <- runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable (primaryKey suspendedJob)
+        pure (primaryKey backoffJob)
 
       let expectOne status pay = do
             resp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs?status=" <> status)
@@ -647,12 +647,12 @@ spec connStr = do
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show parentId) <> "/pause-children") ""
         `shouldRespondWith` 204
 
-      -- Verify children are actually suspended
+      -- Verify children are suspended
       liftIO $ do
         allJobs :: [JobRead ServantTestPayload] <- runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
-        let childJobs = filter (\j -> payload j == TestMessage "child") allJobs
+        let childJobs = filter (\listed -> payload listed == TestMessage "child") allJobs
         length childJobs `shouldBe` 1
-        forM_ childJobs $ \j -> suspended j `shouldBe` True
+        forM_ childJobs $ \listed -> suspended listed `shouldBe` True
 
     it "POST /api/v1/arbiter_servant_test/jobs/:id/pause-children returns 204 for job with no children" $ do
       jobId <- liftIO $ do
@@ -680,7 +680,7 @@ spec connStr = do
       -- Verify children are no longer suspended
       liftIO $ do
         allJobs :: [JobRead ServantTestPayload] <- runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
-        let childJobs = filter (\j -> payload j == TestMessage "child") allJobs
+        let childJobs = filter (\listed -> payload listed == TestMessage "child") allJobs
         length childJobs `shouldBe` 1
         suspended (head childJobs) `shouldBe` False
 
@@ -707,7 +707,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" job3
         pure ()
 
-      -- Get with limit - should return 2 jobs out of 3 total
+      -- Get with limit returns 2 of 3 jobs
       limitResp <- get "/api/v1/arbiter_servant_test/dlq?limit=2"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody limitResp
@@ -715,7 +715,7 @@ spec connStr = do
         dlqTotal body `shouldBe` 3
         length (dlqJobs body) `shouldBe` 2
 
-      -- Get with offset - should return 2 remaining jobs
+      -- Get with offset returns the 2 remaining jobs
       offsetResp <- get "/api/v1/arbiter_servant_test/dlq?offset=1"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody offsetResp
@@ -726,12 +726,12 @@ spec connStr = do
     it "POST /api/v1/arbiter_servant_test/dlq/batch-delete deletes multiple DLQ jobs" $ do
       -- Insert 3 jobs and move to DLQ
       dlqIds <- liftIO $ do
-        Just j1 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd1" (TestMessage "batch del 1"))
-        Just j2 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd2" (TestMessage "batch del 2"))
-        Just j3 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd3" (TestMessage "batch del 3"))
-        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" j1
-        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" j2
-        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" j3
+        Just job1 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd1" (TestMessage "batch del 1"))
+        Just job2 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd2" (TestMessage "batch del 2"))
+        Just job3 <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "bd3" (TestMessage "batch del 3"))
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" job1
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" job2
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "err" job3
         dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 10 0
         pure $ map dlqPrimaryKey dlqs
 
@@ -790,7 +790,7 @@ spec connStr = do
       get "/api/v1/arbiter_servant_test/dlq"
         `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
 
-      -- Verify job is not in main queue either
+      -- Verify job is absent from the main queue
       liftIO $ do
         allJobs :: [JobRead ServantTestPayload] <-
           runSimpleDb mkEnv $ Ops.listJobs testSchema testTable 10 0
@@ -813,13 +813,13 @@ spec connStr = do
         -- Claim and DLQ the child
         claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
         _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
-        -- Cancel parent (cascade) - removes the suspended parent
+        -- Cancel parent (cascade). This removes the suspended parent
         _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @ServantTestPayload (primaryKey parent)
         -- Get DLQ job ID
         dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
         pure $ dlqPrimaryKey (head dlqs)
 
-      -- Retry should return 409 - parent is gone
+      -- Retry returns 409. The parent is gone
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/dlq/" <> T.pack (show dlqId) <> "/retry") ""
         `shouldRespondWith` 409
 
@@ -835,7 +835,7 @@ spec connStr = do
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId) <> "/suspend") ""
         `shouldRespondWith` 204
 
-      -- Verify the job is actually suspended
+      -- Verify the job is suspended
       liftIO $ do
         Just job :: Maybe (JobRead ServantTestPayload) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
         suspended job `shouldBe` True
@@ -914,7 +914,7 @@ spec connStr = do
         Just inserted <- runSimpleDb mkEnv $ HL.insertJob job
         pure $ primaryKey inserted
 
-      -- Job is delayed, not claimable
+      -- Job is delayed and unclaimable
       liftIO $ do
         visible <- runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
         length visible `shouldBe` 0
@@ -928,8 +928,7 @@ spec connStr = do
         length visible `shouldBe` 1
         primaryKey (head visible) `shouldBe` jobId
 
-  -- QueueOverview's instances are also how a gauge snapshot round-trips through the
-  -- shared gate, so a change made for that payload would silently reshape this response.
+  -- QueueOverview's instances also carry a gauge snapshot through the shared gate.
   describe "Job wire contract" $ do
     -- A job object as a server predating the trace and claim fields sends it.
     let olderJob =
@@ -1103,14 +1102,14 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/stats"
       liftIO $ do
         body :: StatsResponse <- decodeBody resp
-        let s = stats body
-        Ops.totalJobs s `shouldBe` 0
-        Ops.readyJobs s `shouldBe` 0
-        Ops.inFlightJobs s `shouldBe` 0
-        Ops.scheduledJobs s `shouldBe` 0
-        Ops.backoffJobs s `shouldBe` 0
-        Ops.suspendedJobs s `shouldBe` 0
-        Ops.oldestReadyAgeSeconds s `shouldBe` Nothing
+        let queueStats = stats body
+        Ops.totalJobs queueStats `shouldBe` 0
+        Ops.readyJobs queueStats `shouldBe` 0
+        Ops.inFlightJobs queueStats `shouldBe` 0
+        Ops.scheduledJobs queueStats `shouldBe` 0
+        Ops.backoffJobs queueStats `shouldBe` 0
+        Ops.suspendedJobs queueStats `shouldBe` 0
+        Ops.oldestReadyAgeSeconds queueStats `shouldBe` Nothing
         timestamp body `shouldSatisfy` (not . T.null)
 
     it "GET /api/v1/arbiter_servant_test/stats reflects inserted and claimed jobs" $ do
@@ -1125,16 +1124,16 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/stats"
       liftIO $ do
         body :: StatsResponse <- decodeBody resp
-        let s = stats body
-        Ops.totalJobs s `shouldBe` 3
-        Ops.readyJobs s `shouldBe` 2
-        Ops.inFlightJobs s `shouldBe` 1
-        Ops.scheduledJobs s `shouldBe` 0
-        Ops.oldestReadyAgeSeconds s `shouldSatisfy` isJust
+        let queueStats = stats body
+        Ops.totalJobs queueStats `shouldBe` 3
+        Ops.readyJobs queueStats `shouldBe` 2
+        Ops.inFlightJobs queueStats `shouldBe` 1
+        Ops.scheduledJobs queueStats `shouldBe` 0
+        Ops.oldestReadyAgeSeconds queueStats `shouldSatisfy` isJust
 
   describe "Cron API" $ with (cleanupDb >> pure app) $ do
-    let seedCron name expr ov = liftIO $ runSimpleDb mkEnv $ do
-          _ <- Ops.upsertCronDefault testSchema name testTable expr ov Nothing
+    let seedCron name expr overlap = liftIO $ runSimpleDb mkEnv $ do
+          _ <- Ops.upsertCronDefault testSchema name testTable expr overlap Nothing
           pure ()
 
     it "GET /api/v1/cron/schedules returns seeded schedules" $ do
@@ -1146,7 +1145,7 @@ spec connStr = do
         simpleStatus resp `shouldBe` status200
         let body = decode @(Map.Map Text [CS.CronScheduleRow]) (simpleBody resp)
         case body of
-          Just m -> case Map.lookup "cronSchedules" m of
+          Just decoded -> case Map.lookup "cronSchedules" decoded of
             Just rows -> length rows `shouldSatisfy` (>= 2)
             Nothing -> fail "Missing cronSchedules key"
           Nothing -> fail "Failed to decode response"
@@ -1156,14 +1155,14 @@ spec connStr = do
 
       let fields
             CS.CronScheduleRow
-              { CS.defaultExpression = de
-              , CS.defaultOverlap = dov
-              , CS.overrideExpression = oe
-              , CS.overrideOverlap = oo
-              , CS.overrideTimezone = ot
-              , CS.enabled = en
+              { CS.defaultExpression = defaultExpr
+              , CS.defaultOverlap = defaultOv
+              , CS.overrideExpression = overrideExpr
+              , CS.overrideOverlap = overrideOv
+              , CS.overrideTimezone = overrideTz
+              , CS.enabled = isEnabled
               } =
-              (de, dov, oe, oo, ot, en)
+              (defaultExpr, defaultOv, overrideExpr, overrideOv, overrideTz, isEnabled)
 
       beforeFields <- liftIO $ do
         Just row <- runSimpleDb mkEnv $ Ops.getCronScheduleByName testSchema "test-cron"
@@ -1196,7 +1195,7 @@ spec connStr = do
       liftIO $ do
         simpleStatus resp `shouldBe` status200
         case decode @CS.CronScheduleRow (simpleBody resp) of
-          Just CS.CronScheduleRow {CS.overrideExpression = oe} -> oe `shouldBe` Just "0 3 * * *"
+          Just CS.CronScheduleRow {CS.overrideExpression = overrideExpr} -> overrideExpr `shouldBe` Just "0 3 * * *"
           Nothing -> fail "Failed to decode response"
 
     it "PATCH /api/v1/cron/schedules/:name clears override with null" $ do
@@ -1221,7 +1220,7 @@ spec connStr = do
       liftIO $ do
         simpleStatus resp `shouldBe` status200
         case decode @CS.CronScheduleRow (simpleBody resp) of
-          Just CS.CronScheduleRow {CS.overrideExpression = oe} -> oe `shouldBe` Nothing
+          Just CS.CronScheduleRow {CS.overrideExpression = overrideExpr} -> overrideExpr `shouldBe` Nothing
           Nothing -> fail "Failed to decode response"
 
     it "PATCH /api/v1/cron/schedules/:name can disable a schedule" $ do
@@ -1237,7 +1236,7 @@ spec connStr = do
       liftIO $ do
         simpleStatus resp `shouldBe` status200
         case decode @CS.CronScheduleRow (simpleBody resp) of
-          Just CS.CronScheduleRow {CS.enabled = en} -> en `shouldBe` False
+          Just CS.CronScheduleRow {CS.enabled = isEnabled} -> isEnabled `shouldBe` False
           Nothing -> fail "Failed to decode response"
 
     it "PATCH /api/v1/cron/schedules/:name rejects invalid cron expression" $ do
@@ -1265,8 +1264,8 @@ spec connStr = do
       liftIO $ do
         simpleStatus resp `shouldBe` status200
         case decode @CS.CronScheduleRow (simpleBody resp) of
-          Just CS.CronScheduleRow {CS.overrideTimezone = ot} ->
-            ot `shouldBe` Just "America/New_York"
+          Just CS.CronScheduleRow {CS.overrideTimezone = overrideTz} ->
+            overrideTz `shouldBe` Just "America/New_York"
           Nothing -> fail "Failed to decode response"
 
     it "PATCH /api/v1/cron/schedules/:name rejects invalid timezone" $ do
@@ -1366,13 +1365,13 @@ spec connStr = do
     it "POST /api/v1/queues/:queue/pause then resume flips the paused flag" $ do
       post "/api/v1/queues/arbiter_servant_test/pause" "" `shouldRespondWith` 204
       liftIO $ do
-        Just q <- runSimpleDb mkEnv $ Ops.getQueue testSchema "arbiter_servant_test"
-        Q.paused q `shouldBe` True
+        Just queueRow <- runSimpleDb mkEnv $ Ops.getQueue testSchema "arbiter_servant_test"
+        Q.paused queueRow `shouldBe` True
 
       post "/api/v1/queues/arbiter_servant_test/resume" "" `shouldRespondWith` 204
       liftIO $ do
-        Just q <- runSimpleDb mkEnv $ Ops.getQueue testSchema "arbiter_servant_test"
-        Q.paused q `shouldBe` False
+        Just queueRow <- runSimpleDb mkEnv $ Ops.getQueue testSchema "arbiter_servant_test"
+        Q.paused queueRow `shouldBe` False
 
     it "POST /api/v1/queues/:queue/pause returns 404 for unknown queue" $ do
       post "/api/v1/queues/not-a-real-queue/pause" "" `shouldRespondWith` 404
@@ -1398,7 +1397,7 @@ spec connStr = do
       liftIO $ do
         body :: WorkersResponse <- decodeBody resp
         length (workers body) `shouldBe` 1
-        forM_ (workers body) $ \w -> W.paused w `shouldBe` False
+        forM_ (workers body) $ \worker -> W.paused worker `shouldBe` False
 
     it "POST /api/v1/workers/:id/pause then resume flips the paused flag" $ do
       _ <- seedWorker

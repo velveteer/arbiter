@@ -59,7 +59,7 @@ testSchema = "arbiter_worker_deadline_test"
 testTable :: Text
 testTable = "arbiter_worker_deadline_test"
 
--- | Longer than any deadline under test, so only a fence ends the handler.
+-- | Longer than any deadline under test.
 handlerSleepMicros :: Int
 handlerSleepMicros = 30_000_000
 
@@ -78,16 +78,16 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   around (withPool sharedPool) $ do
     describe "Heartbeat scheduling" $ do
-      it "stops retrying once the lease is spent instead of spinning" $ \env -> do
+      it "stops retrying once the lease is spent" $ \env -> do
         startedRef <- newIORef (0 :: Int)
         loggedRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job =
-              liftIO (atomicModifyIORef' startedRef (\n -> (n + 1, ())) >> threadDelay handlerSleepMicros)
+              liftIO (atomicModifyIORef' startedRef (\count -> (count + 1, ())) >> threadDelay handlerSleepMicros)
                 `finally` liftIO (threadDelay unwindMicros)
             capture _level msg _ctx =
               when ("Heartbeat error" `T.isInfixOf` msg) $
-                atomicModifyIORef' loggedRef (\n -> (n + 1, ()))
+                atomicModifyIORef' loggedRef (\count -> (count + 1, ()))
 
         runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 30))
 
@@ -114,12 +114,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         beatsRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ do
-              atomicModifyIORef' startedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
               threadDelay 9_000_000
             hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
             hooks =
               defaultObservabilityHooks
-                { onJobHeartbeat = \_ _ _ -> liftIO (atomicModifyIORef' beatsRef (\n -> (n + 1, ())))
+                { onJobHeartbeat = \_ _ _ -> liftIO (atomicModifyIORef' beatsRef (\count -> (count + 1, ())))
                 }
 
         runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 9))
@@ -148,9 +148,9 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         finishedRef <- newIORef (0 :: Int)
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ do
-              atomicModifyIORef' startedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
 
         runSimpleDb env
           $ void
@@ -185,8 +185,8 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
               ackAll callbacks (toList jobs)
               liftIO $ do
                 threadDelay handlerSleepMicros
-                atomicModifyIORef' finishedRef (\n -> (n + 1, ()))
-            capture _level msg _ctx = atomicModifyIORef' loggedRef (\ms -> (msg : ms, ()))
+                atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
+            capture _level msg _ctx = atomicModifyIORef' loggedRef (\messages -> (msg : messages, ()))
 
         runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 30))
 
@@ -213,14 +213,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         reasonsRef <- newIORef ([] :: [Text])
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ do
-              atomicModifyIORef' startedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
             hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
             hooks =
               defaultObservabilityHooks
                 { onJobUnavailable = \_ reason ->
-                    liftIO $ atomicModifyIORef' reasonsRef (\rs -> (reason : rs, ()))
+                    liftIO $ atomicModifyIORef' reasonsRef (\seen -> (reason : seen, ()))
                 }
 
         runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 30))
@@ -251,14 +251,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         reasonsRef <- newIORef ([] :: [Text])
         let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
             handler _conn _job = liftIO $ do
-              atomicModifyIORef' startedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
               threadDelay handlerSleepMicros
-              atomicModifyIORef' finishedRef (\n -> (n + 1, ()))
+              atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
             hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
             hooks =
               defaultObservabilityHooks
                 { onJobUnavailable = \_ reason ->
-                    liftIO $ atomicModifyIORef' reasonsRef (\rs -> (reason : rs, ()))
+                    liftIO $ atomicModifyIORef' reasonsRef (\seen -> (reason : seen, ()))
                 }
 
         runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 30))
@@ -288,25 +288,25 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
       it "survives a failed heartbeat under a short visibility timeout" $ \env ->
         survivesOneFailedHeartbeat connStr env 5 2 8_000_000
 
--- | One extend fails. A fenced handler re-runs, so the assertion is the run count.
+-- | One extend fails. The assertion is the run count.
 survivesOneFailedHeartbeat
   :: ByteString
   -> SimpleEnv WorkerTestRegistry
   -> NominalDiffTime
   -- ^ Visibility timeout.
   -> NominalDiffTime
-  -- ^ Heartbeat interval. The block spans it, so the extend due one interval in fails.
+  -- ^ Heartbeat interval. The block spans it and fails the extend due one interval in.
   -> Int
-  -- ^ Handler run time in microseconds, which must outlast the lease.
+  -- ^ Handler run time in microseconds. It must outlast the lease.
   -> IO ()
 survivesOneFailedHeartbeat connStr env timeout interval handlerMicros = do
   startedRef <- newIORef (0 :: Int)
   finishedRef <- newIORef (0 :: Int)
   let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
       handler _conn _job = liftIO $ do
-        atomicModifyIORef' startedRef (\n -> (n + 1, ()))
+        atomicModifyIORef' startedRef (\count -> (count + 1, ()))
         threadDelay handlerMicros
-        atomicModifyIORef' finishedRef (\n -> (n + 1, ()))
+        atomicModifyIORef' finishedRef (\count -> (count + 1, ()))
 
   runSimpleDb env $ void $ HL.insertJob (defaultJob (SlowTask 1))
 
@@ -331,7 +331,7 @@ survivesOneFailedHeartbeat connStr env timeout interval handlerMicros = do
 listDLQ :: SimpleEnv WorkerTestRegistry -> IO [DLQJob WorkerTestPayload]
 listDLQ env = runSimpleDb env (HL.listDLQJobs 10 0)
 
--- | Fail every row update, which is the heartbeat's only statement once a job is claimed.
+-- | Fail every row update. Once a job is claimed, the heartbeat's only statement is an update.
 blockRowUpdates :: ByteString -> IO ()
 blockRowUpdates connStr = withFreshConn connStr $ \conn -> do
   void $
@@ -364,7 +364,7 @@ unblockRowUpdates connStr = withFreshConn connStr $ \conn -> do
   void $ PG.execute_ conn (fromString (T.unpack ("DROP TRIGGER IF EXISTS block_update ON " <> qualifiedTable)))
   void $ PG.execute_ conn (fromString (T.unpack ("DROP FUNCTION IF EXISTS " <> blockFunction <> "()")))
 
--- | Take the claim without bumping its token, so the extend reports 'VisibilityUnchanged'.
+-- | Take the claim without bumping its token. The extend then reports 'VisibilityUnchanged'.
 takeClaimHolder :: ByteString -> IO ()
 takeClaimHolder connStr = withFreshConn connStr $ \conn ->
   void $

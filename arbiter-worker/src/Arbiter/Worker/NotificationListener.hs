@@ -15,7 +15,7 @@ type Action m a = Maybe Notification -> m a
 
 -- | Loop until 'ShuttingDown'. Per iteration wait on notification, poll timer,
 -- wake trigger, or state change. Fires @action Nothing@ once at startup if the
--- state is 'Running', so callers don't have to wait for the first event.
+-- state is 'Running'.
 runNotificationConsumer
   :: (MonadUnliftIO m)
   => STM.STM WorkerState
@@ -24,23 +24,23 @@ runNotificationConsumer
   -> Maybe (STM.STM ())
   -> Action m ()
   -> m ()
-runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
-  st <- STM.atomically readState
-  when (st == Running) (action Nothing)
+runNotificationConsumer readState pollDelay notifVar mWakeTrigger action = do
+  state <- STM.atomically readState
+  when (state == Running) (action Nothing)
   loop
   where
-    pollMicros = round (polDel * 1_000_000)
+    pollMicros = round (pollDelay * 1_000_000)
 
     loop = do
-      cmd <- nextCommand
-      case cmd of
+      command <- nextCommand
+      case command of
         Halt -> pure ()
         PauseCmd -> do
           next <- awaitUnpause
           case next of
             Halt -> pure ()
             _ -> action Nothing *> loop
-        NotificationRecv n -> action (Just n) *> loop
+        NotificationRecv notification -> action (Just notification) *> loop
         TimerExpired -> action Nothing *> loop
 
     nextCommand = do
@@ -58,8 +58,8 @@ runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
 
     awaitUnpause =
       STM.atomically $ do
-        s <- readState
-        case s of
+        state <- readState
+        case state of
           Paused -> STM.retrySTM
           ShuttingDown -> pure Halt
           Running -> pure TimerExpired
@@ -67,9 +67,9 @@ runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
     consumeNotification = do
       mNotif <- STM.readTVar notifVar
       case mNotif of
-        Just n -> do
+        Just notification -> do
           STM.writeTVar notifVar Nothing
-          pure (NotificationRecv n)
+          pure (NotificationRecv notification)
         Nothing -> STM.retrySTM
 
     timerExpired delayVar = do
@@ -81,8 +81,8 @@ runNotificationConsumer readState polDel notifVar mWakeTrigger action = do
       Just trigger -> trigger >> pure TimerExpired
 
     watchStateChange = do
-      s <- readState
-      case s of
+      state <- readState
+      case state of
         ShuttingDown -> pure Halt
         Paused -> pure PauseCmd
         Running -> STM.retrySTM

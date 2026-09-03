@@ -54,19 +54,18 @@ initCronSchedules
   :: (MonadArbiter m)
   => SchemaName -> Text -> [CronJob payload] -> LogConfig -> m ()
 initCronSchedules schemaName queueName jobs logCfg = do
-  for_ jobs $ \cj ->
+  for_ jobs $ \cron ->
     Ops.upsertCronDefault
       schemaName
-      (name cj)
+      (name cron)
       queueName
-      (cronExpression cj)
-      (overlapPolicyToText (overlap cj))
-      (timezone cj)
+      (cronExpression cron)
+      (overlapPolicyToText (overlap cron))
+      (timezone cron)
   liftIO . tryLog logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
--- | Scheduler entry point. Exits cleanly when the worker state becomes
--- 'ShuttingDown' so graceful shutdown stops creating new jobs.
+-- | Scheduler entry point. Exits when the worker state becomes 'ShuttingDown'.
 runCronScheduler
   :: (QueueOperation m payload)
   => TVar WorkerState
@@ -123,29 +122,29 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
   let currentTick = truncateToMinute now
   traverse_ (processOneCron currentTick) jobs
   where
-    processOneCron currentTick cj = do
-      outcome <- tryCron cronLog ("Cron '" <> name cj <> "' tick") . withDbTransaction $ do
-        haveLeader <- case backfill cj of
+    processOneCron currentTick cron = do
+      outcome <- tryCron cronLog ("Cron '" <> name cron <> "' tick") . withDbTransaction $ do
+        haveLeader <- case backfill cron of
           NoBackfill -> pure True
-          Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cj)
+          Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
         if not haveLeader
           then pure NotLeader
           else do
-            mRow <- Ops.getCronScheduleByName schemaName (name cj)
-            processOne mRow currentTick cj
-            void $ Ops.touchCronChecked schemaName currentTick [name cj]
+            mRow <- Ops.getCronScheduleByName schemaName (name cron)
+            processOne mRow currentTick cron
+            void $ Ops.touchCronChecked schemaName currentTick [name cron]
             pure Ran
       case outcome of
         Left _ -> pure ()
         Right NotLeader ->
-          logCron cronLog Debug $ "Cron '" <> name cj <> "' skipped, another pool holds the lock"
+          logCron cronLog Debug $ "Cron '" <> name cron <> "' skipped, another pool holds the lock"
         Right Ran -> pure ()
-    processOne mRow currentTick cj = case resolveAndParse cj mRow of
+    processOne mRow currentTick cron = case resolveAndParse cron mRow of
       Disabled -> pure ()
       ParseError expr err ->
         logCron cronLog Error $
           "Cron schedule '"
-            <> name cj
+            <> name cron
             <> "' has invalid effective expression '"
             <> expr
             <> "': "
@@ -153,39 +152,37 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
       InvalidTimezone tzName ->
         logCron cronLog Error $
           "Cron schedule '"
-            <> name cj
+            <> name cron
             <> "' has unknown timezone '"
             <> tzName
             <> "'"
       Effective effectiveOv sched effectiveTz -> do
-        let ticksInWindow = enumerateCatchUpTicks (backfill cj) (mRow >>= CS.lastCheckedAt) currentTick
+        let ticksInWindow = enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
             ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
             replayCount = length (filter (/= currentTick) ticksToFire)
         when (replayCount > 0)
           $ logCron cronLog Info
-          $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cj <> "'"
-        for_ ticksToFire $ \t ->
-          tryInsertCronJob cronLog schemaName cj effectiveOv effectiveTz (tickKindFor currentTick t) t
+          $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cron <> "'"
+        for_ ticksToFire $ \tick ->
+          tryInsertCronJob cronLog schemaName cron effectiveOv effectiveTz (tickKindFor currentTick tick) tick
 
 data TickOutcome = NotLeader | Ran
 
--- | 'Live' for @currentTick@, 'Replay' otherwise.
+-- | 'Live' for @currentTick@ and 'Replay' for any other tick.
 tickKindFor :: UTCTime -> UTCTime -> TickKind
-tickKindFor currentTick t = if t == currentTick then Live else Replay
+tickKindFor currentTick tick = if tick == currentTick then Live else Replay
 
--- | 'SkipOverlap' keeps the oldest match so a catch-up handler starts from
--- the earliest unprocessed checkpoint. 'AllowOverlap' keeps all.
+-- | 'SkipOverlap' keeps the oldest match. 'AllowOverlap' keeps all.
 -- Match evaluation uses the supplied timezone ('Nothing' = UTC).
 pickTicksToFire :: CronSchedule -> Maybe Text -> OverlapPolicy -> [UTCTime] -> [UTCTime]
-pickTicksToFire sched tz ov ticks =
-  let matching = filter (matchesInTimezone tz sched) ticks
-   in case ov of
+pickTicksToFire sched zone overlapPolicy ticks =
+  let matching = filter (matchesInTimezone zone sched) ticks
+   in case overlapPolicy of
         SkipOverlap -> take 1 matching
         AllowOverlap -> matching
 
 -- | Minutes to evaluate for a 'processCronCatchUp' call. Returns @[]@ when
--- the watermark is already at or past @currentTick@ (preventing re-fires
--- after job processing).
+-- the watermark is at or past @currentTick@.
 enumerateCatchUpTicks :: BackfillPolicy -> Maybe UTCTime -> UTCTime -> [UTCTime]
 enumerateCatchUpTicks _ (Just lastChecked) currentTick
   | truncateToMinute lastChecked >= currentTick = []
@@ -193,7 +190,7 @@ enumerateCatchUpTicks NoBackfill _ currentTick = [currentTick]
 enumerateCatchUpTicks _ Nothing currentTick = [currentTick]
 enumerateCatchUpTicks (Backfill window) (Just lastChecked) currentTick =
   let truncatedLast = truncateToMinute lastChecked
-      -- Truncate so a non-minute-multiple window doesn't stride past currentTick.
+      -- Truncate the window floor to a minute boundary.
       windowFloor = truncateToMinute (addUTCTime (negate window) currentTick)
       startMinute = max (addUTCTime 60 truncatedLast) windowFloor
    in enumMinutes startMinute currentTick
@@ -208,52 +205,51 @@ data Resolved
 
 -- | The row's overlap override, falling back to the schedule's code default.
 effectiveOverlapFor :: CronJob payload -> CS.CronScheduleRow -> OverlapPolicy
-effectiveOverlapFor cj row = fromMaybe (overlap cj) (overlapPolicyFromText (CS.effectiveOverlap row))
+effectiveOverlapFor cron row = fromMaybe (overlap cron) (overlapPolicyFromText (CS.effectiveOverlap row))
 
 resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
-resolveAndParse cj mRow =
-  let (expr, ov, tz, isEnabled) = case mRow of
-        Nothing -> (cronExpression cj, overlap cj, timezone cj, True)
+resolveAndParse cron mRow =
+  let (expr, overlapPolicy, zone, isEnabled) = case mRow of
+        Nothing -> (cronExpression cron, overlap cron, timezone cron, True)
         Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
           ( CS.effectiveExpression row
-          , effectiveOverlapFor cj row
+          , effectiveOverlapFor cron row
           , CS.effectiveTimezone row
           , rowEnabled
           )
    in if isEnabled
         then case parseCronSchedule expr of
           Left err -> ParseError expr err
-          Right sched -> case tz of
+          Right sched -> case zone of
             Just tzName | isNothing (resolveTZ tzName) -> InvalidTimezone tzName
-            _ -> Effective ov sched tz
+            _ -> Effective overlapPolicy sched zone
         else Disabled
 
 -- | Attempt to insert a single cron-tick job. Any failure is logged.
 --
 -- The insert and the per-tick @last_checked_at@ advance are atomic. If
--- either fails the other rolls back, so a successful fire is always paired
--- with a watermark advance to that tick.
+-- either fails the other rolls back.
 tryInsertCronJob
   :: (QueueOperation m payload)
   => CronLog -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m ()
-tryInsertCronJob cronLog schemaName cj effectiveOv effectiveTz kind tick = do
-  result <- tryCron cronLog ("Cron schedule '" <> name cj <> "' insert") . withDbTransaction $ do
-    -- Gate first: another pool may have already fired this minute.
-    fired <- Ops.tryFireCronGate schemaName (name cj) tick
+tryInsertCronJob cronLog schemaName cron effectiveOv effectiveTz kind tick = do
+  result <- tryCron cronLog ("Cron schedule '" <> name cron <> "' insert") . withDbTransaction $ do
+    -- Gate first. Another pool may have fired this minute.
+    fired <- Ops.tryFireCronGate schemaName (name cron) tick
     when fired $ do
-      let key = makeDedupKeyFromParts (name cj) effectiveOv effectiveTz tick
-          jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cj kind tick
+      let key = makeDedupKeyFromParts (name cron) effectiveOv effectiveTz tick
+          jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
       void $ HL.insertJob jobWrite
-    void $ Ops.touchCronChecked schemaName tick [name cj]
+    void $ Ops.touchCronChecked schemaName tick [name cron]
   traverse_
-    (const . logCron cronLog Debug $ "Cron schedule '" <> name cj <> "' processed at " <> formatMinute tick)
+    (const . logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick)
     result
 
 data RunNowOutcome = Fired | Skipped | NotRequested
 
 -- | Claim and fire every schedule with a pending run request. A 'SkipOverlap'
--- schedule reuses its constant dedup key, so a manual run is skipped while one
--- of its jobs is already active.
+-- schedule reuses its constant dedup key. A manual run is skipped while one of
+-- its jobs is active.
 --
 -- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
@@ -265,29 +261,29 @@ processRunRequests cronLog schemaName jobs now = do
   traverse_ (fireRequested . Set.fromList) scan
   where
     fireRequested requested =
-      traverse_ (claimAndFire (truncateToMinute now)) (filter (\cj -> Set.member (name cj) requested) jobs)
-    -- A run-now happens only when somebody asks for one, so every failure is news.
-    claimAndFire tick cj = do
+      traverse_ (claimAndFire (truncateToMinute now)) (filter (\cron -> Set.member (name cron) requested) jobs)
+    -- Every run-now failure is reported.
+    claimAndFire tick cron = do
       outcome <- tryAny . withDbTransaction $ do
-        claimed <- Ops.claimCronRun schemaName (name cj)
-        maybe (pure NotRequested) (fireClaimed tick cj) claimed
+        claimed <- Ops.claimCronRun schemaName (name cron)
+        maybe (pure NotRequested) (fireClaimed tick cron) claimed
       case outcome of
-        Left e ->
-          logCron cronLog Error $ "Cron '" <> name cj <> "' run-now aborted: " <> displayEx e
+        Left exception ->
+          logCron cronLog Error $ "Cron '" <> name cron <> "' run-now aborted: " <> displayEx exception
         Right NotRequested -> pure ()
         Right Fired ->
-          logCron cronLog Info $ "Cron '" <> name cj <> "' run-now fired at " <> formatMinute tick
+          logCron cronLog Info $ "Cron '" <> name cron <> "' run-now fired at " <> formatMinute tick
         Right Skipped ->
-          logCron cronLog Warning $ "Cron '" <> name cj <> "' run-now skipped, a job is already active"
-    fireClaimed tick cj row = do
-      let key = case effectiveOverlapFor cj row of
-            SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cj)))
+          logCron cronLog Warning $ "Cron '" <> name cron <> "' run-now skipped, a job is already active"
+    fireClaimed tick cron row = do
+      let key = case effectiveOverlapFor cron row of
+            SkipOverlap -> Just (IgnoreDuplicate (skipOverlapKey (name cron)))
             AllowOverlap -> Nothing
-          jobWrite = setDedupKey key $ builder cj Live tick
+          jobWrite = setDedupKey key $ builder cron Live tick
       inserted <- HL.insertJob jobWrite
       case inserted of
         Just _ -> do
-          void $ Ops.touchCronManualRun schemaName tick (name cj)
+          void $ Ops.touchCronManualRun schemaName tick (name cron)
           pure Fired
         Nothing -> pure Skipped
 
@@ -312,17 +308,17 @@ tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cron
 
 -- | Dedup key for a cron job, from its code-defined overlap and timezone.
 makeDedupKey :: CronJob payload -> UTCTime -> Text
-makeDedupKey cj tick = makeDedupKeyFromParts (name cj) (overlap cj) (timezone cj) tick
+makeDedupKey cron tick = makeDedupKeyFromParts (name cron) (overlap cron) (timezone cron) tick
 
 -- | For 'AllowOverlap', the key includes the tick formatted in the schedule's
 -- timezone. A DST fall-back minute fires one time.
 makeDedupKeyFromParts :: Text -> OverlapPolicy -> Maybe Text -> UTCTime -> Text
-makeDedupKeyFromParts jobName ov tz tick = case ov of
+makeDedupKeyFromParts jobName overlapPolicy zone tick = case overlapPolicy of
   SkipOverlap -> skipOverlapKey jobName
-  AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinuteInTimezone tz tick
+  AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinuteInTimezone zone tick
 
--- | The tick-independent key a 'SkipOverlap' schedule reuses, so at most one of
--- its jobs is ever active.
+-- | The tick-independent key a 'SkipOverlap' schedule reuses. At most one of its
+-- jobs is active.
 skipOverlapKey :: Text -> Text
 skipOverlapKey jobName = "arbiter_cron:" <> jobName
 
@@ -344,8 +340,8 @@ data WakeReason = WakeShutdown | WakeMinute | WakeRunNow
 -- Shutdown wins, then an elapsed minute boundary, then a pending run-now.
 waitForWake :: (MonadIO m) => TVar WorkerState -> TVar Bool -> TVar Bool -> m WakeReason
 waitForWake stateVar runNowVar timerVar = liftIO . atomically $ do
-  st <- readTVar stateVar
-  case st of
+  state <- readTVar stateVar
+  case state of
     ShuttingDown -> pure WakeShutdown
     _ -> do
       timedOut <- readTVar timerVar

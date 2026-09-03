@@ -26,8 +26,7 @@
 --   * no concurrency key has more claimed-in-flight jobs than its effective cap
 --   * every group summary column matches its recompute from the main table
 --
--- Generated inserts also carry rate-limit keys and concurrency slots, so the
--- claim, retry, and DLQ round-trip paths are exercised on limited jobs.
+-- Generated inserts also carry rate-limit keys and concurrency slots.
 --
 -- A second property ('prop_concurrent') generates N independent branches of
 -- self-contained actions, runs them concurrently under a gap-free serialization
@@ -133,7 +132,7 @@ type ArbiterC m =
 
 -- | Live main-queue jobs and DLQ jobs, each keyed by its id and carrying its
 -- group. Generates valid command targets. The invariants are checked against
--- the database, not derived from the model.
+-- the database.
 data Model (v :: Type -> Type) = Model
   { mLive :: Map (Var Int64 v) (Maybe Text)
   , mDlq :: Map (Var Int64 v) (Maybe Text)
@@ -152,11 +151,9 @@ holViolTbl schema table = schema <> "." <> table <> "_hol_violations"
 holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
 holTrigger _ table = "detect_hol_" <> table
 
--- | DDL to install the gap-free HOL detector: a row trigger that logs a
--- violation the instant a job becomes a lease\/backoff in-flight while another
--- @attempts > 0@ job in its group already is. The @attempts > 0@ filter excludes
--- scheduled jobs, which do not block the group. Single source of truth shared by
--- both test suites.
+-- | DDL to install the gap-free HOL detector. A row trigger logs a violation
+-- when a job becomes in-flight while another @attempts > 0@ job in its group
+-- already is. The @attempts > 0@ filter excludes scheduled jobs.
 holInstallSql :: Text -> Text -> [Text]
 holInstallSql schema table =
   [ "SET client_min_messages TO warning"
@@ -198,9 +195,7 @@ holRemoveSql schema table =
 -- Invariant checks (queried from the database after each command)
 -- ---------------------------------------------------------------------------
 
--- Per-step check: serialization only. The full summary oracle is a separate
--- settled-state check (it races under concurrent execution), and the gap-free
--- HOL detector is read after a parallel run.
+-- Per-step check. The HOL detector is read after a parallel run.
 checkInvariants
   :: (MonadIO m, MonadTest m)
   => Text
@@ -235,14 +230,16 @@ firstId withConn sql = withConn $ \conn ->
 -- | A scalar @count(*)@ query through the raw-connection accessor.
 countQuery :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO Int64
 countQuery withConn sql = withConn $ \conn -> do
-  [Only n] <- PG.query_ conn (fromString (T.unpack sql))
-  pure n
+  [Only count] <- PG.query_ conn (fromString (T.unpack sql))
+  pure count
 
 -- | Lock one count row @FOR UPDATE@, like a claimer holding the key.
 lockConcurrencyKey :: PG.Connection -> Text -> Text -> IO ()
-lockConcurrencyKey c concTbl k =
+lockConcurrencyKey conn concTbl key =
   void
-    ( PG.query_ c (fromString (T.unpack ("SELECT 1 FROM " <> concTbl <> " WHERE concurrency_key = '" <> k <> "' FOR UPDATE")))
+    ( PG.query_
+        conn
+        (fromString (T.unpack ("SELECT 1 FROM " <> concTbl <> " WHERE concurrency_key = '" <> key <> "' FOR UPDATE")))
         :: IO [Only Int64]
     )
 
@@ -250,41 +247,37 @@ truncateHol :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO
 truncateHol schema table withConn = withConn $ \conn ->
   void $ PG.execute_ conn (fromString (T.unpack ("TRUNCATE " <> holViolTbl schema table)))
 
--- Arbiter's test schema/table names are plain lowercase identifiers, so the SQL
--- can interpolate them directly without quoting.
+-- Test schema and table names are plain lowercase identifiers. The SQL
+-- interpolates them unquoted.
 queryViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 queryViolations schema table withConn =
   (<>) <$> exactViolations schema table withConn <*> driftViolations schema table withConn
 
--- | Summary-drift oracle: full-join the stored @_groups@ row against a fresh
--- recompute and report any column that disagrees. Exact single-threaded, so it
--- runs per-step in the sequential property and at settle in the concurrent one.
+-- | Summary-drift oracle. Full-join the stored @_groups@ row against a fresh
+-- recompute and report any column that disagrees.
 driftViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 driftViolations schema table withConn = withConn $ \conn -> do
-  rows <- PG.query_ conn (q oracleSql)
-  pure ["group " <> T.unpack g <> " summary drift: " <> T.unpack cols | (g, cols) <- rows]
+  rows <- PG.query_ conn (toQuery oracleSql)
+  pure ["group " <> T.unpack groupName <> " summary drift: " <> T.unpack cols | (groupName, cols) <- rows]
   where
-    q = fromString . T.unpack
+    toQuery = fromString . T.unpack
     tbl = schema <> "." <> table
     groupsTbl = schema <> "." <> table <> "_groups"
-    -- Full-join the stored summary against a fresh recompute of every column and
-    -- report which columns differ. NOW() is evaluated once per statement, so the
-    -- stored timestamps compare exactly against the recompute. The recompute
-    -- filters mirror the trigger definitions: ready = unblocked-now, next_due =
-    -- any parked/leased row, in_flight = leased/backoff/throttled (inFlightPredicate).
+    -- NOW() is evaluated once per statement. The recompute filters mirror the
+    -- trigger definitions.
     oracleSql =
-      "SELECT gk, drift FROM (SELECT COALESCE(g.group_key, e.group_key) AS gk, concat_ws(', '"
-        <> ", CASE WHEN g.group_key IS NULL THEN 'missing summary row' END"
-        <> ", CASE WHEN e.group_key IS NULL THEN 'orphan summary row' END"
-        <> ", CASE WHEN g.min_priority IS DISTINCT FROM e.min_priority THEN 'min_priority' END"
-        <> ", CASE WHEN g.min_id IS DISTINCT FROM e.min_id THEN 'min_id' END"
-        <> ", CASE WHEN g.job_count IS DISTINCT FROM e.job_count THEN 'job_count' END"
-        <> ", CASE WHEN g.ready_count IS DISTINCT FROM e.ready_count THEN 'ready_count' END"
-        <> ", CASE WHEN g.next_due IS DISTINCT FROM e.next_due THEN 'next_due' END"
-        <> ", CASE WHEN g.in_flight_until IS DISTINCT FROM e.in_flight_until THEN 'in_flight_until' END"
+      "SELECT group_name, drift FROM (SELECT COALESCE(summary.group_key, expected.group_key) AS group_name, concat_ws(', '"
+        <> ", CASE WHEN summary.group_key IS NULL THEN 'missing summary row' END"
+        <> ", CASE WHEN expected.group_key IS NULL THEN 'orphan summary row' END"
+        <> ", CASE WHEN summary.min_priority IS DISTINCT FROM expected.min_priority THEN 'min_priority' END"
+        <> ", CASE WHEN summary.min_id IS DISTINCT FROM expected.min_id THEN 'min_id' END"
+        <> ", CASE WHEN summary.job_count IS DISTINCT FROM expected.job_count THEN 'job_count' END"
+        <> ", CASE WHEN summary.ready_count IS DISTINCT FROM expected.ready_count THEN 'ready_count' END"
+        <> ", CASE WHEN summary.next_due IS DISTINCT FROM expected.next_due THEN 'next_due' END"
+        <> ", CASE WHEN summary.in_flight_until IS DISTINCT FROM expected.in_flight_until THEN 'in_flight_until' END"
         <> ") AS drift FROM (SELECT group_key, min_priority, min_id, job_count, ready_count, next_due, in_flight_until FROM "
         <> groupsTbl
-        <> " WHERE job_count > 0) g FULL OUTER JOIN (SELECT group_key"
+        <> " WHERE job_count > 0) summary FULL OUTER JOIN (SELECT group_key"
         <> ", MIN(priority)::int AS min_priority"
         <> ", (MIN(ARRAY[priority::bigint, id]))[2]::bigint AS min_id"
         <> ", COUNT(*)::bigint AS job_count"
@@ -294,33 +287,31 @@ driftViolations schema table withConn = withConn $ \conn -> do
         <> inFlightPredicate ""
         <> ") AS in_flight_until FROM "
         <> tbl
-        <> " WHERE group_key IS NOT NULL GROUP BY group_key) e ON g.group_key = e.group_key) t WHERE drift <> ''"
+        <> " WHERE group_key IS NOT NULL GROUP BY group_key) expected ON summary.group_key = expected.group_key) compared WHERE drift <> ''"
 
--- | Exact, non-racy invariant violations, safe to sample live during concurrent
--- churn (unlike the eventually-settled summary oracle):
+-- | Exact invariant violations, safe to sample live during concurrent churn:
 --
---   * serialization: more than one in-flight (leased\/backoff) job per group
---   * attempt bound: a live job past its limit. The claim guard caps @attempts@
---     at @max_attempts@
+--   * serialization: more than one in-flight job per group
+--   * attempt bound: a live job past its limit
 --   * dedup uniqueness: two live jobs sharing a @dedup_key@
---   * rate-limit integrity: a bucket's tokens stay within [0, max]. Negative means
---     the gate over-spent, above max means a refill\/top-up\/seed skipped the cap.
+--   * concurrency cap: more claimed jobs on a key than its effective cap
+--   * rate-limit integrity: a bucket's tokens outside [0, max]
 exactViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 exactViolations schema table withConn = withConn $ \conn -> do
   serial <- PG.query_ conn (fromString (T.unpack serialSql))
   over <- PG.query_ conn (fromString (T.unpack overSql))
   dups <- PG.query_ conn (fromString (T.unpack dupSql))
   conc <- PG.query_ conn (fromString (T.unpack concSql))
-  rl <- PG.query_ conn (fromString (T.unpack rlSql))
+  overSpent <- PG.query_ conn (fromString (T.unpack rlSql))
   rlMax <- PG.query_ conn (fromString (T.unpack rlMaxSql))
-  serialMsgs <- traverse (diagnoseSerial conn) [g | Only g <- serial]
+  serialMsgs <- traverse (diagnoseSerial conn) [groupName | Only groupName <- serial]
   pure $
     serialMsgs
       <> ["job " <> show (jid :: Int64) <> " exceeded its max_attempts" | Only jid <- over]
-      <> ["duplicate live dedup_key " <> T.unpack k | Only k <- dups]
-      <> ["concurrency cap exceeded for key " <> T.unpack k | Only k <- conc]
-      <> ["rate-limit bucket " <> T.unpack k <> " over-spent (negative tokens)" | Only k <- rl]
-      <> ["rate-limit bucket " <> T.unpack k <> " over-credited (tokens above max)" | Only k <- rlMax]
+      <> ["duplicate live dedup_key " <> T.unpack key | Only key <- dups]
+      <> ["concurrency cap exceeded for key " <> T.unpack key | Only key <- conc]
+      <> ["rate-limit bucket " <> T.unpack key <> " over-spent (negative tokens)" | Only key <- overSpent]
+      <> ["rate-limit bucket " <> T.unpack key <> " over-credited (tokens above max)" | Only key <- rlMax]
   where
     tbl = schema <> "." <> table
     concPolicies = schema <> ".arbiter_concurrency_policies"
@@ -329,41 +320,40 @@ exactViolations schema table withConn = withConn $ \conn -> do
     groupsTbl = schema <> "." <> table <> "_groups"
     dma = T.pack (show defaultMaxAttempts)
     -- On a serialization violation, dump the offending group's jobs and summary
-    -- row (timestamps as ms relative to NOW) so the counterexample carries the
-    -- full group state, not just the group key.
-    diagnoseSerial conn g = do
-      jobs <- PG.query conn (fromString (T.unpack jobsSql)) (Only g)
-      summ <- PG.query conn (fromString (T.unpack summSql)) (Only g)
-      let jobStr (jid, att, mx, susp, nvu, dk, upd, att_ms) =
+    -- row. Timestamps are ms relative to NOW.
+    diagnoseSerial conn groupName = do
+      jobs <- PG.query conn (fromString (T.unpack jobsSql)) (Only groupName)
+      summ <- PG.query conn (fromString (T.unpack summSql)) (Only groupName)
+      let jobStr (jid, att, maxAtts, susp, nvu, dedup, upd, att_ms) =
             "{id="
               <> show (jid :: Int64)
               <> " att="
               <> show (att :: Int32)
               <> " max="
-              <> show (mx :: Maybe Int32)
+              <> show (maxAtts :: Maybe Int32)
               <> " susp="
               <> show (susp :: Bool)
               <> " nvu_ms="
               <> show (nvu :: Maybe Int64)
               <> " dk="
-              <> show (dk :: Maybe Text)
+              <> show (dedup :: Maybe Text)
               <> " upd_ago="
               <> show (upd :: Maybe Int64)
               <> " att_ago="
               <> show (att_ms :: Maybe Int64)
               <> "}"
-          summStr (jc, rc, ifu, nd) =
+          summStr (jobCount, readyCount, inFlightUntil, nextDue) =
             "jc="
-              <> show (jc :: Int64)
+              <> show (jobCount :: Int64)
               <> " rc="
-              <> show (rc :: Int64)
+              <> show (readyCount :: Int64)
               <> " ifu_ms="
-              <> show (ifu :: Maybe Int64)
+              <> show (inFlightUntil :: Maybe Int64)
               <> " nd_ms="
-              <> show (nd :: Maybe Int64)
+              <> show (nextDue :: Maybe Int64)
       pure $
         "multiple in-flight in group "
-          <> T.unpack g
+          <> T.unpack groupName
           <> " | summary["
           <> maybe "MISSING" summStr (listToMaybe summ)
           <> "]"
@@ -401,38 +391,33 @@ exactViolations schema table withConn = withConn $ \conn -> do
       "SELECT dedup_key FROM "
         <> tbl
         <> " WHERE dedup_key IS NOT NULL GROUP BY dedup_key HAVING COUNT(*) > 1"
-    -- More claimed-in-flight jobs for a key than its effective cap. The gate
-    -- enforces this atomically at claim time, so it must hold at every committed
-    -- state. eff = COALESCE(pool override, pool default).
+    -- More claimed jobs on a key than its effective cap. The effective cap is the
+    -- pool override, else the pool default.
     concSql =
-      "SELECT j.concurrency_key FROM "
+      "SELECT job.concurrency_key FROM "
         <> tbl
-        <> " j LEFT JOIN "
+        <> " job LEFT JOIN "
         <> concPolicies
-        <> " p ON p.prefix_id = j.concurrency_prefix"
-        <> " WHERE j.concurrency_key IS NOT NULL"
-        <> " GROUP BY j.concurrency_key, p.override_limit, p.default_limit"
-        <> " HAVING COUNT(*) FILTER (WHERE j.claimed_by IS NOT NULL)"
-        <> " > COALESCE(p.override_limit, p.default_limit)"
-    -- Negative tokens means the gate over-spent. Epsilon tolerates float rounding.
+        <> " policy ON policy.prefix_id = job.concurrency_prefix"
+        <> " WHERE job.concurrency_key IS NOT NULL"
+        <> " GROUP BY job.concurrency_key, policy.override_limit, policy.default_limit"
+        <> " HAVING COUNT(*) FILTER (WHERE job.claimed_by IS NOT NULL)"
+        <> " > COALESCE(policy.override_limit, policy.default_limit)"
+    -- Negative tokens mean the gate over-spent. The epsilon tolerates float rounding.
     rlSql = "SELECT rate_limit_key FROM " <> rlBuckets <> " WHERE tokens < -0.001"
-    -- Tokens above the effective max means a refill, top-up, or seed skipped the cap.
-    -- Brackets the balance from above as rlSql does from below. eff = COALESCE(override, default).
+    -- Tokens above the effective max mean a refill, top-up, or seed skipped the cap.
     rlMaxSql =
-      "SELECT b.rate_limit_key FROM "
+      "SELECT bucket.rate_limit_key FROM "
         <> rlBuckets
-        <> " b JOIN "
+        <> " bucket JOIN "
         <> rlPolicies
-        <> " p ON p.prefix_id = b.policy_prefix"
-        <> " WHERE b.tokens > COALESCE(p.override_max_tokens, p.default_max_tokens) + 0.001"
+        <> " policy ON policy.prefix_id = bucket.policy_prefix"
+        <> " WHERE bucket.tokens > COALESCE(policy.override_max_tokens, policy.default_max_tokens) + 0.001"
 
--- | A live child whose parent has left the main queue. Single-threaded this
--- never happens (a finalizer completes only after its children, a DLQ'd parent
--- cascades them, and 'Arbiter.Core.HighLevel.retryFromDLQ' refuses to restore a child whose root parent
--- is gone), so it is a per-step check for the sequential property. Under
--- concurrency a parent can be acked between that refuse-check and a child's
--- re-insert, leaving a benign orphan that just processes as a plain job, so the
--- concurrent oracle does not assert it.
+-- | A live child whose parent has left the main queue. This is a per-step check
+-- for the sequential property. Under concurrency a parent can be acked between
+-- the DLQ retry's refuse-check and a child's re-insert, which leaves a benign
+-- orphan.
 orphanViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 orphanViolations schema table withConn = withConn $ \conn -> do
   orphans <- PG.query_ conn (fromString (T.unpack orphanSql))
@@ -440,32 +425,30 @@ orphanViolations schema table withConn = withConn $ \conn -> do
   where
     tbl = schema <> "." <> table
     orphanSql =
-      "SELECT c.id FROM "
+      "SELECT child.id FROM "
         <> tbl
-        <> " c WHERE c.parent_id IS NOT NULL AND NOT EXISTS"
+        <> " child WHERE child.parent_id IS NOT NULL AND NOT EXISTS"
         <> " (SELECT 1 FROM "
         <> tbl
-        <> " p WHERE p.id = c.parent_id)"
+        <> " parent WHERE parent.id = child.parent_id)"
 
 -- ---------------------------------------------------------------------------
 -- Commands
 -- ---------------------------------------------------------------------------
 
--- | Worker id for the generated claim paths. Concurrency is counted off
--- @claimed_by@, so generated claims must be attributed for the cap to engage.
+-- | Worker id for the generated claim paths.
 smWorker :: UUID.UUID
 smWorker = UUID.fromWords 0 0 0 7
 
--- | Per-job rate-limit key and concurrency pool a generated insert may carry, so
--- the lifecycle (claim, retry, DLQ round-trip) is exercised on limited jobs.
+-- | Per-job rate-limit key and concurrency pool a generated insert can carry.
 data Extras = Extras (Maybe Text) (Maybe Text)
   deriving stock (Eq, Show)
 
--- | Seeded pools with a fixed limit, so the cap oracle is exact.
+-- | Seeded pools with a fixed limit.
 smConcSlots :: [(Text, Int32)]
 smConcSlots = [("cap-a", 1), ("cap-b", 2), ("cap-c", 3)]
 
--- | One suffix per pool, so each pool drives a single count-row key.
+-- | One suffix per pool. Each pool drives a single count-row key.
 smConcSuffix :: Text
 smConcSuffix = "s"
 
@@ -476,7 +459,7 @@ genExtras :: (MonadGen g) => g Extras
 genExtras = Extras <$> Gen.maybe (Gen.element (map fst smConcSlots)) <*> Gen.maybe (Gen.element smRateKeys)
 
 applyExtras :: Extras -> JobWrite SMPayload -> JobWrite SMPayload
-applyExtras (Extras mc mr) j = setPayload ((Job.payload j) {smConcSlot = mc, smRateKey = mr}) j
+applyExtras (Extras concSlot rateKey) job = setPayload ((Job.payload job) {smConcSlot = concSlot, smRateKey = rateKey}) job
 
 -- | A payload carrying optional concurrency and rate-limit keys.
 data SMPayload = SMPayload
@@ -488,7 +471,7 @@ data SMPayload = SMPayload
   deriving anyclass (FromJSON, ToJSON)
 
 smPayload :: Text -> SMPayload
-smPayload t = SMPayload t Nothing Nothing
+smPayload text = SMPayload text Nothing Nothing
 
 data SMSlot = SlotNone | SlotA | SlotB | SlotC
   deriving stock (Bounded, Enum, Eq)
@@ -496,7 +479,7 @@ data SMSlot = SlotNone | SlotA | SlotB | SlotC
 instance HasConcurrency SMPayload where
   concurrencyFor = concurrencyByCase slotTag slotSel
     where
-      slotTag p = case smConcSlot p of
+      slotTag payload = case smConcSlot payload of
         Just "cap-a" -> SlotA
         Just "cap-b" -> SlotB
         Just "cap-c" -> SlotC
@@ -509,14 +492,14 @@ instance HasConcurrency SMPayload where
 data SMRate = RateNone | RateK1 | RateK2
   deriving stock (Bounded, Enum, Eq)
 
--- | A binding bucket: capacity 3 with negligible refill over a test run.
+-- | A binding bucket. Capacity 3 with negligible refill over a test run.
 smBucket :: Policy
 smBucket = tokenBucket "smrl" 3 60
 
 instance HasRateLimit SMPayload where
   rateLimitFor = limitByCase rateTag rateSel
     where
-      rateTag p = case smRateKey p of
+      rateTag payload = case smRateKey payload of
         Just "rk-1" -> RateK1
         Just "rk-2" -> RateK2
         _ -> RateNone
@@ -524,30 +507,28 @@ instance HasRateLimit SMPayload where
       rateSel RateK1 = limitBy smBucket (const "rk-1")
       rateSel RateK2 = limitBy smBucket (const "rk-2")
 
--- | Seed the concurrency pools (idempotent), so a fresh reset re-establishes them.
+-- | Seed the concurrency pools. Idempotent.
 seedConcurrencyPools :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
-seedConcurrencyPools schema withConn = withConn $ \c ->
+seedConcurrencyPools schema withConn = withConn $ \conn ->
   traverse_
-    (\(p, l) -> traverse_ (void . PG.execute_ c . fromString . T.unpack) (seedConcurrencyPoolSQL schema p l))
+    (\(pool, limit) -> traverse_ (void . PG.execute_ conn . fromString . T.unpack) (seedConcurrencyPoolSQL schema pool limit))
     smConcSlots
 
--- | Seed the rate-limit policy (idempotent), so generated limited jobs run the claim gate against a real bucket.
+-- | Seed the rate-limit policy. Idempotent.
 seedRateLimitPolicies :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
-seedRateLimitPolicies schema withConn = withConn $ \c ->
-  void $ PG.execute_ c (fromString (T.unpack (upsertPolicyRowSQL schema (toPolicyRow smBucket))))
+seedRateLimitPolicies schema withConn = withConn $ \conn ->
+  void $ PG.execute_ conn (fromString (T.unpack (upsertPolicyRowSQL schema (toPolicyRow smBucket))))
 
--- | Reset the tables, then re-seed both admission policies (the guard preamble).
+-- | Reset the tables, then re-seed both admission policies.
 resetSeeded :: IO () -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 resetSeeded reset schema withConn = do
   reset
   seedConcurrencyPools schema withConn
   seedRateLimitPolicies schema withConn
 
--- | Insert a job at a varying priority into an optional group, optionally
--- scheduled into the future. Priority variation is what lets @min_priority@
--- drift be observed.
--- | @Insert group delay priority maxAttempts@. A low @maxAttempts@ lets short
--- claim sequences drive jobs to exhaustion, exercising the claim guard + sweep.
+-- | @Insert group delay priority maxAttempts extras@. Insert a job at a varying
+-- priority into an optional group, optionally scheduled into the future. A low
+-- @maxAttempts@ lets short claim sequences drive jobs to exhaustion.
 data Insert (v :: Type -> Type) = Insert (Maybe Text) (Maybe Int) Int (Maybe Int) Extras
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
@@ -571,12 +552,12 @@ cInsert run schema table withConn =
             <*> Gen.maybe (Gen.int (Range.linear 1 3))
             <*> genExtras
     )
-    ( \(Insert g d p ma ext) -> do
-        jid <- evalIO (run (mkInsert (applyExtras ext) g d p ma))
+    ( \(Insert group delay prio maxAtts extras) -> do
+        jid <- evalIO (run (mkInsert (applyExtras extras) group delay prio maxAtts))
         checkInvariants schema table withConn
         pure jid
     )
-    [Update $ \m (Insert g _ _ _ _) o -> m {mLive = Map.insert o g (mLive m)}]
+    [Update $ \model (Insert group _ _ _ _) output -> model {mLive = Map.insert output group (mLive model)}]
 
 mkInsert
   :: forall sm
@@ -587,15 +568,15 @@ mkInsert
   -> Int
   -> Maybe Int
   -> sm Int64
-mkInsert deco g d p ma = do
-  nvu <- traverse (\s -> liftIO (addUTCTime (fromIntegral s) <$> getCurrentTime)) d
+mkInsert deco group delay prio maxAtts = do
+  nvu <- traverse (\secs -> liftIO (addUTCTime (fromIntegral secs) <$> getCurrentTime)) delay
   let job =
-        setMaxAttempts (fromIntegral <$> ma)
-          $ setPriority (fromIntegral p)
+        setMaxAttempts (fromIntegral <$> maxAtts)
+          $ setPriority (fromIntegral prio)
           $ setNotVisibleUntil nvu
-          $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
-  mj <- HL.insertJob (deco job)
-  pure (primaryKey (fromJust mj))
+          $ maybe (defaultJob payload) (`defaultGroupedJob` payload) group
+  inserted <- HL.insertJob (deco job)
+  pure (primaryKey (fromJust inserted))
   where
     payload = smPayload "sm"
 
@@ -616,7 +597,7 @@ cClaim run schema table withConn =
     (\_ -> Just (pure Claim))
     ( \Claim -> do
         ids <- evalIO (run (mkClaim @sm))
-        -- Each claimed job is now a live, in-flight (leased) row in the database.
+        -- Each claimed job is now a live in-flight row.
         live <- evalIO (traverse (isLiveInFlight schema table withConn) ids)
         assert (and live)
         checkInvariants schema table withConn
@@ -625,9 +606,8 @@ cClaim run schema table withConn =
     [ Ensure $ \_ post Claim ids -> do
         -- Never claim more than the batch size.
         assert (length ids <= claimBatchSize)
-        -- A claimed id must not be a DLQ row (those never re-enter the main queue
-        -- by claim). Untracked jobs (batch\/tree\/dedup) are legitimately claimable
-        -- and absent from the model, so only the DLQ membership is asserted.
+        -- A claimed id is never a DLQ row. Untracked jobs are claimable and absent
+        -- from the model.
         let dlqIds = map concrete (Map.keys (mDlq post))
         nub (filter (`elem` dlqIds) ids) === []
     ]
@@ -637,16 +617,16 @@ claimBatchSize = 3
 
 mkClaim :: forall sm. (ArbiterC sm) => sm [Int64]
 mkClaim = do
-  js <- HL.claimNextVisibleJobsAs claimBatchSize 60 smWorker :: sm [JobRead SMPayload]
-  pure (map primaryKey js)
+  jobs <- HL.claimNextVisibleJobsAs claimBatchSize 60 smWorker :: sm [JobRead SMPayload]
+  pure (map primaryKey jobs)
 
--- | True if the id names a live row that is currently leased (in-flight).
+-- | True if the id names a live row that is currently in flight.
 isLiveInFlight :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Bool
 isLiveInFlight schema table withConn jid = withConn $ \conn -> do
   rows <-
     PG.query conn (fromString (T.unpack sql)) (Only jid)
   pure $ case rows of
-    Only n : _ -> (n :: Int64) > 0
+    Only count : _ -> (count :: Int64) > 0
     _ -> False
   where
     sql =
@@ -666,7 +646,7 @@ leaseState
 leaseState schema table withConn jid = withConn $ \conn -> do
   rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
   pure $ case rows of
-    r : _ -> r
+    row : _ -> row
     _ -> (False, False, Nothing)
   where
     sql =
@@ -681,7 +661,7 @@ rowExists :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int6
 rowExists schema table withConn jid = withConn $ \conn -> do
   rows <- PG.query conn (fromString (T.unpack sql)) (Only jid)
   pure $ case rows of
-    Only n : _ -> (n :: Int64) > 0
+    Only count : _ -> (count :: Int64) > 0
     _ -> False
   where
     sql = "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE id = ?"
@@ -696,14 +676,13 @@ data Retry (v :: Type -> Type) = Retry (Var Int64 v) NominalDiffTime
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
 
--- | Retry backoffs the model draws from: back to the pool now, or parked.
+-- | Retry backoffs the model draws from.
 retryBackoffs :: [NominalDiffTime]
 retryBackoffs = [0, 30]
 
 -- | A command that picks a live job from the model and runs an id-keyed
--- operation, tagging any invariant failure with @lbl@. @removes@ says whether
--- the job leaves the queue. @extra@ adds command-specific callbacks (e.g. an
--- ack-removed Ensure).
+-- operation, tagging any invariant failure with the label. @removes@ says
+-- whether the job leaves the queue. The post-check runs after the operation.
 jobRefCommandL'
   :: (MonadGen gen, MonadIO m, MonadTest m)
   => String
@@ -715,19 +694,19 @@ jobRefCommandL'
   -> (Int64 -> m ())
   -> (Int64 -> sm ())
   -> Command gen m Model
-jobRefCommandL' lbl run schema table withConn removes postCheck op =
+jobRefCommandL' lbl run schema table withConn removes postCheck operation =
   Command gen exec callbacks
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
-    exec (JobRef v) = do
-      evalIO (run (op (concrete v)))
-      postCheck (concrete v)
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive model)))
+    exec (JobRef ref) = do
+      evalIO (run (operation (concrete ref)))
+      postCheck (concrete ref)
       checkInvariantsL lbl schema table withConn
     callbacks =
-      Require (\m (JobRef v) -> Map.member v (mLive m))
-        : [Update (\m (JobRef v) _ -> m {mLive = Map.delete v (mLive m)}) | removes]
+      Require (\model (JobRef ref) -> Map.member ref (mLive model))
+        : [Update (\model (JobRef ref) _ -> model {mLive = Map.delete ref (mLive model)}) | removes]
 
 jobRefCommandL
   :: (MonadGen gen, MonadIO m, MonadTest m)
@@ -760,9 +739,8 @@ cAck
 cAck run schema table withConn =
   jobRefCommandL' "Ack" run schema table withConn True ackedRowGone mkAck
   where
-    -- A plain tracked job that was acked must no longer be present in the main
-    -- table. Tracked jobs are never rollup finalizers (those are untracked), so
-    -- ack deletes the row outright rather than suspending it.
+    -- An acked tracked job is gone from the main table. Tracked jobs are never
+    -- rollup finalizers.
     ackedRowGone jid = do
       present <- evalIO (rowExists schema table withConn jid)
       present === False
@@ -770,14 +748,14 @@ cCancel run schema table withConn = jobRefCommandL "Cancel" run schema table wit
 cSuspend run schema table withConn = jobRefCommandL "Suspend" run schema table withConn False (void . HL.suspendJob @SMPayload)
 cResume run schema table withConn = jobRefCommandL "Resume" run schema table withConn False (void . HL.resumeJob @SMPayload)
 cPromote run schema table withConn =
-  Command gen exec [Require (\m (JobRef v) -> Map.member v (mLive m))]
+  Command gen exec [Require (\model (JobRef ref) -> Map.member ref (mLive model))]
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
-    -- Promote holds no claim, so a leased or suspended row must come back untouched.
-    exec (JobRef v) = do
-      let jid = concrete v
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive model)))
+    -- Promote holds no claim. A leased or suspended row comes back untouched.
+    exec (JobRef ref) = do
+      let jid = concrete ref
       (leased, susp, nvu) <- evalIO (leaseState schema table withConn jid)
       promoted <- evalIO (run (HL.promoteJob @SMPayload jid))
       when (leased || susp) $ do
@@ -787,19 +765,18 @@ cPromote run schema table withConn =
         nvu' === nvu
       checkInvariantsL "Promote" schema table withConn
 cRetry run schema table withConn =
-  Command gen exec [Require (\m (Retry v _) -> Map.member v (mLive m))]
+  Command gen exec [Require (\model (Retry ref _) -> Map.member ref (mLive model))]
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (Retry <$> Gen.element (Map.keys (mLive m)) <*> Gen.element retryBackoffs)
-    exec (Retry v backoff) = do
-      evalIO (run (mkRetry @sm (concrete v) backoff))
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (Retry <$> Gen.element (Map.keys (mLive model)) <*> Gen.element retryBackoffs)
+    exec (Retry ref backoff) = do
+      evalIO (run (mkRetry @sm (concrete ref) backoff))
       checkInvariantsL "Retry" schema table withConn
 cExtend run schema table withConn = jobRefCommandL "Extend" run schema table withConn False mkExtend
 
--- | Release a job's lease (visibility timeout 0), making it immediately
--- re-claimable. Claim/release cycles drive a job to its @max_attempts@, which is
--- what exercises the claim guard, the reaper sweep, and the over-execution bound.
+-- | Release a job's lease with a visibility timeout of 0. Claim and release
+-- cycles drive a job to its @max_attempts@.
 cRelease run schema table withConn = jobRefCommandL "Release" run schema table withConn False mkRelease
 
 -- | Read a job by id at this test's payload type.
@@ -818,22 +795,19 @@ mkAck jid = fetchJob @sm jid >>= traverse_ (void . HL.ackJob)
 
 -- | Park a leased job for @backoff@ seconds.
 mkRetry :: forall sm. (ArbiterC sm) => Int64 -> NominalDiffTime -> sm ()
-mkRetry jid backoff = fetchJob @sm jid >>= traverse_ (\j -> whenLeased j (void (HL.updateJobForRetry backoff "sm retry" j)))
+mkRetry jid backoff = fetchJob @sm jid >>= traverse_ (\job -> whenLeased job (void (HL.updateJobForRetry backoff "sm retry" job)))
 
-mkExtend jid = fetchJob @sm jid >>= traverse_ (\j -> whenLeased j (void (HL.setVisibilityTimeout 90 j)))
-mkRelease jid = fetchJob @sm jid >>= traverse_ (\j -> whenLeased j (void (HL.setVisibilityTimeout 0 j)))
+mkExtend jid = fetchJob @sm jid >>= traverse_ (\job -> whenLeased job (void (HL.setVisibilityTimeout 90 job)))
+mkRelease jid = fetchJob @sm jid >>= traverse_ (\job -> whenLeased job (void (HL.setVisibilityTimeout 0 job)))
 mkToDLQ jid = fetchJob @sm jid >>= traverse_ (void . HL.moveToDLQ "sm dlq")
 
--- | Run a lease-management action only when the job is currently in-flight,
--- matching a worker that only extends\/retries\/releases a job it holds. On a
--- non-leased job it would fabricate an in-flight row no claim handed out.
+-- | Run a lease-management action only when the job is currently in flight.
 whenLeased :: (MonadIO m) => JobRead SMPayload -> m () -> m ()
-whenLeased j act = do
+whenLeased job act = do
   now <- liftIO getCurrentTime
-  when (attempts j > 0 && not (suspended j) && maybe False (> now) (notVisibleUntil j)) act
+  when (attempts job > 0 && not (suspended job) && maybe False (> now) (notVisibleUntil job)) act
 
--- | Move a live job to the DLQ, then capture the new DLQ row id so a later
--- 'cFromDLQ' can target it.
+-- | Move a live job to the DLQ, then capture the new DLQ row id.
 cToDLQ
   :: forall gen m sm
    . (ArbiterC sm, MonadGen gen, MonadIO m, MonadTest m)
@@ -845,20 +819,20 @@ cToDLQ
 cToDLQ run schema table withConn =
   Command gen exec callbacks
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive m)))
-    exec (JobRef v) = do
-      let jid = concrete v
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mLive model)))
+    exec (JobRef ref) = do
+      let jid = concrete ref
       dlqId <- evalIO (run (mkToDLQ @sm jid) *> lookupDlqId schema table withConn jid)
       checkInvariants schema table withConn
       pure dlqId
     callbacks =
-      [ Require $ \m (JobRef v) -> Map.member v (mLive m)
-      , Update $ \m (JobRef v) o ->
-          m
-            { mLive = Map.delete v (mLive m)
-            , mDlq = Map.insert o (Map.findWithDefault Nothing v (mLive m)) (mDlq m)
+      [ Require $ \model (JobRef ref) -> Map.member ref (mLive model)
+      , Update $ \model (JobRef ref) output ->
+          model
+            { mLive = Map.delete ref (mLive model)
+            , mDlq = Map.insert output (Map.findWithDefault Nothing ref (mLive model)) (mDlq model)
             }
       ]
 
@@ -874,26 +848,26 @@ cFromDLQ
 cFromDLQ run schema table withConn =
   Command gen exec callbacks
   where
-    gen m
-      | Map.null (mDlq m) = Nothing
-      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mDlq m)))
-    exec (JobRef v) = do
-      newId <- evalIO (run (mkFromDLQ @sm (concrete v)))
+    gen model
+      | Map.null (mDlq model) = Nothing
+      | otherwise = Just (JobRef <$> Gen.element (Map.keys (mDlq model)))
+    exec (JobRef ref) = do
+      newId <- evalIO (run (mkFromDLQ @sm (concrete ref)))
       checkInvariants schema table withConn
       pure newId
     callbacks =
-      [ Require $ \m (JobRef v) -> Map.member v (mDlq m)
-      , Update $ \m (JobRef v) o ->
-          m
-            { mDlq = Map.delete v (mDlq m)
-            , mLive = Map.insert o (Map.findWithDefault Nothing v (mDlq m)) (mLive m)
+      [ Require $ \model (JobRef ref) -> Map.member ref (mDlq model)
+      , Update $ \model (JobRef ref) output ->
+          model
+            { mDlq = Map.delete ref (mDlq model)
+            , mLive = Map.insert output (Map.findWithDefault Nothing ref (mDlq model)) (mLive model)
             }
       ]
 
 mkFromDLQ :: forall sm. (ArbiterC sm) => Int64 -> sm Int64
 mkFromDLQ dlqId = do
-  mj <- HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload))
-  pure (maybe dlqId primaryKey mj)
+  restored <- HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload))
+  pure (maybe dlqId primaryKey restored)
 
 -- | The id of the DLQ row holding the given original job id.
 lookupDlqId :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO Int64
@@ -919,22 +893,19 @@ newtype JobRefs (v :: Type -> Type) = JobRefs [Var Int64 v]
   deriving stock (Eq, Generic, Show)
 
 instance B.FunctorB JobRefs where
-  bmap f (JobRefs vs) = JobRefs (map (B.bmap f) vs)
+  bmap natTrans (JobRefs refs) = JobRefs (map (B.bmap natTrans) refs)
 
 instance B.TraversableB JobRefs where
-  btraverse f (JobRefs vs) = JobRefs <$> traverse (B.btraverse f) vs
+  btraverse natTrans (JobRefs refs) = JobRefs <$> traverse (B.btraverse natTrans) refs
 
--- | Insert several jobs in one statement. Left untracked: a batch output can't
--- be split into per-row 'Var's, so the rows are reachable only via claim, the
--- reaper, or the batch deletes. Exercises the multi-row insert trigger.
+-- | Insert several jobs in one statement. Left untracked. A batch output cannot
+-- be split into per-row 'Var's.
 newtype BatchInsert (v :: Type -> Type) = BatchInsert [(Maybe Text, Int)]
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
 
--- | @InsertTree group childCount@: insert a suspended rollup finalizer over
--- @childCount@ children sharing the optional group. Untracked, like 'BatchInsert'
--- (the multi-row output can't be split into per-row 'Var's). Exercises the tree
--- insert, parent-resume, and cascade-to-DLQ paths.
+-- | @InsertTree group childCount@. Insert a suspended rollup finalizer over
+-- @childCount@ children sharing the optional group. Left untracked.
 data InsertTree (v :: Type -> Type) = InsertTree (Maybe Text) Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
@@ -969,8 +940,8 @@ mkBatchInsert
   -> sm ()
 mkBatchInsert specs = void (HL.insertJobsBatch_ (map toJob specs))
   where
-    toJob (g, p) =
-      setPriority (fromIntegral p) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
+    toJob (group, prio) =
+      setPriority (fromIntegral prio) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) group
     payload = smPayload "sm batch"
 
 cInsertTree
@@ -984,8 +955,8 @@ cInsertTree
 cInsertTree run schema table withConn =
   Command
     (\_ -> Just (InsertTree <$> Gen.maybe (Gen.element ["g1", "g2", "g3"]) <*> Gen.int (Range.linear 1 3)))
-    ( \(InsertTree g n) -> do
-        evalIO (run (mkInsertTree @sm g n))
+    ( \(InsertTree group childCount) -> do
+        evalIO (run (mkInsertTree @sm group childCount))
         checkInvariants schema table withConn
     )
     []
@@ -996,10 +967,10 @@ mkInsertTree
   => Maybe Text
   -> Int
   -> sm ()
-mkInsertTree g n = do
-  let mk lbl = maybe (defaultJob (smPayload lbl)) (`defaultGroupedJob` smPayload lbl) g
-      children = mk "sm tree child 0" :| [mk ("sm tree child " <> T.pack (show i)) | i <- [1 .. n - 1]]
-  void (HL.insertJobTree @SMPayload (mk "sm tree parent" <~~ children))
+mkInsertTree group childCount = do
+  let mkJob lbl = maybe (defaultJob (smPayload lbl)) (`defaultGroupedJob` smPayload lbl) group
+      children = mkJob "sm tree child 0" :| [mkJob ("sm tree child " <> T.pack (show index)) | index <- [1 .. childCount - 1]]
+  void (HL.insertJobTree @SMPayload (mkJob "sm tree parent" <~~ children))
 
 cBatchCancel
   , cBatchDLQ
@@ -1013,38 +984,37 @@ cBatchCancel
 cBatchCancel run schema table withConn =
   Command gen exec callbacks
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRefs <$> Gen.subsequence (Map.keys (mLive m)))
-    exec (JobRefs vs) = do
-      evalIO (run (void (HL.cancelJobsBatch @SMPayload (map concrete vs))))
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (JobRefs <$> Gen.subsequence (Map.keys (mLive model)))
+    exec (JobRefs refs) = do
+      evalIO (run (void (HL.cancelJobsBatch @SMPayload (map concrete refs))))
       checkInvariants schema table withConn
     callbacks =
-      [ Require $ \m (JobRefs vs) -> all (`Map.member` mLive m) vs
-      , Update $ \m (JobRefs vs) _ -> m {mLive = foldl' (flip Map.delete) (mLive m) vs}
+      [ Require $ \model (JobRefs refs) -> all (`Map.member` mLive model) refs
+      , Update $ \model (JobRefs refs) _ -> model {mLive = foldl' (flip Map.delete) (mLive model) refs}
       ]
 cBatchDLQ run schema table withConn =
   Command gen exec callbacks
   where
-    gen m
-      | Map.null (mLive m) = Nothing
-      | otherwise = Just (JobRefs <$> Gen.subsequence (Map.keys (mLive m)))
-    exec (JobRefs vs) = do
-      evalIO (run (mkBatchDLQ @sm (map concrete vs)))
+    gen model
+      | Map.null (mLive model) = Nothing
+      | otherwise = Just (JobRefs <$> Gen.subsequence (Map.keys (mLive model)))
+    exec (JobRefs refs) = do
+      evalIO (run (mkBatchDLQ @sm (map concrete refs)))
       checkInvariants schema table withConn
     callbacks =
-      [ Require $ \m (JobRefs vs) -> all (`Map.member` mLive m) vs
-      , Update $ \m (JobRefs vs) _ -> m {mLive = foldl' (flip Map.delete) (mLive m) vs}
+      [ Require $ \model (JobRefs refs) -> all (`Map.member` mLive model) refs
+      , Update $ \model (JobRefs refs) _ -> model {mLive = foldl' (flip Map.delete) (mLive model) refs}
       ]
 
 mkBatchDLQ :: forall sm. (ArbiterC sm) => [Int64] -> sm ()
 mkBatchDLQ ids = do
   jobs <- catMaybes <$> traverse (fetchJob @sm) ids
-  void (HL.moveToDLQBatch (map (\j -> (j, "sm batch dlq")) jobs))
+  void (HL.moveToDLQBatch (map (\job -> (job, "sm batch dlq")) jobs))
 
 -- | Insert a job under one of a few shared dedup keys. Repeated keys exercise
--- the @ON CONFLICT@ path, including replace-with-group-change (old group
--- decremented) and replace-with-priority-change. Left untracked.
+-- the @ON CONFLICT@ path. Left untracked.
 data Dedup (v :: Type -> Type) = Dedup Text Bool (Maybe Text) Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
@@ -1067,8 +1037,8 @@ cDedup run schema table withConn =
             <*> Gen.maybe (Gen.element ["g1", "g2", "g3"])
             <*> Gen.int (Range.linear 0 5)
     )
-    ( \(Dedup key replace g p) -> do
-        evalIO (run (mkDedup @sm key replace g p))
+    ( \(Dedup key replace group prio) -> do
+        evalIO (run (mkDedup @sm key replace group prio))
         checkInvariants schema table withConn
     )
     []
@@ -1081,20 +1051,22 @@ mkDedup
   -> Maybe Text
   -> Int
   -> sm ()
-mkDedup key replace g p = void (HL.insertJob job)
+mkDedup key replace group prio = void (HL.insertJob job)
   where
-    dk = if replace then ReplaceDuplicate key else IgnoreDuplicate key
+    dedupKey = if replace then ReplaceDuplicate key else IgnoreDuplicate key
     job =
-      setPriority (fromIntegral p) $ setDedupKey (Just dk) $ maybe (defaultJob payload) (`defaultGroupedJob` payload) g
+      setPriority (fromIntegral prio)
+        $ setDedupKey (Just dedupKey)
+        $ maybe (defaultJob payload) (`defaultGroupedJob` payload) group
     payload = smPayload "sm dedup"
 
--- | Run the reaper. Drift-correcting, so it must never break an invariant.
+-- | Run the reaper.
 data Refresh (v :: Type -> Type) = Refresh
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
 
--- | A reaper tick: drift-correct the groups summary and sweep exhausted jobs to
--- the DLQ. Both are backstops, so neither may break an invariant.
+-- | A reaper tick. Drift-correct the groups summary and sweep exhausted jobs to
+-- the DLQ.
 runReaper
   :: forall sm
    . (MonadArbiter sm, RegistryTables (RegistryOf sm))
@@ -1126,18 +1098,15 @@ cRefresh run schema table withConn =
 -- Concurrency property
 -- ---------------------------------------------------------------------------
 
--- | Groups and dedup keys for the concurrency churn. More groups widens the set
--- of summary rows updated at once. Fewer than @nWorkers@, so contention per
--- group stays high.
+-- | Groups and dedup keys for the concurrency churn. Fewer groups than workers
+-- keeps contention per group high.
 concGroups, concDedupKeys :: [Text]
-concGroups = ["g" <> T.pack (show i) | i <- [1 .. 3 :: Int]]
-concDedupKeys = ["d" <> T.pack (show i) | i <- [1 .. 6 :: Int]]
+concGroups = ["g" <> T.pack (show index) | index <- [1 .. 3 :: Int]]
+concDedupKeys = ["d" <> T.pack (show index) | index <- [1 .. 6 :: Int]]
 
 -- | One self-contained engine action with its parameters baked in. Showable
--- and shrinkable, so the N-way concurrent property can generate, display, and
--- minimise whole branches of these. Every target-based op claims first and
--- acts on what it claimed, so no action needs to coordinate ids with another
--- branch.
+-- and shrinkable. Every target-based op claims first and acts on what it
+-- claimed.
 data Act
   = AInsert (Maybe Text) (Maybe Int) Int (Maybe Int) Extras
   | ABatchInsert [(Maybe Text, Int)]
@@ -1203,10 +1172,10 @@ interpret
   -> Act
   -> sm ()
 interpret schema table withConn act = case act of
-  AInsert g d p ma ext -> void (mkInsert @sm (applyExtras ext) g d p ma)
+  AInsert group delay prio maxAtts extras -> void (mkInsert @sm (applyExtras extras) group delay prio maxAtts)
   ABatchInsert specs -> mkBatchInsert @sm specs
-  AInsertTree g n -> mkInsertTree @sm g n
-  ADedup k r g p -> mkDedup @sm k r g p
+  AInsertTree group childCount -> mkInsertTree @sm group childCount
+  ADedup key replace group prio -> mkDedup @sm key replace group prio
   AClaimAck -> claimAck @sm
   AClaimRetry -> claimRetry @sm
   AClaimCancel -> claimCancel @sm
@@ -1226,7 +1195,7 @@ interpret schema table withConn act = case act of
   ADeleteDLQBatch -> deleteRandomDLQBatch @sm schema table withConn
   AReaper -> runReaper @sm schema table
 
--- | The opaque-action form, for samplers ('serializationGuard') that don't shrink.
+-- | The opaque-action form, for samplers that do not shrink.
 genAction
   :: forall sm
    . (ArbiterC sm)
@@ -1238,9 +1207,9 @@ genAction schema table withConn =
   interpret @sm schema table withConn <$> genActionData
 
 claimThen :: forall sm. (ArbiterC sm) => (JobRead SMPayload -> sm ()) -> sm ()
-claimThen f = do
-  js <- HL.claimNextVisibleJobsAs 3 30 smWorker :: sm [JobRead SMPayload]
-  traverse_ f js
+claimThen handle = do
+  jobs <- HL.claimNextVisibleJobsAs 3 30 smWorker :: sm [JobRead SMPayload]
+  traverse_ handle jobs
 
 claimAck
   , claimRetry
@@ -1253,7 +1222,7 @@ claimAck
 claimAck = claimThen @sm (void . HL.ackJob)
 claimRetry = claimThen @sm (void . HL.updateJobForRetry 30 "conc retry")
 claimCancel = claimThen @sm (void . HL.cancelJob @SMPayload . primaryKey)
--- Force-cancel while still leased hits the flag-claimed-live branch, so the job stays present and must keep blocking its group head.
+-- Force-cancel while still leased flags the job in place. It stays present and keeps blocking its group head.
 claimForceCancel = claimThen @sm (void . HL.forceCancelJob @SMPayload . primaryKey)
 claimExtend = claimThen @sm (void . HL.setVisibilityTimeout 60)
 claimRelease = claimThen @sm (void . HL.setVisibilityTimeout 0)
@@ -1274,8 +1243,7 @@ retryRandomDLQ schema table withConn = do
     sql =
       "SELECT id FROM " <> schema <> "." <> table <> "_dlq ORDER BY random() LIMIT 1"
 
--- | Apply an id-keyed admin op to a random live job, if any. Lets stateless
--- churn exercise readiness-changing ops (suspend\/resume\/promote) concurrently.
+-- | Apply an id-keyed admin op to a random live job, if any.
 onRandomJob
   :: forall sm
    . (ArbiterC sm)
@@ -1303,9 +1271,8 @@ suspendRandom schema table withConn = onRandomJob @sm schema table withConn (voi
 resumeRandom schema table withConn = onRandomJob @sm schema table withConn (void . HL.resumeJob @SMPayload)
 promoteRandom schema table withConn = onRandomJob @sm schema table withConn (void . HL.promoteJob @SMPayload)
 
--- | Apply an id-keyed op to a random rollup-finalizer parent (a row with a
--- @parent_state@ snapshot), if any. Drives the tree-mutation ops the flat random
--- churn would otherwise never target.
+-- | Apply an id-keyed op to a random rollup-finalizer parent, if any. A parent
+-- is a row with a @parent_state@ snapshot.
 onRandomRollupParent
   :: forall sm
    . (ArbiterC sm)
@@ -1321,7 +1288,7 @@ onRandomRollupParent schema table withConn act = do
     sql =
       "SELECT id FROM " <> schema <> "." <> table <> " WHERE parent_state IS NOT NULL ORDER BY random() LIMIT 1"
 
--- | Delete a random DLQ row (with parent-resume side effects).
+-- | Delete a random DLQ row.
 deleteRandomDLQ
   :: forall sm
    . (ArbiterC sm)
@@ -1350,25 +1317,22 @@ deleteRandomDLQBatch schema table withConn = do
     pure [dlqId | Only dlqId <- rows]
   void (HL.deleteDLQJobsBatch @SMPayload ids)
 
--- | Run an action, retrying transient serialization/deadlock aborts the way a
--- real worker would. These are expected under contention and are not invariant
--- violations.
+-- | Run an action, retrying transient serialization and deadlock aborts.
 withRetry :: IO () -> IO ()
 withRetry act = go (5 :: Int)
   where
-    go n = do
-      r <- tryAny act
-      case r of
+    go remaining = do
+      outcome <- tryAny act
+      case outcome of
         Right () -> pure ()
-        Left e
-          | n > 0 && isRetryableError e -> go (n - 1)
-          | otherwise -> throwIO e
+        Left err
+          | remaining > 0 && isRetryableError err -> go (remaining - 1)
+          | otherwise -> throwIO err
 
--- | Detect a transient serialization or deadlock abort. PostgreSQL-simple and
--- Hasql use different exception types for 40P01 and 40001. Match the SQLSTATE in
--- the rendered message for both backends.
+-- | Detect a transient serialization or deadlock abort by the SQLSTATE in the
+-- rendered message.
 isRetryableError :: SomeException -> Bool
-isRetryableError e = any (`isInfixOf` show e) ["40P01", "40001"]
+isRetryableError err = any (`isInfixOf` show err) ["40P01", "40001"]
 
 -- | Install the gap-free HOL detector through the raw-connection accessor.
 installHolDetector :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
@@ -1379,8 +1343,8 @@ countHolViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a
 countHolViolations schema table withConn = withConn $ \conn -> do
   rows <- PG.query_ conn (fromString (T.unpack ("SELECT group_key, job_id FROM " <> holViolTbl schema table)))
   pure
-    [ "HOL violation: job " <> show (jid :: Int64) <> " claimed while group " <> T.unpack g <> " already in-flight"
-    | (g, jid) <- rows
+    [ "HOL violation: job " <> show (jid :: Int64) <> " claimed while group " <> T.unpack groupName <> " already in-flight"
+    | (groupName, jid) <- rows
     ]
 
 removeHolDetector :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
@@ -1443,16 +1407,15 @@ prop_concurrent
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> IO ()
   -> Property
--- 'withShrinks 0': a concurrent failure is nondeterministic, so most shrink
--- candidates do not reproduce it and hedgehog thrashes for minutes. Keep the
--- original seed-reproducible counterexample instead and minimise deterministically.
+-- A concurrent failure is nondeterministic and shrink candidates rarely
+-- reproduce it. The seed-reproducible counterexample is kept.
 prop_concurrent run schema table withConn reset = withTests 100 $ withShrinks 0 $ property $ do
   branches <- forAll $ Gen.list (Range.linear 2 8) (Gen.list (Range.linear 5 25) genActionData)
   (hol, settled) <- evalIO $ do
     resetSeeded reset schema withConn
     truncateHol schema table withConn
     mapConcurrently_
-      (traverse_ (\a -> withRetry (run (interpret @sm schema table withConn a))))
+      (traverse_ (\act -> withRetry (run (interpret @sm schema table withConn act))))
       branches
     void (run (runReaper @sm schema table))
     (,) <$> countHolViolations schema table withConn <*> queryViolations schema table withConn
@@ -1460,22 +1423,20 @@ prop_concurrent run schema table withConn reset = withTests 100 $ withShrinks 0 
 
 -- | Set a wall-clock time limit for a concurrent test.
 withinSecs :: Int -> IO () -> IO ()
-withinSecs s act =
-  timeout (s * 1_000_000) act
-    >>= maybe (expectationFailure ("timed out after " <> show s <> "s")) pure
+withinSecs secs act =
+  timeout (secs * 1_000_000) act
+    >>= maybe (expectationFailure ("timed out after " <> show secs <> "s")) pure
 
 -- ---------------------------------------------------------------------------
 -- Deterministic regression guards
 -- ---------------------------------------------------------------------------
--- Saturated, bounded stress targeted at the two fixed concurrency bugs. Unlike
--- the diffuse fuzz, these reproduce a regression on nearly every run, so they
--- are reliable CI guards.
+-- Saturated, bounded stress targeted at fixed concurrency bugs. These reproduce
+-- a regression on nearly every run.
 
 -- | Test for the cross-group trigger deadlock. Two actors repeatedly run
 -- conflicting multi-group operations. One inserts a batch across g1 and g3.
 -- The other moves a deduplication key between those groups. The @FOR UPDATE@
--- clauses must lock group rows in a consistent order. Count @40P01@ errors and
--- require a count of zero.
+-- clauses lock group rows in a consistent order. Count @40P01@ errors.
 deadlockGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1487,28 +1448,26 @@ deadlockGuard run reset = do
   deadlocks <- newIORef (0 :: Int)
   let rounds = 600 :: Int
       watch act = do
-        r <- tryAny act
-        case r of
+        outcome <- tryAny act
+        case outcome of
           Right () -> pure ()
-          Left e
-            | "40P01" `isInfixOf` show e -> atomicModifyIORef' deadlocks (\n -> (n + 1, ()))
-            | "40001" `isInfixOf` show e -> pure ()
-            | otherwise -> throwIO e
+          Left err
+            | "40P01" `isInfixOf` show err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
+            | "40001" `isInfixOf` show err -> pure ()
+            | otherwise -> throwIO err
       actorA = replicateM_ rounds $ watch (run (mkBatchInsert @sm [(Just "g1", 0), (Just "g3", 0)]))
       actorB =
         traverse_
-          (\i -> watch (run (mkDedup @sm "dlk" True (Just (if even i then "g1" else "g3")) 0)))
+          (\index -> watch (run (mkDedup @sm "dlk" True (Just (if even index then "g1" else "g3")) 0)))
           [1 .. rounds]
   mapConcurrently_ id [actorA, actorB]
-  n <- readIORef deadlocks
-  -- Tolerate the rare residual race but still catch a regression (hundreds of deadlocks).
-  n `shouldSatisfy` (<= rounds `div` 100)
+  deadlockCount <- readIORef deadlocks
+  -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
+  deadlockCount `shouldSatisfy` (<= rounds `div` 100)
 
 -- | Guard for the dedup group-move double-claim. Saturates the hot groups with
 -- concurrent dedup moves and claims under the gap-free HOL detector, with the
--- reaper churning. If the claim's @expected_group@ re-check or the reaper fix
--- regresses, a job moved between groups gets double-claimed and the detector
--- logs it. Asserts the detector stayed empty.
+-- reaper churning. Asserts the detector stayed empty.
 serializationGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1554,11 +1513,9 @@ concurrentDriftGuard run schema table withConn reset = do
   driftViolations schema table withConn >>= (`shouldBe` [])
 
 -- | Deterministic guard for the @max_attempts@ machinery. Inserts ungrouped jobs
--- capped at a single attempt, then claim\/release-cycles them: the claim guard
--- must hold attempts at the limit (so nothing over-executes), and the reaper
--- sweep must then move every exhausted job to the DLQ. The random fuzzer reaches
--- this state only by luck (leases rarely expire in a fast run). This guarantees
--- it, so a regressed claim guard or a broken sweep is caught every run.
+-- capped at a single attempt, then claim and release cycles them. The claim guard
+-- holds attempts at the limit and the reaper sweep moves every exhausted job to
+-- the DLQ.
 exhaustionGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1570,17 +1527,17 @@ exhaustionGuard
   -> IO ()
 exhaustionGuard run schema table withConn reset = do
   reset
-  let n = 20 :: Int
-  run (replicateM_ n (void (mkInsert @sm id Nothing Nothing 0 (Just 1))))
-  -- Claim everything, then release it back. With the guard intact, only the
-  -- first cycle claims (attempts -> 1 = limit). Later cycles are no-ops.
+  let jobCount = 20 :: Int
+  run (replicateM_ jobCount (void (mkInsert @sm id Nothing Nothing 0 (Just 1))))
+  -- Claim everything, then release it back. Only the first cycle claims. Later
+  -- cycles are no-ops.
   replicateM_ 3 $
     run $ do
-      js <- HL.claimNextVisibleJobs 100 60 :: sm [JobRead SMPayload]
-      traverse_ (void . HL.setVisibilityTimeout 0) js
-  -- Claim guard: no live job is past its limit.
+      jobs <- HL.claimNextVisibleJobs 100 60 :: sm [JobRead SMPayload]
+      traverse_ (void . HL.setVisibilityTimeout 0) jobs
+  -- No live job is past its limit.
   exactViolations schema table withConn >>= (`shouldBe` [])
-  -- Sweep: every exhausted, claimable job lands in the DLQ.
+  -- Every exhausted, claimable job lands in the DLQ.
   void (run (Ops.sweepExhaustedJobs schema [table]))
   let tbl = schema <> "." <> table
   stranded <-
@@ -1591,11 +1548,10 @@ exhaustionGuard run schema table withConn reset = do
         <> " AND (not_visible_until IS NULL OR not_visible_until <= NOW())"
   dlqd <- countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
   stranded `shouldBe` 0
-  dlqd `shouldBe` fromIntegral n
+  dlqd `shouldBe` fromIntegral jobCount
 
 -- | Claim everything visible and ack it, repeatedly, until a claim comes back
--- empty or the round bound is hit. Acking children resumes their finalizers, so
--- a healthy queue with no suspended\/backoff jobs drains fully.
+-- empty or the round bound is hit.
 drainToEmpty
   :: forall sm
    . (ArbiterC sm)
@@ -1607,17 +1563,14 @@ drainToEmpty run = go
     go bound
       | bound <= 0 = pure ()
       | otherwise = do
-          js <- run (HL.claimNextVisibleJobs 50 60 :: sm [JobRead SMPayload])
-          if null js
+          jobs <- run (HL.claimNextVisibleJobs 50 60 :: sm [JobRead SMPayload])
+          if null jobs
             then pure ()
-            else run (traverse_ (void . HL.ackJob) js) >> go (bound - 1)
+            else run (traverse_ (void . HL.ackJob) jobs) >> go (bound - 1)
 
--- | Deterministic liveness guard: a fixed set of jobs across several groups plus
--- ungrouped, at mixed priorities, must fully drain under a fair claim+ack loop
--- within a bounded number of rounds. A job the claim can never surface -- a stuck
--- @in_flight_until@, a lost wakeup, a @ready_count@ undercount -- strands the
--- queue, so the bound (or 'withinSecs') trips. Liveness, expressed as bounded
--- progress.
+-- | Deterministic liveness guard. A fixed set of jobs across several groups plus
+-- ungrouped, at mixed priorities, drains fully under a fair claim and ack loop
+-- within a bounded number of rounds.
 progressGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1631,25 +1584,23 @@ progressGuard run schema table withConn reset = do
   reset
   run $ do
     traverse_
-      ( \i ->
+      ( \index ->
           void
-            (mkInsert @sm id (Just ("pg-" <> T.pack (show (i `mod` 8)))) Nothing (i `mod` 5) Nothing)
+            (mkInsert @sm id (Just ("pg-" <> T.pack (show (index `mod` 8)))) Nothing (index `mod` 5) Nothing)
       )
       [1 .. 40 :: Int]
     traverse_
-      (\i -> void (mkInsert @sm id Nothing Nothing (i `mod` 5) Nothing))
+      (\index -> void (mkInsert @sm id Nothing Nothing (index `mod` 5) Nothing))
       [1 .. 20 :: Int]
   drainToEmpty @sm run 300
   remaining <- withConn $ \conn -> do
-    [Only x] <- PG.query_ conn (fromString (T.unpack ("SELECT count(*) FROM " <> schema <> "." <> table)))
-    pure (x :: Int64)
+    [Only count] <- PG.query_ conn (fromString (T.unpack ("SELECT count(*) FROM " <> schema <> "." <> table)))
+    pure (count :: Int64)
   remaining `shouldBe` 0
 
--- | Deterministic guard against group starvation: ineligible groups (in backoff
--- or suspended) must drop out of the ready ranking, or many low-id ineligible
--- groups crowd the bounded claim window and starve a productive higher-id group.
--- Re-adds the scenarios that previously guarded that ranking bug. A regression
--- makes the productive claim come back empty.
+-- | Deterministic guard against group starvation. Ineligible groups in backoff
+-- or suspended drop out of the ready ranking. A regression makes the productive
+-- claim come back empty.
 starvationGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1658,37 +1609,35 @@ starvationGuard
   -> IO ()
 starvationGuard run reset = do
   let crowders = [1 .. 30 :: Int]
-      grp prefix i = prefix <> T.pack (show i)
-      ins g lbl = void (run (HL.insertJob (defaultGroupedJob g (smPayload lbl))))
+      grp prefix index = prefix <> T.pack (show index)
+      ins group lbl = void (run (HL.insertJob (defaultGroupedJob group (smPayload lbl))))
       claim1 = run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
-  -- Backoff-blocked crowders: each fails its head into a long backoff with a
+  -- Backoff-blocked crowders. Each fails its head into a long backoff with a
   -- ready successor queued behind it.
   reset
-  traverse_ (\i -> ins (grp "boff-" i) (grp "boff-" i <> "-head")) crowders
+  traverse_ (\index -> ins (grp "boff-" index) (grp "boff-" index <> "-head")) crowders
   replicateM_ (length crowders) $ do
-    js <- claim1
-    run (traverse_ (void . HL.updateJobForRetry 3600 "boom") js)
-  traverse_ (\i -> ins (grp "boff-" i) (grp "boff-" i <> "-succ")) crowders
+    jobs <- claim1
+    run (traverse_ (void . HL.updateJobForRetry 3600 "boom") jobs)
+  traverse_ (\index -> ins (grp "boff-" index) (grp "boff-" index <> "-succ")) crowders
   ins "productive-g" "productive"
-  c1 <- claim1
-  length c1 `shouldBe` 1
-  -- Suspended crowders: not claimable, but must still leave the ready ranking.
+  behindBackoff <- claim1
+  length behindBackoff `shouldBe` 1
+  -- Suspended crowders. They are not claimable and leave the ready ranking.
   reset
   traverse_
-    ( \i -> do
-        mj <- run (HL.insertJob (defaultGroupedJob (grp "susp-" i) (smPayload (grp "susp-" i))))
-        run (traverse_ (void . HL.suspendJob @SMPayload . primaryKey) mj)
+    ( \index -> do
+        inserted <- run (HL.insertJob (defaultGroupedJob (grp "susp-" index) (smPayload (grp "susp-" index))))
+        run (traverse_ (void . HL.suspendJob @SMPayload . primaryKey) inserted)
     )
     crowders
   ins "productive-g" "productive"
-  c2 <- claim1
-  length c2 `shouldBe` 1
+  behindSuspended <- claim1
+  length behindSuspended `shouldBe` 1
 
--- | Deterministic guard for the rollup-tree lifecycle, which the fuzzer hits
--- only sparsely. Part 1: a finalizer over two children resumes and completes
--- once both children are acked, leaving the queue empty. Part 2: DLQ'ing the
--- parent cascades every tree member to the DLQ. Catches a broken parent-resume
--- or a broken cascade on every run.
+-- | Deterministic guard for the rollup-tree lifecycle. Part 1: a finalizer over
+-- two children resumes and completes once both children are acked. Part 2:
+-- DLQ'ing the parent cascades every tree member to the DLQ.
 treeGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1702,8 +1651,8 @@ treeGuard run schema table withConn reset = do
   let tbl = schema <> "." <> table
       mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
       dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
-      mk lbl = defaultJob (smPayload lbl)
-      twoChildTree = mk "tg parent" <~~ (mk "tg child 0" :| [mk "tg child 1"])
+      mkJob lbl = defaultJob (smPayload lbl)
+      twoChildTree = mkJob "tg parent" <~~ (mkJob "tg child 0" :| [mkJob "tg child 1"])
   -- Part 1: acking both children resumes the parent, which then completes.
   reset
   run (mkInsertTree @sm Nothing 2)
@@ -1717,10 +1666,9 @@ treeGuard run schema table withConn reset = do
   mainCount >>= (`shouldBe` 0)
   dlqCount >>= (`shouldBe` 3)
 
--- | Regression guard: a dedup-replaced job is fresh, so it must not carry a stale
--- claim owner. A grouped job is claimed as a worker with a 1s lease and abandoned
--- (claimed_by set), then dedup-replaced once the lease expires. The replaced row's
--- claimed_by must be NULL.
+-- | A dedup-replaced job is fresh and carries no stale claim owner. A grouped
+-- job is claimed with a 1s lease and abandoned, then dedup-replaced once the
+-- lease expires. The replaced row has no claimant.
 dedupReplaceStaleLeaseGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1742,9 +1690,8 @@ dedupReplaceStaleLeaseGuard run schema table withConn reset = do
       "SELECT count(*) FROM " <> schema <> "." <> table <> " WHERE dedup_key = 'drsl-key' AND claimed_by IS NOT NULL"
   stale `shouldBe` 0
 
--- | Deterministic guard for the two rows promote must refuse: one back in flight on a
--- second attempt, one suspended with a schedule. The random sequences reach the second
--- attempt only by coincidence.
+-- | Deterministic guard for the rows promote refuses: back in flight on a second
+-- attempt, released, and suspended with a schedule.
 promoteLeaseGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1764,7 +1711,7 @@ promoteLeaseGuard run schema table withConn reset = do
   map primaryKey attempt2 `shouldBe` [jid]
   run (HL.promoteJob @SMPayload jid) >>= (`shouldBe` 0)
   isLiveInFlight schema table withConn jid >>= (`shouldBe` True)
-  -- Released with setVisibilityTimeout 0: still claimed, no window left.
+  -- Released with a zero visibility timeout. Still claimed, no window left.
   reset
   rid <- run (mkInsert @sm id Nothing Nothing 0 Nothing)
   released <- run (HL.claimNextVisibleJobsAs 1 60 smWorker :: sm [JobRead SMPayload])
@@ -1781,11 +1728,9 @@ promoteLeaseGuard run schema table withConn reset = do
   (_, _, nvu') <- leaseState schema table withConn sid
   nvu' `shouldBe` nvu
 
--- | Deterministic guard for crashed-worker recovery: a grouped job claimed with
--- a one-second lease must become reclaimable once the lease expires, both via the
--- @next_due@ trigger path alone and after a reaper recompute of @in_flight_until@.
--- The property's millisecond sequences never let a lease expire, so this is its
--- own guard.
+-- | Deterministic guard for crashed-worker recovery. A grouped job claimed with
+-- a one-second lease becomes reclaimable once the lease expires, both through the
+-- @next_due@ trigger path and after a reaper recompute of @in_flight_until@.
 reclaimGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1793,27 +1738,25 @@ reclaimGuard
   -> IO ()
   -> IO ()
 reclaimGuard run reset = do
-  let insClaimExpire g = do
-        void (run (mkInsert @sm id (Just g) Nothing 0 Nothing))
+  let insClaimExpire group = do
+        void (run (mkInsert @sm id (Just group) Nothing 0 Nothing))
         _ <- run (HL.claimNextVisibleJobs 1 1 :: sm [JobRead SMPayload])
         threadDelay 2_000_000
       claim1 = run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
-  -- Via the next_due trigger path alone (no reaper).
+  -- Through the next_due trigger path alone.
   reset
   insClaimExpire "rc-trig"
-  c1 <- claim1
-  length c1 `shouldBe` 1
+  viaTrigger <- claim1
+  length viaTrigger `shouldBe` 1
   -- After a reaper recompute of in_flight_until.
   reset
   insClaimExpire "rc-reaper"
   void (run (HL.refreshAllGroupsFully @sm))
-  c2 <- claim1
-  length c2 `shouldBe` 1
+  viaReaper <- claim1
+  length viaReaper `shouldBe` 1
 
--- | Deterministic checks for the 'Ops.runGated' gate the reaper relies on: a
--- second caller within the interval is skipped, and under concurrency exactly
--- one of many callers wins. Recovers the gating-mechanism coverage dropped with
--- the old groups-invariant suite.
+-- | Deterministic checks for 'Ops.runGated'. A second caller within the interval
+-- is skipped. Under concurrency exactly one of many callers wins.
 runGatedChecks
   :: forall sm
    . (MonadArbiter sm)
@@ -1827,20 +1770,18 @@ runGatedChecks run schema withConn = do
           void (PG.execute_ conn (fromString (T.unpack ("TRUNCATE " <> schema <> ".arbiter_gates"))))
   -- A second call within the interval is skipped.
   truncateGates
-  r1 <- run (Ops.runGated schema "sm-gate" 3600 (pure (1 :: Int)))
-  r2 <- run (Ops.runGated schema "sm-gate" 3600 (pure (2 :: Int)))
-  r1 `shouldBe` Just 1
-  r2 `shouldBe` Nothing
+  firstRun <- run (Ops.runGated schema "sm-gate" 3600 (pure (1 :: Int)))
+  secondRun <- run (Ops.runGated schema "sm-gate" 3600 (pure (2 :: Int)))
+  firstRun `shouldBe` Just 1
+  secondRun `shouldBe` Nothing
   -- Under concurrency exactly one caller wins the gate.
   truncateGates
   results <- mapConcurrently (const (run (Ops.runGated schema "sm-gate2" 3600 (pure ())))) [1 .. 16 :: Int]
   length (filter isJust results) `shouldBe` 1
 
--- | Deterministic crash-recovery guard. Jobs claimed with a short lease and then
--- abandoned (the worker died) must, once the lease expires, be reclaimed and acked
--- exactly once under concurrent workers with no double-claim, no lost job, and
--- per-group serialization intact. The fuzzer never reaches this because its leases
--- are 60s and never expire mid-run.
+-- | Deterministic crash-recovery guard. Jobs claimed with a short lease and
+-- abandoned are reclaimed and acked exactly once under concurrent workers, with
+-- per-group serialization intact.
 concurrentReclaimGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1855,9 +1796,9 @@ concurrentReclaimGuard run schema table withConn reset = do
   installHolDetector schema table withConn
   flip finally (removeHolDetector schema table withConn) $ do
     truncateHol schema table withConn
-    let groups = [Just ("crg" <> T.pack (show i)) | i <- [1 .. 5 :: Int]]
-        seeds = [(Nothing, p) | p <- [0 .. 29 :: Int]] <> [(g, p) | g <- groups, p <- [0 .. 1 :: Int]]
-    ids <- run (traverse (\(g, p) -> mkInsert @sm id g Nothing p Nothing) seeds)
+    let groups = [Just ("crg" <> T.pack (show index)) | index <- [1 .. 5 :: Int]]
+        seeds = [(Nothing, prio) | prio <- [0 .. 29 :: Int]] <> [(group, prio) | group <- groups, prio <- [0 .. 1 :: Int]]
+    ids <- run (traverse (\(group, prio) -> mkInsert @sm id group Nothing prio Nothing) seeds)
     let total = length ids
     -- Claim with a 1s lease and abandon, simulating crashed workers.
     void (run (HL.claimNextVisibleJobs total 1 :: sm [JobRead SMPayload]))
@@ -1865,12 +1806,12 @@ concurrentReclaimGuard run schema table withConn reset = do
     -- Race workers to reclaim and ack until drained, recording every acked id.
     acked <- newIORef []
     let drain = do
-          js <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
-          if null js
+          jobs <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
+          if null jobs
             then pure ()
             else do
-              run (traverse_ (void . HL.ackJob) js)
-              atomicModifyIORef' acked (\xs -> (map primaryKey js <> xs, ()))
+              run (traverse_ (void . HL.ackJob) jobs)
+              atomicModifyIORef' acked (\acc -> (map primaryKey jobs <> acc, ()))
               drain
     mapConcurrently_ id (replicate 10 drain)
     got <- readIORef acked
@@ -1881,7 +1822,7 @@ concurrentReclaimGuard run schema table withConn reset = do
 
 -- | Deterministic guard that claims honor priority. Ungrouped jobs come out in
 -- ascending priority order, and the grouped candidate ranking serves the lowest
--- min-priority group first. No other test asserts priority ordering.
+-- min-priority group first.
 priorityOrderGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1889,12 +1830,12 @@ priorityOrderGuard
   -> IO ()
   -> IO ()
 priorityOrderGuard run reset = do
-  let ins g p = void (mkInsert @sm id g Nothing p Nothing)
+  let ins group prio = void (mkInsert @sm id group Nothing prio Nothing)
       claimPriorities acc = do
-        c <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
-        case c of
+        claimed <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
+        case claimed of
           [] -> pure (reverse acc)
-          js -> claimPriorities (map priority js <> acc)
+          jobs -> claimPriorities (map priority jobs <> acc)
   -- Ungrouped: claim order is ascending in priority.
   reset
   run (traverse_ (ins Nothing) [3, 1, 4, 1, 5, 0, 2])
@@ -1904,13 +1845,11 @@ priorityOrderGuard run reset = do
   reset
   run (ins (Just "pg-hi") 5)
   run (ins (Just "pg-lo") 0)
-  c <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
-  map priority c `shouldBe` [0]
+  claimed <- run (HL.claimNextVisibleJobs 1 60 :: sm [JobRead SMPayload])
+  map priority claimed `shouldBe` [0]
 
--- | Deterministic guard: a freshly inserted scheduled job (never leased) becomes
--- claimable exactly when its delay elapses, for both the grouped (@next_due@) and
--- ungrouped paths. The fuzzer schedules 30-120s out, so it never sees the due
--- transition.
+-- | Deterministic guard. A freshly inserted scheduled job becomes claimable when
+-- its delay elapses, for both the grouped and ungrouped paths.
 scheduledDueGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1921,15 +1860,14 @@ scheduledDueGuard run reset = do
   reset
   void (run (mkInsert @sm id (Just "sched-g") (Just 1) 0 Nothing))
   void (run (mkInsert @sm id Nothing (Just 1) 0 Nothing))
-  c0 <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
-  length c0 `shouldBe` 0
+  early <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
+  length early `shouldBe` 0
   threadDelay 1_500_000
-  c1 <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
-  length c1 `shouldBe` 2
+  due <- run (HL.claimNextVisibleJobs 5 60 :: sm [JobRead SMPayload])
+  length due `shouldBe` 2
 
 -- | Deterministic guard for the recursive @retryFromDLQ@ restore. A rollup tree
--- cascaded to the DLQ and then retried must be restored intact and drain to empty,
--- exercising the ancestor-walk SQL the fuzzer only hits by chance.
+-- cascaded to the DLQ and then retried is restored intact and drains to empty.
 treeRetryFromDLQGuard
   :: forall sm
    . (ArbiterC sm)
@@ -1943,8 +1881,8 @@ treeRetryFromDLQGuard run schema table withConn reset = do
   let tbl = schema <> "." <> table
       mainCount = countQuery withConn ("SELECT count(*) FROM " <> tbl)
       dlqCount = countQuery withConn ("SELECT count(*) FROM " <> tbl <> "_dlq")
-      mk lbl = defaultJob (smPayload lbl)
-      tree = mk "trd parent" <~~ (mk "trd child 0" :| [mk "trd child 1"])
+      mkJob lbl = defaultJob (smPayload lbl)
+      tree = mkJob "trd parent" <~~ (mkJob "trd child 0" :| [mkJob "trd child 1"])
   reset
   Right (parent :| _) <- run (HL.insertJobTree @SMPayload tree)
   void (run (HL.moveToDLQ "tree retry guard" parent))
@@ -1952,9 +1890,9 @@ treeRetryFromDLQGuard run schema table withConn reset = do
   dlqCount >>= (`shouldBe` 3)
   -- Retry the parent's DLQ row. The recursive restore brings the whole tree back.
   dlqId <- withConn $ \conn -> do
-    [Only i] <-
+    [Only rowId] <-
       PG.query conn (fromString (T.unpack ("SELECT id FROM " <> tbl <> "_dlq WHERE job_id = ?"))) (Only (primaryKey parent))
-    pure (i :: Int64)
+    pure (rowId :: Int64)
   void (run (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload))))
   mainCount >>= (`shouldBe` 3)
   dlqCount >>= (`shouldBe` 0)
@@ -1973,33 +1911,32 @@ combinedGateGuard
   -> IO ()
 combinedGateGuard run schema withConn reset = do
   resetSeeded reset schema withConn
-  let insBoth conc rate n =
+  let insBoth conc rate count =
         run
           ( replicateM_
-              n
+              count
               ( void
                   (mkInsert @sm (applyExtras (Extras (Just conc) (Just rate))) Nothing Nothing 0 Nothing)
               )
           )
-      claimN n = run (HL.claimNextVisibleJobsAs n 60 smWorker :: sm [JobRead SMPayload])
-  -- Concurrency is the tighter gate: cap-a admits 1 though the bucket holds 3.
+      claimN limit = run (HL.claimNextVisibleJobsAs limit 60 smWorker :: sm [JobRead SMPayload])
+  -- Concurrency is the tighter gate. cap-a admits 1 and the bucket holds 3.
   insBoth "cap-a" "rk-1" 4
-  c1 <- claimN 10
-  length c1 `shouldBe` 1
+  concCapped <- claimN 10
+  length concCapped `shouldBe` 1
   -- Spend rk-2 to one token under the roomy cap-c pool.
   insBoth "cap-c" "rk-2" 2
-  c2 <- claimN 10
-  length c2 `shouldBe` 2
-  run (traverse_ (void . HL.ackJob) c2)
-  -- Ack frees the slots but not the tokens, so rate now caps the fresh batch.
+  spent <- claimN 10
+  length spent `shouldBe` 2
+  run (traverse_ (void . HL.ackJob) spent)
+  -- Ack frees the slots and leaves the tokens spent. Rate now caps the fresh batch.
   insBoth "cap-c" "rk-2" 3
-  c3 <- claimN 10
-  length c3 `shouldBe` 1
+  rateCapped <- claimN 10
+  length rateCapped `shouldBe` 1
 
 -- | Deterministic guard for the claim-trigger lock inversion. A claim's throttle
--- deferral row references a count row the claim never locked (SKIP LOCKED passed
--- over it). The update trigger must not lock that row, or the claim deadlocks
--- with an ordered scan that holds it while waiting behind a key the claim holds.
+-- deferral row references a count row the claim never locked. The update trigger
+-- leaves that row unlocked.
 deferralLockOrderGuard
   :: forall sm
    . (ArbiterC sm)
@@ -2014,45 +1951,45 @@ deferralLockOrderGuard run schema table withConn reset = do
   let ins conc rate = void (run (mkInsert @sm (applyExtras (Extras conc rate)) Nothing Nothing 0 Nothing))
       tbl = schema <> "." <> table
       concTbl = schema <> ".arbiter_concurrency"
-  -- The cap-a job is rate-denied (drained bucket) so the claim defers it without
-  -- holding cap-a:s. The cap-b:s row exists only to park the ordered scan between
-  -- cap-a:s and cap-c:s. The cap-c job is admitted, so the claim holds cap-c:s.
+  -- The cap-a job is rate-denied on a drained bucket. The claim defers it without
+  -- holding cap-a:s. The cap-b:s row parks the ordered scan between cap-a:s and
+  -- cap-c:s. The cap-c job is admitted and the claim holds cap-c:s.
   ins (Just "cap-a") (Just "rk-1")
   ins (Just "cap-c") Nothing
-  withConn $ \c -> do
+  withConn $ \conn -> do
     execute_
-      c
+      conn
       ("UPDATE " <> schema <> ".arbiter_rate_limits SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
     execute_
-      c
+      conn
       ( "INSERT INTO "
           <> concTbl
           <> " (concurrency_key, concurrency_prefix, in_flight) VALUES ('cap-b:s', 'cap-b', 0) ON CONFLICT (concurrency_key) DO NOTHING"
       )
   held <- newEmptyMVar
   release <- newEmptyMVar
-  h <- async $ withConn $ \c -> do
-    PG.begin c
-    lockConcurrencyKey c concTbl "cap-b:s"
+  holder <- async $ withConn $ \conn -> do
+    PG.begin conn
+    lockConcurrencyKey conn concTbl "cap-b:s"
     putMVar held ()
     takeMVar release
-    PG.commit c
+    PG.commit conn
   takeMVar held
   -- The ordered scan locks cap-a:s, then parks on the held cap-b:s.
-  r <- async (void (run (HL.reconcileConcurrencyCounts :: sm Int64)))
+  reconciler <- async (void (run (HL.reconcileConcurrencyCounts :: sm Int64)))
   threadDelay 300_000
-  a <- async (run (HL.claimNextVisibleJobsAs 10 60 smWorker :: sm [JobRead SMPayload]))
+  claimer <- async (run (HL.claimNextVisibleJobsAs 10 60 smWorker :: sm [JobRead SMPayload]))
   threadDelay 300_000
   putMVar release ()
-  wait h
-  claimedJobs <- wait a
-  wait r
+  wait holder
+  claimedJobs <- wait claimer
+  wait reconciler
   length claimedJobs `shouldBe` 1
   countQuery withConn ("SELECT count(*) FROM " <> tbl <> " WHERE throttled_until IS NOT NULL") >>= (`shouldBe` 1)
 
--- | The claimed_by-flip variant of 'deferralLockOrderGuard'. Deferring a stale-leased
--- job flips claimed_by, so the trigger must lock its count row. The claim must not
--- defer it while another claimer holds that row, or two claims can form a lock cycle.
+-- | The claimed_by-flip variant of 'deferralLockOrderGuard'. Deferring a
+-- stale-leased job flips claimed_by and the trigger locks its count row. The
+-- claim skips the deferral while another claimer holds that row.
 deferralClaimedByFlipGuard
   :: forall sm
    . (ArbiterC sm)
@@ -2068,14 +2005,14 @@ deferralClaimedByFlipGuard run schema table withConn reset = do
       tbl = schema <> "." <> table
       concTbl = schema <> ".arbiter_concurrency"
       staleWorker = "00000000-0000-0000-0000-000000000009" :: Text
-  -- The cap-a job is a stale lease (claimed_by set, lease expired) with a drained
-  -- bucket, so a claim would rate-defer it with a claimed_by flip. The cap-c job is
-  -- admissible, so the claim holds cap-c:s.
+  -- The cap-a job is a stale lease with a drained bucket. A claim would rate-defer
+  -- it with a claimed_by flip. The cap-c job is admissible and the claim holds
+  -- cap-c:s.
   ins (Just "cap-a") (Just "rk-1")
   ins (Just "cap-c") Nothing
-  withConn $ \c -> do
+  withConn $ \conn -> do
     execute_
-      c
+      conn
       ( "UPDATE "
           <> tbl
           <> " SET claimed_by = '"
@@ -2083,21 +2020,21 @@ deferralClaimedByFlipGuard run schema table withConn reset = do
           <> "', attempts = 1, not_visible_until = NOW() - interval '1 second' WHERE concurrency_key = 'cap-a:s'"
       )
     execute_
-      c
+      conn
       ("UPDATE " <> schema <> ".arbiter_rate_limits SET tokens = 0, last_refill = NOW() WHERE rate_limit_key = 'smrl:rk-1'")
   held <- newEmptyMVar
-  -- Hold cap-a:s like a concurrent claimer, then reach for the cap-c:s row the claim
-  -- holds, closing the cycle if the claim's deferral waits on cap-a:s.
-  h <- async $ withConn $ \c -> do
-    PG.begin c
-    lockConcurrencyKey c concTbl "cap-a:s"
+  -- Hold cap-a:s like a concurrent claimer, then reach for the cap-c:s row the
+  -- claim holds.
+  holder <- async $ withConn $ \conn -> do
+    PG.begin conn
+    lockConcurrencyKey conn concTbl "cap-a:s"
     putMVar held ()
     threadDelay 600_000
-    lockConcurrencyKey c concTbl "cap-c:s"
-    PG.commit c
+    lockConcurrencyKey conn concTbl "cap-c:s"
+    PG.commit conn
   takeMVar held
   claimedJobs <- run (HL.claimNextVisibleJobsAs 10 60 smWorker :: sm [JobRead SMPayload])
-  wait h
+  wait holder
   length claimedJobs `shouldBe` 1
   countQuery withConn ("SELECT count(*) FROM " <> tbl <> " WHERE throttled_until IS NOT NULL") >>= (`shouldBe` 0)
   countQuery withConn ("SELECT count(*) FROM " <> tbl <> " WHERE claimed_by = '" <> staleWorker <> "'") >>= (`shouldBe` 1)
@@ -2121,15 +2058,15 @@ stateMachineSpec
   -> Spec
 stateMachineSpec run schema table withConn reset = do
   it "core engine invariants hold over random operation sequences" $ do
-    ok <- check (prop_engine @sm run schema table withConn reset)
-    ok `shouldBe` True
+    passed <- check (prop_engine @sm run schema table withConn reset)
+    passed `shouldBe` True
   it "no serialization or summary violation under N concurrent generated streams" $
     withinSecs 180 $ do
       installHolDetector schema table withConn
-      ok <-
+      passed <-
         check (prop_concurrent @sm run schema table withConn reset)
           `finally` removeHolDetector schema table withConn
-      ok `shouldBe` True
+      passed `shouldBe` True
   it "concurrent cross-group operations never deadlock" $
     withinSecs 150 (deadlockGuard @sm run reset)
   it "concurrent dedup moves and claims never double-claim a group" $

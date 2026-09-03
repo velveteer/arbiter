@@ -145,8 +145,8 @@ orFail msg = maybe (expectationFailure msg >> error "unreachable") pure
 -- would leave it.
 withAttachedSpan :: ByteString -> IO a -> IO a
 withAttachedSpan traceparent action = do
-  sc <- orFail "sample traceparent did not decode" (decodeSpanContext (Just traceparent) Nothing)
-  bracket (attachContext (insertSpan (wrapSpanContext sc) empty)) detachContext (const action)
+  sampleContext <- orFail "sample traceparent did not decode" (decodeSpanContext (Just traceparent) Nothing)
+  bracket (attachContext (insertSpan (wrapSpanContext sampleContext) empty)) detachContext (const action)
 
 -- | Drop and re-migrate the test schema.
 freshSchema :: ByteString -> IO ()
@@ -164,20 +164,20 @@ recordingTracerProvider = do
   let processor =
         SpanProcessor
           { spanProcessorOnStart = \_ _ -> pure ()
-          , spanProcessorOnEnd = \sp -> modifyIORef' ref (sp :)
+          , spanProcessorOnEnd = \endedSpan -> modifyIORef' ref (endedSpan :)
           , spanProcessorShutdown = pure ShutdownSuccess
           , spanProcessorForceFlush = pure FlushSuccess
           }
   (,) ref <$> createTracerProvider [processor] emptyTracerProviderOptions
 
--- | Paths are package-relative, which is where cabal runs a test suite from.
+-- | Paths are package-relative. Cabal runs a test suite from the package directory.
 dashboardPath :: FilePath
 dashboardPath = "deploy/observability/grafana/dashboards/arbiter.json"
 
 alertingPath :: FilePath
 alertingPath = "deploy/observability/grafana/provisioning/alerting/arbiter.yaml"
 
--- | The provisioned files live in the repo, not the package, so an sdist run has none.
+-- | The provisioned files live in the repo. An sdist run has none.
 withProvisioned :: FilePath -> ([Text] -> Spec) -> Spec
 withProvisioned path checks = do
   present <- runIO (doesFileExist path)
@@ -185,23 +185,23 @@ withProvisioned path checks = do
     then runIO (referencedMetrics <$> TIO.readFile path) >>= checks
     else it "ships outside the package" $ pendingWith (path <> " is not in this tree")
 
--- | Every @arbiter_*@ family a provisioned file names, Prometheus having flattened the
--- dots. Read from the whole file rather than the queries alone: a metric named in a
--- panel description should be just as real as one in a query.
+-- | Every @arbiter_*@ family a provisioned file names, with Prometheus-flattened dots.
+-- Reads the whole file, including panel descriptions.
 referencedMetrics :: Text -> [Text]
 referencedMetrics = map (T.takeWhile nameChar . snd) . T.breakOnAll "arbiter_"
   where
-    nameChar c = isAsciiLower c || c == '_'
+    nameChar char = isAsciiLower char || char == '_'
 
 -- | Every instrument the library registers, as Prometheus renders it.
 declaredMetrics :: [Text]
 declaredMetrics = map (T.replace "." "_") Otel.arbiterMetricNames
 
--- | A provisioned file names at least one metric, and only ones the library registers.
+-- | A provisioned file names at least one metric. Every named metric is one the library
+-- registers.
 queriesOnlyDeclared :: [Text] -> Expectation
 queriesOnlyDeclared referenced = do
   referenced `shouldSatisfy` (not . null)
-  filter (\r -> not (any (`T.isPrefixOf` r) declaredMetrics)) referenced `shouldBe` []
+  filter (\metric -> not (any (`T.isPrefixOf` metric) declaredMetrics)) referenced `shouldBe` []
 
 -- | Every point a collection produced, as its metric name and attributes.
 collected :: SdkMeterEnv -> IO [(Text, Attributes)]
@@ -215,7 +215,7 @@ collected env = concatMap resourcePoints <$> collectResourceMetrics env
       MetricExportHistogram {mehName, mehPoints} -> withName mehName histogramDataPointAttributes mehPoints
       MetricExportExponentialHistogram {meehName, meehPoints} ->
         withName meehName exponentialHistogramDataPointAttributes meehPoints
-    withName name pointAttrs = foldMap (\p -> [(name, pointAttrs p)])
+    withName name pointAttrs = foldMap (\point -> [(name, pointAttrs point)])
 
 -- | The monotonic sums a collection produced, as metric name and point value.
 collectedSums :: SdkMeterEnv -> IO [(Text, Double)]
@@ -225,17 +225,17 @@ collectedSums env = concatMap resourceSums <$> collectResourceMetrics env
     scopeSums = foldMap metricSums . scopeMetricsExports
     metricSums = \case
       MetricExportSum {mesName, mesMonotonic = True, mesSumPoints} ->
-        foldMap (\p -> [(mesName, asDouble (sumDataPointValue p))]) mesSumPoints
+        foldMap (\point -> [(mesName, asDouble (sumDataPointValue point))]) mesSumPoints
       _ -> []
     asDouble = \case
-      DoubleNumber d -> d
-      IntNumber n -> fromIntegral n
+      DoubleNumber double -> double
+      IntNumber int -> fromIntegral int
 
 -- | Whether a metric was recorded carrying every one of @kvs@ on one point.
 recordedWith :: Text -> [(Text, Text)] -> [(Text, Attributes)] -> Bool
-recordedWith name kvs = any (\(n, as) -> n == name && all (carries as) kvs)
+recordedWith name kvs = any (\(recordedName, attributes) -> recordedName == name && all (carries attributes) kvs)
   where
-    carries as (k, v) = lookupAttributeByKey as (fromString (T.unpack k) :: AttributeKey Text) == Just v
+    carries attributes (key, value) = lookupAttributeByKey attributes (fromString (T.unpack key) :: AttributeKey Text) == Just value
 
 main :: IO ()
 main = hspec spec
@@ -277,13 +277,13 @@ spec = do
 
   describe "telemetry" $
     it "records job metrics and queue-depth gauges" $ do
-      (mp, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-      Otel.withExternalTelemetry (Just mp) Nothing $ \tel -> do
+      (meterProvider, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+      Otel.withExternalTelemetry (Just meterProvider) Nothing $ \tel -> do
         job <- enqueue plainEnv (Greeting "measured")
         now <- getCurrentTime
         let noopHandler :: JobHandler (SimpleDb Reg IO) Greeting ()
             noopHandler _conn _job = pure ()
-        -- Through the pool's own instrumentation, which is what labels a running pool.
+        -- Through the pool's own instrumentation.
         instrumented <- Otel.instrumentConfig tel <$> transactionalWorkerConfig 1 noopHandler
         let hooks = observabilityHooks instrumented
         runSimpleDb plainEnv $ do
@@ -314,7 +314,7 @@ spec = do
 
   -- The one series that tells a stopped refresh loop from a fresh reading.
   describe "reading staleness" $ do
-    let scanned at = Cache.Live (Cache.Cached at (Cache.Snapshot [] Nothing [] [] []))
+    let scanned scanAt = Cache.Live (Cache.Cached scanAt (Cache.Snapshot [] Nothing [] [] []))
 
     it "keeps the scan time a retired reading was taken at" $
       Cache.lastScan (Cache.retire (scanned 100)) `shouldBe` Just 100
@@ -330,7 +330,7 @@ spec = do
 
   describe "counter baselines" $ do
     let rise = Cache.riseSince ("arbiter.jobs.processed", [("outcome", "success")])
-        counted at total = fst (rise at total mempty)
+        counted scanAt total = fst (rise scanAt total mempty)
 
     it "counts nothing from the first scan" $
       snd (rise 10 7 mempty) `shouldBe` 0
@@ -348,11 +348,11 @@ spec = do
     let name = "arbiter.test.total"
         key = (name, [])
         scans totals = do
-          (mp, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-          meter <- getMeter mp "arbiter-otel-test"
+          (meterProvider, env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+          meter <- getMeter meterProvider "arbiter-otel-test"
           counter <- meterCreateCounterDouble meter name Nothing Nothing defaultAdvisoryParameters
-          let count seen (at, total) = do
-                let (seen', rise) = Cache.riseSince key at total seen
+          let count seen (scanAt, total) = do
+                let (seen', rise) = Cache.riseSince key scanAt total seen
                 counterAdd counter rise emptyAttributes
                 pure seen'
           foldM_ count mempty totals
@@ -367,12 +367,12 @@ spec = do
     it "counts the whole total across a reset" $
       scans [(10, 100), (20, 130), (30, 5)] `shouldReturn` Just 35
 
-  -- Nothing else reads the dashboard, so a renamed metric would blank a panel silently.
+  -- Nothing else reads the dashboard.
   describe "provisioned dashboard" $ withProvisioned dashboardPath $ \referenced -> do
     it "queries only metrics the library registers" $ queriesOnlyDeclared referenced
 
     it "has a panel for every metric the library registers" $
-      filter (\d -> not (any (d `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
+      filter (\declared -> not (any (declared `T.isPrefixOf`) referenced)) declaredMetrics `shouldBe` []
 
   describe "provisioned alerts" $ withProvisioned alertingPath $ \referenced ->
     it "query only metrics the library registers" $ queriesOnlyDeclared referenced
@@ -391,18 +391,18 @@ spec = do
         reattach (liftIO (fmap traceparent <$> currentTraceContext))
 
       spans <- readIORef recorded
-      sp <- orFail "expected exactly one consumer span" $ case spans of
+      consumerSpan <- orFail "expected exactly one consumer span" $ case spans of
         [one] -> Just one
         _ -> Nothing
-      hot <- readIORef (spanHot sp)
+      hot <- readIORef (spanHot consumerSpan)
       hotName hot `shouldBe` "process " <> queue
-      spanKind sp `shouldBe` Consumer
+      spanKind consumerSpan `shouldBe` Consumer
       hotStatus hot `shouldBe` Error "boom"
       map eventName (values (hotEvents hot)) `shouldBe` ["job.failed"]
       -- Linked to the enqueue's trace, and running under a trace of its own.
       map (traceId . frozenLinkContext) (values (hotLinks hot))
         `shouldBe` map traceId (toList (spanContextOf . traceparent =<< traceContext job))
-      (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext sp))
+      (traceId <$> (spanContextOf =<< inherited)) `shouldBe` Just (traceId (spanContext consumerSpan))
       kindAttrOf hot `shouldBe` Just "Greeting"
 
     it "labels a publish span with the variant the payload derives" $ do
@@ -421,9 +421,9 @@ spec = do
           handler _conn _job = pure ()
           hooks =
             defaultObservabilityHooks
-              { onJobClaimed = \j _ -> liftIO $ do
+              { onJobClaimed = \claimedJob _ -> liftIO $ do
                   ctx <- currentTraceContext
-                  modifyIORef' seen ((payload j, traceparent <$> ctx) :)
+                  modifyIORef' seen ((payload claimedJob, traceparent <$> ctx) :)
               }
       config <- transactionalWorkerConfig 1 handler
       void $ enqueue plainEnv (Greeting "claim-hook")
@@ -436,8 +436,8 @@ spec = do
   where
     values = toList . appendOnlyBoundedCollectionValues
     kindAttrOf hot = lookupAttributeByKey (hotAttributes hot) ("arbiter.kind" :: AttributeKey Text)
-    spanContextOf tp = decodeSpanContext (Just (encodeUtf8 tp)) Nothing
-    enqueue env p = insertRaw env (defaultJob p)
+    spanContextOf header = decodeSpanContext (Just (encodeUtf8 header)) Nothing
+    enqueue env greeting = insertRaw env (defaultJob greeting)
     insertRaw env job = do
       inserted <- runSimpleDb env (Ops.insertJob schema queue job)
       orFail "insert returned no row" inserted

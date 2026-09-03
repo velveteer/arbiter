@@ -60,16 +60,16 @@ data ConcurrencyKey = ConcurrencyKey
   deriving stock (Eq, Show)
 
 instance ToJSON ConcurrencyKey where
-  toJSON (ConcurrencyKey p s) = prefixedKeyToJSON p s
+  toJSON (ConcurrencyKey prefix suffix) = prefixedKeyToJSON prefix suffix
 
 instance FromJSON ConcurrencyKey where
   parseJSON = prefixedKeyParseJSON "ConcurrencyKey" ConcurrencyKey
 
 -- | The stored key text, @prefix:suffix@.
 concurrencyKeyText :: ConcurrencyKey -> Text
-concurrencyKeyText (ConcurrencyKey p s) = prefixedKeyText p s
+concurrencyKeyText (ConcurrencyKey prefix suffix) = prefixedKeyText prefix suffix
 
--- | A concurrency pool: at most @cpLimit@ jobs share a key under @cpPrefix@. The
+-- | A concurrency pool. At most @cpLimit@ jobs share a key under @cpPrefix@. The
 -- default is seeded. An operator override on the pool takes precedence.
 data ConcurrencyPolicy = ConcurrencyPolicy
   { cpPrefix :: Text
@@ -81,8 +81,8 @@ instance AdmissionPolicy ConcurrencyPolicy where
   policyPrefixOf = cpPrefix
 
 -- | A pool named @prefix@ admitting at most @limit@ concurrent jobs per key. The cap is
--- floored at 1, since the seeded default must be positive (pause a pool via an override).
--- The prefix must not contain @:@ (the key separator), which the migration enforces.
+-- floored at 1. Pause a pool via an override. The prefix must not contain @:@, the key
+-- separator. The migration enforces this.
 concurrencyPool :: Text -> Int32 -> ConcurrencyPolicy
 concurrencyPool prefix limit = ConcurrencyPolicy prefix (max 1 limit)
 
@@ -111,7 +111,7 @@ concurrencyByCase = selectByCase
 runConcurrencyFor :: payload -> ConcurrencyFor payload -> Maybe ConcurrencyKey
 runConcurrencyFor = runSelector
 
--- | A payload's per-job pool selection. Defaults to unbounded, so only capped
+-- | A payload's per-job pool selection. Defaults to unbounded. Only capped
 -- payloads need an instance.
 class HasConcurrency payload where
   concurrencyFor :: ConcurrencyFor payload

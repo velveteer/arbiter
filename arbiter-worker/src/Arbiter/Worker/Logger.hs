@@ -2,7 +2,7 @@
 
 -- | The worker's own structured JSON logging: its level, its destination, and the
 -- context every message carries. Application-level job logging belongs on
--- 'Arbiter.Core.Job.Types.ObservabilityHooks' instead.
+-- 'Arbiter.Core.Job.Types.ObservabilityHooks'.
 module Arbiter.Worker.Logger
   ( -- * Log Configuration
     LogConfig (..)
@@ -97,8 +97,7 @@ data LogConfig = LogConfig
   , logDestination :: LogDestination
   -- ^ Where to write logs. Default: 'LogStdout'.
   , additionalContext :: IO [Pair]
-  -- ^ Context merged into every message, read at log time so it can pick up
-  -- thread-local state such as an ambient trace id. Default: @pure []@.
+  -- ^ Context merged into every message, read at log time. Default: @pure []@.
   , identityContext :: [Pair]
   -- ^ The library's pool and worker pairs. 'additionalContext' wins on a
   -- collision. Default: @[]@.
@@ -127,7 +126,7 @@ tryLog cfg level msg = void . tryAny . liftIO $ logMessage cfg level msg
 
 -- | 'tryLog' an exception at 'Warning' under @label@.
 warnEx :: (MonadUnliftIO m) => LogConfig -> Text -> SomeException -> m ()
-warnEx logCfg label e = tryLog logCfg Warning $ label <> ": " <> displayEx e
+warnEx logCfg label exception = tryLog logCfg Warning $ label <> ": " <> displayEx exception
 
 -- | Log an attempt only when it changes the gate. @subject@ reads with both
 -- failed and recovered.
@@ -140,8 +139,8 @@ reportOutcome
   -> Either SomeException a
   -> m ()
 reportOutcome cfg level gate subject = \case
-  Left e ->
-    let failure = displayEx e
+  Left exception ->
+    let failure = displayEx exception
      in holdFailure gate (failureRepeatInterval cfg) failure
           >>= \worth -> when worth (tryLog cfg level (subject <> " failed: " <> failure))
   Right _ ->
@@ -165,8 +164,7 @@ hubLogFor cfg =
 recoveryLevel :: LogConfig -> LogLevel -> LogLevel
 recoveryLevel cfg level = min level (max Info (minLogLevel cfg))
 
--- | Gates addressed by subject, drawn from a bounded set: every subject holds
--- its gate for the life of the store.
+-- | Gates addressed by subject. Every subject holds its gate for the life of the store.
 newtype FailureGates = FailureGates (IORef (Map Text FailureGate))
 
 -- | An empty gate store.
@@ -209,21 +207,19 @@ tryReported cfg level gate subject action = do
   result <- tryAny action
   result <$ reportOutcome cfg level gate subject result
 
--- | Log a message using the given config.
 logMessage :: LogConfig -> LogLevel -> Text -> IO ()
 logMessage config level msg = when (level >= minLogLevel config) $ do
   extraCtx <- additionalContext config
   runWithDestination (logDestination config) (identityContext config <> extraCtx) level msg
 
--- | Run the logger with the appropriate destination and context.
 runWithDestination :: LogDestination -> [Pair] -> LogLevel -> Text -> IO ()
 runWithDestination dest ctx level msg = case dest of
   LogStdout -> MLA.runStdoutLoggingT $ MLA.withThreadContext ctx $ logAt level msg
   LogStderr -> MLA.runStderrLoggingT $ MLA.withThreadContext ctx $ logAt level msg
   LogFastLogger loggerSet -> MLA.runFastLoggingT loggerSet $ MLA.withThreadContext ctx $ logAt level msg
-  LogCallback cb -> do
+  LogCallback callback -> do
     threadCtx <- KM.toList <$> MLA.myThreadContext
-    cb level msg (threadCtx <> ctx)
+    callback level msg (threadCtx <> ctx)
   LogTee base extra ->
     runWithDestination base ctx level msg `finally` runWithDestination extra ctx level msg
   LogDiscard -> pure ()

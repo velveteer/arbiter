@@ -5,7 +5,7 @@
 -- | Types for the @cron_schedules@ table.
 --
 -- Code-defined defaults and user overrides sit in separate columns. Worker startup
--- upserts only the defaults, so an override survives every deploy.
+-- upserts the defaults. An override survives every deploy.
 module Arbiter.Core.CronSchedule
   ( -- * Types
     CronScheduleRow (..)
@@ -70,15 +70,15 @@ data CronScheduleRow = CronScheduleRow
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Effective expression: override if set, else default.
+-- | The override expression if set, else the default.
 effectiveExpression :: CronScheduleRow -> Text
 effectiveExpression CronScheduleRow {defaultExpression = def, overrideExpression = mOvr} = fromMaybe def mOvr
 
--- | Effective overlap policy: override if set, else default.
+-- | The override overlap policy if set, else the default.
 effectiveOverlap :: CronScheduleRow -> Text
 effectiveOverlap CronScheduleRow {defaultOverlap = def, overrideOverlap = mOvr} = fromMaybe def mOvr
 
--- | Effective timezone: override if set, else default. 'Nothing' means UTC.
+-- | The override timezone if set, else the default. 'Nothing' means UTC.
 effectiveTimezone :: CronScheduleRow -> Maybe Text
 effectiveTimezone CronScheduleRow {defaultTimezone = mDef, overrideTimezone = mOvr} = mOvr <|> mDef
 
@@ -98,12 +98,18 @@ instance ToJSON CronScheduleUpdate where
 
 -- Plain @.:?@ collapses missing and null for @Maybe (Maybe a)@. 'explicitOptionalField' distinguishes them.
 instance FromJSON CronScheduleUpdate where
-  parseJSON = withObject "CronScheduleUpdate" $ \o -> do
-    oe <- explicitOptionalField o "overrideExpression"
-    oo <- explicitOptionalField o "overrideOverlap"
-    ot <- explicitOptionalField o "overrideTimezone"
-    en <- o .:? "enabled"
-    pure CronScheduleUpdate {overrideExpression = oe, overrideOverlap = oo, overrideTimezone = ot, enabled = en}
+  parseJSON = withObject "CronScheduleUpdate" $ \obj -> do
+    expression <- explicitOptionalField obj "overrideExpression"
+    overlap <- explicitOptionalField obj "overrideOverlap"
+    timezone <- explicitOptionalField obj "overrideTimezone"
+    enabledPatch <- obj .:? "enabled"
+    pure
+      CronScheduleUpdate
+        { overrideExpression = expression
+        , overrideOverlap = overlap
+        , overrideTimezone = timezone
+        , enabled = enabledPatch
+        }
 
 -- | Qualified table name for the cron_schedules table.
 cronSchedulesTable :: Text -> Text

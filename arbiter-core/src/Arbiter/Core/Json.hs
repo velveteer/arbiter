@@ -1,5 +1,5 @@
--- | Shared Aeson helpers for triple-state patch decoders, where an omitted field
--- (leave unchanged) must stay distinct from an explicit @null@ (clear the override).
+-- | Shared Aeson helpers for triple-state patch decoders. An omitted field leaves
+-- the value unchanged. An explicit @null@ clears the override.
 module Arbiter.Core.Json
   ( patchOptions
   , explicitOptionalField
@@ -12,15 +12,15 @@ import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 
 -- | Generic options that omit @Nothing@ fields. A cleared override is absent
--- from the JSON. It is not encoded as @null@.
+-- from the JSON.
 patchOptions :: Options
 patchOptions = defaultOptions {omitNothingFields = True}
 
 -- | Decode an override field with three states: absent (@Nothing@, leave unchanged),
 -- present and @null@ (@Just Nothing@, clear), or present with a value (@Just (Just v)@).
 explicitOptionalField :: (FromJSON a) => Object -> Text -> Parser (Maybe (Maybe a))
-explicitOptionalField o n =
-  let k = Key.fromText n
-   in if KeyMap.member k o
-        then Just <$> o .: k
+explicitOptionalField obj name =
+  let key = Key.fromText name
+   in if KeyMap.member key obj
+        then Just <$> obj .: key
         else pure Nothing

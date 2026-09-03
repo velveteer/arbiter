@@ -121,14 +121,13 @@ data PipelinePayload
   deriving anyclass (FromJSON, HasKind, ToJSON, ToSchema)
 
 -- | The demo's routes: the queue API, an OpenAPI description of it with a Swagger UI
--- to read it in, and the dashboard. The dashboard is a catch-all, so it comes last.
+-- to read it in, and the dashboard. The dashboard is a catch-all and comes last.
 type DemoAPI =
   ArbiterAPI DemoRegistry
     :<|> SwaggerSchemaUI "docs" "openapi.json"
     :<|> AdminUI
 
--- | The demo application. @mDevDir@ serves the dashboard from disk when set, so an
--- edit needs no rebuild.
+-- | The demo application. @mDevDir@ serves the dashboard from disk when set.
 demoApp :: Maybe FilePath -> ArbiterServerConfig DemoRegistry -> Application
 demoApp mDevDir config =
   serve (Proxy @DemoAPI) $
@@ -278,28 +277,26 @@ runDemo tel = do
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
 
-  -- Self-restart watchdog: after RESET_INTERVAL_MINUTES, raise SIGTERM so the
-  -- process exits via the handler above and the container's restart policy
-  -- reseeds a clean demo. A value of 0 disables it.
+  -- Self-restart watchdog. After RESET_INTERVAL_MINUTES, raise SIGTERM. The
+  -- handler above exits the process and the container's restart policy reseeds
+  -- a clean demo. A value of 0 disables it.
   resetMin <- maybe 20 read <$> lookupEnv "RESET_INTERVAL_MINUTES"
   when (resetMin > 0) $ void $ forkIO $ do
     threadDelay (resetMin * 60 * 1_000_000)
     putStrLn $ "[reset] " <> show resetMin <> "m elapsed, restarting for a clean demo"
     Signals.raiseSignal Signals.sigTERM
 
-  -- Background load generator: pulse a few jobs on an interval so the queues
-  -- stay visibly active between cron ticks. A value of 0 disables it.
+  -- Background load generator. Pulse a few jobs on an interval. A value of 0
+  -- disables it.
   pulseSec <- maybe 5 read <$> lookupEnv "LOAD_PULSE_SECONDS"
   when (pulseSec > 0) $ void $ forkIO $ loadPulse producerEnv pulseSec
 
-  -- Emit a small archivable pipeline on an interval so completed runs accumulate
-  -- in the archive with visible results. A value of 0 disables it.
+  -- Emit a small archivable pipeline on an interval. A value of 0 disables it.
   pipeSec <- maybe 2 read <$> lookupEnv "PIPELINE_PULSE_SECONDS"
   when (pipeSec > 0) $ void $ forkIO $ pipelinePulse producerEnv schema pipeSec
 
-  -- Bursty batch inserts into bulk_queue: a spike of multi-row inserts on a
-  -- jittered interval, so queue depth, claim rate, and vacuum pressure sawtooth
-  -- instead of sitting flat. Either value at 0 disables it.
+  -- Bursty batch inserts into bulk_queue. A spike of multi-row inserts on a
+  -- jittered interval. Either value at 0 disables it.
   burstSec <- maybe 10 read <$> lookupEnv "BURST_INTERVAL_SECONDS"
   burstSize <- maybe 1000 read <$> lookupEnv "BURST_SIZE"
   burstGroups <- maybe 8 read <$> lookupEnv "BURST_GROUPS"
@@ -323,8 +320,8 @@ type DemoM = SimpleDb DemoRegistry IO
 
 simulateWork :: Double -> IO ()
 simulateWork mean = do
-  u <- randomRIO (1.0e-6, 1.0)
-  threadDelay (round (mean * negate (log u) * 1e6))
+  uniform <- randomRIO (1.0e-6, 1.0)
+  threadDelay (round (mean * negate (log uniform) * 1e6))
 
 mkDemoWorker :: IO (WorkerConfig DemoM DemoPayload)
 mkDemoWorker = do
@@ -343,7 +340,7 @@ mkDemoWorker = do
             "demo-ticker"
             "* * * * *" -- every minute
             AllowOverlap
-            (\_ t -> defaultJob (TestMessage $ "tick:" <> tshow t))
+            (\_ tickTime -> defaultJob (TestMessage $ "tick:" <> tshow tickTime))
       ]
 
 mkEmailWorker :: IO (WorkerConfig DemoM EmailPayload)
@@ -383,12 +380,11 @@ mkNotifWorker = do
             "notif-broadcast"
             "*/3 * * * *" -- every 3 minutes
             AllowOverlap
-            (\_ t -> defaultJob (PushNotification $ "broadcast:" <> tshow t))
+            (\_ tickTime -> defaultJob (PushNotification $ "broadcast:" <> tshow tickTime))
       ]
 
--- | Drains the burst queue: many workers claiming large batches with a near-zero
--- handler, so the spikes clear and the churn shows up as vacuum pressure rather
--- than an ever-growing backlog. Sized by BURST_WORKERS and BURST_BATCH.
+-- | Drains the burst queue. Many workers claim large batches with a near-zero
+-- handler. Sized by BURST_WORKERS and BURST_BATCH.
 mkBulkWorker :: IO (WorkerConfig DemoM BulkPayload)
 mkBulkWorker = do
   count <- maybe 6 read <$> lookupEnv "BURST_WORKERS"
@@ -396,8 +392,8 @@ mkBulkWorker = do
   cfg <- defaultBatchedWorkerConfig count batch handler
   pure cfg {pollInterval = 1, livenessFile = Nothing}
   where
-    -- Roughly 300 jobs a second across the pool: several times the average
-    -- insert rate, so a burst drains, but slowly enough to be sampled.
+    -- Roughly 300 jobs a second across the pool. A burst drains slowly enough
+    -- to be sampled.
     handler jobs cbs = do
       liftIO $ simulateWork 0.5
       ackAll cbs (NE.toList jobs)
@@ -433,9 +429,9 @@ chunkFindings name
 -- Seed data
 -- ---------------------------------------------------------------------------
 
--- | Seed a varied initial dataset so a fresh demo exercises every queue and
--- every status the admin UI can show: ready, scheduled, suspended, backoff,
--- in-flight (as workers claim jobs), and dead-letter.
+-- | Seed a varied initial dataset across every queue and every status the
+-- admin UI can show: ready, scheduled, suspended, backoff, in-flight (as
+-- workers claim jobs), and dead-letter.
 seedDemoData :: SimpleEnv DemoRegistry -> Text -> IO ()
 seedDemoData env schemaName = runSimpleDb env $ do
   seedPipeline schemaName
@@ -446,11 +442,11 @@ seedDemoData env schemaName = runSimpleDb env $ do
 -- Priority 10 keeps this long run behind the quick pipelines from 'pipelinePulse'.
 seedPipeline :: Text -> DemoM ()
 seedPipeline schemaName = do
-  let bg p = setPriority 10 $ defaultJob p
-      chunk = JT.leaf . bg . ProcessChunk
-      agg name = JT.rollup (bg (AggregateResults name))
+  let background job = setPriority 10 $ defaultJob job
+      chunk = JT.leaf . background . ProcessChunk
+      agg name = JT.rollup (background (AggregateResults name))
   tracer <- demoTracer
-  result <- Trace.inSpan' tracer "seed pipeline" Trace.defaultSpanArguments $ \sp -> do
+  result <- Trace.inSpan' tracer "seed pipeline" Trace.defaultSpanArguments $ \seedSpan -> do
     tree <-
       JT.insertJobTree schemaName "pipeline" $
         agg
@@ -464,7 +460,7 @@ seedPipeline schemaName = do
           )
     traverse_
       ( \(root :| rest) ->
-          Trace.addAttributes sp $
+          Trace.addAttributes seedSpan $
             HM.fromList
               [ ("demo.pipeline.node_count", Attr.toAttribute (1 + length rest :: Int))
               , ("demo.pipeline.root_id", Attr.toAttribute (tshow (primaryKey root)))
@@ -502,8 +498,8 @@ seedQueues = do
   void $ HL.moveToDLQ "unparseable payload after 5 attempts" doomed
 
   -- demo_queue: ready jobs with varied priority and group keys
-  forM_ (zip [0 :: Int ..] demoTasks) $ \(i, (grp, msg)) ->
-    void $ HL.insertJob (setGroupKey (Just grp) $ setPriority (fromIntegral (i `mod` 5)) $ defaultJob (TestMessage msg))
+  forM_ (zip [0 :: Int ..] demoTasks) $ \(index, (grp, msg)) ->
+    void $ HL.insertJob (setGroupKey (Just grp) $ setPriority (fromIntegral (index `mod` 5)) $ defaultJob (TestMessage msg))
   -- scheduled (not visible yet) and suspended (paused)
   void $
     HL.insertJob
@@ -542,49 +538,52 @@ demoTasks =
   , ("integrations", "sync CRM contacts")
   ]
 
--- | Background load generator: a small pulse of jobs every @sec@ seconds so the
--- queues stay visibly active between cron ticks.
+-- | Background load generator. A small pulse of jobs every @sec@ seconds.
 loadPulse :: SimpleEnv DemoRegistry -> Int -> IO ()
 loadPulse env sec = go 0
   where
-    -- Archive one job in @k@ so ordinary completed jobs also fill the archive.
-    keepEvery k n = if n `mod` k == 0 then Just 3600 else Nothing
+    -- Archive one job in @every@.
+    keepEvery every tick = if tick `mod` every == 0 then Just 3600 else Nothing
     go :: Int -> IO ()
-    go n = do
+    go tick = do
       threadDelay (sec * 1_000_000)
       runSimpleDb env $ do
         void $
           HL.insertJob
-            (setArchiveFor (keepEvery 4 n) $ setPriority (fromIntegral (n `mod` 5)) $ defaultJob (TestMessage ("pulse #" <> tshow n)))
-        when (even n) $ void $ HL.insertJob (setArchiveFor (keepEvery 6 n) $ defaultJob (SendEmail ("digest #" <> tshow n)))
-        when (n `mod` 3 == 0)
+            ( setArchiveFor (keepEvery 4 tick)
+                $ setPriority (fromIntegral (tick `mod` 5))
+                $ defaultJob (TestMessage ("pulse #" <> tshow tick))
+            )
+        when (even tick)
           $ void
-          $ HL.insertJob (setArchiveFor (keepEvery 9 n) $ defaultJob (PushNotification ("alert #" <> tshow n)))
-      go (n + 1)
+          $ HL.insertJob (setArchiveFor (keepEvery 6 tick) $ defaultJob (SendEmail ("digest #" <> tshow tick)))
+        when (tick `mod` 3 == 0)
+          $ void
+          $ HL.insertJob (setArchiveFor (keepEvery 9 tick) $ defaultJob (PushNotification ("alert #" <> tshow tick)))
+      go (tick + 1)
 
--- | Burst load: every @sec@ seconds (jittered by half), insert @size@ jobs as
+-- | Burst load. Every @sec@ seconds (jittered by half), insert @size@ jobs as
 -- back-to-back multi-row inserts, with a four-times spike every fifth round.
--- Half of each burst joins one of @groups@ group keys, so the queue's group
--- summary takes the update volume while the rest drives the ungrouped path.
+-- Half of each burst joins one of @groups@ group keys.
 burstPulse :: SimpleEnv DemoRegistry -> Int -> Int -> Int -> IO ()
 burstPulse env sec size groups = go 0
   where
     perStatement = 250
-    grouped i
-      | groups <= 0 || odd i = id
-      | otherwise = setGroupKey (Just ("bulk-" <> tshow ((i `div` 2) `mod` groups)))
+    grouped index
+      | groups <= 0 || odd index = id
+      | otherwise = setGroupKey (Just ("bulk-" <> tshow ((index `div` 2) `mod` groups)))
     go :: Int -> IO ()
-    go n = do
+    go tick = do
       gap <- randomRIO (0.5, 1.5 :: Double)
       threadDelay (round (fromIntegral sec * gap * 1e6))
-      let total = if n `mod` 5 == 4 then size * 4 else size
-          jobs = [grouped i (defaultJob (BulkTask ("burst " <> tshow n <> " #" <> tshow i))) | i <- [1 .. total]]
+      let total = if tick `mod` 5 == 4 then size * 4 else size
+          jobs = [grouped index (defaultJob (BulkTask ("burst " <> tshow tick <> " #" <> tshow index))) | index <- [1 .. total]]
       runSimpleDb env $ traverse_ (void . HL.insertJobsBatch_) (chunksOf perStatement jobs)
-      go (n + 1)
+      go (tick + 1)
 
--- | Split into chunks of at most @k@.
+-- | Split into chunks of at most @chunkSize@.
 chunksOf :: Int -> [a] -> [[a]]
-chunksOf k = unfoldr (\xs -> if null xs then Nothing else Just (splitAt k xs))
+chunksOf chunkSize = unfoldr (\remaining -> if null remaining then Nothing else Just (splitAt chunkSize remaining))
 
 -- | Chunk sets a quick pipeline picks from, for variety across runs.
 quickChunkSets :: [[Text]]
@@ -595,26 +594,25 @@ quickChunkSets =
   , ["forecast-data", "support-data", "churn-data"]
   ]
 
--- | Insert a small rollup every @sec@ seconds whose root archives its merged
--- result, so finished runs accumulate in the archive with visible results.
+-- | Insert a small rollup every @sec@ seconds. Its root archives its merged result.
 pipelinePulse :: SimpleEnv DemoRegistry -> Text -> Int -> IO ()
 pipelinePulse env schemaName sec = go 0
   where
     go :: Int -> IO ()
-    go n = do
+    go tick = do
       threadDelay (sec * 1_000_000)
-      t <- getCurrentTime
-      let seed = fromInteger (diffTimeToPicoseconds (utctDayTime t)) :: Int
+      now <- getCurrentTime
+      let seed = fromInteger (diffTimeToPicoseconds (utctDayTime now)) :: Int
           chosen = quickChunkSets !! (seed `mod` length quickChunkSets)
-          root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow n))
+          root = setArchiveFor (Just 3600) $ defaultJob (AggregateResults ("quick-report-" <> tshow tick))
           leaves = NE.fromList (map (JT.leaf . defaultJob . ProcessChunk) chosen)
       runSimpleDb env $ void $ JT.insertJobTree schemaName "pipeline" (JT.rollup root leaves)
-      go (n + 1)
+      go (tick + 1)
 
 demoTracer :: (MonadIO m) => m Trace.Tracer
 demoTracer = do
-  tp <- Trace.getGlobalTracerProvider
-  pure (Trace.makeTracer tp "arbiter-demo" Trace.tracerOptions)
+  provider <- Trace.getGlobalTracerProvider
+  pure (Trace.makeTracer provider "arbiter-demo" Trace.tracerOptions)
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show

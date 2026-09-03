@@ -169,29 +169,29 @@ type JobWrite payload = Job payload () () () ()
 
 -- | Decode the complete persisted representation of a job.
 instance (FromJSON payload) => FromJSON (JobRead payload) where
-  parseJSON = withObject "Job" $ \v ->
+  parseJSON = withObject "Job" $ \obj ->
     Job
-      <$> v .: "primaryKey"
-      <*> v .: "payload"
-      <*> v .: "queueName"
-      <*> v .: "groupKey"
-      <*> v .: "insertedAt"
-      <*> v .: "updatedAt"
-      <*> v .: "attempts"
-      <*> v .: "lastError"
-      <*> v .: "priority"
-      <*> v .: "lastAttemptedAt"
-      <*> v .: "notVisibleUntil"
-      <*> v .: "dedupKey"
-      <*> v .: "maxAttempts"
-      <*> v .:? "parentId"
-      <*> v .:? "parentState"
-      <*> (toTraceContext <$> v .:? "traceparent" <*> v .:? "tracestate")
-      <*> v .:? "suspended" .!= False
-      <*> v .:? "claimedBy"
-      <*> v .:? "claimSeq" .!= 0
-      <*> v .:? "archiveFor"
-      <*> (PayloadKeys <$> v .:? "kind" <*> v .:? "rateLimit" <*> v .:? "concurrency")
+      <$> obj .: "primaryKey"
+      <*> obj .: "payload"
+      <*> obj .: "queueName"
+      <*> obj .: "groupKey"
+      <*> obj .: "insertedAt"
+      <*> obj .: "updatedAt"
+      <*> obj .: "attempts"
+      <*> obj .: "lastError"
+      <*> obj .: "priority"
+      <*> obj .: "lastAttemptedAt"
+      <*> obj .: "notVisibleUntil"
+      <*> obj .: "dedupKey"
+      <*> obj .: "maxAttempts"
+      <*> obj .:? "parentId"
+      <*> obj .:? "parentState"
+      <*> (toTraceContext <$> obj .:? "traceparent" <*> obj .:? "tracestate")
+      <*> obj .:? "suspended" .!= False
+      <*> obj .:? "claimedBy"
+      <*> obj .:? "claimSeq" .!= 0
+      <*> obj .:? "archiveFor"
+      <*> (PayloadKeys <$> obj .:? "kind" <*> obj .:? "rateLimit" <*> obj .:? "concurrency")
 
 -- | Ungrouped 'JobWrite' with default values. For serial processing within a
 -- group, use 'defaultGroupedJob'.
@@ -262,9 +262,10 @@ mapPayload
   :: (payload -> payload')
   -> Job payload key q insertedAt adm
   -> Job payload' key q insertedAt adm
-mapPayload f job = job {payload = f (payload job)}
+mapPayload transform job = job {payload = transform (payload job)}
 
--- | The full payload contract: JSON round-trip for JSONB storage plus the rate-limit and concurrency declarations (both default to unlimited).
+-- | The full payload contract. JSON round-trip for JSONB storage plus the rate-limit
+-- and concurrency declarations. Both default to unlimited.
 type JobPayload payload =
   (FromJSON payload, ToJSON payload, HasKind payload, HasRateLimit payload, HasConcurrency payload)
 
@@ -297,8 +298,7 @@ type ErrorMsg = Text
 type BackoffDelay = NominalDiffTime
 
 -- | Callbacks fired at each point of a job's lifecycle, for metrics, logging or tracing.
--- An exception thrown inside one is caught and dropped, so a hook cannot take the worker
--- down with it.
+-- An exception thrown inside one is caught and dropped.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed
       :: (JobPayload payload)
@@ -321,7 +321,7 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> EndTime
       -> m ()
   -- ^ Called after a job handler fails and the job was retried or dead-lettered.
-  -- A deliberate cancel reports through 'onJobCancelled' instead.
+  -- A deliberate cancel reports through 'onJobCancelled'.
   , onJobRetry
       :: (JobPayload payload)
       => JobRead payload
@@ -378,23 +378,23 @@ defaultObservabilityHooks =
     }
 
 -- | Run both hooks at each lifecycle point, left before right. The right one runs
--- however the left ended, and when both throw the right's failure propagates.
+-- however the left ended. When both throw, the right's failure propagates.
 instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
-  a <> b =
+  left <> right =
     ObservabilityHooks
-      { onJobClaimed = \j t -> onJobClaimed a j t `andThen` onJobClaimed b j t
-      , onJobSuccess = \j s e -> onJobSuccess a j s e `andThen` onJobSuccess b j s e
-      , onJobFailure = \j msg s e -> onJobFailure a j msg s e `andThen` onJobFailure b j msg s e
-      , onJobRetry = \j d -> onJobRetry a j d `andThen` onJobRetry b j d
-      , onJobFailedAndMovedToDLQ = \msg j -> onJobFailedAndMovedToDLQ a msg j `andThen` onJobFailedAndMovedToDLQ b msg j
-      , onJobCancelled = \j msg -> onJobCancelled a j msg `andThen` onJobCancelled b j msg
-      , onJobUnavailable = \j msg -> onJobUnavailable a j msg `andThen` onJobUnavailable b j msg
-      , onJobHeartbeat = \j c s -> onJobHeartbeat a j c s `andThen` onJobHeartbeat b j c s
+      { onJobClaimed = \job claimTime -> onJobClaimed left job claimTime `andThen` onJobClaimed right job claimTime
+      , onJobSuccess = \job start end -> onJobSuccess left job start end `andThen` onJobSuccess right job start end
+      , onJobFailure = \job msg start end -> onJobFailure left job msg start end `andThen` onJobFailure right job msg start end
+      , onJobRetry = \job delay -> onJobRetry left job delay `andThen` onJobRetry right job delay
+      , onJobFailedAndMovedToDLQ = \msg job -> onJobFailedAndMovedToDLQ left msg job `andThen` onJobFailedAndMovedToDLQ right msg job
+      , onJobCancelled = \job msg -> onJobCancelled left job msg `andThen` onJobCancelled right job msg
+      , onJobUnavailable = \job msg -> onJobUnavailable left job msg `andThen` onJobUnavailable right job msg
+      , onJobHeartbeat = \job now start -> onJobHeartbeat left job now start `andThen` onJobHeartbeat right job now start
       }
 
 instance (MonadUnliftIO m) => Monoid (ObservabilityHooks m payload) where
   mempty = defaultObservabilityHooks
 
--- | base's @finally@, so the second action stays interruptible unlike UnliftIO's.
+-- | base's @finally@. The second action stays interruptible.
 andThen :: (MonadUnliftIO m) => m () -> m () -> m ()
 andThen first second = withRunInIO $ \run -> run first `E.finally` run second

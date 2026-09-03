@@ -32,8 +32,8 @@ module Arbiter.Core
 
     -- * Cron schedule overrides and worker health
 
-    -- | The admin row records share field names with each other and with 'Job',
-    -- so unqualified use needs @DuplicateRecordFields@ or @OverloadedRecordDot@.
+    -- | The admin row records share field names with each other and with 'Job'.
+    -- Unqualified use needs @DuplicateRecordFields@ or @OverloadedRecordDot@.
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   , effectiveExpression
@@ -47,8 +47,8 @@ module Arbiter.Core
 
     -- * Listener types
 
-    -- | @import Arbiter.Core.Listen@ for 'Arbiter.Core.Listen.Notification',
-    -- which collides with @Database.PostgreSQL.Simple.Notification@.
+    -- | 'Arbiter.Core.Listen.Notification' collides with @Database.PostgreSQL.Simple.Notification@.
+    -- Import it from @Arbiter.Core.Listen@.
   , Listener
   , RunningHub
   , HubLog (..)

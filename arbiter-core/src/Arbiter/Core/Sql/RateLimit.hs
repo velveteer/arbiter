@@ -22,15 +22,16 @@ import Data.Int (Int64)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
+import NeatInterpolation (text)
 
-import Arbiter.Core.Admission (effectivePolicyCol, policyViewScope)
-import Arbiter.Core.Codec (Col (..), col, rateLimitBucketCodec, rateLimitPolicyViewCodec)
+import Arbiter.Core.Admission (effectivePolicyCol)
+import Arbiter.Core.Codec (rateLimitBucketCodec, rateLimitPolicyViewCodec)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueTable)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable)
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyView)
 import Arbiter.Core.Sql.Jobs (throttledPredicateSQL, unionAllOverQueueTables)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, mwhen, raw, rows, sepBy)
+import Arbiter.Core.Sql.Query (Query, rows, sepBy)
 
 -- | Deny-path wait (seconds) when no refill interval yields a real wait.
 defaultThrottleWaitSeconds :: Double
@@ -42,81 +43,79 @@ addRateLimitTokensSQL :: SchemaName -> Text -> Text -> Double -> Query ()
 addRateLimitTokensSQL schema key prefix amount =
   let buckets = arbiterRateLimitsTable schema
       policies = arbiterRateLimitPoliciesTable schema
-      mx = effectivePolicyCol "p" "max_tokens"
-      rf = effectivePolicyCol "p" "refill_amount"
-      iv = effectivePolicyCol "p" "interval"
-      toppedUp =
-        "GREATEST(0, "
-          <> refilledExpr
-            "(SELECT mx FROM pol)"
-            "a.tokens + (SELECT amt FROM k)"
-            "a.last_refill"
-            "(SELECT rf FROM pol)"
-            "(SELECT iv FROM pol)"
-          <> ")"
+      effMax = effectivePolicyCol "policy" "max_tokens"
+      effRefill = effectivePolicyCol "policy" "refill_amount"
+      effInterval = effectivePolicyCol "policy" "interval"
+      refilled =
+        refilledExpr
+          "(SELECT max_tokens FROM pol)"
+          "bucket.tokens + (SELECT amt FROM input)"
+          "bucket.last_refill"
+          "(SELECT refill_amount FROM pol)"
+          "(SELECT refill_interval FROM pol)"
    in [sql|
-        WITH k AS (SELECT #{key :: CText}::text AS key, #{prefix :: CText}::text AS prefix, #{amount :: CFloat8}::float8 AS amt),
+        WITH input AS (
+          SELECT #{key :: CText}::text AS key, #{prefix :: CText}::text AS prefix, #{amount :: CFloat8}::float8 AS amt
+        ),
         pol AS (
-          SELECT ${mx} AS mx, ${rf} AS rf, ${iv} AS iv
-          FROM ${policies} p WHERE p.prefix_id = (SELECT prefix FROM k)
+          SELECT ${effMax} AS max_tokens, ${effRefill} AS refill_amount, ${effInterval} AS refill_interval
+          FROM ${policies} policy WHERE policy.prefix_id = (SELECT prefix FROM input)
         )
-        INSERT INTO ${buckets} AS a (rate_limit_key, policy_prefix, tokens, last_refill)
-        SELECT (SELECT key FROM k), (SELECT prefix FROM k), (SELECT mx FROM pol), NOW()
+        INSERT INTO ${buckets} AS bucket (rate_limit_key, policy_prefix, tokens, last_refill)
+        SELECT (SELECT key FROM input), (SELECT prefix FROM input), (SELECT max_tokens FROM pol), NOW()
         FROM pol
         ON CONFLICT (rate_limit_key) DO UPDATE
-          SET tokens = ${toppedUp},
+          SET tokens = GREATEST(0, ${refilled}),
               last_refill = NOW()
       |]
 
--- | Delete idle buckets that have refilled to max, since a full bucket re-seeds
--- identically on next use.
+-- | Delete idle buckets that have refilled to max.
 pruneRateLimitBucketsSQL :: SchemaName -> Double -> Query ()
 pruneRateLimitBucketsSQL schema idleSeconds =
   let buckets = arbiterRateLimitsTable schema
       policies = arbiterRateLimitPoliciesTable schema
-      accrued = accruedTokensExpr "b.last_refill" (effectivePolicyCol "p" "refill_amount") (effectivePolicyCol "p" "interval")
-      effMax = effectivePolicyCol "p" "max_tokens"
+      effMax = effectivePolicyCol "policy" "max_tokens"
    in [sql|
-        DELETE FROM ${buckets} b
-        USING ${policies} p
-        WHERE p.prefix_id = b.policy_prefix
-          AND b.last_refill < NOW() - (#{idleSeconds :: CFloat8}::float8 * interval '1 second')
-          AND b.tokens + ${accrued} >= ${effMax}
+        DELETE FROM ${buckets} bucket
+        USING ${policies} policy
+        WHERE policy.prefix_id = bucket.policy_prefix
+          AND bucket.last_refill < NOW() - (#{idleSeconds :: CFloat8}::float8 * interval '1 second')
+          AND ${refilledBucketTokens} >= ${effMax}
       |]
 
--- | Refill a prefix's buckets to full. The fixed-window reset, which also wakes jobs, is the HighLevel resetRateLimitBuckets.
+-- | Refill a prefix's buckets to full. The fixed-window reset, which also wakes jobs,
+-- is the HighLevel resetRateLimitBuckets.
 resetRateLimitBucketsSQL :: SchemaName -> Text -> Query ()
 resetRateLimitBucketsSQL schema prefix =
   let buckets = arbiterRateLimitsTable schema
       policies = arbiterRateLimitPoliciesTable schema
-      effMax = effectivePolicyCol "p" "max_tokens"
+      effMax = effectivePolicyCol "policy" "max_tokens"
    in [sql|
-        UPDATE ${buckets} b
+        UPDATE ${buckets} bucket
         SET tokens = ${effMax}, last_refill = NOW()
-        FROM ${policies} p
-        WHERE p.prefix_id = b.policy_prefix AND b.policy_prefix = #{prefix :: CText}
+        FROM ${policies} policy
+        WHERE policy.prefix_id = bucket.policy_prefix AND bucket.policy_prefix = #{prefix :: CText}
       |]
 
--- | Clear the rate-limit deferral on a prefix's throttled jobs so a window reset
--- releases work parked in the middle of a window before the full interval elapses.
--- One statement over all given queue tables.
+-- | Clear the rate-limit deferral on a prefix's throttled jobs. One statement over
+-- all given queue tables.
 wakeThrottledJobsSQL :: SchemaName -> [TableName] -> Text -> Query Int64
 wakeThrottledJobsSQL schema tableNames prefix =
-  wakeThrottledAcrossSQL [wakeThrottledBody schema t prefix mempty | t <- tableNames]
+  wakeThrottledAcrossSQL [wakeThrottledBody schema tableName prefix mempty | tableName <- tableNames]
 
 -- | Like 'wakeThrottledJobsSQL' but for one key, after a top-up.
 wakeThrottledJobsForKeySQL :: SchemaName -> [TableName] -> Text -> Text -> Query Int64
 wakeThrottledJobsForKeySQL schema tableNames prefix key =
   wakeThrottledAcrossSQL
-    [wakeThrottledBody schema t prefix [sql|AND rate_limit_key = #{key :: CText}|] | t <- tableNames]
+    [wakeThrottledBody schema tableName prefix [sql|AND rate_limit_key = #{key :: CText}|] | tableName <- tableNames]
 
--- | One wake UPDATE CTE per queue table, summed, so a wake is a single round trip.
+-- | One wake UPDATE CTE per queue table, summed.
 wakeThrottledAcrossSQL :: [Query ()] -> Query Int64
 wakeThrottledAcrossSQL bodies =
-  let named = zip [0 :: Int ..] bodies
-      cteFrag = sepBy ", " [raw ("w" <> T.pack (show i) <> " AS (") <> b <> raw " RETURNING 1)" | (i, b) <- named]
-      total = T.intercalate " + " ["(SELECT COUNT(*) FROM w" <> T.pack (show i) <> ")" | (i, _) <- named]
-   in rows (col "count" CInt8) (raw "WITH " <> cteFrag <> raw (" SELECT (" <> total <> ")::int8 AS count"))
+  let named = [(T.pack ("wake_" <> show index), body) | (index, body) <- zip [0 :: Int ..] bodies]
+      wakeCtes = sepBy ", " [[sql|${cteName} AS (${body} RETURNING 1)|] | (cteName, body) <- named]
+      total = T.intercalate " + " [[text|(SELECT COUNT(*) FROM ${cteName})|] | (cteName, _) <- named]
+   in [sql|WITH ${wakeCtes} SELECT (${total})::int8 AS @{count :: CInt8}|]
 
 -- | Shared wake UPDATE for a prefix, optionally narrowed by @keyFrag@ (e.g. one key).
 wakeThrottledBody :: SchemaName -> TableName -> Text -> Query () -> Query ()
@@ -134,30 +133,25 @@ wakeThrottledBody schema tableName prefix keyFrag =
 -- are SQL expressions.
 accruedTokensExpr :: Text -> Text -> Text -> Text
 accruedTokensExpr lastRefill refill interval =
-  "COALESCE(EXTRACT(EPOCH FROM (NOW() - "
-    <> lastRefill
-    <> ")) / NULLIF("
-    <> interval
-    <> ", 0) * "
-    <> refill
-    <> ", 0)"
+  [text|COALESCE(EXTRACT(EPOCH FROM (NOW() - ${lastRefill})) / NULLIF(${interval}, 0) * ${refill}, 0)|]
 
 -- | A bucket's lazily-refilled token count, capped at @maxTokens@. Arguments are SQL
--- expressions, so callers pass either CTE references or effective policy columns.
+-- expressions.
 refilledExpr :: Text -> Text -> Text -> Text -> Text -> Text
 refilledExpr maxTokens tokens lastRefill refill interval =
-  "LEAST(" <> maxTokens <> ", " <> tokens <> " + " <> accruedTokensExpr lastRefill refill interval <> ")"
+  let accrued = accruedTokensExpr lastRefill refill interval
+   in [text|LEAST(${maxTokens}, ${tokens} + ${accrued})|]
 
--- | A bucket's lazily-refilled current token count, for bucket alias @b@ and policy
--- alias @p@. Mirrors the gate's accrual so observability reflects tokens available now.
-refilledTokensExpr :: Text -> Text -> Text
-refilledTokensExpr b p =
+-- | The lazily-refilled token count of the bucket at alias @bucket@ under the policy
+-- at alias @policy@. Mirrors the gate's accrual.
+refilledBucketTokens :: Text
+refilledBucketTokens =
   refilledExpr
-    (effectivePolicyCol p "max_tokens")
-    (b <> ".tokens")
-    (b <> ".last_refill")
-    (effectivePolicyCol p "refill_amount")
-    (effectivePolicyCol p "interval")
+    (effectivePolicyCol "policy" "max_tokens")
+    "bucket.tokens"
+    "bucket.last_refill"
+    (effectivePolicyCol "policy" "refill_amount")
+    (effectivePolicyCol "policy" "interval")
 
 -- | List every policy with its default/override params and per-prefix bucket
 -- aggregates (count, min and average of lazily-refilled tokens, live throttled
@@ -175,54 +169,55 @@ rateLimitPolicyExistsSQL schema prefix =
   let tbl = arbiterRateLimitPoliciesTable schema
    in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE prefix_id = #{prefix :: CText}) AS @{result :: CBool}|]
 
+-- | The policy views, every policy or the one a prefix names.
 rateLimitPoliciesSQL :: SchemaName -> [TableName] -> Maybe Text -> Query RateLimitPolicyView
 rateLimitPoliciesSQL schema tableNames mPrefix =
   let policies = arbiterRateLimitPoliciesTable schema
       buckets = arbiterRateLimitsTable schema
-      refilled = refilledTokensExpr "b" "pp"
-      single = isJust mPrefix
-      kCte = foldMap (\p -> [sql|WITH k AS (SELECT #{p :: CText}::text AS prefix)|]) mPrefix
-      (aggWhere, scope) = policyViewScope single "b.policy_prefix"
-      thrScope = mwhen single " AND rate_limit_prefix = (SELECT prefix FROM k)" :: Text
-      thrUnion = unionAllOverQueueTables schema tableNames $ \_ t ->
-        "SELECT rate_limit_prefix AS prefix, COUNT(*)::int8 AS c FROM "
-          <> t
-          <> " WHERE "
-          <> throttledPredicateSQL
-          <> " AND NOT suspended AND rate_limit_prefix IS NOT NULL"
-          <> thrScope
-          <> " GROUP BY rate_limit_prefix"
-      (thrCol, thrJoin)
-        | null tableNames = ("0::int8 AS throttled_count" :: Text, "" :: Text)
-        | otherwise =
-            ( "COALESCE(thr.cnt, 0) AS throttled_count"
-            , "LEFT JOIN (SELECT prefix, SUM(c)::int8 AS cnt FROM ("
-                <> thrUnion
-                <> ") u GROUP BY prefix) thr ON thr.prefix = p.prefix_id"
-            )
+      throttledPerTable = unionAllOverQueueTables schema tableNames $ \_ table ->
+        [text|
+          SELECT rate_limit_prefix AS prefix, COUNT(*)::int8 AS throttled
+          FROM ${table}
+          WHERE ${throttledPredicateSQL} AND NOT suspended AND rate_limit_prefix IS NOT NULL
+            AND ((SELECT prefix FROM target) IS NULL OR rate_limit_prefix = (SELECT prefix FROM target))
+          GROUP BY rate_limit_prefix
+        |]
+      throttledJoin =
+        [text|
+          LEFT JOIN (
+            SELECT prefix, SUM(throttled)::int8 AS throttled
+            FROM (${throttledPerTable}) per_table
+            GROUP BY prefix
+          ) throttled ON throttled.prefix = policy.prefix_id
+        |]
+      throttledCol, throttledJoinClause :: Text
+      (throttledCol, throttledJoinClause) = case tableNames of
+        [] -> ("0::int8 AS throttled_count", "")
+        _ -> ("COALESCE(throttled.throttled, 0) AS throttled_count", throttledJoin)
    in rows
         rateLimitPolicyViewCodec
         [sql|
-        ${kCte}
-        SELECT p.prefix_id,
-               p.default_max_tokens, p.default_refill_amount, p.default_interval,
-               p.override_max_tokens, p.override_refill_amount, p.override_interval,
+        WITH target AS (SELECT #{mPrefix :: Maybe CText}::text AS prefix)
+        SELECT policy.prefix_id,
+               policy.default_max_tokens, policy.default_refill_amount, policy.default_interval,
+               policy.override_max_tokens, policy.override_refill_amount, policy.override_interval,
                COALESCE(agg.bucket_count, 0) AS bucket_count,
-               ${thrCol},
+               ${throttledCol},
                agg.min_tokens, agg.avg_tokens
-        FROM ${policies} p
+        FROM ${policies} policy
         LEFT JOIN (
           SELECT policy_prefix, COUNT(*) AS bucket_count,
-                 MIN(tok) AS min_tokens, AVG(tok) AS avg_tokens
+                 MIN(tokens) AS min_tokens, AVG(tokens) AS avg_tokens
           FROM (
-            SELECT b.policy_prefix, ${refilled} AS tok
-            FROM ${buckets} b JOIN ${policies} pp ON pp.prefix_id = b.policy_prefix
-            ${aggWhere}
-          ) r
+            SELECT bucket.policy_prefix, ${refilledBucketTokens} AS tokens
+            FROM ${buckets} bucket JOIN ${policies} policy ON policy.prefix_id = bucket.policy_prefix
+            WHERE (SELECT prefix FROM target) IS NULL OR bucket.policy_prefix = (SELECT prefix FROM target)
+          ) refilled_bucket
           GROUP BY policy_prefix
-        ) agg ON agg.policy_prefix = p.prefix_id
-        ${thrJoin}
-        ${scope}
+        ) agg ON agg.policy_prefix = policy.prefix_id
+        ${throttledJoinClause}
+        WHERE (SELECT prefix FROM target) IS NULL OR policy.prefix_id = (SELECT prefix FROM target)
+        ORDER BY policy.prefix_id
       |]
 
 -- | List a prefix's buckets with effective max and lazily-refilled fill fraction,
@@ -231,8 +226,7 @@ listRateLimitBucketsSQL :: SchemaName -> Text -> Int64 -> Int64 -> Query RateLim
 listRateLimitBucketsSQL schema prefix limit offset =
   let policies = arbiterRateLimitPoliciesTable schema
       buckets = arbiterRateLimitsTable schema
-      refilled = refilledTokensExpr "b" "p"
-      effMax = effectivePolicyCol "p" "max_tokens"
+      effMax = effectivePolicyCol "policy" "max_tokens"
    in rows
         rateLimitBucketCodec
         [sql|
@@ -240,14 +234,14 @@ listRateLimitBucketsSQL schema prefix limit offset =
                  tokens / NULLIF(max_tokens, 0) AS fill_fraction,
                  last_refill
           FROM (
-            SELECT b.rate_limit_key, b.policy_prefix,
-                   ${refilled} AS tokens,
+            SELECT bucket.rate_limit_key, bucket.policy_prefix,
+                   ${refilledBucketTokens} AS tokens,
                    ${effMax} AS max_tokens,
-                   b.last_refill
-            FROM ${buckets} b
-            JOIN ${policies} p ON p.prefix_id = b.policy_prefix
-            WHERE b.policy_prefix = #{prefix :: CText}
-          ) r
+                   bucket.last_refill
+            FROM ${buckets} bucket
+            JOIN ${policies} policy ON policy.prefix_id = bucket.policy_prefix
+            WHERE bucket.policy_prefix = #{prefix :: CText}
+          ) refilled_bucket
           ORDER BY fill_fraction ASC NULLS LAST, rate_limit_key
           LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
         |]
@@ -256,18 +250,24 @@ listRateLimitBucketsSQL schema prefix limit offset =
 -- @Just v@ writes @v@ (a null clears the override back to the default).
 updateRateLimitOverridesSQL
   :: SchemaName -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Text -> Query ()
-updateRateLimitOverridesSQL schema mMax mRefill mIv prefix =
+updateRateLimitOverridesSQL schema mMax mRefill mInterval prefix =
   let policies = arbiterRateLimitPoliciesTable schema
-      touch :: Text -> Maybe (Maybe Double) -> Query ()
-      touch name field =
-        let flag = isJust field
-            val = join field
-         in [sql|${name} = CASE WHEN #{flag :: CBool}::boolean THEN #{val :: Maybe CFloat8}::float8 ELSE ${name} END|]
-      setFrag =
-        sepBy
-          ", "
-          [ touch "override_max_tokens" mMax
-          , touch "override_refill_amount" mRefill
-          , touch "override_interval" mIv
-          ]
-   in [sql| UPDATE ${policies} SET ${setFrag} WHERE prefix_id = #{prefix :: CText} |]
+      setMax = isJust mMax
+      maxTokens = join mMax
+      setRefill = isJust mRefill
+      refill = join mRefill
+      setInterval = isJust mInterval
+      interval = join mInterval
+   in [sql|
+        UPDATE ${policies}
+        SET override_max_tokens = CASE WHEN #{setMax :: CBool}::boolean
+                                       THEN #{maxTokens :: Maybe CFloat8}::float8
+                                       ELSE override_max_tokens END,
+            override_refill_amount = CASE WHEN #{setRefill :: CBool}::boolean
+                                          THEN #{refill :: Maybe CFloat8}::float8
+                                          ELSE override_refill_amount END,
+            override_interval = CASE WHEN #{setInterval :: CBool}::boolean
+                                     THEN #{interval :: Maybe CFloat8}::float8
+                                     ELSE override_interval END
+        WHERE prefix_id = #{prefix :: CText}
+      |]

@@ -61,7 +61,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
             -- Transaction commits here
             pure ()
 
-        -- Job should be in the queue (transaction committed)
+        -- The committed transaction leaves the job in the queue.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         length claimed `shouldBe` 1
         payload (head claimed) `shouldBe` TestMessage "InTx"
@@ -79,11 +79,11 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
                 -- Force a rollback by throwing an error
                 throwIO (userError "Intentional rollback")
           )
-            `catch` \(e :: SomeException) -> pure (show e)
+            `catch` \(exception :: SomeException) -> pure (show exception)
 
         result `shouldContain` "Intentional rollback"
 
-        -- Job should NOT be in the queue (transaction rolled back)
+        -- The rolled-back transaction leaves no job in the queue.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         length claimed `shouldBe` 0
 
@@ -104,7 +104,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
             Just _inserted <- inTransaction @SimpleOpsTestRegistry conn testSchema $ HL.insertJob job
             pure ()
 
-          -- Verify user's data was committed (on same connection)
+          -- Verify the user's data was committed on the same connection
           result <- PG.query_ conn "SELECT value FROM test_tx_table" :: IO [[Text]]
           length result `shouldBe` 1
           head (head result) `shouldBe` "test-value"
@@ -132,7 +132,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
                 -- Force rollback
                 throwIO (userError "Force rollback")
             )
-              `catch` \(e :: SomeException) -> pure (show e)
+              `catch` \(exception :: SomeException) -> pure (show exception)
 
           result `shouldContain` "Force rollback"
 
@@ -140,20 +140,19 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           rows <- PG.query_ conn "SELECT value FROM test_rollback_table" :: IO [[Text]]
           length rows `shouldBe` 0
 
-        -- Job should NOT be in queue
+        -- The queue has no job.
         claimed <- runSimpleDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         length claimed `shouldBe` 0
 
     describe "Insertion Ordering" $ do
       it "insertJob: grouped inserts serialize via groups table upsert" $ \env -> do
         -- The groups table upsert (INSERT...ON CONFLICT) serializes concurrent
-        -- inserts within the same group. B blocks until A commits, preventing
-        -- the race where B's job becomes visible before A's.
+        -- inserts within the same group. B blocks until A commits.
 
         connA <- PG.connectPostgreSQL connStr
         connB <- PG.connectPostgreSQL connStr
 
-        -- A starts transaction and inserts (holds lock on groups table row)
+        -- A starts a transaction and inserts. A holds the lock on the groups table row.
         _ <- PG.execute_ connA "BEGIN"
         Just _ <-
           inTransaction @SimpleOpsTestRegistry connA testSchema
@@ -161,7 +160,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
             $ setGroupKey (Just "g1")
             $ defaultJob (TestMessage "JobA")
 
-        -- B tries to insert same group - BLOCKS on groups table upsert until A commits
+        -- B inserts into the same group and blocks on the groups table upsert until A commits
         asyncB <- async $ do
           _ <- PG.execute_ connB "BEGIN"
           Just job <-
@@ -175,7 +174,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         -- Give B time to start and block
         threadDelay 100_000
 
-        -- A commits (releases groups table lock, B unblocks)
+        -- A commits and releases the groups table lock. B unblocks.
         _ <- PG.execute_ connA "COMMIT"
 
         -- B can now proceed

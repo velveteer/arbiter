@@ -8,8 +8,8 @@
 -- | Golden tests guarding migration checksums against in-place edits.
 --
 -- @postgresql-migration@ records a checksum per migration name. Editing an
--- already-shipped migration changes that checksum and every deployed database
--- rejects the run, so migrations must be add-only / rename-on-change. Each
+-- already-shipped migration changes that checksum. Every deployed database then
+-- rejects the run. Migrations are add-only or rename-on-change. Each
 -- migration's SQL body is pinned to its own golden file. A body change fails the
 -- corresponding test with a diff. Accept an intentional add or rename with
 -- @cabal test arbiter-migrations-tests --test-options=--accept@.
@@ -73,7 +73,7 @@ main = do
       , migrationLockTests connStr
       ]
 
--- | 'conflictingPolicyPrefixes' flags only a prefix carrying two distinct parameter sets.
+-- | 'conflictingPolicyPrefixes' flags a prefix carrying two distinct parameter sets.
 conflictTests :: [TestTree]
 conflictTests =
   [ testCase "distinct prefixes are not a conflict" $
@@ -84,7 +84,7 @@ conflictTests =
       conflictingPolicyPrefixes [row "a" 1 1 1, row "a" 2 1 1] @?= ["a"]
   ]
   where
-    row p mx rf iv = PolicyRow {prefixId = p, maxTokens = mx, refillAmt = rf, interval = iv}
+    row prefix tokens refill every = PolicyRow {prefixId = prefix, maxTokens = tokens, refillAmt = refill, interval = every}
 
 registryNameTests :: [TestTree]
 registryNameTests =
@@ -146,7 +146,7 @@ migrationReconciliationTests connStr =
           triggerOids <- optionalTriggerOids conn
           functionOids <- optionalFunctionOids conn
 
-          -- A second run rebuilds nothing, so no queue table is locked.
+          -- A second run rebuilds nothing.
           migrate triggerOn
           optionalTriggerOids conn >>= (@?= triggerOids)
           optionalFunctionOids conn >>= (@?= functionOids)
@@ -156,7 +156,7 @@ migrationReconciliationTests connStr =
           optionalFunctionCount conn >>= (@?= 0)
 
           -- Create migrations are already recorded. Desired-state
-          -- reconciliation must restore the objects without editing them.
+          -- reconciliation restores the objects.
           migrate triggerOn
           optionalTriggerCount conn >>= (@?= 3)
           optionalFunctionCount conn >>= (@?= 2)
@@ -263,8 +263,8 @@ migrationReconciliationTests connStr =
               \FOR EACH ROW EXECUTE FUNCTION arbiter_migration_reconciliation_test.notify_job_event('legacy_q', 'false')"
           migrate triggerOff
           optionalTriggerCount conn >>= (@?= 0)
-    , -- Installs predating the marker have an unmarked function with an older body, so
-      -- enabling streaming has to replace and stamp it rather than treat it as foreign.
+    , -- Installs predating the marker have an unmarked function with an older body.
+      -- Enabling streaming replaces and stamps it.
       testCase "adopts an unmarked event function" $
         withFreshSchema connStr reconciliationSchema $ \conn -> do
           migrate triggerOff
@@ -375,9 +375,9 @@ migrationLockTests connStr =
 withMigrationLockHeld :: PG.Connection -> IO a -> IO a
 withMigrationLockHeld conn = bracket_ (advisory "pg_advisory_lock") (advisory "pg_advisory_unlock")
   where
-    advisory fn =
+    advisory lockFn =
       void
-        (PG.query conn ("SELECT " <> fn <> "(hashtextextended(?, 0))::text") (PG.Only lockName) :: IO [PG.Only (Maybe Text)])
+        (PG.query conn ("SELECT " <> lockFn <> "(hashtextextended(?, 0))::text") (PG.Only lockName) :: IO [PG.Only (Maybe Text)])
     lockName = "arbiter.migrations:" <> lockSchema
 
 -- | How many migration names the history records more than once.
@@ -387,7 +387,7 @@ appliedTwice conn =
     PG.query_ conn (sql ("SELECT count(*) - count(DISTINCT filename) FROM " <> lockSchema <> ".schema_migrations"))
 
 timedOut :: MigrationResult String -> Bool
-timedOut (MigrationError e) = "Timed out waiting on the arbiter migration lock" `isInfixOf` e
+timedOut (MigrationError message) = "Timed out waiting on the arbiter migration lock" `isInfixOf` message
 timedOut MigrationSuccess = False
 
 -- | The next event-stream payload, or 'Nothing' when none lands within a second.
@@ -416,11 +416,11 @@ optionalTriggerOids conn =
   map PG.fromOnly
     <$> PG.query
       conn
-      ( "SELECT t.oid::bigint "
+      ( "SELECT trigger.oid::bigint "
           <> triggerJoins
-          <> "WHERE n.nspname = ? AND t.tgname IN "
+          <> "WHERE namespace.nspname = ? AND trigger.tgname IN "
           <> optionalTriggerNames
-          <> " ORDER BY t.tgname"
+          <> " ORDER BY trigger.tgname"
       )
       (PG.Only reconciliationSchema)
 
@@ -429,11 +429,11 @@ optionalFunctionOids conn =
   map PG.fromOnly
     <$> PG.query
       conn
-      ( "SELECT p.oid::bigint "
+      ( "SELECT function.oid::bigint "
           <> functionJoins
-          <> "WHERE n.nspname = ? AND p.proname IN "
+          <> "WHERE namespace.nspname = ? AND function.proname IN "
           <> optionalFunctionNames
-          <> " ORDER BY p.proname"
+          <> " ORDER BY function.proname"
       )
       (PG.Only reconciliationSchema)
 
@@ -442,24 +442,22 @@ optionalTriggerCount conn =
   fromOnlyOne
     <$> PG.query
       conn
-      ("SELECT count(*) " <> triggerJoins <> "WHERE n.nspname = ? AND t.tgname IN " <> optionalTriggerNames)
+      ("SELECT count(*) " <> triggerJoins <> "WHERE namespace.nspname = ? AND trigger.tgname IN " <> optionalTriggerNames)
       (PG.Only reconciliationSchema)
 
--- | Compares the installed objects against the rendered trigger definition rather
--- than a hand-listed set of catalog attributes, so a clause the reconciler forgot
--- to emit still fails.
+-- | Compares the installed objects against the rendered trigger definition.
 notificationObjectsAreCurrent :: PG.Connection -> IO Bool
 notificationObjectsAreCurrent conn = do
   rows <-
     PG.query
       conn
-      "SELECT pg_get_triggerdef(t.oid), p.prosrc \
-      \FROM pg_trigger t \
-      \JOIN pg_proc p ON p.oid = t.tgfoid \
-      \JOIN pg_class c ON c.oid = t.tgrelid \
-      \JOIN pg_namespace n ON n.oid = c.relnamespace \
-      \WHERE n.nspname = ? AND c.relname = 'migration_reconciliation_q' \
-      \AND t.tgname = 'migration_reconciliation_q_notify_trigger'"
+      "SELECT pg_get_triggerdef(trigger.oid), function.prosrc \
+      \FROM pg_trigger trigger \
+      \JOIN pg_proc function ON function.oid = trigger.tgfoid \
+      \JOIN pg_class relation ON relation.oid = trigger.tgrelid \
+      \JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+      \WHERE namespace.nspname = ? AND relation.relname = 'migration_reconciliation_q' \
+      \AND trigger.tgname = 'migration_reconciliation_q_notify_trigger'"
       (PG.Only reconciliationSchema)
   pure $ case rows of
     [(definition, body)] ->
@@ -472,10 +470,10 @@ eventFunctionIsCurrent conn =
   any PG.fromOnly
     <$> PG.query
       conn
-      ( "SELECT p.prosrc LIKE '%queue_name text := TG_ARGV[0]%' \
-        \AND p.prosrc LIKE '%is_dlq boolean := TG_ARGV[1]::boolean%' "
+      ( "SELECT function.prosrc LIKE '%queue_name text := TG_ARGV[0]%' \
+        \AND function.prosrc LIKE '%is_dlq boolean := TG_ARGV[1]::boolean%' "
           <> functionJoins
-          <> "WHERE n.nspname = ? AND p.proname = 'notify_job_event' AND p.pronargs = 0"
+          <> "WHERE namespace.nspname = ? AND function.proname = 'notify_job_event' AND function.pronargs = 0"
       )
       (PG.Only reconciliationSchema)
 
@@ -490,7 +488,10 @@ eventTriggerDefinitionsFor conn trigger =
   map PG.fromOnly
     <$> PG.query
       conn
-      ("SELECT pg_get_triggerdef(t.oid) " <> triggerJoins <> "WHERE n.nspname = ? AND t.tgname = ? ORDER BY t.tgname")
+      ( "SELECT pg_get_triggerdef(trigger.oid) "
+          <> triggerJoins
+          <> "WHERE namespace.nspname = ? AND trigger.tgname = ? ORDER BY trigger.tgname"
+      )
       (reconciliationSchema, trigger)
 
 removedQueueTriggerCount :: PG.Connection -> IO Int64
@@ -500,7 +501,7 @@ removedQueueTriggerCount conn =
       conn
       ( "SELECT count(*) "
           <> triggerJoins
-          <> "WHERE n.nspname = ? AND t.tgname IN \
+          <> "WHERE namespace.nspname = ? AND trigger.tgname IN \
              \('notify_job_event_removed_reconciliation_q', 'notify_job_event_removed_reconciliation_q_dlq')"
       )
       (PG.Only reconciliationSchema)
@@ -513,7 +514,7 @@ removedNotifyObjectCount conn = do
         conn
         ( "SELECT count(*) "
             <> triggerJoins
-            <> "WHERE n.nspname = ? AND t.tgname = 'removed_reconciliation_q_notify_trigger'"
+            <> "WHERE namespace.nspname = ? AND trigger.tgname = 'removed_reconciliation_q_notify_trigger'"
         )
         (PG.Only reconciliationSchema)
   functionCount <-
@@ -522,7 +523,7 @@ removedNotifyObjectCount conn = do
         conn
         ( "SELECT count(*) "
             <> functionJoins
-            <> "WHERE n.nspname = ? AND p.proname = 'notify_removed_reconciliation_q_created'"
+            <> "WHERE namespace.nspname = ? AND function.proname = 'notify_removed_reconciliation_q_created'"
         )
         (PG.Only reconciliationSchema)
   pure (triggerCount + functionCount)
@@ -532,7 +533,7 @@ triggerCountNamed conn name =
   fromOnlyOne
     <$> PG.query
       conn
-      ("SELECT count(*) " <> triggerJoins <> "WHERE n.nspname = ? AND t.tgname = ?")
+      ("SELECT count(*) " <> triggerJoins <> "WHERE namespace.nspname = ? AND trigger.tgname = ?")
       (reconciliationSchema, name)
 
 functionCountNamed :: PG.Connection -> Text -> IO Int64
@@ -540,7 +541,7 @@ functionCountNamed conn name =
   fromOnlyOne
     <$> PG.query
       conn
-      ("SELECT count(*) " <> functionJoins <> "WHERE n.nspname = ? AND p.proname = ?")
+      ("SELECT count(*) " <> functionJoins <> "WHERE namespace.nspname = ? AND function.proname = ?")
       (reconciliationSchema, name)
 
 optionalFunctionCount :: PG.Connection -> IO Int64
@@ -548,16 +549,17 @@ optionalFunctionCount conn =
   fromOnlyOne
     <$> PG.query
       conn
-      ("SELECT count(*) " <> functionJoins <> "WHERE n.nspname = ? AND p.proname IN " <> optionalFunctionNames)
+      ("SELECT count(*) " <> functionJoins <> "WHERE namespace.nspname = ? AND function.proname IN " <> optionalFunctionNames)
       (PG.Only reconciliationSchema)
 
 -- | Catalog joins shared by the trigger probes.
 triggerJoins :: PG.Query
-triggerJoins = "FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+triggerJoins =
+  "FROM pg_trigger trigger JOIN pg_class relation ON relation.oid = trigger.tgrelid JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace "
 
 -- | Catalog joins shared by the function probes.
 functionJoins :: PG.Query
-functionJoins = "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+functionJoins = "FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
 
 -- | The triggers the reconciliation registry installs when both options are on.
 optionalTriggerNames :: PG.Query
@@ -578,8 +580,8 @@ bucketPersistence conn =
   fmap (fmap PG.fromOnly . listToMaybe) $
     PG.query
       conn
-      "SELECT relpersistence::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-      \WHERE n.nspname = ? AND c.relname = ?"
+      "SELECT relpersistence::text FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+      \WHERE namespace.nspname = ? AND relation.relname = ?"
       (reconciliationSchema, arbiterRateLimitsTableName)
 
 getTestConnectionString :: IO ByteString

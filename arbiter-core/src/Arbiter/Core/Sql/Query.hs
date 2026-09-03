@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | A SQL query bundling its text, its positional parameters, and its row
--- decoder in one value, so the three cannot drift. Built by the @sql@
+-- decoder in one value. Built by the @sql@
 -- quasiquoter in "Arbiter.Core.Sql.QQ". The parameters and decoder use the
 -- same 'Arbiter.Core.Codec.Col'-driven vocabulary as the profunctor codec in
 -- "Arbiter.Core.Codec".
@@ -34,57 +34,54 @@ data Query a = Query
   }
 
 instance Functor Query where
-  fmap f (Query s p d) = Query s p (fmap f d)
+  fmap fn (Query text params decoder) = Query text params (fmap fn decoder)
 
--- | Concatenation carries no decoder, so it is defined only for @Query ()@:
--- fragments that contribute text and parameters but no output columns.
+-- | Concatenation is defined for @Query ()@, a fragment with text and parameters and no output columns.
 instance Semigroup (Query ()) where
-  Query s1 p1 _ <> Query s2 p2 _ = Query (s1 <> s2) (p1 <> p2) (pure ())
+  Query text1 params1 _ <> Query text2 params2 _ = Query (text1 <> text2) (params1 <> params2) (pure ())
 
 instance Monoid (Query ()) where
   mempty = Query "" [] (pure ())
-  mconcat qs = Query (T.concat (map qSql qs)) (concatMap qParams qs) (pure ())
+  mconcat queries = Query (T.concat (map qSql queries)) (concatMap qParams queries) (pure ())
 
 -- | Literal SQL with no parameters (table names, static clauses).
 raw :: Text -> Query ()
-raw t = Query t [] (pure ())
+raw text = Query text [] (pure ())
 
 -- | One @?@ placeholder bound to a single parameter.
 param :: SomeParam -> Query ()
-param p = Query "?" [p] (pure ())
+param value = Query "?" [value] (pure ())
 
 -- | Rewrite the @?@ placeholders in a query's text to PostgreSQL positional
 -- placeholders (@$1@, @$2@, ...) for libpq-based backends. The Nth @?@ maps to
 -- the Nth entry of 'qParams'.
 numberPlaceholders :: Text -> Text
-numberPlaceholders t =
-  case T.splitOn "?" t of
+numberPlaceholders text =
+  case T.splitOn "?" text of
     [] -> ""
     (first : rest) ->
-      first <> mconcat (zipWith (\i part -> "$" <> T.pack (show (i :: Int)) <> part) [1 ..] rest)
+      first <> mconcat (zipWith (\index part -> "$" <> T.pack (show (index :: Int)) <> part) [1 ..] rest)
 
--- | Attach a handwritten row decoder to a parameterized fragment. Takes a
--- @Query ()@ so a fragment that already declares its own output columns cannot
--- have a second decoder bolted on.
+-- | Attach a handwritten row decoder to a parameterized fragment.
 rows :: RowCodec a -> Query () -> Query a
-rows d (Query s p _) = Query s p d
+rows decoder (Query text params _) = Query text params decoder
 
 -- | Attach a decoder to literal, parameter-free SQL rendered as plain 'Text'.
 rawRows :: RowCodec a -> Text -> Query a
-rawRows d = rows d . raw
+rawRows decoder = rows decoder . raw
 
 -- | Join fragments with a separator, concatenating their text and parameters
 -- in order. Used for @WHERE ... AND ...@ and runtime-sized @VALUES@ lists.
 sepBy :: Text -> [Query ()] -> Query ()
-sepBy sep qs =
+sepBy sep queries =
   Query
-    (T.intercalate sep (map qSql qs))
-    (concatMap qParams qs)
+    (T.intercalate sep (map qSql queries))
+    (concatMap qParams queries)
     (pure ())
 
--- | A fragment present only when the flag holds, else the empty monoid.
+-- | The fragment under a true flag. @mempty@ under a false one.
 mwhen :: (Monoid m) => Bool -> m -> m
-mwhen True m = m
+mwhen True fragment = fragment
 mwhen False _ = mempty
 
 -- | Values a @${...}@ splice accepts: raw 'Text' (a bare clause or table name)

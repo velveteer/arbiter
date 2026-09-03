@@ -102,8 +102,7 @@ trialCount = 10
 trialDurationUs :: Int
 trialDurationUs = 10_000_000
 
--- | Per-test timeout. tasty-bench 0.5 defaults to 100s, too tight for these
--- multi-trial tests (trialCount trials plus per-trial preloads).
+-- | Per-test timeout. Each test runs trialCount trials plus per-trial preloads.
 benchTimeout :: Integer
 benchTimeout = fromIntegral trialCount * fromIntegral trialDurationUs * 40
 
@@ -113,12 +112,12 @@ steadyStateWarmupUs = 2_000_000
 data BenchPayload
   = BenchMessage Int
   | BenchBatch Int
-  | -- | Fails on its first attempt, then succeeds, to populate the backoff backlog.
+  | -- | Fails on its first attempt, then succeeds. Populates the backoff backlog.
     BenchFlaky Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Gated payloads for the overhead benches. Limits are huge, so gates never throttle.
+-- | Gated payloads for the overhead benches. The huge limits keep the gates open.
 newtype BenchRl = BenchRl Int
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -136,23 +135,23 @@ gateKeyCount :: Int
 gateKeyCount = 256
 
 gateKey :: Int -> Text
-gateKey i = T.pack (show (i `mod` gateKeyCount))
+gateKey index = T.pack (show (index `mod` gateKeyCount))
 
 -- | A 'BenchBoth' concurrency key decorrelated from 'gateKey'.
 gateKey2 :: Int -> Text
-gateKey2 i = T.pack (show (i `mod` max 1 (gateKeyCount - 1)))
+gateKey2 index = T.pack (show (index `mod` max 1 (gateKeyCount - 1)))
 
 instance HasRateLimit BenchRl where
-  rateLimitFor = limitBy (tokenBucket "blr" 1.0e9 1) (\(BenchRl i) -> gateKey i)
+  rateLimitFor = limitBy (tokenBucket "blr" 1.0e9 1) (\(BenchRl index) -> gateKey index)
 
 instance HasConcurrency BenchCc where
-  concurrencyFor = concurrencyBy (concurrencyPool "blc" 1000000) (\(BenchCc i) -> gateKey i)
+  concurrencyFor = concurrencyBy (concurrencyPool "blc" 1000000) (\(BenchCc index) -> gateKey index)
 
 instance HasRateLimit BenchBoth where
-  rateLimitFor = limitBy (tokenBucket "bbr" 1.0e9 1) (\(BenchBoth i) -> gateKey i)
+  rateLimitFor = limitBy (tokenBucket "bbr" 1.0e9 1) (\(BenchBoth index) -> gateKey index)
 
 instance HasConcurrency BenchBoth where
-  concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth i) -> gateKey2 i)
+  concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth index) -> gateKey2 index)
 
 type BenchRegistry =
   '[ Queue "bench_queue" BenchPayload
@@ -167,33 +166,32 @@ data QueueFlavor
   | -- | Grouped with 80 percent of jobs assigned to a small hot set.
     GroupedSkewed Int Int
   | Mixed Int
-  | -- | Grouped, with a fraction of jobs scheduled into the near future and a
-    -- fraction that fail once into backoff, exercising the next_due and
-    -- in_flight_until claim sources alongside the ready window.
+  | -- | Grouped. A fraction of jobs is scheduled into the near future. A fraction
+    -- fails once into backoff. Exercises the next_due and in_flight_until claim
+    -- sources alongside the ready window.
     GroupedBacklog Int
-  | -- | Grouped, half the backlog scheduled far into the future (parked, never due
-    -- in-trial) while the rest is ready. Measures whether a standing scheduled
-    -- backlog slows the claim for the ready work in those same groups.
+  | -- | Grouped. Half the backlog is parked far into the future. The rest is ready.
+    -- Measures whether a standing scheduled backlog slows the claim for the ready
+    -- work in those groups.
     GroupedDormant Int
-  | -- | Ungrouped 'GroupedDormant': half the backlog parked 30 days out, half
-    -- ready, exercising the ungrouped ready/due index split.
+  | -- | Ungrouped 'GroupedDormant'. Half the backlog is parked 30 days out. Half is
+    -- ready. Exercises the ungrouped ready/due index split.
     UngroupedDormant
   deriving stock (Eq)
 
 -- | Deterministic 80/20 group distribution. Eight jobs in each ten go to the
 -- hot set. The rest span all other groups. The group comes from a separate
--- counter, so a hot or cold set whose size shares a factor with ten still
--- receives every one of its groups.
+-- counter.
 skewedGroupKey :: Int -> Int -> Int -> Text
-skewedGroupKey numGroups hotGroups i =
+skewedGroupKey numGroups hotGroups index =
   T.pack $ "g" <> show groupNumber
   where
     total = max 1 numGroups
     hot = max 1 (min hotGroups total)
     cold = max 1 (total - hot)
-    spread = i `div` 10
+    spread = index `div` 10
     groupNumber
-      | i `mod` 10 < 8 = (spread `mod` hot) + 1
+      | index `mod` 10 < 8 = (spread `mod` hot) + 1
       | hot == total = (spread `mod` hot) + 1
       | otherwise = hot + (spread `mod` cold) + 1
 
@@ -205,20 +203,19 @@ data BenchMode
 data Instrumentation = Plain | Instrumented
   deriving stock (Eq)
 
--- | The SDK the instrumented trials record into: real span and metric machinery,
--- exporting nowhere, so a trial measures instrumentation and not a collector.
--- Built once, every trial sharing the one provider pair.
+-- | The SDK the instrumented trials record into. Real span and metric machinery that
+-- exports nowhere. Built once and shared by every trial.
 benchTelemetry :: IO (TracerProvider, Otel.Telemetry)
 benchTelemetry = modifyMVar benchTelemetryVar $ \case
   Just built -> pure (Just built, built)
   Nothing -> do
     processor <- batchProcessor batchTimeoutConfig discardSpans
-    tp <- createTracerProvider [processor] emptyTracerProviderOptions
-    (mp, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-    setGlobalMeterProvider mp
-    -- The handle holds nothing bracketed, so it outlives the call.
-    tel <- Otel.withExternalTelemetry (Just mp) Nothing pure
-    pure (Just (tp, tel), (tp, tel))
+    tracerProvider <- createTracerProvider [processor] emptyTracerProviderOptions
+    (meterProvider, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+    setGlobalMeterProvider meterProvider
+    -- The handle holds nothing bracketed and outlives the call.
+    tel <- Otel.withExternalTelemetry (Just meterProvider) Nothing pure
+    pure (Just (tracerProvider, tel), (tracerProvider, tel))
   where
     discardSpans =
       SpanExporter
@@ -248,64 +245,62 @@ withInstrumentedPools otel configs use = do
         setGlobalTracerProvider =<< createTracerProvider [] emptyTracerProviderOptions
         use configs
       Instrumented -> do
-        (tp, tel) <- benchTelemetry
-        setGlobalTracerProvider tp
+        (tracerProvider, tel) <- benchTelemetry
+        setGlobalTracerProvider tracerProvider
         use (map (Otel.instrumentConfig tel) configs)
 
--- | One job in a 'GroupedBacklog' queue, selected by index: roughly a fifth are
--- flaky (fail once into backoff), a fifth are scheduled into the near future,
--- the rest are ready now.
+-- | One job in a 'GroupedBacklog' queue, selected by index. A fifth are flaky and
+-- fail once into backoff. A fifth are scheduled into the near future. The rest are
+-- ready now.
 backlogJob :: UTCTime -> Int -> Int -> JobWrite BenchPayload
-backlogJob now numGroups i =
-  let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
-   in case i `mod` 5 of
-        0 -> defaultGroupedJob gk (BenchFlaky i)
-        1 -> setNotVisibleUntil (Just (addUTCTime (scheduledDelay i) now)) $ defaultGroupedJob gk (BenchBatch i)
-        _ -> defaultGroupedJob gk (BenchBatch i)
+backlogJob now numGroups index =
+  let groupKey = T.pack $ "g" <> show ((index `mod` numGroups) + 1)
+   in case index `mod` 5 of
+        0 -> defaultGroupedJob groupKey (BenchFlaky index)
+        1 -> setNotVisibleUntil (Just (addUTCTime (scheduledDelay index) now)) $ defaultGroupedJob groupKey (BenchBatch index)
+        _ -> defaultGroupedJob groupKey (BenchBatch index)
 
--- | Spread scheduled jobs across the first few seconds so they come due during
--- the trial rather than all at once.
+-- | Spread scheduled jobs across the first few seconds of the trial.
 scheduledDelay :: Int -> NominalDiffTime
-scheduledDelay i = realToFrac (0.5 + fromIntegral (i `mod` 7) * 0.4 :: Double)
+scheduledDelay index = realToFrac (0.5 + fromIntegral (index `mod` 7) * 0.4 :: Double)
 
 -- | One job in a 'GroupedDormant' queue. Each group alternates ready jobs with
--- jobs parked 30 days out, so the claim must skip a standing scheduled backlog
--- to reach the ready work.
+-- jobs parked 30 days out.
 dormantJob :: UTCTime -> Int -> Int -> JobWrite BenchPayload
-dormantJob now numGroups i =
-  let gk = T.pack $ "g" <> show ((i `mod` numGroups) + 1)
-   in if odd (i `div` numGroups)
-        then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultGroupedJob gk (BenchBatch i)
-        else defaultGroupedJob gk (BenchBatch i)
+dormantJob now numGroups index =
+  let groupKey = T.pack $ "g" <> show ((index `mod` numGroups) + 1)
+   in if odd (index `div` numGroups)
+        then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultGroupedJob groupKey (BenchBatch index)
+        else defaultGroupedJob groupKey (BenchBatch index)
 
--- | Ungrouped 'dormantJob': alternate ready jobs with jobs parked 30 days out.
+-- | Ungrouped 'dormantJob'. Alternates ready jobs with jobs parked 30 days out.
 dormantUngroupedJob :: UTCTime -> Int -> JobWrite BenchPayload
-dormantUngroupedJob now i =
-  if odd i
-    then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultJob (BenchBatch i)
-    else defaultJob (BenchBatch i)
+dormantUngroupedJob now index =
+  if odd index
+    then setNotVisibleUntil (Just (addUTCTime (30 * 86400) now)) $ defaultJob (BenchBatch index)
+    else defaultJob (BenchBatch index)
 
 -- | A flaky job on its first attempt. The dispatcher increments attempts at
--- claim, so the retry lands on attempts >= 2 and succeeds.
+-- claim. The retry lands on attempts >= 2 and succeeds.
 isFlakyFirst :: JobRead BenchPayload -> Bool
 isFlakyFirst job = case payload job of
   BenchFlaky _ -> attempts job <= 1
   _ -> False
 
--- | Single-job handler body: fail flaky-first jobs into backoff, else ack.
+-- | Single-job handler body. Fails flaky-first jobs into backoff and acks the rest.
 flakyGate :: (MonadIO m) => m () -> JobRead BenchPayload -> m ()
 flakyGate onAck job
   | isFlakyFirst job = throwRetryable "bench-induced backoff"
   | otherwise = onAck
 
--- | Batched handler body: failRetry the flaky-first jobs, ack the rest, and
--- return the acked count for throughput accounting.
+-- | Batched handler body. Retries the flaky-first jobs, acks the rest, and returns
+-- the acked count.
 flakyBatch
   :: (Monad m) => BatchCallbacks m BenchPayload () -> NonEmpty (JobRead BenchPayload) -> m Int
-flakyBatch cb jobs = do
+flakyBatch callbacks jobs = do
   let (toFail, toAck) = partition isFlakyFirst (toList jobs)
-  traverse_ (\job -> failRetry cb job "bench-induced backoff") toFail
-  ackAll cb toAck
+  traverse_ (\job -> failRetry callbacks job "bench-induced backoff") toFail
+  ackAll callbacks toAck
   pure (length toAck)
 
 data BenchStats = BenchStats
@@ -321,25 +316,25 @@ instance IsTest ThroughputBench where
   run _opts (ThroughputBench action) _progress = testPassed <$> action
 
 computeStats :: [Double] -> BenchStats
-computeStats xs = BenchStats {statsMean = mean, statsStdev = sd, statsSamples = n}
+computeStats samples = BenchStats {statsMean = mean, statsStdev = stdev, statsSamples = count}
   where
-    n = length xs
-    mean = sum xs / fromIntegral n
-    sd
-      | n > 1 = sqrt (sum [(x - mean) * (x - mean) | x <- xs] / fromIntegral (n - 1))
+    count = length samples
+    mean = sum samples / fromIntegral count
+    stdev
+      | count > 1 = sqrt (sum [(sample - mean) * (sample - mean) | sample <- samples] / fromIntegral (count - 1))
       | otherwise = 0
 
 formatStats :: String -> BenchStats -> String
-formatStats unit s =
-  show (round (statsMean s) :: Int)
+formatStats unit stats =
+  show (round (statsMean stats) :: Int)
     <> " +/- "
-    <> show (round (statsStdev s) :: Int)
+    <> show (round (statsStdev stats) :: Int)
     <> " "
     <> unit
     <> " ("
-    <> showFFloat (Just 1) (if statsMean s > 0 then statsStdev s / statsMean s * 100 else 0) ""
+    <> showFFloat (Just 1) (if statsMean stats > 0 then statsStdev stats / statsMean stats * 100 else 0) ""
     <> "%, n="
-    <> show (statsSamples s)
+    <> show (statsSamples stats)
     <> ")"
 
 data TriggerStats = TriggerStats
@@ -371,29 +366,29 @@ formatTriggerStats [] = "  (no trigger stats)"
 formatTriggerStats stats =
   unlines $
     map
-      ( \s ->
+      ( \stat ->
           "  "
-            <> T.unpack (tsFuncName s)
+            <> T.unpack (tsFuncName stat)
             <> ": "
-            <> show (tsCalls s)
+            <> show (tsCalls stat)
             <> " calls, "
-            <> showFFloat (Just 1) (tsTotalTimeMs s) ""
+            <> showFFloat (Just 1) (tsTotalTimeMs stat) ""
             <> "ms total, "
-            <> showFFloat (Just 3) (tsMeanTimeMs s) ""
+            <> showFFloat (Just 3) (tsMeanTimeMs stat) ""
             <> "ms/call"
       )
       stats
 
 multiTrial :: Int -> IO () -> IO Double -> String -> IO String
-multiTrial n setup measure unit = do
-  samples <- replicateM n (setup >> measure)
+multiTrial trials setup measure unit = do
+  samples <- replicateM trials (setup >> measure)
   pure $ formatStats unit (computeStats samples)
 
 -- ---------------------------------------------------------------------------
 -- Write-amplification / autovacuum sampling
 -- ---------------------------------------------------------------------------
 
--- | Per-table readings from pg_stat_user_tables. All cumulative except the dead-tuple gauge.
+-- | Per-table readings from pg_stat_user_tables. The dead-tuple gauge is instantaneous. The rest are cumulative.
 data TableSnap = TableSnap
   { tnUpd :: Int64
   , tnHot :: Int64
@@ -413,24 +408,24 @@ zeroSnapshot = DbSnapshot 0 (TableSnap 0 0 0 0) (TableSnap 0 0 0 0)
 
 -- | HOT-update percentage of total updates between two snapshots of a table.
 hotPct :: TableSnap -> TableSnap -> Double
-hotPct a b =
-  let du = fromIntegral (tnUpd b - tnUpd a) :: Double
-      dh = fromIntegral (tnHot b - tnHot a) :: Double
-   in if du > 0 then dh / du * 100 else 0
+hotPct before after =
+  let updates = fromIntegral (tnUpd after - tnUpd before) :: Double
+      hotUpdates = fromIntegral (tnHot after - tnHot before) :: Double
+   in if updates > 0 then hotUpdates / updates * 100 else 0
 
--- | Dead tuples a table holds at one instant. Autovacuum lowers this, so it is read, not differenced.
+-- | Dead tuples a table holds at one instant. Autovacuum lowers this.
 deadAt :: TableSnap -> Int64
 deadAt = tnDead
 
 -- | 'deadAt' per 1000 jobs.
 deadPerK :: TableSnap -> Double -> Double
-deadPerK b jobs = fromIntegral (deadAt b) / jobs * 1000
+deadPerK snap jobs = fromIntegral (deadAt snap) / jobs * 1000
 
 -- | A table's snapshot row by relname from a pg_stat_user_tables result.
 snapRow :: [(Text, Int64, Int64, Int64, Int64)] -> Text -> TableSnap
 snapRow rows name =
-  case find (\(rn, _, _, _, _) -> rn == name) rows of
-    Just (_, u, h, d, av) -> TableSnap u h d av
+  case find (\(relName, _, _, _, _) -> relName == name) rows of
+    Just (_, updates, hotUpdates, dead, autovac) -> TableSnap updates hotUpdates dead autovac
     Nothing -> TableSnap 0 0 0 0
 
 -- | WAL position plus a per-table snapshot lookup over the named tables.
@@ -470,29 +465,29 @@ data SteadyResult = SteadyResult
   }
 
 mkSteadyResult :: Double -> Int -> DbSnapshot -> DbSnapshot -> [TriggerStats] -> SteadyResult
-mkSteadyResult throughput processed s0 s1 trg =
+mkSteadyResult throughput processed before after triggers =
   SteadyResult
     { srThroughput = throughput
-    , srGroupTriggerUsPerJob = sum (map tsTotalTimeMs trg) * 1000 / jobs
-    , srWalPerJob = fromIntegral (dsWal s1 - dsWal s0) / jobs
-    , srQueueHotPct = hotPct (dsQueue s0) (dsQueue s1)
-    , srQueueUpdPerJob = fromIntegral (tnUpd (dsQueue s1) - tnUpd (dsQueue s0)) / jobs
-    , srQueueDead = deadAt (dsQueue s1)
-    , srQueueDeadPerK = deadPerK (dsQueue s1) jobs
-    , srQueueAutovac = tnAutovac (dsQueue s1) - tnAutovac (dsQueue s0)
-    , srGroupsHotPct = hotPct (dsGroups s0) (dsGroups s1)
-    , srGroupsDead = deadAt (dsGroups s1)
-    , srGroupsDeadPerK = deadPerK (dsGroups s1) jobs
-    , srGroupsAutovac = tnAutovac (dsGroups s1) - tnAutovac (dsGroups s0)
-    , srTriggers = trg
+    , srGroupTriggerUsPerJob = sum (map tsTotalTimeMs triggers) * 1000 / jobs
+    , srWalPerJob = fromIntegral (dsWal after - dsWal before) / jobs
+    , srQueueHotPct = hotPct (dsQueue before) (dsQueue after)
+    , srQueueUpdPerJob = fromIntegral (tnUpd (dsQueue after) - tnUpd (dsQueue before)) / jobs
+    , srQueueDead = deadAt (dsQueue after)
+    , srQueueDeadPerK = deadPerK (dsQueue after) jobs
+    , srQueueAutovac = tnAutovac (dsQueue after) - tnAutovac (dsQueue before)
+    , srGroupsHotPct = hotPct (dsGroups before) (dsGroups after)
+    , srGroupsDead = deadAt (dsGroups after)
+    , srGroupsDeadPerK = deadPerK (dsGroups after) jobs
+    , srGroupsAutovac = tnAutovac (dsGroups after) - tnAutovac (dsGroups before)
+    , srTriggers = triggers
     }
   where
     jobs = fromIntegral (max 1 processed) :: Double
 
 formatSteady :: [SteadyResult] -> String
 formatSteady [] = "(no samples)"
-formatSteady rs =
-  formatStats "jobs/sec" (computeStats (map srThroughput rs))
+formatSteady results =
+  formatStats "jobs/sec" (computeStats (map srThroughput results))
     <> "\n  group triggers: "
     <> showFFloat (Just 2) (meanOf srGroupTriggerUsPerJob) ""
     <> " us/job"
@@ -518,19 +513,19 @@ formatSteady rs =
     <> "/1k jobs), "
     <> showFFloat (Just 1) (meanOf (fromIntegral . srGroupsAutovac)) ""
     <> " autovac/trial\n"
-    <> formatTriggerStats (srTriggers (last rs))
+    <> formatTriggerStats (srTriggers (last results))
   where
     meanOf :: (SteadyResult -> Double) -> Double
-    meanOf f = sum (map f rs) / fromIntegral (length rs)
+    meanOf field = sum (map field results) / fromIntegral (length results)
 
 multiTrialSteady :: Int -> IO () -> IO SteadyResult -> IO String
-multiTrialSteady n setup measure = do
-  results <- replicateM n (setup >> measure)
+multiTrialSteady trials setup measure = do
+  results <- replicateM trials (setup >> measure)
   pure $ formatSteady results
 
 -- | Bracket an action returning (throughput, jobs processed) with trigger-stat
 -- reset and WAL/churn snapshots, yielding a 'SteadyResult'. For trials whose
--- whole duration is the measurement window (no warmup) - i.e. the worker benches.
+-- whole duration is the measurement window, such as the worker benches.
 captureWindow :: Connection -> IO (Double, Int) -> IO SteadyResult
 captureWindow statsConn body = do
   resetTriggerStats statsConn
@@ -551,8 +546,8 @@ newtype BenchOrville a = BenchOrville {unBenchOrville :: ReaderT (Text, O.Orvill
 
 instance O.HasOrvilleState BenchOrville where
   askOrvilleState = BenchOrville $ asks snd
-  localOrvilleState f (BenchOrville action) = BenchOrville $ ReaderT $ \(s, os) ->
-    runReaderT action (s, f os)
+  localOrvilleState adjust (BenchOrville action) = BenchOrville $ ReaderT $ \(schema, state) ->
+    runReaderT action (schema, adjust state)
 
 instance O.MonadOrvilleControl BenchOrville where
   liftWithConnection = O.liftWithConnectionViaUnliftIO
@@ -581,7 +576,7 @@ benchConfigs runM numPools mkConfig = replicateM numPools (benchTune <$> runM mk
 
 -- | The poll interval and logging every benched pool runs with.
 benchTune :: WorkerConfig m payload -> WorkerConfig m payload
-benchTune c = c {pollInterval = 0.1, logConfig = silentLogConfig}
+benchTune config = config {pollInterval = 0.1, logConfig = silentLogConfig}
 
 -- | A worker trial for one backend. @mkSingle@ builds that backend's single-job config.
 workerTrial
@@ -599,7 +594,7 @@ workerTrial runM statsConn mkSingle totalJobs durationUs numPools workersPerPool
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs cb -> void $ flakyBatch cb jobs)
+      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs callbacks -> void $ flakyBatch callbacks jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
@@ -624,7 +619,7 @@ runWorkerTrial runM statsConn configs totalJobs durationUs =
   captureWindow statsConn $ do
     start <- getCurrentTime
     race_
-      (mapConcurrently_ (\c -> runM $ runWorkerPool c) configs)
+      (mapConcurrently_ (\config -> runM $ runWorkerPool config) configs)
       (threadDelay durationUs)
     end <- getCurrentTime
     remaining <- runM (HL.countJobs @BenchPayload)
@@ -646,9 +641,9 @@ runMeasuredWindow
   -> Int
   -> IO (Double, Int, snap, snap, [TriggerStats])
 runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn processedCounter threads durationUs = do
-  t0 <- getCurrentTime
-  startRef <- newIORef t0
-  endRef <- newIORef t0
+  startTime <- getCurrentTime
+  startRef <- newIORef startTime
+  endRef <- newIORef startTime
   snap0Ref <- newIORef zeroSnap
   snap1Ref <- newIORef zeroSnap
   trgRef <- newIORef []
@@ -657,11 +652,10 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
     ( do
         threadDelay steadyStateWarmupUs
         writeIORef processedCounter 0
-        -- Window start: reset trigger stats and ANALYZE so the planner sees the
-        -- steady-state depth, then snapshot WAL/churn. ANALYZE WAL is excluded
-        -- because the snapshot is taken after it.
+        -- Window start. Reset trigger stats and ANALYZE the tables. The WAL/churn
+        -- snapshot follows the ANALYZE.
         resetTrg statsConn
-        traverse_ (\t -> execute_ statsConn ("ANALYZE " <> benchSchema <> "." <> t)) analyzeTables
+        traverse_ (\table -> execute_ statsConn ("ANALYZE " <> benchSchema <> "." <> table)) analyzeTables
         captureSnap statsConn >>= writeIORef snap0Ref
         getCurrentTime >>= writeIORef startRef
         threadDelay durationUs
@@ -679,8 +673,7 @@ runMeasuredWindow zeroSnap captureSnap resetTrg readTrg analyzeTables statsConn 
   pure (fromIntegral processed / elapsed, processed, snap0, snap1, trg)
 
 -- | Steady-state trial. Producers insert continuously while workers consume.
--- Workers increment a counter per job, decoupling throughput from queue
--- depth at trial boundaries.
+-- Workers increment a counter per job.
 runSteadyStateTrial
   :: (HasRegistry m BenchRegistry)
   => RunM m
@@ -688,7 +681,7 @@ runSteadyStateTrial
   -> RunM SimpleM
   -- ^ Runner for producers (separate pool)
   -> Connection
-  -- ^ Stats connection for WAL/churn snapshots (used only on the timer thread)
+  -- ^ Stats connection for WAL/churn snapshots, used on the timer thread
   -> [WorkerConfig m BenchPayload]
   -> IORef Int
   -- ^ Counter that handlers increment per job processed
@@ -708,31 +701,31 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
         when (producerDelayUs > 0) $
           threadDelay (producerId * (producerDelayUs `div` numProducers))
         let go = do
-              offset <- atomicModifyIORef' batchCounter (\n -> (n + producerBatchSize, n))
+              offset <- atomicModifyIORef' batchCounter (\count -> (count + producerBatchSize, count))
               now <- getCurrentTime
               let jobs = case flavor of
                     Ungrouped ->
-                      [defaultJob (BenchBatch i) | i <- [1 .. producerBatchSize]]
+                      [defaultJob (BenchBatch index) | index <- [1 .. producerBatchSize]]
                     Grouped numGroups ->
-                      [ defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
-                      | i <- [1 .. producerBatchSize]
+                      [ defaultGroupedJob (T.pack $ "g" <> show (((offset + index) `mod` numGroups) + 1)) (BenchBatch index)
+                      | index <- [1 .. producerBatchSize]
                       ]
                     GroupedSkewed numGroups hotGroups ->
-                      [ defaultGroupedJob (skewedGroupKey numGroups hotGroups (offset + i)) (BenchBatch i)
-                      | i <- [1 .. producerBatchSize]
+                      [ defaultGroupedJob (skewedGroupKey numGroups hotGroups (offset + index)) (BenchBatch index)
+                      | index <- [1 .. producerBatchSize]
                       ]
                     Mixed numGroups ->
-                      [ if even i
-                          then defaultJob (BenchBatch i)
-                          else defaultGroupedJob (T.pack $ "g" <> show (((offset + i) `mod` numGroups) + 1)) (BenchBatch i)
-                      | i <- [1 .. producerBatchSize]
+                      [ if even index
+                          then defaultJob (BenchBatch index)
+                          else defaultGroupedJob (T.pack $ "g" <> show (((offset + index) `mod` numGroups) + 1)) (BenchBatch index)
+                      | index <- [1 .. producerBatchSize]
                       ]
                     GroupedBacklog numGroups ->
-                      [backlogJob now numGroups (offset + i) | i <- [1 .. producerBatchSize]]
+                      [backlogJob now numGroups (offset + index) | index <- [1 .. producerBatchSize]]
                     GroupedDormant numGroups ->
-                      [dormantJob now numGroups (offset + i) | i <- [1 .. producerBatchSize]]
+                      [dormantJob now numGroups (offset + index) | index <- [1 .. producerBatchSize]]
                     UngroupedDormant ->
-                      [dormantUngroupedJob now (offset + i) | i <- [1 .. producerBatchSize]]
+                      [dormantUngroupedJob now (offset + index) | index <- [1 .. producerBatchSize]]
               producerRunM $ void $ HL.insertJobsBatch_ jobs
               when (producerDelayUs > 0) $ threadDelay producerDelayUs
               go
@@ -746,7 +739,9 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
       ["bench_queue", "bench_queue_groups"]
       statsConn
       processedCounter
-      (map (\c -> runM $ runWorkerPool c) configs <> [mkProducer i | i <- [0 .. numProducers - 1]])
+      ( map (\config -> runM $ runWorkerPool config) configs
+          <> [mkProducer producerIndex | producerIndex <- [0 .. numProducers - 1]]
+      )
       durationUs
   pure (mkSteadyResult throughput processed snap0 snap1 trg)
 
@@ -774,8 +769,8 @@ steadyStateTrial runM producerRunM statsConn mkSingle durationUs numPools worker
   processedCounter <- newIORef (0 :: Int)
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool processedCounter
-    BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs cb -> do
-      acked <- flakyBatch cb jobs
+    BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs callbacks -> do
+      acked <- flakyBatch callbacks jobs
       countProcessedN processedCounter acked
   withInstrumentedPools otel configs $ \instrumented ->
     runSteadyStateTrial
@@ -796,7 +791,7 @@ countProcessed = flip countProcessedN 1
 
 -- | 'countProcessed' over a batch.
 countProcessedN :: (MonadIO n) => IORef Int -> Int -> n ()
-countProcessedN counter k = liftIO $ atomicModifyIORef' counter (\n -> (n + k, ()))
+countProcessedN counter delta = liftIO $ atomicModifyIORef' counter (\count -> (count + delta, ()))
 
 -- Setup
 
@@ -820,22 +815,21 @@ cleanupData conn = do
     conn
     ("TRUNCATE " <> benchSchema <> ".bench_queue, " <> benchSchema <> ".bench_queue_groups CASCADE")
 
--- | Truncate on a fresh connection that is closed afterwards, so the per-trial
--- steady-state setup does not leak a connection per trial.
+-- | Truncate on a fresh connection that is closed afterwards.
 cleanupFresh :: IO ()
 cleanupFresh = do
   conn <- connectPostgreSQL benchConnStr
   cleanupData conn
   close conn
 
--- | Settle the database before a measurement group: clear the dead-tuple debt
--- earlier suites left behind and flush checkpoint work, so neither runs mid-window.
+-- | Settle the database before a measurement group. Clears the dead-tuple debt
+-- earlier suites left behind and flushes checkpoint work.
 quietBenchDb :: IO ()
 quietBenchDb = do
   conn <- connectPostgreSQL benchConnStr
   execute_ conn "SET client_min_messages = WARNING"
   tables <- PG.query conn "SELECT tablename FROM pg_tables WHERE schemaname = ?" (Only benchSchema)
-  traverse_ (\(Only t) -> execute_ conn ("VACUUM ANALYZE " <> benchSchema <> "." <> t)) (tables :: [Only Text])
+  traverse_ (\(Only table) -> execute_ conn ("VACUUM ANALYZE " <> benchSchema <> "." <> table)) (tables :: [Only Text])
   execute_ conn "CHECKPOINT"
   close conn
 
@@ -907,23 +901,23 @@ readGatedTriggers conn =
       \ORDER BY funcname"
 
 mkGatedResult :: Double -> Int -> GatedSnap -> GatedSnap -> [TriggerStats] -> GatedResult
-mkGatedResult throughput processed (GatedSnap w0 cc0 rl0) (GatedSnap w1 cc1 rl1) trg =
+mkGatedResult throughput processed (GatedSnap walBefore concBefore rateBefore) (GatedSnap walAfter concAfter rateAfter) triggers =
   GatedResult
     { grThroughput = throughput
-    , grWalPerJob = fromIntegral (w1 - w0) / jobs
-    , grCcHotPct = hotPct cc0 cc1
-    , grCcUpdPerJob = fromIntegral (tnUpd cc1 - tnUpd cc0) / jobs
-    , grRlHotPct = hotPct rl0 rl1
-    , grRlUpdPerJob = fromIntegral (tnUpd rl1 - tnUpd rl0) / jobs
-    , grTriggers = trg
+    , grWalPerJob = fromIntegral (walAfter - walBefore) / jobs
+    , grCcHotPct = hotPct concBefore concAfter
+    , grCcUpdPerJob = fromIntegral (tnUpd concAfter - tnUpd concBefore) / jobs
+    , grRlHotPct = hotPct rateBefore rateAfter
+    , grRlUpdPerJob = fromIntegral (tnUpd rateAfter - tnUpd rateBefore) / jobs
+    , grTriggers = triggers
     }
   where
     jobs = fromIntegral (max 1 processed) :: Double
 
 formatGated :: [GatedResult] -> String
 formatGated [] = "(no samples)"
-formatGated rs =
-  formatStats "jobs/sec" (computeStats (map grThroughput rs))
+formatGated results =
+  formatStats "jobs/sec" (computeStats (map grThroughput results))
     <> "\n  "
     <> showFFloat (Just 0) (meanOf grWalPerJob) ""
     <> " B WAL/job | count HOT "
@@ -935,13 +929,13 @@ formatGated rs =
     <> "% ("
     <> showFFloat (Just 2) (meanOf grRlUpdPerJob) ""
     <> " upd/job)\n"
-    <> formatTriggerStats (grTriggers (last rs))
+    <> formatTriggerStats (grTriggers (last results))
   where
     meanOf :: (GatedResult -> Double) -> Double
-    meanOf f = sum (map f rs) / fromIntegral (length rs)
+    meanOf field = sum (map field results) / fromIntegral (length results)
 
 multiTrialGated :: Int -> IO () -> IO GatedResult -> IO String
-multiTrialGated n setup measure = formatGated <$> replicateM n (setup >> measure)
+multiTrialGated trials setup measure = formatGated <$> replicateM trials (setup >> measure)
 
 -- | One steady-state window over a gated queue: 10 producers insert, a 10-worker pool acks.
 runGatedSteadyTrial
@@ -963,8 +957,8 @@ runGatedSteadyTrial
 runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob durationUs = do
   batchCounter <- newIORef (0 :: Int)
   let producer = do
-        offset <- atomicModifyIORef' batchCounter (\n -> (n + 100, n))
-        producerRunM $ void $ HL.insertJobsBatch_ [mkJob (offset + i) | i <- [1 .. 100]]
+        offset <- atomicModifyIORef' batchCounter (\count -> (count + 100, count))
+        producerRunM $ void $ HL.insertJobsBatch_ [mkJob (offset + index) | index <- [1 .. 100]]
         producer
   (throughput, processed, snap0, snap1, trg) <-
     runMeasuredWindow
@@ -997,8 +991,8 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = 
       transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         countProcessed processedCounter
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) cb -> do
-        ackAll cb (toList jobs)
+      defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
+        ackAll callbacks (toList jobs)
         countProcessedN processedCounter (length jobs)
   runGatedSteadyTrial runM producerRunM statsConn (benchTune cfg0) processedCounter table mkJob durationUs
 
@@ -1012,10 +1006,10 @@ gatingBenches
      )
   -> [Benchmark]
 gatingBenches settle trial =
-  [ bgroup "ungrouped" (profiles (\ctor i -> defaultJob (ctor i)))
+  [ bgroup "ungrouped" (profiles (\ctor index -> defaultJob (ctor index)))
   , bgroup
       "grouped (5000 groups)"
-      (profiles (\ctor i -> defaultGroupedJob (T.pack ("g" <> show ((i `mod` 5000) + 1))) (ctor i)))
+      (profiles (\ctor index -> defaultGroupedJob (T.pack ("g" <> show ((index `mod` 5000) + 1))) (ctor index)))
   ]
   where
     profiles :: (forall payload. (Int -> payload) -> Int -> JobWrite payload) -> [Benchmark]
@@ -1035,10 +1029,10 @@ gatingBenches settle trial =
         , mode "batched (size 10)" (BenchBatchedJobsMode 10)
         ]
       where
-        mode label m =
+        mode label benchMode =
           singleTest label
             $ ThroughputBench
-            $ multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial m table mkJob trialDurationUs)
+            $ multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial benchMode table mkJob trialDurationUs)
 
 setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
 setupQueue simpleEnv totalJobs flavor = do
@@ -1049,27 +1043,27 @@ setupQueue simpleEnv totalJobs flavor = do
   let chunkSize = 50000
       mkJobs offset = case flavor of
         Ungrouped ->
-          [defaultJob (BenchBatch i) | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+          [defaultJob (BenchBatch index) | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
         Grouped numGroups ->
-          [ defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          [ defaultGroupedJob (T.pack $ "g" <> show ((index `mod` numGroups) + 1)) (BenchBatch index)
+          | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]
           ]
         GroupedSkewed numGroups hotGroups ->
-          [ defaultGroupedJob (skewedGroupKey numGroups hotGroups i) (BenchBatch i)
-          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          [ defaultGroupedJob (skewedGroupKey numGroups hotGroups index) (BenchBatch index)
+          | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]
           ]
         Mixed numGroups ->
-          [ if even i
-              then defaultJob (BenchBatch i)
-              else defaultGroupedJob (T.pack $ "g" <> show ((i `mod` numGroups) + 1)) (BenchBatch i)
-          | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]
+          [ if even index
+              then defaultJob (BenchBatch index)
+              else defaultGroupedJob (T.pack $ "g" <> show ((index `mod` numGroups) + 1)) (BenchBatch index)
+          | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]
           ]
         GroupedBacklog numGroups ->
-          [backlogJob now numGroups i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+          [backlogJob now numGroups index | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
         GroupedDormant numGroups ->
-          [dormantJob now numGroups i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+          [dormantJob now numGroups index | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
         UngroupedDormant ->
-          [dormantUngroupedJob now i | i <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
+          [dormantUngroupedJob now index | index <- [offset + 1 .. min (offset + chunkSize) totalJobs]]
       go offset
         | offset >= totalJobs = pure ()
         | otherwise = do
@@ -1103,9 +1097,9 @@ main = do
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
 
   statsConn <- connectPostgreSQL benchConnStr
-  -- Suppress "index does not exist, skipping" NOTICEs from applyIndexProfile.
+  -- Suppress "index does not exist, skipping" NOTICEs.
   execute_ statsConn "SET client_min_messages = WARNING"
-  -- Keep autovacuum off the shared gated tables so a mid-window pass is not measured.
+  -- Keep autovacuum off the shared gated tables.
   execute_ statsConn "ALTER TABLE arbiter.arbiter_concurrency SET (autovacuum_enabled = false)"
   execute_ statsConn "ALTER TABLE arbiter.arbiter_rate_limits SET (autovacuum_enabled = false)"
   [Only trackSetting] <- PG.query_ statsConn "SHOW track_functions"
@@ -1203,15 +1197,21 @@ claimTrial runM durationUs claimAction = do
 
 simpleWorkerBenches :: Connection -> SimpleEnv BenchRegistry -> RunM SimpleM -> [Benchmark]
 simpleWorkerBenches statsConn simpleEnv runM =
-  mkWorkerBenches simpleEnv (\n d p w m -> simpleWorkerTrial runM statsConn n d p w m)
+  mkWorkerBenches
+    simpleEnv
+    (\jobs duration pools workers mode -> simpleWorkerTrial runM statsConn jobs duration pools workers mode)
 
 hasqlWorkerBenches :: Connection -> SimpleEnv BenchRegistry -> RunM HasqlM -> [Benchmark]
 hasqlWorkerBenches statsConn simpleEnv runM =
-  mkWorkerBenches simpleEnv (\n d p w m -> hasqlWorkerTrial runM statsConn n d p w m)
+  mkWorkerBenches
+    simpleEnv
+    (\jobs duration pools workers mode -> hasqlWorkerTrial runM statsConn jobs duration pools workers mode)
 
 orvilleWorkerBenches :: Connection -> SimpleEnv BenchRegistry -> RunM OrvilleM -> [Benchmark]
 orvilleWorkerBenches statsConn simpleEnv runM =
-  mkWorkerBenches simpleEnv (\n d p w m -> orvilleWorkerTrial runM statsConn n d p w m)
+  mkWorkerBenches
+    simpleEnv
+    (\jobs duration pools workers mode -> orvilleWorkerTrial runM statsConn jobs duration pools workers mode)
 
 -- | Measure the group-maintenance cost as group size and key skew increase.
 -- A smaller trial set keeps this diagnostic suite practical.
@@ -1261,7 +1261,7 @@ mkWorkerBenches simpleEnv trial =
   where
     poolLabel :: Int -> String
     poolLabel 1 = "1 pool"
-    poolLabel n = show n <> " pools"
+    poolLabel count = show count <> " pools"
     defaultFlavors :: [(String, QueueFlavor)]
     defaultFlavors =
       [ ("ungrouped", Ungrouped)
@@ -1315,8 +1315,7 @@ steadyStateBenches trial =
               [ mkBench "single job mode" BenchSingleJobMode Plain
               , mkBench "batched mode (size 10)" (BenchBatchedJobsMode 10) Plain
               ]
-                -- One flavor carries the OTel comparison, the cost being per job
-                -- rather than per queue shape.
+                -- One flavor carries the OTel comparison. The cost is per job.
                 <> [mkBench "single job mode (instrumented)" BenchSingleJobMode Instrumented | flavor == Ungrouped]
   ]
   where

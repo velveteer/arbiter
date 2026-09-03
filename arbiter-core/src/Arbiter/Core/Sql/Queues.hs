@@ -12,18 +12,18 @@ module Arbiter.Core.Sql.Queues
 
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Text qualified as T
 
-import Arbiter.Core.Codec (codecColumns, queueRowCodec)
+import Arbiter.Core.Codec (queueRowCodec)
 import Arbiter.Core.Job.Schema (SchemaName, pauseNotifyChannelPrefix)
 import Arbiter.Core.Queues (QueueRow, arbiterQueuesTable)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
+import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Core.Worker (arbiterWorkersTable)
 
--- | The @arbiter_queues@ read columns, comma separated.
+-- | The @arbiter_queues@ read columns, in codec order.
 queueColumnList :: Text
-queueColumnList = T.intercalate ", " (codecColumns queueRowCodec)
+queueColumnList = "queue_name, paused, paused_at, metadata, created_at, updated_at"
 
 -- | Insert an arbiter_queues row with defaults if one doesn't already exist.
 ensureQueueSQL :: SchemaName -> Text -> Query ()
@@ -39,12 +39,13 @@ ensureQueueSQL schemaName queue =
 setQueuePausedSQL :: SchemaName -> Text -> Bool -> Query Int64
 setQueuePausedSQL schemaName queue paused =
   let tbl = arbiterQueuesTable schemaName
-      wTbl = arbiterWorkersTable schemaName
-      chanPrefix = pauseNotifyChannelPrefix schemaName
+      workersTbl = arbiterWorkersTable schemaName
+      chanPrefix = textLiteral (pauseNotifyChannelPrefix schemaName)
    in [sql|
         WITH upsert AS (
           INSERT INTO ${tbl} (queue_name, paused, paused_at)
-            VALUES (#{queue :: CText}, #{paused :: CBool}, CASE WHEN #{paused :: CBool}::boolean THEN NOW() ELSE NULL END)
+            VALUES (#{queue :: CText}, #{paused :: CBool},
+                    CASE WHEN #{paused :: CBool}::boolean THEN NOW() ELSE NULL END)
           ON CONFLICT (queue_name) DO UPDATE
             SET paused = EXCLUDED.paused,
                 paused_at = CASE
@@ -57,14 +58,14 @@ setQueuePausedSQL schemaName queue paused =
         ),
         notif AS (
           SELECT pg_notify(
-            LEFT('${chanPrefix}' || w.queue_name, 63),
+            LEFT(${chanPrefix} || worker.queue_name, 63),
             json_build_object(
-              'worker_id', w.worker_id,
-              'paused', w.paused OR u.paused
+              'worker_id', worker.worker_id,
+              'paused', worker.paused OR upserted.paused
             )::text
           )
-          FROM upsert u
-          JOIN ${wTbl} w ON w.queue_name = u.queue_name
+          FROM upsert upserted
+          JOIN ${workersTbl} worker ON worker.queue_name = upserted.queue_name
         )
         SELECT count(*)::int8 AS @{count :: CInt8} FROM upsert
         WHERE (SELECT count(*) FROM notif) >= 0
@@ -74,12 +75,10 @@ setQueuePausedSQL schemaName queue paused =
 getQueueSQL :: SchemaName -> Text -> Query QueueRow
 getQueueSQL schemaName queue =
   let tbl = arbiterQueuesTable schemaName
-      cols = queueColumnList
-   in rows queueRowCodec [sql|SELECT ${cols} FROM ${tbl} WHERE queue_name = #{queue :: CText}|]
+   in rows queueRowCodec [sql|SELECT ${queueColumnList} FROM ${tbl} WHERE queue_name = #{queue :: CText}|]
 
 -- | List all arbiter_queues rows.
 listQueuesSQL :: SchemaName -> Query QueueRow
 listQueuesSQL schemaName =
   let tbl = arbiterQueuesTable schemaName
-      cols = queueColumnList
-   in rows queueRowCodec [sql|SELECT ${cols} FROM ${tbl} ORDER BY queue_name|]
+   in rows queueRowCodec [sql|SELECT ${queueColumnList} FROM ${tbl} ORDER BY queue_name|]

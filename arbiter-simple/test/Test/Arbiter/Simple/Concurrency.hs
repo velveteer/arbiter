@@ -50,7 +50,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   sharedPool <- runIO (createSimplePool 10 connStr)
   let withConn :: SimpleEnv SimpleConcurrencyTestRegistry -> (PG.Connection -> IO ()) -> IO ()
-      withConn env f = withResource (fromJust (connectionPool (simplePool env))) f
+      withConn env action = withResource (fromJust (connectionPool (simplePool env))) action
   around (withCleanup sharedPool) $ do
     concurrencySpec @TestPayload TestMessage runSimpleDb
     raceConditionSpec @TestPayload TestMessage runSimpleDb
@@ -63,14 +63,12 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
           connSlow <- PG.connectPostgreSQL connStr
           _ <- PG.execute_ connSlow "BEGIN"
 
-          -- Pod 1: insert within slow transaction (groups trigger holds row lock)
+          -- Pod 1 inserts inside the slow transaction. The groups trigger holds the row lock.
           Just jobA <-
             inTransaction @SimpleConcurrencyTestRegistry connSlow testSchema $
               HL.insertJob (setGroupKey (Just "serialize") $ defaultJob (TestMessage "SlowPod"))
 
-          -- Pod 2 insert + concurrent claims + Pod 1 commit - all concurrent.
-          -- Without groups trigger serialization, Pod 2 could commit first and
-          -- be claimed before Pod 1's transaction commits.
+          -- Pod 2 insert, concurrent claims, and Pod 1 commit run at the same time.
           results <-
             mapConcurrently
               id
@@ -87,20 +85,18 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
                    ]
 
           let allClaimed = concat results
-          -- Any claimed job from this group must be Pod 1's (lower id).
-          -- Pod 2's job being claimed first would mean it committed before
-          -- Pod 1 - a serialization failure.
-          forM_ allClaimed $ \j ->
-            when (groupKey j == Just "serialize" && primaryKey j /= primaryKey jobA) $
-              atomicModifyIORef' violationsRef (\n -> (n + 1, ()))
+          -- Any claimed job from this group must be Pod 1's job, which has the lower id.
+          forM_ allClaimed $ \job ->
+            when (groupKey job == Just "serialize" && primaryKey job /= primaryKey jobA) $
+              atomicModifyIORef' violationsRef (\count -> (count + 1, ()))
 
-          forM_ allClaimed $ \j -> void $ runSimpleDb env (HL.ackJob j)
+          forM_ allClaimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
           let drain = do
-                c <- runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload]
-                if null c
+                claimed <- runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload]
+                if null claimed
                   then pure ()
                   else do
-                    forM_ c $ \j -> void $ runSimpleDb env (HL.ackJob j)
+                    forM_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job)
                     drain
           drain
 
@@ -136,10 +132,10 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
 
         -- Drain stragglers
         let drain = do
-              c <- runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload]
-              if null c
+              claimed <- runSimpleDb env (HL.claimNextVisibleJobs 100 60) :: IO [JobRead TestPayload]
+              if null claimed
                 then pure ()
-                else do forM_ c $ \j -> void $ runSimpleDb env (HL.ackJob j); drain
+                else do forM_ claimed $ \job -> void $ runSimpleDb env (HL.ackJob job); drain
         drain
 
         withConn env $ \conn -> do

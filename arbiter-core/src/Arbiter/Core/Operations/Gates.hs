@@ -42,24 +42,23 @@ import Arbiter.Core.Sql.QQ qualified as QQ
 -- database aborts a statement that exceeds the limit.
 setLocalStatementTimeout :: (MonadArbiter m) => NominalDiffTime -> m ()
 setLocalStatementTimeout limit =
-  let ms = ceiling (realToFrac limit * 1000 :: Double) :: Int
-      msTxt = T.pack (show ms)
+  let millis = ceiling (realToFrac limit * 1000 :: Double) :: Int
+      millisText = T.pack (show millis)
    in void $
         MA.executeQuery
-          [QQ.sql|SELECT set_config('statement_timeout', '${msTxt}', true) AS @{set_config :: CText}|]
+          [QQ.sql|SELECT set_config('statement_timeout', '${millisText}', true) AS @{set_config :: CText}|]
 
 -- | 'runGated' with each statement of @work@ bounded by @limit@. The bound is
--- transaction-local, which the gate transaction @work@ runs in makes effective.
+-- transaction-local.
 runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> NominalDiffTime -> m a -> m (Maybe a)
 runGatedBounded schemaName task interval limit work =
   runGated schemaName task interval (setLocalStatementTimeout limit >> work)
 
 -- | Run @work@ at most once per @interval@ across every worker pool sharing
 -- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@
--- claimed via @SELECT FOR UPDATE SKIP LOCKED@, so the interval check and the
--- mutual exclusion happen in one statement. Returns @Just@ the work's result
--- if it ran, @Nothing@ if either the gate said "too recent" or another pool
--- was already running the task.
+-- claimed via @SELECT FOR UPDATE SKIP LOCKED@. Returns @Just@ the work's result
+-- when it ran. Returns @Nothing@ when the gate is too recent or another pool
+-- holds the task.
 runGated
   :: (MonadArbiter m)
   => SchemaName
@@ -86,8 +85,7 @@ runGatedState
 runGatedState schemaName task interval work =
   runGatedInner schemaName task interval (fmap (second (Just . toJSON)) . work . (>>= parseMaybe parseJSON))
 
--- | 'runGatedState' with each statement of @work@ bounded by @limit@, as
--- 'runGatedBounded' bounds 'runGated'.
+-- | 'runGatedState' with each statement of @work@ bounded by @limit@.
 runGatedStateBounded
   :: (FromJSON s, MonadArbiter m, ToJSON s)
   => SchemaName
@@ -126,10 +124,10 @@ runGatedInner schemaName task interval work = do
     tryClaimGate = listToMaybe <$> MA.executeQuery (Sql.tryClaimGateSQL schemaName task intervalSecs)
 
     ran state = do
-      (r, next) <- work state
-      r <$ MA.executeStatement (maybe (Sql.bumpGateSQL schemaName task) (Sql.bumpGateStateSQL schemaName task) next)
+      (result, next) <- work state
+      result <$ MA.executeStatement (maybe (Sql.bumpGateSQL schemaName task) (Sql.bumpGateStateSQL schemaName task) next)
 
--- | A gate name for a set of parts: the sorted set itself while it fits the gate's
+-- | A gate name for a set of parts. The sorted set itself while it fits the gate's
 -- key, an md5 digest of it beyond that.
 gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
 gateNameFor prefix parts
@@ -176,15 +174,17 @@ runGatedShared schemaName task interval maxAge work =
     claimOrRead =
       Sql.claimOrReadGateSQL schemaName task (realToFrac interval) (realToFrac maxAge)
     shared (mClaimedAt, mPrevious, mPayload, mAge) = case (mClaimedAt, mPrevious) of
-      (Just at, Just previous) -> Just . Ran <$> publish at previous
+      (Just claimedAt, Just previous) -> Just . Ran <$> publish claimedAt previous
       _ -> pure (decoded <$> mPayload <*> mAge)
-    -- Base onException: UnliftIO's masks the handler uninterruptibly.
-    publish at previous = withRunInIO $ \run ->
-      run (work >>= \a -> a <$ MA.executeStatement (Sql.setGateMetadataSQL schemaName (toJSON a) at task))
-        `E.onException` run (reopen at previous)
-    reopen at previous =
-      void (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Sql.releaseGateSQL schemaName task at previous))))
-    decoded v age = either (Unreadable . (\e -> task <> " gate payload: " <> T.pack e)) (Published age) (parseEither parseJSON v)
+    -- Base onException. UnliftIO's masks the handler uninterruptibly.
+    publish claimedAt previous = withRunInIO $ \run ->
+      run
+        (work >>= \result -> result <$ MA.executeStatement (Sql.setGateMetadataSQL schemaName (toJSON result) claimedAt task))
+        `E.onException` run (reopen claimedAt previous)
+    reopen claimedAt previous =
+      void
+        (tryAny (UIO.timeout (micros interval) (MA.executeStatement (Sql.releaseGateSQL schemaName task claimedAt previous))))
+    decoded value age = either (Unreadable . (\err -> task <> " gate payload: " <> T.pack err)) (Published age) (parseEither parseJSON value)
 
 -- | An interval in microseconds, for the timeout and delay primitives.
 micros :: NominalDiffTime -> Int

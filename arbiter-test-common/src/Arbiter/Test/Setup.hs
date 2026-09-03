@@ -75,8 +75,7 @@ setupDDL = setupDDLWithConfig defaultSetupConfig {setupEnableNotifications = Fal
 setupDDLWithNotify :: Text -> Text -> Connection -> IO ()
 setupDDLWithNotify = setupDDLWithConfig defaultSetupConfig
 
--- | Rebuild the schema by running the shipped migration scripts, so tests exercise
--- exactly the DDL that deploys do.
+-- | Rebuild the schema with the shipped migration scripts.
 setupDDLWithConfig :: SetupConfig -> Text -> Text -> Connection -> IO ()
 setupDDLWithConfig config schemaName tableName conn = do
   void $ execute_ conn $ "DROP SCHEMA IF EXISTS " <> schemaName <> " CASCADE"
@@ -98,25 +97,24 @@ setupDDLWithConfig config schemaName tableName conn = do
 cleanupData :: Text -> Text -> Connection -> IO ()
 cleanupData schemaName tableName conn = do
   execute_ conn "SET client_min_messages = WARNING"
-  -- A draining worker pool may still hold locks on the job and groups tables in
-  -- the opposite order from this TRUNCATE, so bound the wait and retry on a
-  -- deadlock or lock timeout instead of failing the test.
+  -- A draining worker pool can still hold locks on the job and groups tables.
+  -- Bound the wait and retry on a deadlock or lock timeout.
   execute_ conn "SET lock_timeout = '5s'"
-  -- Rate-limit policies are seeded once per suite, not per test.
+  -- Rate-limit policies are seeded once per suite.
   let truncated = filter (/= RL.arbiterRateLimitPoliciesTableName) (allSchemaTables [tableName])
       truncateSql =
         "TRUNCATE "
           <> T.intercalate ", " (map (Schema.qualifiedTable schemaName) truncated)
           <> " CASCADE"
-      go n = do
-        r <- try (execute_ conn truncateSql) :: IO (Either SqlError ())
-        case r of
+      go remaining = do
+        outcome <- try (execute_ conn truncateSql) :: IO (Either SqlError ())
+        case outcome of
           Right () -> pure ()
           -- 40P01 deadlock_detected, 55P03 lock_not_available
-          Left e
-            | sqlState e `elem` ["40P01", "55P03"] && n > (0 :: Int) ->
-                threadDelay 100_000 >> go (n - 1)
-            | otherwise -> throwIO e
+          Left sqlErr
+            | sqlState sqlErr `elem` ["40P01", "55P03"] && remaining > (0 :: Int) ->
+                threadDelay 100_000 >> go (remaining - 1)
+            | otherwise -> throwIO sqlErr
   go 10
   execute_ conn "RESET lock_timeout"
   execute_ conn "SET client_min_messages = NOTICE"
@@ -142,8 +140,7 @@ setupOnce connStr schemaName tableName withNotify = do
   setupDDLWithConfig config schemaName tableName conn
   close conn
 
--- | Add one more job-queue table to an existing schema without dropping it, for
--- tests that exercise several queues in one schema.
+-- | Add one more job-queue table to an existing schema.
 addQueueTable :: ByteString -> Text -> Text -> Bool -> IO ()
 addQueueTable connStr schemaName tableName withNotify = do
   conn <- connectPostgreSQL connStr
@@ -173,7 +170,6 @@ createSharedPool connStr =
   newPool $ setNumStripes (Just 1) $ defaultPoolConfig (connectPostgreSQL connStr) close 60 5
 
 -- | Seed a concurrency pool's default limit and clear any override, as SQL statements.
--- Callers run them in their own context (monad or raw connection).
 seedConcurrencyPoolSQL :: Text -> Text -> Int32 -> [Text]
 seedConcurrencyPoolSQL schema prefix lim =
   [ CC.upsertConcurrencyPolicyRowSQL schema (ConcurrencyPolicy prefix lim)
@@ -193,6 +189,6 @@ drainWith fetch = go []
 
 -- | Truncate to microsecond precision to match PostgreSQL @timestamptz@.
 truncateToMicros :: UTCTime -> UTCTime
-truncateToMicros (UTCTime d t) =
-  let micros = floor (t * 1e6) :: Integer
-   in UTCTime d (picosecondsToDiffTime (micros * 1000000))
+truncateToMicros (UTCTime day dayTime) =
+  let micros = floor (dayTime * 1e6) :: Integer
+   in UTCTime day (picosecondsToDiffTime (micros * 1000000))

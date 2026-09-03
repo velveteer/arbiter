@@ -75,8 +75,8 @@ class (Monad m) => HasHasqlPool m where
   getHasqlPool :: m HasqlConnectionPool
   localHasqlPool :: (HasqlConnectionPool -> HasqlConnectionPool) -> m a -> m a
 
--- | Pin a hasql connection for the callback, which every arbiter operation inside it
--- then runs on. The caller has already issued its @BEGIN@.
+-- | Pin a hasql connection for the callback. Every arbiter operation inside it runs on
+-- that connection. The caller has already issued its @BEGIN@.
 localHasqlConnection :: (HasHasqlPool m) => Hasql.Connection -> m a -> m a
 localHasqlConnection conn = localHasqlPool (\pool -> pool {activeConn = Just conn, transactionDepth = 1})
 
@@ -100,8 +100,8 @@ hasqlExecuteQueryPrepared (Query sql params codec) = do
 
 runQueryStatement :: Bool -> Hasql.Connection -> Text -> Params -> RowCodec a -> IO [a]
 runQueryStatement prepare conn sql params codec = do
-  let mk = if prepare then S.preparable else S.unpreparable
-      stmt = mk (numberPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
+  let mkStatement = if prepare then S.preparable else S.unpreparable
+      stmt = mkStatement (numberPlaceholders sql) (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
     Right rows -> pure rows
@@ -116,7 +116,7 @@ hasqlExecuteStatement (Query sql params _) = withConn $ \conn -> liftIO $ do
   let stmt = Encode.buildStatementRowCount sql params
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
-    Right n -> pure n
+    Right rowCount -> pure rowCount
     Left err -> throwInternal $ "hasql statement error: " <> T.pack (show err)
 
 -- | Transaction bracket. Nests via savepoints.
@@ -127,21 +127,21 @@ hasqlWithDbTransaction action = do
   case (activeConn pool, depth) of
     (Nothing, _) -> case connectionPool pool of
       Nothing -> throwInternal "No active connection and no connection pool available"
-      Just p -> withRunInIO $ \run ->
-        Pool.withResource p $ \conn ->
+      Just connPool -> withRunInIO $ \run ->
+        Pool.withResource connPool $ \conn ->
           beginCommitOrRollback conn $
             run (localHasqlPool (\hpool -> hpool {activeConn = Just conn, transactionDepth = 1}) action)
     (Just conn, 0) -> withRunInIO $ \run ->
       beginCommitOrRollback conn $
-        run (localHasqlPool (\p -> p {transactionDepth = 1}) action)
-    (Just conn, d) -> mask $ \restore -> do
-      let spName = "arbiter_sp_" <> BSC.pack (show d)
+        run (localHasqlPool (\hpool -> hpool {transactionDepth = 1}) action)
+    (Just conn, nestedDepth) -> mask $ \restore -> do
+      let spName = "arbiter_sp_" <> BSC.pack (show nestedDepth)
       liftIO $ Compat.runSQL conn ("SAVEPOINT " <> spName)
-      a <-
-        restore (localHasqlPool (\p -> p {transactionDepth = d + 1}) action)
+      result <-
+        restore (localHasqlPool (\hpool -> hpool {transactionDepth = nestedDepth + 1}) action)
           `onException` liftIO (Compat.runSQL conn ("ROLLBACK TO SAVEPOINT " <> spName))
       liftIO $ Compat.runSQL conn ("RELEASE SAVEPOINT " <> spName)
-      pure a
+      pure result
 
 beginCommitOrRollback :: forall a. Hasql.Connection -> IO a -> IO a
 beginCommitOrRollback conn action = mask $ \restore -> do
@@ -157,8 +157,8 @@ beginCommitOrRollback conn action = mask $ \restore -> do
         _ <- try (Compat.runSQL conn "ROLLBACK") :: IO (Either SomeException ())
         pure ()
 
--- | Run a handler on the active connection, so it can issue typed hasql queries inside
--- the worker transaction.
+-- | Run a handler on the active connection. The handler can issue typed hasql queries
+-- inside the worker transaction.
 hasqlRunHandlerWithConnection
   :: (HasHasqlPool m, MonadIO m)
   => (Hasql.Connection -> job -> m result)
@@ -176,9 +176,9 @@ hasqlRunHandlerWithConnection handler job = do
 
 -- | The pinned connection, or one checked out of the pool.
 withConn :: (HasHasqlPool m, MonadIO m) => (Hasql.Connection -> IO a) -> m a
-withConn f = do
+withConn action = do
   pool <- getHasqlPool
   case (activeConn pool, connectionPool pool) of
-    (Just conn, _) -> liftIO $ f conn
-    (Nothing, Just p) -> liftIO $ Pool.withResource p f
+    (Just conn, _) -> liftIO $ action conn
+    (Nothing, Just connPool) -> liftIO $ Pool.withResource connPool action
     (Nothing, Nothing) -> throwInternal "No active connection and no connection pool available"

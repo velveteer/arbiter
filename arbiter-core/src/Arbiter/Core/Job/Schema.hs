@@ -102,7 +102,7 @@ type SchemaName = Text
 -- | Unqualified table name within a schema, e.g. @"email_jobs"@.
 type TableName = Text
 
--- | The schema arbiter's tables live in by default, keeping them out of @public@.
+-- | The schema arbiter's tables live in by default.
 defaultSchemaName :: SchemaName
 defaultSchemaName = "arbiter"
 
@@ -115,14 +115,12 @@ eventStreamingChannel :: Text
 eventStreamingChannel = "arbiter_job_events"
 
 -- | Prefix for per-queue pause NOTIFY channels. The full channel name appends
--- the queue. Exported so SQL templates can build the channel dynamically from
--- @queue_name@ returned by a CTE.
+-- the queue. SQL templates build the channel from @queue_name@ returned by a CTE.
 pauseNotifyChannelPrefix :: SchemaName -> Text
 pauseNotifyChannelPrefix schemaName = "arbiter_pause_" <> schemaName <> "_"
 
 -- | Per-queue NOTIFY channel for pause/resume changes. Workers LISTEN on the
--- channel for their own queue to reconcile faster than the heartbeat poll
--- cadence.
+-- channel for their own queue.
 pauseNotifyChannel :: SchemaName -> Text -> Text
 pauseNotifyChannel schemaName queueName =
   T.take 63 $ pauseNotifyChannelPrefix schemaName <> queueName
@@ -172,9 +170,8 @@ legacyEventStreamingTriggers =
   ]
 
 -- | Ownership marker stamped on every notify function and trigger arbiter installs.
--- Sweeps match 'notifyObjectCommentPrefix', so an unmarked object is never dropped.
--- A trigger is current when its comment equals this exact value, so bump the version
--- whenever 'createNotifyTriggerSQL' changes.
+-- Sweeps match 'notifyObjectCommentPrefix'. A trigger is current when its comment
+-- equals this exact value. Bump the version whenever 'createNotifyTriggerSQL' changes.
 notifyObjectComment :: Text
 notifyObjectComment = notifyObjectCommentPrefix <> "v1"
 
@@ -183,7 +180,7 @@ notifyObjectCommentPrefix :: Text
 notifyObjectCommentPrefix = "arbiter:notify:"
 
 -- | Marker stamped on notify objects installed before arbiter marked them. Sweeps
--- match it and no trigger body is ever built with it, so an adopted trigger is rebuilt.
+-- match it. An adopted trigger is rebuilt.
 notifyAdoptedObjectComment :: Text
 notifyAdoptedObjectComment = notifyObjectCommentPrefix <> "adopted"
 
@@ -218,7 +215,7 @@ jobQueueArchiveTable :: SchemaName -> TableName -> Text
 jobQueueArchiveTable schemaName tableName = qualifiedTable schemaName (tableName <> archiveSuffix)
 
 -- | Backfill NULL @max_attempts@ to the default and set the column default.
--- Left nullable for rolling-deploy safety (old code may still insert NULL).
+-- The column stays nullable for rolling deploys.
 setMaxAttemptsDefaultSQL :: SchemaName -> TableName -> Text
 setMaxAttemptsDefaultSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
@@ -253,7 +250,7 @@ createSchemaSQL schemaName =
   "CREATE SCHEMA IF NOT EXISTS " <> quoteIdentifier schemaName <> ";"
 
 -- | The job columns the queue and DLQ tables share. Checksummed by the create-table
--- migration, so a new column ships as its own ALTER script.
+-- migration. A new column ships as its own ALTER script.
 jobColumns :: [Text]
 jobColumns =
   [ "  id BIGSERIAL PRIMARY KEY,"
@@ -347,8 +344,7 @@ jobColumnsForArchive =
     ]
     <> T.unlines (drop 1 jobColumns)
 
--- | Create the completed-job archive table. Logged, since it is the only copy of
--- completed-job history and must survive an unclean shutdown and reach replicas.
+-- | Create the completed-job archive table. The table is logged.
 createJobQueueArchiveTableSQL :: Text -> Text -> Text
 createJobQueueArchiveTableSQL schemaName tableName =
   T.unlines
@@ -398,10 +394,8 @@ createArchiveGroupKeyIndexSQL schemaName tableName =
     , "ON " <> jobQueueArchiveTable schemaName tableName <> " (group_key);"
     ]
 
--- | Ranking index over ready ungrouped jobs only (@not_visible_until IS NULL AND
--- NOT suspended@). Scheduled/backoff/in-flight rows have @not_visible_until@ set
--- and suspended rows are excluded, so they are absent, and the claim's ordered
--- @LIMIT@ stops the scan at the first ready rows.
+-- | Ranking index over ready ungrouped jobs (@not_visible_until IS NULL AND NOT
+-- suspended@). The claim's ordered @LIMIT@ stops the scan at the first ready rows.
 createJobQueueUngroupedReadyRankingIndexSQL :: Text -> Text -> Text
 createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
   T.unlines
@@ -410,9 +404,8 @@ createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
     , "WHERE group_key IS NULL AND not_visible_until IS NULL AND NOT suspended;"
     ]
 
--- | Due-finder for ungrouped parked rows: range-scanned by @not_visible_until <=
--- NOW()@ to pick up scheduled/backoff jobs that have come due and expired leases,
--- without touching the future-dated tail.
+-- | Due-finder for ungrouped parked rows. The claim range-scans it by
+-- @not_visible_until <= NOW()@ for due scheduled, backoff and expired-lease jobs.
 createJobQueueUngroupedDueIndexSQL :: Text -> Text -> Text
 createJobQueueUngroupedDueIndexSQL schemaName tableName =
   T.unlines
@@ -421,9 +414,8 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
     , "WHERE group_key IS NULL AND not_visible_until IS NOT NULL AND NOT suspended;"
     ]
 
--- | Migration: replace the full ungrouped ranking index with the ready-only
--- ranking index plus the due-finder, so the claim splits ready and due instead
--- of walking the backlog through one @(priority, id)@ index.
+-- | Replace the full ungrouped ranking index with the ready-only ranking index
+-- plus the due-finder.
 migrateUngroupedReadySplitIndexesSQL :: Text -> Text -> Text
 migrateUngroupedReadySplitIndexesSQL schemaName tableName =
   T.unlines
@@ -461,7 +453,7 @@ createDLQParentIdIndexSQL schemaName tableName =
     , "WHERE parent_id IS NOT NULL;"
     ]
 
--- | Unique index on @dedup_key@, which the dedup @ON CONFLICT@ resolves against.
+-- | Unique index on @dedup_key@. The dedup @ON CONFLICT@ resolves against it.
 createDedupKeyIndexSQL :: Text -> Text -> Text
 createDedupKeyIndexSQL schemaName tableName =
   T.unlines
@@ -480,7 +472,7 @@ createParentIdIndexSQL schemaName tableName =
     ]
 
 -- | Create a queue's results table, one row per child keyed by @(parent_id, child_id)@.
--- Its foreign key cascades, so acking the parent clears them.
+-- Its foreign key cascades. Acking the parent clears them.
 createResultsTableSQL :: Text -> Text -> Text
 createResultsTableSQL schemaName tableName =
   let resultsTbl = jobQueueResultsTable schemaName tableName
@@ -505,7 +497,7 @@ maintenanceFunctionNames schemaName baseName =
   where
     func suffix = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
 
--- | One statement-level AFTER trigger: drop then recreate, wiring the
+-- | One statement-level AFTER trigger. Drops then recreates, wiring the
 -- @<baseName><suffix>@ function over @tbl@ with the given event and REFERENCING clause.
 statementTriggerSQL :: Text -> Text -> Text -> Text -> Text -> Text -> Text
 statementTriggerSQL schemaName tbl baseName suffix event referencing =
@@ -534,7 +526,7 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
 
 -- | SQL for the per-table NOTIFY function, fired once per insert statement.
 -- A statement that inserted nothing notifies nothing. Channel name is quoted as
--- a string literal, not an identifier.
+-- a string literal.
 createNotifyFunctionSQL :: Text -> Text -> Text
 createNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -559,8 +551,8 @@ createNotifyFunctionSQL schemaName tableName =
             <> "';"
         ]
 
--- | A table's job-arrival NOTIFY trigger. Statement-level, so a batch insert notifies
--- one time for the statement.
+-- | A table's job-arrival NOTIFY trigger. Statement-level. A batch insert notifies
+-- one time.
 createNotifyTriggerSQL :: Text -> Text -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
@@ -596,9 +588,8 @@ dropNotifyFunctionSQL schemaName tableName =
 -- ---------------------------------------------------------------------------
 
 -- | Event-streaming function that receives the logical queue name and DLQ flag
--- from each trigger. Trigger arguments avoid inferring either value from table
--- suffixes, so queue names ending in @_dlq@ remain unambiguous. A leased row whose
--- update only extended its lease is not an event.
+-- from each trigger. Queue names ending in @_dlq@ stay unambiguous. A lease-extend
+-- update emits no event.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName

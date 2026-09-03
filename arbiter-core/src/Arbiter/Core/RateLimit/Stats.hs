@@ -50,25 +50,25 @@ data RateLimitBucketView = RateLimitBucketView
   deriving stock (Eq, Generic, Show)
 
 instance ToJSON RateLimitBucketView where
-  toJSON v =
+  toJSON view =
     object
-      [ "key" .= rateLimitKey v
-      , "prefix" .= policyPrefix v
-      , "tokens" .= tokens v
-      , "maxTokens" .= maxTokens v
-      , "fillFraction" .= fillFraction v
-      , "lastRefill" .= lastRefill v
+      [ "key" .= rateLimitKey view
+      , "prefix" .= policyPrefix view
+      , "tokens" .= tokens view
+      , "maxTokens" .= maxTokens view
+      , "fillFraction" .= fillFraction view
+      , "lastRefill" .= lastRefill view
       ]
 
 instance FromJSON RateLimitBucketView where
-  parseJSON = withObject "RateLimitBucketView" $ \o ->
+  parseJSON = withObject "RateLimitBucketView" $ \obj ->
     RateLimitBucketView
-      <$> o .: "key"
-      <*> o .: "prefix"
-      <*> o .: "tokens"
-      <*> o .: "maxTokens"
-      <*> o .:? "fillFraction"
-      <*> o .: "lastRefill"
+      <$> obj .: "key"
+      <*> obj .: "prefix"
+      <*> obj .: "tokens"
+      <*> obj .: "maxTokens"
+      <*> obj .:? "fillFraction"
+      <*> obj .: "lastRefill"
 
 -- | A patch over a policy's override params. Per field: 'Nothing' leaves it
 -- unchanged, @Just Nothing@ clears the override (reverts to the default), and
@@ -84,11 +84,11 @@ instance ToJSON RateLimitPolicyUpdate where
   toJSON = Aeson.genericToJSON patchOptions
   toEncoding = Aeson.genericToEncoding patchOptions
 
--- | Hand-written so a missing key (leave unchanged) is distinguished from an
--- explicit @null@ (clear the override). Plain @.:?@ collapses the two.
+-- | Hand-written. A missing key leaves the field unchanged. An explicit @null@
+-- clears the override.
 instance FromJSON RateLimitPolicyUpdate where
-  parseJSON = withObject "RateLimitPolicyUpdate" $ \o ->
+  parseJSON = withObject "RateLimitPolicyUpdate" $ \obj ->
     RateLimitPolicyUpdate
-      <$> explicitOptionalField o "overrideMaxTokens"
-      <*> explicitOptionalField o "overrideRefillAmount"
-      <*> explicitOptionalField o "overrideInterval"
+      <$> explicitOptionalField obj "overrideMaxTokens"
+      <*> explicitOptionalField obj "overrideRefillAmount"
+      <*> explicitOptionalField obj "overrideInterval"

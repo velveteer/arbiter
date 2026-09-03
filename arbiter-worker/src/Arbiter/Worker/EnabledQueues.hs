@@ -47,14 +47,14 @@ requestedQueues
   -- ^ Registry proxy
   -> IO (Maybe [Text])
 requestedQueues envVar registry = do
-  mVal <- lookupEnv envVar
-  case T.strip . T.pack <$> mVal of
-    Just tval | not (T.null tval) -> Just <$> validate tval
+  rawValue <- lookupEnv envVar
+  case T.strip . T.pack <$> rawValue of
+    Just trimmed | not (T.null trimmed) -> Just <$> validate trimmed
     _ -> pure Nothing
   where
-    validate tval =
+    validate trimmed =
       let allQueues = registryTableNames registry
-          requested = filter (not . T.null) . map T.strip $ T.splitOn "," tval
+          requested = filter (not . T.null) . map T.strip $ T.splitOn "," trimmed
           invalid = filter (`notElem` allQueues) requested
        in case (requested, invalid) of
             ([], _) -> throwInternal $ T.pack envVar <> " is set but names no queues"

@@ -27,12 +27,10 @@ import Arbiter.Core.Sql.Query (Query (..))
 -- | Database abstraction for job queue operations. Each backend (postgresql-simple,
 -- hasql, orville) provides an instance that maps queries to its native driver.
 --
--- The instance also names the monad's schema and queue registry, which is how
--- the high-level API resolves table names and result types from payload types
--- at compile time.
+-- The instance also names the monad's schema and queue registry. The high-level
+-- API resolves table names and result types from them at compile time.
 class (MonadUnliftIO m) => MonadArbiter m where
-  -- | This monad's registry. The default reports an instance that omits it,
-  -- which would otherwise surface as an irreducible 'RegistryOf' application.
+  -- | This monad's registry. The default reports an instance that omits it.
   type RegistryOf m :: JobPayloadRegistry
 
   type
@@ -54,11 +52,11 @@ class (MonadUnliftIO m) => MonadArbiter m where
   getSchema :: m SchemaName
 
   -- | Run a query and decode the result rows. The text, its parameters, and the
-  -- decoder all travel together in the 'Query', so they cannot drift.
+  -- decoder travel together in the 'Query'.
   executeQuery :: Query a -> m [a]
 
-  -- | 'executeQuery' for a hot statement whose text is stable across calls, so a
-  -- backend may prepare it once per connection and reuse the plan.
+  -- | 'executeQuery' for a hot statement whose text is stable across calls. A
+  -- backend may prepare it once per connection.
   executeQueryPrepared :: Query a -> m [a]
   executeQueryPrepared = executeQuery
 
@@ -85,6 +83,6 @@ type JobHandler m (payload :: Type) result = Handler m (JobRead payload) result
 type HasRegistry m (registry :: JobPayloadRegistry) =
   (MonadArbiter m, RegistryOf m ~ registry)
 
--- | The result type declared by @payload@'s registry entry. Not injective, so a
--- signature naming it needs another argument to determine @payload@.
+-- | The result type declared by @payload@'s registry entry. It is not injective.
+-- A signature naming it needs another argument to determine @payload@.
 type ResultOf m (payload :: Type) = ResultFor payload (RegistryOf m)

@@ -23,35 +23,41 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 import NeatInterpolation (text)
 
-import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec)
+import Arbiter.Core.Codec (archiveRowCodec, jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, jobColsExceptId, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
--- | Archive columns: archive-specific fields + all Job read fields (with job_id
--- and renames @id@ to @job_id@). Used as the SELECT list for archive listings.
-allArchiveColumns :: [Text]
-allArchiveColumns = codecColumns (archiveRowCodec "")
+-- | The archive read columns, in codec order. The archive uses @job_id@ for the
+-- main-table @id@.
+allArchiveColumns :: Text
+allArchiveColumns =
+  [text|
+    id, completed_at, job_id, payload, group_key, inserted_at, updated_at, attempts, last_error, priority,
+    last_attempted_at, not_visible_until, dedup_key, dedup_strategy, max_attempts,
+    parent_id, parent_state, traceparent, tracestate, suspended, claimed_by, claim_seq,
+    archive_for, kind, rate_limit_key, rate_limit_prefix, concurrency_key, concurrency_prefix,
+    result
+  |]
 
--- | The @, archived AS (...)@ CTE teeing rows from the named @ack@ CTE into the
--- archive, per-row on @archive_for@ (rows with NULL retention are not archived).
--- @archive_expires_at@ is precomputed so the purge is a self-contained sweep.
--- Shared by single and batch ack.
+-- | The @archived@ CTE teeing rows from the named @ack@ CTE into the archive, per-row
+-- on @archive_for@. @archive_expires_at@ is precomputed. Shared by single and batch ack.
 archiveAckCte :: Text -> Text -> Text -> Text
 archiveAckCte schema tableName ackCte =
   let archiveTbl = jobQueueArchiveTable schema tableName
-   in [text|,
+   in [text|
         archived AS (
           INSERT INTO ${archiveTbl} (job_id, ${jobColsExceptId}, rate_limit_cost, completed_at, archive_expires_at)
           SELECT id, ${jobColsExceptId}, rate_limit_cost, NOW(), NOW() + (archive_for * interval '1 second')
           FROM ${ackCte}
           WHERE archive_for > 0
-        )|]
+        ),
+      |]
 
--- | Set a completed root job's stored @result@ on its archive row. No-ops when
--- the job was not archived (no row for @job_id@).
+-- | Set a completed root job's stored @result@ on its archive row. No-ops without
+-- an archive row.
 updateArchiveResultSQL :: Text -> Text -> Value -> Int64 -> Query ()
 updateArchiveResultSQL schema tableName result jobId =
   let archiveTbl = jobQueueArchiveTable schema tableName
@@ -62,12 +68,12 @@ updateArchiveResultsBatchSQL :: Text -> Text -> [Int64] -> [Value] -> Query ()
 updateArchiveResultsBatchSQL schema tableName jobIds results =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|
-        UPDATE ${archiveTbl} a SET result = src.result
+        UPDATE ${archiveTbl} archive_row SET result = src.result
         FROM (
           SELECT unnest(#{jobIds :: [CInt8]}::bigint[]) AS job_id,
                  unnest(#{results :: [CJsonb]}::jsonb[]) AS result
         ) src
-        WHERE a.job_id = src.job_id
+        WHERE archive_row.job_id = src.job_id
       |]
 
 -- | Per-queue cap on archived jobs purged in one reaper pass.
@@ -75,8 +81,7 @@ archivePurgeBatch :: Int
 archivePurgeBatch = 10000
 
 -- | Delete up to @archivePurgeBatch@ archived jobs whose per-row
--- @archive_expires_at@ has passed. Capped per call so a large backlog drains over
--- multiple reaper ticks and prevents an unbounded DELETE from stalling the loop.
+-- @archive_expires_at@ has passed.
 purgeArchiveSQL :: Text -> Text -> Text
 purgeArchiveSQL schema tableName =
   let archiveTbl = jobQueueArchiveTable schema tableName
@@ -95,11 +100,10 @@ listArchiveFilteredSQL
   :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead Value, Maybe Value)
 listArchiveFilteredSQL schema tableName whereFrag orderBy limit offset =
   let archiveTbl = jobQueueArchiveTable schema tableName
-      columns = T.intercalate ", " allArchiveColumns
    in rows
         (archiveRowCodec tableName)
         [sql|
-          SELECT ${columns}
+          SELECT ${allArchiveColumns}
           FROM ${archiveTbl}
           ${whereFrag}
           ORDER BY ${orderBy}
@@ -125,21 +129,17 @@ deleteArchiveJobsBatchSQL schema tableName archiveIds =
    in [sql|DELETE FROM ${archiveTbl} WHERE id = ANY(#{archiveIds :: [CInt8]})|]
 
 -- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
--- row. Carries payload, group, priority, max_attempts, admission keys/cost,
--- archive_for, and the trace context it was enqueued with. Resets everything
--- else (attempts, error, parent, dedup) to column defaults.
+-- row. Carries 'enqueuedAgainCols' and resets the other columns to their defaults.
 reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Query (JobRead Value)
 reEnqueueFromArchiveSQL schema tableName archiveId =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName
-      columns = jobColumns Nothing
-      carried = enqueuedAgainCols
    in rows
         (jobRowCodec tableName)
         [sql|
-          INSERT INTO ${tbl} (${carried})
-          SELECT ${carried}
+          INSERT INTO ${tbl} (${enqueuedAgainCols})
+          SELECT ${enqueuedAgainCols}
           FROM ${archiveTbl}
           WHERE id = #{archiveId :: CInt8}
-          RETURNING ${columns}
+          RETURNING ${jobColumns}
         |]

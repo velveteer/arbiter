@@ -12,6 +12,7 @@ module Arbiter.Core.Sql.Groups
 
 import Data.Int (Int64)
 import Data.Text (Text)
+import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Schema.Groups (groupAggregates, inFlightPredicate)
@@ -24,18 +25,21 @@ groupsWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
 groupsWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
-      after = foldMap (\k -> [sql|WHERE group_key > #{k :: CText}|]) cursor
+      after = foldMap (\key -> [sql|WHERE group_key > #{key :: CText}|]) cursor
    in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} ${after} ORDER BY group_key LIMIT #{lim :: CInt8}|]
 
 -- | At most @limit@ keys past @cursor@ the maintenance triggers emptied in place, in the
--- database's key order. Its last key is the caller's resume cursor, so a prefix that
--- empties again every pass cannot starve the keys above it.
+-- database's key order. Its last key is the caller's resume cursor.
 emptiedWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
 emptiedWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
-      after = foldMap (\k -> [sql|AND group_key > #{k :: CText}|]) cursor
-   in [sql|SELECT @{group_key :: CText} FROM ${groupsTbl} WHERE job_count = 0 ${after} ORDER BY group_key LIMIT #{lim :: CInt8}|]
+      after = foldMap (\key -> [sql|AND group_key > #{key :: CText}|]) cursor
+   in [sql|
+        SELECT @{group_key :: CText} FROM ${groupsTbl}
+        WHERE job_count = 0 ${after}
+        ORDER BY group_key LIMIT #{lim :: CInt8}
+      |]
 
 -- | @FOR UPDATE SKIP LOCKED@ over the window 'groupsWindowSQL' returned plus the keys
 -- 'emptiedWindowSQL' returned, one ascending pass in the key order the maintenance
@@ -43,8 +47,13 @@ emptiedWindowSQL schema tableName limit cursor =
 lockGroupsSQL :: Text -> Text -> Maybe Text -> Maybe Text -> [Text] -> Query Text
 lockGroupsSQL schema tableName cursor upper emptied =
   let groupsTbl = jobQueueGroupsTable schema tableName
-      after = foldMap (\k -> [sql|AND group_key > #{k :: CText}|]) cursor
-      window = foldMap (\hi -> [sql|SELECT group_key FROM ${groupsTbl} WHERE group_key <= #{hi :: CText} ${after} UNION |]) upper
+      after = foldMap (\key -> [sql|AND group_key > #{key :: CText}|]) cursor
+      window =
+        foldMap
+          ( \upperKey ->
+              [sql|SELECT group_key FROM ${groupsTbl} WHERE group_key <= #{upperKey :: CText} ${after} UNION |]
+          )
+          upper
    in [sql|
         WITH targets AS (
           ${window}SELECT unnest(#{emptied :: [CText]}::text[]) AS group_key
@@ -58,11 +67,12 @@ lockGroupsSQL schema tableName cursor upper emptied =
 -- | Summary columns, shared by the refresh and the insert.
 summaryAggregates :: Text
 summaryAggregates =
-  groupAggregates "" <> ", MAX(not_visible_until) FILTER (WHERE " <> inFlightPredicate "" <> ") AS in_flight_until"
+  let aggs = groupAggregates ""
+      inFlight = inFlightPredicate ""
+   in [text|${aggs}, MAX(not_visible_until) FILTER (WHERE ${inFlight}) AS in_flight_until|]
 
--- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL',
--- returning the rows it rewrote. A separate statement, so its snapshot post-dates
--- the lock and cannot clobber a concurrent claim's @in_flight_until@.
+-- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
+-- Returns the count of rows it rewrote. A separate statement whose snapshot post-dates the lock.
 refreshGroupsSQL :: Text -> Text -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName
@@ -79,26 +89,26 @@ refreshGroupsSQL schema tableName keys =
           GROUP BY group_key
         ),
         deleted AS (
-          DELETE FROM ${groupsTbl} g
-          WHERE g.group_key IN (SELECT group_key FROM params)
-            AND NOT EXISTS (SELECT 1 FROM current c WHERE c.group_key = g.group_key)
+          DELETE FROM ${groupsTbl} summary
+          WHERE summary.group_key IN (SELECT group_key FROM params)
+            AND NOT EXISTS (SELECT 1 FROM current fresh WHERE fresh.group_key = summary.group_key)
           RETURNING 1
         ),
         updated AS (
-          UPDATE ${groupsTbl} g
-          SET min_priority = c.min_priority,
-              min_id = c.min_id,
-              job_count = c.job_count,
-              ready_count = c.ready_count,
-              next_due = c.next_due,
-              in_flight_until = c.in_flight_until
-          FROM current c
-          WHERE g.group_key = c.group_key
-            AND (g.min_priority <> c.min_priority OR g.min_id <> c.min_id
-                 OR g.job_count <> c.job_count
-                 OR g.ready_count <> c.ready_count
-                 OR g.next_due IS DISTINCT FROM c.next_due
-                 OR g.in_flight_until IS DISTINCT FROM c.in_flight_until)
+          UPDATE ${groupsTbl} summary
+          SET min_priority = fresh.min_priority,
+              min_id = fresh.min_id,
+              job_count = fresh.job_count,
+              ready_count = fresh.ready_count,
+              next_due = fresh.next_due,
+              in_flight_until = fresh.in_flight_until
+          FROM current fresh
+          WHERE summary.group_key = fresh.group_key
+            AND (summary.min_priority <> fresh.min_priority OR summary.min_id <> fresh.min_id
+                 OR summary.job_count <> fresh.job_count
+                 OR summary.ready_count <> fresh.ready_count
+                 OR summary.next_due IS DISTINCT FROM fresh.next_due
+                 OR summary.in_flight_until IS DISTINCT FROM fresh.in_flight_until)
           RETURNING 1
         )
         SELECT (SELECT count(*) FROM deleted) + (SELECT count(*) FROM updated) AS @{rewritten :: CInt8}
@@ -113,17 +123,17 @@ insertMissingGroupsSQL schema tableName limit lower upper =
       groupsTbl = jobQueueGroupsTable schema tableName
       aggs = summaryAggregates
       lim = fromIntegral limit :: Int64
-      after = foldMap (\k -> [sql|AND j.group_key > #{k :: CText}|]) lower
-      upTo = foldMap (\k -> [sql|AND j.group_key <= #{k :: CText}|]) upper
+      after = foldMap (\key -> [sql|AND job.group_key > #{key :: CText}|]) lower
+      upTo = foldMap (\key -> [sql|AND job.group_key <= #{key :: CText}|]) upper
    in [sql|
         WITH missing_keys AS (
-          SELECT DISTINCT j.group_key
-          FROM ${tbl} j
-          WHERE j.group_key IS NOT NULL
+          SELECT DISTINCT job.group_key
+          FROM ${tbl} job
+          WHERE job.group_key IS NOT NULL
             ${after}
             ${upTo}
-            AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} g WHERE g.group_key = j.group_key)
-          ORDER BY j.group_key
+            AND NOT EXISTS (SELECT 1 FROM ${groupsTbl} summary WHERE summary.group_key = job.group_key)
+          ORDER BY job.group_key
           LIMIT #{lim :: CInt8}
         ),
         missing AS (
@@ -140,8 +150,8 @@ insertMissingGroupsSQL schema tableName limit lower upper =
           ON CONFLICT (group_key) DO NOTHING
           RETURNING group_key
         )
-        SELECT k.group_key AS @{group_key :: CText}, (i.group_key IS NOT NULL) AS @{inserted :: CBool}
-        FROM missing_keys k
-        LEFT JOIN inserted i ON i.group_key = k.group_key
-        ORDER BY k.group_key
+        SELECT missing_key.group_key AS @{group_key :: CText}, (landed.group_key IS NOT NULL) AS @{inserted :: CBool}
+        FROM missing_keys missing_key
+        LEFT JOIN inserted landed ON landed.group_key = missing_key.group_key
+        ORDER BY missing_key.group_key
       |]

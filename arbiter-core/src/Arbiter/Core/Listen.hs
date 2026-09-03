@@ -70,7 +70,7 @@ import Arbiter.Core.FailureGate
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 import Arbiter.Core.Threads (labelArbiterThread)
 
--- | A received notification: the channel it arrived on and its payload.
+-- | A received notification. The channel it arrived on and its payload.
 data Notification = Notification
   { notificationChannel :: ByteString
   , notificationData :: ByteString
@@ -121,13 +121,13 @@ withChannels
   -> [(ByteString, Notification -> m ())]
   -> (STM Bool -> m a)
   -> m a
-withChannels listener logger handlers k =
+withChannels listener logger handlers body =
   withRunInIO $ \runInIO -> do
-    let ioHandlers = [(chan, runInIO . h) | (chan, h) <- handlers]
+    let ioHandlers = [(chan, runInIO . handler) | (chan, handler) <- handlers]
     bracket
       (registerHub listener logger ioHandlers)
       (\(regId, _) -> deregisterHub listener regId)
-      (\(_, ready) -> runInIO (k ready))
+      (\(_, ready) -> runInIO (body ready))
 
 registerHub
   :: Listener
@@ -142,8 +142,8 @@ registerHub listener logger ioHandlers =
       res <- atomically $ do
         regId <- readTVar (hubNextId hub)
         writeTVar (hubNextId hub) $! regId + 1
-        modifyTVar' (hubHandlers hub) $ \m ->
-          foldl' (\acc (chan, h) -> Map.insertWith (++) chan [(regId, logger, h)] acc) m ioHandlers
+        modifyTVar' (hubHandlers hub) $ \handlerMap ->
+          foldl' (\acc (chan, handler) -> Map.insertWith (++) chan [(regId, logger, handler)] acc) handlerMap ioHandlers
         modifyTVar' (hubRefs hub) (+ 1)
         let myChans = map fst ioHandlers
             ready = do
@@ -171,10 +171,10 @@ deregisterHub listener regId = do
   traverse_ Async.cancel mthread
   where
     dropReg rid =
-      Map.mapMaybe $ \hs ->
-        case filter (\(r, _, _) -> r /= rid) hs of
+      Map.mapMaybe $ \registrations ->
+        case filter (\(candidateId, _, _) -> candidateId /= rid) registrations of
           [] -> Nothing
-          hs' -> Just hs'
+          kept -> Just kept
 
 startHub :: Listener -> IO RunningHub
 startHub listener = do
@@ -207,9 +207,9 @@ hubLoop :: Listener -> RunningHub -> IO ()
 hubLoop listener hub = newFailureGate >>= go baseBackoff
   where
     go backoff gate = do
-      -- Set once the channels are subscribed, which a connection alone is not.
+      -- Set once the channels are subscribed.
       readyAt <- newIORef Nothing
-      -- Clear before each attempt so a failed reconnect does not leave stale subscriptions.
+      -- Clear before each attempt.
       atomically $ writeTVar (hubSubscribed hub) Set.empty
       result <-
         tryAny $
@@ -248,19 +248,19 @@ connectionLoop hub conn onReady = do
     loop desired = do
       mNotify <- PQ.notifies conn
       case mNotify of
-        Just n -> dispatch hub (toNotification n) >> loop desired
+        Just notify -> dispatch hub (toNotification notify) >> loop desired
         Nothing -> do
           mfd <- PQ.socket conn
           case mfd of
             Nothing -> throwInternal "connection has no socket"
-            Just fd -> do
+            Just socketFd -> do
               changed <-
-                bracket (threadWaitReadSTM fd) snd $ \(waitRead, _) ->
+                bracket (threadWaitReadSTM socketFd) snd $ \(waitRead, _) ->
                   atomically $
                     (False <$ waitRead)
-                      `orElse` (readTVar (hubHandlers hub) >>= \hs -> True <$ check (Map.keysSet hs /= desired))
-              ok <- PQ.consumeInput conn
-              unless ok $ throwInternal "consumeInput failed"
+                      `orElse` (readTVar (hubHandlers hub) >>= \handlers -> True <$ check (Map.keysSet handlers /= desired))
+              consumed <- PQ.consumeInput conn
+              unless consumed $ throwInternal "consumeInput failed"
               if changed then reconcile hub conn >>= loop else loop desired
 
 -- | Bring the wire's subscriptions in line with the registered channels.
@@ -279,54 +279,54 @@ reconcile hub conn = do
     issue _ [] = pure ()
     issue verb chans = do
       escaped <- traverse escapeChannel chans
-      mres <- PQ.exec conn (BSC.intercalate "; " [verb <> " " <> e | e <- escaped])
+      mres <- PQ.exec conn (BSC.intercalate "; " [verb <> " " <> ident | ident <- escaped])
       case mres of
         Nothing ->
           throwInternal $
             T.pack (BSC.unpack verb) <> " returned no result"
         Just res -> do
-          st <- PQ.resultStatus res
-          when (st /= PQ.CommandOk)
+          status <- PQ.resultStatus res
+          when (status /= PQ.CommandOk)
             $ throwInternal
-            $ T.pack (BSC.unpack verb) <> " failed with " <> T.pack (show st)
+            $ T.pack (BSC.unpack verb) <> " failed with " <> T.pack (show status)
     escapeChannel chan =
       fromMaybe (quoteChannel chan) <$> PQ.escapeIdentifier conn chan
 
 dispatch :: RunningHub -> Notification -> IO ()
-dispatch hub n = do
-  hs <- Map.findWithDefault [] (notificationChannel n) <$> readTVarIO (hubHandlers hub)
-  for_ hs $ \(_, lg, h) ->
-    tryAny (h n) >>= either (void . tryAny . hubWarn lg . ("channel handler exception: " <>) . displayEx) pure
+dispatch hub notification = do
+  handlers <- Map.findWithDefault [] (notificationChannel notification) <$> readTVarIO (hubHandlers hub)
+  for_ handlers $ \(_, logger, handler) ->
+    tryAny (handler notification)
+      >>= either (void . tryAny . hubWarn logger . ("channel handler exception: " <>) . displayEx) pure
 
--- | Report a hub event through one registrant, the first whose logger takes it.
--- The hub is shared, so a broadcast repeats one event once per pool. False when
--- it reached no one.
+-- | Report a hub event through the first registrant whose logger takes it. False
+-- when it reached no one.
 logHub :: (HubLog -> Text -> IO ()) -> RunningHub -> Text -> IO Bool
 logHub channel hub msg = hubLoggers hub >>= emitFirst
   where
     emitFirst [] = pure False
-    emitFirst (lg : rest) =
-      tryAny (channel lg msg) >>= either (const (emitFirst rest)) (const (pure True))
+    emitFirst (logger : rest) =
+      tryAny (channel logger msg) >>= either (const (emitFirst rest)) (const (pure True))
 
 -- | One logger per registration.
 hubLoggers :: RunningHub -> IO [HubLog]
 hubLoggers hub = registrants <$> readTVarIO (hubHandlers hub)
   where
     registrants handlers =
-      Map.elems (Map.fromList [(regId, lg) | hs <- Map.elems handlers, (regId, lg, _) <- hs])
+      Map.elems (Map.fromList [(regId, logger) | registrations <- Map.elems handlers, (regId, logger, _) <- registrations])
 
 toNotification :: PQ.Notify -> Notification
-toNotification n =
+toNotification notify =
   Notification
-    { notificationChannel = PQ.notifyRelname n
-    , notificationData = PQ.notifyExtra n
+    { notificationChannel = PQ.notifyRelname notify
+    , notificationData = PQ.notifyExtra notify
     }
 
 -- | Quote a channel name as a SQL identifier, doubling embedded quotes.
 quoteChannel :: ByteString -> ByteString
 quoteChannel = TE.encodeUtf8 . quoteIdentifier . TE.decodeUtf8
 
--- | A listener over its own libpq connection opened from a connection string, not a pool slot.
+-- | A listener over its own libpq connection opened from a connection string.
 data DedicatedListen = DedicatedListen
   { dedicatedSlot :: MVar (Maybe RunningHub)
   , dedicatedConnStr :: ByteString
@@ -340,13 +340,13 @@ newDedicatedListen connStr = liftIO $ do
 
 -- | The 'Listener' for a 'DedicatedListen'.
 dedicatedListener :: DedicatedListen -> Listener
-dedicatedListener d =
+dedicatedListener dedicated =
   Listener
-    { listenerSlot = dedicatedSlot d
+    { listenerSlot = dedicatedSlot dedicated
     , listenerWithConn = \action ->
-        bracket (interruptibleConnectDb (dedicatedConnStr d)) PQ.finish $ \conn -> do
-          st <- PQ.status conn
-          case st of
+        bracket (interruptibleConnectDb (dedicatedConnStr dedicated)) PQ.finish $ \conn -> do
+          status <- PQ.status conn
+          case status of
             PQ.ConnectionOk -> action conn
             _ -> do
               merr <- PQ.errorMessage conn
@@ -354,12 +354,12 @@ dedicatedListener d =
                 "connect failed" <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
     }
 
--- | Open a libpq connection asynchronously so a teardown cancel is not lost in the uninterruptible connect FFI.
+-- | Open a libpq connection asynchronously. A teardown cancel interrupts the connect.
 interruptibleConnectDb :: ByteString -> IO PQ.Connection
 interruptibleConnectDb connStr = do
   conn <- PQ.connectStart connStr
-  st <- PQ.status conn
-  case st of
+  status <- PQ.status conn
+  case status of
     PQ.ConnectionBad -> pure conn
     _ -> (poll conn >> pure conn) `onException` PQ.finish conn
   where
@@ -371,5 +371,5 @@ interruptibleConnectDb connStr = do
         _ -> pure ()
     waitSocket conn wait =
       PQ.socket conn >>= \case
-        Just fd -> wait fd
+        Just socketFd -> wait socketFd
         Nothing -> throwInternal "connection has no socket during connect"

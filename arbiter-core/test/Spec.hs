@@ -20,10 +20,15 @@ import Arbiter.Core.Codec
   , JobWriteSource (..)
   , ParamType (..)
   , SomeParam (..)
+  , archiveRowCodec
   , cScalar
   , codecColumns
+  , cronScheduleRowCodec
+  , dlqRowCodec
   , jobCodec
   , jobRowCodec
+  , queueRowCodec
+  , workerRowWithHealthCodec
   , writeColumnNames
   )
 import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
@@ -31,23 +36,27 @@ import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Job.Types (PayloadColumns (..), defaultJob)
 import Arbiter.Core.Operations (QueueStats, buildWhereClause, statsRowCodec)
+import Arbiter.Core.Sql.Archive (allArchiveColumns)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
-import Arbiter.Core.Sql.Jobs (JobFilter (..))
+import Arbiter.Core.Sql.Cron (allCronColumns)
+import Arbiter.Core.Sql.Jobs (JobFilter (..), allDLQColumns, dedupUpdateSet, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
+import Arbiter.Core.Sql.Queues (queueColumnList)
 import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
 import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
+import Arbiter.Core.Sql.Workers (workerColumnList)
 import Arbiter.Core.Worker (WorkerHealth (Live), workerHealthFromText)
 
--- | A short tag per parameter, so tests can assert the encoders and their order.
+-- | A short tag per parameter. Tests assert the encoders and their order.
 paramTags :: [SomeParam] -> [Text]
 paramTags = map tag
   where
-    tag (SomeParam pt _) = case pt of
-      PScalar c -> colTag c
-      PNullable c -> colTag c <> "?"
-      PArray c -> colTag c <> "[]"
-      PNullArray c -> colTag c <> "?[]"
+    tag (SomeParam paramType _) = case paramType of
+      PScalar colType -> colTag colType
+      PNullable colType -> colTag colType <> "?"
+      PArray colType -> colTag colType <> "[]"
+      PNullArray colType -> colTag colType <> "?[]"
 
 colTag :: Col a -> Text
 colTag CInt4 = "int4"
@@ -61,7 +70,7 @@ colTag CUuid = "uuid"
 
 -- | The JSONB values a set of parameters carries.
 jsonParams :: [SomeParam] -> [Value]
-jsonParams params = [v | SomeParam (PScalar CJsonb) v <- params]
+jsonParams params = [value | SomeParam (PScalar CJsonb) value <- params]
 
 -- | An insert source whose stored encoding is not the payload's own.
 sentinelSource :: JobWriteSource KindPayload
@@ -77,7 +86,7 @@ sentinelSource =
 
 -- | The text a set of parameters carries, for asserting on an escaped search term.
 textParams :: [SomeParam] -> [Text]
-textParams params = [t | SomeParam (PScalar CText) t <- params]
+textParams params = [term | SomeParam (PScalar CText) term <- params]
 
 -- | One of every filter, in the order 'buildWhereClause' renders them.
 allFilters :: [JobFilter]
@@ -110,7 +119,7 @@ newtype PlainPayload = PlainPayload Text
   deriving stock (Eq, Show)
 
 instance ToJSON PlainPayload where
-  toJSON (PlainPayload t) = toJSON t
+  toJSON (PlainPayload text) = toJSON text
 
 -- | A payload labelling its constructors by something other than their names.
 data RenamedPayload
@@ -131,10 +140,10 @@ newtype Envelope = Envelope KindPayload
   deriving stock (Eq, Show)
 
 lowerFirst :: Text -> Text
-lowerFirst t = maybe t (\(c, rest) -> T.toLower (T.singleton c) <> rest) (T.uncons t)
+lowerFirst text = maybe text (\(first, rest) -> T.toLower (T.singleton first) <> rest) (T.uncons text)
 
 instance HasKind Envelope where
-  kindOf (Envelope b) = Just (lowerFirst (constructorKind b))
+  kindOf (Envelope body) = Just (lowerFirst (constructorKind body))
   kindsFor = map lowerFirst (constructorKinds @KindPayload)
 
 -- | The per-queue stats query over a declared label set.
@@ -207,46 +216,50 @@ main = hspec $ do
     it "emits one placeholder per input hole, in order" $ do
       let jobId = 7 :: Int64
           att = 2 :: Int32
-          q = [sql|UPDATE t SET a = #{att :: CInt4} WHERE id = #{jobId :: CInt8}|] :: Query ()
-      sqlOf q `shouldBe` "UPDATE t SET a = ? WHERE id = ?"
-      paramTags (qParams q) `shouldBe` ["int4", "int8"]
+          query = [sql|UPDATE jobs SET a = #{att :: CInt4} WHERE id = #{jobId :: CInt8}|] :: Query ()
+      sqlOf query `shouldBe` "UPDATE jobs SET a = ? WHERE id = ?"
+      paramTags (qParams query) `shouldBe` ["int4", "int8"]
 
     it "reuses an in-scope identifier for each occurrence" $ do
       let jobId = 9 :: Int64
           att = 1 :: Int32
-          q = [sql|WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4} AND parent_id = #{jobId :: CInt8}|] :: Query ()
-      sqlOf q `shouldBe` "WHERE id = ? AND attempts = ? AND parent_id = ?"
-      paramTags (qParams q) `shouldBe` ["int8", "int4", "int8"]
+          query =
+            [sql|WHERE id = #{jobId :: CInt8} AND attempts = #{att :: CInt4} AND parent_id = #{jobId :: CInt8}|]
+              :: Query ()
+      sqlOf query `shouldBe` "WHERE id = ? AND attempts = ? AND parent_id = ?"
+      paramTags (qParams query) `shouldBe` ["int8", "int4", "int8"]
 
     it "picks nullable, array, and nullable-array encoders" $ do
-      let a = Just (1 :: Int64)
-          b = [2, 3] :: [Int32]
-          c = [Nothing] :: [Maybe Text]
-          q = [sql|#{a :: Maybe CInt8} #{b :: [CInt4]} #{c :: [Maybe CText]}|] :: Query ()
-      paramTags (qParams q) `shouldBe` ["int8?", "int4[]", "text?[]"]
+      let maybeId = Just (1 :: Int64)
+          counts = [2, 3] :: [Int32]
+          names = [Nothing] :: [Maybe Text]
+          query = [sql|#{maybeId :: Maybe CInt8} #{counts :: [CInt4]} #{names :: [Maybe CText]}|] :: Query ()
+      paramTags (qParams query) `shouldBe` ["int8?", "int4[]", "text?[]"]
 
     it "interleaves the parameters of a ${} Query splice at its position" $ do
       let tbl = "jobs" :: Text
-          a = 1 :: Int32
-          b = 2 :: Int64
-          inner = [sql|x = #{a :: CInt4}|] :: Query ()
-          q = [sql|SELECT ${tbl} WHERE ${inner} AND y = #{b :: CInt8}|] :: Query ()
-      sqlOf q `shouldBe` "SELECT jobs WHERE x = ? AND y = ?"
-      paramTags (qParams q) `shouldBe` ["int4", "int8"]
+          xValue = 1 :: Int32
+          yValue = 2 :: Int64
+          inner = [sql|x = #{xValue :: CInt4}|] :: Query ()
+          query = [sql|SELECT ${tbl} WHERE ${inner} AND y = #{yValue :: CInt8}|] :: Query ()
+      sqlOf query `shouldBe` "SELECT jobs WHERE x = ? AND y = ?"
+      paramTags (qParams query) `shouldBe` ["int4", "int8"]
 
     it "emits @{} alias names and builds a matching decoder" $ do
-      let q = [sql|SELECT @{parent_id :: Maybe CInt8}, @{n :: CInt8} FROM t|] :: Query (Maybe Int64, Int64)
-      sqlOf q `shouldBe` "SELECT parent_id, n FROM t"
-      codecColumns (qDecode q) `shouldBe` ["parent_id", "n"]
+      let query =
+            [sql|SELECT @{parent_id :: Maybe CInt8}, @{job_count :: CInt8} FROM jobs|]
+              :: Query (Maybe Int64, Int64)
+      sqlOf query `shouldBe` "SELECT parent_id, job_count FROM jobs"
+      codecColumns (qDecode query) `shouldBe` ["parent_id", "job_count"]
 
     it "sepBy joins fragments and concatenates their parameters" $ do
-      let g = "grp" :: Text
-          p = 3 :: Int64
-          f1 = [sql|group_key = #{g :: CText}|]
-          f2 = [sql|parent_id = #{p :: CInt8}|]
-          w = sepBy " AND " [f1, f2]
-      sqlOf w `shouldBe` "group_key = ? AND parent_id = ?"
-      paramTags (qParams w) `shouldBe` ["text", "int8"]
+      let groupKey = "grp" :: Text
+          parentId = 3 :: Int64
+          groupFragment = [sql|group_key = #{groupKey :: CText}|]
+          parentFragment = [sql|parent_id = #{parentId :: CInt8}|]
+          whereClause = sepBy " AND " [groupFragment, parentFragment]
+      sqlOf whereClause `shouldBe` "group_key = ? AND parent_id = ?"
+      paramTags (qParams whereClause) `shouldBe` ["text", "int8"]
 
   describe "statement shapes" $ do
     it "locks a named job's own subtree as well as its root's" $ do
@@ -255,13 +268,15 @@ main = hspec $ do
 
     it "moves the claim token on a rate-limited defer as well as an admit" $ do
       let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60)
-      rendered `shouldSatisfy` T.isInfixOf "claim_seq = j.claim_seq + 1,"
-      rendered `shouldSatisfy` (not . T.isInfixOf "WHEN dc._admit THEN j.claim_seq + 1")
+      rendered `shouldSatisfy` T.isInfixOf "claim_seq = job.claim_seq + 1,"
+      rendered `shouldSatisfy` (not . T.isInfixOf "WHEN verdict._admit THEN job.claim_seq + 1")
 
-    it "reads the gated group head as two ordered runs, not one sort" $ do
+    it "reads the gated group head as two ordered runs" $ do
       let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60)
-      rendered `shouldSatisfy` T.isInfixOf "AND t.attempts > 0 ORDER BY t.attempts DESC, t.priority ASC, t.id ASC LIMIT 10"
-      rendered `shouldSatisfy` T.isInfixOf "AND t.attempts = 0 ORDER BY t.priority ASC, t.id ASC LIMIT 10"
+      rendered
+        `shouldSatisfy` T.isInfixOf
+          "AND job.attempts > 0 ORDER BY job.attempts DESC, job.priority ASC, job.id ASC LIMIT 10"
+      rendered `shouldSatisfy` T.isInfixOf "AND job.attempts = 0 ORDER BY job.priority ASC, job.id ASC LIMIT 10"
 
     it "binds the claimant, so one statement serves every claimer" $ do
       let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60)
@@ -303,10 +318,33 @@ main = hspec $ do
     it "rolls up nothing for a payload that declares no label" $
       squished (statsSQL (kindsFor @PlainPayload)) `shouldSatisfy` T.isInfixOf "NULL::text AS kind"
 
+    it "selects the job columns in codec order" $
+      squish jobColumns `shouldBe` T.intercalate ", " (codecColumns (jobRowCodec "jobs"))
+
+    it "selects the DLQ columns in codec order" $
+      squish allDLQColumns `shouldBe` T.intercalate ", " (codecColumns (dlqRowCodec "jobs"))
+
+    it "selects the archive columns in codec order" $
+      squish allArchiveColumns `shouldBe` T.intercalate ", " (codecColumns (archiveRowCodec "jobs"))
+
+    it "selects the cron columns in codec order" $
+      squish allCronColumns `shouldBe` T.intercalate ", " (codecColumns cronScheduleRowCodec)
+
+    it "selects the queue columns in codec order" $
+      squish queueColumnList `shouldBe` T.intercalate ", " (codecColumns queueRowCodec)
+
+    it "selects the worker columns in codec order" $
+      map (last . T.words) (T.splitOn "," workerColumnList) `shouldBe` codecColumns workerRowWithHealthCodec
+
+    it "copies every writable column on a replace" $ do
+      let rendered = dedupUpdateSet "jobs"
+          copied = filter (`notElem` ["dedup_key", "attempts", "claim_seq", "last_error"]) writeColumnNames
+      copied `shouldSatisfy` all (\column -> T.isInfixOf (column <> " = EXCLUDED." <> column) rendered)
+
     it "selects stats columns in the decoder's own order" $ do
       let cols = codecColumns statsRowCodec
           rendered = squished (statsSQL (kindsFor @KindPayload))
-          aliasAt c = T.length (fst (T.breakOn (" AS " <> c) rendered))
+          aliasAt column = T.length (fst (T.breakOn (" AS " <> column) rendered))
           positions = map aliasAt cols
-      cols `shouldSatisfy` all (\c -> T.isInfixOf (" AS " <> c) rendered)
-      positions `shouldSatisfy` \ps -> and (zipWith (<) ps (drop 1 ps))
+      cols `shouldSatisfy` all (\column -> T.isInfixOf (" AS " <> column) rendered)
+      positions `shouldSatisfy` \offsets -> and (zipWith (<) offsets (drop 1 offsets))

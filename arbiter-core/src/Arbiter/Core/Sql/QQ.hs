@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
 -- | The @sql@ quasiquoter. It builds a 'Arbiter.Core.Sql.Query.Query' whose text, parameters, and row
--- decoder all come from one template, so they cannot drift.
+-- decoder all come from one template.
 --
 -- Holes reference in-scope identifiers, like @NeatInterpolation@'s @${var}@:
 --
@@ -15,8 +15,8 @@
 --     CInt8@ to the decoder (@Maybe CInt8@ uses @ncol@). The quote's result type
 --     is @Query@ of the tuple of these holes, or @Query ()@ when there are none.
 --
--- A bare @?@ is rejected so every placeholder comes from a hole. A literal @?@
--- is unsupported. Use @jsonb_exists@ and friends for jsonb key-existence.
+-- A bare @?@ is rejected. Every placeholder comes from a hole. Use @jsonb_exists@
+-- and friends for jsonb key-existence.
 module Arbiter.Core.Sql.QQ
   ( sql
   ) where
@@ -38,11 +38,11 @@ import Arbiter.Core.Codec
   )
 import Arbiter.Core.Sql.Query (param, raw, rows, toFragment)
 
--- | The @sql@ quasiquoter, valid in expression position only.
+-- | The @sql@ quasiquoter, valid in expression position.
 sql :: QuasiQuoter
 sql =
   QuasiQuoter
-    { quoteExp = \s -> either fail compile (tokenize (T.unpack (normalizeIndent (T.pack s))))
+    { quoteExp = \template -> either fail compile (tokenize (T.unpack (normalizeIndent (T.pack template))))
     , quotePat = badContext
     , quoteType = badContext
     , quoteDec = badContext
@@ -70,15 +70,16 @@ data Piece
 tokenize :: String -> Either String [Piece]
 tokenize = go ""
   where
-    go buf s = case s of
+    go buf input = case input of
       [] -> Right (flush buf)
       ('$' : '{' : rest) -> hole '$' buf rest
       ('#' : '{' : rest) -> hole '#' buf rest
       ('@' : '{' : rest) -> hole '@' buf rest
       ('?' : _) ->
         Left
-          "sql: bare '?' placeholder. Use a #{} hole. For jsonb key-existence use jsonb_exists/jsonb_exists_any/jsonb_exists_all"
-      (c : rest) -> go (c : buf) rest
+          "sql: bare '?' placeholder. Use a #{} hole. \
+          \For jsonb key-existence use jsonb_exists/jsonb_exists_any/jsonb_exists_all"
+      (ch : rest) -> go (ch : buf) rest
 
     hole sig buf rest = do
       (inside, rest') <- takeBrace rest
@@ -89,7 +90,7 @@ tokenize = go ""
     flush buf = [Lit (T.pack (reverse buf)) | not (null buf)]
 
 takeBrace :: String -> Either String (String, String)
-takeBrace s = case break (== '}') s of
+takeBrace input = case break (== '}') input of
   (inside, '}' : rest) -> Right (inside, rest)
   _ -> Left "sql: unterminated hole (missing '}')"
 
@@ -108,31 +109,31 @@ mkPiece '@' inside = do
     KScalar -> Right (OutHole name False colName)
     KNullable -> Right (OutHole name True colName)
     _ -> Left "sql: @{} output holes cannot be array-typed"
-mkPiece c _ = Left ("sql: unknown hole sigil " ++ [c])
+mkPiece sigil _ = Left ("sql: unknown hole sigil " ++ [sigil])
 
 -- | Split @expr :: coltype@ on the @::@.
 splitAnn :: String -> Either String (Text, Text)
-splitAnn s = case T.breakOn "::" (T.pack s) of
+splitAnn annotation = case T.breakOn "::" (T.pack annotation) of
   (lhs, rhs)
-    | T.null rhs -> Left ("sql: hole needs a ':: ColType' annotation: " ++ s)
+    | T.null rhs -> Left ("sql: hole needs a ':: ColType' annotation: " ++ annotation)
     | otherwise -> Right (T.strip lhs, T.strip (T.drop 2 rhs))
 
 -- | Parse a column-type annotation into its shape and 'Col' constructor name.
 parseColType :: Text -> Either String (Kind, Text)
-parseColType s0 =
-  let s = T.strip s0
-   in case bracketed s of
+parseColType rawType =
+  let trimmed = T.strip rawType
+   in case bracketed trimmed of
         Just inner -> case maybePrefixed inner of
-          Just c -> Right (KNullArray, c)
+          Just conName -> Right (KNullArray, conName)
           Nothing -> Right (KArray, inner)
-        Nothing -> case maybePrefixed s of
-          Just c -> Right (KNullable, c)
-          Nothing -> Right (KScalar, s)
+        Nothing -> case maybePrefixed trimmed of
+          Just conName -> Right (KNullable, conName)
+          Nothing -> Right (KScalar, trimmed)
   where
-    bracketed t = do
-      a <- T.stripPrefix "[" (T.strip t)
-      T.strip <$> T.stripSuffix "]" (T.strip a)
-    maybePrefixed t = T.strip <$> T.stripPrefix "Maybe " (T.strip t)
+    bracketed token = do
+      afterOpen <- T.stripPrefix "[" (T.strip token)
+      T.strip <$> T.stripSuffix "]" (T.strip afterOpen)
+    maybePrefixed token = T.strip <$> T.stripPrefix "Maybe " (T.strip token)
 
 -- ---------------------------------------------------------------------------
 -- Codegen
@@ -141,7 +142,7 @@ parseColType s0 =
 compile :: [Piece] -> Q Exp
 compile pieces = do
   let textExpr = [|mconcat $(TH.listE (map pieceExp pieces))|]
-      outHoles = [(n, nul, c) | OutHole n nul c <- pieces]
+      outHoles = [(name, nullable, colType) | OutHole name nullable colType <- pieces]
   case outHoles of
     [] -> textExpr
     _ -> do
@@ -150,7 +151,7 @@ compile pieces = do
 
 -- | A single piece as an expression of type @Query ()@.
 pieceExp :: Piece -> Q Exp
-pieceExp (Lit t) = [|raw (T.pack $(TH.stringE (T.unpack t)))|]
+pieceExp (Lit literal) = [|raw (T.pack $(TH.stringE (T.unpack literal)))|]
 pieceExp (Splice name) = [|toFragment $(TH.varE (TH.mkName (T.unpack name)))|]
 pieceExp (OutHole name _ _) = [|raw (T.pack $(TH.stringE (T.unpack name)))|]
 pieceExp (InHole ident kind colType) = do
@@ -169,8 +170,9 @@ mkDecoder holes
       fail "sql: more than 8 @{} output holes. Attach a handwritten codec with `rows` instead"
   | otherwise = case map colDecoder holes of
       [] -> fail "sql: mkDecoder called with no holes"
-      [c] -> c
-      cs -> foldl' (\acc c -> [|$acc <*> $c|]) [|pure $(TH.conE (TH.tupleDataName (length cs)))|] cs
+      [single] -> single
+      decoders ->
+        foldl' (\acc decoder -> [|$acc <*> $decoder|]) [|pure $(TH.conE (TH.tupleDataName (length decoders)))|] decoders
   where
     colDecoder (name, nullable, colType) = do
       colN <- colConName colType
@@ -179,7 +181,7 @@ mkDecoder holes
 
 -- | The 'Col' constructor 'Name' for a column-type token.
 colConName :: Text -> Q Name
-colConName t = case t of
+colConName token = case token of
   "CInt4" -> pure 'CInt4
   "CInt8" -> pure 'CInt8
   "CText" -> pure 'CText
@@ -197,10 +199,10 @@ colConName t = case t of
 -- | Strip the common leading indentation and surrounding blank lines, matching
 -- how @NeatInterpolation@ normalizes a multi-line quote.
 normalizeIndent :: Text -> Text
-normalizeIndent t =
-  let ls = dropTrailingBlank (dropWhile isBlank (T.lines t))
-      indent = minimum (maxBound : [leading l | l <- ls, not (isBlank l)])
-   in T.intercalate "\n" (map (T.drop indent) ls)
+normalizeIndent template =
+  let templateLines = dropTrailingBlank (dropWhile isBlank (T.lines template))
+      indent = minimum (maxBound : [leading line | line <- templateLines, not (isBlank line)])
+   in T.intercalate "\n" (map (T.drop indent) templateLines)
   where
     isBlank = T.null . T.strip
     leading = T.length . T.takeWhile (== ' ')
