@@ -397,11 +397,14 @@ countStrict label query = do
 
 -- | Run a single-row count @Query@, returning 0 on an empty or unexpected result.
 countOr0 :: (MonadArbiter m) => Q.Query Int64 -> m Int64
-countOr0 query = do
-  rows <- MA.executeQuery query
-  pure $ case rows of
-    [count] -> count
-    _ -> 0
+countOr0 = fmap singleCount . MA.executeQuery
+
+countOr0Prepared :: (MonadArbiter m) => Q.Query Int64 -> m Int64
+countOr0Prepared = fmap singleCount . MA.executeQueryPrepared
+
+singleCount :: [Int64] -> Int64
+singleCount [count] = count
+singleCount _ = 0
 
 -- | Take a transaction-scoped advisory lock keyed by a @schema.table@ string and a job id.
 advisoryXactLockSQL :: Text -> Int64 -> Q.Query (Maybe Text)
@@ -1002,7 +1005,7 @@ ackJobInner schemaName tableName job = do
   lockJobParents schemaName tableName [parentId job]
   let jid = primaryKey job
       cseq = claimSeq job
-  countOr0 (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid cseq)
+  countOr0Prepared (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid cseq)
 
 -- | Take the advisory lock of every distinct parent named, ascending, before any
 -- row lock the caller goes on to take.
@@ -1066,7 +1069,7 @@ ackJobsBatch
 ackJobsBatch _ _ [] = pure []
 ackJobsBatch schemaName tableName jobs = withDbTransaction $ do
   lockJobParents schemaName tableName (map parentId jobs)
-  MA.executeQuery
+  MA.executeQueryPrepared
     (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName (map primaryKey jobs) (map claimSeq jobs))
 
 -- | Extend a job's visibility timeout.

@@ -34,7 +34,7 @@ data ClaimAdmission = ClaimAdmission
 groupFifoCutCtes :: Text -> Text
 groupFifoCutCtes prefix =
   [text|
-    ${prefix}_group_cut AS (
+    ${prefix}_group_cut AS MATERIALIZED (
       SELECT group_key, MIN(grp_rank) AS cut_rank
       FROM ${prefix}_self
       WHERE group_key IS NOT NULL AND NOT self_ok
@@ -87,7 +87,7 @@ concGateCtes concTbl concPolicies =
         -- Ungated jobs pass straight through. Keyed jobs join their held pool row (a key
         -- locked by another claimer or absent drops out). fresh_rn reserves a slot per
         -- fresh candidate in priority order, admitting up to the pool's headroom.
-        conc_self_ok AS (
+        conc_self_ok AS MATERIALIZED (
           SELECT id FROM locked WHERE concurrency_key IS NULL
           UNION ALL
           SELECT ranked.id FROM (
@@ -142,7 +142,7 @@ rlGateCtes buckets rlPolicies =
         ),
         -- Per-key admission in priority order while cumulative cost fits
         -- (keyed jobs only).
-        rl_keyed AS (
+        rl_keyed AS MATERIALIZED (
           SELECT candidate.id,
             (bucket.max_tokens > 0 AND
              SUM(${clampedCostExpr}) OVER (
@@ -334,7 +334,6 @@ ungroupedPoolCtes tbl ungroupedLimit batchLimit dma ccGate =
         WHERE job.group_key IS NULL
           AND NOT job.suspended
           AND job.cancel_requested_at IS NULL
-          AND job.not_visible_until IS NOT NULL
           AND job.not_visible_until <= NOW()
           AND job.attempts < COALESCE(job.max_attempts, ${dma})
           ${ccGate}

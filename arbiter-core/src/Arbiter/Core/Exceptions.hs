@@ -32,7 +32,6 @@ module Arbiter.Core.Exceptions
   , throwInternal
   , throwJobGone
   , throwJobGoneIds
-  , throwJobDeadline
   , namedJobIds
   , displayEx
   ) where
@@ -177,10 +176,6 @@ throwInternal msg = UE.throwIO (InternalException msg)
 -- | Names the jobs that went away.
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
-
--- | Stop a handler that has outrun the pool's maximum job duration.
-throwJobDeadline :: (MonadIO m) => Text -> m a
-throwJobDeadline msg = UE.throwIO (JobDeadlineExceeded msg)
 
 -- | Signal that the claim is no longer valid, naming no ids.
 throwJobGone :: (MonadIO m) => Text -> m a

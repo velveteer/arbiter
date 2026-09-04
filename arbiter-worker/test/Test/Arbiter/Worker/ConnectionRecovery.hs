@@ -173,8 +173,8 @@ killSchemaConnections connStr schemaName = do
       \FROM pg_stat_activity \
       \WHERE pid <> pg_backend_pid() \
       \  AND datname = current_database() \
-      \  AND (query LIKE ? OR query LIKE ?)"
-      ("%" <> schemaName <> "%" :: Text, "%LISTEN%" :: Text)
+      \  AND query LIKE ?"
+      (Only ("%" <> schemaName <> "%" :: Text))
   close conn
 
 -- | Terminate a specific backend PID.

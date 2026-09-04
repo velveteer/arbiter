@@ -278,6 +278,18 @@ main = hspec $ do
           "AND job.attempts > 0 ORDER BY job.attempts DESC, job.priority ASC, job.id ASC LIMIT 10"
       rendered `shouldSatisfy` T.isInfixOf "AND job.attempts = 0 ORDER BY job.priority ASC, job.id ASC LIMIT 10"
 
+    it "materializes the gate verdicts, so each cut runs once" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True True) 10 1 60)
+      rendered `shouldSatisfy` T.isInfixOf "conc_self_ok AS MATERIALIZED ("
+      rendered `shouldSatisfy` T.isInfixOf "conc_group_cut AS MATERIALIZED ("
+      rendered `shouldSatisfy` T.isInfixOf "rl_keyed AS MATERIALIZED ("
+      rendered `shouldSatisfy` T.isInfixOf "rl_group_cut AS MATERIALIZED ("
+
+    it "range-scans the ungrouped due branch without a redundant null test" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 10 1 60)
+      rendered `shouldSatisfy` T.isInfixOf "AND job.cancel_requested_at IS NULL AND job.not_visible_until <= NOW()"
+      rendered `shouldSatisfy` (not . T.isInfixOf "AND job.not_visible_until IS NOT NULL AND job.not_visible_until <= NOW()")
+
     it "binds the claimant, so one statement serves every claimer" $ do
       let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60)
       rendered `shouldSatisfy` T.isInfixOf "claimed_by = ?::uuid"
