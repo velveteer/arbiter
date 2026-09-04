@@ -42,10 +42,10 @@ database connection. The handler must ack, fail, or nack each job. Arbiter
 reprocesses jobs that the handler does not finalize before visibility expires.
 
 Wrap a callback in `withDbTransaction` to commit the ack and application writes
-atomically. The ack uses a savepoint. The success hook runs when Arbiter
-releases that savepoint. It can run before the outer transaction commits. If
-the outer transaction rolls back, Arbiter can process the job again after the
-hook has run.
+atomically. The callback's transaction becomes a savepoint. The success hook
+runs when Arbiter releases that savepoint. It can run before the outer
+transaction commits. If the outer transaction rolls back, Arbiter can process
+the job again after the hook has run.
 
 Batching is independent of transaction mode. Use
 `defaultBatchedWorkerConfig` when per-job overhead is too high and each job

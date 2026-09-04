@@ -174,7 +174,7 @@ data WorkerConfig m payload = WorkerConfig
 --
 -- Each callback runs in its own transaction and commits on return. Call them at
 -- the top level of the handler. Wrapping one in your own 'Arbiter.Core.MonadArbiter.withDbTransaction'
--- enlists the ack into that transaction as a savepoint, committing atomically
+-- enlists the callback into that transaction as a savepoint, committing atomically
 -- with your writes. The success hook then fires at savepoint release. An outer
 -- rollback reprocesses the job after the visibility timeout.
 data BatchCallbacks m payload result = BatchCallbacks

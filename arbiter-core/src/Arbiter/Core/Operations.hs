@@ -47,7 +47,9 @@ module Arbiter.Core.Operations
   , reconcileConcurrencyCountsIfStale
   , reconcileAndPruneConcurrency
   , ackJob
+  , ackJobInner
   , ackJobsBatch
+  , ackJobsBatchInner
   , lockJobParents
   , lockJobTrees
   , lockJobTreesFromRoot
@@ -1066,8 +1068,15 @@ ackJobsBatch
   -> [JobRead payload]
   -> m [Int64]
   -- ^ Ids acked (deleted or suspended). Reclaimed jobs are absent.
-ackJobsBatch _ _ [] = pure []
-ackJobsBatch schemaName tableName jobs = withDbTransaction $ do
+ackJobsBatch schemaName tableName = withDbTransaction . ackJobsBatchInner schemaName tableName
+
+-- | Inner batch ack, run inside the caller's transaction.
+ackJobsBatchInner
+  :: forall m payload
+   . (MonadArbiter m)
+  => SchemaName -> TableName -> [JobRead payload] -> m [Int64]
+ackJobsBatchInner _ _ [] = pure []
+ackJobsBatchInner schemaName tableName jobs = do
   lockJobParents schemaName tableName (map parentId jobs)
   MA.executeQueryPrepared
     (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName (map primaryKey jobs) (map claimSeq jobs))

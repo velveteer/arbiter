@@ -98,10 +98,11 @@ batchLog config = withJobContext (logConfig config)
 unownedReason :: Text
 unownedReason = "no longer claimed by this worker"
 
--- | Ack a job, throwing if another worker reclaimed it mid-flight.
+-- | Ack a job inside the caller's transaction, throwing if another worker reclaimed it mid-flight.
 ackOrGone :: (JobOperation m payload) => Job.JobRead payload -> m ()
 ackOrGone job = do
-  rowsAffected <- Arb.ackJob job
+  schemaName <- getSchema
+  rowsAffected <- Ops.ackJobInner schemaName (Job.queueName job) job
   when (rowsAffected == 0) $
     throwJobGoneIds "reclaimed by another worker during processing" [Job.primaryKey job]
 
@@ -141,6 +142,7 @@ batchCallbacks config handoff jobs startTime schemaName =
     , nack = nackOne
     }
   where
+    (firstJob :| _) = jobs
     shape = batchSpanShape jobs
     nackOne job = releaseJobs config handoff [job]
     failAs mkExc job msg = failWith job (toException (mkExc msg))
@@ -169,7 +171,7 @@ batchCallbacks config handoff jobs startTime schemaName =
        in settleBy
             handoff
             ( withDbTransaction $ do
-                acked <- Set.fromList <$> Arb.ackJobsBatch jobsToAck
+                acked <- Set.fromList <$> Ops.ackJobsBatchInner schemaName (Job.queueName firstJob) jobsToAck
                 storeEncodedResults schemaName (filter (hasIdIn acked . fst) pairs)
                 pure (partition (hasIdIn acked) jobsToAck)
             )

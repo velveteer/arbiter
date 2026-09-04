@@ -13,7 +13,8 @@ The class specifies a registry, handler type, and these database operations:
 - `executeQuery` and `executeStatement` run a `Query`. The value contains its
   SQL text, parameters, and decoder.
 - `withDbTransaction` starts a transaction or savepoint. A nested call must
-  start a savepoint. This lets an ack participate in the caller's transaction.
+  start a savepoint. This lets a finalization callback participate in the
+  caller's transaction.
   See [Worker Configuration](../worker/configuration.md).
 - `runHandlerWithConnection` checks out a connection and runs a handler.
 - `getListener` returns the shared `LISTEN/NOTIFY` listener. Return `Nothing`
