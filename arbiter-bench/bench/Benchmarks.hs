@@ -937,7 +937,7 @@ formatGated results =
 multiTrialGated :: Int -> IO () -> IO GatedResult -> IO String
 multiTrialGated trials setup measure = formatGated <$> replicateM trials (setup >> measure)
 
--- | One steady-state window over a gated queue: 10 producers insert, a 10-worker pool acks.
+-- | One steady-state window over a gated queue: 10 producers insert, each 10-worker pool acks.
 runGatedSteadyTrial
   :: ( EncodeJobResult (ResultOf m payload)
      , QueueOperation SimpleM payload
@@ -948,13 +948,13 @@ runGatedSteadyTrial
   => RunM m
   -> RunM SimpleM
   -> Connection
-  -> WorkerConfig m payload
+  -> [WorkerConfig m payload]
   -> IORef Int
   -> Text
   -> (Int -> JobWrite payload)
   -> Int
   -> IO GatedResult
-runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob durationUs = do
+runGatedSteadyTrial runM producerRunM statsConn cfgs processedCounter table mkJob durationUs = do
   batchCounter <- newIORef (0 :: Int)
   let producer = do
         offset <- atomicModifyIORef' batchCounter (\count -> (count + 100, count))
@@ -969,7 +969,7 @@ runGatedSteadyTrial runM producerRunM statsConn cfg processedCounter table mkJob
       [table, table <> "_groups"]
       statsConn
       processedCounter
-      (runM (runWorkerPool cfg) : replicate 10 producer)
+      (map (runM . runWorkerPool) cfgs <> replicate 10 producer)
       durationUs
   pure (mkGatedResult throughput processed snap0 snap1 trg)
 
@@ -983,10 +983,18 @@ type GatedPayload payload =
 hasqlGatedSteadyTrial
   :: forall payload
    . (GatedPayload payload)
-  => RunM HasqlM -> RunM SimpleM -> Connection -> BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
-hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = do
+  => RunM HasqlM
+  -> RunM SimpleM
+  -> Connection
+  -> BenchMode
+  -> Int
+  -> Text
+  -> (Int -> JobWrite payload)
+  -> Int
+  -> IO GatedResult
+hasqlGatedSteadyTrial runM producerRunM statsConn mode pools table mkJob durationUs = do
   processedCounter <- newIORef (0 :: Int)
-  cfg0 <- runM $ case mode of
+  cfgs <- replicateM pools $ runM $ case mode of
     BenchSingleJobMode ->
       transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         countProcessed processedCounter
@@ -994,15 +1002,23 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode table mkJob durationUs = 
       defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
         ackAll callbacks (toList jobs)
         countProcessedN processedCounter (length jobs)
-  runGatedSteadyTrial runM producerRunM statsConn (benchTune cfg0) processedCounter table mkJob durationUs
+  runGatedSteadyTrial runM producerRunM statsConn (map benchTune cfgs) processedCounter table mkJob durationUs
+
+-- | Pools per gated trial. One dispatcher claims for each pool.
+gatedPools :: Int
+gatedPools = 1
+
+-- | Pools for the wide single-mode cell, so several dispatchers claim at once.
+gatedPoolsWide :: Int
+gatedPoolsWide = 4
 
 -- | No gate / rate limit / concurrency / both, each ungrouped and grouped, in single
--- and batched mode.
+-- mode on one pool, single mode on several pools, and batched mode.
 gatingBenches
   :: IO ()
   -> ( forall payload
         . (GatedPayload payload)
-       => BenchMode -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
+       => BenchMode -> Int -> Text -> (Int -> JobWrite payload) -> Int -> IO GatedResult
      )
   -> [Benchmark]
 gatingBenches settle trial =
@@ -1025,14 +1041,15 @@ gatingBenches settle trial =
     profile name table mkJob =
       bgroup
         name
-        [ mode "single" BenchSingleJobMode
-        , mode "batched (size 10)" (BenchBatchedJobsMode 10)
+        [ mode "single" BenchSingleJobMode gatedPools
+        , mode ("single (" <> show gatedPoolsWide <> " pools)") BenchSingleJobMode gatedPoolsWide
+        , mode "batched (size 10)" (BenchBatchedJobsMode 10) gatedPools
         ]
       where
-        mode label benchMode =
+        mode label benchMode pools =
           singleTest label
             $ ThroughputBench
-            $ multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial benchMode table mkJob trialDurationUs)
+            $ multiTrialGated trialCount (settle >> cleanupGatedFresh table) (trial benchMode pools table mkJob trialDurationUs)
 
 setupQueue :: SimpleEnv BenchRegistry -> Int -> QueueFlavor -> IO ()
 setupQueue simpleEnv totalJobs flavor = do
