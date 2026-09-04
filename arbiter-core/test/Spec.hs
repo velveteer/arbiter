@@ -290,6 +290,11 @@ main = hspec $ do
       rendered `shouldSatisfy` T.isInfixOf "AND job.cancel_requested_at IS NULL AND job.not_visible_until <= NOW()"
       rendered `shouldSatisfy` (not . T.isInfixOf "AND job.not_visible_until IS NOT NULL AND job.not_visible_until <= NOW()")
 
+    it "probes the count table per candidate, never hashing it per claim" $ do
+      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60)
+      rendered
+        `shouldSatisfy` T.isInfixOf "OR counts.in_flight < COALESCE(policy.override_limit, policy.default_limit)) OFFSET 0 ))"
+
     it "binds the claimant, so one statement serves every claimer" $ do
       let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60)
       rendered `shouldSatisfy` T.isInfixOf "claimed_by = ?::uuid"

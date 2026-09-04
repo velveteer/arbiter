@@ -430,6 +430,8 @@ lockedCandidateCtes tbl batchLimit dma ungroupedLimit =
 
 -- | Concurrency headroom over a candidate row alias. Keeps a full key off the
 -- bounded candidate window, in the ungrouped pool and at each group's head.
+-- OFFSET 0 keeps the probe correlated. Without it the planner hashes the whole
+-- count table once per claim.
 concHeadroomPred :: Text -> Text -> Text -> Text
 concHeadroomPred concTbl concPolicies alias =
   let effLimit = effectivePolicyCol "policy" "limit"
@@ -440,6 +442,7 @@ concHeadroomPred concTbl concPolicies alias =
           WHERE counts.concurrency_key = ${alias}.concurrency_key
             AND (${effLimit} IS NULL
                  OR counts.in_flight < ${effLimit})
+          OFFSET 0
         ))
       |]
 

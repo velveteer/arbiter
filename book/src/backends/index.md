@@ -55,10 +55,11 @@ the group triggers at 7 µs/job.
 
 | | no gate | rate limit | concurrency | both |
 |---------|--------|---------|----------------|-----------------|
-| ungrouped | 3,370 / 12,236 | 2,359 / 6,826 | 1,719 / 7,208 | 1,441 / 4,407 |
-| 5k groups | 817 / 5,327 | 886 / 4,288 | 681 / 3,716 | 619 / 3,115 |
+| ungrouped | 4,001 / 15,827 | 3,131 / 7,878 | 2,104 / 7,541 | 1,896 / 5,061 |
+| 5k groups | 772 / 5,151 | 789 / 4,521 | 699 / 3,954 | 645 / 3,031 |
 
-These cells vary by 4-23% between trials. In single-job mode the rate limit
-costs up to 30% and the concurrency limit 17-49%. In batched mode one control
-costs 20-44% and both together 42-64%. These reductions are in addition to the
-cost of grouping.
+These cells vary by 3-13% between trials. In single-job mode the rate limit
+costs up to 22% and the concurrency limit up to 47%. In batched mode one control
+costs 12-52% and both together 41-68%. Grouped queues pay less because the
+group ranking already dominates the claim. These reductions are in addition to
+the cost of grouping.
