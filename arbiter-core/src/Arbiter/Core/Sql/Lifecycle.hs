@@ -16,9 +16,9 @@ module Arbiter.Core.Sql.Lifecycle
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 
-import Arbiter.Core.Job.Schema (jobQueueTable)
+import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
-import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.QQ (sql, stmt)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
@@ -27,11 +27,11 @@ import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 -- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
 -- is teed into the archive per-row on @archive_for@.
 smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
-smartAckJobSQL archiveEnabled schema tableName jobId cseq =
+smartAckJobSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "*" else "id, parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
-   in [sql|
+   in [stmt|
         WITH ack AS (
           DELETE FROM ${tbl}
           WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
@@ -132,11 +132,13 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- | 'setVisibilityTimeoutSQL' over a batch, for the heartbeat. Extends every job still
 -- under this claim, held by the same worker and unsuspended, and reports per row whether
 -- the update landed alongside its claim token, cancel flag and suspension. @valuesFrag@
--- carries the input @(id, claim_seq, claimed_by)@ rows.
+-- carries the input @(id, claim_seq, claimed_by)@ rows. The statement never waits on a
+-- lock. It takes the group summaries first, then the rows, both with SKIP LOCKED, and a
+-- row whose summary or row is busy reads back unchanged.
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
-      locked = lockedByIdsCte tbl ids
+      groupsTbl = jobQueueGroupsTable schema tableName
    in [sql|
         WITH input_jobs AS (
           SELECT input_values.id::bigint AS id,
@@ -144,7 +146,29 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
                  input_values.expected_claimed_by::uuid AS expected_claimed_by
           FROM (VALUES ${valuesFrag}) AS input_values(id, expected_claim_seq, expected_claimed_by)
         ),
-        ${locked},
+        wanted_groups AS MATERIALIZED (
+          SELECT DISTINCT group_key FROM ${tbl}
+          WHERE id = ANY(#{ids :: [CInt8]}) AND group_key IS NOT NULL
+        ),
+        held_groups AS (
+          SELECT group_key FROM ${groupsTbl}
+          WHERE group_key IN (SELECT group_key FROM wanted_groups)
+          ORDER BY group_key
+          FOR UPDATE SKIP LOCKED
+        ),
+        busy_groups AS MATERIALIZED (
+          SELECT group_key FROM ${groupsTbl}
+          WHERE group_key IN (SELECT group_key FROM wanted_groups)
+          EXCEPT
+          SELECT group_key FROM held_groups
+        ),
+        locked AS (
+          SELECT id FROM ${tbl} job
+          WHERE job.id = ANY(#{ids :: [CInt8]})
+            AND (job.group_key IS NULL OR NOT EXISTS (SELECT 1 FROM busy_groups busy WHERE busy.group_key = job.group_key))
+          ORDER BY id DESC
+          FOR UPDATE SKIP LOCKED
+        ),
         updated AS (
           UPDATE ${tbl} job
           SET not_visible_until = CASE WHEN #{secs :: CFloat8}::double precision <= 0

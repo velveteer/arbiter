@@ -27,6 +27,7 @@ import Arbiter.Core.MonadArbiter (MonadArbiter, Params)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.RateLimit.Schema qualified as RL
 import Arbiter.Core.SchemaTables (allSchemaTables)
+import Arbiter.Core.Sql.Query (Piece (..))
 import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Migrations
   ( allTableAdmission
@@ -39,6 +40,7 @@ import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.Foldable (traverse_)
 import Data.Int (Int32, Int64)
+import Data.List (intersperse)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -123,13 +125,19 @@ cleanupData schemaName tableName conn = do
 execute_ :: Connection -> Text -> IO ()
 execute_ conn sql = void $ execute conn (fromString (T.unpack sql) :: Query) ()
 
--- | Run a pre-rendered statement with positional parameters (test setup only).
+-- | Run a pre-rendered statement with @?@ placeholders and positional parameters
+-- (test setup only).
 execStatement :: (MonadArbiter m) => Text -> Params -> m Int64
-execStatement sql params = MA.executeStatement (MA.Query sql params (pure ()))
+execStatement sql params = MA.executeStatement (MA.mkQuery (placeholderPieces sql) params (pure ()))
 
--- | Run a pre-rendered query with positional parameters and a decoder (test setup only).
+-- | Run a pre-rendered query with @?@ placeholders, positional parameters and a
+-- decoder (test setup only).
 execQuery :: (MonadArbiter m) => Text -> Params -> RowCodec a -> m [a]
-execQuery sql params codec = MA.executeQuery (MA.Query sql params codec)
+execQuery sql params codec = MA.executeQuery (MA.mkQuery (placeholderPieces sql) params codec)
+
+-- | Every @?@ in the text is a hole.
+placeholderPieces :: Text -> [Piece]
+placeholderPieces = intersperse Hole . map Lit . T.splitOn "?"
 
 -- | Connect and rebuild the schema once, for a suite's outer bracket.
 setupOnce :: ByteString -> Text -> Text -> Bool -> IO ()

@@ -1,8 +1,6 @@
--- | Batch finalization state and ordered finalization operations.
---
--- A finalization commits the outcome, records it, and then calls its hooks. The
--- record precedes the hooks. 'settle' enforces this order.
-module Arbiter.Worker.Settle
+-- | The batch handoff: what a batch has settled so far, and the settle that records
+-- an outcome before its hooks run.
+module Arbiter.Worker.Handoff
   ( -- * Handoff
     CancelHandoff
   , newCancelHandoff

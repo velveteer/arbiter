@@ -307,7 +307,7 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
         | groupKey <- Set.toList (Set.fromList (map fst tagged))
         , all ((/= hotPool) . snd) (filter ((== groupKey) . fst) tagged)
         ]
-      claimSql = Ops.mkClaimSql (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 worker
+      claimSql = Ops.mkJobStatements (Proxy :: Proxy CLPayload) schema concurrencyTable batchSize 0 60 worker
       round_ =
         run
           ( do

@@ -7,7 +7,6 @@ module Arbiter.Hasql.Encode
   ) where
 
 import Arbiter.Core.Codec (Col (..), ParamType (..), Params, SomeParam (..))
-import Arbiter.Core.Sql.Query (numberPlaceholders)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -17,8 +16,8 @@ import Hasql.Statement qualified as S
 
 -- | Unprepared statement over numbered placeholders, returning rows affected.
 buildStatementRowCount :: Text -> Params -> S.Statement () Int64
-buildStatementRowCount sql params =
-  S.unpreparable (numberPlaceholders sql) (buildEncoder params) D.rowsAffected
+buildStatementRowCount numbered params =
+  S.unpreparable numbered (buildEncoder params) D.rowsAffected
 
 -- | A parameter list as one positional encoder.
 buildEncoder :: Params -> E.Params ()

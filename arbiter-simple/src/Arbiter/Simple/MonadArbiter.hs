@@ -47,7 +47,7 @@ simpleExecuteQuery
   :: (HasSimplePool m, MonadUnliftIO m)
   => MA.Query a
   -> m [a]
-simpleExecuteQuery (MA.Query sqlTemplate params codec) = do
+simpleExecuteQuery (MA.Query _ params sqlTemplate _ codec) = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
       parser = runCodec interpretNullCol codec
   withConn $ \conn -> liftIO $ case params of
@@ -59,7 +59,7 @@ simpleExecuteStatement
   :: (HasSimplePool m, MonadUnliftIO m)
   => MA.Query a
   -> m Int64
-simpleExecuteStatement (MA.Query sqlTemplate params _) = do
+simpleExecuteStatement (MA.Query _ params sqlTemplate _ _) = do
   let sql = Query $ T.encodeUtf8 sqlTemplate
   withConn $ \conn -> liftIO $ case params of
     [] -> PG.execute_ conn sql

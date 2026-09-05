@@ -5,6 +5,7 @@
 -- | Fence tests: the deadlines the worker holds a handler to without asking the database.
 module Test.Arbiter.Worker.Deadline (spec) where
 
+import Arbiter.Core.Exceptions (JobForceCancelled (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..))
 import Arbiter.Core.Job.Types
@@ -13,6 +14,9 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   , lastError
+  , payload
+  , primaryKey
+  , setGroupKey
   , setMaxAttempts
   )
 import Arbiter.Core.MonadArbiter (JobHandler)
@@ -21,27 +25,42 @@ import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnvWithPool, runSimpleDb
 import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce)
-import Control.Concurrent (threadDelay)
-import Control.Exception (uninterruptibleMask_)
-import Control.Monad (void, when)
+import Control.Concurrent
+  ( MVar
+  , forkIO
+  , forkOn
+  , forkOnWithUnmask
+  , killThread
+  , newEmptyMVar
+  , putMVar
+  , takeMVar
+  , threadDelay
+  , yield
+  )
+import Control.Exception (SomeAsyncException, SomeException, evaluate, fromException, uninterruptibleMask_)
+import Control.Exception qualified as E
+import Control.Monad (forever, replicateM, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString (ByteString)
+import Data.Either (isRight)
 import Data.Foldable (toList)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.List.NonEmpty (NonEmpty)
-import Data.Maybe (isJust)
+import Data.Int (Int64)
+import Data.List (partition)
+import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.Maybe (fromMaybe, isJust)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime)
+import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Clock (getMonotonicTime)
 import Test.Hspec (Spec, around, beforeAll, describe, it, runIO, shouldBe, shouldSatisfy)
-import UnliftIO (bracket, bracket_, finally, tryAny)
-import UnliftIO.Async (withAsync)
+import UnliftIO (bracket, bracket_, finally, mask_, tryAny)
+import UnliftIO.Async (async, poll, waitCatch, withAsync)
 
 import Arbiter.Worker (runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
@@ -52,6 +71,7 @@ import Arbiter.Worker.Config
   , defaultBatchedWorkerConfig
   , transactionalWorkerConfig
   )
+import Arbiter.Worker.Heartbeat (newHeartbeatGuard, runHeartbeatGuard, withJobsHeartbeat)
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), defaultLogConfig, silentLogConfig)
 
 type WorkerTestRegistry = '[Queue "arbiter_worker_deadline_test" WorkerTestPayload]
@@ -81,6 +101,66 @@ hangSeconds = 8
 -- | The fence must give up on a hung extend well before the extend returns.
 hungFenceMillis :: Int
 hungFenceMillis = 5_000
+
+-- | A heartbeat hook slow enough to cover another batch's whole deadline.
+slowHookMicros :: Int
+slowHookMicros = 8_000_000
+
+-- | Longer than 'maskedMicros'.
+stuckRegistrationMillis :: Int
+stuckRegistrationMillis = 8_000
+
+-- | A pause after the registration returns.
+afterRegistrationMicros :: Int
+afterRegistrationMicros = 500_000
+
+-- | How long two sibling handlers run.
+siblingRunMicros :: Int
+siblingRunMicros = 6_000_000
+
+-- | Registrations raced against a fence already due.
+registerRaceRounds :: Int
+registerRaceRounds = 500
+
+-- | How long each raced registration's handler runs.
+registerRaceMicros :: Int
+registerRaceMicros = 2_000
+
+-- | The capability the raced handler and the spinner share.
+pinnedCapability :: Int
+pinnedCapability = 0
+
+-- | How long the spinner holds the capability each time the raced handler yields.
+spinnerHoldSeconds :: Double
+spinnerHoldSeconds = 0.001
+
+-- | Allocation per spinner step, so the hold stays preemptible.
+spinnerWork :: Int
+spinnerWork = 256
+
+-- | Lease left at register, so the first beat lands just before the lease.
+lateExtendRemaining :: NominalDiffTime
+lateExtendRemaining = 0.3
+
+-- | How long the server holds the late extend. Past the lease, inside the retry pause.
+lateExtendSleep :: Double
+lateExtendSleep = 0.13
+
+-- | How long the handler under a late extend runs.
+lateExtendRunMicros :: Int
+lateExtendRunMicros = 1_000_000
+
+-- | Insert a slow job with the default attempt budget and return its id.
+insertedPlainId :: SimpleEnv WorkerTestRegistry -> IO Int64
+insertedPlainId env =
+  runSimpleDb env (HL.insertJob (defaultJob (SlowTask 30)))
+    >>= maybe (fail "insert returned no job") (pure . primaryKey)
+
+-- | Insert a single-attempt slow job and return its id.
+insertedId :: SimpleEnv WorkerTestRegistry -> IO Int64
+insertedId env =
+  runSimpleDb env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (SlowTask 30))))
+    >>= maybe (fail "insert returned no job") (pure . primaryKey)
 
 withPool :: Pool PG.Connection -> (SimpleEnv WorkerTestRegistry -> IO a) -> IO a
 withPool sharedPool action = do
@@ -157,6 +237,264 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           beats <- readIORef beatsRef
           beats `shouldSatisfy` (>= 3)
 
+    describe "Guard registration" $ do
+      it "returns once a signal in flight meets the unregister" $ \env -> do
+        job <- runSimpleDb env (HL.insertJob (defaultJob (SlowTask 1))) >>= maybe (fail "insert returned no job") pure
+        let idle :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            idle _conn _job = pure ()
+        config <- transactionalWorkerConfig 1 idle
+        guard <- runSimpleDb env (newHeartbeatGuard config {maxJobDuration = Just 1, logConfig = silentLogConfig})
+        startTime <- getCurrentTime
+        withAsync (runSimpleDb env (runHeartbeatGuard guard)) $ \_ -> do
+          registration <-
+            async . runSimpleDb env . mask_ $ do
+              withJobsHeartbeat guard startTime (job :| []) (pure []) (liftIO (uninterruptibleMask_ (threadDelay maskedMicros)))
+              liftIO (threadDelay afterRegistrationMicros)
+          waitUntil stuckRegistrationMillis (isJust <$> poll registration)
+          outcome <- waitCatch registration
+          outcome `shouldSatisfy` isRight
+
+      -- The raced window is only hit often under @+RTS -C0@.
+      it "keeps a signal due at register inside the handler boundary" $ \env -> do
+        job <- runSimpleDb env (HL.insertJob (defaultJob (SlowTask 1))) >>= maybe (fail "insert returned no job") pure
+        let idle :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            idle _conn _job = pure ()
+        config <- transactionalWorkerConfig 1 idle
+        guard <-
+          runSimpleDb
+            env
+            (newHeartbeatGuard config {visibilityTimeout = 1, jobHeartbeatInterval = 10, logConfig = silentLogConfig})
+        startTime <- addUTCTime (-5) <$> getCurrentTime
+        withAsync (runSimpleDb env (runHeartbeatGuard guard)) $ \_ ->
+          withPinnedSpinner $ do
+            outcomes <- replicateM registerRaceRounds $ do
+              done <- newEmptyMVar :: IO (MVar (Either SomeException ()))
+              -- The fork makes the capability switch at its next heap check.
+              _ <-
+                forkOn pinnedCapability $
+                  E.try
+                    ( forkIO (pure ())
+                        *> runSimpleDb env (withJobsHeartbeat guard startTime (job :| []) (pure [job]) (liftIO (threadDelay registerRaceMicros)))
+                    )
+                    >>= putMVar done
+              takeMVar done
+            length (filter escapedGuard outcomes) `shouldBe` 0
+
+    describe "Shared extend" $ do
+      it "stops only the batch whose job another worker reclaimed" $ \env -> do
+        startedRef <- newIORef ([] :: [Int64])
+        finishedRef <- newIORef ([] :: [Int64])
+        reasonsRef <- newIORef ([] :: [(Int64, Text)])
+        beatsRef <- newIORef ([] :: [(Int64, Double)])
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn job = liftIO $ do
+              atomicModifyIORef' startedRef (\started -> (primaryKey job : started, ()))
+              threadDelay siblingRunMicros
+              atomicModifyIORef' finishedRef (\finished -> (primaryKey job : finished, ()))
+            hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+            hooks =
+              defaultObservabilityHooks
+                { onJobHeartbeat = \job _ _ ->
+                    liftIO $ getMonotonicTime >>= \now -> atomicModifyIORef' beatsRef (\beats -> ((primaryKey job, now) : beats, ()))
+                , onJobUnavailable = \job reason ->
+                    liftIO $ atomicModifyIORef' reasonsRef (\seen -> ((primaryKey job, reason) : seen, ()))
+                }
+        stolenId <- insertedId env
+        keptId <- insertedId env
+
+        config <- transactionalWorkerConfig 2 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 1
+                , observabilityHooks = hooks
+                , logConfig = silentLogConfig
+                }
+
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . length <$> readIORef startedRef
+          reclaimJob connStr stolenId
+          waitUntil 10_000 $ not . null <$> readIORef reasonsRef
+          reclaimedAt <- getMonotonicTime
+          waitUntil 15_000 $ not . null <$> readIORef finishedRef
+          reasons <- readIORef reasonsRef
+          reasons `shouldBe` [(stolenId, "reclaimed by another worker")]
+          finished <- readIORef finishedRef
+          finished `shouldBe` [keptId]
+          beats <- readIORef beatsRef
+          [() | (jobId, at) <- beats, jobId == keptId, at > reclaimedAt] `shouldSatisfy` (not . null)
+
+    describe "Shared guard" $ do
+      it "stops only the batch whose live claim the cancel names" $ \env -> do
+        let idle :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            idle _conn _job = pure ()
+        config <- transactionalWorkerConfig 1 idle
+        let guardConfig = config {jobHeartbeatInterval = 0.5, visibilityTimeout = 20, logConfig = silentLogConfig}
+        handedId <- insertedPlainId env
+        _ <- insertedPlainId env
+        batch <- runSimpleDb env (HL.claimNextVisibleJobsAs @WorkerTestPayload 2 20 (workerId config))
+        (handed, kept) <- case partition ((== handedId) . primaryKey) batch of
+          ([job], [sibling]) -> pure (job, sibling)
+          _ -> fail "expected two claimed jobs"
+        releaseRow connStr handedId
+        reclaimed <- runSimpleDb env (HL.claimNextVisibleJobsAs @WorkerTestPayload 1 20 (workerId config)) >>= single
+        guard <- runSimpleDb env (newHeartbeatGuard guardConfig)
+        startTime <- getCurrentTime
+        withAsync (runSimpleDb env (runHeartbeatGuard guard)) $ \_ -> do
+          keeper <-
+            async . runSimpleDb env $
+              withJobsHeartbeat guard startTime (handed :| [kept]) (pure [kept]) (liftIO (threadDelay siblingRunMicros))
+          holder <-
+            async . runSimpleDb env $
+              withJobsHeartbeat guard startTime (reclaimed :| []) (pure [reclaimed]) (liftIO (threadDelay siblingRunMicros))
+          threadDelay 700_000
+          flagCancelled connStr handedId
+          holderOutcome <- waitCatch holder
+          keeperOutcome <- waitCatch keeper
+          either isForceCancelled (const False) holderOutcome `shouldBe` True
+          keeperOutcome `shouldSatisfy` isRight
+
+      it "fences a batch registered while another batch's extend hangs" $ \env -> do
+        startedRef <- newIORef ([] :: [(Int64, Double)])
+        endedRef <- newIORef ([] :: [(Int64, Double)])
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn job = liftIO $ do
+              stamp startedRef job
+              threadDelay handlerSleepMicros `finally` (stamp endedRef job >> threadDelay handlerSleepMicros)
+        _ <- insertedId env
+        config <- transactionalWorkerConfig 2 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 1
+                , maxJobDuration = Just 2
+                , logConfig = silentLogConfig
+                }
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 1) . length <$> readIORef startedRef
+          bracket_ (hangExtends connStr) (unblockRowUpdates connStr) $ do
+            threadDelay 3_500_000
+            fencedId <- insertedId env
+            waitUntil 10_000 $ isJust . lookup fencedId <$> readIORef startedRef
+            waitUntil 20_000 $ isJust . lookup fencedId <$> readIORef endedRef
+            started <- readIORef startedRef
+            ended <- readIORef endedRef
+            (fromMaybe 0 (lookup fencedId ended) - fromMaybe 0 (lookup fencedId started)) `shouldSatisfy` (< 4)
+        awaitHungUpdates connStr
+
+      it "beats a batch while a sibling batch's row is locked" $ \env -> do
+        startedRef <- newIORef ([] :: [Int64])
+        beatsRef <- newIORef ([] :: [(Int64, Double)])
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn job = liftIO $ do
+              atomicModifyIORef' startedRef (\started -> (primaryKey job : started, ()))
+              threadDelay handlerSleepMicros
+            hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+            hooks = defaultObservabilityHooks {onJobHeartbeat = \job _ _ -> liftIO (stamp beatsRef job)}
+        lockedId <- insertedId env
+        freeId <- insertedId env
+        config <- transactionalWorkerConfig 2 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 1
+                , observabilityHooks = hooks
+                , logConfig = silentLogConfig
+                }
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . length <$> readIORef startedRef
+          lockedFrom <- getMonotonicTime
+          holdRowLock connStr lockedId 4_000_000
+          beats <- readIORef beatsRef
+          [() | (jobId, at) <- beats, jobId == freeId, at > lockedFrom + 1, at < lockedFrom + 3.5] `shouldSatisfy` (not . null)
+
+      it "signals a handler again once a beat finds it still running" $ \env -> do
+        startedRef <- newIORef (0 :: Int)
+        firstRef <- newIORef (Nothing :: Maybe Double)
+        endedRef <- newIORef (Nothing :: Maybe Double)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn _job = liftIO $ do
+              atomicModifyIORef' startedRef (\count -> (count + 1, ()))
+              ( threadDelay handlerSleepMicros `E.catch` \(_ :: SomeException) -> do
+                  getMonotonicTime >>= writeIORef firstRef . Just
+                  threadDelay handlerSleepMicros
+                )
+                `finally` (getMonotonicTime >>= writeIORef endedRef . Just)
+        jobId <- insertedId env
+        config <- transactionalWorkerConfig 1 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 0.5
+                , logConfig = silentLogConfig
+                }
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 1) <$> readIORef startedRef
+          flagCancelled connStr jobId
+          waitUntil 10_000 $ isJust <$> readIORef firstRef
+          waitUntil 5_000 $ isJust <$> readIORef endedRef
+          first <- fromMaybe 0 <$> readIORef firstRef
+          ended <- fromMaybe 0 <$> readIORef endedRef
+          (ended - first) `shouldSatisfy` (< 3)
+
+      it "delivers one signal when the lease and the deadline pass together" $ \env -> do
+        job <- runSimpleDb env (HL.insertJob (defaultJob (SlowTask 1))) >>= maybe (fail "insert returned no job") pure
+        let idle :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            idle _conn _job = pure ()
+        config <- transactionalWorkerConfig 1 idle
+        guard <-
+          runSimpleDb env $
+            newHeartbeatGuard
+              config {maxJobDuration = Just 0.001, visibilityTimeout = 1, jobHeartbeatInterval = 10, logConfig = silentLogConfig}
+        signalsRef <- newIORef (0 :: Int)
+        startTime <- addUTCTime (-5) <$> getCurrentTime
+        withAsync (runSimpleDb env (runHeartbeatGuard guard)) $ \_ -> do
+          outcome <-
+            tryAny . runSimpleDb env $
+              withJobsHeartbeat guard startTime (job :| []) (pure [job]) (liftIO (countSignals signalsRef 1_500_000))
+          outcome `shouldSatisfy` isRight
+          signals <- readIORef signalsRef
+          signals `shouldBe` 1
+
+      it "extends a grouped job whose handler enqueued into its group" $ \env -> do
+        loggedRef <- newIORef ([] :: [Text])
+        finishedRef <- newIORef (0 :: Int)
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn job = case payload job of
+              SlowTask _ -> do
+                void (HL.insertJob (setGroupKey (Just "shared") (defaultJob (SimpleTask "child"))))
+                liftIO (threadDelay 2_500_000)
+                liftIO (atomicModifyIORef' finishedRef (\count -> (count + 1, ())))
+              _ -> pure ()
+            capture _level msg _ctx = atomicModifyIORef' loggedRef (\messages -> (msg : messages, ()))
+        parent <-
+          runSimpleDb env (HL.insertJob (setGroupKey (Just "shared") (setMaxAttempts (Just 1) (defaultJob (SlowTask 3)))))
+            >>= maybe (fail "insert returned no job") pure
+        config <- transactionalWorkerConfig 1 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 1
+                , logConfig = defaultLogConfig {logDestination = LogCallback capture}
+                }
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 1) <$> readIORef finishedRef
+          waitUntil 10_000 $ (== 0) <$> rowCount connStr (primaryKey parent)
+          logged <- readIORef loggedRef
+          filter (T.isInfixOf "deadlock" . T.toLower) logged `shouldBe` []
+          dlq <- listDLQ env
+          map (primaryKey . jobSnapshot) dlq `shouldBe` []
+
     describe "Job deadline" $ do
       it "interrupts a handler that outruns the maximum job duration" $ \env -> do
         startedRef <- newIORef (0 :: Int)
@@ -188,6 +526,44 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           finished `shouldBe` 0
           map (lastError . jobSnapshot) dlq
             `shouldBe` [Just "handler ran past the maximum job duration of 1s"]
+
+      it "fences a batch on time while another batch's heartbeat hook is slow" $ \env -> do
+        startedRef <- newIORef ([] :: [(Int64, Double)])
+        let handler :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            handler _conn job = liftIO $ do
+              now <- getMonotonicTime
+              atomicModifyIORef' startedRef (\started -> ((primaryKey job, now) : started, ()))
+              threadDelay handlerSleepMicros
+        slowId <- insertedId env
+        let hooks :: ObservabilityHooks (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+            hooks =
+              defaultObservabilityHooks
+                { onJobHeartbeat = \job _ _ ->
+                    when (primaryKey job == slowId) (liftIO (threadDelay slowHookMicros))
+                }
+
+        config <- transactionalWorkerConfig 2 handler
+        let workerConfig =
+              config
+                { pollInterval = 0.2
+                , jitter = NoJitter
+                , visibilityTimeout = 20
+                , jobHeartbeatInterval = 1
+                , maxJobDuration = Just 2
+                , observabilityHooks = hooks
+                , logConfig = silentLogConfig
+                }
+
+        withAsync (runSimpleDb env $ runWorkerPool workerConfig) $ \_ -> do
+          waitUntil 10_000 $ (== 1) . length <$> readIORef startedRef
+          threadDelay 1_300_000
+          fencedId <- insertedId env
+          waitUntil 10_000 $ (== 2) . length <$> readIORef startedRef
+          waitUntil 15_000 $ any ((== fencedId) . primaryKey . jobSnapshot) <$> listDLQ env
+          fencedAt <- getMonotonicTime
+          started <- readIORef startedRef
+          let startedAt = fromMaybe 0 (lookup fencedId started)
+          (fencedAt - startedAt) `shouldSatisfy` (< 5)
 
       it "reports stopping a handler that had already finalized its batch" $ \env -> do
         loggedRef <- newIORef ([] :: [Text])
@@ -455,6 +831,22 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           reasons `shouldBe` ["lease expired without renewal"]
         awaitHungUpdates connStr
 
+      it "keeps a handler whose extend lands after the lease" $ \env -> do
+        let idle :: JobHandler (SimpleDb WorkerTestRegistry IO) WorkerTestPayload ()
+            idle _conn _job = pure ()
+        config <- transactionalWorkerConfig 1 idle
+        let guardConfig = config {visibilityTimeout = 2, jobHeartbeatInterval = 1, logConfig = silentLogConfig}
+        _ <- insertedPlainId env
+        job <- runSimpleDb env (HL.claimNextVisibleJobsAs @WorkerTestPayload 1 20 (workerId config)) >>= single
+        guard <- runSimpleDb env (newHeartbeatGuard guardConfig)
+        startTime <- addUTCTime (lateExtendRemaining - visibilityTimeout guardConfig) <$> getCurrentTime
+        withAsync (runSimpleDb env (runHeartbeatGuard guard)) $ \_ ->
+          bracket_ (delayRowUpdates connStr) (unblockRowUpdates connStr) $ do
+            outcome <-
+              tryAny . runSimpleDb env $
+                withJobsHeartbeat guard startTime (job :| []) (pure [job]) (liftIO (threadDelay lateExtendRunMicros))
+            outcome `shouldSatisfy` isRight
+
       it "survives a failed heartbeat when the retry pause fits the lease" $ \env ->
         survivesOneFailedHeartbeat connStr env 8 4 11_000_000
       it "survives a failed heartbeat under a short visibility timeout" $ \env ->
@@ -508,6 +900,27 @@ maskedSeconds = fromIntegral maskedMicros / 1_000_000
 
 recordBeat :: (MonadIO m) => IORef [Double] -> m ()
 recordBeat beatsRef = liftIO $ getMonotonicTime >>= \now -> atomicModifyIORef' beatsRef (\beats -> (now : beats, ()))
+
+-- | Hold every row update on the server for 'lateExtendSleep'.
+delayRowUpdates :: ByteString -> IO ()
+delayRowUpdates = installUpdateTrigger ("BEGIN PERFORM pg_sleep(" <> T.pack (show lateExtendSleep) <> "); RETURN NEW; END;")
+
+-- | Whether a guard signal left the handler boundary still asynchronous.
+escapedGuard :: Either SomeException () -> Bool
+escapedGuard = either (\exc -> isJust (fromException exc :: Maybe SomeAsyncException)) (const False)
+
+-- | Run @act@ while a spinner on 'pinnedCapability' takes each yield for 'spinnerHoldSeconds'.
+withPinnedSpinner :: IO a -> IO a
+withPinnedSpinner act =
+  bracket (forkOnWithUnmask pinnedCapability (\unmask -> unmask (forever (hold >> yield)))) killThread (const act)
+  where
+    hold = do
+      release <- (+ spinnerHoldSeconds) <$> getMonotonicTime
+      let spin = do
+            void (evaluate (length (replicate spinnerWork ())))
+            now <- getMonotonicTime
+            when (now < release) spin
+      spin
 
 -- | Fail every row update. Once a job is claimed, the heartbeat's only statement is an update.
 blockRowUpdates :: ByteString -> IO ()
@@ -576,6 +989,17 @@ takeClaimHolder connStr = withFreshConn connStr $ \conn ->
           )
       )
 
+-- | Take the claim under a new token, as another worker's claim does.
+reclaimJob :: ByteString -> Int64 -> IO ()
+reclaimJob connStr jobId = withFreshConn connStr $ \conn ->
+  void $
+    PG.execute
+      conn
+      ( fromString
+          (T.unpack ("UPDATE " <> qualifiedTable <> " SET attempts = attempts + 1, claim_seq = claim_seq + 1 WHERE id = ?"))
+      )
+      (PG.Only jobId)
+
 qualifiedTable :: Text
 qualifiedTable = testSchema <> "." <> testTable
 
@@ -584,3 +1008,76 @@ blockFunction = testSchema <> ".block_update"
 
 withFreshConn :: ByteString -> (PG.Connection -> IO a) -> IO a
 withFreshConn connStr = bracket (connectPostgreSQL connStr) close
+
+single :: [a] -> IO a
+single [x] = pure x
+single _ = fail "expected exactly one job"
+
+isForceCancelled :: SomeException -> Bool
+isForceCancelled exc = isJust (fromException exc :: Maybe JobForceCancelled)
+
+stamp :: IORef [(Int64, Double)] -> JobRead WorkerTestPayload -> IO ()
+stamp ref job = getMonotonicTime >>= \now -> atomicModifyIORef' ref (\seen -> ((primaryKey job, now) : seen, ()))
+
+-- | Count the asynchronous exceptions that land while sleeping for @micros@.
+countSignals :: IORef Int -> Int -> IO ()
+countSignals ref micros = do
+  deadline <- (+ fromIntegral micros / 1_000_000) <$> getMonotonicTime
+  let loop = do
+        now <- getMonotonicTime
+        when (now < deadline) $
+          threadDelay (ceiling ((deadline - now) * 1_000_000))
+            `E.catch` \(_ :: SomeException) -> atomicModifyIORef' ref (\count -> (count + 1, ())) >> loop
+  loop
+
+-- | Stall every extend on the server for 'hangSeconds'. Claims and releases pass.
+hangExtends :: ByteString -> IO ()
+hangExtends =
+  installUpdateTrigger
+    ( "BEGIN IF OLD.claimed_by IS NOT NULL AND NEW.claimed_by IS NOT DISTINCT FROM OLD.claimed_by THEN PERFORM pg_sleep("
+        <> T.pack (show hangSeconds)
+        <> "); END IF; RETURN NEW; END;"
+    )
+
+-- | Hold a row lock on one job for @micros@, as a transaction touching it would.
+holdRowLock :: ByteString -> Int64 -> Int -> IO ()
+holdRowLock connStr jobId micros = withFreshConn connStr $ \conn -> do
+  PG.begin conn
+  _ <-
+    PG.query
+      conn
+      (fromString (T.unpack ("SELECT id FROM " <> qualifiedTable <> " WHERE id = ? FOR UPDATE")))
+      (PG.Only jobId)
+      :: IO [PG.Only Int64]
+  threadDelay micros
+  PG.commit conn
+
+-- | Flag a job cancelled under its lease, as a force-cancel does, without the NOTIFY.
+flagCancelled :: ByteString -> Int64 -> IO ()
+flagCancelled connStr jobId = withFreshConn connStr $ \conn ->
+  void $
+    PG.execute
+      conn
+      ( fromString
+          (T.unpack ("UPDATE " <> qualifiedTable <> " SET cancel_requested_at = NOW(), claim_seq = claim_seq + 1 WHERE id = ?"))
+      )
+      (PG.Only jobId)
+
+-- | Release a claim and make the row claimable now.
+releaseRow :: ByteString -> Int64 -> IO ()
+releaseRow connStr jobId = withFreshConn connStr $ \conn ->
+  void $
+    PG.execute
+      conn
+      (fromString (T.unpack ("UPDATE " <> qualifiedTable <> " SET claimed_by = NULL, not_visible_until = NULL WHERE id = ?")))
+      (PG.Only jobId)
+
+-- | How many rows carry the job id.
+rowCount :: ByteString -> Int64 -> IO Int
+rowCount connStr jobId = withFreshConn connStr $ \conn -> do
+  [PG.Only count] <-
+    PG.query
+      conn
+      (fromString (T.unpack ("SELECT count(*)::int FROM " <> qualifiedTable <> " WHERE id = ?")))
+      (PG.Only jobId)
+  pure count

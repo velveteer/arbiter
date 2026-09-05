@@ -2,69 +2,84 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | A SQL query bundling its text, its positional parameters, and its row
--- decoder in one value. Built by the @sql@
+-- decoder in one value. The text is a list of literals and parameter holes, rendered
+-- in the placeholder form each backend needs. Built by the @sql@
 -- quasiquoter in "Arbiter.Core.Sql.QQ". The parameters and decoder use the
 -- same 'Arbiter.Core.Codec.Col'-driven vocabulary as the profunctor codec in
 -- "Arbiter.Core.Codec".
 module Arbiter.Core.Sql.Query
   ( Query (..)
+  , mkQuery
   , raw
   , param
   , rows
   , rawRows
   , sepBy
   , mwhen
-  , numberPlaceholders
+  , Piece (..)
   , ToFragment (..)
   ) where
 
+import Data.List (intercalate)
 import Data.Text (Text)
 import Data.Text qualified as T
 
 import Arbiter.Core.Codec (Params, RowCodec, SomeParam)
 
+-- | One run of literal SQL or one parameter hole.
+data Piece = Lit !Text | Hole
+  deriving stock (Eq, Show)
+
 -- | A parameterized query paired with the decoder for its result rows.
 data Query a = Query
-  { qSql :: !Text
-  -- ^ SQL text with @?@ placeholders, one per entry of 'qParams'.
+  { qPieces :: [Piece]
+  -- ^ The text as literals and holes, one hole per entry of 'qParams'.
   , qParams :: Params
-  -- ^ Positional parameters, in placeholder order.
+  -- ^ Positional parameters, in hole order.
+  , qSql :: Text
+  -- ^ The text with @?@ placeholders.
+  , qPositional :: Text
+  -- ^ The text with @$n@ placeholders.
   , qDecode :: RowCodec a
   -- ^ Decoder for the result rows.
   }
 
+-- | A query from its pieces, parameters and decoder.
+mkQuery :: [Piece] -> Params -> RowCodec a -> Query a
+mkQuery pieces params = Query pieces params (render (const "?") pieces) (render positional pieces)
+  where
+    positional index = "$" <> T.pack (show index)
+
+-- | Render the pieces, numbering the holes from one.
+render :: (Int -> Text) -> [Piece] -> Text
+render hole = T.concat . go 1
+  where
+    go _ [] = []
+    go index (Lit literal : rest) = literal : go index rest
+    go index (Hole : rest) = hole index : go (index + 1) rest
+
 instance Functor Query where
-  fmap fn (Query text params decoder) = Query text params (fmap fn decoder)
+  fmap fn (Query pieces params sql positional decoder) = Query pieces params sql positional (fmap fn decoder)
 
 -- | Concatenation is defined for @Query ()@, a fragment with text and parameters and no output columns.
 instance Semigroup (Query ()) where
-  Query text1 params1 _ <> Query text2 params2 _ = Query (text1 <> text2) (params1 <> params2) (pure ())
+  Query pieces1 params1 _ _ _ <> Query pieces2 params2 _ _ _ = mkQuery (pieces1 <> pieces2) (params1 <> params2) (pure ())
 
 instance Monoid (Query ()) where
-  mempty = Query "" [] (pure ())
-  mconcat queries = Query (T.concat (map qSql queries)) (concatMap qParams queries) (pure ())
+  mempty = mkQuery [] [] (pure ())
+  mconcat queries = mkQuery (concatMap qPieces queries) (concatMap qParams queries) (pure ())
 
 -- | Literal SQL with no parameters (table names, static clauses).
 raw :: Text -> Query ()
-raw text = Query text [] (pure ())
+raw literal = mkQuery [Lit literal] [] (pure ())
 
--- | One @?@ placeholder bound to a single parameter.
+-- | One hole bound to a single parameter.
 param :: SomeParam -> Query ()
-param value = Query "?" [value] (pure ())
-
--- | Rewrite the @?@ placeholders in a query's text to PostgreSQL positional
--- placeholders (@$1@, @$2@, ...) for libpq-based backends. The Nth @?@ maps to
--- the Nth entry of 'qParams'.
-numberPlaceholders :: Text -> Text
-numberPlaceholders text =
-  case T.splitOn "?" text of
-    [] -> ""
-    (first : rest) ->
-      first <> mconcat (zipWith (\index part -> "$" <> T.pack (show (index :: Int)) <> part) [1 ..] rest)
+param value = mkQuery [Hole] [value] (pure ())
 
 -- | Attach a handwritten row decoder to a parameterized fragment.
 rows :: RowCodec a -> Query () -> Query a
-rows decoder (Query text params _) = Query text params decoder
+rows decoder (Query pieces params sql positional _) = Query pieces params sql positional decoder
 
 -- | Attach a decoder to literal, parameter-free SQL rendered as plain 'Text'.
 rawRows :: RowCodec a -> Text -> Query a
@@ -74,8 +89,8 @@ rawRows decoder = rows decoder . raw
 -- in order. Used for @WHERE ... AND ...@ and runtime-sized @VALUES@ lists.
 sepBy :: Text -> [Query ()] -> Query ()
 sepBy sep queries =
-  Query
-    (T.intercalate sep (map qSql queries))
+  mkQuery
+    (intercalate [Lit sep] (map qPieces queries))
     (concatMap qParams queries)
     (pure ())
 

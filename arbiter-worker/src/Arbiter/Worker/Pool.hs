@@ -40,9 +40,6 @@ import UnliftIO
   , atomically
   , checkSTM
   , finally
-  , isEmptyTBQueue
-  , lengthTBQueue
-  , newTBQueueIO
   , newTVarIO
   , readTVar
   , tryAny
@@ -50,8 +47,9 @@ import UnliftIO
   , writeTVar
   )
 import UnliftIO.Async qualified as Async
+import UnliftIO.Chan (newChan)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (STM, TBQueue, TVar)
+import UnliftIO.STM (STM, TVar)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.ChannelHandlers
@@ -62,6 +60,7 @@ import Arbiter.Worker.ChannelHandlers
 import Arbiter.Worker.Config
 import Arbiter.Worker.Cron (CronJob (..), runCronScheduler)
 import Arbiter.Worker.Dispatcher
+import Arbiter.Worker.Heartbeat (newHeartbeatGuard, runHeartbeatGuard)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (tryWarn, tryWarnWith)
 import Arbiter.Worker.Processing (workerLoop)
@@ -103,10 +102,14 @@ runWorkerPool config = do
       consumeSpan = consumeSpanFor queueName (poolSpanShape config)
 
   schemaName <- getSchema
-  workQueue <- newTBQueueIO (fromIntegral workerCap)
+  workQueue <- newChan
+  queuedCount <- newTVarIO 0
   busyWorkerCount <- newTVarIO 0
   workerFinishedVar <- newTVarIO False
   runningJobs <- STM.newTVarIO Map.empty
+  guard <- newHeartbeatGuard config
+  statements <-
+    Arb.mkJobStatements @payload (handlerBatchSize config) workerCap (visibilityTimeout config) (workerId config)
 
   tryAny (registerSelf config schemaName queueName)
     >>= either
@@ -149,13 +152,16 @@ runWorkerPool config = do
     heartbeat <-
       spawn "Worker heartbeat" $
         heartbeatLoop config schemaName queueName
+    jobGuard <-
+      spawn "Job heartbeat guard" $
+        void (runHeartbeatGuard guard)
     dispatcher <-
       spawn "Dispatcher" $
-        runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
+        runDispatcher config workerCap statements workQueue queuedCount busyWorkerCount workerFinishedVar dispatcherNotifVar
     workers <-
       replicateM workerCap
         $ spawn "Worker thread"
-        $ workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
+        $ workerLoop config consumeSpan runningJobs guard statements workQueue queuedCount busyWorkerCount workerFinishedVar
     crons <-
       unlessNull (cronJobs config)
         $ spawn "Cron scheduler"
@@ -164,13 +170,13 @@ runWorkerPool config = do
       spawn "Reaper" $
         reaperLoop (logConfig config) (onMaintenance config) (reaperPace config) (reaperTimeout config)
 
-    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
+    (_, res) <- waitAnyCatch (dispatcher : jobGuard : reaper : heartbeat : crons <> workers)
     case res of
       Left exception ->
         lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx exception
       Right _ -> pure ()
 
-    lift $ shutdownPool config schemaName workQueue busyWorkerCount
+    lift $ shutdownPool config schemaName queuedCount busyWorkerCount
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool. Startup does not wait on it.
@@ -206,15 +212,15 @@ shutdownPool
   :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
-  -> TBQueue a
+  -> TVar Int
   -> TVar Int
   -> m ()
-shutdownPool config schemaName workQueue busyCount = do
+shutdownPool config schemaName queuedCount busyCount = do
   shutdownWorker config
   let wid = workerId config
       logCfg = logConfig config
   tryWarn logCfg "Failed to mark worker shutting down" (Ops.markWorkerShuttingDown schemaName wid)
-  drainPool logCfg (gracefulShutdownTimeout config) workQueue busyCount
+  drainPool logCfg (gracefulShutdownTimeout config) queuedCount busyCount
   tryWarn logCfg "Failed to deregister worker" (Ops.deregisterWorker schemaName wid)
 
 -- | Wait for the work queue to drain and all worker threads to go idle,
@@ -224,10 +230,10 @@ drainPool
   :: (MonadUnliftIO m)
   => LogConfig
   -> Maybe NominalDiffTime
-  -> TBQueue a
+  -> TVar Int
   -> TVar Int
   -> m ()
-drainPool logCfg mTimeout workQueue busyCount = do
+drainPool logCfg mTimeout queuedCount busyCount = do
   tryLog logCfg Info "Starting graceful shutdown. Draining in-flight jobs..."
   result <- case mTimeout of
     Nothing -> Right () <$ drainLoop
@@ -238,8 +244,8 @@ drainPool logCfg mTimeout workQueue busyCount = do
     Left () -> tryLog logCfg Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
   where
     waitForDrain = atomically $ do
-      qEmpty <- isEmptyTBQueue workQueue
-      checkSTM qEmpty
+      queued <- readTVar queuedCount
+      checkSTM (queued == 0)
       busy <- readTVar busyCount
       checkSTM (busy == 0)
     drainLoop = do
@@ -251,7 +257,7 @@ drainPool logCfg mTimeout workQueue busyCount = do
             atomically $
               (,)
                 <$> readTVar busyCount
-                <*> (fromIntegral <$> lengthTBQueue workQueue)
+                <*> readTVar queuedCount
           tryLog logCfg Info $
             "Graceful shutdown: waiting for "
               <> T.pack (show (busy :: Int))

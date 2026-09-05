@@ -58,17 +58,7 @@ import Data.UUID (UUID)
 
 import Arbiter.Worker.BackoffStrategy
 import Arbiter.Worker.Config
-import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal
-  ( runHook
-  , tryWarn
-  , tryWarnWith
-  , withJobContext
-  , withJobContextList
-  , withJobContextOne
-  )
-import Arbiter.Worker.Results (storeEncodedResult, storeEncodedResults)
-import Arbiter.Worker.Settle
+import Arbiter.Worker.Handoff
   ( CancelHandoff
   , byIdDesc
   , disowned
@@ -82,6 +72,16 @@ import Arbiter.Worker.Settle
   , settleInterruptibly
   , unownedJobs
   )
+import Arbiter.Worker.Logger
+import Arbiter.Worker.Logger.Internal
+  ( runHook
+  , tryWarn
+  , tryWarnWith
+  , withJobContext
+  , withJobContextList
+  , withJobContextOne
+  )
+import Arbiter.Worker.Results (storeEncodedResult, storeEncodedResults)
 
 -- | Add one job to the pool log context.
 jobLog :: WorkerConfig m payload -> Job.JobRead payload -> LogConfig
@@ -99,10 +99,9 @@ unownedReason :: Text
 unownedReason = "no longer claimed by this worker"
 
 -- | Ack a job inside the caller's transaction, throwing if another worker reclaimed it mid-flight.
-ackOrGone :: (JobOperation m payload) => Job.JobRead payload -> m ()
-ackOrGone job = do
-  schemaName <- getSchema
-  rowsAffected <- Ops.ackJobInner schemaName (Job.queueName job) job
+ackOrGone :: (JobOperation m payload) => Ops.JobStatements -> Job.JobRead payload -> m ()
+ackOrGone statements job = do
+  rowsAffected <- Ops.ackJobWith statements job
   when (rowsAffected == 0) $
     throwJobGoneIds "reclaimed by another worker during processing" [Job.primaryKey job]
 
@@ -124,12 +123,13 @@ batchCallbacks
      , JobOperation m payload
      )
   => WorkerConfig m payload
+  -> Ops.JobStatements
   -> CancelHandoff
   -> NonEmpty (Job.JobRead payload)
   -> UTCTime
   -> Text
   -> BatchCallbacks m payload (ResultOf m payload)
-batchCallbacks config handoff jobs startTime schemaName =
+batchCallbacks config statements handoff jobs startTime schemaName =
   BatchCallbacks
     { ack = (`ackOneStoring` Nothing)
     , ackWith = \job result -> ackOneStoring job (encodeJobResult result)
@@ -142,7 +142,6 @@ batchCallbacks config handoff jobs startTime schemaName =
     , nack = nackOne
     }
   where
-    (firstJob :| _) = jobs
     shape = batchSpanShape jobs
     nackOne job = releaseJobs config handoff [job]
     failAs mkExc job msg = failWith job (toException (mkExc msg))
@@ -162,7 +161,7 @@ batchCallbacks config handoff jobs startTime schemaName =
         handoff
         (finalized [job])
         ( withDbTransaction $ do
-            ackOrGone job
+            ackOrGone statements job
             storeEncodedResult schemaName job mVal
         )
         (const (reportSuccess config startTime job))
@@ -171,7 +170,7 @@ batchCallbacks config handoff jobs startTime schemaName =
        in settleBy
             handoff
             ( withDbTransaction $ do
-                acked <- Set.fromList <$> Ops.ackJobsBatchInner schemaName (Job.queueName firstJob) jobsToAck
+                acked <- Set.fromList <$> Ops.ackJobsBatchWith statements jobsToAck
                 storeEncodedResults schemaName (filter (hasIdIn acked . fst) pairs)
                 pure (partition (hasIdIn acked) jobsToAck)
             )

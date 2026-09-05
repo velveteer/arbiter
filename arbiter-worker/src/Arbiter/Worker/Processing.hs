@@ -12,6 +12,7 @@ import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.Trace (ConsumeSpan, resolveTracer, withConsumeSpan)
 import Control.Exception (fromException)
 import Control.Exception qualified as E
@@ -26,21 +27,17 @@ import UnliftIO
   , finally
   , mask_
   , modifyTVar'
-  , readTBQueue
   , tryAny
   , writeTVar
   )
 import UnliftIO.Async qualified as Async
+import UnliftIO.Chan (Chan, readChan)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (TBQueue, TVar)
+import UnliftIO.STM (TVar)
 
 import Arbiter.Worker.ChannelHandlers (RunningJobs, withRegisteredJobs)
 import Arbiter.Worker.Config
-import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
-import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (runHook)
-import Arbiter.Worker.Results (storeJobResult)
-import Arbiter.Worker.Settle
+import Arbiter.Worker.Handoff
   ( CancelHandoff
   , cancelFinalized
   , finalized
@@ -49,6 +46,10 @@ import Arbiter.Worker.Settle
   , pendingJobs
   , settleInterruptibly
   )
+import Arbiter.Worker.Heartbeat (HeartbeatGuard, withJobsHeartbeat)
+import Arbiter.Worker.Logger
+import Arbiter.Worker.Logger.Internal (runHook)
+import Arbiter.Worker.Results (storeJobResult)
 import Arbiter.Worker.Settlement
   ( ackOrGone
   , batchCallbacks
@@ -70,19 +71,23 @@ workerLoop
   -- ^ The pool's consumer-span shape, built once for its queue.
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
-  -> TBQueue (NonEmpty (Job.JobRead payload))
+  -> HeartbeatGuard m payload
+  -> Ops.JobStatements
+  -> Chan (NonEmpty (Job.JobRead payload))
+  -> TVar Int
+  -- ^ Queued batch count
   -> TVar Int
   -- ^ Busy worker count
   -> TVar Bool
   -- ^ Worker finished signal
   -> m ()
-workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
-  -- Mask covers the window between the atomic claim (which increments
-  -- busyCount) and entering the finally block that decrements it.
-  jobBatch <- atomically $ do
-    batch <- readTBQueue workQueue
+workerLoop config consumeSpan runningJobs guard statements workQueue queuedCount busyCount workerFinishedVar = forever $ mask_ $ do
+  -- Mask covers the window between taking a batch (which moves it from queued
+  -- to busy) and entering the finally block that decrements busyCount.
+  jobBatch <- readChan workQueue
+  atomically $ do
+    modifyTVar' queuedCount (subtract 1)
     modifyTVar' busyCount (+ 1)
-    pure batch
 
   let jobIds = map Job.primaryKey (toList jobBatch)
 
@@ -96,7 +101,7 @@ workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar 
       handoff <- newCancelHandoff
       result <-
         withRegisteredJobs runningJobs jobIds $
-          processJobsWithRetry config consumeSpan handoff jobBatch
+          processJobsWithRetry config consumeSpan guard statements handoff jobBatch
       case result of
         Right () -> pure ()
         Left exception
@@ -119,10 +124,12 @@ processJobsWithRetry
   => WorkerConfig m payload
   -> ConsumeSpan
   -- ^ The pool's consumer-span shape, built once for its queue.
+  -> HeartbeatGuard m payload
+  -> Ops.JobStatements
   -> CancelHandoff
   -> NonEmpty (Job.JobRead payload)
   -> m ()
-processJobsWithRetry config consumeSpan handoff jobs = do
+processJobsWithRetry config consumeSpan guard statements handoff jobs = do
   startTime <- liftIO getCurrentTime
   schemaName <- Arb.getSchema
   tracer <- resolveTracer
@@ -141,28 +148,19 @@ processJobsWithRetry config consumeSpan handoff jobs = do
   withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
     traverse_ claimHook jobs
     result <-
-      tryAny
-        $ withJobsHeartbeat
-          (observabilityHooks config)
-          (jobHeartbeatInterval config)
-          (visibilityTimeout config)
-          (maxJobDuration config)
-          startTime
-          jobs
-          (pendingJobs handoff jobs)
-          (logConfig config)
-          (heartbeatSignal config)
-        $ case handlerMode config of
-          SingleJobMode handler ->
-            settleInterruptibly
-              handoff
-              (finalized [firstJob])
-              ( withDbTransaction $ do
-                  handlerResult <- runHandlerWithConnection handler firstJob
-                  ackOrGone firstJob
-                  storeJobResult schemaName firstJob handlerResult
-              )
-              (const (reportSuccess config startTime firstJob))
-          BatchedJobsMode _ handler -> handler jobs (batchCallbacks config handoff jobs startTime schemaName)
+      tryAny $
+        withJobsHeartbeat guard startTime jobs (pendingJobs handoff jobs) $
+          case handlerMode config of
+            SingleJobMode handler ->
+              settleInterruptibly
+                handoff
+                (finalized [firstJob])
+                ( withDbTransaction $ do
+                    handlerResult <- runHandlerWithConnection handler firstJob
+                    ackOrGone statements firstJob
+                    storeJobResult schemaName firstJob handlerResult
+                )
+                (const (reportSuccess config startTime firstJob))
+            BatchedJobsMode _ handler -> handler jobs (batchCallbacks config statements handoff jobs startTime schemaName)
     endTime <- liftIO getCurrentTime
     reportBatchOutcome config startTime endTime jobs handoff result

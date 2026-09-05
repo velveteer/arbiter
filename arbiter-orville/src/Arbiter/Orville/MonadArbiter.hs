@@ -12,7 +12,6 @@ import Arbiter.Core.Array qualified as Array
 import Arbiter.Core.Codec (Col (..), NullCol (..), ParamType (..), SomeParam (..), runCodec)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.MonadArbiter (Query (..))
-import Arbiter.Core.Sql.Query (numberPlaceholders)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, eitherDecodeStrict', encode)
 import Data.ByteString (ByteString)
@@ -37,9 +36,9 @@ orvilleExecuteQuery
   :: (O.MonadOrville m)
   => Query a
   -> m [a]
-orvilleExecuteQuery (Query sql params codec) = O.withConnection $ \conn -> do
+orvilleExecuteQuery (Query _ params _ positional codec) = O.withConnection $ \conn -> do
   pgParams <- encodeParams params
-  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (numberPlaceholders sql)) pgParams
+  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 positional) pgParams
   let marshaller = O.annotateSqlMarshallerEmptyAnnotation (O.marshallReadOnly (runCodec orvilleCol codec))
   decoded <- liftIO $ O.marshallResultFromSql O.defaultErrorDetailLevel marshaller result
   case decoded of
@@ -51,9 +50,9 @@ orvilleExecuteStatement
   :: (O.MonadOrville m)
   => Query a
   -> m Int64
-orvilleExecuteStatement (Query sql params _) = O.withConnection $ \conn -> do
+orvilleExecuteStatement (Query _ params _ positional _) = O.withConnection $ \conn -> do
   pgParams <- encodeParams params
-  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 (numberPlaceholders sql)) pgParams
+  result <- liftIO $ Conn.executeRaw conn (TE.encodeUtf8 positional) pgParams
   liftIO $ readRowCount result
 
 -- | Transaction bracket. Nests via savepoints.

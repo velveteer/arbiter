@@ -12,6 +12,7 @@ import Arbiter.Core.Operations qualified as Ops
 import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
+import UnliftIO.Chan (Chan, writeChan)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config
@@ -31,22 +32,21 @@ runDispatcher
    . (QueueOperation m payload)
   => WorkerConfig m payload
   -> Int
-  -> STM.TBQueue (NonEmpty (JobRead payload))
+  -> Ops.JobStatements
+  -> Chan (NonEmpty (JobRead payload))
+  -> STM.TVar Int
   -> STM.TVar Int
   -> STM.TVar Bool
   -> STM.TVar (Maybe Notification)
   -> m ()
-runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
-  -- The claim statement varies only with free capacity. Render every variant once.
-  claimSql <-
-    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (workerId config)
+runDispatcher config workerCapacity statements workQueue queuedCount busyWorkerCount workerFinishedVar notifVar = do
   claimGate <- newFailureGate
   let
     calcFreeWorkers :: STM.STM Int
     calcFreeWorkers = do
       busyCount <- STM.readTVar busyWorkerCount
-      queuedCount <- fromIntegral <$> STM.lengthTBQueue workQueue
-      pure $ workerCapacity - (busyCount + queuedCount)
+      queued <- STM.readTVar queuedCount
+      pure $ workerCapacity - (busyCount + queued)
 
     getFreeWorkers :: STM.STM (Maybe Int)
     getFreeWorkers = do
@@ -58,10 +58,11 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
       eJobs <- tryReported (logConfig config) Error claimGate "Dispatcher claim" $
         case handlerMode config of
           SingleJobMode _ ->
-            map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers
+            map (:| []) <$> Ops.claimJobsCached statements freeWorkers
           BatchedJobsMode _ _ ->
-            Ops.claimJobsBatchedCached claimSql freeWorkers
-      traverse_ (STM.atomically . traverse_ (STM.writeTBQueue workQueue)) eJobs
+            Ops.claimJobsBatchedCached statements freeWorkers
+      -- The count goes up before the write, so a free-worker reading never overshoots.
+      traverse_ (traverse_ (\batch -> STM.atomically (STM.modifyTVar' queuedCount (+ 1)) *> writeChan workQueue batch)) eJobs
       -- Pulse on every attempt, including a failed claim.
       STM.atomically $ void $ STM.tryPutTMVar (heartbeatSignal config) ()
 

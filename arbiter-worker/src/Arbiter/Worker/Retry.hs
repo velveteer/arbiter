@@ -3,18 +3,16 @@
 -- | Retry combinators for worker infrastructure threads (notification listener,
 -- cron scheduler, etc.) that should survive transient database failures.
 module Arbiter.Worker.Retry
-  ( isJobSignal
-  , retryOnException
+  ( retryOnException
   , spawnRetried
   ) where
 
-import Arbiter.Core.Exceptions (JobException, JobGoneException, displayEx)
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Monad (unless)
 import Control.Monad.Trans.Cont (ContT (..))
-import Data.Maybe (isJust)
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, SomeException, fromException, liftIO)
+import UnliftIO (MonadUnliftIO, liftIO)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.Exception (tryAny)
@@ -52,12 +50,6 @@ retryOnException stateVar logCfg label action = loop
 -- | Wait between attempts of a retried infrastructure thread.
 retryBackoffMicros :: Int
 retryBackoffMicros = 5_000_000
-
--- | A signal that only the worker layer can act on. A retry loop rethrows it.
-isJobSignal :: SomeException -> Bool
-isJobSignal exception =
-  isJust (fromException exception :: Maybe JobException)
-    || isJust (fromException exception :: Maybe JobGoneException)
 
 -- | Spawn a thread under 'withAsync' and 'retryOnException'. A transient failure
 -- restarts the action.

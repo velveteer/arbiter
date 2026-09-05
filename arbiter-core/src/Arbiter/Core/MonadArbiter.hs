@@ -10,6 +10,7 @@ module Arbiter.Core.MonadArbiter
   , SomeParam (..)
   , ParamType (..)
   , Query (..)
+  , mkQuery
   ) where
 
 import Data.Int (Int64)
@@ -22,7 +23,7 @@ import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.Listen (Listener)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, ResultFor)
-import Arbiter.Core.Sql.Query (Query (..))
+import Arbiter.Core.Sql.Query (Query (..), mkQuery)
 
 -- | Database abstraction for job queue operations. Each backend (postgresql-simple,
 -- hasql, orville) provides an instance that maps queries to its native driver.
