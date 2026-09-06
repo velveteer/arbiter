@@ -21,6 +21,7 @@ module Arbiter.Core.Sql.QQ
   , stmt
   ) where
 
+import Data.Containers.ListUtils (nubOrd)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Haskell.TH (Exp, Name, Q)
@@ -36,8 +37,7 @@ import Arbiter.Core.Codec
   , pnul
   , pval
   )
-import Arbiter.Core.Sql.Query (Query (..), mkQuery, rows, toFragment)
-import Arbiter.Core.Sql.Query qualified as Q
+import Arbiter.Core.Sql.Query (Piece (..), Query (..), mkQuery, toFragment)
 
 -- | The @sql@ quasiquoter, valid in expression position.
 sql :: QuasiQuoter
@@ -48,7 +48,7 @@ sql = quoter compile
 stmt :: QuasiQuoter
 stmt = quoter compileStmt
 
-quoter :: ([Piece] -> Q Exp) -> QuasiQuoter
+quoter :: ([Token] -> Q Exp) -> QuasiQuoter
 quoter codegen =
   QuasiQuoter
     { quoteExp = \template -> either fail codegen (tokenize (T.unpack (normalizeIndent (T.pack template))))
@@ -66,8 +66,8 @@ quoter codegen =
 -- | How a parameter column is shaped.
 data Kind = KScalar | KNullable | KArray | KNullArray
 
-data Piece
-  = Lit Text
+data Token
+  = Raw Text
   | -- | @${ident}@
     Splice Text
   | -- | @#{ident :: coltype}@: identifier, shape, column constructor.
@@ -75,8 +75,8 @@ data Piece
   | -- | @\@{name :: coltype}@: name, nullable, column constructor.
     OutHole Text Bool Text
 
--- | Scan a template into pieces.
-tokenize :: String -> Either String [Piece]
+-- | Scan a template into tokens.
+tokenize :: String -> Either String [Token]
 tokenize = go ""
   where
     go buf input = case input of
@@ -88,33 +88,33 @@ tokenize = go ""
 
     hole sig buf rest = do
       (inside, rest') <- takeBrace rest
-      piece <- mkPiece sig inside
+      token <- mkToken sig inside
       rest'' <- go "" rest'
-      Right (flush buf ++ [piece] ++ rest'')
+      Right (flush buf ++ [token] ++ rest'')
 
-    flush buf = [Lit (T.pack (reverse buf)) | not (null buf)]
+    flush buf = [Raw (T.pack (reverse buf)) | not (null buf)]
 
 takeBrace :: String -> Either String (String, String)
 takeBrace input = case break (== '}') input of
   (inside, '}' : rest) -> Right (inside, rest)
   _ -> Left "sql: unterminated hole (missing '}')"
 
-mkPiece :: Char -> String -> Either String Piece
-mkPiece '$' inside =
+mkToken :: Char -> String -> Either String Token
+mkToken '$' inside =
   let name = T.strip (T.pack inside)
    in if T.null name then Left "sql: empty ${} splice" else Right (Splice name)
-mkPiece '#' inside = do
+mkToken '#' inside = do
   (ident, colType) <- splitAnn inside
   (kind, colName) <- parseColType colType
   Right (InHole ident kind colName)
-mkPiece '@' inside = do
+mkToken '@' inside = do
   (name, colType) <- splitAnn inside
   (kind, colName) <- parseColType colType
   case kind of
     KScalar -> Right (OutHole name False colName)
     KNullable -> Right (OutHole name True colName)
     _ -> Left "sql: @{} output holes cannot be array-typed"
-mkPiece sigil _ = Left ("sql: unknown hole sigil " ++ [sigil])
+mkToken sigil _ = Left ("sql: unknown hole sigil " ++ [sigil])
 
 -- | Split @expr :: coltype@ on the @::@.
 splitAnn :: String -> Either String (Text, Text)
@@ -145,42 +145,38 @@ parseColType rawType =
 -- ---------------------------------------------------------------------------
 
 -- | The 'sql' form.
-compile :: [Piece] -> Q Exp
-compile pieces = do
-  let piecesExpr = [|concat $(TH.listE (map piecesExp pieces))|]
-      paramsExpr = [|concat $(TH.listE (map paramsExp pieces))|]
-      queryExpr = [|mkQuery $piecesExpr $paramsExpr (pure ())|]
-      outHoles = [(name, nullable, colType) | OutHole name nullable colType <- pieces]
-  case outHoles of
-    [] -> queryExpr
-    _ -> do
-      dec <- mkDecoder outHoles
-      [|rows $(pure dec) $queryExpr|]
+compile :: [Token] -> Q Exp
+compile tokens = [|mkQuery $(piecesE tokens) $(paramsE tokens) $(decoderE tokens)|]
 
 -- | The 'stmt' form. The staged query is shared by every application.
-compileStmt :: [Piece] -> Q Exp
-compileStmt pieces = do
+compileStmt :: [Token] -> Q Exp
+compileStmt tokens = do
   stagedN <- TH.newName "staged"
-  let idents = foldl' (\seen ident -> if ident `elem` seen then seen else seen <> [ident]) [] [ident | InHole ident _ _ <- pieces]
-      binders = map (TH.VarP . TH.mkName . T.unpack) idents
-      outHoles = [(name, nullable, colType) | OutHole name nullable colType <- pieces]
-  stagedE <- [|mkQuery (concat $(TH.listE (map piecesExp pieces))) [] (pure ())|]
-  paramsE <- [|concat $(TH.listE (map paramsExp pieces))|]
-  dec <- case outHoles of
-    [] -> [|pure ()|]
-    _ -> mkDecoder outHoles
-  body <- [|$(TH.varE stagedN) {qParams = $(pure paramsE), qDecode = $(pure dec)}|]
+  let binders = map (TH.VarP . TH.mkName . T.unpack) (nubOrd [ident | InHole ident _ _ <- tokens])
+  stagedE <- [|mkQuery $(piecesE tokens) [] $(decoderE tokens)|]
+  body <- [|$(TH.varE stagedN) {qParams = $(paramsE tokens)}|]
   pure (TH.LetE [TH.ValD (TH.VarP stagedN) (TH.NormalB stagedE) []] (TH.LamE binders body))
 
--- | A piece's contribution to the query's pieces.
-piecesExp :: Piece -> Q Exp
-piecesExp (Lit literal) = [|[Q.Lit (T.pack $(TH.stringE (T.unpack literal)))]|]
-piecesExp (Splice name) = [|qPieces (toFragment $(TH.varE (TH.mkName (T.unpack name))))|]
-piecesExp (OutHole name _ _) = [|[Q.Lit (T.pack $(TH.stringE (T.unpack name)))]|]
-piecesExp (InHole _ _ _) = [|[Q.Hole]|]
+piecesE :: [Token] -> Q Exp
+piecesE tokens = [|concat $(TH.listE (map piecesExp tokens))|]
 
--- | A piece's contribution to the parameters.
-paramsExp :: Piece -> Q Exp
+paramsE :: [Token] -> Q Exp
+paramsE tokens = [|concat $(TH.listE (map paramsExp tokens))|]
+
+decoderE :: [Token] -> Q Exp
+decoderE tokens = case [(name, nullable, colType) | OutHole name nullable colType <- tokens] of
+  [] -> [|pure ()|]
+  holes -> mkDecoder holes
+
+-- | A token's contribution to the query's pieces.
+piecesExp :: Token -> Q Exp
+piecesExp (Raw literal) = [|[Lit (T.pack $(TH.stringE (T.unpack literal)))]|]
+piecesExp (Splice name) = [|qPieces (toFragment $(TH.varE (TH.mkName (T.unpack name))))|]
+piecesExp (OutHole name _ _) = [|[Lit (T.pack $(TH.stringE (T.unpack name)))]|]
+piecesExp (InHole _ _ _) = [|[Hole]|]
+
+-- | A token's contribution to the parameters.
+paramsExp :: Token -> Q Exp
 paramsExp (Splice name) = [|qParams (toFragment $(TH.varE (TH.mkName (T.unpack name))))|]
 paramsExp (InHole ident kind colType) = do
   colN <- colConName colType

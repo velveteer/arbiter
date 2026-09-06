@@ -19,7 +19,7 @@ import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQ
 import Arbiter.Core.Job.Types (defaultMaxAttempts)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
 import Arbiter.Core.Sql.Jobs (jobColumns)
-import Arbiter.Core.Sql.QQ (stmt)
+import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
 
@@ -482,11 +482,22 @@ decisionCte admission =
 
 -- | The @claimed@ UPDATE and the final SELECT, over the CTEs rendered before them.
 claimStatement :: ClaimAdmission -> Text -> Text -> Text -> UUID -> Query ()
-claimStatement admission tbl timeout ctes
-  | admitRateLimited admission =
-      [stmt|
+claimStatement admission tbl timeout ctes claimant =
+  let claimed = claimedCte admission tbl timeout claimant
+      admitFilter = mwhen (admitRateLimited admission) (" WHERE _admit" :: Text)
+   in [sql|
         WITH
         ${ctes}
+        ${claimed}
+        SELECT ${jobColumns} FROM claimed${admitFilter} ORDER BY priority ASC, id ASC
+      |]
+
+-- | The @claimed@ UPDATE. Under rate limiting a deferred row moves its claim token
+-- and parks, taking no attempt.
+claimedCte :: ClaimAdmission -> Text -> Text -> UUID -> Query ()
+claimedCte admission tbl timeout claimant
+  | admitRateLimited admission =
+      [sql|
         claimed AS (
           UPDATE ${tbl} job
           SET not_visible_until = CASE
@@ -513,12 +524,9 @@ claimStatement admission tbl timeout ctes
           WHERE job.id = verdict.id
           RETURNING job.*, verdict._admit
         )
-        SELECT ${jobColumns} FROM claimed WHERE _admit ORDER BY priority ASC, id ASC
       |]
   | otherwise =
-      [stmt|
-        WITH
-        ${ctes}
+      [sql|
         claimed AS (
           UPDATE ${tbl} job
           SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
@@ -531,7 +539,6 @@ claimStatement admission tbl timeout ctes
           WHERE job.id = admitted_row.id
           RETURNING job.*
         )
-        SELECT ${jobColumns} FROM claimed ORDER BY priority ASC, id ASC
       |]
 
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes

@@ -5,9 +5,9 @@
 -- This module is not part of the public API.
 module Arbiter.Worker.Logger.Internal
   ( withJobContext
-  , withJobContextOne
-  , withJobContextList
   , runHook
+  , jobHook
+  , poolLog
   , tryWarn
   , tryWarnWith
   ) where
@@ -73,6 +73,14 @@ runHook cfg hookName action =
     >>= either
       (\exception -> tryLog cfg Warning $ "Observability hook '" <> hookName <> "' failed: " <> displayEx exception)
       pure
+
+-- | Run an observability hook with the job in the log context.
+jobHook :: (MonadUnliftIO m) => LogConfig -> Job.JobRead payload -> Text -> m () -> m ()
+jobHook cfg = runHook . withJobContextOne cfg
+
+-- | Log with the jobs in context.
+poolLog :: LogConfig -> LogLevel -> [Job.JobRead payload] -> Text -> IO ()
+poolLog cfg level jobs = tryLog (withJobContextList cfg jobs) level
 
 -- | Run an action and log a warning if it fails.
 tryWarn :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m ()

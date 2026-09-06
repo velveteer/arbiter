@@ -20,7 +20,7 @@ module Arbiter.Core.Sql.Query
   , ToFragment (..)
   ) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, mapAccumL)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -52,18 +52,17 @@ mkQuery pieces params = Query pieces params (render (const "?") pieces) (render 
 
 -- | Render the pieces, numbering the holes from one.
 render :: (Int -> Text) -> [Piece] -> Text
-render hole = T.concat . go 1
+render hole = T.concat . snd . mapAccumL step 1
   where
-    go _ [] = []
-    go index (Lit literal : rest) = literal : go index rest
-    go index (Hole : rest) = hole index : go (index + 1) rest
+    step !index (Lit literal) = (index, literal)
+    step !index Hole = (index + 1, hole index)
 
 instance Functor Query where
-  fmap fn (Query pieces params sql positional decoder) = Query pieces params sql positional (fmap fn decoder)
+  fmap fn query = query {qDecode = fmap fn (qDecode query)}
 
 -- | Concatenation is defined for @Query ()@, a fragment with text and parameters and no output columns.
 instance Semigroup (Query ()) where
-  Query pieces1 params1 _ _ _ <> Query pieces2 params2 _ _ _ = mkQuery (pieces1 <> pieces2) (params1 <> params2) (pure ())
+  query1 <> query2 = mkQuery (qPieces query1 <> qPieces query2) (qParams query1 <> qParams query2) (pure ())
 
 instance Monoid (Query ()) where
   mempty = mkQuery [] [] (pure ())
@@ -79,7 +78,7 @@ param value = mkQuery [Hole] [value] (pure ())
 
 -- | Attach a handwritten row decoder to a parameterized fragment.
 rows :: RowCodec a -> Query () -> Query a
-rows decoder (Query pieces params sql positional _) = Query pieces params sql positional decoder
+rows decoder query = query {qDecode = decoder}
 
 -- | Attach a decoder to literal, parameter-free SQL rendered as plain 'Text'.
 rawRows :: RowCodec a -> Text -> Query a

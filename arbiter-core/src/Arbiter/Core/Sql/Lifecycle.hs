@@ -69,16 +69,19 @@ smartAckJobSQL archiveEnabled schema tableName =
 -- acked ids. Reclaimed jobs are absent. Locks children-first to match nack and
 -- force-cancel. The caller holds the parent locks.
 smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
-smartAckJobsBatchSQL archiveEnabled schema tableName ids cseqs =
+smartAckJobsBatchSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "job.*" else "job.id, job.parent_id" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
-      locked = lockedByIdsCte tbl ids
-   in [sql|
+   in [stmt|
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
         ),
-        ${locked},
+        locked AS (
+          SELECT id FROM ${tbl} WHERE id = ANY(#{ids :: [CInt8]})
+          ORDER BY id DESC
+          FOR UPDATE
+        ),
         ack AS (
           DELETE FROM ${tbl} job
           USING input input_row

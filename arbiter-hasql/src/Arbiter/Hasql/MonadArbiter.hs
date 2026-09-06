@@ -36,15 +36,13 @@ module Arbiter.Hasql.MonadArbiter
   , localHasqlConnection
   ) where
 
-import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Exceptions (throwInternal)
-import Arbiter.Core.MonadArbiter (Params, Query (..))
+import Arbiter.Core.MonadArbiter (Query (..))
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Int (Int64)
 import Data.Pool qualified as Pool
-import Data.Text (Text)
 import Data.Text qualified as T
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
@@ -84,8 +82,7 @@ hasqlExecuteQuery
   :: (HasHasqlPool m, MonadIO m)
   => Query a
   -> m [a]
-hasqlExecuteQuery query = withConn $ \conn ->
-  runQueryStatement False conn (qPositional query) (qParams query) (qDecode query)
+hasqlExecuteQuery query = withConn $ \conn -> runQueryStatement False conn query
 
 -- | 'hasqlExecuteQuery' that prepares the statement once per connection and reuses
 -- the plan, when the pool enables prepared statements.
@@ -95,12 +92,12 @@ hasqlExecuteQueryPrepared
   -> m [a]
 hasqlExecuteQueryPrepared query = do
   pool <- getHasqlPool
-  withConn $ \conn -> runQueryStatement (preparedStatements pool) conn (qPositional query) (qParams query) (qDecode query)
+  withConn $ \conn -> runQueryStatement (preparedStatements pool) conn query
 
-runQueryStatement :: Bool -> Hasql.Connection -> Text -> Params -> RowCodec a -> IO [a]
-runQueryStatement prepare conn positional params codec = do
+runQueryStatement :: Bool -> Hasql.Connection -> Query a -> IO [a]
+runQueryStatement prepare conn query = do
   let mkStatement = if prepare then S.preparable else S.unpreparable
-      stmt = mkStatement positional (Encode.buildEncoder params) (Decode.hasqlRowDecoder codec)
+      stmt = mkStatement (qPositional query) (Encode.buildEncoder (qParams query)) (Decode.hasqlRowDecoder (qDecode query))
   result <- Hasql.use conn (Session.statement () stmt)
   case result of
     Right rows -> pure rows
