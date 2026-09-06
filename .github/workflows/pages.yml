@@ -43,9 +43,8 @@ jobs:
         run: |
           cabal update
           cabal build all
-          curl -L -O https://hackage.haskell.org/package/kedgeree-0.1.0/candidate/kedgeree-0.1.0.tar.gz
-          tar xzf kedgeree-0.1.0.tar.gz
-          cd kedgeree-0.1.0
+          git clone --depth 1 https://github.com/velveteer/kedgeree.git
+          cd kedgeree
           cabal install --project-dir=.
 
       - name: Generate Haddocks
