@@ -17,7 +17,7 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , mkClaimSql
+  , mkJobStatements
   , addRateLimitTokens
   , pruneRateLimitBuckets
   , resetRateLimitBuckets
@@ -491,19 +491,18 @@ reconcileAndPruneConcurrency = do
   schemaName <- getSchema
   Ops.reconcileAndPruneConcurrency schemaName (registryTableNames (Proxy @(RegistryOf m)))
 
--- | Assemble a pool's claim statements once (see 'Ops.mkClaimSql'). Batch size 1
--- is the single-job claim.
-mkClaimSql
+-- | Assemble a pool's statements once. Batch size 1 is the single-job claim.
+mkJobStatements
   :: forall payload m
    . (QueueOperation m payload)
   => Int
   -> Int
   -> NominalDiffTime
   -> UUID
-  -> m Ops.ClaimSql
-mkClaimSql batchSize poolSize timeout workerId =
+  -> m Ops.JobStatements
+mkJobStatements batchSize poolSize timeout workerId =
   onQueue @payload $ \schemaName tableName ->
-    pure $ Ops.mkClaimSql (Proxy @payload) schemaName tableName batchSize poolSize timeout workerId
+    pure $ Ops.mkJobStatements (Proxy @payload) schemaName tableName batchSize poolSize timeout workerId
 
 -- | 'claimNextVisibleJobs' under a given worker id. The dispatcher claims this way.
 claimNextVisibleJobsAs

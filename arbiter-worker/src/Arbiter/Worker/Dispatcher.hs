@@ -5,11 +5,9 @@ module Arbiter.Worker.Dispatcher
   ) where
 
 import Arbiter.Core.HighLevel (QueueOperation)
-import Arbiter.Core.HighLevel qualified as Arb
 import Arbiter.Core.Job.Types (JobRead)
 import Arbiter.Core.Listen (Notification)
 import Arbiter.Core.Operations qualified as Ops
-import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.List.NonEmpty (NonEmpty (..))
 import UnliftIO.STM qualified as STM
@@ -17,12 +15,12 @@ import UnliftIO.STM qualified as STM
 import Arbiter.Worker.Config
   ( HandlerMode (..)
   , WorkerConfig (..)
-  , handlerBatchSize
-  , heartbeatSignal
+  , pulseHeartbeat
   , readEffectiveState
   )
 import Arbiter.Worker.Logger (LogLevel (..), newFailureGate, tryReported)
 import Arbiter.Worker.NotificationListener (runNotificationConsumer)
+import Arbiter.Worker.WorkQueue (WorkQueue, awaitFinished, inFlight, pushWork)
 
 -- | Wake on NOTIFY, poll timer, or worker-finished, then claim up to capacity.
 -- @notifVar@ is filled from the shared hub in "Arbiter.Core.Listen".
@@ -31,22 +29,15 @@ runDispatcher
    . (QueueOperation m payload)
   => WorkerConfig m payload
   -> Int
-  -> STM.TBQueue (NonEmpty (JobRead payload))
-  -> STM.TVar Int
-  -> STM.TVar Bool
+  -> Ops.JobStatements
+  -> WorkQueue (NonEmpty (JobRead payload))
   -> STM.TVar (Maybe Notification)
   -> m ()
-runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar notifVar = do
-  -- The claim statement varies only with free capacity. Render every variant once.
-  claimSql <-
-    Arb.mkClaimSql @payload (handlerBatchSize config) workerCapacity (visibilityTimeout config) (workerId config)
+runDispatcher config workerCapacity statements workQueue notifVar = do
   claimGate <- newFailureGate
   let
     calcFreeWorkers :: STM.STM Int
-    calcFreeWorkers = do
-      busyCount <- STM.readTVar busyWorkerCount
-      queuedCount <- fromIntegral <$> STM.lengthTBQueue workQueue
-      pure $ workerCapacity - (busyCount + queuedCount)
+    calcFreeWorkers = (workerCapacity -) <$> inFlight workQueue
 
     getFreeWorkers :: STM.STM (Maybe Int)
     getFreeWorkers = do
@@ -58,26 +49,21 @@ runDispatcher config workerCapacity workQueue busyWorkerCount workerFinishedVar 
       eJobs <- tryReported (logConfig config) Error claimGate "Dispatcher claim" $
         case handlerMode config of
           SingleJobMode _ ->
-            map (:| []) <$> Ops.claimJobsCached claimSql freeWorkers
+            map (:| []) <$> Ops.claimJobsCached statements freeWorkers
           BatchedJobsMode _ _ ->
-            Ops.claimJobsBatchedCached claimSql freeWorkers
-      traverse_ (STM.atomically . traverse_ (STM.writeTBQueue workQueue)) eJobs
+            Ops.claimJobsBatchedCached statements freeWorkers
+      traverse_ (pushWork workQueue) eJobs
       -- Pulse on every attempt, including a failed claim.
-      STM.atomically $ void $ STM.tryPutTMVar (heartbeatSignal config) ()
+      STM.atomically (pulseHeartbeat config)
 
     claimOnWakeup :: m ()
     claimOnWakeup = do
       mFree <- STM.atomically getFreeWorkers
       traverse_ claimAndEnqueue mFree
 
-    workerFinishedTrigger = Just $ do
-      finished <- STM.readTVar workerFinishedVar
-      STM.checkSTM finished
-      STM.writeTVar workerFinishedVar False
-
   runNotificationConsumer
     (readEffectiveState config)
     (pollInterval config)
     notifVar
-    workerFinishedTrigger
+    (Just (awaitFinished workQueue))
     (const claimOnWakeup)

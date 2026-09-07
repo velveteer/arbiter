@@ -352,7 +352,8 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> CurrentTime
       -> StartTime
       -> m ()
-  -- ^ Called periodically for a running job.
+  -- ^ Called after each landed extend, on its own thread. It can overlap an earlier
+  -- call for the same job and run after the handler has finished.
   }
 
 -- | No-op hooks. Override fields to add observability:

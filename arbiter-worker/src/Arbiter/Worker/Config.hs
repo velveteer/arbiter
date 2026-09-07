@@ -34,13 +34,14 @@ module Arbiter.Worker.Config
   , pauseVar
   , pauseEpoch
   , heartbeatSignal
+  , pulseHeartbeat
   , listenerReadyVar
   ) where
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Exception (Exception)
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value, (.=))
 import Data.Foldable (toList)
@@ -423,6 +424,10 @@ pauseEpoch = runtimePauseEpoch . workerRuntime
 -- | Signal used to coordinate worker heartbeats.
 heartbeatSignal :: WorkerConfig n payload -> TMVar ()
 heartbeatSignal = runtimeHeartbeatSignal . workerRuntime
+
+-- | Pulse the heartbeat signal.
+pulseHeartbeat :: WorkerConfig n payload -> STM.STM ()
+pulseHeartbeat config = void (STM.tryPutTMVar (heartbeatSignal config) ())
 
 -- | State of the pool's notification listener.
 listenerReadyVar :: WorkerConfig n payload -> TVar Bool

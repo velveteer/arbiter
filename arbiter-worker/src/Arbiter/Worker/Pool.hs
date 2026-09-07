@@ -20,13 +20,12 @@ import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..))
-import Arbiter.Core.Trace (ConsumeShape (..), consumeSpanFor)
+import Arbiter.Core.Trace (ConsumeShape, consumeSpanFor, toConsumeShape)
 import Control.Exception qualified as E
 import Control.Monad (forever, replicateM, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Data.Bool (bool)
 import Data.Foldable (traverse_)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -40,18 +39,13 @@ import UnliftIO
   , atomically
   , checkSTM
   , finally
-  , isEmptyTBQueue
-  , lengthTBQueue
-  , newTBQueueIO
-  , newTVarIO
-  , readTVar
   , tryAny
   , waitAnyCatch
   , writeTVar
   )
 import UnliftIO.Async qualified as Async
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (STM, TBQueue, TVar)
+import UnliftIO.STM (STM)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.ChannelHandlers
@@ -62,11 +56,14 @@ import Arbiter.Worker.ChannelHandlers
 import Arbiter.Worker.Config
 import Arbiter.Worker.Cron (CronJob (..), runCronScheduler)
 import Arbiter.Worker.Dispatcher
+import Arbiter.Worker.Heartbeat (newHeartbeatGuard, runHeartbeatGuard)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (tryWarn, tryWarnWith)
 import Arbiter.Worker.Processing (workerLoop)
 import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop, runReaperOp)
 import Arbiter.Worker.Retry (spawnRetried)
+import Arbiter.Worker.Settlement (poolEffects, poolMode)
+import Arbiter.Worker.WorkQueue (WorkQueue, busyCount, inFlight, newWorkQueue, queuedCount)
 
 -- ---------------------------------------------------------------------------
 -- Worker Pool
@@ -74,7 +71,7 @@ import Arbiter.Worker.Retry (spawnRetried)
 
 -- | The span shape for claims made by a pool.
 poolSpanShape :: WorkerConfig m payload -> ConsumeShape
-poolSpanShape = bool PerJob PerBatch . (> 1) . handlerBatchSize
+poolSpanShape = toConsumeShape . handlerBatchSize
 
 -- | The pace the pool's reaper keeps.
 reaperPace :: WorkerConfig m payload -> MaintenancePace
@@ -103,10 +100,13 @@ runWorkerPool config = do
       consumeSpan = consumeSpanFor queueName (poolSpanShape config)
 
   schemaName <- getSchema
-  workQueue <- newTBQueueIO (fromIntegral workerCap)
-  busyWorkerCount <- newTVarIO 0
-  workerFinishedVar <- newTVarIO False
+  workQueue <- newWorkQueue
   runningJobs <- STM.newTVarIO Map.empty
+  guard <- newHeartbeatGuard config
+  statements <-
+    Arb.mkJobStatements @payload (handlerBatchSize config) workerCap (visibilityTimeout config) (workerId config)
+  mode <- poolMode config statements
+  effectsFor <- poolEffects config statements consumeSpan
 
   tryAny (registerSelf config schemaName queueName)
     >>= either
@@ -149,13 +149,16 @@ runWorkerPool config = do
     heartbeat <-
       spawn "Worker heartbeat" $
         heartbeatLoop config schemaName queueName
+    jobGuard <-
+      spawn "Job heartbeat guard" $
+        void (runHeartbeatGuard guard)
     dispatcher <-
       spawn "Dispatcher" $
-        runDispatcher config workerCap workQueue busyWorkerCount workerFinishedVar dispatcherNotifVar
+        runDispatcher config workerCap statements workQueue dispatcherNotifVar
     workers <-
       replicateM workerCap
         $ spawn "Worker thread"
-        $ workerLoop config consumeSpan runningJobs workQueue busyWorkerCount workerFinishedVar
+        $ workerLoop config runningJobs guard mode effectsFor workQueue
     crons <-
       unlessNull (cronJobs config)
         $ spawn "Cron scheduler"
@@ -164,13 +167,13 @@ runWorkerPool config = do
       spawn "Reaper" $
         reaperLoop (logConfig config) (onMaintenance config) (reaperPace config) (reaperTimeout config)
 
-    (_, res) <- waitAnyCatch (dispatcher : reaper : heartbeat : crons <> workers)
+    (_, res) <- waitAnyCatch (dispatcher : jobGuard : reaper : heartbeat : crons <> workers)
     case res of
       Left exception ->
         lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx exception
       Right _ -> pure ()
 
-    lift $ shutdownPool config schemaName workQueue busyWorkerCount
+    lift $ shutdownPool config schemaName workQueue
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool. Startup does not wait on it.
@@ -206,15 +209,14 @@ shutdownPool
   :: (MonadArbiter m)
   => WorkerConfig n payload
   -> SchemaName
-  -> TBQueue a
-  -> TVar Int
+  -> WorkQueue a
   -> m ()
-shutdownPool config schemaName workQueue busyCount = do
+shutdownPool config schemaName workQueue = do
   shutdownWorker config
   let wid = workerId config
       logCfg = logConfig config
   tryWarn logCfg "Failed to mark worker shutting down" (Ops.markWorkerShuttingDown schemaName wid)
-  drainPool logCfg (gracefulShutdownTimeout config) workQueue busyCount
+  drainPool logCfg (gracefulShutdownTimeout config) workQueue
   tryWarn logCfg "Failed to deregister worker" (Ops.deregisterWorker schemaName wid)
 
 -- | Wait for the work queue to drain and all worker threads to go idle,
@@ -224,10 +226,9 @@ drainPool
   :: (MonadUnliftIO m)
   => LogConfig
   -> Maybe NominalDiffTime
-  -> TBQueue a
-  -> TVar Int
+  -> WorkQueue a
   -> m ()
-drainPool logCfg mTimeout workQueue busyCount = do
+drainPool logCfg mTimeout workQueue = do
   tryLog logCfg Info "Starting graceful shutdown. Draining in-flight jobs..."
   result <- case mTimeout of
     Nothing -> Right () <$ drainLoop
@@ -237,21 +238,13 @@ drainPool logCfg mTimeout workQueue busyCount = do
     Right () -> tryLog logCfg Info "All workers are now idle. Graceful shutdown complete."
     Left () -> tryLog logCfg Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
   where
-    waitForDrain = atomically $ do
-      qEmpty <- isEmptyTBQueue workQueue
-      checkSTM qEmpty
-      busy <- readTVar busyCount
-      checkSTM (busy == 0)
+    waitForDrain = atomically (inFlight workQueue >>= checkSTM . (== 0))
     drainLoop = do
       drainOrTick <- Async.race (threadDelay 10_000_000) waitForDrain
       case drainOrTick of
         Right () -> pure ()
         Left () -> do
-          (busy, qLen) <-
-            atomically $
-              (,)
-                <$> readTVar busyCount
-                <*> (fromIntegral <$> lengthTBQueue workQueue)
+          (busy, qLen) <- atomically ((,) <$> busyCount workQueue <*> queuedCount workQueue)
           tryLog logCfg Info $
             "Graceful shutdown: waiting for "
               <> T.pack (show (busy :: Int))

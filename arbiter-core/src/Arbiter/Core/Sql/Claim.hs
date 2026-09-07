@@ -10,6 +10,7 @@ module Arbiter.Core.Sql.Claim
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
+import Data.UUID.Types (UUID)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Admission (effectivePolicyCol)
@@ -18,7 +19,8 @@ import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQ
 import Arbiter.Core.Job.Types (defaultMaxAttempts)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
 import Arbiter.Core.Sql.Jobs (jobColumns)
-import Arbiter.Core.Sql.Query (mwhen)
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
 
 -- | Which admission filters the claim SQL renders. A payload type that declares
@@ -478,13 +480,24 @@ decisionCte admission =
       ),
     |]
 
--- | The @claimed@ UPDATE. Rate limiting splits it into an admit/defer decision.
--- Without it, a straight claim of the admitted ids. A defer clears the holder and
--- moves the token.
-claimedCte :: ClaimAdmission -> Text -> Text -> Text
-claimedCte admission tbl timeout
+-- | The @claimed@ UPDATE and the final SELECT, over the CTEs rendered before them.
+claimStatement :: ClaimAdmission -> Text -> Text -> Text -> UUID -> Query ()
+claimStatement admission tbl timeout ctes claimant =
+  let claimed = claimedCte admission tbl timeout claimant
+      admitFilter = mwhen (admitRateLimited admission) (" WHERE _admit" :: Text)
+   in [sql|
+        WITH
+        ${ctes}
+        ${claimed}
+        SELECT ${jobColumns} FROM claimed${admitFilter} ORDER BY priority ASC, id ASC
+      |]
+
+-- | The @claimed@ UPDATE. Under rate limiting a deferred row moves its claim token
+-- and parks, taking no attempt.
+claimedCte :: ClaimAdmission -> Text -> Text -> UUID -> Query ()
+claimedCte admission tbl timeout claimant
   | admitRateLimited admission =
-      [text|
+      [sql|
         claimed AS (
           UPDATE ${tbl} job
           SET not_visible_until = CASE
@@ -506,14 +519,14 @@ claimedCte admission tbl timeout
                 ELSE verdict._defer
               END,
               claimed_by =
-                (CASE WHEN verdict._admit THEN ?::uuid ELSE NULL END)::uuid
+                (CASE WHEN verdict._admit THEN #{claimant :: CUuid} ELSE NULL END)::uuid
           FROM decision verdict
           WHERE job.id = verdict.id
           RETURNING job.*, verdict._admit
         )
       |]
   | otherwise =
-      [text|
+      [sql|
         claimed AS (
           UPDATE ${tbl} job
           SET not_visible_until = NOW() + (${timeout} * interval '1 second'),
@@ -521,7 +534,7 @@ claimedCte admission tbl timeout
               claim_seq = job.claim_seq + 1,
               last_attempted_at = NOW(),
               updated_at = NOW(),
-              claimed_by = ?::uuid
+              claimed_by = #{claimant :: CUuid}::uuid
           FROM admitted admitted_row
           WHERE job.id = admitted_row.id
           RETURNING job.*
@@ -531,7 +544,7 @@ claimedCte admission tbl timeout
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
 -- any unsuspended visible job, rollup children and woken rollup parents included.
 -- Each gate's CTEs render when the payload declares that kind of policy.
-claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> Text
+claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> UUID -> Query ()
 claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -563,20 +576,17 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       admitted = admittedCte admission
       rlSpend = mwhen hasRateLimit (rlSpendCtes admission buckets)
       decision = decisionCte admission
-      claimed = claimedCte admission tbl timeout
-      admitFilter = mwhen hasRateLimit " WHERE _admit"
-   in [text|
-        WITH
-        ${groupCandidates},
-        ${ungroupedPool},
-        ${allocatedSlots},
-        ${lockedCandidates},
-        ${concLocked}
-        ${rlSeed}
-        ${judged}
-        ${admitted}
-        ${rlSpend}
-        ${decision}
-        ${claimed}
-        SELECT ${jobColumns} FROM claimed${admitFilter} ORDER BY priority ASC, id ASC
-      |]
+      ctes =
+        [text|
+          ${groupCandidates},
+          ${ungroupedPool},
+          ${allocatedSlots},
+          ${lockedCandidates},
+          ${concLocked}
+          ${rlSeed}
+          ${judged}
+          ${admitted}
+          ${rlSpend}
+          ${decision}
+        |]
+   in claimStatement admission tbl timeout ctes

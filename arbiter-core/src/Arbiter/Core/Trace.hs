@@ -20,10 +20,12 @@ module Arbiter.Core.Trace
     -- * Consumer
   , ConsumeSpan
   , ConsumeShape (..)
+  , toConsumeShape
   , consumeSpanFor
   , withConsumeSpan
   , withJobParent
   , capturingContext
+  , capturingContextIO
 
     -- * Span enrichment
     -- $enrichment
@@ -35,7 +37,7 @@ module Arbiter.Core.Trace
 import Control.Applicative ((<|>))
 import Control.Exception (fromException)
 import Control.Monad (guard)
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HM
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -77,7 +79,7 @@ import OpenTelemetry.Trace.Core
   , withActiveSpan
   , wrapSpanContext
   )
-import UnliftIO (MonadUnliftIO, bracket)
+import UnliftIO (MonadUnliftIO, UnliftIO (..), askUnliftIO, bracket)
 import UnliftIO.Async (AsyncCancelled (..))
 
 import Arbiter.Core.Exceptions
@@ -181,6 +183,10 @@ data ConsumeSpan = ConsumeSpan
 data ConsumeShape = PerJob | PerBatch
   deriving stock (Eq, Show)
 
+-- | The shape over this many jobs. One job narrows the span to that job.
+toConsumeShape :: Int -> ConsumeShape
+toConsumeShape n = if n > 1 then PerBatch else PerJob
+
 -- | The consumer-span shape for a queue.
 consumeSpanFor :: TableName -> ConsumeShape -> ConsumeSpan
 consumeSpanFor queue shape =
@@ -205,6 +211,13 @@ withConsumeSpan mTracer consumeSpan jobs =
 -- unchanged action if the context has no span.
 capturingContext :: (MonadUnliftIO m) => m (m a -> m a)
 capturingContext = (\ctx -> maybe id (const (withContext ctx)) (lookupSpan ctx)) <$> getContext
+
+-- | 'capturingContext' for an action run from IO.
+capturingContextIO :: (MonadUnliftIO m) => m (IO a -> IO a)
+capturingContextIO = do
+  inherit <- capturingContext
+  UnliftIO run <- askUnliftIO
+  pure (run . inherit . liftIO)
 
 -- | Run an action under @ctx@, restoring the caller's own afterwards.
 withContext :: (MonadUnliftIO m) => Context -> m a -> m a

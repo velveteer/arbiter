@@ -1,168 +1,75 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Handler execution and job settlement for a worker pool.
+-- | The worker thread: takes batches off the queue and runs each through
+-- "Arbiter.Worker.Batch".
 module Arbiter.Worker.Processing
   ( workerLoop
   ) where
 
-import Arbiter.Core.Exceptions (JobForceCancelled (..), displayEx)
-import Arbiter.Core.HighLevel (JobOperation)
-import Arbiter.Core.HighLevel qualified as Arb
+import Arbiter.Core.Exceptions (displayEx)
 import Arbiter.Core.Job.Types qualified as Job
-import Arbiter.Core.JobResult
-import Arbiter.Core.MonadArbiter (MonadArbiter (..))
-import Arbiter.Core.Trace (ConsumeSpan, resolveTracer, withConsumeSpan)
 import Control.Exception (fromException)
 import Control.Exception qualified as E
-import Control.Monad (forever, unless)
+import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (toList, traverse_)
-import Data.List.NonEmpty (NonEmpty (..))
-import Data.Time (getCurrentTime)
+import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty)
 import UnliftIO
-  ( atomically
-  , catchSyncOrAsync
+  ( MonadUnliftIO
+  , atomically
   , finally
   , mask_
-  , modifyTVar'
-  , readTBQueue
-  , tryAny
-  , writeTVar
   )
 import UnliftIO.Async qualified as Async
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (TBQueue, TVar)
 
+import Arbiter.Worker.Batch (afterBatch, newHandoff, runBatch)
 import Arbiter.Worker.ChannelHandlers (RunningJobs, withRegisteredJobs)
 import Arbiter.Worker.Config
-import Arbiter.Worker.Heartbeat (withJobsHeartbeat)
+import Arbiter.Worker.Heartbeat (HeartbeatGuard)
 import Arbiter.Worker.Logger
-import Arbiter.Worker.Logger.Internal (runHook)
-import Arbiter.Worker.Results (storeJobResult)
-import Arbiter.Worker.Settle
-  ( CancelHandoff
-  , cancelFinalized
-  , finalized
-  , markCancelFinalized
-  , newCancelHandoff
-  , pendingJobs
-  , settleInterruptibly
-  )
-import Arbiter.Worker.Settlement
-  ( ackOrGone
-  , batchCallbacks
-  , batchLog
-  , finalizeForceCancelled
-  , jobLog
-  , reportBatchOutcome
-  , reportSuccess
-  )
+import Arbiter.Worker.Settlement (PoolEffects, PoolMode, batchLog)
+import Arbiter.Worker.WorkQueue (WorkQueue, finishWork, popWork)
+
+-- | The pause after a batch escapes with an unexpected exception.
+exceptionPauseMicros :: Int
+exceptionPauseMicros = 2_000_000
 
 -- | Main loop for a single worker thread.
 workerLoop
   :: forall payload m
-   . ( EncodeJobResult (ResultOf m payload)
-     , JobOperation m payload
-     )
+   . (MonadUnliftIO m)
   => WorkerConfig m payload
-  -> ConsumeSpan
-  -- ^ The pool's consumer-span shape, built once for its queue.
   -> RunningJobs
   -- ^ Pool-shared map from job id to running handler async.
-  -> TBQueue (NonEmpty (Job.JobRead payload))
-  -> TVar Int
-  -- ^ Busy worker count
-  -> TVar Bool
-  -- ^ Worker finished signal
+  -> HeartbeatGuard payload
+  -> PoolMode m payload
+  -> PoolEffects m payload
+  -> WorkQueue (NonEmpty (Job.JobRead payload))
   -> m ()
-workerLoop config consumeSpan runningJobs workQueue busyCount workerFinishedVar = forever $ mask_ $ do
-  -- Mask covers the window between the atomic claim (which increments
-  -- busyCount) and entering the finally block that decrements it.
-  jobBatch <- atomically $ do
-    batch <- readTBQueue workQueue
-    modifyTVar' busyCount (+ 1)
-    pure batch
+workerLoop config runningJobs guard mode effectsFor workQueue =
+  forever $ mask_ $ do
+    -- Mask covers the window between taking a batch (which moves it from queued
+    -- to busy) and entering the finally block that frees the busy slot.
+    jobBatch <- popWork workQueue
 
-  let jobIds = map Job.primaryKey (toList jobBatch)
+    let jobIds = map Job.primaryKey (toList jobBatch)
 
-  flip
-    finally
-    ( atomically $ do
-        modifyTVar' busyCount (subtract 1)
-        writeTVar workerFinishedVar True
-    )
-    $ do
-      handoff <- newCancelHandoff
-      result <-
-        withRegisteredJobs runningJobs jobIds $
-          processJobsWithRetry config consumeSpan handoff jobBatch
-      case result of
-        Right () -> pure ()
-        Left exception
-          -- Finalized inside the job span. A cancel delivered before that catch, or
-          -- one that interrupts it, arrives here undone.
-          | Just (JobForceCancelled cancelledIds reclaimedIds) <- fromException exception -> do
-              alreadyFinalized <- cancelFinalized handoff
-              unless alreadyFinalized $
-                finalizeForceCancelled config jobBatch cancelledIds reclaimedIds handoff
-          | Just Async.AsyncCancelled <- fromException exception -> liftIO (E.throwIO exception)
-          | otherwise -> do
-              tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
-              threadDelay 2_000_000
-
-processJobsWithRetry
-  :: forall payload m
-   . ( EncodeJobResult (ResultOf m payload)
-     , JobOperation m payload
-     )
-  => WorkerConfig m payload
-  -> ConsumeSpan
-  -- ^ The pool's consumer-span shape, built once for its queue.
-  -> CancelHandoff
-  -> NonEmpty (Job.JobRead payload)
-  -> m ()
-processJobsWithRetry config consumeSpan handoff jobs = do
-  startTime <- liftIO getCurrentTime
-  schemaName <- Arb.getSchema
-  tracer <- resolveTracer
-  let (firstJob :| _) = jobs
-      -- Rethrown with base throwIO. The flag is set last. An interrupted finalizer
-      -- leaves the rest to 'workerLoop'.
-      onForceCancel exc@(JobForceCancelled cancelledIds goneIds) = do
-        finalizeForceCancelled config jobs cancelledIds goneIds handoff
-        markCancelFinalized handoff
-        liftIO $ E.throwIO exc
-      claimHook job =
-        runHook (jobLog config job) "onJobClaimed" $
-          Job.onJobClaimed (observabilityHooks config) job startTime
-  -- The span covers the claim hooks, the outcome report and the force-cancel
-  -- finalizer.
-  withConsumeSpan tracer consumeSpan jobs $ flip catchSyncOrAsync onForceCancel $ do
-    traverse_ claimHook jobs
-    result <-
-      tryAny
-        $ withJobsHeartbeat
-          (observabilityHooks config)
-          (jobHeartbeatInterval config)
-          (visibilityTimeout config)
-          (maxJobDuration config)
-          startTime
-          jobs
-          (pendingJobs handoff jobs)
-          (logConfig config)
-          (heartbeatSignal config)
-        $ case handlerMode config of
-          SingleJobMode handler ->
-            settleInterruptibly
-              handoff
-              (finalized [firstJob])
-              ( withDbTransaction $ do
-                  handlerResult <- runHandlerWithConnection handler firstJob
-                  ackOrGone firstJob
-                  storeJobResult schemaName firstJob handlerResult
-              )
-              (const (reportSuccess config startTime firstJob))
-          BatchedJobsMode _ handler -> handler jobs (batchCallbacks config handoff jobs startTime schemaName)
-    endTime <- liftIO getCurrentTime
-    reportBatchOutcome config startTime endTime jobs handoff result
+    flip
+      finally
+      (atomically (finishWork workQueue))
+      $ do
+        handoff <- liftIO (newHandoff guard)
+        let effects = effectsFor jobBatch
+        result <-
+          withRegisteredJobs runningJobs jobIds $
+            liftIO (runBatch effects guard mode handoff jobBatch)
+        case result of
+          Right () -> pure ()
+          Left exception
+            | Just cancel <- fromException exception -> liftIO (afterBatch effects handoff jobBatch cancel)
+            | Just Async.AsyncCancelled <- fromException exception -> liftIO (E.throwIO exception)
+            | otherwise -> do
+                tryLog (batchLog config jobBatch) Error $ "Worker exception: " <> displayEx exception
+                threadDelay exceptionPauseMicros

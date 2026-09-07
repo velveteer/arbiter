@@ -10,8 +10,9 @@ The class specifies a registry, handler type, and these database operations:
 - `Handler` specifies the handler type. It can include a connection argument if
   the database library supplies one.
 - `getSchema` returns the Arbiter schema.
-- `executeQuery` and `executeStatement` run a `Query`. The value contains its
-  SQL text, parameters, and decoder.
+- `executeQuery` and `executeStatement` run a `Query`. The value carries its
+  SQL text with `?` placeholders, the same text with `$n` placeholders for
+  libpq, its parameters, and its decoder.
 - `withDbTransaction` starts a transaction or savepoint. A nested call must
   start a savepoint. This lets a finalization callback participate in the
   caller's transaction.

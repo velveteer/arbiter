@@ -267,35 +267,35 @@ main = hspec $ do
       rendered `shouldSatisfy` T.isInfixOf "WHERE id = ANY(?) OR id IN (SELECT id FROM roots)"
 
     it "moves the claim token on a rate-limited defer as well as an admit" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True False) 10 1 60 UUID.nil))
       rendered `shouldSatisfy` T.isInfixOf "claim_seq = job.claim_seq + 1,"
       rendered `shouldSatisfy` (not . T.isInfixOf "WHEN verdict._admit THEN job.claim_seq + 1")
 
     it "reads the gated group head as two ordered runs" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60 UUID.nil))
       rendered
         `shouldSatisfy` T.isInfixOf
           "AND job.attempts > 0 ORDER BY job.attempts DESC, job.priority ASC, job.id ASC LIMIT 10"
       rendered `shouldSatisfy` T.isInfixOf "AND job.attempts = 0 ORDER BY job.priority ASC, job.id ASC LIMIT 10"
 
     it "judges every gate in one materialized pass over the locked rows" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True True) 10 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission True True) 10 1 60 UUID.nil))
       rendered `shouldSatisfy` T.isInfixOf "judged AS MATERIALIZED ("
       rendered `shouldSatisfy` T.isInfixOf "admitted AS ( SELECT id FROM judged WHERE conc_admit AND rl_admit )"
       rendered `shouldSatisfy` (not . T.isInfixOf "JOIN judged")
 
     it "range-scans the ungrouped due branch without a redundant null test" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 10 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 10 1 60 UUID.nil))
       rendered `shouldSatisfy` T.isInfixOf "AND job.cancel_requested_at IS NULL AND job.not_visible_until <= NOW()"
       rendered `shouldSatisfy` (not . T.isInfixOf "AND job.not_visible_until IS NOT NULL AND job.not_visible_until <= NOW()")
 
     it "probes the count table per candidate, never hashing it per claim" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False True) 10 1 60 UUID.nil))
       rendered
         `shouldSatisfy` T.isInfixOf "OR counts.in_flight < COALESCE(policy.override_limit, policy.default_limit)) OFFSET 0 ))"
 
     it "binds the claimant, so one statement serves every claimer" $ do
-      let rendered = squish (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60)
+      let rendered = squish (qSql (claimJobsBatchedSQL "arbiter" "jobs" (ClaimAdmission False False) 1 1 60 UUID.nil))
       rendered `shouldSatisfy` T.isInfixOf "claimed_by = ?::uuid"
 
     it "measures queue ages from clock_timestamp, so none of them can go negative" $ do

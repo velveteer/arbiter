@@ -24,8 +24,6 @@ module Arbiter.Core.Operations
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , ClaimSql (..)
-  , mkClaimSql
   , claimJobsCached
   , claimJobsBatchedCached
   , addRateLimitTokens
@@ -47,9 +45,13 @@ module Arbiter.Core.Operations
   , reconcileConcurrencyCountsIfStale
   , reconcileAndPruneConcurrency
   , ackJob
-  , ackJobInner
+  , JobStatements
+  , mkJobStatements
+  , statementsAck
+  , AckStatements
+  , ackJobWith
+  , ackJobsBatchWith
   , ackJobsBatch
-  , ackJobsBatchInner
   , lockJobParents
   , lockJobTrees
   , lockJobTreesFromRoot
@@ -240,7 +242,6 @@ import Arbiter.Core.Codec
   , jobCodec
   , jobRowCodec
   , ncol
-  , pval
   )
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyKey (..)
@@ -408,15 +409,11 @@ singleCount :: [Int64] -> Int64
 singleCount [count] = count
 singleCount _ = 0
 
--- | Take a transaction-scoped advisory lock keyed by a @schema.table@ string and a job id.
-advisoryXactLockSQL :: Text -> Int64 -> Q.Query (Maybe Text)
-advisoryXactLockSQL key pid =
-  [QQ.sql|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, #{pid :: CInt8}))::text AS @{result :: Maybe CText}|]
-
--- | 'advisoryXactLockSQL' over many ids, ascending, in one round trip.
+-- | Take the transaction-scoped advisory locks keyed by a @schema.table@ string and
+-- the ids named, ascending, in one round trip.
 advisoryXactLockManySQL :: Text -> [Int64] -> Q.Query (Maybe Text)
-advisoryXactLockManySQL key pids =
-  [QQ.sql|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText} FROM unnest(#{pids :: [CInt8]}::bigint[]) AS job_ids(id) ORDER BY id|]
+advisoryXactLockManySQL =
+  [QQ.stmt|SELECT pg_advisory_xact_lock(hashtextextended(#{key :: CText}, id))::text AS @{result :: Maybe CText} FROM unnest(#{pids :: [CInt8]}::bigint[]) AS job_ids(id) ORDER BY id|]
 
 -- | The columns a job derives from its payload.
 payloadColumns
@@ -877,55 +874,17 @@ claimJobs
   -> m [JobRead payload]
 claimJobs schemaName tableName maxJobs timeout workerId =
   -- Batch size 1 is the single-job claim.
-  claimJobsCached (mkClaimSql (Proxy @payload) schemaName tableName 1 0 timeout workerId) maxJobs
+  claimJobsCached (mkJobStatements (Proxy @payload) schemaName tableName 1 0 timeout workerId) maxJobs
 
--- | A pool's claim statements, rendered once per capacity in @[1 .. poolSize]@.
--- 'claimSqlFor' falls back to a fresh render outside that range.
-data ClaimSql = ClaimSql
-  { claimSqlTable :: TableName
-  , claimSqlBatchSize :: Int
-  , claimSqlClaimant :: UUID
-  -- ^ Bound as the claim's @claimed_by@. One rendered statement serves every claimant.
-  , claimSqlFor :: Int -> Q.Query (JobRead Value)
-  }
-
--- | Assemble a pool's claim statements. Every input except the per-poll capacity
--- is constant for the pool's lifetime.
-mkClaimSql
-  :: forall payload proxy
-   . (JobPayload payload)
-  => proxy payload
-  -> SchemaName
-  -> TableName
-  -> Int
-  -> Int
-  -> NominalDiffTime
-  -> UUID
-  -> ClaimSql
-mkClaimSql _ schemaName tableName batchSize poolSize timeout workerId =
-  let admission = claimAdmissionFor @payload
-      claimant = [pval CUuid workerId]
-      codec = jobRowCodec tableName
-      render capacity =
-        Q.Query (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize capacity timeout) claimant codec
-      cache = IntMap.fromList [(capacity, render capacity) | capacity <- [1 .. poolSize]]
-   in ClaimSql
-        { claimSqlTable = tableName
-        , claimSqlBatchSize = batchSize
-        , claimSqlClaimant = workerId
-        , claimSqlFor = \capacity -> IntMap.findWithDefault (render capacity) capacity cache
-        }
-
--- | 'claimJobs' over a prebuilt 'ClaimSql'.
+-- | 'claimJobs' over a pool's staged statements.
 claimJobsCached
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
-  => ClaimSql
+  => JobStatements
   -> Int
   -> m [JobRead payload]
-claimJobsCached claimSql maxJobs = withDbTransaction $ do
-  rawJobs <- MA.executeQueryPrepared (claimSqlFor claimSql maxJobs)
-  traverse decodePayload rawJobs
+claimJobsCached statements maxJobs =
+  MA.executeQueryPrepared (claimFor statements maxJobs) >>= traverse decodePayload
 
 -- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each of @maxBatches@
 -- groups. Stamps 'anonymousClaimant'.
@@ -952,24 +911,24 @@ claimJobsBatched
   -> UUID
   -> m [NonEmpty (JobRead payload)]
 claimJobsBatched schemaName tableName batchSize maxBatches timeout workerId =
-  claimJobsBatchedCached (mkClaimSql (Proxy @payload) schemaName tableName batchSize 0 timeout workerId) maxBatches
+  claimJobsBatchedCached (mkJobStatements (Proxy @payload) schemaName tableName batchSize 0 timeout workerId) maxBatches
 
--- | 'claimJobsBatched' over a prebuilt 'ClaimSql'.
+-- | 'claimJobsBatched' over a pool's staged statements.
 claimJobsBatchedCached
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
-  => ClaimSql
+  => JobStatements
   -> Int
   -> m [NonEmpty (JobRead payload)]
-claimJobsBatchedCached claimSql maxBatches
-  | claimSqlBatchSize claimSql < 1 = pure []
+claimJobsBatchedCached statements maxBatches
+  | claimBatchSize statements < 1 = pure []
   | maxBatches < 1 = pure []
-  | otherwise = withDbTransaction $ do
-      rawJobs <- MA.executeQueryPrepared (claimSqlFor claimSql maxBatches)
+  | otherwise = do
+      rawJobs <- MA.executeQueryPrepared (claimFor statements maxBatches)
       jobs <- traverse decodePayload rawJobs
       let sorted = sortOn groupKey jobs
           groups = groupBy (\jobA jobB -> groupKey jobA == groupKey jobB) sorted
-      pure $ concatMap (chunksOfNE (claimSqlBatchSize claimSql)) $ mapMaybe NE.nonEmpty groups
+      pure $ concatMap (chunksOfNE (claimBatchSize statements)) $ mapMaybe NE.nonEmpty groups
 
 -- | Split a NonEmpty list into chunks of at most @size@ elements.
 chunksOfNE :: Int -> NonEmpty a -> [NonEmpty a]
@@ -996,28 +955,84 @@ ackJob
   -- ^ Table name
   -> JobRead payload
   -> m Int64
-ackJob schemaName tableName job = withDbTransaction $ ackJobInner schemaName tableName job
+ackJob schemaName tableName = withDbTransaction . ackJobWith (mkAckStatements schemaName tableName)
 
--- | Inner ack logic, run inside the caller's transaction.
-ackJobInner
-  :: forall m payload
-   . (MonadArbiter m)
-  => SchemaName -> TableName -> JobRead payload -> m Int64
-ackJobInner schemaName tableName job = do
-  lockJobParents schemaName tableName [parentId job]
-  let jid = primaryKey job
-      cseq = claimSeq job
-  countOr0Prepared (Tmpl.smartAckJobSQL (archivesOnAck job) schemaName tableName jid cseq)
+-- | A table's ack statements, rendered once. A call binds only its parameters.
+data AckStatements = AckStatements
+  { ackSchema :: SchemaName
+  , ackTable :: TableName
+  , ackFor :: Bool -> Int64 -> Int64 -> Q.Query Int64
+  -- ^ The ack, archiving or not, for a job id and claim token.
+  , ackBatchFor :: Bool -> [Int64] -> [Int64] -> Q.Query Int64
+  }
+
+mkAckStatements :: SchemaName -> TableName -> AckStatements
+mkAckStatements schemaName tableName =
+  AckStatements
+    { ackSchema = schemaName
+    , ackTable = tableName
+    , ackFor = \archiving -> if archiving then ackArchiving else ackPlain
+    , ackBatchFor = \archiving -> if archiving then ackBatchArchiving else ackBatchPlain
+    }
+  where
+    ackPlain = Tmpl.smartAckJobSQL False schemaName tableName
+    ackArchiving = Tmpl.smartAckJobSQL True schemaName tableName
+    ackBatchPlain = Tmpl.smartAckJobsBatchSQL False schemaName tableName
+    ackBatchArchiving = Tmpl.smartAckJobsBatchSQL True schemaName tableName
+
+-- | A pool's statements, rendered once. A call binds only its parameters.
+data JobStatements = JobStatements
+  { claimBatchSize :: Int
+  , claimFor :: Int -> Q.Query (JobRead Value)
+  -- ^ The claim at a capacity, with this pool's claimant bound.
+  , statementsAck :: AckStatements
+  }
+
+mkJobStatements
+  :: forall payload proxy
+   . (JobPayload payload)
+  => proxy payload
+  -> SchemaName
+  -> TableName
+  -> Int
+  -- ^ Batch size
+  -> Int
+  -- ^ Pool size
+  -> NominalDiffTime
+  -- ^ Visibility timeout
+  -> UUID
+  -- ^ Bound as the claim's @claimed_by@
+  -> JobStatements
+mkJobStatements _ schemaName tableName batchSize poolSize timeout workerId =
+  JobStatements
+    { claimBatchSize = batchSize
+    , claimFor = \capacity -> IntMap.findWithDefault (renderClaim capacity) capacity claims
+    , statementsAck = mkAckStatements schemaName tableName
+    }
+  where
+    admission = claimAdmissionFor @payload
+    codec = jobRowCodec tableName
+    renderClaim capacity =
+      Q.rows codec (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize capacity timeout workerId)
+    claims = IntMap.fromList [(capacity, renderClaim capacity) | capacity <- [1 .. poolSize]]
+
+-- | 'ackJob' inside the caller's transaction, over staged statements.
+ackJobWith :: (MonadArbiter m) => AckStatements -> JobRead payload -> m Int64
+ackJobWith statements job = do
+  ackParents statements [parentId job]
+  countOr0Prepared (ackFor statements (archivesOnAck job) (primaryKey job) (claimSeq job))
 
 -- | Take the advisory lock of every distinct parent named, ascending, before any
 -- row lock the caller goes on to take.
 lockJobParents :: (MonadArbiter m) => SchemaName -> TableName -> [Maybe Int64] -> m ()
 lockJobParents schemaName tableName parents =
-  unless (null pids)
-    $ void
-    $ MA.executeQuery (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
+  unless (null pids) $ void $ MA.executeQueryPrepared (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
   where
     pids = Set.toAscList (Set.fromList (catMaybes parents))
+
+-- | 'lockJobParents' on the table the ack statements name.
+ackParents :: (MonadArbiter m) => AckStatements -> [Maybe Int64] -> m ()
+ackParents statements = lockJobParents (ackSchema statements) (ackTable statements)
 
 -- | Read a job's parent and take its advisory lock, before any row lock the caller takes.
 lockParentOf :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m (Maybe Int64)
@@ -1048,10 +1063,7 @@ lockJobTreesFromRoot schemaName tableName ids =
 -- | Wake a suspended parent when all children are done.
 tryResumeParent :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> Int64 -> m ()
 tryResumeParent locks schemaName tableName pid = do
-  when (locks == TakeLocks)
-    $ void
-    $ MA.executeQuery
-      (advisoryXactLockSQL (schemaName <> "." <> tableName) pid)
+  when (locks == TakeLocks) $ lockJobParents schemaName tableName [Just pid]
   void $
     MA.executeStatement
       (Tmpl.tryWakeAncestorSQL schemaName tableName pid)
@@ -1068,18 +1080,14 @@ ackJobsBatch
   -> [JobRead payload]
   -> m [Int64]
   -- ^ Ids acked (deleted or suspended). Reclaimed jobs are absent.
-ackJobsBatch schemaName tableName = withDbTransaction . ackJobsBatchInner schemaName tableName
+ackJobsBatch schemaName tableName = withDbTransaction . ackJobsBatchWith (mkAckStatements schemaName tableName)
 
--- | Inner batch ack, run inside the caller's transaction.
-ackJobsBatchInner
-  :: forall m payload
-   . (MonadArbiter m)
-  => SchemaName -> TableName -> [JobRead payload] -> m [Int64]
-ackJobsBatchInner _ _ [] = pure []
-ackJobsBatchInner schemaName tableName jobs = do
-  lockJobParents schemaName tableName (map parentId jobs)
-  MA.executeQueryPrepared
-    (Tmpl.smartAckJobsBatchSQL (any archivesOnAck jobs) schemaName tableName (map primaryKey jobs) (map claimSeq jobs))
+-- | 'ackJobsBatch' inside the caller's transaction, over staged statements.
+ackJobsBatchWith :: (MonadArbiter m) => AckStatements -> [JobRead payload] -> m [Int64]
+ackJobsBatchWith _ [] = pure []
+ackJobsBatchWith statements jobs = do
+  ackParents statements (map parentId jobs)
+  MA.executeQueryPrepared (ackBatchFor statements (any archivesOnAck jobs) (map primaryKey jobs) (map claimSeq jobs))
 
 -- | Extend a job's visibility timeout.
 setVisibilityTimeout
