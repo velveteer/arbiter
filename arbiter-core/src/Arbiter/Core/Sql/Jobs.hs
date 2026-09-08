@@ -422,7 +422,7 @@ dedupUpdateSet tbl =
     claimed_by = NULL
   |]
 
--- | An existing row is replaceable when idle, unflagged and childless.
+-- | An existing row is replaceable when idle, unflagged, childless and same-parent.
 replaceableGuard :: Text -> Text -> Text
 replaceableGuard tbl dlqTbl =
   [text|
@@ -431,6 +431,7 @@ replaceableGuard tbl dlqTbl =
       OR ${tbl}.not_visible_until IS NULL
       OR ${tbl}.not_visible_until <= NOW())
       AND ${tbl}.cancel_requested_at IS NULL
+      AND ${tbl}.parent_id IS NOT DISTINCT FROM EXCLUDED.parent_id
       AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = ${tbl}.id)
       AND NOT EXISTS (SELECT 1 FROM ${dlqTbl} dlq_child WHERE dlq_child.parent_id = ${tbl}.id)
   |]

@@ -34,12 +34,14 @@ import Arbiter.Core.Exceptions
   , JobNackException (..)
   , JobPermanentException (..)
   , JobRetryableException (..)
+  , JobScopedFailure (..)
   , ParsingException (..)
   , TreeCancelException (..)
   , displayEx
   , namedJobIds
   )
 import Arbiter.Core.Job.Types (JobId)
+import Control.Applicative ((<|>))
 import Control.Concurrent.Class.MonadSTM
   ( MonadSTM
   , TVar
@@ -97,7 +99,7 @@ data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled
 -- | The statements and hooks a batch drives, each in the context @ctx@ it is
 -- called from. A callback runs in the handler's own context, so a statement it
 -- drives joins a transaction the handler holds. Each is one transaction or one hook.
-data Effects n ctx job stored = Effects
+data Effects n ctx job kids stored = Effects
   { effectAmbient :: ctx
   -- ^ The context the batch runs in, outside the handler.
   , effectSpan :: ((n () -> n ()) -> n ()) -> n ()
@@ -116,23 +118,26 @@ data Effects n ctx job stored = Effects
   -- ^ Delete the jobs a force-cancel flagged. The ids deleted.
   , effectRelease :: ctx -> [job] -> n (Set JobId)
   -- ^ Hand back the attempt the claim consumed. The ids released.
+  , effectSpawn :: ctx -> job -> kids -> n ()
+  -- ^ Attach children to one job and settle it suspended, in one transaction.
   , effectReport :: ctx -> Report job -> n ()
   , effectLog :: LogLevel -> [job] -> Text -> n ()
   }
 
 -- | How the pool runs a batch's handler.
-data Mode n ctx job stored
+data Mode n ctx job kids stored
   = -- | One transaction that runs the handler, acks the job and stores its result.
     SingleMode (job -> n ())
   | -- | The handler settles each job through the callbacks, in its context at the call.
-    BatchedMode (NonEmpty job -> Callbacks n ctx job stored -> n ())
+    BatchedMode (NonEmpty job -> Callbacks n ctx job kids stored -> n ())
 
 -- | The settle operations a batch handler drives its jobs through.
-data Callbacks n ctx job stored = Callbacks
+data Callbacks n ctx job kids stored = Callbacks
   { callbackAck :: ctx -> job -> Maybe stored -> n ()
   , callbackAckAll :: ctx -> [(job, Maybe stored)] -> n ()
   , callbackFail :: ctx -> Failure -> job -> n ()
   , callbackNack :: ctx -> job -> n ()
+  , callbackSpawn :: ctx -> job -> kids -> n ()
   }
 
 -- ---------------------------------------------------------------------------
@@ -149,6 +154,8 @@ data Progress n = Progress
   -- ^ Jobs a force-cancel accounted for.
   , progressReported :: !(Set JobId)
   -- ^ Jobs whose terminal report fired.
+  , progressSpawned :: !(Set JobId)
+  -- ^ Jobs a spawn suspended.
   , progressDeferred :: !(Maybe (n ()))
   -- ^ The hooks of a settle a signal can interrupt.
   , progressFinalized :: !Bool
@@ -165,7 +172,20 @@ data Handoff n job = Handoff
 -- | A handoff keyed the way the guard keys its jobs.
 newHandoff :: (MonadSTM n) => HeartbeatGuard n job -> n (Handoff n job)
 {-# SPECIALIZE newHandoff :: HeartbeatGuard IO job -> IO (Handoff IO job) #-}
-newHandoff guard = Handoff (guardKey guard) <$> newTVarIO (Progress mempty mempty mempty mempty Nothing False)
+newHandoff guard = Handoff (guardKey guard) <$> newTVarIO emptyProgress
+
+-- | A batch that has settled nothing.
+emptyProgress :: Progress n
+emptyProgress =
+  Progress
+    { progressHandled = mempty
+    , progressUnowned = mempty
+    , progressCancelled = mempty
+    , progressReported = mempty
+    , progressSpawned = mempty
+    , progressDeferred = Nothing
+    , progressFinalized = False
+    }
 
 readProgress :: (MonadSTM n) => Handoff n job -> n (Progress n)
 readProgress = readTVarIO . handoffVar
@@ -220,6 +240,12 @@ pendingJobs handoff = jobsBy handoff progressHandled not
 unownedJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 unownedJobs handoff = jobsBy handoff progressUnowned id
 
+-- | Record that a spawn suspended a job.
+recordSpawned :: (MonadSTM n) => Handoff n job -> job -> n ()
+recordSpawned handoff job =
+  alterProgress handoff $ \progress ->
+    progress {progressSpawned = Set.insert (handoffKey handoff job) (progressSpawned progress)}
+
 -- | Add to the jobs a force-cancel accounted for, returning every id recorded so far.
 recordCancelled :: (MonadSTM n) => Handoff n job -> Set JobId -> n (Set JobId)
 recordCancelled handoff ids =
@@ -244,30 +270,30 @@ markFinalized handoff = alterProgress handoff $ \progress -> progress {progressF
 
 -- | What every settle path works with: the effects, the context to run them in,
 -- and the handoff. A callback rebuilds it with the handler's context.
-data Run n ctx job stored = Run
-  { runEffects :: Effects n ctx job stored
+data Run n ctx job kids stored = Run
+  { runEffects :: Effects n ctx job kids stored
   , runContext :: ctx
   , runHandoff :: Handoff n job
   }
 
 -- | The batch's run outside the handler.
-ambientRun :: Effects n ctx job stored -> Handoff n job -> Run n ctx job stored
+ambientRun :: Effects n ctx job kids stored -> Handoff n job -> Run n ctx job kids stored
 ambientRun effects = Run effects (effectAmbient effects)
 
 -- | Run the batch on the calling thread: the claim hooks, the handler under the
 -- guard, the outcome report, and the force-cancel finalizer.
 runBatch
   :: (MonadFork n, MonadMask n, MonadMonotonicTime n, MonadSTM n, MonadTime n)
-  => Effects n ctx job stored
+  => Effects n ctx job kids stored
   -> HeartbeatGuard n job
-  -> Mode n ctx job stored
+  -> Mode n ctx job kids stored
   -> Handoff n job
   -> NonEmpty job
   -> n ()
 {-# SPECIALIZE runBatch ::
-  Effects IO ctx job stored
+  Effects IO ctx job kids stored
   -> HeartbeatGuard IO job
-  -> Mode IO ctx job stored
+  -> Mode IO ctx job kids stored
   -> Handoff IO job
   -> NonEmpty job
   -> IO ()
@@ -301,9 +327,9 @@ runBatch effects guard mode handoff jobs = do
 -- | Finalize a force-cancel that the batch left undone: one delivered before the
 -- catch in 'runBatch', or one that interrupted its finalizer.
 afterBatch
-  :: (MonadMask n, MonadSTM n) => Effects n ctx job stored -> Handoff n job -> NonEmpty job -> JobForceCancelled -> n ()
+  :: (MonadMask n, MonadSTM n) => Effects n ctx job kids stored -> Handoff n job -> NonEmpty job -> JobForceCancelled -> n ()
 {-# SPECIALIZE afterBatch ::
-  Effects IO ctx job stored -> Handoff IO job -> NonEmpty job -> JobForceCancelled -> IO ()
+  Effects IO ctx job kids stored -> Handoff IO job -> NonEmpty job -> JobForceCancelled -> IO ()
   #-}
 afterBatch effects handoff jobs (JobForceCancelled cancelledIds goneIds) = do
   already <- progressFinalized <$> readProgress handoff
@@ -318,13 +344,13 @@ afterBatch effects handoff jobs (JobForceCancelled cancelledIds goneIds) = do
 -- ---------------------------------------------------------------------------
 
 -- | An effect, in the run's context.
-effect :: (Effects n ctx job stored -> ctx -> a) -> Run n ctx job stored -> a
+effect :: (Effects n ctx job kids stored -> ctx -> a) -> Run n ctx job kids stored -> a
 effect field run = field (runEffects run) (runContext run)
 
-report :: Run n ctx job stored -> Report job -> n ()
+report :: Run n ctx job kids stored -> Report job -> n ()
 report = effect effectReport
 
-logAt :: Run n ctx job stored -> LogLevel -> [job] -> Text -> n ()
+logAt :: Run n ctx job kids stored -> LogLevel -> [job] -> Text -> n ()
 logAt run = effectLog (runEffects run)
 
 -- | Commit a settle, record it, then run its hooks. The mask covers the commit,
@@ -334,10 +360,10 @@ logAt run = effectLog (runEffects run)
 -- what the commit did.
 settleWith
   :: (MonadMask n, MonadSTM n)
-  => Run n ctx job stored
+  => Run n ctx job kids stored
   -> ((forall x. n x -> n x) -> n a)
   -> (a -> Settled job)
-  -> (Run n ctx job stored -> a -> n ())
+  -> (Run n ctx job kids stored -> a -> n ())
   -> n a
 settleWith run commit accounts hooks = do
   (result, outermost) <- mask $ \restore -> do
@@ -346,7 +372,7 @@ settleWith run commit accounts hooks = do
         settled progress =
           ( isNothing (progressDeferred progress)
           , (recorded handoff (accounts result) progress)
-              { progressDeferred = maybe (Just later) Just (progressDeferred progress)
+              { progressDeferred = progressDeferred progress <|> Just later
               }
           )
     (,) result <$> onProgress handoff settled
@@ -358,12 +384,12 @@ settleWith run commit accounts hooks = do
 -- | 'settleWith' for a set known before the commit.
 settle
   :: (MonadMask n, MonadSTM n)
-  => Run n ctx job stored -> Settled job -> n a -> (Run n ctx job stored -> a -> n ()) -> n a
+  => Run n ctx job kids stored -> Settled job -> n a -> (Run n ctx job kids stored -> a -> n ()) -> n a
 settle run settled commit = settleWith run (\_ -> commit) (const settled)
 
 -- | Fire a job's terminal report, once per batch. The claim and the report are one
 -- unit against a signal.
-reportOnce :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> job -> n () -> n ()
+reportOnce :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> job -> n () -> n ()
 reportOnce run job fire = mask_ $ do
   fresh <- onProgress handoff $ \progress ->
     ( not (Set.member key (progressReported progress))
@@ -374,12 +400,13 @@ reportOnce run job fire = mask_ $ do
     handoff = runHandoff run
     key = handoffKey handoff job
 
-reportSuccess :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job stored -> UTCTime -> job -> n ()
+reportSuccess :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> job -> n ()
 reportSuccess run startTime job = reportOnce run job (getCurrentTime >>= report run . Succeeded job startTime)
 
 -- | Report a failure's write.
 reportFailed
-  :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> Text -> UTCTime -> UTCTime -> job -> Either Text Outcome -> n ()
+  :: (MonadMask n, MonadSTM n)
+  => Run n ctx job kids stored -> Text -> UTCTime -> UTCTime -> job -> Either Text Outcome -> n ()
 reportFailed run msg startTime endTime job = traverse_ (reportOnce run job . report run . toReport)
   where
     toReport TreeCancelled = Cancelled job msg
@@ -387,31 +414,55 @@ reportFailed run msg startTime endTime job = traverse_ (reportOnce run job . rep
 
 -- | The settle operations a batch handler drives its jobs through, each from the
 -- handler's context at the call.
-callbacks :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job stored -> UTCTime -> Callbacks n ctx job stored
+callbacks
+  :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> Callbacks n ctx job kids stored
 callbacks base startTime =
   Callbacks
-    { callbackAck = \ctx job stored -> within ctx $ \run ->
+    { callbackAck = \ctx job stored -> unlessSpawned "ack" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectAck run job stored) $ \at () ->
           reportSuccess at startTime job
     , -- Only the commit knows which jobs it acked and which had moved.
-      callbackAckAll = \ctx pairs -> within ctx $ \run ->
-        void $ settleWith run (\_ -> effect effectAckAll run pairs) (uncurry Settled) $ \at (done, reclaimed) -> do
-          traverse_ (reportSuccess at startTime) done
-          unless (null reclaimed) $ do
-            logAt at Info reclaimed ("Jobs " <> unownedReason <> " during bulk completion, skipped")
-            void (settleGoneJobs at unownedReason reclaimed)
-    , callbackFail = \ctx failure@(msg, _) job -> within ctx $ \run -> do
+      callbackAckAll = \ctx pairs -> within ctx $ \run -> do
+        fresh <- dropSpawned pairs
+        unless (null fresh) $
+          void $
+            settleWith run (\_ -> effect effectAckAll run fresh) (uncurry Settled) $
+              \at (done, reclaimed) -> do
+                traverse_ (reportSuccess at startTime) done
+                unless (null reclaimed) $ do
+                  logAt at Info reclaimed ("Jobs " <> unownedReason <> " during bulk completion, skipped")
+                  void (settleGoneJobs at unownedReason reclaimed)
+    , callbackFail = \ctx failure@(msg, _) job -> unlessSpawned "failure" job $ within ctx $ \run -> do
         endTime <- getCurrentTime
         void $ settle run (finalized [job]) (effect effectFail run failure job) $ \at outcome -> do
           reportFailed at msg startTime endTime job outcome
           settleUnwritten at [(job, outcome)]
-    , callbackNack = \ctx job -> within ctx $ \run -> releaseJobs run [job]
+    , callbackNack = \ctx job -> unlessSpawned "nack" job $ within ctx $ \run -> releaseJobs run [job]
+    , callbackSpawn = \ctx job kids -> unlessSpawned "spawn" job $ within ctx $ \run ->
+        settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () -> do
+          recordSpawned (runHandoff at) job
+          reportSuccess at startTime job
     }
   where
     within ctx body = body base {runContext = ctx}
+    spawnedIds = progressSpawned <$> readProgress (runHandoff base)
+    unlessSpawned label job act = do
+      spawned <- spawnedIds
+      if hasIdIn (runHandoff base) spawned job
+        then logAt base Warning [job] ("Ignoring " <> label <> " on a job its handler already spawned")
+        else act
+    dropSpawned pairs = do
+      spawned <- spawnedIds
+      let (ignored, fresh) = partition (hasIdIn (runHandoff base) spawned . fst) pairs
+      unless (null ignored) $
+        logAt base Warning (map fst ignored) "Ignoring bulk completion on jobs their handler already spawned"
+      pure fresh
 
 unownedReason :: Text
 unownedReason = "no longer claimed by this worker"
+
+interruptedSiblingReason :: Text
+interruptedSiblingReason = "Releasing an interrupted batch sibling failed"
 
 forceCancelledLog :: Text
 forceCancelledLog = "Job(s) force-cancelled"
@@ -424,7 +475,7 @@ forceCancelledReason = "force-cancelled"
 -- the claim consumed for the batch siblings it interrupted.
 finalizeForceCancelled
   :: (MonadMask n, MonadSTM n)
-  => Run n ctx job stored
+  => Run n ctx job kids stored
   -> NonEmpty job
   -> [JobId]
   -- ^ The jobs the cancel named.
@@ -451,30 +502,30 @@ finalizeForceCancelled run jobs cancelledIds goneIds = do
 
 -- | Hand back the attempt the claim consumed for the jobs left unfinalized, in one
 -- statement, and report whichever of them the release found under another claim.
-releaseJobs :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> [job] -> n ()
+releaseJobs :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> [job] -> n ()
 releaseJobs _ [] = pure ()
 releaseJobs run jobs =
   void $ settle run (finalized jobs) (effect effectRelease run jobs) $ \at released ->
     settleUnwritten at [(job, Left unownedReason) | job <- jobs, not (hasIdIn (runHandoff run) released job)]
 
 -- | 'releaseJobs' on an unwinding path. A failure is logged as a warning.
-releaseOrWarn :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> Text -> [job] -> n ()
+releaseOrWarn :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Text -> [job] -> n ()
 releaseOrWarn run warning jobs = warnOn run jobs warning () (releaseJobs run jobs)
 
 -- | Run an action, logging a warning and returning @fallback@ when it fails.
-warnOn :: (MonadCatch n) => Run n ctx job stored -> [job] -> Text -> a -> n a -> n a
+warnOn :: (MonadCatch n) => Run n ctx job kids stored -> [job] -> Text -> a -> n a -> n a
 warnOn run jobs label fallback act =
   trySync act
     >>= either (\exception -> fallback <$ logAt run Warning jobs (label <> ": " <> displayEx exception)) pure
 
 -- | Delete whichever of @jobs@ a force-cancel flagged, returning the ids deleted. A
 -- failure is logged as a warning.
-deleteCancelled :: (MonadCatch n) => Run n ctx job stored -> [job] -> n (Set JobId)
+deleteCancelled :: (MonadCatch n) => Run n ctx job kids stored -> [job] -> n (Set JobId)
 deleteCancelled run jobs =
   warnOn run jobs "Deleting force-cancelled jobs failed" mempty (effect effectDeleteCancelled run jobs)
 
 -- | Settle the jobs a failure could not be written for, each under its own reason.
-settleUnwritten :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> [(job, Either Text outcome)] -> n ()
+settleUnwritten :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> [(job, Either Text outcome)] -> n ()
 settleUnwritten run pairs =
   traverse_ settleOne (Map.toList (Map.fromListWith (<>) [(reason, [job]) | (job, Left reason) <- pairs]))
   where
@@ -486,7 +537,7 @@ settleUnwritten run pairs =
 
 -- | Delete whichever of @jobs@ a force-cancel flagged and report them all, as one
 -- settle. Returns the ids deleted.
-settleGoneJobs :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> Text -> [job] -> n (Set JobId)
+settleGoneJobs :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Text -> [job] -> n (Set JobId)
 settleGoneJobs _ _ [] = pure mempty
 settleGoneJobs run reason jobs =
   settleWith run (\_ -> deleteCancelled run jobs) (const (finalized jobs)) $ \at cancelled -> do
@@ -495,7 +546,7 @@ settleGoneJobs run reason jobs =
 
 -- | Report jobs this worker can no longer act on. A job a force-cancel deleted is
 -- reported as cancelled. Each is recorded against the handoff.
-reportGoneJobs :: (MonadMask n, MonadSTM n) => Run n ctx job stored -> Text -> [job] -> n ()
+reportGoneJobs :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> Text -> [job] -> n ()
 reportGoneJobs run reason jobs = do
   record handoff (finalized jobs)
   cancelled <- progressCancelled <$> readProgress handoff
@@ -510,7 +561,7 @@ reportGoneJobs run reason jobs = do
 -- retry for gone or nacked jobs. Fail the rest.
 reportBatchOutcome
   :: (MonadMask n, MonadSTM n)
-  => Run n ctx job stored
+  => Run n ctx job kids stored
   -> NonEmpty job
   -> UTCTime
   -> UTCTime
@@ -519,6 +570,10 @@ reportBatchOutcome
 reportBatchOutcome run jobs startTime endTime outcome = do
   finishDeferred handoff
   unhandled <- pendingJobs handoff jobs
+  let splitNamed ids =
+        let named = Set.fromList ids
+            (theirs, siblings) = partition (hasIdIn handoff named) unhandled
+         in (any (hasIdIn handoff named) jobs, theirs, siblings)
   case outcome of
     Right () ->
       unless (null unhandled) $
@@ -528,10 +583,17 @@ reportBatchOutcome run jobs startTime endTime outcome = do
           logAt run Info (toList jobs) ("Job(s) " <> reason <> ", skipping retry" <> namedJobIds gone)
           -- An exception naming no job speaks for none of them. The remainder keeps
           -- its attempt.
-          let (jobsGone, siblings) = partition (hasIdIn handoff (Set.fromList gone)) unhandled
+          let (inBatch, jobsGone, siblings) = splitNamed gone
           void (settleGoneJobs run reason jobsGone)
-          unless (null gone) $
-            releaseOrWarn run "Releasing an interrupted batch sibling failed" siblings
+          when inBatch $ releaseOrWarn run interruptedSiblingReason siblings
+      | Just (JobScopedFailure inner scoped) <- fromException exc -> do
+          let (inBatch, theirs, siblings) = splitNamed scoped
+              failure = classifyException (toException inner)
+          if inBatch
+            then do
+              failJobs failure theirs
+              releaseOrWarn run interruptedSiblingReason siblings
+            else failJobs failure unhandled
       | Just JobNackException <- fromException exc -> do
           -- Hand back the attempt the claim consumed for every job the handler
           -- left unfinalized.
@@ -539,21 +601,23 @@ reportBatchOutcome run jobs startTime endTime outcome = do
           logAt run Info (toList jobs) "Job(s) nacked, will be reprocessed"
       | otherwise -> do
           -- Fail the jobs the handler did not finalize, in a separate transaction.
-          let failure@(reason, kind) = classifyException exc
+          let failure@(reason, _) = classifyException exc
           when (null unhandled) $
             logAt run Warning (toList jobs) ("Handler stopped with its jobs already finalized: " <> reason)
-          -- A tree or branch cancel acts on the whole tree.
-          unowned <- if cancelsTree kind then unownedJobs handoff jobs else pure []
-          void
-            $ settle
-              run
-              (finalized unhandled)
-              (effect effectFailAll run failure unhandled unowned)
-            $ \at outcomes -> do
-              traverse_ (reportOne at reason) outcomes
-              settleUnwritten at outcomes
+          failJobs failure unhandled
   where
     handoff = runHandoff run
+    failJobs failure@(reason, kind) targets = do
+      -- A tree or branch cancel acts on the whole tree.
+      unowned <- if cancelsTree kind then unownedJobs handoff jobs else pure []
+      void
+        $ settle
+          run
+          (finalized targets)
+          (effect effectFailAll run failure targets unowned)
+        $ \committed outcomes -> do
+          traverse_ (reportOne committed reason) outcomes
+          settleUnwritten committed outcomes
     reportOne at reason (job, write) =
       warnOn at [job] "Reporting a job's failure failed" () (reportFailed at reason startTime endTime job write)
 

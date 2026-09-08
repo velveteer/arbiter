@@ -71,7 +71,7 @@ import Arbiter.Core.Job.Types
   )
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobTree ((<~~))
-import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
 import Arbiter.Core.RateLimit.Schema (toPolicyRow, upsertPolicyRowSQL)
@@ -91,7 +91,7 @@ import Control.Monad (replicateM_, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Foldable (traverse_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.Kind (Type)
 import Data.List (isInfixOf, nub)
@@ -967,10 +967,19 @@ mkInsertTree
   => Maybe Text
   -> Int
   -> sm ()
-mkInsertTree group childCount = do
-  let mkJob lbl = maybe (defaultJob (smPayload lbl)) (`defaultGroupedJob` smPayload lbl) group
-      children = mkJob "sm tree child 0" :| [mkJob ("sm tree child " <> T.pack (show index)) | index <- [1 .. childCount - 1]]
-  void (HL.insertJobTree @SMPayload (mkJob "sm tree parent" <~~ children))
+mkInsertTree group childCount =
+  void (HL.insertJobTree @SMPayload (smJob group "sm tree parent" <~~ smChildren group "sm tree child" childCount))
+
+-- | A labelled job, grouped when the caller names a group.
+smJob :: Maybe Text -> Text -> JobWrite SMPayload
+smJob group lbl = maybe (defaultJob (smPayload lbl)) (`defaultGroupedJob` smPayload lbl) group
+
+-- | @childCount@ jobs labelled from the prefix, numbered from zero.
+smChildren :: Maybe Text -> Text -> Int -> NonEmpty (JobWrite SMPayload)
+smChildren group prefix childCount =
+  smJob group (childLabel 0) :| [smJob group (childLabel index) | index <- [1 .. childCount - 1]]
+  where
+    childLabel index = prefix <> " " <> T.pack (show index)
 
 cBatchCancel
   , cBatchDLQ
@@ -1119,6 +1128,7 @@ data Act
   | AClaimExtend
   | AClaimRelease
   | AClaimToDLQ
+  | AClaimSpawn (Maybe Text) Int
   | ARetryRandomDLQ
   | ASuspendRandom
   | AResumeRandom
@@ -1145,6 +1155,7 @@ genActionData =
     , (1, pure AClaimExtend)
     , (1, pure AClaimRelease)
     , (2, pure AClaimToDLQ)
+    , (2, AClaimSpawn <$> genGroup <*> Gen.int (Range.linear 1 2))
     , (1, pure ARetryRandomDLQ)
     , (1, pure ASuspendRandom)
     , (1, pure AResumeRandom)
@@ -1183,6 +1194,7 @@ interpret schema table withConn act = case act of
   AClaimExtend -> claimExtend @sm
   AClaimRelease -> claimRelease @sm
   AClaimToDLQ -> claimToDLQ @sm
+  AClaimSpawn group childCount -> claimSpawn @sm group childCount
   ARetryRandomDLQ -> retryRandomDLQ @sm schema table withConn
   ASuspendRandom -> suspendRandom @sm schema table withConn
   AResumeRandom -> resumeRandom @sm schema table withConn
@@ -1206,10 +1218,13 @@ genAction
 genAction schema table withConn =
   interpret @sm schema table withConn <$> genActionData
 
-claimThen :: forall sm. (ArbiterC sm) => (JobRead SMPayload -> sm ()) -> sm ()
-claimThen handle = do
+claimThenWith :: forall sm a. (ArbiterC sm) => (JobRead SMPayload -> sm a) -> sm [a]
+claimThenWith handle = do
   jobs <- HL.claimNextVisibleJobsAs 3 30 smWorker :: sm [JobRead SMPayload]
-  traverse_ handle jobs
+  traverse handle jobs
+
+claimThen :: forall sm. (ArbiterC sm) => (JobRead SMPayload -> sm ()) -> sm ()
+claimThen = void . claimThenWith @sm
 
 claimAck
   , claimRetry
@@ -1227,6 +1242,38 @@ claimForceCancel = claimThen @sm (void . HL.forceCancelJob @SMPayload . primaryK
 claimExtend = claimThen @sm (void . HL.setVisibilityTimeout 60)
 claimRelease = claimThen @sm (void . HL.setVisibilityTimeout 0)
 claimToDLQ = claimThen @sm (void . HL.moveToDLQ "conc dlq")
+
+-- | Attach children to a claimed job and settle it suspended, as a spawn callback does.
+claimSpawn :: forall sm. (ArbiterC sm) => Maybe Text -> Int -> sm ()
+claimSpawn group childCount = void (claimSpawnCount @sm group childCount)
+
+-- | 'claimSpawn', counting the spawns that committed.
+claimSpawnCount :: forall sm. (ArbiterC sm) => Maybe Text -> Int -> sm Int
+claimSpawnCount group childCount = length . filter id <$> claimThenWith @sm spawnOne
+  where
+    children = smChildren group "sm spawn child" childCount
+    spawnOne job =
+      tryAny
+        ( withDbTransaction $ do
+            void (HL.spawnChildren job children)
+            void (HL.ackJob job)
+        )
+        >>= either (\err -> False <$ rethrowRetryable err) (const (pure True))
+
+-- | Let a deadlock or serialization abort through, swallowing the rest.
+rethrowRetryable :: (MonadIO m) => SomeException -> m ()
+rethrowRetryable err = when (isRetryableError err) (liftIO (throwIO err))
+
+-- | Run one round of a deadlock guard, counting the deadlocks.
+countingDeadlocks :: IORef Int -> IO () -> IO ()
+countingDeadlocks deadlocks act = do
+  outcome <- tryAny act
+  case outcome of
+    Right () -> pure ()
+    Left err
+      | "40P01" `isInfixOf` show err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
+      | "40001" `isInfixOf` show err -> pure ()
+      | otherwise -> throwIO err
 
 -- | Retry one arbitrary DLQ row back into the main queue, if any exists.
 retryRandomDLQ
@@ -1447,20 +1494,46 @@ deadlockGuard run reset = do
   reset
   deadlocks <- newIORef (0 :: Int)
   let rounds = 600 :: Int
-      watch act = do
-        outcome <- tryAny act
-        case outcome of
-          Right () -> pure ()
-          Left err
-            | "40P01" `isInfixOf` show err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
-            | "40001" `isInfixOf` show err -> pure ()
-            | otherwise -> throwIO err
+      watch = countingDeadlocks deadlocks
       actorA = replicateM_ rounds $ watch (run (mkBatchInsert @sm [(Just "g1", 0), (Just "g3", 0)]))
       actorB =
         traverse_
           (\index -> watch (run (mkDedup @sm "dlk" True (Just (if even index then "g1" else "g3")) 0)))
           [1 .. rounds]
   mapConcurrently_ id [actorA, actorB]
+  deadlockCount <- readIORef deadlocks
+  -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
+  deadlockCount `shouldSatisfy` (<= rounds `div` 100)
+
+-- | Guard for the tree lock order a spawn shares with a dead-letter move and a
+-- cascade cancel.
+spawnDeadlockGuard
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+spawnDeadlockGuard run schema table withConn reset = do
+  reset
+  deadlocks <- newIORef (0 :: Int)
+  spawns <- newIORef (0 :: Int)
+  let rounds = 200 :: Int
+      watch = countingDeadlocks deadlocks
+      spawnRound = do
+        run (mkBatchInsert @sm [(Just "spd", 0), (Nothing, 0)])
+        committed <- run (claimSpawnCount @sm (Just "spd") 2)
+        atomicModifyIORef' spawns (\count -> (count + committed, ()))
+      actorA = replicateM_ rounds (watch spawnRound)
+      actorB =
+        replicateM_ rounds
+          $ watch
+          $ run (claimToDLQ @sm >> onRandomRollupParent @sm schema table withConn (void . HL.cancelJobCascade @SMPayload))
+  mapConcurrently_ id [actorA, actorB]
+  -- A saturated run commits a few hundred spawns. Refuse a run that raced itself idle.
+  readIORef spawns >>= (`shouldSatisfy` (>= rounds `div` 2))
   deadlockCount <- readIORef deadlocks
   -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
   deadlockCount `shouldSatisfy` (<= rounds `div` 100)
@@ -2069,6 +2142,8 @@ stateMachineSpec run schema table withConn reset = do
       passed `shouldBe` True
   it "concurrent cross-group operations never deadlock" $
     withinSecs 150 (deadlockGuard @sm run reset)
+  it "concurrent spawns, dead-letter moves and cascade cancels never deadlock" $
+    withinSecs 150 (spawnDeadlockGuard @sm run schema table withConn reset)
   it "concurrent dedup moves and claims never double-claim a group" $
     withinSecs 120 (serializationGuard @sm run schema table withConn reset)
   it "trigger-maintained group summary stays exact under concurrency without the reaper" $

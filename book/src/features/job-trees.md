@@ -72,6 +72,51 @@ Tree-scoped cancellation:
 - `throwBranchCancel` deletes the current job's parent and all descendants of
   that parent. This includes the current job and its siblings.
 
+## Spawning Children at Runtime
+
+`insertJobTree` needs the whole tree up front. A handler that only discovers its
+children while running uses the `spawn` callback instead. It inserts children
+under the running job and suspends that job in one transaction. The job becomes a
+finalizer and wakes once every child has left the main queue,
+where `mergedChildResults` reads what the children stored.
+
+```haskell
+batchHandler jobs cbs = for_ jobs $ \job -> do
+  (results, _) <- Worker.mergedChildResults job
+  chunks <- discoverChunks (Arb.payload job) results
+  case NE.nonEmpty chunks of
+    Nothing -> do
+      sendToS3 results
+      Worker.ack cbs job
+    Just cs -> Worker.spawn cbs job (fmap (Arb.defaultJob . ProcessChunk) cs)
+```
+
+Each spawn drops the previous round's results, so `mergedChildResults` returns
+only the children of the round that just finished.
+
+In `transactionalWorkerConfig`, call `Arb.spawnChildren` in the handler instead.
+The worker's own ack runs in the same transaction and suspends the job the same
+way. That path stores the handler's return value on every round, so return
+`mempty` from a round that spawns.
+
+Spawn rules:
+
+- A spawn round counts as a success and fires `onJobSuccess`.
+- A spawn hands back the attempt its claim consumed, so rounds leave
+  `maxAttempts` for real failures. Nothing bounds the number of rounds, so a
+  handler that always spawns runs forever.
+- A spawn is atomic with the suspension. A crash before the commit reprocesses
+  the job and spawns again, so give the children dedup keys when a repeat insert
+  would be wrong.
+- A child that lands in the DLQ has left the main queue and wakes the finalizer.
+  Its error arrives in `mergedChildResults` for that round. The next spawn detaches
+  it, so a later round never sees it and a retry of it restores it as a root.
+- A dedup conflict on any child aborts the handler and commits nothing. The abort
+  names only the spawning job. Its batch siblings are nack'd, so they hand back the
+  attempt their claim consumed.
+- A settle after a spawn is ignored with a warning. The row is suspended and
+  answers to the next round, not to the claim that spawned.
+
 ## Chunked Data Migration
 
 To migrate a large table in parts, assign a set of row identifiers to each

@@ -38,7 +38,7 @@ module Arbiter.Worker.Config
   , listenerReadyVar
   ) where
 
-import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
+import Arbiter.Core.Job.Types (JobRead, JobWrite, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
 import Control.Exception (Exception)
 import Control.Monad (void, when)
@@ -204,6 +204,8 @@ data BatchCallbacks m payload result = BatchCallbacks
   , nack :: JobRead payload -> m ()
   -- ^ Reprocess after the visibility timeout. Records no failure and consumes
   -- no attempt.
+  , spawn :: JobRead payload -> NonEmpty (JobWrite payload) -> m ()
+  -- ^ Insert children under this job and suspend it, in one transaction.
   }
 
 -- | How the worker claims and runs jobs. Set by this module's config constructors.

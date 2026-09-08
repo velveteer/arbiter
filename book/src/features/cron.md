@@ -41,6 +41,10 @@ import Arbiter.Worker.Cron qualified as Cron
 The builder receives a `TickKind` (`Live` for the current minute, `Replay` for
 any catch-up tick) and the tick time.
 
+A schedule enqueues one job per tick. To start a whole tree on a schedule, have
+that job's handler
+[spawn its children](job-trees.md#spawning-children-at-runtime).
+
 A schedule enqueues jobs on its configured pool. Its builder must return the
 payload type for that pool. Configure schedules for other queues on their
 respective pools.

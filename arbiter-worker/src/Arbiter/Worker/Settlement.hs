@@ -59,7 +59,9 @@ batchLog config = withJobContext (logConfig config)
 -- statement runs in the handler's own context at a callback, so it joins a
 -- transaction the handler holds, and in the pool's otherwise. Built once for the
 -- pool. A batch binds its jobs.
-type PoolEffects m payload = NonEmpty (Job.JobRead payload) -> Effects IO (UnliftIO m) (Job.JobRead payload) Value
+type PoolEffects m payload =
+  NonEmpty (Job.JobRead payload)
+  -> Effects IO (UnliftIO m) (Job.JobRead payload) (NonEmpty (Job.JobWrite payload)) Value
 
 poolEffects
   :: forall payload m
@@ -107,6 +109,10 @@ poolEffects config statements consumeSpan = do
           , effectDeleteCancelled = \(UnliftIO runIn) gone ->
               runIn (Set.fromList <$> Ops.deleteCancelledJobs schemaName queue (Just (workerId config)) (map Job.primaryKey gone))
           , effectRelease = \(UnliftIO runIn) released -> runIn (Set.fromList <$> Arb.nackJobsBatch released)
+          , effectSpawn = \(UnliftIO runIn) job kids ->
+              runIn $ withDbTransaction $ do
+                void $ Arb.spawnChildren job kids
+                ackOrGone statements job
           , effectReport = \(UnliftIO runIn) -> runIn . report (batchSpanShape jobs)
           , effectLog = poolLog (logConfig config)
           }
@@ -125,7 +131,7 @@ poolEffects config statements consumeSpan = do
       Unavailable job reason -> hook job "onJobUnavailable" $ Job.onJobUnavailable hooks job reason
 
 -- | How a pool runs a batch.
-type PoolMode m payload = Mode IO (UnliftIO m) (Job.JobRead payload) Value
+type PoolMode m payload = Mode IO (UnliftIO m) (Job.JobRead payload) (NonEmpty (Job.JobWrite payload)) Value
 
 -- | How the pool runs a batch's handler, unlifted to IO.
 poolMode
@@ -153,7 +159,8 @@ poolMode config statements = do
 -- handler's context at the call.
 batchCallbacks
   :: (EncodeJobResult result, MonadUnliftIO m)
-  => Callbacks IO (UnliftIO m) (Job.JobRead payload) Value -> BatchCallbacks m payload result
+  => Callbacks IO (UnliftIO m) (Job.JobRead payload) (NonEmpty (Job.JobWrite payload)) Value
+  -> BatchCallbacks m payload result
 batchCallbacks callbacks =
   BatchCallbacks
     { ack = ackAs Nothing
@@ -165,6 +172,7 @@ batchCallbacks callbacks =
     , cancelBranch = failAs BranchCancelFailure
     , cancelTree = failAs TreeCancelFailure
     , nack = \job -> here (\ctx -> callbackNack callbacks ctx job)
+    , spawn = \job children -> here (\ctx -> callbackSpawn callbacks ctx job children)
     }
   where
     here act = askUnliftIO >>= liftIO . act

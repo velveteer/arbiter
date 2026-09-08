@@ -19,6 +19,7 @@ module Arbiter.Core.Exceptions
   , ParsingException (..)
   , InternalException (..)
   , JobGoneException (..)
+  , JobScopedFailure (..)
   , JobForceCancelled (..)
   , JobDeadlineExceeded (..)
 
@@ -32,6 +33,7 @@ module Arbiter.Core.Exceptions
   , throwInternal
   , throwJobGone
   , throwJobGoneIds
+  , throwScopedFailure
   , namedJobIds
   , displayEx
   ) where
@@ -127,6 +129,14 @@ instance Exception JobGoneException where
   backtraceDesired _ = False
   displayException (JobGoneException msg ids) = T.unpack (msg <> namedJobIds ids)
 
+-- | A failure that settles the jobs it names and no others.
+data JobScopedFailure = JobScopedFailure JobException [Int64]
+  deriving stock (Show)
+
+instance Exception JobScopedFailure where
+  backtraceDesired _ = False
+  displayException (JobScopedFailure inner ids) = displayException inner <> T.unpack (namedJobIds ids)
+
 -- | Async exception for user-initiated force-cancel, naming the jobs it cancels
 -- and any the same check found reclaimed by another worker.
 data JobForceCancelled = JobForceCancelled [Int64] [Int64]
@@ -180,6 +190,10 @@ throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 -- | Signal that the claim is no longer valid, naming no ids.
 throwJobGone :: (MonadIO m) => Text -> m a
 throwJobGone msg = throwJobGoneIds msg []
+
+-- | Fail only the jobs named, leaving the rest of the batch its attempt.
+throwScopedFailure :: (MonadIO m) => JobException -> [Int64] -> m a
+throwScopedFailure inner ids = UE.throwIO (JobScopedFailure inner ids)
 
 -- | The ids a signal names, appended to its message. Empty when it names none.
 namedJobIds :: [Int64] -> Text
