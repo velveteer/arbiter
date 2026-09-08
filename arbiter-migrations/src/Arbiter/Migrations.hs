@@ -179,6 +179,10 @@ data MigrationConfig = MigrationConfig
   , migrationLockTimeout :: Maybe NominalDiffTime
   -- ^ How many seconds to wait for the schema's migration lock. The lock serializes
   -- replicas that migrate at the same time. 'Nothing' (default) waits indefinitely.
+  , extraMigrations :: [MigrationCommand]
+  -- ^ Migrations of a layer built on the queue, applied after the schema's own under
+  -- the same lock and the same tracked history. Add-only, like the shipped ones.
+  -- Default: @[]@.
   }
   deriving stock (Eq, Show)
 
@@ -190,6 +194,7 @@ defaultMigrationConfig =
     , enableEventStreaming = False
     , rateLimitDurability = Unlogged
     , migrationLockTimeout = Nothing
+    , extraMigrations = []
     }
 
 -- | Migrate every queue in a registry into one schema. The schema itself is created
@@ -414,7 +419,7 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
 
   let schemaMigrations = schemaLevelMigrations schemaName
       tableMigrations = concatMap (uncurry (jobQueueMigrationsForTable schemaName)) tableNames
-      migrations = schemaMigrations <> tableMigrations
+      migrations = schemaMigrations <> tableMigrations <> extraMigrations config
       migrationTableName = encodeUtf8 $ schemaName <> ".schema_migrations"
       options =
         defaultOptions

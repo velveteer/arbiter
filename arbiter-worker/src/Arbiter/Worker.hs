@@ -14,6 +14,8 @@ module Arbiter.Worker
   , mergeChildResults
   , storeJobResult
   , storeEncodedResult
+  , settleAck
+  , settleDeadLetter
 
     -- * Configuration and logging
   , module Arbiter.Worker.Config
@@ -28,6 +30,7 @@ module Arbiter.Worker
 
     -- * Cron
   , CronJob (..)
+  , CronFiredHook
   , OverlapPolicy (..)
   , BackfillPolicy (..)
   , TickKind (..)
@@ -46,6 +49,7 @@ import Arbiter.Worker.BackoffStrategy
 import Arbiter.Worker.Config
 import Arbiter.Worker.Cron
   ( BackfillPolicy (..)
+  , CronFiredHook
   , CronJob (..)
   , OverlapPolicy (..)
   , TickKind (..)
@@ -62,5 +66,13 @@ import Arbiter.Worker.Logger
 import Arbiter.Worker.MultiQueue
 import Arbiter.Worker.Pool (runReaperOp, runWorkerPool)
 import Arbiter.Worker.Reaper (MaintenancePace (..), runMaintenancePass)
-import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults, storeEncodedResult, storeJobResult)
+import Arbiter.Worker.Results
+  ( childResults
+  , mergeChildResults
+  , mergedChildResults
+  , settleAck
+  , settleDeadLetter
+  , storeEncodedResult
+  , storeJobResult
+  )
 import Arbiter.Worker.WorkerState

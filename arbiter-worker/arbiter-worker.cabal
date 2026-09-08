@@ -3,7 +3,7 @@ name:            arbiter-worker
 version:         0.1.0.0
 synopsis:        Worker framework for arbiter
 description:
-  Worker pools for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Worker pools for Arbiter, a PostgreSQL job queue for Haskell.
 
   Runs concurrent pools that claim jobs under a visibility timeout, heartbeat
   long-running work, retry with a configurable backoff strategy, and move

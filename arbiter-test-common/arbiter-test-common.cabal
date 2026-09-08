@@ -5,7 +5,7 @@ synopsis:
   Shared fixtures and backend-parameterized suites for arbiter
 
 description:
-  Shared test support for Arbiter, an opinionated PostgreSQL job queue for
+  Shared test support for Arbiter, a PostgreSQL job queue for
   Haskell.
   Schema setup and teardown against a live PostgreSQL database, shared payload
   fixtures, and the backend-parameterized rate-limit, concurrency, and

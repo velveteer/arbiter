@@ -33,6 +33,10 @@
 - [Liveness Probes](worker/liveness.md)
 - [Pausing Work](worker/pause.md)
 
+# Workflows
+
+- [Workflow Graphs](workflows.md)
+
 # Integration
 
 - [REST API and Admin UI](rest-api.md)

@@ -11,6 +11,9 @@ module Arbiter.Worker.Config
   , defaultBatchedWorkerConfig
   , withHooks
   , withMaintenance
+  , withExtraMaintenance
+  , withJobSettled
+  , withPostCronInsert
   , HandlerMode (..)
   , handlerBatchSize
   , MaintenanceOp (..)
@@ -40,6 +43,7 @@ module Arbiter.Worker.Config
 
 import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks, andThen, defaultObservabilityHooks)
 import Arbiter.Core.MonadArbiter (JobHandler, MonadArbiter, ResultOf)
+import Arbiter.Core.Settled (JobSettledHook, noJobSettled)
 import Control.Exception (Exception)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -60,7 +64,7 @@ import UnliftIO.STM (TMVar, TVar, newEmptyTMVarIO, newTVarIO)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy, Jitter (..), exponentialBackoff)
-import Arbiter.Worker.Cron (CronJob)
+import Arbiter.Worker.Cron (CronFiredHook, CronJob, noCronFired)
 import Arbiter.Worker.Logger (LogConfig (..), defaultLogConfig)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
@@ -74,7 +78,9 @@ data MaintenanceOp
   | ReconcileConcurrencyStale
   | ReconcilePruneConcurrency
   | PurgeArchives
-  deriving stock (Bounded, Enum, Eq, Ord, Show)
+  | -- | A pass a caller registered in 'extraMaintenance', named by its gate.
+    ExtraMaintenance Text
+  deriving stock (Eq, Ord, Show)
 
 -- | The op's stable name, used to coordinate replicas and to label its metrics.
 maintenanceOpName :: MaintenanceOp -> Text
@@ -87,6 +93,7 @@ maintenanceOpName operation = case operation of
   ReconcileConcurrencyStale -> "reconcile-concurrency-stale"
   ReconcilePruneConcurrency -> "reconcile-prune-concurrency"
   PurgeArchives -> "purge-archives"
+  ExtraMaintenance task -> task
 
 -- | Invalid worker configuration detected before a pool starts.
 newtype WorkerConfigException = WorkerConfigException Text
@@ -132,6 +139,14 @@ data WorkerConfig m payload = WorkerConfig
   , onMaintenance :: MaintenanceOp -> Int64 -> m ()
   -- ^ Called after a reaper op this pool won the gate for, with the rows it touched.
   -- Reaper work is schema-wide and carries no queue. Default: no-op.
+  , extraMaintenance :: [(Text, m Int64)]
+  -- ^ Extra schema-wide maintenance, each behind a gate of its own name and run on
+  -- the reaper's cadence, so one pool in a deployment runs each per interval.
+  -- Reported through 'onMaintenance' as 'ExtraMaintenance'. Default: @[]@.
+  , jobSettled :: JobSettledHook m
+  -- ^ Called inside the transaction that took a job out of its queue, with the jobs
+  -- an ack deleted and the ones a failure dead-lettered, and the results they stored.
+  -- A throw rolls that transaction back. Default: no-op.
   , workerRuntime :: WorkerRuntime
   -- ^ Mutable lifecycle state allocated for this pool.
   , livenessFile :: Maybe FilePath
@@ -147,6 +162,9 @@ data WorkerConfig m payload = WorkerConfig
   , cronJobs :: [CronJob payload]
   -- ^ Cron schedules. A non-empty list gives the pool a scheduler thread, which reads
   -- the @cron_schedules@ table each tick for runtime overrides. Default: @[]@.
+  , postCronInsert :: CronFiredHook m payload
+  -- ^ Called inside the transaction that inserted a job one of this pool's schedules
+  -- fired. A throw rolls that insert back. Default: no-op.
   , reaperInterval :: NominalDiffTime
   -- ^ How often the reaper runs. Default: @300@ (5 minutes).
   , reaperSparseInterval :: NominalDiffTime
@@ -248,11 +266,14 @@ fieldInvariants config =
     <*> waived (jitter config)
     <*> waived (observabilityHooks config)
     <*> waived (onMaintenance config)
+    <*> waived (extraMaintenance config)
+    <*> waived (jobSettled config)
     <*> waived (workerRuntime config)
     <*> waived (livenessFile config)
     <*> traverse (nonNegative "gracefulShutdownTimeout") (gracefulShutdownTimeout config)
     <*> waived (logConfig config)
     <*> waived (cronJobs config)
+    <*> waived (postCronInsert config)
     <*> positive "reaperInterval" (reaperInterval config)
     <*> positive "reaperSparseInterval" (reaperSparseInterval config)
     <*> positive "reaperBucketIdle" (reaperBucketIdle config)
@@ -354,6 +375,36 @@ withMaintenance
 withMaintenance report cfg =
   cfg {onMaintenance = \operation count -> report operation count `andThen` onMaintenance cfg operation count}
 
+-- | Register one extra maintenance pass, run on the reaper's cadence behind a gate
+-- of the name given.
+withExtraMaintenance
+  :: Text
+  -> m Int64
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+withExtraMaintenance task pass cfg = cfg {extraMaintenance = extraMaintenance cfg <> [(task, pass)]}
+
+-- | Run @settle@ before the pool's own settled hook. Each runs even when the other fails.
+withJobSettled
+  :: (MonadUnliftIO m)
+  => JobSettledHook m
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+withJobSettled settle cfg = cfg {jobSettled = \jobs -> settle jobs `andThen` jobSettled cfg jobs}
+
+-- | Run @record@ before the pool's own post-insert hook. Each runs even when the other
+-- fails.
+withPostCronInsert
+  :: (MonadUnliftIO m)
+  => CronFiredHook m payload
+  -> WorkerConfig m payload
+  -> WorkerConfig m payload
+withPostCronInsert record cfg =
+  cfg
+    { postCronInsert = \schedule tick job ->
+        record schedule tick job `andThen` postCronInsert cfg schedule tick job
+    }
+
 -- | Internal helper to create a config with the given handler mode.
 mkDefaultConfig
   :: (Applicative n, MonadIO m)
@@ -383,6 +434,8 @@ mkDefaultConfig workerCnt mode = do
       , jitter = EqualJitter
       , observabilityHooks = defaultObservabilityHooks
       , onMaintenance = \_ _ -> pure ()
+      , extraMaintenance = []
+      , jobSettled = noJobSettled
       , workerRuntime =
           WorkerRuntime
             { runtimeStateVar = shutdownTVar
@@ -395,6 +448,7 @@ mkDefaultConfig workerCnt mode = do
       , gracefulShutdownTimeout = Just 30
       , logConfig = withWorkerIdContext uuid defaultLogConfig
       , cronJobs = []
+      , postCronInsert = noCronFired
       , reaperInterval = 300
       , reaperSparseInterval = 3600
       , reaperBucketIdle = 300

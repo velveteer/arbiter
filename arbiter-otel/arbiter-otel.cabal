@@ -3,7 +3,7 @@ name:            arbiter-otel
 version:         0.1.0.0
 synopsis:        OpenTelemetry traces, metrics, and logs for arbiter
 description:
-  OpenTelemetry for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  OpenTelemetry for Arbiter, a PostgreSQL job queue for Haskell.
 
   Exports job, worker, queue-depth, admission, and database-health instruments
   over OTLP, tees structured logs to the OpenTelemetry log pipeline, and resolves

@@ -3,7 +3,7 @@ name:            arbiter-servant
 version:         0.1.0.0
 synopsis:        Servant REST API for arbiter job queue
 description:
-  REST API for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  REST API for Arbiter, a PostgreSQL job queue for Haskell.
   Serves job, dead-letter, archive, cron, rate-limit, concurrency, queue, worker,
   and statistics endpoints over a typed queue registry, plus a Server-Sent Events
   stream for live updates. Ships no authentication of its own: it exposes a WAI

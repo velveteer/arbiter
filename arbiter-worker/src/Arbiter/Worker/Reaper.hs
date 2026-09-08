@@ -45,12 +45,13 @@ reaperLoop
      )
   => LogConfig
   -> (MaintenanceOp -> Int64 -> m ())
+  -> [(Text, m Int64)]
   -> MaintenancePace
   -> NominalDiffTime
   -> m ()
-reaperLoop logCfg report pace stmtTimeout =
+reaperLoop logCfg report extra pace stmtTimeout =
   forever $ do
-    void $ runMaintenancePass logCfg report pace stmtTimeout
+    void $ runMaintenancePass logCfg report extra pace stmtTimeout
     threadDelay (ceiling (paceWindow pace) * 1_000_000)
 
 -- | Gaps a caller holds between runs of each kind of work. A zero gap runs it every pass.
@@ -64,9 +65,10 @@ data MaintenancePace = MaintenancePace
   }
   deriving stock (Eq, Show)
 
--- | One pass of the maintenance the reaper runs, with each operation independently
--- gated across all callers. An operation whose window has not elapsed is skipped.
--- Returns the operations that failed. A failure does not stop the pass.
+-- | One pass of the maintenance the reaper runs, the built-in operations and the
+-- caller's own, with each independently gated across all callers. An operation whose
+-- window has not elapsed is skipped. Returns the operations that failed. A failure
+-- does not stop the pass.
 runMaintenancePass
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
@@ -75,10 +77,12 @@ runMaintenancePass
      )
   => LogConfig
   -> (MaintenanceOp -> Int64 -> m ())
+  -> [(Text, m Int64)]
+  -- ^ Extra passes, each behind a gate of its own name.
   -> MaintenancePace
   -> NominalDiffTime
   -> m [MaintenanceOp]
-runMaintenancePass logCfg report pace stmtTimeout = do
+runMaintenancePass logCfg report extra pace stmtTimeout = do
   let reaped operation count = runHook logCfg "onMaintenance" $ report operation count
       queues = registryTableNames (Proxy @(RegistryOf m))
       window = paceWindow pace
@@ -128,6 +132,7 @@ runMaintenancePass logCfg report pace stmtTimeout = do
              (\count -> tryLog logCfg Info $ "Reaper purged " <> T.pack (show count) <> " archived job(s)")
              $ Ops.purgeArchives schema queues
          ]
+      <> [gatedCount (ExtraMaintenance task) window pass | (task, pass) <- extra]
 
 -- | Name a failed operation. Report a completed one through @emit@.
 reportOutcome

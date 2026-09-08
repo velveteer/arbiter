@@ -23,10 +23,11 @@ import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Parent-aware ack. Deletes a childless job, suspends one whose children are still
--- running, and wakes a suspended parent whose last child left the queue. Returns 1,
--- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
--- is teed into the archive per-row on @archive_for@.
-smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
+-- running, and wakes a suspended parent whose last child left the queue. Returns the
+-- id and whether the row was deleted, or no row for a job gone, reclaimed or
+-- cancelled. When @archiveEnabled@, the deleted row is teed into the archive per-row
+-- on @archive_for@.
+smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query (Int64, Bool)
 smartAckJobSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "*" else "id, parent_id" :: Text
@@ -59,16 +60,19 @@ smartAckJobSQL archiveEnabled schema tableName =
             )
           RETURNING id
         )
-        SELECT
-          (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS @{result :: CInt8}
+        SELECT @{id :: CInt8}, @{deleted :: CBool} FROM (
+          SELECT id, TRUE AS deleted FROM ack
+          UNION ALL
+          SELECT id, FALSE AS deleted FROM suspend
+        ) settled
       |]
 
 -- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays. Deletes leaves,
 -- suspends finalizers that still have children, and wakes parents whose last
--- child completed. The wake check excludes acked children explicitly. Returns the
--- acked ids. Reclaimed jobs are absent. Locks children-first to match nack and
--- force-cancel. The caller holds the parent locks.
-smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
+-- child completed. The wake check excludes acked children explicitly. Returns each
+-- acked id and whether its row was deleted. Reclaimed jobs are absent. Locks
+-- children-first to match nack and force-cancel. The caller holds the parent locks.
+smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query (Int64, Bool)
 smartAckJobsBatchSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "job.*" else "job.id, job.parent_id" :: Text
@@ -113,9 +117,11 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
             )
           RETURNING parent.id
         )
-        SELECT @{id :: CInt8} FROM ack
-        UNION
-        SELECT id FROM suspend
+        SELECT @{id :: CInt8}, @{deleted :: CBool} FROM (
+          SELECT id, TRUE AS deleted FROM ack
+          UNION ALL
+          SELECT id, FALSE AS deleted FROM suspend
+        ) settled
       |]
 
 -- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows

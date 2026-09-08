@@ -3,7 +3,7 @@ name:            arbiter-hasql
 version:         0.1.0.0
 synopsis:        Hasql backend for arbiter
 description:
-  A hasql backend for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  A hasql backend for Arbiter, a PostgreSQL job queue for Haskell.
 
   Provides a @MonadArbiter@ instance over a hasql connection pool, with
   savepoint-based nested transactions and optional prepared statements for the

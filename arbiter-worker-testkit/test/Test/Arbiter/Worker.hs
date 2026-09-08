@@ -29,6 +29,7 @@ import Arbiter.Core.MonadArbiter (JobHandler, executeStatement, withDbTransactio
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Queues qualified as Q
+import Arbiter.Core.Settled (SettledJob (..), SettledOutcome (..))
 import Arbiter.Core.Sql.Query (raw)
 import Arbiter.Core.Worker qualified as WR
 import Arbiter.Simple
@@ -43,6 +44,7 @@ import Arbiter.Test.Fixtures (WorkerTestPayload (..))
 import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, execute_, setupOnce)
 import Arbiter.Worker (WorkerState (..), mergedChildResults, runReaperOp, runWorkerPool)
+import Arbiter.Worker.BackoffStrategy (BackoffStrategy (..), Jitter (..))
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
   , ackAll
@@ -60,12 +62,13 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, finally, throwIO, try)
 import Control.Monad (void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BSC
 import Data.Either (isRight)
 import Data.Foldable (for_, toList, traverse_)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -112,6 +115,14 @@ testSchema = "arbiter_worker_test"
 
 testTable :: Text
 testTable = "arbiter_worker_test"
+
+-- | Collect one post-ack call.
+record :: (MonadIO n) => IORef [[SettledJob]] -> NonEmpty SettledJob -> n ()
+record ref jobs = liftIO $ atomicModifyIORef' ref $ \calls -> (calls <> [toList jobs], ())
+
+labelOf :: WorkerTestPayload -> Text
+labelOf (SimpleTask label) = label
+labelOf task = T.pack (show task)
 
 -- | Take a job's row lock on a connection of the test's own.
 lockJobRow :: PG.Connection -> Int64 -> IO (Either SomeException [Only Int64])
@@ -437,6 +448,80 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
           waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
           final <- readIORef finalRef
           final `shouldMatchList` ["alpha", "beta"]
+
+    describe "Settled hook" $ do
+      it "reports a job and its result when the ack deletes the row" $ \env -> do
+        ackedRef <- newIORef ([] :: [[SettledJob]])
+        let handler _conn job = pure (Just [labelOf (payload job)])
+        void $ runSimpleDb env $ HL.insertJob $ defaultJob (SimpleTask "post-ack-single")
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 handler
+        withLinkedAsync (runSimpleDb env $ runWorkerPool config {pollInterval = 0.05, jobSettled = record ackedRef}) $ \_ -> do
+          waitUntil 10_000 $ (== 1) . length <$> readIORef ackedRef
+          [[acked]] <- readIORef ackedRef
+          settledQueue acked `shouldBe` testTable
+          settledOutcome acked `shouldBe` JobAcked
+          settledResult acked `shouldBe` Just (toJSON (Just ["post-ack-single" :: Text]))
+
+      it "reports a batch ack in one call" $ \env -> do
+        ackedRef <- newIORef ([] :: [[SettledJob]])
+        let batchHandler claimed cbs = ackAll cbs (toList claimed)
+            jobs =
+              [ setGroupKey (Just "post-ack-batch") $ defaultJob (SimpleTask "post-ack-b1")
+              , setGroupKey (Just "post-ack-batch") $ defaultJob (SimpleTask "post-ack-b2")
+              ]
+        void $ runSimpleDb env $ HL.insertJobsBatch jobs
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          defaultBatchedWorkerConfig 1 10 batchHandler
+        withLinkedAsync (runSimpleDb env $ runWorkerPool config {pollInterval = 0.05, jobSettled = record ackedRef}) $ \_ -> do
+          waitUntil 10_000 $ (== 2) . sum . map length <$> readIORef ackedRef
+          calls <- readIORef ackedRef
+          length calls `shouldBe` 1
+          map settledResult (concat calls) `shouldBe` [Nothing, Nothing]
+
+      it "reports a job that fails to the dead-letter queue" $ \env -> do
+        ackedRef <- newIORef ([] :: [[SettledJob]])
+        let handler _conn _job = throwRetryable "post-ack-boom"
+        void
+          $ runSimpleDb env
+          $ HL.insertJob
+          $ setMaxAttempts (Just 1)
+          $ defaultJob (SimpleTask "post-ack-failing")
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 (noResult handler)
+        withLinkedAsync (runSimpleDb env $ runWorkerPool config {pollInterval = 0.05, jobSettled = record ackedRef}) $ \_ -> do
+          waitUntil 10_000 $ do
+            dlqJobs <- runSimpleDb env $ HL.listDLQJobs 10 0 :: IO [DLQ.DLQJob WorkerTestPayload]
+            pure (length dlqJobs == 1)
+          [[dead]] <- readIORef ackedRef
+          settledQueue dead `shouldBe` testTable
+          settledOutcome dead `shouldBe` JobDeadLettered
+          settledResult dead `shouldBe` Nothing
+
+      it "rolls the ack back when the hook throws" $ \env -> do
+        callsRef <- newIORef (0 :: Int)
+        let handler _conn _job = pure (Nothing :: Maybe [Text])
+            failingHook _ = do
+              calls <- liftIO $ atomicModifyIORef' callsRef $ \calls -> (calls + 1, calls + 1)
+              when (calls == 1) $ liftIO $ throwIO (userError "post-ack-hook-boom")
+        void $ runSimpleDb env $ HL.insertJob $ defaultJob (SimpleTask "post-ack-rollback")
+        config :: WorkerConfig (SimpleDb WorkerTestRegistry IO) WorkerTestPayload <-
+          transactionalWorkerConfig 10 handler
+        withLinkedAsync
+          ( runSimpleDb env $
+              runWorkerPool
+                config
+                  { pollInterval = 0.05
+                  , jobSettled = failingHook
+                  , backoffStrategy = Constant 0
+                  , jitter = NoJitter
+                  }
+          )
+          $ \_ -> do
+            waitUntil 10_000 $ do
+              depth <- runSimpleDb env (HL.countJobs @WorkerTestPayload)
+              pure (depth == 0)
+            readIORef callsRef `shouldReturn` 2
 
     describe "Fan-out/fan-in with rollup" $ do
       it "worker auto-appends handler results; finalizer reads merged state" $ \env -> do

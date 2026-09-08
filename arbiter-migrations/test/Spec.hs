@@ -335,6 +335,12 @@ migrationReconciliationTests connStr =
             nextEvent lconn >>= assertEvent "job_updated"
             _ <- PG.execute_ conn (sql ("UPDATE " <> tbl <> " SET last_error = 'boom', claimed_by = NULL"))
             nextEvent lconn >>= assertEvent "job_updated"
+    , testCase "applies an extra tracked migration once, in the schema's own history" $
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
+          migrate withExtra
+          extraTableExists conn >>= (@?= Just True)
+          migrate withExtra
+          extraApplications conn >>= (@?= Just 1)
     , testCase "preserves queue names ending in the DLQ suffix" $
         withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate
@@ -346,7 +352,34 @@ migrationReconciliationTests connStr =
     durableConfig = defaultMigrationConfig {rateLimitDurability = Durable}
     triggerOff = defaultMigrationConfig {enableNotifications = False, enableEventStreaming = False}
     triggerOn = defaultMigrationConfig {enableNotifications = True, enableEventStreaming = True}
+    withExtra = defaultMigrationConfig {extraMigrations = [extraProbeMigration]}
     migrate config = runMigrationsForRegistry (Proxy @MigrationRegistry) connStr reconciliationSchema config >>= shouldMigrate
+
+-- | A tracked migration of the layer's own, alongside the queue's.
+extraProbeMigration :: MigrationCommand
+extraProbeMigration =
+  MigrationScript
+    "extra-probe-table"
+    (encodeUtf8 ("CREATE TABLE " <> reconciliationSchema <> "." <> extraProbeTable <> " (id BIGSERIAL PRIMARY KEY)"))
+
+extraProbeTable :: Text
+extraProbeTable = "extra_probe"
+
+extraTableExists :: PG.Connection -> IO (Maybe Bool)
+extraTableExists conn =
+  fmap (fmap PG.fromOnly . listToMaybe) $
+    PG.query
+      conn
+      "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = ? AND tablename = ?)"
+      (reconciliationSchema, extraProbeTable)
+
+extraApplications :: PG.Connection -> IO (Maybe Int)
+extraApplications conn =
+  fmap (fmap PG.fromOnly . listToMaybe) $
+    PG.query
+      conn
+      (sql ("SELECT count(*)::int FROM " <> reconciliationSchema <> ".schema_migrations WHERE filename = ?"))
+      (PG.Only ("extra-probe-table" :: Text))
 
 lockSchema :: Text
 lockSchema = "arbiter_migration_lock_test"

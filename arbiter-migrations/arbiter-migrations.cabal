@@ -3,7 +3,7 @@ name:               arbiter-migrations
 version:            0.1.0.0
 synopsis:           Schema migrations and trigger reconciliation for arbiter
 description:
-  Schema migrations for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Schema migrations for Arbiter, a PostgreSQL job queue for Haskell.
   Derives the DDL for a type-level queue registry and applies it as tracked,
   checksummed migrations. Optional notification and event-streaming triggers are
   reconciled to the declared configuration on every run, so enabling or disabling

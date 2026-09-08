@@ -162,10 +162,22 @@ runWorkerPool config = do
     crons <-
       unlessNull (cronJobs config)
         $ spawn "Cron scheduler"
-        $ runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
+        $ runCronScheduler
+          (workerStateVar config)
+          cronRunVar
+          (logConfig config)
+          schemaName
+          queueName
+          (cronJobs config)
+          (postCronInsert config)
     reaper <-
       spawn "Reaper" $
-        reaperLoop (logConfig config) (onMaintenance config) (reaperPace config) (reaperTimeout config)
+        reaperLoop
+          (logConfig config)
+          (onMaintenance config)
+          (extraMaintenance config)
+          (reaperPace config)
+          (reaperTimeout config)
 
     (_, res) <- waitAnyCatch (dispatcher : jobGuard : reaper : heartbeat : crons <> workers)
     case res of

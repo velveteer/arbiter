@@ -45,10 +45,12 @@ module Arbiter.Core.Operations
   , reconcileConcurrencyCountsIfStale
   , reconcileAndPruneConcurrency
   , ackJob
+  , AckedRow (..)
   , JobStatements
   , mkJobStatements
   , statementsAck
   , AckStatements
+  , mkAckStatements
   , ackJobWith
   , ackJobsBatchWith
   , ackJobsBatch
@@ -133,6 +135,7 @@ module Arbiter.Core.Operations
   , cancelJobCascade
   , cancelJobTree
   , forceCancelJob
+  , forceCancelJobs
 
     -- * Suspend/Resume Operations
   , suspendJob
@@ -401,9 +404,6 @@ countStrict label query = do
 -- | Run a single-row count @Query@, returning 0 on an empty or unexpected result.
 countOr0 :: (MonadArbiter m) => Q.Query Int64 -> m Int64
 countOr0 = fmap singleCount . MA.executeQuery
-
-countOr0Prepared :: (MonadArbiter m) => Q.Query Int64 -> m Int64
-countOr0Prepared = fmap singleCount . MA.executeQueryPrepared
 
 singleCount :: [Int64] -> Int64
 singleCount [count] = count
@@ -955,15 +955,16 @@ ackJob
   -- ^ Table name
   -> JobRead payload
   -> m Int64
-ackJob schemaName tableName = withDbTransaction . ackJobWith (mkAckStatements schemaName tableName)
+ackJob schemaName tableName job =
+  fromIntegral . length <$> withDbTransaction (ackJobWith (mkAckStatements schemaName tableName) job)
 
 -- | A table's ack statements, rendered once. A call binds only its parameters.
 data AckStatements = AckStatements
   { ackSchema :: SchemaName
   , ackTable :: TableName
-  , ackFor :: Bool -> Int64 -> Int64 -> Q.Query Int64
+  , ackFor :: Bool -> Int64 -> Int64 -> Q.Query (Int64, Bool)
   -- ^ The ack, archiving or not, for a job id and claim token.
-  , ackBatchFor :: Bool -> [Int64] -> [Int64] -> Q.Query Int64
+  , ackBatchFor :: Bool -> [Int64] -> [Int64] -> Q.Query (Int64, Bool)
   }
 
 mkAckStatements :: SchemaName -> TableName -> AckStatements
@@ -1016,11 +1017,23 @@ mkJobStatements _ schemaName tableName batchSize poolSize timeout workerId =
       Q.rows codec (Claim.claimJobsBatchedSQL schemaName tableName admission batchSize capacity timeout workerId)
     claims = IntMap.fromList [(capacity, renderClaim capacity) | capacity <- [1 .. poolSize]]
 
--- | 'ackJob' inside the caller's transaction, over staged statements.
-ackJobWith :: (MonadArbiter m) => AckStatements -> JobRead payload -> m Int64
+-- | What one ack did to a job's row.
+data AckedRow = AckedRow
+  { ackedId :: Int64
+  , ackedDeleted :: Bool
+  -- ^ 'False' for a finalizer the ack suspended, whose children are still running.
+  }
+  deriving stock (Eq, Ord, Show)
+
+-- | 'ackJob' inside the caller's transaction, over staged statements. An empty result
+-- is a job gone, reclaimed or cancelled.
+ackJobWith :: (MonadArbiter m) => AckStatements -> JobRead payload -> m [AckedRow]
 ackJobWith statements job = do
   ackParents statements [parentId job]
-  countOr0Prepared (ackFor statements (archivesOnAck job) (primaryKey job) (claimSeq job))
+  map toAckedRow <$> MA.executeQueryPrepared (ackFor statements (archivesOnAck job) (primaryKey job) (claimSeq job))
+
+toAckedRow :: (Int64, Bool) -> AckedRow
+toAckedRow (jobId, deleted) = AckedRow jobId deleted
 
 -- | Take the advisory lock of every distinct parent named, ascending, before any
 -- row lock the caller goes on to take.
@@ -1080,14 +1093,17 @@ ackJobsBatch
   -> [JobRead payload]
   -> m [Int64]
   -- ^ Ids acked (deleted or suspended). Reclaimed jobs are absent.
-ackJobsBatch schemaName tableName = withDbTransaction . ackJobsBatchWith (mkAckStatements schemaName tableName)
+ackJobsBatch schemaName tableName jobs =
+  map ackedId <$> withDbTransaction (ackJobsBatchWith (mkAckStatements schemaName tableName) jobs)
 
 -- | 'ackJobsBatch' inside the caller's transaction, over staged statements.
-ackJobsBatchWith :: (MonadArbiter m) => AckStatements -> [JobRead payload] -> m [Int64]
+ackJobsBatchWith :: (MonadArbiter m) => AckStatements -> [JobRead payload] -> m [AckedRow]
 ackJobsBatchWith _ [] = pure []
 ackJobsBatchWith statements jobs = do
   ackParents statements (map parentId jobs)
-  MA.executeQueryPrepared (ackBatchFor statements (any archivesOnAck jobs) (map primaryKey jobs) (map claimSeq jobs))
+  map toAckedRow
+    <$> MA.executeQueryPrepared
+      (ackBatchFor statements (any archivesOnAck jobs) (map primaryKey jobs) (map claimSeq jobs))
 
 -- | Extend a job's visibility timeout.
 setVisibilityTimeout
@@ -2276,6 +2292,27 @@ forceCancelJob
   -- ^ Root job id
   -> m Int64
 forceCancelJob = cascadeDeleteJob Tmpl.forceCancelJobSQL
+
+-- | 'forceCancelJob' over a set of jobs in one statement. A row another transaction
+-- holds is skipped, so a settle that holds its job row cannot deadlock with a cancel.
+-- Returns the number cancelled.
+forceCancelJobs
+  :: (MonadArbiter m)
+  => SchemaName
+  -- ^ Schema name
+  -> TableName
+  -- ^ Table name
+  -> [Int64]
+  -- ^ Root job ids
+  -> m Int64
+forceCancelJobs _ _ [] = pure 0
+forceCancelJobs schemaName tableName jobIds =
+  withDbTransaction $ do
+    let ids = Set.toList (Set.fromList jobIds)
+    parents <- MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName ids)
+    lockJobParents schemaName tableName parents
+    cancelled <- countOr0 (Tmpl.forceCancelJobsSQL schemaName tableName ids)
+    cancelled <$ when (cancelled > 0) (resumeJobParents LocksHeld schemaName tableName parents)
 
 -- ---------------------------------------------------------------------------
 -- Suspend/Resume Operations

@@ -10,6 +10,7 @@ module Test.Arbiter.Servant.API (spec) where
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.DLQ (DLQJob (..), dlqPrimaryKey)
+import Arbiter.Core.Settled (SettledJob (..), SettledOutcome (..))
 import Arbiter.Core.Job.Types
   ( DedupKey (..)
   , HasKind
@@ -43,6 +44,8 @@ import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LB
 import Data.Int (Int64)
+import Data.Foldable (toList)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -161,6 +164,28 @@ spec connStr = do
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
 
   mkEnv <- runIO (createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema)
+
+  settledRef <- runIO (newIORef ([] :: [SettledJob]))
+  let recordingApp =
+        arbiterApp @ServantTestRegistry
+          serverConfig
+            { queueStatsCacheTtl = 0
+            , serverJobSettled = \settled -> liftIO (modifyIORef' settledRef (<> toList settled))
+            }
+
+  describe "Settled hook" $ with (cleanupDb >> writeIORef settledRef [] >> pure recordingApp) $ do
+    it "reports the job the admin move-to-dlq route dead-letters" $ do
+      jobId <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "dlq-hook" (TestMessage "to dlq"))
+        pure (primaryKey jobRead)
+
+      post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId) <> "/move-to-dlq") ""
+        `shouldRespondWith` 204
+
+      liftIO $ do
+        settled <- readIORef settledRef
+        map settledJobId settled `shouldBe` [jobId]
+        map settledOutcome settled `shouldBe` [JobDeadLettered]
 
   describe "Jobs API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/jobs returns empty list initially" $ do

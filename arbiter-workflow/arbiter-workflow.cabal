@@ -1,0 +1,105 @@
+cabal-version:   2.2
+name:            arbiter-workflow
+version:         0.1.0.0
+synopsis:        Workflow graphs over the Arbiter job queue
+
+description:
+  A workflow layer over Arbiter, a PostgreSQL job queue for Haskell.
+  A workflow is a directed acyclic graph of steps, each one a job in one queue.
+  This package holds the graph builder, the run tables, and the settle path that
+  advances a run from the transaction of the ack that finished a step.
+
+license:         MIT
+license-file:    LICENSE
+author:          Joshua Miller
+maintainer:      joshua.ian.miller@pm.me
+category:        Database
+build-type:      Simple
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+
+homepage:        https://github.com/velveteer/arbiter
+bug-reports:     https://github.com/velveteer/arbiter/issues
+
+source-repository head
+  type:     git
+  location: https://github.com/velveteer/arbiter.git
+
+common shared-properties
+  default-language: GHC2024
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields
+    -Wredundant-constraints -Werror=incomplete-patterns
+    -Wunused-packages -Wmissing-export-lists -Wunused-type-patterns
+    -Wderiving-defaults -Wmissing-deriving-strategies
+    -Wmissing-signatures
+
+library
+  import:          shared-properties
+  hs-source-dirs:  src
+  exposed-modules:
+    Arbiter.Workflow
+    Arbiter.Workflow.Checkpoint
+    Arbiter.Workflow.Expr
+    Arbiter.Workflow.Graph
+    Arbiter.Workflow.Interpret
+    Arbiter.Workflow.LockPlan
+    Arbiter.Workflow.Ops
+    Arbiter.Workflow.Registry
+    Arbiter.Workflow.Settle
+    Arbiter.Workflow.Worker
+    Arbiter.Workflow.Schema
+    Arbiter.Workflow.Sql
+    Arbiter.Workflow.Types
+
+  build-depends:
+    , aeson                        >=2.0  && <2.3
+    , arbiter-core                 >=0.1  && <0.2
+    , arbiter-worker               >=0.1  && <0.2
+    , base                         >=4.20 && <5
+    , containers                   >=0.6  && <0.9
+    , postgresql-migration          >=0.2  && <0.3
+    , text                         >=1.2  && <2.2
+    , transformers                 >=0.5  && <0.7
+    , unliftio                     >=0.2  && <0.3
+    , vector                       >=0.12 && <0.14
+    , time                         >=1.9  && <1.16
+
+test-suite arbiter-workflow-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  other-modules:
+    Test.Arbiter.Workflow.Builder
+    Test.Arbiter.Workflow.Checkpoints
+    Test.Arbiter.Workflow.Example
+    Test.Arbiter.Workflow.EndToEnd
+    Test.Arbiter.Workflow.Harness
+    Test.Arbiter.Workflow.LockSim
+    Test.Arbiter.Workflow.LockTrace
+    Test.Arbiter.Workflow.Runs
+    Test.Arbiter.Workflow.Sim
+
+  build-depends:
+    , aeson
+    , arbiter-core
+    , arbiter-simple
+    , arbiter-test-common
+    , arbiter-worker
+    , arbiter-workflow
+    , base
+    , bytestring
+    , containers
+    , hspec
+    , io-classes
+    , io-sim
+    , postgresql-migration
+    , postgresql-simple
+    , QuickCheck
+    , resource-pool
+    , text
+    , time
+    , transformers
+    , unliftio

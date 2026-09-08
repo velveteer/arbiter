@@ -76,15 +76,16 @@ runCronScheduler
   -> Text
   -- ^ Queue name (recorded on each schedule row).
   -> [CronJob payload]
+  -> CronFiredHook m payload
   -> m ()
-runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
+runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs onFired = do
   initCronSchedules schemaName queueName jobs logCfg
   cronLog <- newCronLog logCfg
   startupNow <- liftIO getCurrentTime
   shuttingDown <- isShuttingDown stateVar
   unless shuttingDown $ do
-    processRunRequests cronLog schemaName jobs startupNow
-    processCronCatchUp cronLog schemaName queueName jobs startupNow
+    processRunRequests cronLog schemaName jobs onFired startupNow
+    processCronCatchUp cronLog schemaName queueName jobs onFired startupNow
   logCron cronLog Info $ "Cron scheduler started with " <> T.pack (show (length jobs)) <> " schedule(s)"
   loop cronLog
   where
@@ -98,12 +99,12 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
         WakeShutdown -> pure ()
         WakeMinute -> do
           now <- liftIO getCurrentTime
-          processRunRequests cronLog schemaName jobs now
-          processCronCatchUp cronLog schemaName queueName jobs now
+          processRunRequests cronLog schemaName jobs onFired now
+          processCronCatchUp cronLog schemaName queueName jobs onFired now
           loop cronLog
         WakeRunNow -> do
           now <- liftIO getCurrentTime
-          processRunRequests cronLog schemaName jobs now
+          processRunRequests cronLog schemaName jobs onFired now
           serve cronLog timerVar
 
 -- | Scheduler catch-up step. Each cron runs in its own transaction.
@@ -115,10 +116,11 @@ processCronCatchUp
   -> Text
   -- ^ Queue name
   -> [CronJob payload]
+  -> CronFiredHook m payload
   -> UTCTime
   -- ^ Current wall-clock time
   -> m ()
-processCronCatchUp cronLog schemaName queueName jobs now = do
+processCronCatchUp cronLog schemaName queueName jobs onFired now = do
   let currentTick = truncateToMinute now
   traverse_ (processOneCron currentTick) jobs
   where
@@ -164,7 +166,7 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
           $ logCron cronLog Info
           $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cron <> "'"
         for_ ticksToFire $ \tick ->
-          tryInsertCronJob cronLog schemaName cron effectiveOv effectiveTz (tickKindFor currentTick tick) tick
+          tryInsertCronJob cronLog schemaName cron onFired effectiveOv effectiveTz (tickKindFor currentTick tick) tick
 
 data TickOutcome = NotLeader | Ran
 
@@ -231,15 +233,23 @@ resolveAndParse cron mRow =
 -- either fails the other rolls back.
 tryInsertCronJob
   :: (QueueOperation m payload)
-  => CronLog -> Text -> CronJob payload -> OverlapPolicy -> Maybe Text -> TickKind -> UTCTime -> m ()
-tryInsertCronJob cronLog schemaName cron effectiveOv effectiveTz kind tick = do
+  => CronLog
+  -> Text
+  -> CronJob payload
+  -> CronFiredHook m payload
+  -> OverlapPolicy
+  -> Maybe Text
+  -> TickKind
+  -> UTCTime
+  -> m ()
+tryInsertCronJob cronLog schemaName cron onFired effectiveOv effectiveTz kind tick = do
   result <- tryCron cronLog ("Cron schedule '" <> name cron <> "' insert") . withDbTransaction $ do
     -- Gate first. Another pool may have fired this minute.
     fired <- Ops.tryFireCronGate schemaName (name cron) tick
     when fired $ do
       let key = makeDedupKeyFromParts (name cron) effectiveOv effectiveTz tick
           jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
-      void $ HL.insertJob jobWrite
+      traverse_ (onFired (name cron) tick) =<< HL.insertJob jobWrite
     void $ Ops.touchCronChecked schemaName tick [name cron]
   traverse_
     (const . logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick)
@@ -255,8 +265,8 @@ data RunNowOutcome = Fired | Skipped | NotRequested
 processRunRequests
   :: forall payload m
    . (QueueOperation m payload)
-  => CronLog -> Text -> [CronJob payload] -> UTCTime -> m ()
-processRunRequests cronLog schemaName jobs now = do
+  => CronLog -> Text -> [CronJob payload] -> CronFiredHook m payload -> UTCTime -> m ()
+processRunRequests cronLog schemaName jobs onFired now = do
   scan <- tryCron cronLog "Cron run-request scan" $ Ops.pendingCronRuns schemaName (map name jobs)
   traverse_ (fireRequested . Set.fromList) scan
   where
@@ -282,7 +292,8 @@ processRunRequests cronLog schemaName jobs now = do
           jobWrite = setDedupKey key $ builder cron Live tick
       inserted <- HL.insertJob jobWrite
       case inserted of
-        Just _ -> do
+        Just row -> do
+          onFired (name cron) tick row
           void $ Ops.touchCronManualRun schemaName tick (name cron)
           pure Fired
         Nothing -> pure Skipped

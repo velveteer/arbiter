@@ -5,7 +5,7 @@ synopsis:
   Core types, queue registry, and SQL for a PostgreSQL job queue
 
 description:
-  Core of Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Core of Arbiter, a PostgreSQL job queue for Haskell.
   This package holds the job and dead-letter queue types, the type-level queue
   registry, the SQL the queue runs on, and the @MonadArbiter@ backend interface
   the postgresql-simple, hasql, and Orville packages are built against.
@@ -82,6 +82,7 @@ library
     Arbiter.Core.RateLimit.Stats
     Arbiter.Core.SchemaTables
     Arbiter.Core.Selector
+    Arbiter.Core.Settled
     Arbiter.Core.Sql.Archive
     Arbiter.Core.Sql.Claim
     Arbiter.Core.Sql.Concurrency

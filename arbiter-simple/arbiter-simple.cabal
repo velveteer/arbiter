@@ -3,7 +3,7 @@ name:            arbiter-simple
 version:         0.1.0.0
 synopsis:        PostgreSQL-simple backend for arbiter
 description:
-  A postgresql-simple backend for Arbiter, an opinionated PostgreSQL job queue
+  A postgresql-simple backend for Arbiter, a PostgreSQL job queue
   for Haskell.
   Provides a @MonadArbiter@ instance over a postgresql-simple connection pool,
   with savepoint-based nested transactions so a handler's own database work

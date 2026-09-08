@@ -40,11 +40,12 @@ import Arbiter.Core.Sql.Archive (allArchiveColumns)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.Cron (allCronColumns)
 import Arbiter.Core.Sql.Jobs (JobFilter (..), allDLQColumns, dedupUpdateSet, jobColumns)
+import Arbiter.Core.Sql.Lifecycle (smartAckJobSQL, smartAckJobsBatchSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
 import Arbiter.Core.Sql.Queues (queueColumnList)
 import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
-import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
+import Arbiter.Core.Sql.Tree (forceCancelJobsSQL, lockJobTreesFromRootSQL)
 import Arbiter.Core.Sql.Workers (workerColumnList)
 import Arbiter.Core.Worker (WorkerHealth (Live), workerHealthFromText)
 
@@ -262,6 +263,24 @@ main = hspec $ do
       paramTags (qParams whereClause) `shouldBe` ["text", "int8"]
 
   describe "statement shapes" $ do
+    it "reports whether the ack deleted its row or suspended it" $ do
+      let acked = smartAckJobSQL False "arbiter" "jobs" 1 1
+          rendered = squished acked
+      rendered `shouldSatisfy` T.isInfixOf "SELECT id, TRUE AS deleted FROM ack"
+      rendered `shouldSatisfy` T.isInfixOf "SELECT id, FALSE AS deleted FROM suspend"
+      codecColumns (qDecode acked) `shouldBe` ["id", "deleted"]
+
+    it "reports the branch per job over a batch" $ do
+      let acked = smartAckJobsBatchSQL False "arbiter" "jobs" [1, 2] [1, 1]
+          rendered = squished acked
+      rendered `shouldSatisfy` T.isInfixOf "SELECT id, TRUE AS deleted FROM ack"
+      rendered `shouldSatisfy` T.isInfixOf "SELECT id, FALSE AS deleted FROM suspend"
+      codecColumns (qDecode acked) `shouldBe` ["id", "deleted"]
+
+    it "skips a locked row when it cancels a set" $ do
+      let rendered = squished (forceCancelJobsSQL "arbiter" "jobs" [1, 2])
+      rendered `shouldSatisfy` T.isInfixOf "ORDER BY id DESC FOR UPDATE SKIP LOCKED"
+
     it "locks a named job's own subtree as well as its root's" $ do
       let rendered = squished (lockJobTreesFromRootSQL "arbiter" "jobs" [1, 2])
       rendered `shouldSatisfy` T.isInfixOf "WHERE id = ANY(?) OR id IN (SELECT id FROM roots)"

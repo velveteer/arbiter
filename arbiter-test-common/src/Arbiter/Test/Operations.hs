@@ -24,7 +24,9 @@ import Arbiter.Core.Sql.DLQ qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as GroupsTmpl
 import Arbiter.Core.Sql.Tree qualified as TreeTmpl
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM, forM_, void)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson qualified as Aeson
 import Data.Int (Int32, Int64)
 import Data.List (find, nub, sort)
@@ -102,6 +104,29 @@ operationsSpec mkMessage mkResult runM = do
           tbl <- groupsTable
           rows <- execQuery ("SELECT job_count FROM " <> tbl <> " WHERE group_key = ?") [pval CText key] (col "job_count" CInt4)
           pure (listToMaybe rows :: Maybe Int32)
+      ackPair row = (Ops.ackedId row, Ops.ackedDeleted row)
+      ackStatements = do
+        schemaName <- getSchema
+        pure (Ops.mkAckStatements schemaName (HL.queueTable @payload @m))
+      ackRows env job =
+        runM env $ do
+          statements <- ackStatements
+          MA.withDbTransaction (map ackPair <$> Ops.ackJobWith statements job)
+      ackBatchRows env jobs =
+        runM env $ do
+          statements <- ackStatements
+          MA.withDbTransaction (sort . map ackPair <$> Ops.ackJobsBatchWith statements jobs)
+      cancelJobSet env jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          Ops.forceCancelJobs schemaName (HL.queueTable @payload @m) jobIds
+      holdRowLock env jobId held release =
+        runM env $ do
+          schemaName <- getSchema
+          MA.withDbTransaction $ do
+            let tbl = Schema.jobQueueTable schemaName (HL.queueTable @payload @m)
+            void $ execQuery ("SELECT id FROM " <> tbl <> " WHERE id = ? FOR UPDATE") [pval CInt8 jobId] (col "id" CInt8)
+            liftIO (putMVar held () >> takeMVar release)
 
   describe "job kind" $ do
     it "stores the label its payload derives" $ \env -> do
@@ -578,6 +603,101 @@ operationsSpec mkMessage mkResult runM = do
       -- The second jobs are claimable now
       claimed2 <- runM env (HL.claimNextVisibleJobs 10 60) :: IO [JobRead payload]
       length claimed2 `shouldBe` 2
+
+  describe "ack outcomes" $ do
+    it "reports a childless ack as a delete" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "ack-outcome-leaf")))
+      [claimed] <- claimJobs env 1
+      ackRows env claimed `shouldReturn` [(primaryKey inserted, True)]
+
+    it "reports a finalizer's ack as a suspend while a child is queued" $ \env -> do
+      Right (parent :| [child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "ack-outcome-parent"))
+            (JT.leaf (defaultJob (mkMessage "ack-outcome-child")) :| [])
+      [claimedChild] <- claimJobs env 1
+      primaryKey claimedChild `shouldBe` primaryKey child
+      runM env (HL.moveToDLQ "boom" claimedChild) `shouldReturn` 1
+
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+
+      ackRows env claimedParent `shouldReturn` [(primaryKey parent, False)]
+      assertSuspended env (primaryKey parent)
+
+    it "reports nothing for a job another claim holds" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "ack-outcome-stolen")))
+      [stale] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 stale)
+      [live] <- claimJobsAs env 1 UUID.nil
+      claimSeq live `shouldBe` claimSeq stale + 1
+      ackRows env stale `shouldReturn` []
+      ackRows env live `shouldReturn` [(primaryKey inserted, True)]
+
+    it "reports each branch over a batch" $ \env -> do
+      Right (parent :| [child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "ack-batch-parent"))
+            (JT.leaf (defaultJob (mkMessage "ack-batch-child")) :| [])
+      [claimedChild] <- claimJobs env 1
+      runM env (HL.moveToDLQ "boom" claimedChild) `shouldReturn` 1
+      [claimedParent] <- claimJobs env 1
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+
+      Just leaf <- runM env (HL.insertJob (defaultJob (mkMessage "ack-batch-leaf")))
+      claimed <- claimJobs env 10
+      Just claimedLeaf <- pure (find ((== primaryKey leaf) . primaryKey) claimed)
+
+      ackBatchRows env [claimedParent, claimedLeaf]
+        `shouldReturn` sort [(primaryKey parent, False), (primaryKey leaf, True)]
+
+  describe "forceCancelJobs" $ do
+    it "deletes an idle job and flags an in-flight one" $ \env -> do
+      Just busy <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-set-busy")))
+      [claimed] <- claimJobsAs env 1 UUID.nil
+      primaryKey claimed `shouldBe` primaryKey busy
+      Just idle <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-set-idle")))
+
+      cancelJobSet env [primaryKey busy, primaryKey idle] `shouldReturn` 2
+      assertGone env (primaryKey idle)
+      runM env (HL.ackJob claimed) `shouldReturn` 0
+      getJob env (primaryKey busy) >>= (`shouldSatisfy` isJust)
+
+    it "cancels a job's descendants with it" $ \env -> do
+      Right (parent :| [child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "cancel-set-parent"))
+            (JT.leaf (defaultJob (mkMessage "cancel-set-child")) :| [])
+      cancelJobSet env [primaryKey parent] `shouldReturn` 2
+      assertGone env (primaryKey parent)
+      assertGone env (primaryKey child)
+
+    it "skips a row another transaction holds" $ \env -> do
+      Just held <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-set-held")))
+      Just free <- runM env (HL.insertJob (defaultJob (mkMessage "cancel-set-free")))
+      lockTaken <- newEmptyMVar
+      release <- newEmptyMVar
+      (_, cancelled) <-
+        concurrently
+          (holdRowLock env (primaryKey held) lockTaken release)
+          ( do
+              takeMVar lockTaken
+              cancelled <- cancelJobSet env [primaryKey held, primaryKey free]
+              putMVar release ()
+              pure cancelled
+          )
+      cancelled `shouldBe` 1
+      assertGone env (primaryKey free)
+      getJob env (primaryKey held) >>= (`shouldSatisfy` isJust)
 
   describe "setVisibilityTimeoutBatch" $ do
     it "extends visibility timeout for multiple jobs" $ \env -> do

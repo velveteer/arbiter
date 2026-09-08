@@ -3,7 +3,7 @@ name:            arbiter-orville
 version:         0.1.0.0
 synopsis:        Orville backend integration for arbiter
 description:
-  An Orville backend for Arbiter, an opinionated PostgreSQL job queue for
+  An Orville backend for Arbiter, a PostgreSQL job queue for
   Haskell.
 
   Supplies the query, statement, transaction, and handler primitives implemented

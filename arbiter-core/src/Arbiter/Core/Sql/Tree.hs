@@ -3,7 +3,8 @@
 
 -- | Tree SQL templates.
 module Arbiter.Core.Sql.Tree
-  ( pauseChildrenSQL
+  ( HeldRows (..)
+  , pauseChildrenSQL
   , resumeChildrenSQL
   , descendantsCte
   , lockedByIdsCte
@@ -11,6 +12,7 @@ module Arbiter.Core.Sql.Tree
   , lockJobTreesFromRootSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
+  , forceCancelJobsSQL
   , deleteCancelledJobsSQL
   , selectCancelledReapableJobsSQL
   , cancelJobTreeSQL
@@ -210,9 +212,29 @@ cancelJobCascadeSQL schema tableName jobId =
 -- token, deletes the rest, and NOTIFYs every claimed job affected.
 forceCancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 forceCancelJobSQL schema tableName jobId =
+  forceCancelDescendantsSQL schema tableName Wait (descendantsCte (jobQueueTable schema tableName) jobId)
+
+-- | 'forceCancelJobSQL' over a set of jobs, each with its own subtree, in one pass.
+-- A row another transaction holds is skipped rather than waited on.
+forceCancelJobsSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
+forceCancelJobsSQL schema tableName jobIds =
+  forceCancelDescendantsSQL schema tableName Skip (descendantsOfCte (jobQueueTable schema tableName) jobIds)
+
+-- | What a lock pass does with a row another transaction holds.
+data HeldRows = Wait | Skip
+  deriving stock (Eq, Ord, Show)
+
+-- | The @SKIP LOCKED@ clause a lock pass carries.
+heldRowsClause :: HeldRows -> Text
+heldRowsClause Wait = ""
+heldRowsClause Skip = " SKIP LOCKED"
+
+-- | The force-cancel body over whatever @descendants@ the caller's CTE names.
+forceCancelDescendantsSQL :: SchemaName -> TableName -> HeldRows -> Query () -> Query Int64
+forceCancelDescendantsSQL schema tableName heldRows cte =
   let tbl = jobQueueTable schema tableName
-      cte = descendantsCte tbl jobId
       chan = textLiteral (cancelNotifyChannel schema tableName)
+      skip = heldRowsClause heldRows
    in [sql|
         ${cte},
         locked AS (
@@ -220,7 +242,7 @@ forceCancelJobSQL schema tableName jobId =
           FROM ${tbl}
           WHERE id IN (SELECT id FROM descendants)
           ORDER BY id DESC
-          FOR UPDATE
+          FOR UPDATE${skip}
         ),
         cancelled AS (
           UPDATE ${tbl} job SET cancel_requested_at = NOW(), claim_seq = job.claim_seq + 1

@@ -49,7 +49,7 @@ import Arbiter.Worker.Config
 import Arbiter.Worker.Heartbeat.Guard (reclaimedReason)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (jobHook, poolLog, withJobContext)
-import Arbiter.Worker.Results (storeEncodedResult, storeEncodedResults, storeJobResult)
+import Arbiter.Worker.Results (settleAck, settleDeadLetter)
 
 -- | Add a claimed batch to the pool log context.
 batchLog :: WorkerConfig m payload -> NonEmpty (Job.JobRead payload) -> LogConfig
@@ -80,15 +80,14 @@ poolEffects config statements consumeSpan = do
               withConsumeSpan tracer consumeSpan jobs (capturingContextIO >>= liftIO . body)
           , effectAck = \(UnliftIO runIn) job stored ->
               runIn $ withDbTransaction $ do
-                ackOrGone statements job
-                storeEncodedResult schemaName job stored
+                acked <- ackOrGone statements job
+                void (settleAck schemaName (jobSettled config) acked [(job, stored)])
           , effectAckAll = \(UnliftIO runIn) pairs ->
               runIn $ withDbTransaction $ do
                 let jobsToAck = map fst pairs
-                acked <- Set.fromList <$> Ops.ackJobsBatchWith (Ops.statementsAck statements) jobsToAck
-                let ackedJob = (`Set.member` acked) . Job.primaryKey
-                storeEncodedResults schemaName (filter (ackedJob . fst) pairs)
-                pure (partition ackedJob jobsToAck)
+                rows <- Ops.ackJobsBatchWith (Ops.statementsAck statements) jobsToAck
+                acked <- settleAck schemaName (jobSettled config) rows pairs
+                pure (partition ((`Set.member` acked) . Job.primaryKey) jobsToAck)
           , effectFail = \(UnliftIO runIn) failure job ->
               runIn $ withDbTransaction $ handleJobFailure config Ops.TakeLocks failure job
           , effectFailAll = \(UnliftIO runIn) failure@(_, kind) unhandled unowned ->
@@ -144,8 +143,8 @@ poolMode config statements = do
       SingleMode $ \job ->
         run $ withDbTransaction $ do
           handlerResult <- runHandlerWithConnection handler job
-          ackOrGone statements job
-          storeJobResult schemaName job handlerResult
+          acked <- ackOrGone statements job
+          void (settleAck schemaName (jobSettled config) acked [(job, encodeJobResult handlerResult)])
     BatchedJobsMode _ handler ->
       BatchedMode $ \jobs callbacks -> run (handler jobs (batchCallbacks callbacks))
 
@@ -172,11 +171,10 @@ batchCallbacks callbacks =
     failAs kind job msg = here (\ctx -> callbackFail callbacks ctx (msg, kind) job)
 
 -- | Ack a job inside the caller's transaction, throwing if another worker reclaimed it mid-flight.
-ackOrGone :: (JobOperation m payload) => Ops.JobStatements -> Job.JobRead payload -> m ()
+ackOrGone :: (JobOperation m payload) => Ops.JobStatements -> Job.JobRead payload -> m [Ops.AckedRow]
 ackOrGone statements job = do
-  rowsAffected <- Ops.ackJobWith (Ops.statementsAck statements) job
-  when (rowsAffected == 0) $
-    throwJobGoneIds reclaimedReason [Job.primaryKey job]
+  acked <- Ops.ackJobWith (Ops.statementsAck statements) job
+  acked <$ when (null acked) (throwJobGoneIds reclaimedReason [Job.primaryKey job])
 
 -- | The job's own attempt budget, or the default.
 jobMaxAtts :: Job.JobRead payload -> Int32
@@ -248,7 +246,7 @@ handleJobFailure config locks (errorMsg, failureKind) job
   | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
       schemaName <- getSchema
       wrote "no longer available for the dead-letter queue" DeadLettered
-        <$> Ops.moveToDLQ locks schemaName (Job.queueName job) errorMsg job
+        <$> settleDeadLetter (jobSettled config) locks schemaName (Job.queueName job) errorMsg job
   | otherwise = do
       let baseDelay = calculateBackoff (backoffStrategy config) (Job.attempts job)
       backoffSecs <- liftIO $ applyJitter (jitter config) baseDelay

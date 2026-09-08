@@ -3,7 +3,7 @@ name:            arbiter-worker-testkit
 version:         0.1.0.0
 synopsis:        Backend-parameterized worker-pool test suite for arbiter
 description:
-  Worker conformance tests for Arbiter, an opinionated PostgreSQL job queue for
+  Worker conformance tests for Arbiter, a PostgreSQL job queue for
   Haskell.
 
   A worker-pool test suite parameterized over a @MonadArbiter@ runner, so a new

@@ -7,7 +7,7 @@ module Test.Arbiter.Worker.Cron (spec) where
 import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload)
+import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), JobRead, dedupKey, defaultJob, payload, queueName)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Simple (SimpleDb, SimpleEnv (..), createSimpleEnvWithPool, inTransaction, runSimpleDb)
@@ -17,6 +17,7 @@ import Control.Exception (bracket, catch)
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (find, sort)
 import Data.Maybe (isJust)
 import Data.Pool (Pool, withResource)
@@ -43,11 +44,13 @@ import Test.Hspec
   , runIO
   , shouldBe
   , shouldNotBe
+  , shouldReturn
   , shouldSatisfy
   )
 
 import Arbiter.Worker.Cron
   ( BackfillPolicy (..)
+  , CronFiredHook
   , CronJob (..)
   , OverlapPolicy (..)
   , computeDelayMicros
@@ -62,6 +65,7 @@ import Arbiter.Worker.Cron
   , matchesInTimezone
   , newCronLog
   , nextRunInTimezone
+  , noCronFired
   , processCronCatchUp
   , processRunRequests
   , resolveTZ
@@ -92,9 +96,19 @@ catchUpAt
   -> [CronJob WorkerTestPayload]
   -> UTCTime
   -> SimpleDb WorkerTestRegistry IO ()
-catchUpAt schema table jobs tick = do
+catchUpAt schema table jobs tick = catchUpWith noCronFired schema table jobs tick
+
+-- | 'catchUpAt' over a hook of the caller's own.
+catchUpWith
+  :: CronFiredHook (SimpleDb WorkerTestRegistry IO) WorkerTestPayload
+  -> Text
+  -> Text
+  -> [CronJob WorkerTestPayload]
+  -> UTCTime
+  -> SimpleDb WorkerTestRegistry IO ()
+catchUpWith onFired schema table jobs tick = do
   cronLog <- newCronLog testLogConfig
-  processCronCatchUp cronLog schema table jobs tick
+  processCronCatchUp cronLog schema table jobs onFired tick
 
 -- | 'processRunRequests' under a fresh gate store.
 runRequestsAt
@@ -104,7 +118,7 @@ runRequestsAt
   -> SimpleDb WorkerTestRegistry IO ()
 runRequestsAt schema jobs now = do
   cronLog <- newCronLog testLogConfig
-  processRunRequests cronLog schema jobs now
+  processRunRequests cronLog schema jobs noCronFired now
 
 -- | Helper to build a UTCTime from components.
 mkTime :: Integer -> Int -> Int -> Int -> Int -> Int -> UTCTime
@@ -888,6 +902,23 @@ spec connStr = do
         jobs <- runSimpleDb env $ HL.listJobs 100 0 :: IO [JobRead WorkerTestPayload]
         -- Expect at least 5 missed minutes plus the current one.
         length jobs `shouldSatisfy` (>= 5)
+
+      it "calls the post-insert hook with the job the tick inserted" $ \env -> do
+        let Right cron =
+              cronJob
+                "catchup-hook"
+                "* * * * *"
+                AllowOverlap
+                (\_ _ -> defaultJob (SimpleTask "hooked"))
+        runSimpleDb env $ initCronSchedules testSchema testTable [cron] testLogConfig
+        seen <- newIORef ([] :: [(Text, Text, WorkerTestPayload)])
+
+        now <- runSimpleDb env $ liftIO getCurrentTime
+        let record schedule _tick job =
+              liftIO (atomicModifyIORef' seen (\rows -> (rows <> [(schedule, queueName job, payload job)], ())))
+        runSimpleDb env $ catchUpWith record testSchema testTable [cron] now
+
+        readIORef seen `shouldReturn` [("catchup-hook", testTable, SimpleTask "hooked")]
 
       it "does not replay missed minutes for NoBackfill schedules" $ \env -> do
         -- NoBackfill replays no stale ticks. With a stale last_checked_at, only

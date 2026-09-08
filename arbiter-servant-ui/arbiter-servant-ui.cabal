@@ -3,7 +3,7 @@ name:               arbiter-servant-ui
 version:            0.1.0.0
 synopsis:           Embedded admin dashboard for arbiter job queue
 description:
-  Admin dashboard for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Admin dashboard for Arbiter, a PostgreSQL job queue for Haskell.
   A browser interface over the arbiter-servant API for inspecting and operating
   queues: job, dead-letter, and archive browsing, retries and cancellation, cron
   schedules, rate-limit and concurrency policies, queue pausing, and worker

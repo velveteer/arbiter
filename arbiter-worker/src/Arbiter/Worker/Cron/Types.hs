@@ -3,6 +3,8 @@
 -- | Cron declarations, validation, and timezone calculations.
 module Arbiter.Worker.Cron.Types
   ( CronJob (..)
+  , CronFiredHook
+  , noCronFired
   , OverlapPolicy (..)
   , BackfillPolicy (..)
   , TickKind (..)
@@ -24,7 +26,7 @@ module Arbiter.Worker.Cron.Types
 
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.HighLevel qualified as HL
-import Arbiter.Core.Job.Types (JobWrite)
+import Arbiter.Core.Job.Types (JobRead, JobWrite)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Control.Applicative ((<|>))
 import Control.Monad (join, unless)
@@ -122,6 +124,14 @@ data CronJob payload = CronJob
   -- catch-up). 'Live' is passed for the current minute boundary.
   }
   deriving stock (Generic)
+
+-- | Called with a schedule's name, its tick, and the job it fired, inside the
+-- transaction that inserted the job. An insert a dedup key skipped calls nothing.
+type CronFiredHook m payload = Text -> UTCTime -> JobRead payload -> m ()
+
+-- | The default hook.
+noCronFired :: (Applicative m) => CronFiredHook m payload
+noCronFired _ _ _ = pure ()
 
 -- | Build a 'CronJob'. A bad expression returns @Left@. The expression is
 -- evaluated in UTC. 'cronJobInTimezone' is the local-time form. Set 'backfill'

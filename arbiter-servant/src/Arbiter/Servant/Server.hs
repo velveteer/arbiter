@@ -37,10 +37,11 @@ import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload, SpecResult)
 import Arbiter.Core.Queues qualified as Queues
+import Arbiter.Core.Settled (JobSettledHook, noJobSettled)
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Simple (SimpleConnectionPool (..), SimpleDb, SimpleEnv (..), createSimpleEnvWithConfig, runSimpleDb)
-import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, storeEncodedResult)
+import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, settleAck, settleDeadLetter)
 import Arbiter.Worker.Config (maintenanceOpName)
 import Arbiter.Worker.Cron (nextRunFromExpression, updateCronScheduleChecked)
 import Arbiter.Worker.Logger (defaultLogConfig)
@@ -62,7 +63,7 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (SomeAsyncException, SomeException, bracket, bracket_, fromException, handle, throwIO, try)
-import Control.Monad (forever, guard, join, mfilter, unless, void, when)
+import Control.Monad (forever, guard, join, mfilter, unless, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
@@ -150,6 +151,12 @@ data ArbiterServerConfig (registry :: JobPayloadRegistry) = ArbiterServerConfig
   , maintenanceTimeout :: NominalDiffTime
   -- ^ Abort any single maintenance statement that runs longer than this.
   -- Default: 'defaultMaintenanceTimeout'.
+  , serverExtraMaintenance :: [(Text, SimpleDb registry IO Int64)]
+  -- ^ Extra maintenance passes the maintenance route runs, each behind a gate of its
+  -- own name, as a worker pool's own are. Default: @[]@.
+  , serverJobSettled :: JobSettledHook (SimpleDb registry IO)
+  -- ^ Called inside the transaction that took a job out of its queue, as the worker
+  -- pool's own hook is. Default: no-op.
   }
 
 -- | A running SSE broadcast hub: the channel every client duplicates, and the
@@ -239,6 +246,8 @@ initArbiterServer _proxy connStr schemaName = do
       , maintenanceSparseInterval = defaultMaintenanceSparseInterval
       , maintenanceBucketIdle = defaultMaintenanceBucketIdle
       , maintenanceTimeout = defaultMaintenanceTimeout
+      , serverExtraMaintenance = []
+      , serverJobSettled = noJobSettled
       }
 
 -- | Jobs API handlers for a specific table.
@@ -440,7 +449,14 @@ moveToDLQHandler tableName config jobId = do
     case mJob of
       Nothing -> pure Nothing
       Just job ->
-        Just <$> Ops.moveToDLQ Ops.TakeLocks schemaName tableName "Manually moved to DLQ via admin API" job
+        Just
+          <$> settleDeadLetter
+            (serverJobSettled config)
+            Ops.TakeLocks
+            schemaName
+            tableName
+            "Manually moved to DLQ via admin API"
+            job
 
   case result of
     Nothing -> throwError err404 {errBody = "Job not found"}
@@ -795,9 +811,9 @@ ackClaimedJobHandler
 ackClaimedJobHandler tableName config jobId req =
   withHeldJob @registry @payload tableName config jobId (arLease req) $ \schemaName job ->
     withDbTransaction $ do
-      rows <- Ops.ackJob schemaName tableName job
-      when (rows > 0) $ storeEncodedResult schemaName job (arResult req >>= encodeJobResult)
-      pure rows
+      let stored = arResult req >>= encodeJobResult
+      acked <- Ops.ackJobWith (Ops.mkAckStatements schemaName tableName) job
+      fromIntegral . Set.size <$> settleAck schemaName (serverJobSettled config) acked [(job, stored)]
 
 -- | Restore the attempt used by a claim. The job becomes available when its
 -- lease expires.
@@ -889,7 +905,7 @@ maintenanceHandler config = liftIO $ do
           }
   failed <-
     runDb config $
-      runMaintenancePass defaultLogConfig report pace (maintenanceTimeout config)
+      runMaintenancePass defaultLogConfig report (serverExtraMaintenance config) pace (maintenanceTimeout config)
   ops <- readIORef touched
   pure $ MaintenanceResponse ops (map maintenanceOpName failed)
 
