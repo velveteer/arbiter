@@ -18,7 +18,7 @@ import Arbiter.Core.Exceptions
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.Job.Types (JobId)
 import Control.Concurrent.Class.MonadSTM (TVar, atomically, newTVarIO, readTVarIO, stateTVar, writeTVar)
-import Control.Monad (filterM, unless, void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Class.MonadAsync (MonadAsync (..))
 import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
 import Control.Monad.Class.MonadTest (exploreRaces)
@@ -81,6 +81,7 @@ data Row = Row
   , rowLease :: !(Maybe Time)
   , rowFlagged :: !Bool
   , rowAttempts :: !Int
+  , rowSuspended :: !Bool
   }
   deriving stock (Eq, Show)
 
@@ -96,7 +97,7 @@ data Job = Job
 type Rows s = TVar (IOSim s) (Map JobId Row)
 
 -- | A row write: this worker's, or the reaper's sweep.
-data Op = Acked | Retried | Dlqed | Released | Deleted | Flagged | Swept
+data Op = Acked | Retried | Dlqed | Released | Deleted | Flagged | Swept | Spawned
   deriving stock (Eq, Show)
 
 -- | An outside actor's move.
@@ -175,9 +176,17 @@ statement rows run = do
   now <- getMonotonicTime
   atomically (stateTVar rows (run now))
 
--- | Ack: delete the row the token still matches.
+-- | Ack: delete a row with no children, and re-suspend one that spawned.
 ackRow :: Job -> Statement Bool
 ackRow job _ rows = case Map.lookup (jobId job) rows of
+  Just row
+    | rowSeq row == jobSeq job ->
+        (True, if rowSuspended row then rows else Map.delete (jobId job) rows)
+  _ -> (False, rows)
+
+-- | Dead-letter: delete the row the token still matches.
+dlqRow :: Job -> Statement Bool
+dlqRow job _ rows = case Map.lookup (jobId job) rows of
   Just row | rowSeq row == jobSeq job -> (True, Map.delete (jobId job) rows)
   _ -> (False, rows)
 
@@ -185,7 +194,8 @@ ackRow job _ rows = case Map.lookup (jobId job) rows of
 retryRow :: Job -> Statement Bool
 retryRow job now rows = case Map.lookup (jobId job) rows of
   Just row
-    | rowSeq row == jobSeq job ->
+    | rowSeq row == jobSeq job
+    , not (rowSuspended row) ->
         (True, Map.insert (jobId job) row {rowHolder = Nothing, rowLease = Just (addTime retryPark now)} rows)
   _ -> (False, rows)
 
@@ -194,13 +204,28 @@ releaseRow :: Job -> Statement Bool
 releaseRow job _ rows = case Map.lookup (jobId job) rows of
   Just row
     | rowSeq row == jobSeq job
-    , isJust (rowHolder row) ->
+    , isJust (rowHolder row)
+    , not (rowSuspended row) ->
         (True, Map.insert (jobId job) row {rowHolder = Nothing, rowAttempts = handedBack job row} rows)
   _ -> (False, rows)
 
 -- | The attempt count a nack leaves behind.
 handedBack :: Job -> Row -> Int
 handedBack job row = min (max (jobAttempt job - 1) (max (rowAttempts row - 1) 0)) (rowAttempts row)
+
+-- | Spawn: settle the row suspended when the token matches.
+spawnRow :: Job -> Statement Bool
+spawnRow job _ rows = case Map.lookup (jobId job) rows of
+  Just row
+    | rowSeq row == jobSeq job
+    , not (rowSuspended row) ->
+        ( True
+        , Map.insert
+            (jobId job)
+            row {rowHolder = Nothing, rowLease = Nothing, rowSuspended = True, rowAttempts = handedBack job row}
+            rows
+        )
+  _ -> (False, rows)
 
 -- | Delete a flagged row this worker holds or no live lease holds.
 deleteCancelledRow :: Job -> Statement Bool
@@ -214,6 +239,7 @@ extendRow job now rows = case Map.lookup (jobId job) rows of
   Nothing -> (JobGone (jobId job), rows)
   Just row
     | rowFlagged row, rowHolder row == Just Us, rowSeq row == jobSeq job + 1 -> (JobCancelled (jobId job), rows)
+    | rowSuspended row, rowSeq row == jobSeq job -> (JobSuspended (jobId job), rows)
     | rowSeq row /= jobSeq job -> (JobReclaimed (jobId job) (fromIntegral (jobSeq job)) (fromIntegral (rowSeq row)), rows)
     | otherwise ->
         (VisibilityExtended (jobId job), Map.insert (jobId job) row {rowLease = Just (addTime leaseTimeout now)} rows)
@@ -228,17 +254,45 @@ flagRow job now rows = case Map.lookup job rows of
     | otherwise -> ((rowHolder row, Just Deleted), Map.delete job rows)
   Nothing -> ((Nothing, Nothing), rows)
 
+-- | One job's failure write: the outcome it reports and the op that landed.
+failWrite :: Failure -> Job -> Statement (Either Text Outcome, Maybe Op)
+failWrite (_, kind) job now rows
+  | cancelsTree kind =
+      let ((_, op), rows') = flagRow (jobId job) now rows
+       in ((Right TreeCancelled, op), rows')
+  | kind == PermanentFailure = write Dlqed DeadLettered dlqRow unwrittenDlq
+  | otherwise = write Retried (Retrying modelBackoff) retryRow unwrittenRetry
+  where
+    write op outcome stmt reason =
+      let (landed, rows') = stmt job now rows
+       in ((if landed then Right outcome else Left reason, if landed then Just op else Nothing), rows')
+
+-- | The whole failure write, as the one transaction the pool runs for it.
+failWrites :: Failure -> [Job] -> [Job] -> Statement ([(Job, Either Text Outcome)], [(JobId, Op)])
+failWrites failure unhandled unowned now rows =
+  let (rows', failed) = mapAccumL onFail rows unhandled
+      (rows'', cancelled) = mapAccumL onCancel rows' unowned
+      onFail table job =
+        let ((outcome, op), table') = failWrite failure job now table
+         in (table', ((job, outcome), (jobId job, op)))
+      onCancel table job =
+        let ((_, op), table') = flagRow (jobId job) now table
+         in (table', (jobId job, op))
+      landings = [(job, op) | (job, Just op) <- map snd failed <> cancelled]
+   in ((map fst failed, landings), rows'')
+
 -- | The reaper's pass: delete every flagged row whose lease lapsed.
 sweepRows :: Statement [JobId]
 sweepRows now rows = (Map.keys swept, rows `Map.difference` swept)
   where
-    swept = Map.filter (\row -> rowFlagged row && maybe True (<= now) (rowLease row)) rows
+    swept = Map.filter (\row -> rowFlagged row && not (rowSuspended row) && maybe True (<= now) (rowLease row)) rows
 
 -- | Another worker's claim, once the lease lapsed.
 stealRow :: JobId -> Statement Bool
 stealRow job now rows = case Map.lookup job rows of
   Just row
-    | not (rowFlagged row) ->
+    | not (rowFlagged row)
+    , not (rowSuspended row) ->
         ( True
         , Map.insert
             job
@@ -262,9 +316,17 @@ landing rows recorder op run job = do
   done <- statement rows (run job)
   done <$ when done (recorder (Landed (jobId job) op))
 
--- | 'landing' over jobs. The ids that landed.
+-- | 'landing' over jobs, as the one statement the pool issues for them.
 landedIds :: Rows s -> Recorder s Event -> Op -> (Job -> Statement Bool) -> [Job] -> IOSim s (Set.Set JobId)
-landedIds rows recorder op run jobs = Set.fromList . map jobId <$> filterM (landing rows recorder op run) jobs
+landedIds rows recorder op run jobs = do
+  landed <- statement rows bulk
+  for_ landed $ \job -> recorder (Landed (jobId job) op)
+  pure (Set.fromList (map jobId landed))
+  where
+    bulk now table =
+      let step acc job = let (done, acc') = run job now acc in (acc', (job, done))
+          (table', outcomes) = mapAccumL step table jobs
+       in ([job | (job, True) <- outcomes], table')
 
 -- | The ack inside the pool's transaction. Throws for a job held elsewhere.
 ackOrGone :: Rows s -> Recorder s Event -> Job -> IOSim s ()
@@ -272,7 +334,7 @@ ackOrGone rows recorder job = do
   acked <- landing rows recorder Acked ackRow job
   unless acked (throwIO (JobGoneException reclaimedReason [jobId job]))
 
-modelEffects :: Rows s -> Recorder s Event -> Effects (IOSim s) () Job ()
+modelEffects :: Rows s -> Recorder s Event -> Effects (IOSim s) () Job () ()
 modelEffects rows recorder =
   Effects
     { effectAmbient = ()
@@ -284,11 +346,14 @@ modelEffects rows recorder =
         pure (partition ((`Set.member` acked) . jobId) jobs)
     , effectFail = \() failure job -> failRow failure job
     , effectFailAll = \() failure unhandled unowned -> do
-        outcomes <- traverse (\job -> (job,) <$> failRow failure job) unhandled
-        for_ unowned cancelRow
+        (outcomes, landings) <- statement rows (failWrites failure unhandled unowned)
+        for_ landings $ \(job, op) -> recorder (Landed job op)
         pure outcomes
     , effectDeleteCancelled = \() -> landedIds rows recorder Deleted deleteCancelledRow
     , effectRelease = \() -> landedIds rows recorder Released releaseRow
+    , effectSpawn = \() job () -> do
+        spawned <- landing rows recorder Spawned spawnRow job
+        unless spawned (throwIO (JobGoneException reclaimedReason [jobId job]))
     , effectReport = \() -> \case
         Claimed _ _ -> pure ()
         Succeeded job _ _ -> reported job SuccessK
@@ -299,21 +364,14 @@ modelEffects rows recorder =
     }
   where
     reported job kind = recorder (Reported (jobId job) kind) >> threadDelay reportLatency
-    -- The model holds no tree, so a tree cancel is a force-cancel of the row.
-    cancelRow job = do
-      (_, op) <- statement rows (flagRow (jobId job))
+    failRow failure job = do
+      (outcome, op) <- statement rows (failWrite failure job)
       for_ op (recorder . Landed (jobId job))
-    failRow (_, kind) job
-      | cancelsTree kind = Right TreeCancelled <$ cancelRow job
-      | kind == PermanentFailure = written Dlqed DeadLettered ackRow unwrittenDlq job
-      | otherwise = written Retried (Retrying modelBackoff) retryRow unwrittenRetry job
+      pure outcome
     kindOf = \case
       Retrying _ -> RetryK
       DeadLettered -> DlqK
       TreeCancelled -> CancelledK
-    written op outcome stmt reason job = do
-      landed <- landing rows recorder op stmt job
-      pure (if landed then Right outcome else Left reason)
 
 guardConfigFor
   :: Rows s -> Recorder s Event -> TVar (IOSim s) [ExtendReply] -> Maybe DiffTime -> GuardConfig (IOSim s) Job
@@ -345,6 +403,7 @@ data Step
   | AckMany [Int]
   | FailOne FailureKind Int
   | NackOne Int
+  | SpawnOne Int
   | Sleep DiffTime
   | Throw Thrown
   deriving stock (Show)
@@ -409,6 +468,7 @@ genPlan = do
       AckMany indexes -> Just indexes
       FailOne _ index -> Just [index]
       NackOne index -> Just [index]
+      SpawnOne index -> Just [index]
       _ -> Nothing
     genSingle = frequency [(2, Right <$> elements [0.5, 2]), (1, Left <$> genThrown 1)]
     genStep count =
@@ -417,6 +477,7 @@ genPlan = do
         , (1, AckMany . enumFromTo 1 <$> choose (1, count))
         , (2, FailOne <$> elements [RetryFailure, PermanentFailure, TreeCancelFailure, BranchCancelFailure] <*> choose (1, count))
         , (1, NackOne <$> choose (1, count))
+        , (2, SpawnOne <$> choose (1, count))
         , (3, Sleep <$> elements [0.005, 0.5, 1, 2.5])
         ]
     genThrown count =
@@ -455,7 +516,18 @@ runPlan plan = do
   let batch = Job 1 1 1 :| [Job (fromIntegral index) 1 1 | index <- [2 .. planJobs plan]]
       claimed =
         Map.fromList
-          [(jobId job, Row 1 (Just Us) (Just (addTime leaseTimeout now)) False (jobAttempt job)) | job <- toList batch]
+          [ ( jobId job
+            , Row
+                { rowSeq = 1
+                , rowHolder = Just Us
+                , rowLease = Just (addTime leaseTimeout now)
+                , rowFlagged = False
+                , rowAttempts = jobAttempt job
+                , rowSuspended = False
+                }
+            )
+          | job <- toList batch
+          ]
   rows <- newTVarIO claimed
   script <- newTVarIO (planReplies plan)
   guard <- startGuard (guardConfigFor rows recorder script (planDeadline plan))
@@ -471,9 +543,9 @@ runPlan plan = do
 
 -- | The worker thread: run the batch on its own thread, then finish what it left.
 worker
-  :: Effects (IOSim s) () Job ()
+  :: Effects (IOSim s) () Job () ()
   -> HeartbeatGuard (IOSim s) Job
-  -> Mode (IOSim s) () Job ()
+  -> Mode (IOSim s) () Job () ()
   -> TVar (IOSim s) (Maybe (ThreadId (IOSim s)))
   -> NonEmpty Job
   -> Recorder s Event
@@ -512,7 +584,7 @@ act rows recorder handlerVar move = case move of
     for_ swept $ \job -> recorder (Landed job Swept)
 
 -- | Single mode is the pool's transaction: the handler, then the ack.
-modeFor :: Rows s -> Recorder s Event -> NonEmpty Job -> Plan -> Mode (IOSim s) () Job ()
+modeFor :: Rows s -> Recorder s Event -> NonEmpty Job -> Plan -> Mode (IOSim s) () Job () ()
 modeFor rows recorder jobs plan = case planSingle plan of
   Just single -> SingleMode $ \job -> case single of
     Right runFor -> threadDelay runFor >> ackOrGone rows recorder job
@@ -522,6 +594,7 @@ modeFor rows recorder jobs plan = case planSingle plan of
     AckMany indexes -> callbackAckAll callbacks () [(pick batch index, Nothing) | index <- indexes]
     FailOne kind index -> callbackFail callbacks () ("failed", kind) (pick batch index)
     NackOne index -> callbackNack callbacks () (pick batch index)
+    SpawnOne index -> callbackSpawn callbacks () (pick batch index) ()
     Sleep delay -> threadDelay delay
     Throw thrown -> throwIO (thrownException batch thrown)
   where
@@ -598,7 +671,7 @@ judgePlan (plan, events, table) =
       conjoin
         [ counterexample ("job " <> show job <> " was reported more than once") (length reports <= 1)
         , counterexample ("job " <> show job <> " was reported successful without its ack landing") $
-            SuccessK `notElem` kinds || landed job Acked
+            SuccessK `notElem` kinds || landed job Acked || landed job Spawned
         , counterexample ("job " <> show job <> " was reported retried without its retry landing") $
             RetryK `notElem` kinds || landed job Retried
         , counterexample ("job " <> show job <> " was reported dead-lettered without the move landing") $
@@ -627,6 +700,8 @@ judgePlan (plan, events, table) =
             not (landed job Released) || threw || null reports
         , counterexample ("job " <> show job <> " was nacked but kept its attempt") $
             not (landed job Released) || moved job || maybe True ((== 0) . rowAttempts) (row job)
+        , counterexample ("job " <> show job <> " spawned children but kept its attempt") $
+            not (landed job Spawned) || moved job || maybe True ((== 0) . rowAttempts) (row job)
         , counterexample ("job " <> show job <> " was released but this worker still holds it") $
             not (landed job Released) || maybe True ((/= Just Us) . rowHolder) (row job)
         , counterexample ("a statement carried job " <> show job <> " after its outcome was reported") $
@@ -673,6 +748,15 @@ unwrittenThenLateCancel =
 -- lifecycle reports it.
 goneThenSiblingCancel :: Plan
 goneThenSiblingCancel = Plan 2 Nothing [Sleep 0.005, Throw (ThrowGone 1)] [(0.005, Flag 2)] [Extends] Nothing
+
+-- | A force-cancel of one sibling lands while the lifecycle reports the other's
+-- spawn.
+spawnThenForceCancel :: Plan
+spawnThenForceCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, SpawnOne 1] [(1.5, Flag 2)] [Extends] Nothing
+
+-- | The share of explored schedules in which the cancel lands after the spawn.
+spawnInterruptedTarget :: Double
+spawnInterruptedTarget = 5
 
 -- | The share of plans that must leave a job unfinalized.
 unfinalizedTarget :: Double
@@ -727,6 +811,9 @@ spec = describe "Batch simulation" $ do
   it "reports a job the handler called gone when a force-cancel interrupts the report" $
     scenario goneThenSiblingCancel "the cancel landed inside the gone report" goneReportInterruptedTarget $ \(_, events, _) ->
       batchThrew events && UnavailableK handlerGone `elem` map snd (reportedKinds events 1)
+  it "reports a spawned job when a force-cancel interrupts the report" $
+    scenario spawnThenForceCancel "the cancel landed after the spawn" spawnInterruptedTarget $ \(_, events, _) ->
+      batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
   it "keeps its invariants over generated plans"
     $ checkCoverage
     $ explorePlans

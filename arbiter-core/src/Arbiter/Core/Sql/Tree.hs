@@ -18,12 +18,17 @@ module Arbiter.Core.Sql.Tree
   , treeRollupIdsSQL
   , suspendJobSQL
   , resumeJobSQL
+  , beginSpawnSQL
+  , spawnedAlreadySQL
+  , rollupIdsSQL
   , jobExistsSQL
   , getParentIdSQL
   , getParentIdsSQL
   , insertResultSQL
   , insertResultsBatchSQL
   , getResultsByParentSQL
+  , deleteResultsByParentSQL
+  , detachDLQChildrenSQL
   , getDLQChildErrorsByParentSQL
   , persistParentStateSQL
   , getParentStateSnapshotSQL
@@ -335,6 +340,37 @@ treeRollupIdsSQL schema tableName jobId =
         SELECT id AS @{result :: CInt8} FROM descendants WHERE parent_state IS NOT NULL
       |]
 
+-- | Make a claimed job a rollup finalizer, handing back the attempt its claim consumed.
+beginSpawnSQL :: Text -> Text -> Int64 -> Int64 -> Query ()
+beginSpawnSQL schema tableName jobId cseq =
+  let tbl = jobQueueTable schema tableName
+   in [sql|
+        UPDATE ${tbl}
+        SET parent_state = '{}'::jsonb, attempts = GREATEST(attempts - 1, 0), updated_at = NOW()
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
+          AND NOT suspended AND claimed_by IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})
+      |]
+
+-- | Which of the given ids carry a rollup finalizer's @parent_state@.
+rollupIdsSQL :: Text -> Text -> [Int64] -> Query Int64
+rollupIdsSQL schema tableName ids =
+  let tbl = jobQueueTable schema tableName
+   in [sql|
+        SELECT @{id :: CInt8} FROM ${tbl}
+        WHERE id = ANY(#{ids :: [CInt8]}) AND parent_state IS NOT NULL
+      |]
+
+-- | Whether a job has already spawned a round under the given claim token.
+spawnedAlreadySQL :: Text -> Text -> Int64 -> Int64 -> Query Bool
+spawnedAlreadySQL schema tableName jobId cseq =
+  let tbl = jobQueueTable schema tableName
+   in [sql|
+        SELECT (suspended OR EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})) AS @{spawned :: CBool}
+        FROM ${tbl}
+        WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
+      |]
+
 -- | Suspend a job, making it unclaimable. Refuses an in-flight job.
 suspendJobSQL :: Text -> Text -> Int64 -> Query ()
 suspendJobSQL schema tableName jobId =
@@ -416,6 +452,18 @@ getResultsByParentSQL schema tableName parentId =
    in [sql|
         SELECT @{child_id :: CInt8}, @{result :: CJsonb} FROM ${resultsTbl} WHERE parent_id = #{parentId :: CInt8}
       |]
+
+-- | Drop a parent's stored child results.
+deleteResultsByParentSQL :: Text -> Text -> Int64 -> Query ()
+deleteResultsByParentSQL schema tableName parentId =
+  let resultsTbl = jobQueueResultsTable schema tableName
+   in [sql|DELETE FROM ${resultsTbl} WHERE parent_id = #{parentId :: CInt8}|]
+
+-- | Detach a parent's DLQ children.
+detachDLQChildrenSQL :: Text -> Text -> Int64 -> Query ()
+detachDLQChildrenSQL schema tableName parentId =
+  let dlqTbl = jobQueueDLQTable schema tableName
+   in [sql|UPDATE ${dlqTbl} SET parent_id = NULL WHERE parent_id = #{parentId :: CInt8}|]
 
 -- | Get DLQ child errors for a parent, one @(job_id, last_error)@ row per DLQ'd child.
 getDLQChildErrorsByParentSQL :: Text -> Text -> Int64 -> Query (Int64, Maybe Text)

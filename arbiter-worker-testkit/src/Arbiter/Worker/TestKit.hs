@@ -11,11 +11,16 @@ module Arbiter.Worker.TestKit
   ) where
 
 import Arbiter.Core.Exceptions
-  ( throwBranchCancel
+  ( JobException (..)
+  , JobGoneException (..)
+  , JobPermanentException (..)
+  , JobScopedFailure (..)
+  , throwBranchCancel
   , throwJobGone
   , throwNack
   , throwPermanent
   , throwRetryable
+  , throwScopedFailure
   , throwTreeCancel
   )
 import Arbiter.Core.FailureGate qualified as FailureGate
@@ -23,6 +28,7 @@ import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
+import Arbiter.Core.Job.Dedup (DedupKey (..))
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
   ( JobRead
@@ -32,6 +38,7 @@ import Arbiter.Core.Job.Types
   , defaultJob
   , defaultObservabilityHooks
   , groupKey
+  , isRollup
   , jobKind
   , kindOf
   , parentId
@@ -39,15 +46,17 @@ import Arbiter.Core.Job.Types
   , payloadKeys
   , primaryKey
   , setArchiveFor
+  , setDedupKey
   , setGroupKey
   , setMaxAttempts
+  , setNotVisibleUntil
   )
 import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.JobTree qualified as JT
 import Arbiter.Core.Listen qualified as Listen
 import Arbiter.Core.MonadArbiter (JobHandler, RegistryOf, ResultOf, getListener, withDbTransaction)
 import Arbiter.Core.QueueRegistry (RegistryTables)
-import Arbiter.Worker (runWorkerPool)
+import Arbiter.Worker (childResults, runWorkerPool)
 import Arbiter.Worker.BackoffStrategy (BackoffStrategy (Constant), Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks
@@ -62,28 +71,31 @@ import Arbiter.Worker.Config
   , failPermanent
   , failRetry
   , nack
+  , spawn
   , transactionalWorkerConfig
   )
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless, void, when)
+import Control.Monad (join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
 import Data.ByteString (ByteString)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List (find, partition)
 import Data.List.NonEmpty (NonEmpty (..))
-import Data.Maybe (isJust, isNothing, listToMaybe)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple (Only (..), close, connectPostgreSQL)
 import Database.PostgreSQL.Simple qualified as PG
 import Database.PostgreSQL.Simple.Types (Identifier (..))
 import Test.Hspec
-import UnliftIO (atomically, bracket)
-import UnliftIO.Async (withAsync)
+import UnliftIO (atomically, bracket, newEmptyMVar, putMVar, takeMVar, try)
+import UnliftIO.Async (concurrently_, withAsync)
 
 -- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
 --
@@ -1512,6 +1524,409 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         let g1Batch = filter (\batch -> mkSimple "G1-1" `elem` batch) batches
         length g1Batch `shouldBe` 1
         head g1Batch `shouldMatchList` [mkSimple "G1-1", mkSimple "G1-2"]
+
+  describe "Spawned Children" $ do
+    it "spawn suspends the job and wakes it once its children are done" $ \env -> do
+      roundsRef <- newIORef ([] :: [Bool])
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job = do
+                liftIO $ atomicModifyIORef' roundsRef (\rs -> (rs <> [isRollup job], ()))
+                if isRollup job || payload job /= mkSimple "sp1-root"
+                  then ack cbs job
+                  else
+                    spawn cbs job $
+                      defaultJob (mkSimple "sp1-c1") :| [defaultJob (mkSimple "sp1-c2")]
+      runM env $ void $ HL.insertJob (defaultJob (mkSimple "sp1-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      rounds <- readIORef roundsRef
+      length rounds `shouldBe` 4
+      length (filter id rounds) `shouldBe` 1
+
+    it "a spawn round hands back the attempt its claim consumed" $ \env -> do
+      seenRef <- newIORef (Nothing :: Maybe Int32)
+      failedRef <- newIORef False
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp2-child" = do
+                    parent <- traverse (HL.getJobById @payload) (parentId job)
+                    liftIO $ writeIORef seenRef (fmap attempts (join parent))
+                    ack cbs job
+                | otherwise = do
+                    failedOnce <- liftIO $ atomicModifyIORef' failedRef (\done -> (True, done))
+                    if failedOnce
+                      then spawn cbs job (defaultJob (mkSimple "sp2-child") :| [])
+                      else failRetry cbs job "sp2 first round"
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 4) $ defaultJob (mkSimple "sp2-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05, backoffStrategy = Constant 0, jitter = NoJitter}) $ \_ ->
+        waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef seenRef `shouldReturn` Just 1
+
+    it "a finalizer round that spawns again unfolds a recursion" $ \env -> do
+      seenRef <- newIORef ([] :: [Text])
+      let chain = ["sp3-0", "sp3-1", "sp3-2", "sp3-3"]
+          nameOf job = fromMaybe "?" (find (\name -> payload job == mkSimple name) chain)
+          childOf name = lookup name (zip (drop 1 chain) chain)
+          batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job = do
+                let name = nameOf job
+                liftIO $ atomicModifyIORef' seenRef (\names -> (names <> [name], ()))
+                case (isRollup job, childOf name) of
+                  (False, Just kid) -> spawn cbs job (defaultJob (mkSimple kid) :| [])
+                  _ -> ack cbs job
+      runM env $ void $ HL.insertJob (defaultJob (mkSimple "sp3-3"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      seen <- readIORef seenRef
+      seen `shouldBe` ["sp3-3", "sp3-2", "sp3-1", "sp3-0", "sp3-1", "sp3-2", "sp3-3"]
+
+    it "drains a group whose head spawns children into it" $ \env -> do
+      let inGroup = setGroupKey (Just "spg")
+          batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job || payload job /= mkSimple "sp5-head" = ack cbs job
+                | otherwise =
+                    spawn cbs job $
+                      inGroup (defaultJob (mkSimple "sp5-c1")) :| [inGroup (defaultJob (mkSimple "sp5-c2"))]
+      runM env $
+        traverse_
+          (void . HL.insertJob . inGroup . defaultJob . mkSimple)
+          ["sp5-head", "sp5-sib1", "sp5-sib2"]
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+        runM env $ void $ HL.insertJob (inGroup (defaultJob (mkSimple "sp5-after")))
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+
+    it "a nack after a spawn hands back nothing further" $ \env -> do
+      seenRef <- newIORef (Nothing :: Maybe Int32)
+      failedRef <- newIORef False
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp7-child" = do
+                    parent <- traverse (HL.getJobById @payload) (parentId job)
+                    liftIO $ writeIORef seenRef (fmap attempts (join parent))
+                    ack cbs job
+                | otherwise = do
+                    failedOnce <- liftIO $ atomicModifyIORef' failedRef (\done -> (True, done))
+                    if failedOnce
+                      then do
+                        spawn cbs job (defaultJob (mkSimple "sp7-child") :| [])
+                        nack cbs job
+                      else failRetry cbs job "sp7 first round"
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 4) $ defaultJob (mkSimple "sp7-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05, backoffStrategy = Constant 0, jitter = NoJitter}) $ \_ ->
+        waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef seenRef `shouldReturn` Just 1
+
+    it "a spawned child in the DLQ still wakes the finalizer" $ \env -> do
+      finalizedRef <- newIORef False
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job >> liftIO (writeIORef finalizedRef True)
+                | payload job == mkSimple "sp4-child" = failPermanent cbs job "child gave up"
+                | otherwise = spawn cbs job (defaultJob (mkSimple "sp4-child") :| [])
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 2) $ defaultJob (mkSimple "sp4-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 15_000 $ readIORef finalizedRef
+      dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq `shouldBe` [mkSimple "sp4-child"]
+
+    it "a DLQ move reads the rollup state the spawn wrote, not the claim's" $ \env -> do
+      spawnedRef <- newIORef (Nothing :: Maybe Int64)
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp16-child" = do
+                    parent <- liftIO (readIORef spawnedRef)
+                    for_ parent $ \pid -> void (HL.moveToDLQ @payload "operator pulled the tree" =<< needJob pid)
+                    ack cbs job
+                | otherwise = do
+                    liftIO $ writeIORef spawnedRef (Just (primaryKey job))
+                    spawn cbs job (defaultJob (mkSimple "sp16-child") :| [])
+              needJob pid = do
+                found <- HL.getJobById @payload pid
+                maybe (error "sp16 parent vanished") pure found
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "sp16-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq
+        `shouldMatchList` [mkSimple "sp16-root", mkSimple "sp16-child"]
+      runM env $ void $ HL.deleteDLQJobsBatch @payload (map DLQ.dlqPrimaryKey dlq)
+
+    it "a permanent failure after a spawn leaves the finalizer standing" $ \env -> do
+      roundsRef <- newIORef (0 :: Int)
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = liftIO (bumpRef roundsRef) >> ack cbs job
+                | payload job == mkSimple "sp8-child" = ack cbs job
+                | otherwise = do
+                    spawn cbs job (defaultJob (mkSimple "sp8-child") :| [])
+                    failPermanent cbs job "the handler changed its mind"
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "sp8-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef roundsRef `shouldReturn` 1
+      dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq `shouldBe` []
+
+    it "an ack or a second spawn after a spawn is ignored" $ \env -> do
+      roundsRef <- newIORef (0 :: Int)
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = liftIO (bumpRef roundsRef) >> ack cbs job
+                | payload job == mkSimple "sp11-child" = ack cbs job
+                | otherwise = do
+                    spawn cbs job (defaultJob (mkSimple "sp11-child") :| [])
+                    spawn cbs job (defaultJob (mkSimple "sp11-extra") :| [])
+                    ack cbs job
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "sp11-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef roundsRef `shouldReturn` 1
+
+    it "a dedup conflict on one child commits nothing and spares its batch siblings" $ \env -> do
+      siblingRef <- newIORef ([] :: [Int32])
+      later <- addUTCTime 3600 <$> getCurrentTime
+      let inGroup = setGroupKey (Just "sp12g")
+          taken =
+            setNotVisibleUntil (Just later)
+              . setDedupKey (Just (IgnoreDuplicate "sp12-key"))
+              $ defaultJob (mkSimple "sp12-c2")
+          kids =
+            defaultJob (mkSimple "sp12-c1")
+              :| [setDedupKey (Just (IgnoreDuplicate "sp12-key")) (defaultJob (mkSimple "sp12-c2"))]
+          batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp12-sib" = do
+                    liftIO $ atomicModifyIORef' siblingRef (\seen -> (seen <> [attempts job], ()))
+                    ack cbs job
+                | otherwise = spawn cbs job kids
+      runM env $ do
+        void $ HL.insertJob taken
+        void $ HL.insertJob (setMaxAttempts (Just 1) $ inGroup $ defaultJob (mkSimple "sp12-spawner"))
+        void $ HL.insertJob (setMaxAttempts (Just 2) $ inGroup $ defaultJob (mkSimple "sp12-sib"))
+      config <- mkBatchedConfig 1 2 batchHandler
+
+      dlq <-
+        withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
+          waitUntil 20_000 $ not . null <$> (runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload])
+          runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq `shouldBe` [mkSimple "sp12-spawner"]
+      remaining <- runM env (HL.listJobs 10 0) :: IO [JobRead payload]
+      let byName name = [job | job <- remaining, payload job == mkSimple name]
+      map attempts (byName "sp12-sib") `shouldBe` [0]
+      byName "sp12-c1" `shouldBe` []
+      map payload remaining `shouldMatchList` [mkSimple "sp12-c2", mkSimple "sp12-sib"]
+      readIORef siblingRef `shouldReturn` []
+      runM env $ void $ HL.cancelJobsBatch @payload (map primaryKey remaining)
+
+    it "a later round does not see an earlier round's dead-lettered child" $ \env -> do
+      sizesRef <- newIORef ([] :: [Int])
+      roundKindsRef <- newIORef ([] :: [[Either Text (ResultOf m payload)]])
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | payload job == mkSimple "sp13-c1" = failPermanent cbs job "c1 gave up"
+                | payload job == mkSimple "sp13-c2" = ackWith cbs job (Just ["c2 done"])
+                | isRollup job = do
+                    (seen, _) <- childResults job
+                    liftIO $ atomicModifyIORef' roundKindsRef (\ks -> (ks <> [Map.elems seen], ()))
+                    rounds <-
+                      liftIO $ atomicModifyIORef' sizesRef (\sizes -> (sizes <> [Map.size seen], sizes))
+                    if null rounds
+                      then spawn cbs job (defaultJob (mkSimple "sp13-c2") :| [])
+                      else ack cbs job
+                | otherwise = spawn cbs job (defaultJob (mkSimple "sp13-c1") :| [])
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "sp13-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef sizesRef `shouldReturn` [1, 1]
+      rounds <- readIORef roundKindsRef
+      rounds `shouldBe` [[Left "c1 gave up"], [Right (Just ["c2 done"])]]
+
+    it "cancelJob refuses a job that spawned children" $ \env -> do
+      spawnedRef <- newIORef (Nothing :: Maybe Int64)
+      cancelledRef <- newIORef (Nothing :: Maybe Int64)
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp14-child" = do
+                    parent <- liftIO (readIORef spawnedRef)
+                    for_ parent $ \pid -> do
+                      refused <- HL.cancelJob @payload pid
+                      liftIO (writeIORef cancelledRef (Just refused))
+                    ack cbs job
+                | otherwise = do
+                    liftIO $ writeIORef spawnedRef (Just (primaryKey job))
+                    spawn cbs job (defaultJob (mkSimple "sp14-child") :| [])
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) $ defaultJob (mkSimple "sp14-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef cancelledRef `shouldReturn` Just 0
+
+    it "a replace-dedup insert does not move a child out of its tree" $ \env -> do
+      let child = setDedupKey (Just (ReplaceDuplicate "sp15-key")) (defaultJob (mkSimple "sp15-child"))
+      inserted <-
+        runM env $
+          HL.insertJobTree (defaultJob (mkSimple "sp15-root") <~~ (child :| []))
+      childId <- case inserted of
+        Right (_ :| [kid]) -> pure (primaryKey kid)
+        other -> expectationFailure ("unexpected tree insert: " <> show (fmap (fmap primaryKey) other)) >> pure 0
+      runM env $ void $ HL.insertJob (setDedupKey (Just (ReplaceDuplicate "sp15-key")) (defaultJob (mkSimple "sp15-thief")))
+      stillMine <- runM env (HL.getJobById @payload childId)
+      fmap parentId stillMine `shouldSatisfy` maybe False isJust
+      for_ (stillMine >>= parentId) $ \rootId -> runM env $ void $ HL.cancelJobCascade @payload rootId
+      runM env (HL.countJobs @payload) `shouldReturn` 0
+
+    it "a bulk ack after a spawn stores no result" $ \env -> do
+      seenRef <- newIORef (Nothing :: Maybe [Either Text (ResultOf m payload)])
+      let batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | payload job == mkSimple "sp17-root" = do
+                    (seen, _) <- childResults job
+                    liftIO $ writeIORef seenRef (Just (Map.elems seen))
+                    ack cbs job
+                | payload job == mkSimple "sp17-mid" =
+                    if isRollup job
+                      then ack cbs job
+                      else do
+                        spawn cbs job (defaultJob (mkSimple "sp17-leaf") :| [])
+                        ackAllWith cbs [(job, Just ["premature"])]
+                | otherwise = ack cbs job
+      runM env
+        $ void
+        $ HL.insertJobTree
+        $ setMaxAttempts (Just 5) (defaultJob (mkSimple "sp17-root"))
+          <~~ (setMaxAttempts (Just 5) (defaultJob (mkSimple "sp17-mid")) :| [])
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef seenRef `shouldReturn` Just []
+
+    it "a DLQ move racing a spawn commit takes the new children with it" $ \env -> do
+      spawnHeld <- newEmptyMVar
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) (defaultJob (mkSimple "sp18-root")))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      let job = head claimed
+      concurrently_
+        ( runM env $ withDbTransaction $ do
+            void $ HL.spawnChildren job (defaultJob (mkSimple "sp18-child") :| [])
+            void $ HL.ackJob job
+            liftIO $ putMVar spawnHeld ()
+            liftIO $ threadDelay 300_000
+        )
+        ( takeMVar spawnHeld
+            >> void (runM env (HL.moveToDLQ "operator pulled the tree" job))
+        )
+      dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq
+        `shouldMatchList` [mkSimple "sp18-root", mkSimple "sp18-child"]
+      runM env (HL.countJobs @payload) `shouldReturn` 0
+      runM env $ void $ HL.deleteDLQJobsBatch @payload (map DLQ.dlqPrimaryKey dlq)
+
+    it "refuses a spawn on a job this worker no longer holds" $ \env -> do
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) (defaultJob (mkSimple "sp19-root")))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      let job = head claimed
+      runM env $ withDbTransaction $ do
+        void $ HL.spawnChildren job (defaultJob (mkSimple "sp19-child") :| [])
+        void $ HL.ackJob job
+      suspended <- runM env (HL.getJobById @payload (primaryKey job))
+      late <-
+        traverse (\held -> try (runM env (void (HL.spawnChildren held (defaultJob (mkSimple "sp19-late") :| []))))) suspended
+      case late of
+        Just (Left (JobGoneException _ ids)) -> ids `shouldBe` [primaryKey job]
+        _ -> expectationFailure "a spawn on a suspended job was not refused as gone"
+      runM env $ void $ HL.cancelJobCascade @payload (primaryKey job)
+      runM env (HL.countJobs @payload) `shouldReturn` 0
+
+    it "a scoped failure naming no job of the batch fails the batch" $ \env -> do
+      let stranger = 0
+          batchHandler _jobs _cbs =
+            liftIO $ throwScopedFailure (Permanent (JobPermanentException "names another batch")) [stranger]
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 1) $ defaultJob (mkSimple "sp20-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      dlq <-
+        withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
+          waitUntil 20_000 $ not . null <$> (runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload])
+          runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq `shouldBe` [mkSimple "sp20-root"]
+      runM env $ void $ HL.deleteDLQJobsBatch @payload (map DLQ.dlqPrimaryKey dlq)
+
+    it "children of one spawn that share a dedup key collapse into one" $ \env -> do
+      childrenRef <- newIORef (0 :: Int)
+      let kids =
+            setDedupKey (Just (IgnoreDuplicate "sp21-key")) (defaultJob (mkSimple "sp21-c1"))
+              :| [setDedupKey (Just (IgnoreDuplicate "sp21-key")) (defaultJob (mkSimple "sp21-c2"))]
+          batchHandler jobs cbs = traverse_ each (toList jobs)
+            where
+              each job
+                | isRollup job = ack cbs job
+                | payload job == mkSimple "sp21-root" = spawn cbs job kids
+                | otherwise = liftIO (bumpRef childrenRef) >> ack cbs job
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 2) $ defaultJob (mkSimple "sp21-root"))
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ ->
+        waitUntil 20_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+      readIORef childrenRef `shouldReturn` 1
+      dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+      map (payload . DLQ.jobSnapshot) dlq `shouldBe` []
+
+    it "refuses a second spawn on a job whose round is uncommitted" $ \env -> do
+      runM env $ void $ HL.insertJob (setMaxAttempts (Just 5) (defaultJob (mkSimple "sp22-root")))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      let job = head claimed
+      again <-
+        try $ runM env $ withDbTransaction $ do
+          void $ HL.spawnChildren job (defaultJob (mkSimple "sp22-first") :| [])
+          void $ HL.spawnChildren job (defaultJob (mkSimple "sp22-second") :| [])
+      case again of
+        Left (JobScopedFailure (Retryable _) ids) -> ids `shouldBe` [primaryKey job]
+        _ -> expectationFailure "a second spawn before the ack was not refused"
+      runM env (HL.countJobs @payload) `shouldReturn` 1
+      runM env $ void $ HL.cancelJobCascade @payload (primaryKey job)
+      runM env (HL.countJobs @payload) `shouldReturn` 0
 
   describe "Tree and Branch Cancel" $ do
     it "throwTreeCancel deletes the entire tree (not DLQ'd)" $ \env -> do

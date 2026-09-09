@@ -41,6 +41,8 @@ time in the same transaction as the ack.
 A disposition applies to one job. A failure, cancellation, or nack does not
 change completed jobs in the batch. Arbiter reprocesses an unfinalized job.
 `ackWith` and `ackAllWith` store the queue [result](../features/results.md).
-`ack` and `ackAll` do not store a result and work with all queues. The
+`ack` and `ackAll` do not store a result and work with all queues. `spawn`
+inserts children under the job and suspends it until they finish, covered under
+[job trees](../features/job-trees.md#spawning-children-at-runtime). The
 [`BatchCallbacks` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
 list all dispositions.

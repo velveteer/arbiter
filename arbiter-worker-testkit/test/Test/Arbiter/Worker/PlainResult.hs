@@ -179,5 +179,32 @@ spec connStr =
           withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 10_000 $ isJust <$> readIORef mergedRef
           readIORef mergedRef >>= (`shouldBe` Just ["from-kid1", "from-kid2"])
+      it "a spawn round reads only the children it spawned" $ do
+        cleanup connStr
+        withEnv $ \env -> do
+          roundRef <- newIORef (0 :: Int)
+          mergedRef <- newIORef (Nothing :: Maybe [Text])
+          let handler
+                :: NonEmpty (JobRead PlainResultPayload)
+                -> BatchCallbacks (SimpleDb PlainRegistry IO) PlainResultPayload [Text]
+                -> SimpleDb PlainRegistry IO ()
+              handler jobs cbs = traverse_ each (toList jobs)
+                where
+                  each job = case payload job of
+                    PlainResultTask "acc-root" -> do
+                      round' <- liftIO $ atomicModifyIORef' roundRef (\n -> (n + 1, n + 1))
+                      case round' of
+                        1 -> spawn cbs job (defaultJob (PlainResultTask "acc-a") :| [])
+                        2 -> spawn cbs job (defaultJob (PlainResultTask "acc-b") :| [])
+                        _ -> do
+                          (merged, _) <- mergedChildResults job
+                          liftIO $ writeIORef mergedRef (Just merged)
+                          ack cbs job
+                    PlainResultTask name -> ackWith cbs job ["from-" <> name]
+          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          void $ runSimpleDb env $ HL.insertJob (defaultJob (PlainResultTask "acc-root"))
+          withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
+            waitUntil 15_000 $ isJust <$> readIORef mergedRef
+          readIORef mergedRef >>= (`shouldBe` Just ["from-acc-b"])
   where
     withEnv = bracket (createSimpleEnv (Proxy @PlainRegistry) connStr testSchema) destroySimpleEnv

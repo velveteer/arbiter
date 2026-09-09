@@ -11,6 +11,7 @@ module Arbiter.Core.Operations
   , insertJobStamped
   , insertJobTreeNodeStamped
   , insertJobTreeLeavesStamped
+  , spawnChildren
   , insertJobsBatch
   , insertJobsBatchStamped
   , insertJobsBatch_
@@ -220,7 +221,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Monoid (Ap (..), Sum (..))
 import Data.Proxy (Proxy (..))
 import Data.Sequence ((|>))
@@ -252,7 +253,13 @@ import Arbiter.Core.Concurrency.Spec
   )
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate (..), ConcurrencyPolicyView)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..))
-import Arbiter.Core.Exceptions (throwParsing)
+import Arbiter.Core.Exceptions
+  ( JobException (..)
+  , JobRetryableException (..)
+  , throwJobGoneIds
+  , throwParsing
+  , throwScopedFailure
+  )
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Kind (HasKind, kindOf)
@@ -534,6 +541,54 @@ insertJobTreeLeavesStamped schemaName tableName stamp parent jobs = do
   withDbTransaction $ do
     rawJobs <- MA.executeQuery (Tmpl.insertJobsBatchSQL schemaName tableName batchSrc)
     traverse decodePayload rawJobs
+
+-- | Insert children under a job this worker holds, making it a rollup finalizer.
+-- Ack it in the same transaction.
+spawnChildren
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> JobRead payload
+  -> NonEmpty (JobWrite payload)
+  -> m (NonEmpty (JobRead payload))
+spawnChildren schemaName tableName job children = withDbTransaction $ do
+  lockJobsAndParents schemaName tableName [(jobId, parentId job)]
+  marked <- MA.executeStatement (Tmpl.beginSpawnSQL schemaName tableName jobId (claimSeq job))
+  when (marked == 0) refuseSpawn
+  -- A job with no previous round has no children, so neither statement can match.
+  when (isRollup job) $ do
+    void $ MA.executeStatement (Tmpl.deleteResultsByParentSQL schemaName tableName jobId)
+    void $ MA.executeStatement (Tmpl.detachDLQChildrenSQL schemaName tableName jobId)
+  stamp <- traceStamp
+  let writes = dedupBatch (toList children)
+  inserted <- insertJobTreeLeavesStamped schemaName tableName stamp jobId writes
+  let missing = length writes - length inserted
+  case NE.nonEmpty inserted of
+    Just spawned | missing == 0 -> pure spawned
+    _ ->
+      scopedRetry $
+        "spawnChildren: "
+          <> T.pack (show missing)
+          <> " of "
+          <> T.pack (show (length writes))
+          <> " children of job "
+          <> T.pack (show jobId)
+          <> " hit a dedup conflict"
+  where
+    jobId = primaryKey job
+
+    scopedRetry :: forall a. Text -> m a
+    scopedRetry msg = throwScopedFailure (Retryable (JobRetryableException msg)) [jobId]
+
+    refuseSpawn :: m ()
+    refuseSpawn = do
+      alreadySpawned <- MA.executeQuery (Tmpl.spawnedAlreadySQL schemaName tableName jobId (claimSeq job))
+      if or alreadySpawned && isJust (claimedBy job)
+        then
+          scopedRetry $
+            "spawnChildren: job " <> T.pack (show jobId) <> " already spawned children in this round"
+        else throwJobGoneIds "no longer claimed by this worker" [jobId]
 
 -- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
 -- manually-refilled policies.
@@ -1030,18 +1085,23 @@ lockJobParents schemaName tableName parents =
   where
     pids = Set.toAscList (Set.fromList (catMaybes parents))
 
+-- | Take the advisory locks of the jobs named and of their parents.
+lockJobsAndParents :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Maybe Int64)] -> m ()
+lockJobsAndParents schemaName tableName pairs =
+  lockJobParents schemaName tableName ([Just jobId | (jobId, _) <- pairs] <> map snd pairs)
+
 -- | 'lockJobParents' on the table the ack statements name.
 ackParents :: (MonadArbiter m) => AckStatements -> [Maybe Int64] -> m ()
 ackParents statements = lockJobParents (ackSchema statements) (ackTable statements)
 
--- | Read a job's parent and take its advisory lock, before any row lock the caller takes.
-lockParentOf :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m (Maybe Int64)
-lockParentOf schemaName tableName jobId = do
+-- | Read a job's parent and take the advisory locks of both, before any row lock.
+lockParentAndSelf :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m (Maybe Int64)
+lockParentAndSelf schemaName tableName jobId = do
   parentRows <- MA.executeQuery (Tmpl.getParentIdSQL schemaName tableName jobId)
   let mParentId = case parentRows of
         [Just pid] -> Just pid
         _ -> Nothing
-  mParentId <$ lockJobParents schemaName tableName [mParentId]
+  mParentId <$ lockJobsAndParents schemaName tableName [(jobId, mParentId)]
 
 -- | Wake every distinct parent named, ascending, matching the order the locks were taken.
 resumeJobParents :: (MonadArbiter m) => TreeLocks -> SchemaName -> TableName -> [Maybe Int64] -> m ()
@@ -1222,17 +1282,27 @@ moveToDLQ
   -- ^ Error message (the final error that caused the DLQ move)
   -> JobRead payload
   -> m Int64
-moveToDLQ locks schemaName tableName errorMsg job =
-  moveToDLQFields
-    locks
+moveToDLQ locks schemaName tableName errorMsg job = withDbTransaction $ do
+  when takeLocks $ lockJobsAndParents schemaName tableName [(jobId, parentId job)]
+  rollup <- not . null <$> rollupIdsNow schemaName tableName [jobId]
+  when (takeLocks && rollup) $ lockJobTrees schemaName tableName [jobId]
+  moveToDLQFieldsInner
+    LocksHeld
     Tmpl.MoveNow
     schemaName
     tableName
     errorMsg
-    (primaryKey job)
+    jobId
     (claimSeq job)
     (parentId job)
-    (isRollup job)
+    rollup
+  where
+    jobId = primaryKey job
+    takeLocks = locks == TakeLocks
+
+-- | The ids among these that are rollup finalizers on the row, not on the caller's claim.
+rollupIdsNow :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m [Int64]
+rollupIdsNow schemaName tableName ids = MA.executeQueryPrepared (Tmpl.rollupIdsSQL schemaName tableName ids)
 
 -- | 'moveToDLQ' driven by scalar fields, for callers without a typed 'JobRead'.
 moveToDLQFields
@@ -1252,7 +1322,23 @@ moveToDLQFields
   -> Bool
   -- ^ Whether the job is a rollup finalizer
   -> m Int64
-moveToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup = withDbTransaction $ do
+moveToDLQFields locks move schemaName tableName errorMsg jobId cseq mParentId rollup =
+  withDbTransaction $ moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup
+
+-- | 'moveToDLQFields' run inside the caller's transaction.
+moveToDLQFieldsInner
+  :: (MonadArbiter m)
+  => TreeLocks
+  -> Tmpl.DLQMove
+  -> SchemaName
+  -> TableName
+  -> Text
+  -> Int64
+  -> Int64
+  -> Maybe Int64
+  -> Bool
+  -> m Int64
+moveToDLQFieldsInner locks move schemaName tableName errorMsg jobId cseq mParentId rollup = do
   when (locks == TakeLocks) $ do
     lockJobParents schemaName tableName [mParentId]
     when rollup $ lockJobTrees schemaName tableName [jobId]
@@ -1319,17 +1405,17 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
   let ids = map (primaryKey . fst) jobsWithErrors
       cseqs = map (claimSeq . fst) jobsWithErrors
       msgs = map snd jobsWithErrors
-      rollupIds = Set.toList . Set.fromList $ map (primaryKey . fst) (filter (isRollup . fst) jobsWithErrors)
-  lockJobParents schemaName tableName (map (parentId . fst) jobsWithErrors)
+  lockJobsAndParents schemaName tableName [(primaryKey job, parentId job) | (job, _) <- jobsWithErrors]
+  rollupIds <- Set.fromList <$> rollupIdsNow schemaName tableName ids
   unless (null rollupIds) $ do
     -- Every row the move will lock, plus the trees, in one descending pass.
     lockJobTrees schemaName tableName ids
     -- Before the move, which takes a named rollup's results with it.
-    for_ rollupIds $ snapshotTreeRollups schemaName tableName
+    for_ (Set.toAscList rollupIds) $ snapshotTreeRollups schemaName tableName
   moved <- Set.fromList <$> MA.executeQuery (Tmpl.moveToDLQBatchSQL schemaName tableName ids cseqs msgs)
   let movedJobs = filter (flip Set.member moved . primaryKey . fst) jobsWithErrors
   for_ movedJobs $ \(job, _) ->
-    when (isRollup job)
+    when (Set.member (primaryKey job) rollupIds)
       $ void
       $ cascadeChildrenToDLQ schemaName tableName (primaryKey job) "Parent moved to DLQ"
   resumeJobParents LocksHeld schemaName tableName (map (parentId . fst) movedJobs)
@@ -1898,7 +1984,7 @@ cancelJobInner
   :: (MonadArbiter m)
   => SchemaName -> TableName -> Int64 -> m Int64
 cancelJobInner schemaName tableName jobId = do
-  void $ lockParentOf schemaName tableName jobId
+  void $ lockParentAndSelf schemaName tableName jobId
   countOr0 (Tmpl.cancelJobSQL schemaName tableName jobId)
 
 -- | 'cancelJob' over several ids in one transaction. The last sibling cancelled finds
@@ -2240,7 +2326,7 @@ cascadeDeleteJob
   -> Int64
   -> m Int64
 cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
-  rootParentId <- lockParentOf schemaName tableName jobId
+  rootParentId <- lockParentAndSelf schemaName tableName jobId
   deleted <- countOr0 (mkSql schemaName tableName jobId)
 
   when (deleted > 0)

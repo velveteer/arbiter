@@ -140,6 +140,7 @@ module Arbiter.Core.HighLevel
 
     -- * Job Tree DSL
   , insertJobTree
+  , spawnChildren
 
     -- * Re-exports
   , getSchema
@@ -147,6 +148,7 @@ module Arbiter.Core.HighLevel
 
 import Control.Monad (void, when)
 import Data.Aeson (Value)
+import Data.Foldable (toList)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
@@ -1233,3 +1235,16 @@ insertJobTree
   => JT.JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))
 insertJobTree tree = onQueue @payload $ \schemaName tableName -> JT.insertJobTree schemaName tableName tree
+
+-- | Insert children under a claimed job, making it a rollup finalizer. Ack it in the
+-- same transaction.
+spawnChildren
+  :: forall payload m
+   . (JobOperation m payload)
+  => JobRead payload
+  -> NonEmpty (JobWrite payload)
+  -> m (NonEmpty (JobRead payload))
+spawnChildren job children =
+  withPublishSpan (Job.queueName job) (toList children) $ do
+    schemaName <- getSchema
+    Ops.spawnChildren schemaName (Job.queueName job) job children
