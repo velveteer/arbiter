@@ -36,6 +36,7 @@ import Arbiter.Simple
   , SimpleDb
   , SimpleEnv (..)
   , createSimpleEnvWithPool
+  , destroySimpleEnv
   , disableListener
   , runSimpleDb
   )
@@ -84,6 +85,7 @@ import System.Directory qualified as Dir
 import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
+  , afterAll_
   , around
   , beforeAll
   , describe
@@ -123,7 +125,7 @@ spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
   sharedPool <- runIO (createSharedPool connStr)
   sharedEnv <- runIO (createSimpleEnvWithPool (Proxy @WorkerTestRegistry) sharedPool testSchema)
-  around (withPool sharedEnv) $ do
+  afterAll_ (destroySimpleEnv sharedEnv) $ around (withPool sharedEnv) $ do
     workerSpec @WorkerTestPayload
       SimpleTask
       FailingTask

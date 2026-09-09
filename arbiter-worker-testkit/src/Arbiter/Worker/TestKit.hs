@@ -34,6 +34,7 @@ import Arbiter.Core.Job.Types
   ( JobRead
   , ObservabilityHooks (..)
   , attempts
+  , claimedBy
   , dayRetention
   , defaultJob
   , defaultObservabilityHooks
@@ -1739,9 +1740,13 @@ workerSpec mkSimple mkFailing mkHandler runM = do
         void $ HL.insertJob (setMaxAttempts (Just 2) $ inGroup $ defaultJob (mkSimple "sp12-sib"))
       config <- mkBatchedConfig 1 2 batchHandler
 
+      let settled = do
+            dlq <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
+            jobs <- runM env (HL.listJobs 10 0) :: IO [JobRead payload]
+            pure (not (null dlq) && all (isNothing . claimedBy) [job | job <- jobs, payload job == mkSimple "sp12-sib"])
       dlq <-
         withAsync (runM env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
-          waitUntil 20_000 $ not . null <$> (runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload])
+          waitUntil 20_000 settled
           runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
       map (payload . DLQ.jobSnapshot) dlq `shouldBe` [mkSimple "sp12-spawner"]
       remaining <- runM env (HL.listJobs 10 0) :: IO [JobRead payload]
