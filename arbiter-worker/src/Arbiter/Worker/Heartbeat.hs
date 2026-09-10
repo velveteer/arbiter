@@ -10,7 +10,7 @@ module Arbiter.Worker.Heartbeat
 
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
-import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks (..), primaryKey)
+import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks (..), notVisibleUntil, primaryKey)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Void (Void)
 import UnliftIO (UnliftIO (..), askUnliftIO)
@@ -32,6 +32,7 @@ newHeartbeatGuard config = do
       , configTimeout = toDiffTime (visibilityTimeout config)
       , configMaxDuration = toDiffTime <$> maxJobDuration config
       , configKey = primaryKey
+      , configLease = notVisibleUntil
       , configExtend = run . Arb.setVisibilityTimeoutBatch (visibilityTimeout config)
       , configExtended = atomically (pulseHeartbeat config)
       , configLog = poolLog (logConfig config)

@@ -16,6 +16,7 @@ import Control.Monad.Class.MonadThrow (MonadCatch (..), MonadMask (..), MonadThr
 import Control.Monad.Class.MonadTime.SI
   ( DiffTime
   , Time (..)
+  , UTCTime
   , addTime
   , addUTCTime
   , diffTime
@@ -44,6 +45,7 @@ import Test.QuickCheck
   )
 
 import Arbiter.Worker.Heartbeat.Guard
+import Arbiter.Worker.Logger (LogLevel (..))
 import Test.Arbiter.Worker.Sim
   ( Recorder
   , escaped
@@ -92,6 +94,7 @@ data Event
   | Issued [JobId] Time
   | Finished [(JobId, Verdict)] Time
   | Overlap Time
+  | Logged LogLevel [JobId] Time
   deriving stock (Eq, Show)
 
 data Setup = Setup
@@ -100,8 +103,14 @@ data Setup = Setup
   , maxDuration :: Maybe DiffTime
   , replies :: [Reply]
   -- ^ Consumed in order. The last one repeats.
+  , rowLeases :: [(JobId, DiffTime)]
+  -- ^ Each row's @not_visible_until@, from the start of the simulation.
   }
   deriving stock (Show)
+
+-- | A setup whose rows carry no lease of their own.
+plainSetup :: DiffTime -> DiffTime -> Maybe DiffTime -> [Reply] -> Setup
+plainSetup every timeout duration answers = Setup every timeout duration answers []
 
 -- | The guard under test and the scenario's event recorder.
 data World s = World
@@ -113,10 +122,11 @@ data World s = World
 world :: Setup -> IOSim s (World s, IOSim s [Event])
 world setup = do
   exploreRaces
+  epoch <- getCurrentTime
   (recorder, events) <- newRecorder
   script <- newTVarIO (replies setup)
   inFlight <- newTVarIO (0 :: Int)
-  guard <- startGuard (guardConfig setup recorder script inFlight)
+  guard <- startGuard (guardConfig setup epoch recorder script inFlight)
   pure (World guard recorder, events)
 
 -- | Explore every schedule of a scenario and check its event log.
@@ -129,16 +139,23 @@ simulate setup scenario judge = exploreScenario judge run
       scenario w
       events
 
-guardConfig :: Setup -> Recorder s Event -> TVar (IOSim s) [Reply] -> TVar (IOSim s) Int -> GuardConfig (IOSim s) JobId
-guardConfig setup recorder script inFlight =
+guardConfig
+  :: Setup
+  -> UTCTime
+  -> Recorder s Event
+  -> TVar (IOSim s) [Reply]
+  -> TVar (IOSim s) Int
+  -> GuardConfig (IOSim s) JobId
+guardConfig setup epoch recorder script inFlight =
   GuardConfig
     { configInterval = interval setup
     , configTimeout = leaseTimeout setup
     , configMaxDuration = maxDuration setup
     , configKey = id
+    , configLease = \job -> (`addUTCTime` epoch) . realToFrac <$> lookup job (rowLeases setup)
     , configExtend = extend
     , configExtended = pure ()
-    , configLog = \_ _ _ -> pure ()
+    , configLog = \level jobs _ -> recorder (Logged level jobs)
     , configHeartbeat = \job _ _ -> recorder (Heartbeat job)
     }
   where
@@ -227,6 +244,8 @@ data BatchPlan = BatchPlan
   -- ^ When the handler is forked.
   , elapsed :: DiffTime
   -- ^ How long the batch had run before it registered.
+  , claimGap :: DiffTime
+  -- ^ How long before the batch started that the claim leased its row.
   , runs :: DiffTime
   , acksAt :: Maybe DiffTime
   -- ^ When the body settles its job, emptying the pending set.
@@ -245,15 +264,21 @@ genPlan :: Gen Plan
 genPlan = do
   count <- choose (1, 3)
   batches <- for [1 .. count] genBatch
-  -- An unmoved row only where no handler settles, so the judge's lease model stays exact.
-  let verdicts = if any (isJust . acksAt) batches then movedVerdicts else Unchanged : movedVerdicts
+  -- A row the extend left un-leased only where no handler settles, so the judge's lease
+  -- model stays exact.
+  let verdicts = if any (isJust . acksAt) batches then movedVerdicts else Unchanged : Suspend : movedVerdicts
   setup <-
     Setup
       <$> elements [0.5, 1, 2]
       <*> elements [2, 3, 4]
       <*> frequency [(2, pure Nothing), (1, Just <$> elements [1, 2.5])]
       <*> frequency [(1, pure [Answer 0 []]), (2, choose (1, 4) >>= (`vectorOf` genReply verdicts))]
-  pure (Plan setup batches)
+      <*> pure []
+  pure (Plan setup {rowLeases = [(planJob b, rowLeaseAt setup b) | b <- batches]} batches)
+
+-- | The row's @not_visible_until@: the claim leased it before the batch started.
+rowLeaseAt :: Setup -> BatchPlan -> DiffTime
+rowLeaseAt setup batch = startsAt batch - elapsed batch - claimGap batch + leaseTimeout setup
 
 genBatch :: JobId -> Gen BatchPlan
 genBatch job = do
@@ -262,13 +287,14 @@ genBatch job = do
   BatchPlan job
     <$> elements [0, 0.5, 1, 1.5]
     <*> frequency [(4, pure 0), (2, pure 0.5), (1, pure 1.7), (1, pure 5)]
+    <*> elements [0, 0.25, 1]
     <*> pure runFor
     <*> pure (ack >>= \at -> if at < runFor then Just at else Nothing)
     <*> frequency [(4, pure False), (1, pure True)]
 
 -- | The verdicts for a row the extend moved.
 movedVerdicts :: [Verdict]
-movedVerdicts = [Extend, Reclaim, Cancel, Vanish, Suspend]
+movedVerdicts = [Extend, Reclaim, Cancel, Vanish]
 
 genReply :: [Verdict] -> Gen Reply
 genReply verdicts =
@@ -379,14 +405,19 @@ judgePlan (plan, events) =
       where
         job = planJob batch
         registered = registeredAt job
-        initialLease = addTime (timeoutFor - elapsed batch) registered
+        -- A row lease already past at registration is dropped as clock disagreement.
+        initialLease =
+          minimum
+            ( addTime (timeoutFor - elapsed batch) registered
+                : [Time off | Just off <- [lookup job (rowLeases setup)], Time off > registered]
+            )
         renewals =
           [ addTime timeoutFor (issuedAt statement)
           | statement <- issued
           , job `elem` carried statement
           , Just (replyIndex, verdicts) <- [finished statement]
           , replyIndex < index
-          , lookup job verdicts /= Just Unchanged
+          , lookup job verdicts `notElem` [Just Unchanged, Just Suspend]
           ]
         lease = maximum (initialLease : renewals)
         -- A lease already gone at registration is fenced at registration.
@@ -409,30 +440,52 @@ planRuns = 250
 spec :: Spec
 spec = describe "Guard simulation" $ do
   it "stops a batch whose lease lapses without renewal" $
-    simulate (Setup 1 2 Nothing [Refuse 0]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+    simulate (plainSetup 1 2 Nothing [Refuse 0]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
       [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
 
   it "keeps a batch whose extend lands after the lease" $
-    simulate (Setup 1 2 Nothing [Answer 0.13 []]) (\w -> handler w 1 1.7 (threadDelay 1) >> threadDelay 3) $ \events ->
+    simulate (plainSetup 1 2 Nothing [Answer 0.13 []]) (\w -> handler w 1 1.7 (threadDelay 1) >> threadDelay 3) $ \events ->
       conjoin
         [ [() | (1, Done, _) <- endings events] `is` 1
         , [() | Heartbeat 1 _ <- events] `is` 1
         ]
 
   it "stops a batch whose extend hangs, at the lease" $
-    simulate (Setup 1 2 Nothing [Hang]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+    simulate (plainSetup 1 2 Nothing [Hang]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
       [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
 
   it "stops a batch whose extend cannot be interrupted, at the lease" $
-    simulate (Setup 1 2 Nothing [HangHard]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+    simulate (plainSetup 1 2 Nothing [HangHard]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
       [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
 
+  it "stops a batch whose rows all read back suspended, at the lease" $
+    simulate (plainSetup 1 2 Nothing [Answer 0 [(1, Suspend)]]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
+        , [() | Heartbeat 1 _ <- events] `is` 0
+        ]
+
+  it "takes the initial lease from the row, not from the batch start" $
+    simulate (Setup 5 20 Nothing [Refuse 0] [(1, 3)]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 6) $ \events ->
+      [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 3) at] `is` 1
+
+  it "takes the batch start where it precedes the row's own lease" $
+    simulate (Setup 5 20 Nothing [Refuse 0] [(1, 9)]) (\w -> handler w 1 17 (threadDelay 10) >> threadDelay 6) $ \events ->
+      [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 3) at] `is` 1
+
+  it "keeps a batch whose row lease is already past at register, and says so" $
+    simulate (Setup 5 20 Nothing [Answer 0 []] [(1, -3)]) (\w -> handler w 1 0 (threadDelay 2) >> threadDelay 4) $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , [() | Logged Warning [1] _ <- events] `is` 1
+        ]
+
   it "cannot be held past the lease by a chain of failing extends" $
-    simulate (Setup 0.01 2 Nothing [Refuse 0]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+    simulate (plainSetup 0.01 2 Nothing [Refuse 0]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
       [() | (1, Gone _, at) <- endings events, withinPause (Time 2) at] `is` 1
 
   it "beats again at its interval once a failed extend lands" $
-    simulate (Setup 1 4 Nothing [Refuse 0, Answer 0 []]) (\w -> handler w 1 0 (threadDelay 5) >> threadDelay 6) $ \events ->
+    simulate (plainSetup 1 4 Nothing [Refuse 0, Answer 0 []]) (\w -> handler w 1 0 (threadDelay 5) >> threadDelay 6) $ \events ->
       conjoin
         [ [() | (1, Done, _) <- endings events] `is` 1
         , property (length [() | Heartbeat 1 _ <- events] >= 3)
@@ -440,7 +493,7 @@ spec = describe "Guard simulation" $ do
 
   let reclaimed w = handler w 1 0 (threadDelay 3) >> handler w 2 0 (threadDelay 3) >> threadDelay 5
   it "stops only the batch another worker reclaimed" $
-    simulate (Setup 1 20 Nothing [Answer 0 [(1, Reclaim)]]) reclaimed $ \events ->
+    simulate (plainSetup 1 20 Nothing [Answer 0 [(1, Reclaim)]]) reclaimed $ \events ->
       conjoin
         [ [() | (1, Gone reason, at) <- endings events, reason == reclaimedReason, at == Time 1] `is` 1
         , [() | (2, Done, at) <- endings events, at == Time 3] `is` 1
@@ -449,26 +502,26 @@ spec = describe "Guard simulation" $ do
         ]
 
   it "signals a cancelled batch again each beat while it runs" $
-    simulate (Setup 1 20 Nothing [Answer 0 [(1, Cancel)]]) (\w -> handler w 1 0 (swallowing w 1 10) >> threadDelay 4.5) $ \events ->
+    simulate (plainSetup 1 20 Nothing [Answer 0 [(1, Cancel)]]) (\w -> handler w 1 0 (swallowing w 1 10) >> threadDelay 4.5) $ \events ->
       property (length [() | Caught 1 _ <- events] >= 3)
 
   it "revokes a signal a masked handler outlives"
     $ simulate
-      (Setup 10 20 (Just 1) [])
+      (plainSetup 10 20 (Just 1) [])
       ( \w -> handlerUnder (\call -> mask_ (call >> threadDelay 1)) w 1 0 (uninterruptibleMask_ (threadDelay 3)) >> threadDelay 6
       )
     $ \events ->
       [() | (1, Done, at) <- endings events, at == Time 4] `is` 1
 
   it "delivers one signal when the lease and the deadline pass together" $
-    simulate (Setup 10 1 (Just 0.001) []) (\w -> handler w 1 5 (swallowing w 1 1.5) >> threadDelay 3) $ \events ->
+    simulate (plainSetup 10 1 (Just 0.001) []) (\w -> handler w 1 5 (swallowing w 1 1.5) >> threadDelay 3) $ \events ->
       conjoin
         [ [() | Caught 1 _ <- events] `is` 1
         , [() | (1, Done, _) <- endings events] `is` 1
         ]
 
   it "keeps a signal due at register inside the handler boundary" $
-    simulate (Setup 10 1 Nothing []) (\w -> handler w 1 5 (threadDelay 0.002) >> threadDelay 1) $ \events ->
+    simulate (plainSetup 10 1 Nothing []) (\w -> handler w 1 5 (threadDelay 0.002) >> threadDelay 1) $ \events ->
       conjoin
         [ [() | (1, Escaped _, _) <- endings events] `is` 0
         , [() | (1, _, _) <- endings events] `is` 1
@@ -480,12 +533,24 @@ spec = describe "Guard simulation" $ do
         handler w 2 0 (threadDelay 30)
         threadDelay 4.5
   it "fences a batch registered while another batch's extend hangs" $
-    simulate (Setup 1 20 (Just 2) [Hang]) lateArrival $ \events ->
+    simulate (plainSetup 1 20 (Just 2) [Hang]) lateArrival $ \events ->
       [() | (2, Deadline, at) <- endings events, at == Time 5.5] `is` 1
+
+  let crowded w = do
+        handler w 1 0 (threadDelay 30)
+        threadDelay 2
+        handler w 2 18 (threadDelay 30)
+        threadDelay 6
+  it "fences a batch its lease outruns while another batch's extend holds the slot" $
+    simulate (plainSetup 1 20 Nothing [Hang]) crowded $ \events ->
+      conjoin
+        [ [() | (2, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 4) at] `is` 1
+        , [() | Issued jobs _ <- events, 2 `elem` jobs] `is` 0
+        ]
 
   let together w = handler w 1 0 (threadDelay 5) >> handler w 2 0 (threadDelay 5) >> threadDelay 8
   it "extends due batches in one statement, one statement at a time" $
-    simulate (Setup 1 20 Nothing [Answer 0.5 []]) together $ \events ->
+    simulate (plainSetup 1 20 Nothing [Answer 0.5 []]) together $ \events ->
       conjoin
         [ [() | Overlap _ <- events] `is` 0
         , property (and [length jobs == 2 | Issued jobs at <- events, at < Time 5])

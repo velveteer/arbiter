@@ -69,6 +69,7 @@ import Control.Monad.Class.MonadTime.SI
 import Control.Monad.Class.MonadTimer.SI (MonadTimer (..))
 import Data.Fixed (Fixed (..))
 import Data.Foldable (for_, toList, traverse_)
+import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -122,6 +123,8 @@ data GuardConfig n job = GuardConfig
   , configTimeout :: DiffTime
   , configMaxDuration :: Maybe DiffTime
   , configKey :: job -> JobId
+  , configLease :: job -> Maybe UTCTime
+  -- ^ The row's lease deadline, as the claim read it back.
   , configExtend :: [job] -> n [SetVisibilityResult]
   -- ^ Extend the jobs' leases by 'configTimeout', reporting each.
   , configExtended :: n ()
@@ -222,9 +225,23 @@ guardBatch guard batch action =
       monoNow <- getMonotonicTime
       handler <- myThreadId
       let elapsed = toDiffTime (diffUTCTime wallNow (batchStart batch))
-          leaseUntil = addTime (configTimeout config - elapsed) monoNow
+          -- The rows' own deadlines, which the claim set before the batch started.
+          rowLeases =
+            [ (job, addTime (toDiffTime (diffUTCTime at wallNow)) monoNow)
+            | job <- toList (batchJobs batch)
+            , Just at <- [configLease config job]
+            ]
+          -- The claim just leased these rows in full. One already past is the clocks disagreeing.
+          (past, current) = partition ((<= monoNow) . snd) rowLeases
+          leaseUntil = minimum (addTime (configTimeout config - elapsed) monoNow : map snd current)
           firstBeat = addTime (heartbeatWait (configInterval config) True (leaseUntil `diffTime` monoNow)) monoNow
           deadline = (`addTime` monoNow) <$> configMaxDuration config
+      unless (null past) $
+        configLog
+          config
+          Warning
+          (map fst past)
+          "Lease already expired as the batch registered. The worker and database clocks disagree."
       timers <- newTVarIO (Timers leaseUntil firstBeat False False Nothing (Just []))
       atomically $ do
         token <- stateTVar (guardNextToken guard) (\next -> (next, next + 1))
@@ -415,11 +432,11 @@ settle guard issued currentTime byJob (entry, live) = do
   let cancelledJobs = [jobId | JobCancelled jobId <- mine]
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- mine]
       goneJobs = [jobId | JobGone jobId <- mine]
-      unmoved = [() | VisibilityUnchanged jobId <- mine, Set.member jobId stillPending]
+      unrenewed = [jobId | result <- mine, jobId <- unextended result, Set.member jobId stillPending]
       extendedIds = Set.fromList [jobId | VisibilityExtended jobId <- mine]
       extended = filter ((`Set.member` extendedIds) . key) live
   adjust entry $ \timers ->
-    let lease = if null unmoved then addTime (configTimeout config) issued else leaseAt timers
+    let lease = if null unrenewed then addTime (configTimeout config) issued else leaseAt timers
      in timers {leaseAt = lease, beatAt = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued}
   now <- getMonotonicTime
   case (cancelledJobs, stolenJobs) of
@@ -432,6 +449,13 @@ settle guard issued currentTime byJob (entry, live) = do
   where
     config = guardConfig guard
     batch = guardedBatch entry
+
+-- | The row the extend left un-leased: it read back untouched, or, suspended, holds none.
+unextended :: SetVisibilityResult -> [JobId]
+unextended result = case result of
+  VisibilityUnchanged jobId -> [jobId]
+  JobSuspended jobId -> [jobId]
+  _ -> []
 
 resultId :: SetVisibilityResult -> JobId
 resultId result = case result of
