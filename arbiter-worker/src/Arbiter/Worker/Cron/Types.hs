@@ -116,6 +116,8 @@ data CronJob payload = CronJob
   , timezone :: Maybe Text
   -- ^ IANA tz name (e.g. @\"America\/New_York\"@). 'Nothing' means UTC.
   -- The @override_timezone@ DB column wins if set.
+  , initiallyEnabled :: Bool
+  -- ^ Default: 'True'. 'False' registers the schedule suspended.
   , builder :: TickKind -> UTCTime -> JobWrite payload
   -- ^ Build a job for the given tick time. 'Replay' is passed for any tick
   -- whose minute is not the current scheduler minute (startup or mid-flight
@@ -125,7 +127,7 @@ data CronJob payload = CronJob
 
 -- | Build a 'CronJob'. A bad expression returns @Left@. The expression is
 -- evaluated in UTC. 'cronJobInTimezone' is the local-time form. Set 'backfill'
--- by record update.
+-- and 'initiallyEnabled' by record update.
 --
 -- @
 -- cronJob "nightly-report" "0 3 * * *" SkipOverlap
@@ -147,6 +149,7 @@ cronJob cronName expr overlapPolicy build =
     , overlap = overlapPolicy
     , backfill = NoBackfill
     , timezone = Nothing
+    , initiallyEnabled = True
     , builder = build
     }
     <$ parseCronSchedule expr

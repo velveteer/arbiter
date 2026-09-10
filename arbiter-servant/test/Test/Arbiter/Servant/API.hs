@@ -1133,7 +1133,7 @@ spec connStr = do
 
   describe "Cron API" $ with (cleanupDb >> pure app) $ do
     let seedCron name expr overlap = liftIO $ runSimpleDb mkEnv $ do
-          _ <- Ops.upsertCronDefault testSchema name testTable expr overlap Nothing
+          _ <- Ops.upsertCronDefault testSchema name testTable expr overlap Nothing True
           pure ()
 
     it "GET /api/v1/cron/schedules returns seeded schedules" $ do

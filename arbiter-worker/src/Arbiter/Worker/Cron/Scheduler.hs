@@ -62,6 +62,7 @@ initCronSchedules schemaName queueName jobs logCfg = do
       (cronExpression cron)
       (overlapPolicyToText (overlap cron))
       (timezone cron)
+      (initiallyEnabled cron)
   liftIO . tryLog logCfg Info $
     "Cron schedules initialized: " <> T.pack (show (length jobs)) <> " schedule(s) upserted"
 
@@ -210,7 +211,7 @@ effectiveOverlapFor cron row = fromMaybe (overlap cron) (overlapPolicyFromText (
 resolveAndParse :: CronJob payload -> Maybe CS.CronScheduleRow -> Resolved
 resolveAndParse cron mRow =
   let (expr, overlapPolicy, zone, isEnabled) = case mRow of
-        Nothing -> (cronExpression cron, overlap cron, timezone cron, True)
+        Nothing -> (cronExpression cron, overlap cron, timezone cron, initiallyEnabled cron)
         Just row@CS.CronScheduleRow {CS.enabled = rowEnabled} ->
           ( CS.effectiveExpression row
           , effectiveOverlapFor cron row

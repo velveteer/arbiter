@@ -1569,7 +1569,7 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
 
     describe "Cron schedule defaults" $ do
       it "leaves an unchanged schedule's updated_at alone" $ \env -> do
-        let upsert expr = Ops.upsertCronDefault testSchema "cron-steady" testTable expr "AllowOverlap" Nothing
+        let upsert expr = Ops.upsertCronDefault testSchema "cron-steady" testTable expr "AllowOverlap" Nothing True
             readBack = runSimpleDb env $ Ops.getCronScheduleByName testSchema "cron-steady"
         void $ runSimpleDb env (upsert "* * * * *")
         Just first <- readBack
@@ -1580,12 +1580,31 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable True) $ do
         Just third <- readBack
         CS.updatedAt third `shouldSatisfy` (> CS.updatedAt first)
 
+      it "registers a schedule with initiallyEnabled False as disabled" $ \env -> do
+        void
+          $ runSimpleDb env
+          $ Ops.upsertCronDefault testSchema "cron-suspended" testTable "* * * * *" "AllowOverlap" Nothing False
+        Just CS.CronScheduleRow {CS.enabled = isEnabled} <-
+          runSimpleDb env $ Ops.getCronScheduleByName testSchema "cron-suspended"
+        isEnabled `shouldBe` False
+
+      it "leaves an existing row's enabled state alone on re-upsert" $ \env -> do
+        let readBack = runSimpleDb env $ Ops.getCronScheduleByName testSchema "cron-resurrected"
+        void
+          $ runSimpleDb env
+          $ Ops.upsertCronDefault testSchema "cron-resurrected" testTable "* * * * *" "AllowOverlap" Nothing True
+        void
+          $ runSimpleDb env
+          $ Ops.upsertCronDefault testSchema "cron-resurrected" testTable "*/5 * * * *" "AllowOverlap" Nothing False
+        Just CS.CronScheduleRow {CS.enabled = isEnabled} <- readBack
+        isEnabled `shouldBe` True
+
     describe "Cron queue filter" $ do
       it "filters cron schedules by queue" $ \env -> do
         let otherQueue = "other_queue"
         runSimpleDb env $ do
-          void $ Ops.upsertCronDefault testSchema "cron-here" testTable "* * * * *" "AllowOverlap" Nothing
-          void $ Ops.upsertCronDefault testSchema "cron-elsewhere" otherQueue "* * * * *" "AllowOverlap" Nothing
+          void $ Ops.upsertCronDefault testSchema "cron-here" testTable "* * * * *" "AllowOverlap" Nothing True
+          void $ Ops.upsertCronDefault testSchema "cron-elsewhere" otherQueue "* * * * *" "AllowOverlap" Nothing True
 
         hereOnly <- runSimpleDb env $ Ops.listCronSchedules testSchema (Just testTable)
         map CS.name hereOnly `shouldContain` ["cron-here"]

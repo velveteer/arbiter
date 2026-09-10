@@ -52,14 +52,15 @@ cronReadColumns =
   |]
 
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
--- An unchanged schedule is left alone.
-upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Query ()
-upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz =
+-- An unchanged schedule is left alone. @initialEnabled@ applies only to a row this
+-- statement creates. An existing row keeps the enabled state it already has.
+upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Bool -> Query ()
+upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz initialEnabled =
   let tbl = cronSchedulesTable schemaName
    in [sql|
-        INSERT INTO ${tbl} (name, queue_name, default_expression, default_overlap, default_timezone)
+        INSERT INTO ${tbl} (name, queue_name, default_expression, default_overlap, default_timezone, enabled)
         VALUES (#{name :: CText}, #{queueName :: CText}, #{defaultExpr :: CText},
-                #{defaultOv :: CText}, #{defaultTz :: Maybe CText})
+                #{defaultOv :: CText}, #{defaultTz :: Maybe CText}, #{initialEnabled :: CBool})
         ON CONFLICT (name) DO UPDATE SET
           queue_name = EXCLUDED.queue_name,
           default_expression = EXCLUDED.default_expression,
