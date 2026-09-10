@@ -381,6 +381,7 @@ guardConfigFor rows recorder script deadline =
     , configTimeout = leaseTimeout
     , configMaxDuration = deadline
     , configKey = jobId
+    , configLease = const Nothing
     , configExtend = \jobs -> do
         recorder (Issued (map jobId jobs))
         reply <- atomically (stateTVar script (scripted Extends))
