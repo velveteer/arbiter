@@ -2619,10 +2619,12 @@ upsertCronDefault
   -- ^ Default overlap policy
   -> Maybe Text
   -- ^ Default IANA tz name (@Nothing@ = UTC).
+  -> Bool
+  -- ^ Enabled state for a row this call creates. An existing row keeps its own.
   -> m Int64
-upsertCronDefault schemaName scheduleName queueName defaultExpr defaultOv defaultTz =
+upsertCronDefault schemaName scheduleName queueName defaultExpr defaultOv defaultTz initialEnabled =
   MA.executeStatement
-    (Tmpl.upsertCronDefaultSQL schemaName scheduleName queueName defaultExpr defaultOv defaultTz)
+    (Tmpl.upsertCronDefaultSQL schemaName scheduleName queueName defaultExpr defaultOv defaultTz initialEnabled)
 
 -- | List cron schedules ordered by name, optionally filtered by queue.
 listCronSchedules
