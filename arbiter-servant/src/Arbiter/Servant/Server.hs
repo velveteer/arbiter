@@ -122,11 +122,6 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   -- ^ Run a backend action, for example @runSimpleDb env@ or @runHasqlDb env@.
   , serverSchema :: Text
   -- ^ The schema every handler's statements run against.
-  , enableSSE :: Bool
-  -- ^ Enable the Server-Sent Events streaming endpoint. When 'False', the
-  -- @\/events\/stream@ endpoint returns one \"disabled\" event and closes.
-  -- The admin UI then polls. A backend with no listener answers the same way.
-  -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
   -- ^ Short-TTL cache for the rate-limit policy list.
   , concurrencyPoliciesCache :: CacheCell ConcurrencyPoliciesResponse
@@ -214,7 +209,6 @@ initArbiterServer run = do
     ArbiterServerConfig
       { serverRun = run
       , serverSchema = schemaName
-      , enableSSE = True
       , rateLimitPoliciesCache = rlCache
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
@@ -962,16 +956,16 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 
 -- | Serve the SSE stream as a raw WAI application. Each client registers on the
 -- backend's shared listener for the response's lifetime and gets a @connected@
--- event once its channel is subscribed. If 'enableSSE' is false or the backend
--- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then stops reconnection attempts.
+-- event once its channel is subscribed. A backend with no listener gets one
+-- @disabled@ event and the stream closes. The admin UI then stops reconnection
+-- attempts and polls.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
   => ArbiterServerConfig m registry
   -> Tagged Handler Application
 eventsServer config = Tagged $ \_req sendResponse -> do
-  mListener <- if enableSSE config then runDb config getListener else pure Nothing
+  mListener <- runDb config getListener
   case mListener of
     Nothing -> sendResponse $ responseStream status200 sseHeaders $ \write flush -> do
       write "data: {\"event\":\"disabled\"}\n\n"
