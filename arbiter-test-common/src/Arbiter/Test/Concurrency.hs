@@ -32,6 +32,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (addUTCTime, getCurrentTime)
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
 import UnliftIO.Async (mapConcurrently, replicateConcurrently_, withAsync)
@@ -171,10 +172,10 @@ concurrencySpec mkMessage runM = do
       claimsPastLocked env inserted
 
     it "claims past many locked due ungrouped rows at capacity one" $ \env -> do
-      void $ runM env $ HL.insertJobsBatch (replicate 31 (defaultJob (mkMessage "due")))
-      leased <- runM env (HL.claimNextVisibleJobs 31 60) :: IO [JobRead payload]
-      forM_ leased $ \job -> void $ runM env (HL.setVisibilityTimeout 0 job)
-      claimsPastLocked env leased
+      now <- getCurrentTime
+      let dueJob i = setNotVisibleUntil (Just (addUTCTime (fromIntegral (i - 3600 :: Int)) now)) (defaultJob (mkMessage "due"))
+      inserted <- runM env $ HL.insertJobsBatch (map dueJob [1 .. 31])
+      claimsPastLocked env inserted
 
     it "leaves ungrouped rows it does not claim unlocked" $ \env -> do
       [grouped, ungrouped] <-
