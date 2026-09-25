@@ -28,8 +28,9 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, SomeException, tryAny)
+import UnliftIO (MonadUnliftIO, SomeException)
 import UnliftIO.Concurrent (threadDelay)
+import UnliftIO.Exception (isSyncException, tryJust)
 
 import Arbiter.Worker.Config (MaintenanceOp (..), maintenanceOpName)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog, warnEx)
@@ -51,7 +52,7 @@ reaperLoop
 reaperLoop logCfg report pace stmtTimeout =
   forever $ do
     void $ runMaintenancePass logCfg report pace stmtTimeout
-    threadDelay (ceiling (paceWindow pace) * 1_000_000)
+    threadDelay (Ops.micros (paceWindow pace))
 
 -- | Gaps a caller holds between runs of each kind of work. A zero gap runs it every pass.
 data MaintenancePace = MaintenancePace
@@ -181,5 +182,5 @@ runReaperStateOp logCfg schema stmtTimeout task every work =
 
 reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m (Either SomeException a)
 reaperGate logCfg task action =
-  tryAny action
+  tryJust (\exception -> if isSyncException exception then Just exception else Nothing) action
     >>= either (\exception -> Left exception <$ warnEx logCfg ("Reaper op failed: " <> task) exception) (pure . Right)

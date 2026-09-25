@@ -17,4 +17,4 @@ PG.withTransaction conn $ do
     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 ```
 
-See the [arbiter-simple haddocks](https://arbiterq.dev/arbiter-simple/Arbiter-Simple.html) for the env and pool constructors.
+Environment and pool constructors: [arbiter-simple Haddocks](https://arbiterq.dev/arbiter-simple/Arbiter-Simple.html).

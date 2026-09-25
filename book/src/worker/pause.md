@@ -13,6 +13,6 @@ A pause stops new claims. In-flight jobs run to completion.
 `resumeChildren` leaves a finalizer suspended while its children are queued.
 
 `LISTEN/NOTIFY` delivers a pause at once. Without a listener, each pool reads
-the pause state at its next worker heartbeat. See [Wakeups](wakeups.md).
+the pause state at its next worker heartbeat. Details: [Wakeups](wakeups.md).
 
 The [REST API and admin UI](../rest-api.md) expose the same controls.

@@ -180,7 +180,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let handler :: JobRead payload -> m ()
             handler job = do
               recordOp schema (primaryKey job)
-              -- User manually commits the transaction (violates our transaction semantics)
+              -- Manual commit violates the worker transaction boundary.
               runCommand "COMMIT"
               throwRetryable "Simulated failure after commit"
 

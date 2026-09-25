@@ -55,10 +55,9 @@ import Arbiter.Worker.Results (storeEncodedResult, storeEncodedResults, storeJob
 batchLog :: WorkerConfig m payload -> NonEmpty (Job.JobRead payload) -> LogConfig
 batchLog config = withJobContext (logConfig config)
 
--- | The effects of one batch, each run in its own transaction or hook. A
--- statement runs in the handler's own context at a callback, so it joins a
--- transaction the handler holds, and in the pool's otherwise. Built once for the
--- pool. A batch binds its jobs.
+-- | Per-batch statements and hooks. Callback statements join the handler's
+-- transaction; other statements use the pool context. Built per pool and
+-- bound to jobs per batch.
 type PoolEffects m payload =
   NonEmpty (Job.JobRead payload)
   -> Effects IO (UnliftIO m) (Job.JobRead payload) (NonEmpty (Job.JobWrite payload)) Value

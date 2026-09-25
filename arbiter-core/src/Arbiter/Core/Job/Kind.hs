@@ -32,8 +32,7 @@ instance {-# OVERLAPPABLE #-} HasKind payload where
   kindOf _ = Nothing
   kindsFor = []
 
--- | The constructor name of a value, for a payload that wraps the sum it wants
--- labelled. Needs @Generic@ on the wrapped type.
+-- | Constructor name of a wrapped sum. Requires @Generic@ on the wrapped type.
 --
 -- @
 -- instance HasKind Envelope where

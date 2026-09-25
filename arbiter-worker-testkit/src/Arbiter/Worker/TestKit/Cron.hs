@@ -187,8 +187,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` mkSimple "2025-06-15T14:30"
 
-      it "advances last_checked_at for all schedules, including failed inserts" $ \env -> do
-        -- Failed inserts are logged. The watermark moves forward for every schedule.
+      it "keeps a failed schedule's watermark for retry without blocking other schedules" $ \env -> do
         let Right good =
               cronJob
                 "good-1"
@@ -201,9 +200,11 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 "* * * * *"
                 AllowOverlap
                 (\_ _ -> errorWithoutStackTrace "intentional builder failure")
+            recovered = bad {builder = \_ _ -> defaultJob (mkSimple "recovered"), backfill = Backfill 120}
             tick = mkTime 2025 6 15 12 0 0
         runM env $ do
           initCronSchedules schema table [good, bad] silentLogConfig
+          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) ["bad-1"]
           catchUpAt schema table [good, bad] tick
 
         rows <- runM env $ Ops.listCronSchedules schema Nothing
@@ -212,12 +213,16 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
           Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "good-1 schedule missing"
         case getRow "bad-1" of
-          Just row -> CS.lastCheckedAt row `shouldBe` Just tick
+          Just row -> CS.lastCheckedAt row `shouldBe` Just (mkTime 2025 6 15 11 59 0)
           Nothing -> expectationFailure "bad-1 schedule missing"
 
         -- The good cron's job was inserted.
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
         map payload jobs `shouldBe` [mkSimple "ok"]
+
+        runM env $ catchUpAt schema table [recovered] (mkTime 2025 6 15 12 1 0)
+        recoveredJobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload recoveredJobs `shouldBe` [mkSimple "recovered", mkSimple "recovered"]
 
     describe "processRunRequests" $ do
       it "fires a requested schedule the tick would not match" $ \env -> do

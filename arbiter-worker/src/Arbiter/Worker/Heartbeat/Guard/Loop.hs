@@ -1,10 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The guard loop. It sleeps until the earliest lease, deadline or beat. On
--- waking it fences the batches past a lease or deadline. It then issues one
--- extend over every batch due a beat. The extend runs on a thread of its own,
--- so a hung statement cannot stall the fence. A register wakes the loop only
--- when it precedes the published target.
+-- | Guard loop for lease fencing, deadlines, and heartbeat extension.
+-- Extensions run on separate threads to keep fencing responsive to stalled
+-- statements. Registration wakes the loop for an earlier deadline.
 --
 -- The lease fence waits for an extend that carries the batch. It waits until
 -- that extend gives up. If the extend lands, it waits a settle grace past
@@ -240,14 +238,21 @@ settle
 settle guard issued currentTime byJob (entry, live) = do
   -- Rows this worker settled during the statement do not count.
   stillPending <- Set.fromList . map key <$> pendingOf entry
-  let verdicts = mapMaybe ((`Map.lookup` byJob) . key) live
+  let verdicts = mapMaybe ((`Map.lookup` byJob) . key) (filter (\job -> Set.member (key job) stillPending) live)
       cancelledJobs = [jobId | JobCancelled jobId <- verdicts]
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- verdicts]
       goneJobs = [jobId | JobGone jobId <- verdicts]
-      unrenewed = [jobId | verdict <- verdicts, jobId <- unextended verdict, Set.member jobId stillPending]
-      extended = [job | job <- live, Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]]
+      allRenewed job =
+        not (Set.member (key job) stillPending)
+          || maybe False renewed (Map.lookup (key job) byJob)
+      extended =
+        [ job
+        | job <- live
+        , Set.member (key job) stillPending
+        , Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]
+        ]
   applied <- atomically $ stateTVar (guardedStatus entry) $ \status ->
-    let lease = if null unrenewed then addTime (configTimeout config) issued else leaseAt status
+    let lease = if all allRenewed live then addTime (configTimeout config) issued else leaseAt status
         beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
      in if leaseLapsed status then (False, status) else (True, status {leaseAt = lease, beatAt = beat})
   when applied $ do
@@ -257,19 +262,19 @@ settle guard issued currentTime byJob (entry, live) = do
       ([], _ : _) -> signal guard now entry (toException (JobGoneException reclaimedReason stolenJobs))
       ([], []) ->
         unless (null extended) . void . forkIO . batchInherit batch $
-          for_ extended $
-            \job -> configHeartbeat config job currentTime (batchStart batch)
+          for_ extended $ \job -> do
+            pending <- pendingOf entry
+            when (any ((== key job) . key) pending) $
+              configHeartbeat config job currentTime (batchStart batch)
   where
     config = guardConfig guard
     key = configKey config
     batch = guardedBatch entry
 
--- | The row the extend left un-leased: it read back untouched, or, suspended, holds none.
-unextended :: SetVisibilityResult -> [JobId]
-unextended result = case result of
-  VisibilityUnchanged jobId -> [jobId]
-  JobSuspended jobId -> [jobId]
-  _ -> []
+-- | Only a successful visibility update renews the lease.
+renewed :: SetVisibilityResult -> Bool
+renewed VisibilityExtended {} = True
+renewed _ = False
 
 resultId :: SetVisibilityResult -> JobId
 resultId result = case result of

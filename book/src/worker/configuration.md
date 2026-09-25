@@ -1,7 +1,7 @@
 # Worker Configuration
 
-A `WorkerConfig` holds the handler, thread count, timings, and callbacks. The
-constructors below return one. Set fields before the pool starts.
+`WorkerConfig` holds the handler, thread count, timings, and callbacks.
+Set fields before the pool starts.
 
 `poolConfigForWorkers` sizes the database pool for a list of worker pools. Pass
 the same list to `poolConfigForWorkers`, `runWorkerPools`, and
@@ -48,5 +48,5 @@ fires at the savepoint release, before the outer commit.
 | `jobHeartbeatInterval` | how often the worker renews the hold |
 | `maxJobDuration` | longest a handler can run |
 
-See [Leases and Deadlines](deadlines.md) and the
-[`WorkerConfig` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html).
+Timing details: [Leases and Deadlines](deadlines.md).
+Field reference: [`WorkerConfig` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html).

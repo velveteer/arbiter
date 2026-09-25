@@ -1,12 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | A batch's lifecycle: the handoff, the settle ordering, the outcome report and
--- the force-cancel finalizer.
+-- | Batch settlement, outcome reporting, and force-cancel finalization.
 --
--- The pool supplies every statement and hook as an 'Effects' action. Each
--- transactional unit is one effect, so the lifecycle never composes across a
--- transaction. Written against io-classes, so the pool runs it in IO and the
--- tests run it under io-sim.
+-- Each 'Effects' action runs one transaction or hook. The pool runs the
+-- lifecycle in IO; tests use io-sim.
 module Arbiter.Worker.Batch
   ( -- * The pool's side
     Effects (..)
@@ -96,9 +93,8 @@ type Failure = (Text, FailureKind)
 data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled
   deriving stock (Eq, Show)
 
--- | The statements and hooks a batch drives, each in the context @ctx@ it is
--- called from. A callback runs in the handler's own context, so a statement it
--- drives joins a transaction the handler holds. Each is one transaction or one hook.
+-- | Batch statements and hooks. Callbacks use the handler's context and join
+-- its active transaction. Each effect is one transaction or one hook.
 data Effects n ctx job kids stored = Effects
   { effectAmbient :: ctx
   -- ^ The context the batch runs in, outside the handler.
@@ -144,7 +140,7 @@ data Callbacks n ctx job kids stored = Callbacks
 -- The handoff
 -- ---------------------------------------------------------------------------
 
--- | What a batch has settled so far.
+-- | Batch settlement progress.
 data Progress n = Progress
   { progressHandled :: !(Set JobId)
   -- ^ Jobs whose outcome has been recorded.
@@ -174,7 +170,7 @@ newHandoff :: (MonadSTM n) => HeartbeatGuard n job -> n (Handoff n job)
 {-# SPECIALIZE newHandoff :: HeartbeatGuard IO job -> IO (Handoff IO job) #-}
 newHandoff guard = Handoff (guardKey guard) <$> newTVarIO emptyProgress
 
--- | A batch that has settled nothing.
+-- | Initial settlement state.
 emptyProgress :: Progress n
 emptyProgress =
   Progress
@@ -196,8 +192,7 @@ alterProgress handoff = atomically . modifyTVar' (handoffVar handoff)
 onProgress :: (MonadSTM n) => Handoff n job -> (Progress n -> (a, Progress n)) -> n a
 onProgress handoff = atomically . stateTVar (handoffVar handoff)
 
--- | What a settle accounted for: the jobs it finalized, and the jobs it found under
--- another claim.
+-- | Finalized jobs and jobs held under another claim.
 data Settled job = Settled [job] [job]
 
 finalized :: [job] -> Settled job
@@ -221,8 +216,7 @@ record handoff = alterProgress handoff . recorded handoff
 hasIdIn :: Handoff n job -> Set JobId -> job -> Bool
 hasIdIn handoff ids job = Set.member (handoffKey handoff job) ids
 
--- | Select jobs from the batch in descending identifier order. This gives ack,
--- force-cancel and heartbeat operations the same row-lock order.
+-- | Sort jobs by descending id for consistent row-lock ordering.
 byIdDesc :: Handoff n job -> (job -> Bool) -> NonEmpty job -> [job]
 byIdDesc handoff keep = sortOn (Down . handoffKey handoff) . filter keep . toList
 
@@ -236,7 +230,7 @@ jobsBy handoff recordedSet member jobs = do
 pendingJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 pendingJobs handoff = jobsBy handoff progressHandled not
 
--- | The batch's jobs a settle found under another claim.
+-- | Jobs found under another claim.
 unownedJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 unownedJobs handoff = jobsBy handoff progressUnowned id
 
@@ -246,7 +240,7 @@ recordSpawned handoff job =
   alterProgress handoff $ \progress ->
     progress {progressSpawned = Set.insert (handoffKey handoff job) (progressSpawned progress)}
 
--- | Add to the jobs a force-cancel accounted for, returning every id recorded so far.
+-- | Record force-cancelled jobs; return all recorded ids.
 recordCancelled :: (MonadSTM n) => Handoff n job -> Set JobId -> n (Set JobId)
 recordCancelled handoff ids =
   onProgress handoff $ \progress ->

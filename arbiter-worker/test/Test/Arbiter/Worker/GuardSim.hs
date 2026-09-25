@@ -8,7 +8,18 @@ module Test.Arbiter.Worker.GuardSim (spec) where
 import Arbiter.Core.Exceptions (JobDeadlineExceeded (..), JobForceCancelled (..), JobGoneException (..))
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.Job.Types (JobId)
-import Control.Concurrent.Class.MonadSTM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO, stateTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM
+  ( TVar
+  , atomically
+  , modifyTVar'
+  , newEmptyTMVarIO
+  , newTVarIO
+  , putTMVar
+  , readTMVar
+  , readTVarIO
+  , stateTVar
+  , writeTVar
+  )
 import Control.Monad (void, when)
 import Control.Monad.Class.MonadFork (forkIO)
 import Control.Monad.Class.MonadTest (exploreRaces)
@@ -34,9 +45,11 @@ import Test.Hspec (Spec, describe, it)
 import Test.QuickCheck
   ( Gen
   , Property
+  , checkCoverage
   , choose
   , conjoin
   , counterexample
+  , cover
   , elements
   , frequency
   , property
@@ -67,6 +80,10 @@ data Verdict = Extend | Unchanged | Reclaim | Cancel | Vanish | Suspend
 data Reply
   = -- | Each listed job's verdict after a delay. Unlisted jobs are extended.
     Answer DiffTime [(JobId, Verdict)]
+  | -- | The statement omits every requested job from its response.
+    Omit
+  | -- | A partial response reports only the listed jobs.
+    Partial DiffTime [(JobId, Verdict)]
   | -- | An exception, after a delay.
     Refuse DiffTime
   | -- | Never returns. The timeout interrupts it.
@@ -95,6 +112,7 @@ data Event
   | Finished [(JobId, Verdict)] Time
   | Overlap Time
   | Logged LogLevel [JobId] Time
+  | CancelledIds [JobId] [JobId] Time
   deriving stock (Eq, Show)
 
 data Setup = Setup
@@ -175,6 +193,12 @@ guardConfig setup epoch recorder script inFlight =
         let resolved = [(job, fromMaybe Extend (lookup job verdicts)) | job <- jobs]
         recorder (Finished resolved)
         pure (map (uncurry verdictResult) resolved)
+      Omit -> recorder (Finished []) >> pure []
+      Partial delay verdicts -> do
+        threadDelay delay
+        let resolved = [(job, verdict) | job <- jobs, Just verdict <- [lookup job verdicts]]
+        recorder (Finished resolved)
+        pure (map (uncurry verdictResult) resolved)
       Refuse delay -> threadDelay delay >> refuseExtend
       Hang -> hangExtend
       HangHard -> uninterruptibleMask_ (threadDelay neverReturns) >> pure []
@@ -204,6 +228,18 @@ guarded w under job elapsed pending body = do
   record w (Registered job)
   outcome <- try (under (guardBatch (worldGuard w) (Batch (job :| []) pending start id) body))
   record w (Ended job (classify outcome))
+
+-- | Register a multi-job batch and record the complete force-cancel payload.
+guardedBatch :: World s -> NonEmpty JobId -> IOSim s [JobId] -> IOSim s () -> IOSim s ()
+guardedBatch w jobs@(first :| _) pending body = do
+  start <- getCurrentTime
+  outcome <- try (guardBatch (worldGuard w) (Batch jobs pending start id) body)
+  case outcome of
+    Left exc -> case fromException exc of
+      Just (JobForceCancelled cancelled unavailable) -> record w (CancelledIds cancelled unavailable)
+      Nothing -> pure ()
+    Right () -> pure ()
+  record w (Ended first (classify outcome))
 
 classify :: Either SomeException () -> Outcome
 classify (Right ()) = Done
@@ -423,7 +459,7 @@ judgePlan (plan, events) =
           , job `elem` carried statement
           , Just (replyIndex, verdicts) <- [finished statement]
           , replyIndex < index
-          , lookup job verdicts `notElem` [Just Unchanged, Just Suspend]
+          , lookup job verdicts == Just Extend
           ]
         lease = maximum (initialLease : renewals)
         -- A lease already gone at registration is fenced at registration.
@@ -499,6 +535,152 @@ spec = describe "Guard simulation" $ do
         , [() | Heartbeat 1 _ <- events] `is` 0
         ]
 
+  it "keeps the original lease when every heartbeat finds the row gone" $
+    simulate (plainSetup 1 2 Nothing [Answer 0 [(1, Vanish)]]) (\w -> handler w 1 0 (threadDelay 5) >> threadDelay 3) $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
+        , property (not (null [() | Finished [(1, Vanish)] _ <- events]))
+        , [() | Heartbeat 1 _ <- events] `is` 0
+        ]
+
+  it "recovers from a transient non-renewal before the lease expires"
+    $ simulate
+      (plainSetup 1 3 Nothing [Answer 0 [(1, Unchanged)], Answer 0 []])
+      (\w -> handler w 1 0 (threadDelay 4) >> threadDelay 5)
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , property (not (null [() | Finished [(1, Unchanged)] _ <- events]))
+        , property (not (null [() | Heartbeat 1 _ <- events]))
+        ]
+
+  it "keeps a batch when a gone sibling settled during the heartbeat"
+    $ simulate
+      (plainSetup 1 2 Nothing [Answer 0.5 [(2, Vanish)]])
+      ( \w -> do
+          settled <- newTVarIO False
+          void . forkIO $ threadDelay 1.2 >> atomically (writeTVar settled True)
+          guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [1] else [1, 2])) (threadDelay 3)
+          threadDelay 1
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , property (any (\case Finished [(1, Extend), (2, Vanish)] at -> at == Time 1.5; _ -> False) events)
+        , [() | Heartbeat 2 _ <- events] `is` 0
+        ]
+
+  it "stops a batch when the extend response omits its job" $
+    simulate (plainSetup 1 2 Nothing [Omit]) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 5) $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
+        , [() | Heartbeat 1 _ <- events] `is` 0
+        ]
+
+  it "keeps the batch's old lease when one of two results is missing"
+    $ simulate
+      (plainSetup 1 2 Nothing [Partial 0 [(1, Extend)]])
+      (\w -> guardedBatch w (1 :| [2]) (pure [1, 2]) (threadDelay 4) >> threadDelay 1)
+    $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
+        , property (not (null [() | Heartbeat 1 _ <- events]))
+        , [() | Heartbeat 2 _ <- events] `is` 0
+        ]
+
+  it "ignores a missing result when a sibling settles during the extend"
+    $ simulate
+      (plainSetup 1 2 Nothing [Partial 0.5 [(1, Extend)]])
+      ( \w -> do
+          settled <- newTVarIO False
+          void . forkIO $ threadDelay 1.2 >> atomically (writeTVar settled True)
+          guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [1] else [1, 2])) (threadDelay 3)
+          threadDelay 1
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , [() | Heartbeat 2 _ <- events] `is` 0
+        , property (not (null [() | Heartbeat 1 _ <- events]))
+        , property (any (\case Finished [(1, Extend)] at -> at == Time 1.5; _ -> False) events)
+        ]
+
+  it "ignores a reclaim verdict for a settled sibling"
+    $ simulate
+      (plainSetup 1 3 Nothing [Answer 0.5 [(2, Reclaim)]])
+      ( \w -> do
+          settled <- newTVarIO False
+          void . forkIO $ threadDelay 1.2 >> atomically (writeTVar settled True)
+          guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [1] else [1, 2])) (threadDelay 2)
+          threadDelay 1
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , property (any (\case Finished [(1, Extend), (2, Reclaim)] at -> at == Time 1.5; _ -> False) events)
+        ]
+
+  it "does not heartbeat a settled sibling in a renewed batch"
+    $ simulate
+      (plainSetup 1 3 Nothing [Answer 0.5 []])
+      ( \w -> do
+          settled <- newTVarIO False
+          void . forkIO $ threadDelay 1.2 >> atomically (writeTVar settled True)
+          guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [1] else [1, 2])) (threadDelay 2)
+          threadDelay 1
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , property (any (\case Finished [(1, Extend), (2, Extend)] at -> at == Time 1.5; _ -> False) events)
+        , property (not (null [() | Heartbeat 1 _ <- events]))
+        , [() | Heartbeat 2 _ <- events] `is` 0
+        ]
+
+  it "passes both cancelled and reclaimed siblings to a multi-job handler"
+    $ simulate
+      (plainSetup 1 3 Nothing [Answer 0 [(1, Cancel), (2, Reclaim)]])
+      (\w -> guardedBatch w (1 :| [2]) (pure [1, 2]) (threadDelay 4) >> threadDelay 1)
+    $ \events ->
+      conjoin
+        [ [() | CancelledIds [1] [2] _ <- events] `is` 1
+        , [() | (1, Cancelled, _) <- endings events] `is` 1
+        , [() | Heartbeat _ _ <- events] `is` 0
+        ]
+
+  let judgeMultiBatch (second, settlesDuring, events) =
+        checkCoverage
+          . cover 10 (second == Nothing) "missing sibling"
+          . cover 10 (second == Just Unchanged) "unchanged sibling"
+          . cover 10 (second == Just Extend) "renewed sibling"
+          . cover 10 (second == Just Reclaim) "reclaimed sibling"
+          . cover 20 settlesDuring "settled during extension"
+          $ conjoin
+            [ property (not (null [() | Issued [1, 2] _ <- events]))
+            , if second == Just Reclaim && not settlesDuring
+                then [() | (1, Gone reason, _) <- endings events, reason == reclaimedReason] `is` 1
+                else
+                  if not settlesDuring && second /= Just Extend
+                    then [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
+                    else [() | (1, Done, _) <- endings events] `is` 1
+            , if second == Just Extend && not settlesDuring
+                then property (not (null [() | Heartbeat 2 _ <- events]))
+                else [() | Heartbeat 2 _ <- events] `is` 0
+            ]
+  it "keeps the lease only when every job in a generated batch is renewed" $
+    explorePlans 100 judgeMultiBatch $ do
+      second <- elements [Nothing, Just Unchanged, Just Extend, Just Reclaim]
+      settlesDuring <- elements [False, True]
+      lag <- elements [0.2, 0.5]
+      let response = (1, Extend) : [(2, verdict) | Just verdict <- [second]]
+          run = do
+            (w, events) <- world (plainSetup 1 2 Nothing [Partial lag response])
+            settled <- newTVarIO False
+            when settlesDuring . void . forkIO $ threadDelay 1.1 >> atomically (writeTVar settled True)
+            guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [1] else [1, 2])) (threadDelay 2.75)
+            (,,) second settlesDuring <$> events
+      pure run
+
   it "takes the initial lease from the row, not from the batch start" $
     simulate (Setup 5 20 Nothing [Refuse 0] [(1, 3)] 0 False) (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 6) $ \events ->
       [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 3) at] `is` 1
@@ -523,6 +705,48 @@ spec = describe "Guard simulation" $ do
       conjoin
         [ [() | (1, Done, _) <- endings events] `is` 1
         , property (length [() | Heartbeat 1 _ <- events] >= 3)
+        ]
+
+  it "does not report a heartbeat for a job settled during the extend"
+    $ simulate
+      (plainSetup 1 4 Nothing [Answer 0.5 []])
+      ( \w -> do
+          settled <- newTVarIO False
+          handlerUnder id w 1 0 (threadDelay 3)
+          handlerUnder id w 2 0 (threadDelay 3)
+          guarded w id 3 0 (readTVarIO settled >>= \done -> pure [3 | not done]) $ do
+            threadDelay 1.2
+            atomically (writeTVar settled True)
+            threadDelay 1.8
+          threadDelay 2
+      )
+    $ \events ->
+      conjoin
+        [ [() | (3, Done, _) <- endings events] `is` 1
+        , [() | Heartbeat 3 _ <- events] `is` 0
+        ]
+
+  it "does not start a heartbeat hook after the job settles while its context is captured"
+    $ simulate
+      (plainSetup 1 4 Nothing [Answer 0 []])
+      ( \w -> do
+          settled <- newTVarIO False
+          inheritGate <- newEmptyTMVarIO
+          started <- newEmptyTMVarIO
+          let pending = readTVarIO settled >>= \done -> pure [1 | not done]
+              inherit hook = atomically (putTMVar started ()) >> atomically (readTMVar inheritGate) >> hook
+          void . forkIO $ do
+            start <- getCurrentTime
+            outcome <- try (guardBatch (worldGuard w) (Batch (1 :| []) pending start inherit) (threadDelay 3))
+            record w (Ended 1 (classify outcome))
+          atomically (readTMVar started)
+          atomically (writeTVar settled True >> putTMVar inheritGate ())
+          threadDelay 4
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , [() | Heartbeat 1 _ <- events] `is` 0
         ]
 
   let reclaimed w = handler w 1 0 (threadDelay 3) >> handler w 2 0 (threadDelay 3) >> threadDelay 5

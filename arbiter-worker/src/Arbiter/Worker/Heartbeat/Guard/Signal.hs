@@ -57,7 +57,7 @@ guardBatch guard batch action =
             | job <- toList (batchJobs batch)
             , Just at <- [configLease config job]
             ]
-          -- The claim just leased these rows in full. One already past is the clocks disagreeing.
+          -- A lease already past at registration indicates clock skew.
           (past, current) = partition ((<= monoNow) . snd) rowLeases
           leaseUntil = minimum (addTime (configTimeout config - elapsed) monoNow : map snd current)
           firstBeat = addTime (heartbeatWait (configInterval config) True (leaseUntil `diffTime` monoNow)) monoNow

@@ -30,8 +30,8 @@ of `n`. For a different burst, build a `Policy`:
 | `policyMax` | burst |
 | `policyRefill`, `policyInterval` | tokens added per interval |
 
-`rateLimitCost` sets a job's cost above 1. `addRateLimitTokens` adds tokens by
-hand.
+`rateLimitCost` sets a job's cost above 1. `addRateLimitTokens` adjusts a
+bucket's tokens.
 
 A denied job is invisible until its bucket has enough tokens. The API and admin
 UI show the throttled count per policy and accept policy changes at run time.
@@ -93,8 +93,8 @@ sendEmail job cbs = do
 > With `transactionalWorkerConfig` the bucket update rolls back with the
 > retry. Manual and batched callbacks commit on their own.
 
-**The whole policy is too fast.** Override the policy. Clear the override when
-the vendor recovers:
+**Policy-wide throttling.** Override the policy; clear the override after
+recovery:
 
 ```haskell
 import Arbiter.RateLimit (Policy (..), clearRateLimit, setRateLimit)
@@ -108,4 +108,4 @@ void $ setRateLimit transactional {policyRefill = policyRefill transactional / 2
 void $ clearRateLimit transactional
 ```
 
-See the [`Arbiter.RateLimit` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-RateLimit.html) for the selector DSL and the policy type.
+Selector DSL and policy type: [`Arbiter.RateLimit` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-RateLimit.html).

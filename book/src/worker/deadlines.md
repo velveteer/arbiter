@@ -6,10 +6,11 @@ config { Worker.jobHeartbeatInterval = 30 }  -- how often the worker renews that
 config { Worker.maxJobDuration = Just 300 }  -- longest a handler may run (default: Nothing)
 ```
 
-A claim is a lease on the row's `not_visible_until`. A heartbeat thread renews
-it every `jobHeartbeatInterval` while the handler runs.
+A claim is a lease on the row's `not_visible_until`. One guard per worker pool
+renews due jobs in a shared statement at the `jobHeartbeatInterval` cadence.
+The guard continues fencing leases if an extension stalls.
 
-Three things end a handler before it returns:
+Early handler termination:
 
 | Ends it | When | How the job settles |
 | --- | --- | --- |
@@ -17,8 +18,8 @@ Three things end a handler before it returns:
 | Lease fence | the lease expires after heartbeat failures | unavailable, no retry |
 | Duration deadline | the handler exceeds `maxJobDuration` | retryable failure, then backoff or DLQ |
 
-The lease fence uses the local deadline, needs no database reply, and is
-always on.
+The lease fence uses a local deadline and requires no database response.
+It is always active.
 
 ## maxJobDuration
 
@@ -43,4 +44,4 @@ After the database goes away, a handler continues for at most one
 difference between the two settings. Failed extensions retry until the lease
 expires.
 
-See the [`WorkerConfig` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html) for every timing field.
+Timing fields: [`WorkerConfig` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html).

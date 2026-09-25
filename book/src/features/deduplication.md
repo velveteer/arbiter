@@ -26,4 +26,4 @@ flag, or has children in the queue or DLQ. The queued job is unchanged.
 | Skipped by `IgnoreDuplicate` | `Nothing` |
 | Replacement refused | `Nothing` |
 
-See the [`Arbiter.Core.Job.Dedup` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Dedup.html) for the key type.
+Key type: [`Arbiter.Core.Job.Dedup` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Dedup.html).

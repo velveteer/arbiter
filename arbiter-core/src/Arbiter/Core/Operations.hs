@@ -371,7 +371,7 @@ decodeClaimed
   -> ([JobRead payload], [RejectedRow payload])
 decodeClaimed rows = swap (partitionEithers (map ((\row -> first ((,) row) (decodeRow row)) . mapPayload coerce) rows))
 
--- | Move a rejected row to the DLQ under its decode error, so it cannot poison the next claim.
+-- | Move a rejected row to the DLQ with its decode error.
 -- Returns the number of rows moved. Zero means the claim was voided first.
 deadLetterRejected :: (MonadArbiter m) => RejectedRow payload -> m Int64
 deadLetterRejected (row, err) = do

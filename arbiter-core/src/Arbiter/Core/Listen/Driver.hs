@@ -25,7 +25,7 @@ import Arbiter.Core.Listen (ListenConn (..))
 data ConnStatus = ConnOk | ConnBad | ConnPending
   deriving stock (Eq, Show)
 
--- | What a connect poll asks the caller to wait for.
+-- | Wait target from a connection poll.
 data Polling = PollReading | PollWriting | PollDone
   deriving stock (Eq, Show)
 
@@ -38,7 +38,7 @@ data ConnectDriver conn = ConnectDriver
   , errorMessage :: conn -> IO (Maybe ByteString)
   }
 
--- | Judge a command's result by its status against the driver's success status.
+-- | Check command status against the driver's success status.
 execOutcome :: (Eq status, Show status) => status -> (result -> IO status) -> Maybe result -> IO (Either Text ())
 execOutcome okStatus resultStatus = maybe (pure (Left "returned no result")) (fmap judge . resultStatus)
   where

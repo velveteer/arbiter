@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Resolving which queues a worker process should run from
--- @ARBITER_ENABLED_QUEUES@.
+-- | Worker queue selection from @ARBITER_ENABLED_QUEUES@.
 module Arbiter.Worker.EnabledQueues
   ( getEnabledQueues
   , requestedQueues
@@ -19,15 +18,13 @@ import System.Environment (lookupEnv)
 enabledQueuesEnvVar :: String
 enabledQueuesEnvVar = "ARBITER_ENABLED_QUEUES"
 
--- | The comma-separated queue names @ARBITER_ENABLED_QUEUES@ asks for, every one of them
--- checked against the registry. Unset or blank gives the registry's whole queue set, and
--- a name outside it throws.
+-- | Validated, comma-separated queue names from @ARBITER_ENABLED_QUEUES@.
+-- Unset or blank selects all registered queues. Unknown names throw.
 getEnabledQueues :: (RegistryTables registry) => Proxy registry -> IO [Text]
 getEnabledQueues registry =
   fromMaybe (registryTableNames registry) <$> requestedQueues registry
 
--- | The queue names @ARBITER_ENABLED_QUEUES@ asks for, or 'Nothing' when it is
--- unset or blank. Names are validated against the registry.
+-- | Validated names from @ARBITER_ENABLED_QUEUES@, or 'Nothing' when unset or blank.
 requestedQueues :: (RegistryTables registry) => Proxy registry -> IO (Maybe [Text])
 requestedQueues registry = do
   rawValue <- lookupEnv enabledQueuesEnvVar

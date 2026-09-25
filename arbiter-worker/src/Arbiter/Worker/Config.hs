@@ -112,7 +112,7 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Cadence floor in seconds for the dispatcher poll.
   -- Default: 5.
   , visibilityTimeout :: NominalDiffTime
-  -- ^ How long a claimed job stays invisible to other workers.
+  -- ^ Claimed-job invisibility duration.
   -- Must be greater than 'jobHeartbeatInterval'. Default: 60.
   , jobHeartbeatInterval :: NominalDiffTime
   -- ^ Interval for extending a job's visibility timeout during processing.
@@ -142,15 +142,15 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Seconds a graceful shutdown waits on in-flight jobs before force-exiting.
   -- 'Nothing' waits indefinitely. Default: @Just 30@.
   , logConfig :: LogConfig
-  -- ^ Where the pool's structured JSON logs go, at what level, and what context they
-  -- carry beyond the job's own. Default: Info to stdout.
+  -- ^ Structured JSON log destination, level, and additional context.
+  -- Default: Info to stdout.
   , cronJobs :: [CronJob payload]
   -- ^ Cron schedules. A non-empty list gives the pool a scheduler thread, which reads
   -- the @cron_schedules@ table each tick for runtime overrides. Default: @[]@.
   , reaperInterval :: NominalDiffTime
-  -- ^ How often the reaper runs. Default: @300@ (5 minutes).
+  -- ^ Reaper interval. Default: @300@ (5 minutes).
   , reaperSparseInterval :: NominalDiffTime
-  -- ^ How often the reaper runs an operation that scans the whole schema. Default: @3600@ (1 hour).
+  -- ^ Schema-wide reaper operation interval. Default: @3600@ (1 hour).
   , reaperBucketIdle :: NominalDiffTime
   -- ^ Idle age at which the reaper prunes a rate-limit bucket. Default: @300@ (5 minutes).
   , reaperTimeout :: NominalDiffTime
@@ -169,14 +169,13 @@ data WorkerConfig m payload = WorkerConfig
   -- Default: @300@ (5 minutes).
   }
 
--- | Per-job finalizers handed to a batched handler. Untouched jobs are
+-- | Per-job finalizers passed to a batched handler. Untouched jobs are
 -- reprocessed. The @With@ variants store a result for the job's parent rollup
 -- or its archive entry.
 --
--- Each callback runs in its own transaction and commits on return. Call them at
--- the top level of the handler. Wrapping one in your own 'Arbiter.Core.MonadArbiter.withDbTransaction'
--- enlists the callback into that transaction as a savepoint, committing atomically
--- with your writes. The success hook then fires at savepoint release. An outer
+-- Each callback commits in its own transaction. Inside
+-- 'Arbiter.Core.MonadArbiter.withDbTransaction', it runs as a savepoint in the
+-- outer transaction. The success hook fires at savepoint release. An outer
 -- rollback reprocesses the job after the visibility timeout.
 data BatchCallbacks m payload result = BatchCallbacks
   { ack :: JobRead payload -> m ()
@@ -208,7 +207,7 @@ data BatchCallbacks m payload result = BatchCallbacks
   -- ^ Insert children under this job and suspend it, in one transaction.
   }
 
--- | How the worker claims and runs jobs. Set by this module's config constructors.
+-- | Job claim and handler mode. Set by this module's config constructors.
 data HandlerMode m payload
   = -- | Automatic single-job mode: claim one job per group and run the handler
     -- in a worker transaction, storing its result and acking atomically.
@@ -220,7 +219,7 @@ data HandlerMode m payload
       Int
       (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
 
--- | How many jobs a pool claims per group.
+-- | Jobs claimed per group by a pool.
 handlerBatchSize :: WorkerConfig m payload -> Int
 handlerBatchSize config = case handlerMode config of
   SingleJobMode _ -> 1
@@ -340,7 +339,7 @@ manualWorkerConfig
 manualWorkerConfig workerCnt handler =
   defaultBatchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
 
--- | Rework a pool's observability hooks.
+-- | Transform a pool's observability hooks.
 withHooks
   :: (ObservabilityHooks m payload -> ObservabilityHooks m payload)
   -> WorkerConfig m payload

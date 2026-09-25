@@ -1,4 +1,4 @@
--- | Repeat suppression for a failure a looping action keeps hitting.
+-- | Repeated failure suppression for a looping action.
 module Arbiter.Core.FailureGate
   ( FailureGate
   , newFailureGate
@@ -25,7 +25,7 @@ newFailureGate = FailureGate <$> liftIO (newIORef Nothing)
 defaultFailureRepeatInterval :: NominalDiffTime
 defaultFailureRepeatInterval = 60
 
--- | Take @failure@ as the one the gate holds. True when it is worth reporting.
+-- | Record @failure@. 'True' when reporting is due.
 holdFailure :: (MonadIO m) => FailureGate -> NominalDiffTime -> Text -> m Bool
 holdFailure (FailureGate ref) repeatAfter failure = liftIO $ do
   now <- getMonotonicTime
@@ -33,7 +33,7 @@ holdFailure (FailureGate ref) repeatAfter failure = liftIO $ do
     let worth = maybe True (\(heldFailure, heldAt) -> heldFailure /= failure || now - heldAt >= realToFrac repeatAfter) held
      in (if worth then Just (failure, now) else held, worth)
 
--- | Drop whatever the gate holds. True when it held a failure.
+-- | Clear the recorded failure. 'True' when one was recorded.
 clearFailure :: (MonadIO m) => FailureGate -> m Bool
 clearFailure (FailureGate ref) =
   liftIO $ atomicModifyIORef' ref (\held -> (Nothing, isJust held))

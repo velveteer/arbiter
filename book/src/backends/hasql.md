@@ -24,8 +24,8 @@ ArbH.inTransaction @AppRegistry conn "arbiter" $
 _ <- Hasql.use conn (Session.script "COMMIT")
 ```
 
-Use your own pool. The env holds one pool connection for `LISTEN/NOTIFY`. Any
-adapter can open the pool:
+With a custom pool, the environment reserves one connection for
+`LISTEN/NOTIFY`. Any adapter can open the pool:
 
 ```haskell
 import Data.Pool (defaultPoolConfig, newPool)
@@ -36,4 +36,4 @@ pool <- newPool (defaultPoolConfig acquire Hasql.release 60 10)
 env <- ArbH.createHasqlEnvWithPool (Proxy @AppRegistry) pool "arbiter"
 ```
 
-See the [arbiter-hasql haddocks](https://arbiterq.dev/arbiter-hasql/Arbiter-Hasql.html) for the env and pool constructors.
+Environment and pool constructors: [arbiter-hasql Haddocks](https://arbiterq.dev/arbiter-hasql/Arbiter-Hasql.html).

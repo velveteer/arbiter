@@ -136,4 +136,4 @@ handler conn job = case Arb.payload job of
     pure (Sum totalRows)
 ```
 
-See the [`Arbiter.Core.JobTree` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-JobTree.html) for the tree builders.
+Tree builders: [`Arbiter.Core.JobTree` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-JobTree.html).

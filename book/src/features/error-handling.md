@@ -45,6 +45,6 @@ processExport conn job = do
 
 A failed job sets an error status and message on its consumer span. A batch
 span has no error status. A cancel or nack leaves the span status unchanged.
-See [OpenTelemetry](../opentelemetry.md).
+Trace details: [OpenTelemetry](../opentelemetry.md).
 
-See the [`Arbiter.Core.Exceptions` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Exceptions.html) for each disposition.
+Exception dispositions: [`Arbiter.Core.Exceptions` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Exceptions.html).

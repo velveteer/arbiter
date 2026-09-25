@@ -119,7 +119,7 @@ import Arbiter.Servant.Types
 -- statements run in.
 data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
-  -- ^ Run a backend action, for example @runSimpleDb env@ or @runHasqlDb env@.
+  -- ^ Backend runner, e.g. @runSimpleDb env@ or @runHasqlDb env@.
   , serverSchema :: Text
   -- ^ The schema every handler's statements run against.
   , enableSSE :: Bool
@@ -813,7 +813,7 @@ nackClaimedJobHandler tableName config jobId lease =
   withHeldJob @registry tableName config jobId lease $ \schemaName job ->
     Ops.nackJob schemaName tableName job
 
--- | Extend a held lease. This is the HTTP consumer equivalent of a worker heartbeat.
+-- | Extend a held HTTP lease, equivalent to a worker heartbeat.
 extendClaimedJobHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1165,8 +1165,7 @@ healthHandler config = do
           , errHeaders = [("Content-Type", "application/json;charset=utf-8")]
           }
 
--- | Time a database round-trip and report what it says about itself. Cancellation
--- still propagates.
+-- | Timed database health probe. Cancellation propagates.
 probeHealth
   :: forall registry m
    . (HasRegistry m registry)
@@ -1268,7 +1267,7 @@ cachedForKey ttl cell key produce
         if current == epoch then (current, Map.insert key (now, value) cached) else (current, cached)
       pure value
 
--- | Bump a cache cell's epoch and drop its entries, after an operator mutation.
+-- | Increment a cache cell's epoch and clear its entries after an operator mutation.
 invalidate :: CacheCell a -> Handler ()
 invalidate cell = liftIO $ atomically $ modifyTVar' (cacheEntries cell) $ \(epoch, _) -> (epoch + 1, Map.empty)
 

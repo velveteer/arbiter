@@ -161,11 +161,12 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
         let ticksInWindow = enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
             ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
             replayCount = length (filter (/= currentTick) ticksToFire)
-        when (replayCount > 0)
-          $ logCron cronLog Info
-          $ "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cron <> "'"
-        for_ ticksToFire $ \tick ->
-          tryInsertCronJob cronLog schemaName cron effectiveOv (tickKindFor currentTick tick) tick
+        when (replayCount > 0) $
+          logCron cronLog Info $
+            "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cron <> "'"
+        for_ ticksToFire $ \tick -> do
+          insertCronJob schemaName cron effectiveOv (tickKindFor currentTick tick) tick
+          logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick
 
 data TickOutcome = NotLeader | Ran
 
@@ -226,25 +227,19 @@ resolveAndParse cron mRow =
             _ -> Effective overlapPolicy sched zone
         else Disabled
 
--- | Attempt to insert a single cron-tick job. Any failure is logged.
---
--- The insert and the per-tick @last_checked_at@ advance are atomic. If
--- either fails the other rolls back.
-tryInsertCronJob
+-- | Insert a cron tick inside the catch-up transaction. A failed insert rolls
+-- back the schedule watermark, allowing the next pass to retry the tick.
+insertCronJob
   :: (QueueOperation m payload)
-  => CronLog -> Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m ()
-tryInsertCronJob cronLog schemaName cron effectiveOv kind tick = do
-  result <- tryCron cronLog ("Cron schedule '" <> name cron <> "' insert") . withDbTransaction $ do
-    -- Gate first. Another pool may have fired this minute.
-    fired <- Ops.tryFireCronGate schemaName (name cron) tick
-    when fired $ do
-      let key = makeDedupKeyFromParts (name cron) effectiveOv tick
-          jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
-      void $ HL.insertJob jobWrite
-    void $ Ops.touchCronChecked schemaName tick [name cron]
-  traverse_
-    (const . logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick)
-    result
+  => Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m ()
+insertCronJob schemaName cron effectiveOv kind tick = do
+  -- Gate first. Another pool may have fired this minute.
+  fired <- Ops.tryFireCronGate schemaName (name cron) tick
+  when fired $ do
+    let key = makeDedupKeyFromParts (name cron) effectiveOv tick
+        jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
+    void $ HL.insertJob jobWrite
+  void $ Ops.touchCronChecked schemaName tick [name cron]
 
 data RunNowOutcome = Fired | Skipped | NotRequested
 
@@ -302,8 +297,8 @@ newCronLog logCfg = CronLog logCfg <$> newFailureGates
 logCron :: (MonadIO m) => CronLog -> LogLevel -> Text -> m ()
 logCron cronLog level msg = liftIO $ tryLog (cronLogConfig cronLog) level msg
 
--- | Run a scheduler step, reporting only when its outcome changes. A schedule that
--- keeps failing the same way says so one time, then again when it recovers.
+-- | Run a scheduler step. Report new failures and recovery; suppress repeated
+-- identical failures.
 tryCron :: (MonadUnliftIO m) => CronLog -> Text -> m a -> m (Either SomeException a)
 tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cronLog)
 

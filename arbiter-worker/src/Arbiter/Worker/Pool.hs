@@ -74,7 +74,7 @@ import Arbiter.Worker.WorkQueue (WorkQueue, busyCount, inFlight, newWorkQueue, q
 poolSpanShape :: WorkerConfig m payload -> ConsumeShape
 poolSpanShape = toConsumeShape . handlerBatchSize
 
--- | The pace the pool's reaper keeps.
+-- | Reaper timing for a worker pool.
 reaperPace :: WorkerConfig m payload -> MaintenancePace
 reaperPace config =
   MaintenancePace

@@ -138,7 +138,7 @@ codecColumns = runAp_ colName
 joinColumns :: [Text] -> Text
 joinColumns = T.intercalate ", "
 
--- | How a parameter is shaped: scalar, nullable, or array.
+-- | Parameter shape: scalar, nullable, or array.
 data ParamType a where
   PScalar :: Col a -> ParamType a
   PNullable :: Col a -> ParamType (Maybe a)

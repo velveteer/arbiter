@@ -17,8 +17,7 @@ A PostgreSQL job queue for Haskell applications.
 - Observability callbacks, structured logging
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes and systemd
-- More than 1,000 integration tests
 
 > [!NOTE]
 >
-> The API is subject to breaking changes. A Hackage release following PVP is tentative.
+> The API may change. A Hackage release following PVP is tentative.

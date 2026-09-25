@@ -54,4 +54,4 @@ exception at `Warning` and carries on.
 
 Reaper activity reports through `onMaintenance` on `WorkerConfig`.
 
-See the [`ObservabilityHooks` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Types.html#t:ObservabilityHooks) for each callback's arguments.
+Callback arguments: [`ObservabilityHooks` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Types.html#t:ObservabilityHooks).

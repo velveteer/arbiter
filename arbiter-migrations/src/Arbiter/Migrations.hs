@@ -523,10 +523,9 @@ reconcileRateLimitDurability conn schemaName durability = do
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
     _ -> pure ()
 
--- | Converge the optional triggers after the tracked migrations. This restores what an
--- earlier disabled configuration removed and leaves migration history alone. The sweep
--- is schema-wide. The table list is the schema's whole queue set. An object that
--- belongs to a queue outside it is dropped.
+-- | Reconcile optional triggers schema-wide after tracked migrations.
+-- Restore triggers removed by disabled options; drop objects for queues outside
+-- the supplied table list. Migration history remains unchanged.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do

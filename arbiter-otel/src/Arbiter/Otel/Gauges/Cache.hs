@@ -46,8 +46,7 @@ data Cached = Cached
   , reading :: Snapshot
   }
 
--- | What the instruments export. 'Idle' keeps the last reading's scan time for the
--- staleness series. Before the first scan it has none.
+-- | Instrument export state. 'Idle' retains the last scan time, if available.
 data Export = Live Cached | Idle (Maybe Double)
 
 -- | The scan behind an export, if it has one.

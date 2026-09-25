@@ -2,8 +2,7 @@
 
 `MonadArbiter` separates the core from the database library. Three adapters
 ship: [arbiter-simple](simple.md), [arbiter-orville](orville.md), and
-[arbiter-hasql](hasql.md). Use the one for your application's library to share
-connections.
+[arbiter-hasql](hasql.md). Each shares connections with its database library.
 
 ## Benchmarks
 

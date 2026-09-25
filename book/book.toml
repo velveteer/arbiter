@@ -1,6 +1,6 @@
 [book]
 title = "Arbiter"
-description = "Distributed job processing in Haskell, backed by your own PostgreSQL database"
+description = "PostgreSQL job queue for Haskell"
 src = "src"
 language = "en"
 

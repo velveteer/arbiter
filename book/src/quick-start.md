@@ -93,7 +93,7 @@ skips the insert.
 
 ## Configuring a Job
 
-Start from `defaultJob` or `defaultGroupedJob` and apply setters:
+Configure `defaultJob` or `defaultGroupedJob` with setters:
 
 ```haskell
 job =
@@ -156,5 +156,5 @@ processEmail job cbs = do
   Worker.ack cbs job
 ```
 
-See [Worker Configuration](worker/configuration.md) and
+Configuration details: [Worker Configuration](worker/configuration.md),
 [Batched Handlers](worker/batched-handlers.md).

@@ -67,7 +67,7 @@ handlerSleepMicros = 30_000_000
 unwindMicros :: Int
 unwindMicros = 4_000_000
 
--- | A masked stretch longer than the deadline, so delivery has to wait it out.
+-- | Masked interval longer than the deadline.
 maskedMicros :: Int
 maskedMicros = 4_000_000
 

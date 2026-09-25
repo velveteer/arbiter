@@ -21,15 +21,15 @@ import UnliftIO.Exception (tryAny)
 import Arbiter.Otel.Gauges.Cache (Snapshot)
 import Arbiter.Otel.Gauges.Scan (scanSnapshot)
 
--- | A prepared refresh operation and its timing values. A refresh that says nothing
--- about the database yields @Right Nothing@.
+-- | Prepared refresh operation and timing values. An abandoned refresh yields
+-- @Right Nothing@.
 data RefreshSource = RefreshSource
   { runRefresh :: IO (Either SomeException (Maybe (Shared Snapshot)))
   , minimumDelay :: NominalDiffTime
   }
 
--- | The gate interval over the refresh interval. Under the loop's period, so a
--- replica can win the gate on consecutive ticks.
+-- | Gate interval as a fraction of the refresh interval. Below one for
+-- consecutive gate acquisitions by the same replica.
 gateIntervalFactor :: NominalDiffTime
 gateIntervalFactor = 0.9
 

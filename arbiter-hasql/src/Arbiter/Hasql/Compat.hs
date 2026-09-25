@@ -60,7 +60,7 @@ runScript = Session.sql
 #endif
 
 #if MIN_VERSION_hasql(2,0,0)
--- | How to open a connection. On hasql 2 this is a transport adapter, such as @Pqi.Ffi.adapter@, and a connection string.
+-- | Connection settings for hasql 2: transport adapter (e.g. @Pqi.Ffi.adapter@) and connection string.
 data HasqlConnect = HasqlConnect PQ.Adapter ByteString
 
 toHasqlConnect :: PQ.Adapter -> ByteString -> HasqlConnect
@@ -74,7 +74,7 @@ acquireConnect (HasqlConnect adapter connStr) = either (Left . show) Right <$> H
 withDedicatedListenConn :: HasqlConnect -> (ListenConn -> IO a) -> IO a
 withDedicatedListenConn (HasqlConnect adapter connStr) = withDriverListenConn (pqiConnectDriver adapter) toListenConn connStr
 #else
--- | How to open a connection. On hasql 1.x this is a connection string.
+-- | Connection settings for hasql 1.x: connection string.
 newtype HasqlConnect = HasqlConnect ByteString
 
 toHasqlConnect :: ByteString -> HasqlConnect

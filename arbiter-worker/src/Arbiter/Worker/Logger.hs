@@ -89,7 +89,7 @@ data LogDestination
   | -- | Discard all logs (silent mode)
     LogDiscard
 
--- | How the worker emits its own logs.
+-- | Worker log level, destination, and context.
 data LogConfig = LogConfig
   { minLogLevel :: LogLevel
   -- ^ Minimum severity to emit. Messages below this level are dropped.
@@ -102,7 +102,7 @@ data LogConfig = LogConfig
   -- ^ The library's pool and worker pairs. 'additionalContext' wins on a
   -- collision. Default: @[]@.
   , failureRepeatInterval :: NominalDiffTime
-  -- ^ How often a standing failure says so again. Default: 60s.
+  -- ^ Repeat interval for a persistent failure. Default: 60s.
   }
 
 -- | Default log configuration: Info level to stdout, no additional context.
@@ -159,8 +159,7 @@ hubLogFor cfg =
   where
     shared = cfg {identityContext = []}
 
--- | The gentlest level a recovery can take and still reach a log that showed
--- the failure.
+-- | Recovery log level visible at the failure's logging threshold.
 recoveryLevel :: LogConfig -> LogLevel -> LogLevel
 recoveryLevel cfg level = min level (max Info (minLogLevel cfg))
 

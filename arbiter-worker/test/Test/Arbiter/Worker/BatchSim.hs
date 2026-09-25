@@ -423,6 +423,7 @@ data Thrown
   | ThrowTreeCancel
   | ThrowBranchCancel
   | ThrowGone Int
+  | ThrowGoneAll
   | ThrowNack
   | ThrowOther
   deriving stock (Eq, Show)
@@ -511,6 +512,7 @@ thrownException jobs = \case
   ThrowTreeCancel -> toException (TreeCancel (TreeCancelException "cancel the tree"))
   ThrowBranchCancel -> toException (BranchCancel (BranchCancelException "cancel the branch"))
   ThrowGone index -> toException (JobGoneException handlerGone [jobId (toList jobs !! (index - 1))])
+  ThrowGoneAll -> toException (JobGoneException handlerGone (map jobId (toList jobs)))
   ThrowNack -> toException JobNackException
   ThrowOther -> toException (userError "handler crashed")
 
@@ -762,6 +764,15 @@ goneThenSiblingCancel = Plan 2 Nothing [Sleep 0.005, Throw (ThrowGone 1)] [(0.00
 spawnThenForceCancel :: Plan
 spawnThenForceCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, SpawnOne 1] [(1.5, Flag 2)] [Extends] Nothing
 
+-- | Later callbacks cannot overwrite a job the handler already spawned.
+spawnThenRepeatedCallbacks :: Plan
+spawnThenRepeatedCallbacks =
+  Plan 1 Nothing [SpawnOne 1, AckOne 1, AckMany [1], FailOne RetryFailure 1, NackOne 1, SpawnOne 1] [] [Extends] Nothing
+
+-- | A stale guard signal names a job the handler already acked.
+goneAfterSiblingAck :: Plan
+goneAfterSiblingAck = Plan 2 Nothing [AckMany [2], Throw ThrowGoneAll] [] [Extends] Nothing
+
 -- | The share of explored schedules in which the cancel lands after the spawn.
 spawnInterruptedTarget :: Double
 spawnInterruptedTarget = 5
@@ -807,6 +818,18 @@ scenario plan label target reached =
 
 spec :: Spec
 spec = describe "Batch simulation" $ do
+  it "ignores every callback after a job spawns children" $
+    exploreScenario judgePlan (runPlan spawnThenRepeatedCallbacks)
+  it "preserves an acked sibling named by a stale gone signal" $
+    exploreScenario
+      ( \result@(_, events, _) ->
+          conjoin
+            [ judgePlan result
+            , map snd (reportedKinds events 1) === [UnavailableK handlerGone]
+            , map snd (reportedKinds events 2) === [SuccessK]
+            ]
+      )
+      (runPlan goneAfterSiblingAck)
   it "reports an acked sibling when a force-cancel interrupts the report" $
     scenario ackThenSiblingCancel "the cancel landed after the ack" reportInterruptedTarget $ \(_, events, _) ->
       batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
@@ -822,10 +845,10 @@ spec = describe "Batch simulation" $ do
   it "reports a spawned job when a force-cancel interrupts the report" $
     scenario spawnThenForceCancel "the cancel landed after the spawn" spawnInterruptedTarget $ \(_, events, _) ->
       batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
-  it "keeps its invariants over generated plans"
-    $ checkCoverage
-    $ explorePlans
-      planRuns
-      ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
-      )
-      (runPlan <$> genPlan)
+  it "keeps its invariants over generated plans" $
+    checkCoverage $
+      explorePlans
+        planRuns
+        ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
+        )
+        (runPlan <$> genPlan)

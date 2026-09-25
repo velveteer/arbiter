@@ -12,4 +12,4 @@ nothing.
 
 Handler and pool logs carry the job context.
 
-See the [`Arbiter.Worker.Logger` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Logger.html) for `LogConfig` and every destination.
+`LogConfig` and destinations: [`Arbiter.Worker.Logger` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Logger.html).
