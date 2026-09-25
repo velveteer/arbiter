@@ -99,7 +99,13 @@ poolEffects config statements consumeSpan = do
                 let lockTrees
                       | cancelsTree kind = Ops.lockJobTreesFromRoot
                       | otherwise = Ops.lockJobTrees
-                Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
+                if kind == BranchCancelFailure
+                  then
+                    Ops.lockJobRootsAndParents
+                      schemaName
+                      queue
+                      [fromMaybe (Job.primaryKey job) (Job.parentId job) | job <- unhandled <> unowned]
+                  else Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
                 lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
                 outcomes <-
                   traverse (\job -> (job,) <$> handleJobFailure config Ops.LocksHeld failure job) unhandled

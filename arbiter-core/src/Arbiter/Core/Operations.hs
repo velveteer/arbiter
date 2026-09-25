@@ -58,6 +58,7 @@ module Arbiter.Core.Operations
   , ackJobsBatchWith
   , ackJobsBatch
   , lockJobParents
+  , lockJobRootsAndParents
   , lockJobTrees
   , lockJobTreesFromRoot
   , TreeLocks (..)
@@ -1071,6 +1072,14 @@ lockJobParents schemaName tableName parents =
   unless (null pids) $ void $ MA.executeQueryPrepared (advisoryXactLockManySQL (schemaName <> "." <> tableName) pids)
   where
     pids = Set.toAscList (Set.fromList (catMaybes parents))
+
+-- | Take every advisory lock a cascade cancellation will acquire, in one
+-- ordered pass before locking its rows. A branch root may itself have a parent.
+lockJobRootsAndParents :: (MonadArbiter m) => SchemaName -> TableName -> [Int64] -> m ()
+lockJobRootsAndParents _ _ [] = pure ()
+lockJobRootsAndParents schemaName tableName roots = do
+  parents <- MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName roots)
+  lockJobParents schemaName tableName (map Just roots <> parents)
 
 -- | Take the advisory locks of the jobs named and of their parents.
 lockJobsAndParents :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Maybe Int64)] -> m ()

@@ -447,11 +447,11 @@ judgePlan (plan, events) =
       where
         job = planJob batch
         registered = registeredAt job
-        -- A row lease already past at registration is dropped as clock disagreement.
+        -- An expired initial lease refuses entry at registration.
         initialLease =
           minimum
             ( addTime (timeoutFor - elapsed batch) registered
-                : [Time off | Just off <- [lookup job (rowLeases setup)], Time off > registered]
+                : [Time off | Just off <- [lookup job (rowLeases setup)]]
             )
         renewals =
           [ addTime timeoutFor (issuedAt statement)
@@ -689,11 +689,24 @@ spec = describe "Guard simulation" $ do
     simulate (Setup 5 20 Nothing [Refuse 0] [(1, 9)] 0 False) (\w -> handler w 1 17 (threadDelay 10) >> threadDelay 6) $ \events ->
       [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 3) at] `is` 1
 
-  it "keeps a batch whose row lease is already past at register, and says so" $
-    simulate (Setup 5 20 Nothing [Answer 0 []] [(1, -3)] 0 False) (\w -> handler w 1 0 (threadDelay 2) >> threadDelay 4) $ \events ->
+  it "refuses to enter a handler with an expired row lease"
+    $ simulate
+      (Setup 5 20 Nothing [Answer 0 [(1, Reclaim)]] [(1, -3)] 0 False)
+      (\w -> handler w 1 0 (record w (Caught 1)) >> threadDelay 4)
+    $ \events ->
       conjoin
-        [ [() | (1, Done, _) <- endings events] `is` 1
-        , [() | Logged Warning [1] _ <- events] `is` 1
+        [ [() | (1, Gone reason, _) <- endings events, reason == leaseExpiredReason] `is` 1
+        , [() | Caught 1 _ <- events] `is` 0
+        ]
+
+  it "refuses the whole batch when one sibling's row lease expired before registration"
+    $ simulate
+      (Setup 1 10 Nothing [Answer 0 []] [(1, 8), (2, -1)] 0 False)
+      (\w -> guardedBatch w (1 :| [2]) (pure [1, 2]) (record w (Caught 1)))
+    $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, _) <- endings events, reason == leaseExpiredReason] `is` 1
+        , [() | Caught 1 _ <- events] `is` 0
         ]
 
   it "cannot be held past the lease by a chain of failing extends" $
@@ -772,7 +785,7 @@ spec = describe "Guard simulation" $ do
       [() | (1, Done, at) <- endings events, at == Time 4] `is` 1
 
   it "delivers one signal when the lease and the deadline pass together" $
-    simulate (plainSetup 10 1 (Just 0.001) []) (\w -> handler w 1 5 (swallowing w 1 1.5) >> threadDelay 3) $ \events ->
+    simulate (plainSetup 10 1 (Just 1) [Refuse 0]) (\w -> handler w 1 0 (swallowing w 1 1.5) >> threadDelay 3) $ \events ->
       conjoin
         [ [() | Caught 1 _ <- events] `is` 1
         , [() | (1, Done, _) <- endings events] `is` 1

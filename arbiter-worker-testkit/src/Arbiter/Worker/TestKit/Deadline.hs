@@ -52,7 +52,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Clock (getMonotonicTime)
-import Test.Hspec (Spec, before, describe, it, shouldBe, shouldSatisfy)
+import Test.Hspec (Spec, before, describe, it, shouldBe, shouldReturn, shouldSatisfy)
 import UnliftIO (MonadUnliftIO, finally, mask_, tryAny, withRunInIO)
 import UnliftIO.Async (async, poll, waitCatch, withAsync)
 
@@ -151,6 +151,32 @@ deadlineSpec
 deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, runM} =
   before mkEnv $ do
     describe "Guard registration" $ do
+      it "interrupts a blocked claim hook at the duration deadline before the handler starts" $ \env -> do
+        handlerCalls <- newIORef (0 :: Int)
+        hookCalls <- newIORef (0 :: Int)
+        let handler = mkHandler $ \_ -> liftIO $ atomicModifyIORef' handlerCalls (\n -> (n + 1, ()))
+            hooks =
+              defaultObservabilityHooks
+                { onJobClaimed = \_ _ -> liftIO $ do
+                    atomicModifyIORef' hookCalls (\n -> (n + 1, ()))
+                    threadDelay 30_000_000
+                }
+        void (insertedId env)
+        base :: WorkerConfig m payload <- transactionalWorkerConfig 1 handler
+        let config =
+              base
+                { pollInterval = 0.05
+                , visibilityTimeout = 3
+                , jobHeartbeatInterval = 1
+                , maxJobDuration = Just 0.5
+                , observabilityHooks = hooks
+                , logConfig = silentLogConfig
+                }
+        withAsync (runM env $ runWorkerPool config) $ \_ -> do
+          waitUntil 5_000 $ not . null <$> listDLQ env
+          readIORef hookCalls `shouldReturn` 1
+          readIORef handlerCalls `shouldReturn` 0
+
       it "returns once a signal in flight meets the unregister" $ \env -> do
         job <- inserted env (defaultJob (mkSimple "slow"))
         config <- transactionalWorkerConfig 1 idleHandler

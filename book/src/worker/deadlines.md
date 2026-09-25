@@ -21,6 +21,14 @@ Early handler termination:
 The lease fence uses a local deadline and requires no database response.
 It is always active.
 
+A batch whose lease has already expired when it reaches the guard is rejected
+before its claim hooks or handler run. Keep worker and database clocks synchronized.
+An expired timestamp is not treated as evidence of clock skew.
+
+The guard registers before `onJobClaimed` runs. Claim hooks receive heartbeat
+protection, and their runtime counts toward `maxJobDuration`. A blocked claim hook
+is interrupted by the duration deadline or by lease loss, just like a handler.
+
 ## maxJobDuration
 
 ```haskell

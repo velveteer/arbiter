@@ -818,6 +818,28 @@ scenario plan label target reached =
 
 spec :: Spec
 spec = describe "Batch simulation" $ do
+  it "heartbeats jobs while their claim hook runs" $
+    exploreScenario
+      (\events -> [jobs | Issued jobs _ <- events, not (null jobs)] === [[1], [1]])
+      (claimHookScenario Nothing Extends 2.5)
+  it "bounds a blocked claim hook by the duration deadline" $
+    exploreScenario
+      ( \events ->
+          conjoin
+            [ map snd (reportedKinds events 1) === [RetryK]
+            , [at < Time 1 | Ended _ at <- events] === [True]
+            ]
+      )
+      (claimHookScenario (Just 0.5) Extends 10)
+  it "fences a blocked claim hook when renewal fails" $
+    exploreScenario
+      ( \events ->
+          conjoin
+            [ map snd (reportedKinds events 1) === [UnavailableK leaseExpiredReason]
+            , [at < Time 4 | Ended _ at <- events] === [True]
+            ]
+      )
+      (claimHookScenario Nothing Refuses 10)
   it "ignores every callback after a job spawns children" $
     exploreScenario judgePlan (runPlan spawnThenRepeatedCallbacks)
   it "preserves an acked sibling named by a stale gone signal" $
@@ -852,3 +874,22 @@ spec = describe "Batch simulation" $ do
         ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
         )
         (runPlan <$> genPlan)
+
+-- | The claim hook runs before user processing but already owns a database lease.
+claimHookScenario :: Maybe DiffTime -> ExtendReply -> DiffTime -> IOSim s [Event]
+claimHookScenario deadline reply hookDelay = do
+  exploreRaces
+  (recorder, events) <- newRecorder
+  rows <- newTVarIO (Map.singleton 1 (Row 1 (Just Us) (Just (Time leaseTimeout)) False 1 False))
+  script <- newTVarIO [reply]
+  guard <- startGuard (guardConfigFor rows recorder script deadline)
+  handlerVar <- newTVarIO Nothing
+  let base = modelEffects rows recorder
+      effects =
+        base
+          { effectReport = \ctx report -> case report of
+              Claimed _ _ -> threadDelay hookDelay
+              _ -> effectReport base ctx report
+          }
+  worker effects guard (SingleMode (ackOrGone rows recorder)) handlerVar (Job 1 1 1 :| []) recorder
+  events

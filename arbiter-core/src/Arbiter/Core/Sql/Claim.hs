@@ -85,38 +85,43 @@ groupHeadBatch tbl groupKey extras limit =
 
 -- | The batch a gated group would take, reduced to the row the group cut ranks first,
 -- and the headroom check on that row.
-gatedHeadLateral :: Text -> Text -> Text -> Text
-gatedHeadLateral tbl batchLimit headGate =
-  let headBatch = groupHeadBatch tbl "eligible.group_key" ["concurrency_key", "claimed_by"] batchLimit
+gatedHeadPred :: Text -> Text -> Text -> Text -> Text
+gatedHeadPred tbl groupKey batchLimit headGate =
+  let headBatch = groupHeadBatch tbl groupKey ["concurrency_key", "claimed_by"] batchLimit
    in [text|
-    CROSS JOIN LATERAL (
-      SELECT head_batch.concurrency_key, head_batch.claimed_by
+    EXISTS (
+      SELECT 1
       FROM (
-        ${headBatch}
-      ) head_batch
-      ORDER BY head_batch.priority ASC, head_batch.id ASC
-      LIMIT 1
-    ) gated_head
-    WHERE ${headGate}
+        SELECT head_batch.concurrency_key, head_batch.claimed_by
+        FROM (
+          ${headBatch}
+        ) head_batch
+        ORDER BY head_batch.priority ASC, head_batch.id ASC
+        LIMIT 1
+      ) gated_head
+      WHERE ${headGate}
+    )
   |]
 
 -- | Candidate stage one. Groups with ready or due work, locked and reduced
 -- to each head row. A gated group is judged on the row its next batch would take.
 groupCandidateCtes :: Text -> Text -> Text -> Text -> Text
-groupCandidateCtes groupsTbl tbl overfetch gateLateral =
+groupCandidateCtes groupsTbl tbl overfetch headGate =
   let claimable = claimablePred "job"
    in [text|
     group_candidates AS (
       (
-        SELECT group_key FROM ${groupsTbl}
+        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
         WHERE ready_count > 0 AND in_flight_until IS NULL
+          ${headGate}
         ORDER BY min_priority ASC, min_id ASC
         LIMIT ${overfetch}
       )
       UNION
       (
-        SELECT group_key FROM ${groupsTbl}
+        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
         WHERE next_due <= NOW()
+          ${headGate}
         ORDER BY next_due ASC
         LIMIT ${overfetch}
       )
@@ -141,7 +146,6 @@ groupCandidateCtes groupsTbl tbl overfetch gateLateral =
         ORDER BY job.priority ASC, job.id ASC
         LIMIT 1
       ) head
-      ${gateLateral}
     )
   |]
 
@@ -562,8 +566,10 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       jobHeadroom = concHeadroomPred concTbl concPolicies "job"
       headHeadroom = concHeadroomPred concTbl concPolicies "gated_head"
       ccGate = mwhen hasConcurrency [text|AND ${jobHeadroom}|]
-      gateLateral = mwhen hasConcurrency (gatedHeadLateral tbl batchLimit headHeadroom)
-      groupCandidates = groupCandidateCtes groupsTbl tbl overfetch gateLateral
+      -- Admission precedes the bounded candidate window, so a full key cannot
+      -- pin every poll to the same prefix of blocked groups.
+      headGate = mwhen hasConcurrency ("AND " <> gatedHeadPred tbl "candidate_group.group_key" batchLimit headHeadroom)
+      groupCandidates = groupCandidateCtes groupsTbl tbl overfetch headGate
       ungroupedPool = ungroupedPoolCtes tbl ungroupedLimit batchLimit ccGate
       allocatedSlots = allocatedSlotCtes batchBudget
       lockedCandidates = lockedCandidateCtes tbl batchLimit ungroupedLimit
