@@ -879,13 +879,13 @@ spec = describe "Batch simulation" $ do
   it "reports a spawned job when a force-cancel interrupts the report" $
     scenario spawnThenForceCancel "the cancel landed after the spawn" spawnInterruptedTarget $ \(_, events, _) ->
       batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
-  it "keeps its invariants over generated plans" $
-    checkCoverage $
-      explorePlans
-        planRuns
-        ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
-        )
-        (runPlan <$> genPlan)
+  it "keeps its invariants over generated plans"
+    $ checkCoverage
+    $ explorePlans
+      planRuns
+      ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
+      )
+      (runPlan <$> genPlan)
 
 -- | A job's claim hook as 'Nothing', its terminal report as its kind.
 hookOf :: Event -> Maybe (JobId, Maybe Kind)

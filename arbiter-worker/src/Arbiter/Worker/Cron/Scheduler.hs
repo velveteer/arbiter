@@ -183,9 +183,9 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
         (replayed, lastOutcome) <- case effectiveOv of
           AllowOverlap -> runTicks (== TickNoLeader)
           SkipOverlap -> runTicks (/= TickFailed)
-        when (replayed > 0) $
-          logCron cronLog Info $
-            "Replayed " <> T.pack (show replayed) <> " missed tick(s) for '" <> name cron <> "'"
+        when (replayed > 0)
+          $ logCron cronLog Info
+          $ "Replayed " <> T.pack (show replayed) <> " missed tick(s) for '" <> name cron <> "'"
         pure $ case (lastOutcome, backfill cron) of
           (TickHandled _, _) -> True
           (TickFailed, NoBackfill) -> True

@@ -10,6 +10,14 @@ A claim is a lease on the row's `not_visible_until`. One guard per worker pool
 renews due jobs in a shared statement at the `jobHeartbeatInterval` cadence.
 The guard continues fencing leases if an extension stalls.
 
+An extension that remains stuck past its timeout and settlement grace releases
+the guard's renewal slot so later batches can be renewed. Its late response
+cannot update a replacement attempt's timers or clear its slot. The stuck driver
+call retains its checked-out connection until it exits, so recovery still requires
+another available pool connection. The guard abandons one extension at a time. If
+the replacement also stalls, renewal waits for the abandoned call to exit, so a
+wedged backend holds at most two of the pool's connections.
+
 Early handler termination:
 
 | Ends it | When | How the job settles |

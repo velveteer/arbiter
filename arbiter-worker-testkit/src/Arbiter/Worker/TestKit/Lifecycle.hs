@@ -1309,61 +1309,65 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
               pure (length dlqJobs == 2)
 
       for_ [False, True] $ \nested ->
-        it ("takes branch-cancel advisory locks before settlement row locks (" <> (if nested then "nested" else "standalone") <> ")") $ \env -> do
-          (jid, lockId) <-
-            if nested
-              then do
-                Right (root :| [_, child]) <- runM env $ HL.insertJobTree $
-                  JT.rollup
-                    (defaultJob (mkSimple "branch-grandparent"))
-                    ( JT.rollup
-                        (defaultJob (mkSimple "branch-parent"))
-                        (JT.leaf (defaultJob (mkSimple "branch-child")) :| [])
-                        :| []
-                    )
-                pure (primaryKey child, primaryKey root)
-              else do
-                Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "branch-lock-order"))
-                pure (primaryKey job, primaryKey job)
-          let handler _jobs _callbacks = throwBranchCancel "cancel branch"
-          base :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 1 handler
-          let config = base {pollInterval = 0.05, logConfig = silentLogConfig}
-          withConn connStr $ \conn -> do
-            void $ PG.execute_ conn "BEGIN"
-            flip finally (void $ PG.execute_ conn "ROLLBACK") $ do
-              -- An external cancel takes this advisory lock before touching the row.
-              void
-                ( PG.query
-                    conn
-                    "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))::text"
-                    (schema <> "." <> table, lockId)
-                    :: IO [Only Text]
-                )
-              withLinkedAsync (runM (pollOnly env) $ runWorkerPool config) $ \_ -> do
-                -- Wait until settlement requests the advisory lock we hold.
-                waitUntil 5_000 $ do
-                  blocked <-
-                    PG.query_
+        it
+          ("takes branch-cancel advisory locks before settlement row locks (" <> (if nested then "nested" else "standalone") <> ")")
+          $ \env -> do
+            (jid, lockId) <-
+              if nested
+                then do
+                  Right (root :| [_, child]) <-
+                    runM env
+                      $ HL.insertJobTree
+                      $ JT.rollup
+                        (defaultJob (mkSimple "branch-grandparent"))
+                        ( JT.rollup
+                            (defaultJob (mkSimple "branch-parent"))
+                            (JT.leaf (defaultJob (mkSimple "branch-child")) :| [])
+                            :| []
+                        )
+                  pure (primaryKey child, primaryKey root)
+                else do
+                  Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "branch-lock-order"))
+                  pure (primaryKey job, primaryKey job)
+            let handler _jobs _callbacks = throwBranchCancel "cancel branch"
+            base :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 1 handler
+            let config = base {pollInterval = 0.05, logConfig = silentLogConfig}
+            withConn connStr $ \conn -> do
+              void $ PG.execute_ conn "BEGIN"
+              flip finally (void $ PG.execute_ conn "ROLLBACK") $ do
+                -- An external cancel takes this advisory lock before touching the row.
+                void
+                  ( PG.query
                       conn
-                      "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid)))"
-                      :: IO [Only Bool]
-                  pure (blocked == [Only True])
-                -- Settlement must not already hold this row. NOWAIT makes an
-                -- inverted order fail deterministically instead of relying on a victim.
-                result <-
-                  try
-                    ( PG.query
+                      "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))::text"
+                      (schema <> "." <> table, lockId)
+                      :: IO [Only Text]
+                  )
+                withLinkedAsync (runM (pollOnly env) $ runWorkerPool config) $ \_ -> do
+                  -- Wait until settlement requests the advisory lock we hold.
+                  waitUntil 5_000 $ do
+                    blocked <-
+                      PG.query_
                         conn
-                        (fromString . T.unpack $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE NOWAIT")
-                        (Only jid)
-                        :: IO [Only Int64]
-                    )
-                    :: IO (Either SomeException [Only Int64])
-                void $ PG.execute_ conn "ROLLBACK"
-                -- Keep the cleanup transaction valid after releasing the held locks.
-                void $ PG.execute_ conn "BEGIN"
-                result `shouldSatisfy` isRight
-                waitUntil 5_000 $ isNothing <$> runM env (HL.getJobById @payload jid)
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid)))"
+                        :: IO [Only Bool]
+                    pure (blocked == [Only True])
+                  -- Settlement must not already hold this row. NOWAIT makes an
+                  -- inverted order fail deterministically instead of relying on a victim.
+                  result <-
+                    try
+                      ( PG.query
+                          conn
+                          (fromString . T.unpack $ "SELECT id FROM " <> Schema.jobQueueTable schema table <> " WHERE id = ? FOR UPDATE NOWAIT")
+                          (Only jid)
+                          :: IO [Only Int64]
+                      )
+                      :: IO (Either SomeException [Only Int64])
+                  void $ PG.execute_ conn "ROLLBACK"
+                  -- Keep the cleanup transaction valid after releasing the held locks.
+                  void $ PG.execute_ conn "BEGIN"
+                  result `shouldSatisfy` isRight
+                  waitUntil 5_000 $ isNothing <$> runM env (HL.getJobById @payload jid)
 
       it "deletes a flagged job the handler already nacked" $ \env -> do
         -- A nack keeps the claim. A later cancel flags the row.

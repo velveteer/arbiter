@@ -64,7 +64,9 @@ runHeartbeatGuard guard = forever $ do
   (target, count) <- atomically (plan guard)
   sleepUntil guard count target
   woke <- getMonotonicTime
-  (inFlight, current) <- atomically ((,) <$> readTVar (guardInFlight guard) <*> snapshot guard)
+  (inFlight, current) <- atomically $ do
+    abandon guard woke
+    (,) <$> readTVar (guardInFlight guard) <*> snapshot guard
   -- A batch the fence stops gets no beat.
   leased <- filterM (fence guard woke) current
   let due = [entry | (entry, status) <- leased, beatAt status <= woke]
@@ -77,7 +79,10 @@ runHeartbeatGuard guard = forever $ do
 -- | Publish the loop's target, the earliest due time.
 plan :: (MonadSTM n) => HeartbeatGuard n job -> STM n (Maybe Time, Int)
 plan guard = do
-  times <- concatMap <$> (dueTimes <$> readTVar (guardInFlight guard)) <*> snapshot guard
+  inFlight <- readTVar (guardInFlight guard)
+  abandoned <- readTVar (guardAbandoned guard)
+  entries <- snapshot guard
+  let times = toList (abandonAt abandoned inFlight) <> concatMap (dueTimes inFlight) entries
   let target = if null times then Nothing else Just (minimum times)
   writeTVar (wakeTarget (guardWake guard)) target
   (,) target <$> readTVar (wakeCount (guardWake guard))
@@ -163,20 +168,46 @@ issue guard woke leased due = do
     writeTVar
       (guardInFlight guard)
       (Just (InFlight issued (addTime bound issued) (Set.fromList (map guardedToken due)) False))
-  void . forkIO $ (extend guard issued bound due `finally` finish guard) >>= traverse_ (report guard due)
+  void . forkIO $ (extend guard issued bound due `finally` finish guard issued) >>= traverse_ (report guard due)
   where
     bound =
       max
         minRetryPause
         (minimum (configTimeout (guardConfig guard) : [leaseAt status `diffTime` woke | (_, status) <- leased]))
 
+-- | Abandon the extend in flight past its give-up and settle grace.
+abandon :: (MonadSTM n) => HeartbeatGuard n job -> Time -> STM n ()
+abandon guard woke = do
+  inFlight <- readTVar (guardInFlight guard)
+  abandoned <- readTVar (guardAbandoned guard)
+  for_ ((,) <$> inFlight <*> abandonAt abandoned inFlight) $ \(running, at) ->
+    when (woke >= at) $ do
+      writeTVar (guardInFlight guard) Nothing
+      writeTVar (guardAbandoned guard) (Just (issuedAt running))
+
+-- | When the extend in flight is abandoned. Nothing while another abandoned extend runs.
+abandonAt :: Maybe Time -> Maybe InFlight -> Maybe Time
+abandonAt abandoned inFlight = case (abandoned, inFlight) of
+  (Nothing, Just running) -> Just (addTime settleGrace (givesUp running))
+  _ -> Nothing
+
 -- | The statement returned. The fence holds its batches until it is over.
-land :: (MonadSTM n) => HeartbeatGuard n job -> n ()
-land guard = atomically $ modifyTVar' (guardInFlight guard) (fmap (\running -> running {landed = True}))
+land :: (MonadSTM n) => HeartbeatGuard n job -> Time -> n Bool
+land guard issued = atomically $ do
+  current <- ownsAttempt guard issued
+  when current $ modifyTVar' (guardInFlight guard) (fmap (\running -> running {landed = True}))
+  pure current
+
+ownsAttempt :: (MonadSTM n) => HeartbeatGuard n job -> Time -> STM n Bool
+ownsAttempt guard issued = maybe False ((== issued) . issuedAt) <$> readTVar (guardInFlight guard)
 
 -- | The extend is over. The fence is due at the leases again.
-finish :: (MonadSTM n) => HeartbeatGuard n job -> n ()
-finish guard = atomically (writeTVar (guardInFlight guard) Nothing *> wake guard)
+finish :: (MonadSTM n) => HeartbeatGuard n job -> Time -> n ()
+finish guard issued = atomically $ do
+  current <- ownsAttempt guard issued
+  when current (writeTVar (guardInFlight guard) Nothing *> wake guard)
+  abandoned <- readTVar (guardAbandoned guard)
+  when (abandoned == Just issued) (writeTVar (guardAbandoned guard) Nothing *> wake guard)
 
 -- | One extend statement over every due batch, bounded by @bound@.
 extend
@@ -190,14 +221,16 @@ extend guard issued bound due = do
   lives <- traverse (\entry -> (,) entry <$> pendingOf entry) due
   outcome <- timeout bound (trySync (configExtend config (concatMap snd lives)))
   case outcome of
-    Nothing -> Nothing <$ traverse_ (retryLater guard) due
-    Just (Left exception) -> Just exception <$ traverse_ (retryLater guard) due
+    Nothing -> Nothing <$ traverse_ (retryLater guard issued) due
+    Just (Left exception) -> Just exception <$ traverse_ (retryLater guard issued) due
     Just (Right results) -> do
-      land guard
-      configExtended config
-      currentTime <- getCurrentTime
-      let byJob = Map.fromList [(resultId result, result) | result <- results]
-      Nothing <$ traverse_ (settle guard issued currentTime byJob) lives
+      current <- land guard issued
+      when current $ do
+        configExtended config
+        currentTime <- getCurrentTime
+        let byJob = Map.fromList [(resultId result, result) | result <- results]
+        traverse_ (settle guard issued currentTime byJob) lives
+      pure Nothing
   where
     config = guardConfig guard
 
@@ -212,11 +245,13 @@ report guard due exception =
       ("Heartbeat error (retrying): " <> displayEx exception)
 
 -- | Beat again after a failed extend.
-retryLater :: (MonadMonotonicTime n, MonadSTM n) => HeartbeatGuard n job -> Guarded n job -> n ()
-retryLater guard entry = do
+retryLater :: (MonadMonotonicTime n, MonadSTM n) => HeartbeatGuard n job -> Time -> Guarded n job -> n ()
+retryLater guard issued entry = do
   now <- getMonotonicTime
-  adjust entry $ \status ->
-    status {beatAt = addTime (heartbeatWait (configInterval (guardConfig guard)) False (leaseAt status `diffTime` now)) now}
+  atomically $ do
+    current <- ownsAttempt guard issued
+    when current $ modifyTVar' (guardedStatus entry) $ \status ->
+      status {beatAt = addTime (heartbeatWait (configInterval (guardConfig guard)) False (leaseAt status `diffTime` now)) now}
 
 -- | 'try' for synchronous exceptions only.
 trySync :: (MonadCatch n) => n a -> n (Either SomeException a)
@@ -244,10 +279,15 @@ settle guard issued currentTime byJob (entry, live) = do
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- verdicts]
       goneJobs = [jobId | JobGone jobId <- verdicts]
       extended = [job | job <- pendingLive, Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]]
-  applied <- atomically $ stateTVar (guardedStatus entry) $ \status ->
-    let lease = if all (maybe False renewed . (`Map.lookup` byJob) . key) pendingLive then addTime (configTimeout config) issued else leaseAt status
-        beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
-     in if leaseLapsed status then (False, status) else (True, status {leaseAt = lease, beatAt = beat})
+  applied <- atomically $ do
+    current <- ownsAttempt guard issued
+    stateTVar (guardedStatus entry) $ \status ->
+      let lease =
+            if all (maybe False renewed . (`Map.lookup` byJob) . key) pendingLive
+              then addTime (configTimeout config) issued
+              else leaseAt status
+          beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
+       in if not current || leaseLapsed status then (False, status) else (True, status {leaseAt = lease, beatAt = beat})
   when applied $ do
     now <- getMonotonicTime
     case (cancelledJobs, stolenJobs) of

@@ -14,12 +14,17 @@ module Arbiter.Test.Concurrency
   , removeHolDetector
   ) where
 
+import Arbiter.Core.Codec (Col (..), col)
 import Arbiter.Core.HighLevel qualified as HL
+import Arbiter.Core.Job.Schema (jobQueueTable)
 import Arbiter.Core.Job.Types
-import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf)
+import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, executeQuery, getSchema, withDbTransaction)
 import Arbiter.Core.QueueRegistry (TableForPayload)
+import Arbiter.Core.Sql.Query (rawRows)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM, forM_, replicateM, replicateM_, void, when)
+import Control.Monad.IO.Class (liftIO)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List (sort)
@@ -29,7 +34,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.TypeLits (KnownSymbol)
 import Test.Hspec
-import UnliftIO.Async (mapConcurrently, replicateConcurrently_)
+import UnliftIO.Async (mapConcurrently, replicateConcurrently_, withAsync)
 
 import Arbiter.Test.StateMachine (holViolations, installHolDetector, removeHolDetector)
 
@@ -65,6 +70,18 @@ findDuplicates = go Set.empty Set.empty
     go seen dups (item : rest)
       | Set.member item seen = go seen (Set.insert item dups) rest
       | otherwise = go (Set.insert item seen) dups rest
+
+-- | Lock a job's row with the given lock suffix. The ids locked.
+lockJobRow :: (MonadArbiter m) => Text -> JobRead payload -> m [Int64]
+lockJobRow suffix job = do
+  schema <- getSchema
+  executeQuery . rawRows (col "id" CInt8) $
+    "SELECT id FROM "
+      <> jobQueueTable schema (queueName job)
+      <> " WHERE id = "
+      <> T.pack (show (primaryKey job))
+      <> " FOR UPDATE"
+      <> suffix
 
 -- | Parameterized concurrency test suite. These tests need a connection pool of
 -- at least 10 connections.
@@ -134,6 +151,64 @@ concurrencySpec mkMessage runM = do
       length claimed2 `shouldBe` 1
 
   describe "Concurrent Job Claims" $ do
+    let claimsPastLocked env jobs = do
+          let (locked, free) = splitAt 30 jobs
+          held <- newEmptyMVar
+          release <- newEmptyMVar
+          withAsync
+            ( runM env $ withDbTransaction $ do
+                forM_ locked (lockJobRow "")
+                liftIO $ putMVar held () >> takeMVar release
+            )
+            $ \_ -> do
+              takeMVar held
+              claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+              putMVar release ()
+              map primaryKey claimed `shouldBe` map primaryKey free
+
+    it "claims past many locked ready ungrouped rows at capacity one" $ \env -> do
+      inserted <- runM env $ HL.insertJobsBatch (replicate 31 (defaultJob (mkMessage "ready")))
+      claimsPastLocked env inserted
+
+    it "claims past many locked due ungrouped rows at capacity one" $ \env -> do
+      void $ runM env $ HL.insertJobsBatch (replicate 31 (defaultJob (mkMessage "due")))
+      leased <- runM env (HL.claimNextVisibleJobs 31 60) :: IO [JobRead payload]
+      forM_ leased $ \job -> void $ runM env (HL.setVisibilityTimeout 0 job)
+      claimsPastLocked env leased
+
+    it "leaves ungrouped rows it does not claim unlocked" $ \env -> do
+      [grouped, ungrouped] <-
+        runM env $
+          HL.insertJobsBatch
+            [ setPriority 0 (defaultGroupedJob "first" (mkMessage "grouped"))
+            , setPriority 5 (defaultJob (mkMessage "ungrouped"))
+            ]
+      held <- newEmptyMVar
+      release <- newEmptyMVar
+      withAsync
+        ( runM env $ withDbTransaction $ do
+            claimed <- HL.claimNextVisibleJobs 1 60
+            liftIO $ putMVar held (map primaryKey (claimed :: [JobRead payload])) >> takeMVar release
+        )
+        $ \_ -> do
+          claimed <- takeMVar held
+          lockable <- runM env $ withDbTransaction (lockJobRow " SKIP LOCKED" ungrouped)
+          putMVar release ()
+          claimed `shouldBe` [primaryKey grouped]
+          lockable `shouldBe` [primaryKey ungrouped]
+
+    it "claims healthy work beyond exhausted group heads" $ \env -> do
+      void
+        $ runM env
+        $ HL.insertJobsBatch
+          [ setMaxAttempts (Just 1) $ defaultGroupedJob ("exhausted-" <> T.pack (show i)) (mkMessage "old") | i <- [1 .. 12 :: Int]
+          ]
+      exhausted <- runM env (HL.claimNextVisibleJobs 12 60) :: IO [JobRead payload]
+      forM_ exhausted $ \job -> void $ runM env (HL.setVisibilityTimeout 0 job)
+      Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy" (mkMessage "healthy"))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      map primaryKey claimed `shouldBe` [primaryKey healthy]
+
     it "concurrent workers claim disjoint ungrouped jobs" $ \env -> do
       -- Insert 6 ungrouped jobs, remembering their ids.
       inserted <- runM env $ HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))

@@ -149,39 +149,41 @@ groupCandidateCtes groupsTbl tbl overfetch headGate =
     )
   |]
 
+-- | One ungrouped pool in its index order, ready or due, over alias @job@.
+ungroupedScan :: Text -> Text -> Text -> Text -> Text -> Text
+ungroupedScan tbl ccGate visible order limit =
+  [text|
+    SELECT job.id, job.priority
+    FROM ${tbl} job
+    WHERE job.group_key IS NULL
+      AND NOT job.suspended
+      AND job.cancel_requested_at IS NULL
+      AND ${visible}
+      AND job.attempts < COALESCE(job.max_attempts, ${defaultMaxAttemptsSQL})
+      ${ccGate}
+    ORDER BY ${order}
+    LIMIT ${limit}
+  |]
+
+readyScan :: Text -> Text -> Text -> Text
+readyScan tbl ccGate = ungroupedScan tbl ccGate "job.not_visible_until IS NULL" "job.priority ASC, job.id ASC"
+
+dueScan :: Text -> Text -> Text -> Text
+dueScan tbl ccGate = ungroupedScan tbl ccGate "job.not_visible_until <= NOW()" "job.not_visible_until ASC"
+
 -- | Candidate stage two. The ungrouped ready and due pools, numbered into batches.
 ungroupedPoolCtes :: Text -> Text -> Text -> Text -> Text
 ungroupedPoolCtes tbl ungroupedLimit batchLimit ccGate =
-  [text|
+  let ready = readyScan tbl ccGate ungroupedLimit
+      due = dueScan tbl ccGate ungroupedLimit
+   in [text|
     ungrouped_pool AS (
-      (
-        SELECT job.id, job.priority
-        FROM ${tbl} job
-        WHERE job.group_key IS NULL
-          AND NOT job.suspended
-          AND job.cancel_requested_at IS NULL
-          AND job.not_visible_until IS NULL
-          AND job.attempts < COALESCE(job.max_attempts, ${defaultMaxAttemptsSQL})
-          ${ccGate}
-        ORDER BY job.priority ASC, job.id ASC
-        LIMIT ${ungroupedLimit}
-      )
+      (SELECT ready_scan.*, TRUE AS ready FROM (${ready}) ready_scan)
       UNION ALL
-      (
-        SELECT job.id, job.priority
-        FROM ${tbl} job
-        WHERE job.group_key IS NULL
-          AND NOT job.suspended
-          AND job.cancel_requested_at IS NULL
-          AND job.not_visible_until <= NOW()
-          AND job.attempts < COALESCE(job.max_attempts, ${defaultMaxAttemptsSQL})
-          ${ccGate}
-        ORDER BY job.not_visible_until ASC
-        LIMIT ${ungroupedLimit}
-      )
+      (SELECT due_scan.*, FALSE AS ready FROM (${due}) due_scan)
     ),
     ungrouped_numbered AS (
-      SELECT id, priority,
+      SELECT id, priority, ready,
         ((ROW_NUMBER() OVER (ORDER BY priority ASC, id ASC) - 1)
           / ${batchLimit}) + 1 AS batch_num
       FROM ungrouped_pool
@@ -219,9 +221,12 @@ allocatedSlotCtes batchBudget =
   |]
 
 -- | Candidate stage four. Resolves the allocated slots to rows and locks the claimable set.
-lockedCandidateCtes :: Text -> Text -> Text -> Text
-lockedCandidateCtes tbl batchLimit ungroupedLimit =
+-- Each ungrouped pool locks as many rows as its allocated batches hold, skipping locked rows.
+lockedCandidateCtes :: Text -> Text -> Text -> Text -> Text
+lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
   let claimable = claimablePred "job"
+      ready = readyScan tbl ccGate "(SELECT ready_rows FROM ungrouped_allocated)"
+      due = dueScan tbl ccGate "(SELECT due_rows FROM ungrouped_allocated)"
    in [text|
     grouped_candidates AS (
       SELECT batch.id, target_group.group_key AS expected_group
@@ -235,14 +240,28 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit =
         LIMIT ${batchLimit}
       ) batch
     ),
-    ungrouped_candidates AS (
-      SELECT id, NULL::text AS expected_group
+    ungrouped_allocated AS (
+      SELECT COUNT(*) FILTER (WHERE ready) AS ready_rows,
+             COUNT(*) FILTER (WHERE NOT ready) AS due_rows
       FROM ungrouped_numbered
       WHERE batch_num IN (
         SELECT ungrouped_batch
         FROM allocated_slots
         WHERE ungrouped_batch IS NOT NULL
       )
+    ),
+    ungrouped_ready_locked AS MATERIALIZED (
+      ${ready}
+      FOR UPDATE OF job SKIP LOCKED
+    ),
+    ungrouped_due_locked AS MATERIALIZED (
+      ${due}
+      FOR UPDATE OF job SKIP LOCKED
+    ),
+    ungrouped_candidates AS (
+      SELECT id, NULL::text AS expected_group FROM ungrouped_ready_locked
+      UNION ALL
+      SELECT id, NULL::text FROM ungrouped_due_locked
     ),
     locked AS (
       SELECT job.id, job.priority, job.group_key,
@@ -566,13 +585,24 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       jobHeadroom = concHeadroomPred concTbl concPolicies "job"
       headHeadroom = concHeadroomPred concTbl concPolicies "gated_head"
       ccGate = mwhen hasConcurrency [text|AND ${jobHeadroom}|]
+      claimable = claimablePred "job"
       -- Admission precedes the bounded candidate window, so a full key cannot
       -- pin every poll to the same prefix of blocked groups.
-      headGate = mwhen hasConcurrency ("AND " <> gatedHeadPred tbl "candidate_group.group_key" batchLimit headHeadroom)
+      headGate =
+        if hasConcurrency
+          then "AND " <> gatedHeadPred tbl "candidate_group.group_key" batchLimit headHeadroom
+          else
+            [text|
+              AND EXISTS (
+                SELECT 1 FROM ${tbl} job
+                WHERE job.group_key = candidate_group.group_key
+                  AND ${claimable}
+              )
+            |]
       groupCandidates = groupCandidateCtes groupsTbl tbl overfetch headGate
       ungroupedPool = ungroupedPoolCtes tbl ungroupedLimit batchLimit ccGate
       allocatedSlots = allocatedSlotCtes batchBudget
-      lockedCandidates = lockedCandidateCtes tbl batchLimit ungroupedLimit
+      lockedCandidates = lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate
       concLocked = mwhen hasConcurrency (concLockedCte concTbl concPolicies)
       rlSeed = mwhen hasRateLimit (rlSeedCte buckets rlPolicies)
       concJoin = mwhen hasConcurrency "LEFT JOIN conc_locked pool ON pool.concurrency_key = candidate.concurrency_key"
