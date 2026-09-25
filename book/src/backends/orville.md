@@ -11,9 +11,23 @@ O.withTransaction $ do
     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 ```
 
-Handlers run in the application monad, as `JobRead payload -> AppM result`.
-A handler that inserts jobs wraps those calls in `runOrvilleDb` to share its
-transaction.
+Single-job handlers run in the application monad, as
+`JobRead payload -> AppM result`. A handler that inserts jobs wraps those calls
+in `runOrvilleDb` to share its transaction.
+
+Batched and manual handlers, and observability hooks, run in the worker's
+monad. `Arbiter.Orville.Worker` adapts ones written in `AppM`.
+`orvilleBatchedHandler` runs the callbacks in the worker's own `OrvilleEnv`, on
+the handler's connection and inside its transaction:
+
+```haskell
+import Arbiter.Orville.Worker (orvilleBatchedHandler, orvilleHooks)
+
+processEmail :: Arb.JobRead EmailPayload -> Worker.BatchCallbacks AppM EmailPayload () -> AppM ()
+
+config <- Worker.manualWorkerConfig 5 (orvilleBatchedHandler processEmail)
+let emailPool = config {Worker.observabilityHooks = orvilleHooks appHooks}
+```
 
 For `LISTEN/NOTIFY`, build a `Listener` with `newLibPQListener` from
 `arbiter-libpq` and the pool's connection string, and put it in the

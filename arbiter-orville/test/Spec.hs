@@ -12,6 +12,7 @@ import Test.Arbiter.Orville.Operations qualified as Operations
 import Test.Arbiter.Orville.RateLimit qualified as RateLimit
 import Test.Arbiter.Orville.StateMachine qualified as StateMachine
 import Test.Arbiter.Orville.Worker qualified as Worker
+import Test.Arbiter.Orville.WorkerAdapters qualified as WorkerAdapters
 
 main :: IO ()
 main = do
@@ -28,5 +29,6 @@ main = do
     describe "Arbiter.Orville.Reclaim" $ Worker.reclaimSpec connStr
     describe "Arbiter.Orville.ConnectionRecovery" $ Worker.connectionRecoverySpec connStr
     describe "Arbiter.Orville.Lifecycle" $ Worker.lifecycleSpec connStr
+    describe "Arbiter.Orville.WorkerAdapters" $ WorkerAdapters.spec connStr
     describe "Arbiter.Orville.RateLimit" $ RateLimit.spec connStr
     describe "Arbiter.Orville.ConcurrencyLimit" $ ConcurrencyLimit.spec connStr

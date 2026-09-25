@@ -12,6 +12,7 @@
 -- @
 --
 -- "Arbiter.Orville.MonadArbiter" has the primitives for an application's own instance.
+-- "Arbiter.Orville.Worker" adapts handlers and hooks written in the application monad.
 module Arbiter.Orville
   ( -- * Re-exports
     module Arbiter.Orville.MonadArbiter

@@ -57,4 +57,15 @@ job is redelivered and the hook may fire again. See
 
 Reaper activity reports through `onMaintenance` on `WorkerConfig`.
 
+## Hooks in Another Monad
+
+`hoistObservabilityHooks` runs hooks written in one monad from a worker in
+another, through a monad morphism such as `lift`:
+
+```haskell
+let pool = config {Worker.observabilityHooks = Arb.hoistObservabilityHooks lift appHooks}
+```
+
+[arbiter-orville](../backends/orville.md) provides `orvilleHooks` for this.
+
 Callback arguments: [`ObservabilityHooks` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Types.html#t:ObservabilityHooks).

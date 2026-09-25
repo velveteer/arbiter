@@ -10,7 +10,8 @@ description:
   monad. Arbiter queries run on the application's Orville connection and share
   the transaction Orville is already managing. The query, statement,
   transaction, and handler primitives are exported for applications that write
-  their own instance.
+  their own instance. @Arbiter.Orville.Worker@ adapts handlers and hooks written
+  in the application monad to a worker running in @OrvilleDb@.
 
 license:         MIT
 license-file:    LICENSE
@@ -47,12 +48,14 @@ library
     Arbiter.Orville
     Arbiter.Orville.MonadArbiter
     Arbiter.Orville.OrvilleDb
+    Arbiter.Orville.Worker
 
   other-modules:   Arbiter.Orville.Array
 
   build-depends:
     , aeson               >=2.0  && <2.3
     , arbiter-core        >=0.1  && <0.2
+    , arbiter-worker      >=0.1  && <0.2
     , base                >=4.20 && <5
     , bytestring          >=0.10 && <0.13
     , exceptions          >=0.10 && <0.11
@@ -77,6 +80,7 @@ test-suite arbiter-orville-tests
     Test.Arbiter.Orville.StateMachine
     Test.Arbiter.Orville.TestHelpers
     Test.Arbiter.Orville.Worker
+    Test.Arbiter.Orville.WorkerAdapters
 
   build-depends:
     , aeson
@@ -84,6 +88,7 @@ test-suite arbiter-orville-tests
     , arbiter-libpq           >=0.1 && <0.2
     , arbiter-orville
     , arbiter-test-common     >=0.1 && <0.2
+    , arbiter-worker
     , arbiter-worker-testkit  >=0.1 && <0.2
     , base
     , bytestring
@@ -93,3 +98,4 @@ test-suite arbiter-orville-tests
     , resource-pool           >=0.4 && <0.6
     , text
     , transformers
+    , unliftio

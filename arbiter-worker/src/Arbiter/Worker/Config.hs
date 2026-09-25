@@ -21,6 +21,7 @@ module Arbiter.Worker.Config
 
     -- * Batch Callbacks
   , BatchCallbacks (..)
+  , hoistBatchCallbacks
 
     -- * Worker State
   , WorkerState (..)
@@ -206,6 +207,24 @@ data BatchCallbacks m payload result = BatchCallbacks
   , spawn :: JobRead payload -> NonEmpty (JobWrite payload) -> m ()
   -- ^ Insert children under this job and suspend it, in one transaction.
   }
+
+-- | Callbacks for @m@, called from @n@ through the given natural transformation.
+-- It must be a monad morphism that keeps the worker's connection and schema, so
+-- each callback joins the handler's transaction.
+hoistBatchCallbacks :: (forall a. m a -> n a) -> BatchCallbacks m payload result -> BatchCallbacks n payload result
+hoistBatchCallbacks nat callbacks =
+  BatchCallbacks
+    { ack = nat . ack callbacks
+    , ackWith = \job result -> nat (ackWith callbacks job result)
+    , ackAll = nat . ackAll callbacks
+    , ackAllWith = nat . ackAllWith callbacks
+    , failRetry = \job msg -> nat (failRetry callbacks job msg)
+    , failPermanent = \job msg -> nat (failPermanent callbacks job msg)
+    , cancelBranch = \job msg -> nat (cancelBranch callbacks job msg)
+    , cancelTree = \job msg -> nat (cancelTree callbacks job msg)
+    , nack = nat . nack callbacks
+    , spawn = \job children -> nat (spawn callbacks job children)
+    }
 
 -- | Job claim and handler mode. Set by this module's config constructors.
 data HandlerMode m payload

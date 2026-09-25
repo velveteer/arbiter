@@ -64,4 +64,10 @@ They are not proof that the outer transaction committed.
 | `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack` | see [Error Handling](../features/error-handling.md) |
 | `spawn` | insert children under the job and suspend it. See [runtime spawning](../features/job-trees.md#spawning-children-at-runtime) |
 
+`hoistBatchCallbacks` calls the callbacks from another monad through a monad
+morphism. It must keep the worker's connection and schema so each callback
+joins the handler's transaction. [arbiter-orville](../backends/orville.md)
+provides `orvilleBatchedHandler`, which builds that morphism from the worker's
+own env.
+
 Callback signatures: [`BatchCallbacks` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks).

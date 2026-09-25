@@ -77,6 +77,7 @@ module Arbiter.Core.Job.Types
     -- * Observability
   , ObservabilityHooks (..)
   , defaultObservabilityHooks
+  , hoistObservabilityHooks
   , andThen
   , JobId
   , ClaimSeq
@@ -463,6 +464,21 @@ defaultObservabilityHooks =
     , onJobCancelled = \_ _ -> pure ()
     , onJobUnavailable = \_ _ -> pure ()
     , onJobHeartbeat = \_ _ _ -> pure ()
+    }
+
+-- | Hooks written in @m@, run in @n@ through the given natural transformation.
+-- It must be a monad morphism, such as 'Control.Monad.Trans.Class.lift'.
+hoistObservabilityHooks :: (forall a. m a -> n a) -> ObservabilityHooks m payload -> ObservabilityHooks n payload
+hoistObservabilityHooks nat hooks =
+  ObservabilityHooks
+    { onJobClaimed = \job claimTime -> nat (onJobClaimed hooks job claimTime)
+    , onJobSuccess = \job start end -> nat (onJobSuccess hooks job start end)
+    , onJobFailure = \job msg start end -> nat (onJobFailure hooks job msg start end)
+    , onJobRetry = \job delay -> nat (onJobRetry hooks job delay)
+    , onJobFailedAndMovedToDLQ = \msg job -> nat (onJobFailedAndMovedToDLQ hooks msg job)
+    , onJobCancelled = \job msg -> nat (onJobCancelled hooks job msg)
+    , onJobUnavailable = \job msg -> nat (onJobUnavailable hooks job msg)
+    , onJobHeartbeat = \job now start -> nat (onJobHeartbeat hooks job now start)
     }
 
 -- | Run both hooks at each lifecycle point, left before right. The right one runs
