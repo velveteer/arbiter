@@ -108,21 +108,36 @@ gatedHeadPred tbl groupKey batchLimit headGate =
 groupCandidateCtes :: Text -> Text -> Text -> Text -> Text
 groupCandidateCtes groupsTbl tbl overfetch headGate =
   let claimable = claimablePred "job"
+      headLateral =
+        [text|
+          CROSS JOIN LATERAL (
+            SELECT job.priority AS min_priority, job.id AS min_id
+            FROM ${tbl} job
+            WHERE job.group_key = candidate_group.group_key
+              AND ${claimable}
+            ORDER BY job.priority ASC, job.id ASC
+            LIMIT 1
+          ) head
+        |]
    in [text|
     group_candidates AS (
       (
-        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
-        WHERE ready_count > 0 AND in_flight_until IS NULL
+        SELECT candidate_group.group_key, head.min_priority, head.min_id
+        FROM ${groupsTbl} candidate_group
+        ${headLateral}
+        WHERE candidate_group.ready_count > 0 AND candidate_group.in_flight_until IS NULL
           ${headGate}
-        ORDER BY min_priority ASC, min_id ASC
+        ORDER BY candidate_group.min_priority ASC, candidate_group.min_id ASC
         LIMIT ${overfetch}
       )
       UNION
       (
-        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
-        WHERE next_due <= NOW()
+        SELECT candidate_group.group_key, head.min_priority, head.min_id
+        FROM ${groupsTbl} candidate_group
+        ${headLateral}
+        WHERE candidate_group.next_due <= NOW()
           ${headGate}
-        ORDER BY next_due ASC
+        ORDER BY candidate_group.next_due ASC
         LIMIT ${overfetch}
       )
     ),
@@ -136,16 +151,9 @@ groupCandidateCtes groupsTbl tbl overfetch headGate =
       FOR UPDATE SKIP LOCKED
     ),
     eligible_heads AS (
-      SELECT eligible.group_key, head.min_priority, head.min_id
+      SELECT eligible.group_key, candidate.min_priority, candidate.min_id
       FROM eligible_groups eligible
-      CROSS JOIN LATERAL (
-        SELECT job.priority AS min_priority, job.id AS min_id
-        FROM ${tbl} job
-        WHERE job.group_key = eligible.group_key
-          AND ${claimable}
-        ORDER BY job.priority ASC, job.id ASC
-        LIMIT 1
-      ) head
+      INNER JOIN group_candidates candidate ON candidate.group_key = eligible.group_key
     )
   |]
 
@@ -259,9 +267,11 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
       FOR UPDATE OF job SKIP LOCKED
     ),
     ungrouped_candidates AS (
-      SELECT id, NULL::text AS expected_group FROM ungrouped_ready_locked
+      SELECT id, NULL::text AS expected_group
+      FROM (SELECT id FROM ungrouped_ready_locked LIMIT ${ungroupedLimit}) ready_locked
       UNION ALL
-      SELECT id, NULL::text FROM ungrouped_due_locked
+      SELECT id, NULL::text
+      FROM (SELECT id FROM ungrouped_due_locked LIMIT ${ungroupedLimit}) due_locked
     ),
     locked AS (
       SELECT job.id, job.priority, job.group_key,
@@ -585,20 +595,9 @@ claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSecon
       jobHeadroom = concHeadroomPred concTbl concPolicies "job"
       headHeadroom = concHeadroomPred concTbl concPolicies "gated_head"
       ccGate = mwhen hasConcurrency [text|AND ${jobHeadroom}|]
-      claimable = claimablePred "job"
       -- Admission precedes the bounded candidate window, so a full key cannot
       -- pin every poll to the same prefix of blocked groups.
-      headGate =
-        if hasConcurrency
-          then "AND " <> gatedHeadPred tbl "candidate_group.group_key" batchLimit headHeadroom
-          else
-            [text|
-              AND EXISTS (
-                SELECT 1 FROM ${tbl} job
-                WHERE job.group_key = candidate_group.group_key
-                  AND ${claimable}
-              )
-            |]
+      headGate = mwhen hasConcurrency ("AND " <> gatedHeadPred tbl "candidate_group.group_key" batchLimit headHeadroom)
       groupCandidates = groupCandidateCtes groupsTbl tbl overfetch headGate
       ungroupedPool = ungroupedPoolCtes tbl ungroupedLimit batchLimit ccGate
       allocatedSlots = allocatedSlotCtes batchBudget
