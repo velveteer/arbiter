@@ -238,21 +238,14 @@ settle
 settle guard issued currentTime byJob (entry, live) = do
   -- Rows this worker settled during the statement do not count.
   stillPending <- Set.fromList . map key <$> pendingOf entry
-  let verdicts = mapMaybe ((`Map.lookup` byJob) . key) (filter (\job -> Set.member (key job) stillPending) live)
+  let pendingLive = filter ((`Set.member` stillPending) . key) live
+      verdicts = mapMaybe ((`Map.lookup` byJob) . key) pendingLive
       cancelledJobs = [jobId | JobCancelled jobId <- verdicts]
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- verdicts]
       goneJobs = [jobId | JobGone jobId <- verdicts]
-      allRenewed job =
-        not (Set.member (key job) stillPending)
-          || maybe False renewed (Map.lookup (key job) byJob)
-      extended =
-        [ job
-        | job <- live
-        , Set.member (key job) stillPending
-        , Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]
-        ]
+      extended = [job | job <- pendingLive, Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]]
   applied <- atomically $ stateTVar (guardedStatus entry) $ \status ->
-    let lease = if all allRenewed live then addTime (configTimeout config) issued else leaseAt status
+    let lease = if all (maybe False renewed . (`Map.lookup` byJob) . key) pendingLive then addTime (configTimeout config) issued else leaseAt status
         beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
      in if leaseLapsed status then (False, status) else (True, status {leaseAt = lease, beatAt = beat})
   when applied $ do

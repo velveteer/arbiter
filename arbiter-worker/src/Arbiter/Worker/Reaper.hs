@@ -28,9 +28,8 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
-import UnliftIO (MonadUnliftIO, SomeException)
+import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.Exception (isSyncException, tryJust)
 
 import Arbiter.Worker.Config (MaintenanceOp (..), maintenanceOpName)
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog, warnEx)
@@ -182,5 +181,5 @@ runReaperStateOp logCfg schema stmtTimeout task every work =
 
 reaperGate :: (MonadUnliftIO m) => LogConfig -> Text -> m a -> m (Either SomeException a)
 reaperGate logCfg task action =
-  tryJust (\exception -> if isSyncException exception then Just exception else Nothing) action
+  tryAny action
     >>= either (\exception -> Left exception <$ warnEx logCfg ("Reaper op failed: " <> task) exception) (pure . Right)

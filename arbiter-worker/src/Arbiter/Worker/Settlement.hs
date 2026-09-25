@@ -56,7 +56,7 @@ batchLog :: WorkerConfig m payload -> NonEmpty (Job.JobRead payload) -> LogConfi
 batchLog config = withJobContext (logConfig config)
 
 -- | Per-batch statements and hooks. Callback statements join the handler's
--- transaction; other statements use the pool context. Built per pool and
+-- transaction. Other statements use the pool context. Built per pool and
 -- bound to jobs per batch.
 type PoolEffects m payload =
   NonEmpty (Job.JobRead payload)

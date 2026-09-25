@@ -93,7 +93,7 @@ sendEmail job cbs = do
 > With `transactionalWorkerConfig` the bucket update rolls back with the
 > retry. Manual and batched callbacks commit on their own.
 
-**Policy-wide throttling.** Override the policy; clear the override after
+**Policy-wide throttling.** Override the policy. Clear the override after
 recovery:
 
 ```haskell

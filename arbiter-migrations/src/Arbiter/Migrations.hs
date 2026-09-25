@@ -524,7 +524,7 @@ reconcileRateLimitDurability conn schemaName durability = do
     _ -> pure ()
 
 -- | Reconcile optional triggers schema-wide after tracked migrations.
--- Restore triggers removed by disabled options; drop objects for queues outside
+-- Restore triggers removed by disabled options. Drop objects for queues outside
 -- the supplied table list. Migration history remains unchanged.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =

@@ -39,6 +39,6 @@ later redelivered. Put once-only effects in the ack's transaction.
 | `ack`, `ackAll` | complete, no result |
 | `ackWith`, `ackAllWith` | complete and store the queue [result](../features/results.md) |
 | `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack` | see [Error Handling](../features/error-handling.md) |
-| `spawn` | insert children under the job and suspend it; [runtime spawning](../features/job-trees.md#spawning-children-at-runtime) |
+| `spawn` | insert children under the job and suspend it. See [runtime spawning](../features/job-trees.md#spawning-children-at-runtime) |
 
 Callback signatures: [`BatchCallbacks` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks).

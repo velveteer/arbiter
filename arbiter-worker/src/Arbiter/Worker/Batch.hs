@@ -3,7 +3,7 @@
 -- | Batch settlement, outcome reporting, and force-cancel finalization.
 --
 -- Each 'Effects' action runs one transaction or hook. The pool runs the
--- lifecycle in IO; tests use io-sim.
+-- lifecycle in IO. Tests use io-sim.
 module Arbiter.Worker.Batch
   ( -- * The pool's side
     Effects (..)
@@ -240,7 +240,7 @@ recordSpawned handoff job =
   alterProgress handoff $ \progress ->
     progress {progressSpawned = Set.insert (handoffKey handoff job) (progressSpawned progress)}
 
--- | Record force-cancelled jobs; return all recorded ids.
+-- | Record force-cancelled jobs and return all recorded ids.
 recordCancelled :: (MonadSTM n) => Handoff n job -> Set JobId -> n (Set JobId)
 recordCancelled handoff ids =
   onProgress handoff $ \progress ->
