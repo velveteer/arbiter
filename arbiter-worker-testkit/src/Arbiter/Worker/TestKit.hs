@@ -1428,7 +1428,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
 
-    it "reprocesses a bulk ack rolled back by the handler transaction" $ \env -> do
+    it "reprocesses a rolled-back bulk ack and reports each savepoint release" $ \env -> do
       callsRef <- newIORef (0 :: Int)
       successesRef <- newIORef (0 :: Int)
       batchSizesRef <- newIORef ([] :: [Int])

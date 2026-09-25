@@ -24,6 +24,7 @@ import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
 import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Either (fromRight)
 import Data.Foldable (for_, traverse_)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Set qualified as Set
@@ -107,8 +108,12 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
           processRunRequests cronLog schemaName jobs now
           serve cronLog timerVar
 
--- | Scheduler catch-up step. Each cron runs in its own transaction.
--- Backfill schedules hold a per-(schema, queue, name) advisory lock.
+-- | Scheduler catch-up step. Each tick commits independently. Backfill ticks
+-- acquire a per-schedule advisory lock for their transaction.
+--
+-- A failed tick is logged and skipped once a later tick fires. The watermark
+-- of a Backfill schedule stays behind a failed newest tick, and the next pass
+-- retries it.
 processCronCatchUp
   :: (QueueOperation m payload)
   => CronLog
@@ -124,25 +129,13 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
   traverse_ (processOneCron currentTick) jobs
   where
     processOneCron currentTick cron = do
-      outcome <- tryCron cronLog ("Cron '" <> name cron <> "' tick") . withDbTransaction $ do
-        haveLeader <- case backfill cron of
-          NoBackfill -> pure True
-          Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
-        if not haveLeader
-          then pure NotLeader
-          else do
-            mRow <- Ops.getCronScheduleByName schemaName (name cron)
-            processOne mRow currentTick cron
-            void $ Ops.touchCronChecked schemaName currentTick [name cron]
-            pure Ran
-      case outcome of
-        Left _ -> pure ()
-        Right NotLeader ->
-          logCron cronLog Debug $ "Cron '" <> name cron <> "' skipped, another pool holds the lock"
-        Right Ran -> pure ()
+      void $ tryCron cronLog ("Cron '" <> name cron <> "' tick") $ do
+        mRow <- Ops.getCronScheduleByName schemaName (name cron)
+        completed <- processOne mRow currentTick cron
+        when completed $ void $ Ops.touchCronChecked schemaName currentTick [name cron]
     processOne mRow currentTick cron = case resolveAndParse cron mRow of
-      Disabled -> pure ()
-      ParseError expr err ->
+      Disabled -> pure True
+      ParseError expr err -> do
         logCron cronLog Error $
           "Cron schedule '"
             <> name cron
@@ -150,38 +143,62 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
             <> expr
             <> "': "
             <> T.pack err
-      InvalidTimezone tzName ->
+        pure True
+      InvalidTimezone tzName -> do
         logCron cronLog Error $
           "Cron schedule '"
             <> name cron
             <> "' has unknown timezone '"
             <> tzName
             <> "'"
+        pure True
       Effective effectiveOv sched effectiveTz -> do
         let ticksInWindow = enumerateCatchUpTicks (backfill cron) (mRow >>= CS.lastCheckedAt) currentTick
-            ticksToFire = pickTicksToFire sched effectiveTz effectiveOv ticksInWindow
-            replayCount = length (filter (/= currentTick) ticksToFire)
-        when (replayCount > 0) $
+            ticksToFire = filter (matchesInTimezone effectiveTz sched) ticksInWindow
+            fireTick tick = do
+              result <- tryCron cronLog ("Cron '" <> name cron <> "' insert") . withDbTransaction $ do
+                haveLeader <- case backfill cron of
+                  NoBackfill -> pure True
+                  Backfill _ -> Ops.tryAcquireCronLeader schemaName queueName (name cron)
+                if haveLeader
+                  then TickHandled <$> insertCronJob schemaName cron effectiveOv (tickKindFor currentTick tick) tick
+                  else pure TickNoLeader
+              let outcome = fromRight TickFailed result
+              case outcome of
+                TickHandled _ -> logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick
+                TickNoLeader -> logCron cronLog Debug $ "Cron '" <> name cron <> "' skipped, another pool holds the lock"
+                TickFailed -> pure ()
+              pure outcome
+            replayedBy tick outcome = if tick /= currentTick && outcome == TickHandled True then 1 else 0
+            runTicks stopAt =
+              foldr
+                ( \tick rest (replayed, _) -> do
+                    outcome <- fireTick tick
+                    let next = (replayed + replayedBy tick outcome, outcome)
+                    if stopAt outcome then pure next else rest next
+                )
+                pure
+                ticksToFire
+                (0 :: Int, TickHandled False)
+        (replayed, lastOutcome) <- case effectiveOv of
+          AllowOverlap -> runTicks (== TickNoLeader)
+          SkipOverlap -> runTicks (/= TickFailed)
+        when (replayed > 0) $
           logCron cronLog Info $
-            "Replaying " <> T.pack (show replayCount) <> " missed tick(s) for '" <> name cron <> "'"
-        for_ ticksToFire $ \tick -> do
-          insertCronJob schemaName cron effectiveOv (tickKindFor currentTick tick) tick
-          logCron cronLog Debug $ "Cron schedule '" <> name cron <> "' processed at " <> formatMinute tick
+            "Replayed " <> T.pack (show replayed) <> " missed tick(s) for '" <> name cron <> "'"
+        pure $ case (lastOutcome, backfill cron) of
+          (TickHandled _, _) -> True
+          (TickFailed, NoBackfill) -> True
+          _ -> False
 
-data TickOutcome = NotLeader | Ran
+-- | How one tick's transaction ended. 'TickHandled' carries whether this pool
+-- fired the gate.
+data TickOutcome = TickHandled Bool | TickNoLeader | TickFailed
+  deriving stock (Eq)
 
 -- | 'Live' for @currentTick@ and 'Replay' for any other tick.
 tickKindFor :: UTCTime -> UTCTime -> TickKind
 tickKindFor currentTick tick = if tick == currentTick then Live else Replay
-
--- | 'SkipOverlap' keeps the oldest match. 'AllowOverlap' keeps all.
--- Match evaluation uses the supplied timezone ('Nothing' = UTC).
-pickTicksToFire :: CronSchedule -> Maybe Text -> OverlapPolicy -> [UTCTime] -> [UTCTime]
-pickTicksToFire sched zone overlapPolicy ticks =
-  let matching = filter (matchesInTimezone zone sched) ticks
-   in case overlapPolicy of
-        SkipOverlap -> take 1 matching
-        AllowOverlap -> matching
 
 -- | Minutes to evaluate for a 'processCronCatchUp' call. Returns @[]@ when
 -- the watermark is at or past @currentTick@.
@@ -227,11 +244,11 @@ resolveAndParse cron mRow =
             _ -> Effective overlapPolicy sched zone
         else Disabled
 
--- | Insert a cron tick inside the catch-up transaction. A failed insert rolls
--- back the schedule watermark, allowing the next pass to retry the tick.
+-- | Fire the gate for @tick@, insert its job if the gate opened, and advance
+-- the watermark to @tick@. Returns whether this call fired the gate.
 insertCronJob
   :: (QueueOperation m payload)
-  => Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m ()
+  => Text -> CronJob payload -> OverlapPolicy -> TickKind -> UTCTime -> m Bool
 insertCronJob schemaName cron effectiveOv kind tick = do
   -- Gate first. Another pool may have fired this minute.
   fired <- Ops.tryFireCronGate schemaName (name cron) tick
@@ -240,6 +257,7 @@ insertCronJob schemaName cron effectiveOv kind tick = do
         jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
     void $ HL.insertJob jobWrite
   void $ Ops.touchCronChecked schemaName tick [name cron]
+  pure fired
 
 data RunNowOutcome = Fired | Skipped | NotRequested
 
@@ -297,7 +315,7 @@ newCronLog logCfg = CronLog logCfg <$> newFailureGates
 logCron :: (MonadIO m) => CronLog -> LogLevel -> Text -> m ()
 logCron cronLog level msg = liftIO $ tryLog (cronLogConfig cronLog) level msg
 
--- | Run a scheduler step. Report new failures and recovery; suppress repeated
+-- | Run a scheduler step. Report new failures and recovery. Suppress repeated
 -- identical failures.
 tryCron :: (MonadUnliftIO m) => CronLog -> Text -> m a -> m (Either SomeException a)
 tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cronLog)

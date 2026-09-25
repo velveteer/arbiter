@@ -52,6 +52,9 @@ through both 01:00 hours.
 
 **Backfill.** `Backfill n` replays ticks missed in the last `n` seconds after
 downtime or a scheduler pause.
+If a tick fails to insert, the scheduler logs the failure and continues with
+later ticks. A failed tick is skipped once a later tick fires. A failed newest
+tick is retried on the next pass.
 
 **Runtime overrides.** The REST API and admin UI set a schedule's expression,
 overlap policy, time zone, and enabled state. An override of `null` restores

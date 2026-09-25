@@ -187,7 +187,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         length jobs `shouldBe` 1
         payload (head jobs) `shouldBe` mkSimple "2025-06-15T14:30"
 
-      it "keeps a failed schedule's watermark for retry without blocking other schedules" $ \env -> do
+      it "advances a failed schedule and continues processing other schedules" $ \env -> do
         let Right good =
               cronJob
                 "good-1"
@@ -200,11 +200,10 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 "* * * * *"
                 AllowOverlap
                 (\_ _ -> errorWithoutStackTrace "intentional builder failure")
-            recovered = bad {builder = \_ _ -> defaultJob (mkSimple "recovered"), backfill = Backfill 120}
+            recovered = bad {builder = \_ _ -> defaultJob (mkSimple "recovered")}
             tick = mkTime 2025 6 15 12 0 0
         runM env $ do
           initCronSchedules schema table [good, bad] silentLogConfig
-          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) ["bad-1"]
           catchUpAt schema table [good, bad] tick
 
         rows <- runM env $ Ops.listCronSchedules schema Nothing
@@ -213,7 +212,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
           Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "good-1 schedule missing"
         case getRow "bad-1" of
-          Just row -> CS.lastCheckedAt row `shouldBe` Just (mkTime 2025 6 15 11 59 0)
+          Just row -> CS.lastCheckedAt row `shouldBe` Just tick
           Nothing -> expectationFailure "bad-1 schedule missing"
 
         -- The good cron's job was inserted.
@@ -222,7 +221,101 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
 
         runM env $ catchUpAt schema table [recovered] (mkTime 2025 6 15 12 1 0)
         recoveredJobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
-        map payload recoveredJobs `shouldBe` [mkSimple "recovered", mkSimple "recovered"]
+        map payload recoveredJobs `shouldBe` [mkSimple "recovered"]
+
+      it "fires later backfill and live ticks after a tick keeps failing" $ \env -> do
+        let failedTick = mkTime 2025 6 15 12 0 0
+            currentTick = mkTime 2025 6 15 12 2 0
+            Right base =
+              cronJob "partial-backfill" "* * * * *" AllowOverlap $ \_ tick ->
+                if tick == failedTick
+                  then errorWithoutStackTrace "persistent builder failure"
+                  else defaultJob (mkSimple (formatMinute tick))
+            cron = base {backfill = Backfill 600}
+        runM env $ do
+          initCronSchedules schema table [cron] silentLogConfig
+          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) [name cron]
+          catchUpAt schema table [cron] currentTick
+
+        jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload jobs `shouldBe` map (mkSimple . formatMinute) [mkTime 2025 6 15 12 1 0, currentTick]
+        Just row <- runM env $ Ops.getCronScheduleByName schema (name cron)
+        CS.lastCheckedAt row `shouldBe` Just currentTick
+
+        runM env $ catchUpAt schema table [cron] (mkTime 2025 6 15 12 3 0)
+        next <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload next `shouldBe` [mkSimple "2025-06-15T12:03"]
+
+      it "retries a failed newest backfill tick on the next pass" $ \env -> do
+        let lastChecked = mkTime 2025 6 15 11 59 0
+            failedTick = mkTime 2025 6 15 12 1 0
+            nextTick = mkTime 2025 6 15 12 2 0
+            Right base =
+              cronJob "retry-newest" "* * * * *" AllowOverlap $ \_ tick ->
+                if tick == failedTick
+                  then errorWithoutStackTrace "transient builder failure"
+                  else defaultJob (mkSimple (formatMinute tick))
+            cron = base {backfill = Backfill 600}
+            recovered = cron {builder = \_ tick -> defaultJob (mkSimple (formatMinute tick))}
+        runM env $ do
+          initCronSchedules schema table [cron] silentLogConfig
+          void $ Ops.touchCronChecked schema lastChecked [name cron]
+          catchUpAt schema table [cron] failedTick
+
+        Just held <- runM env $ Ops.getCronScheduleByName schema (name cron)
+        CS.lastCheckedAt held `shouldBe` Just (mkTime 2025 6 15 12 0 0)
+
+        runM env $ catchUpAt schema table [recovered] nextTick
+        jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload jobs `shouldBe` map (mkSimple . formatMinute) [mkTime 2025 6 15 12 0 0, failedTick, nextTick]
+        Just row <- runM env $ Ops.getCronScheduleByName schema (name cron)
+        CS.lastCheckedAt row `shouldBe` Just nextTick
+
+      it "fires a later SkipOverlap tick after the oldest backfill tick fails" $ \env -> do
+        let failedTick = mkTime 2025 6 15 12 0 0
+            currentTick = mkTime 2025 6 15 12 2 0
+            Right base =
+              cronJob "skip-failed" "* * * * *" SkipOverlap $ \_ tick ->
+                if tick == failedTick
+                  then errorWithoutStackTrace "persistent builder failure"
+                  else defaultJob (mkSimple (formatMinute tick))
+            cron = base {backfill = Backfill 600}
+        runM env $ do
+          initCronSchedules schema table [cron] silentLogConfig
+          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) [name cron]
+          catchUpAt schema table [cron] currentTick
+
+        jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload jobs `shouldBe` [mkSimple "2025-06-15T12:01"]
+        Just row <- runM env $ Ops.getCronScheduleByName schema (name cron)
+        CS.lastCheckedAt row `shouldBe` Just currentTick
+
+      it "retains the backfill watermark while another pool holds the leader lock" $ \env -> do
+        let lastChecked = mkTime 2025 6 15 11 59 0
+            currentTick = mkTime 2025 6 15 12 1 0
+            Right base = cronJob "contended-backfill" "* * * * *" AllowOverlap (\_ tick -> defaultJob (mkSimple (formatMinute tick)))
+            cron = base {backfill = Backfill 600}
+        runM env $ do
+          initCronSchedules schema table [cron] silentLogConfig
+          void $ Ops.touchCronChecked schema lastChecked [name cron]
+        held <- newEmptyMVar
+        release <- newEmptyMVar
+        let holdLeader = runM env . withDbTransaction $ do
+              got <- Ops.tryAcquireCronLeader schema table (name cron)
+              liftIO (putMVar held got)
+              liftIO (takeMVar release)
+        withAsync holdLeader $ \holder -> do
+          got <- takeMVar held
+          got `shouldBe` True
+          runM env $ catchUpAt schema table [cron] currentTick
+          Just blocked <- runM env $ Ops.getCronScheduleByName schema (name cron)
+          CS.lastCheckedAt blocked `shouldBe` Just lastChecked
+          putMVar release ()
+          wait holder
+
+        runM env $ catchUpAt schema table [cron] currentTick
+        jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
+        map payload jobs `shouldBe` map (mkSimple . formatMinute) [mkTime 2025 6 15 12 0 0, currentTick]
 
     describe "processRunRequests" $ do
       it "fires a requested schedule the tick would not match" $ \env -> do
