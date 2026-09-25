@@ -2,10 +2,20 @@
 
 -- | Convenience re-exports for the @orville-postgresql@ backend.
 --
--- See "Arbiter.Orville.MonadArbiter" for integration details.
+-- @
+-- import Arbiter.Orville
+--
+-- enqueue :: (MonadOrville m, MonadUnliftIO m) => m ()
+-- enqueue =
+--   runOrvilleDb \@MyRegistry (OrvilleEnv "arbiter" Nothing) $
+--     insertJob (defaultJob myPayload)
+-- @
+--
+-- "Arbiter.Orville.MonadArbiter" has the primitives for an application's own instance.
 module Arbiter.Orville
   ( -- * Re-exports
     module Arbiter.Orville.MonadArbiter
+  , module Arbiter.Orville.OrvilleDb
 
     -- * Helper Functions
   , createOrvilleConnectionOptions
@@ -17,6 +27,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Orville.PostgreSQL qualified as O
 
 import Arbiter.Orville.MonadArbiter
+import Arbiter.Orville.OrvilleDb
 
 -- | Orville @ConnectionOptions@ from an arbiter 'Arbiter.Core.PoolConfig.PoolConfig'.
 createOrvilleConnectionOptions

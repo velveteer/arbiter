@@ -6,11 +6,11 @@ description:
   An Orville backend for Arbiter, an opinionated PostgreSQL job queue for
   Haskell.
 
-  Supplies the query, statement, transaction, and handler primitives implemented
-  against @MonadOrville@, so an application with its own Orville monad can define
-  a @MonadArbiter@ instance that shares the transaction Orville is already
-  managing. Unlike arbiter-simple and arbiter-hasql, this package ships no
-  instance of its own.
+  Provides @OrvilleDb@, a @MonadArbiter@ transformer over any @MonadOrville@
+  monad. Arbiter queries run on the application's Orville connection and share
+  the transaction Orville is already managing. The query, statement,
+  transaction, and handler primitives are exported for applications that write
+  their own instance.
 
 license:         MIT
 license-file:    LICENSE
@@ -46,6 +46,7 @@ library
   exposed-modules:
     Arbiter.Orville
     Arbiter.Orville.MonadArbiter
+    Arbiter.Orville.OrvilleDb
 
   other-modules:   Arbiter.Orville.Array
 
@@ -54,9 +55,12 @@ library
     , arbiter-core        >=0.1  && <0.2
     , base                >=4.20 && <5
     , bytestring          >=0.10 && <0.13
+    , exceptions          >=0.10 && <0.11
     , orville-postgresql  >=1.0  && <1.2
     , postgresql-libpq    >=0.9  && <0.12
     , text                >=1.2  && <2.2
+    , transformers        >=0.5  && <0.7
+    , unliftio            >=0.2  && <0.3
 
 test-suite arbiter-orville-tests
   import:         shared-properties
@@ -83,11 +87,9 @@ test-suite arbiter-orville-tests
     , arbiter-worker-testkit  >=0.1 && <0.2
     , base
     , bytestring
-    , exceptions
     , hspec                   >=2.0 && <2.12
     , orville-postgresql
     , postgresql-simple
     , resource-pool           >=0.4 && <0.6
     , text
     , transformers
-    , unliftio

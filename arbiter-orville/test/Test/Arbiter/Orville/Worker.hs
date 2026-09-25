@@ -29,6 +29,7 @@ import Test.Arbiter.Orville.TestHelpers
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
   , disableOrvilleListener
+  , orvilleTestHandler
   , runOrvilleTest
   )
 
@@ -76,7 +77,7 @@ orvilleBackend connStr schema env =
     , pollOnly = disableOrvilleListener
     , mkFreshEnv = TestSetup.cleanupOnce connStr schema schema >> createOrvilleTestEnv connStr schema schema orvillePoolSize
     , destroyEnv = destroyOrvilleTestEnv
-    , mkHandler = id
+    , mkHandler = orvilleTestHandler schema
     , runCommand = TestKit.statementCommand
     , runM = runOrvilleTest
     }

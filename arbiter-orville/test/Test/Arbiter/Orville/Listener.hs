@@ -19,6 +19,7 @@ import Test.Arbiter.Orville.TestHelpers
   ( TestOrville
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
+  , orvilleTestHandler
   , runOrvilleTest
   )
 import Test.Arbiter.Orville.Worker (OrvilleWorkerTestPayload, withOrvilleBackend)
@@ -64,7 +65,7 @@ multiQueueSpec connStr =
       MqBPayload
       mkEnv
       destroyOrvilleTestEnv
-      id
+      (orvilleTestHandler mqSchema)
       runOrvilleTest
   where
     mkEnv = do

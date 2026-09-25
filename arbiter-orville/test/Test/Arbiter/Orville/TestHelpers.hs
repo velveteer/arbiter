@@ -1,5 +1,3 @@
-{-# LANGUAGE TypeFamilies #-}
-
 module Test.Arbiter.Orville.TestHelpers
   ( setupOrvilleTest
   , createOrvilleTestEnv
@@ -7,32 +5,24 @@ module Test.Arbiter.Orville.TestHelpers
   , disableOrvilleListener
   , cleanupOrvilleTest
   , runOrvilleTest
+  , orvilleTestHandler
   , OrvilleTestEnv (..)
-  , TestOrville (..)
+  , TestOrville
   ) where
 
 import Arbiter.Core.Listen (Listener)
-import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Arbiter.LibPQ (newLibPQListener)
 import Arbiter.Test.Setup qualified as TestSetup
-import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
-import Control.Monad.Trans.Reader (ReaderT (..), asks, runReaderT)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Orville.PostgreSQL qualified as O
 import Orville.PostgreSQL.Raw.Connection (destroyIdleConnections)
-import Orville.PostgreSQL.UnliftIO qualified as O
-import UnliftIO (MonadIO (..), MonadUnliftIO (..))
 
-import Arbiter.Orville.MonadArbiter
-  ( orvilleExecuteQuery
-  , orvilleExecuteStatement
-  , orvilleRunHandlerWithConnection
-  , orvilleWithDbTransaction
-  )
+import Arbiter.Orville.OrvilleDb (OrvilleDb, OrvilleEnv (..), runOrvilleDb)
 
 -- Test environment combining schema name, table name, and OrvilleState
 data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
@@ -44,30 +34,8 @@ data OrvilleTestEnv (registry :: JobPayloadRegistry) = OrvilleTestEnv
   , testListen :: Maybe Listener
   }
 
--- | Test monad that provides both OrvilleState and ArbiterEnv
-newtype TestOrville (registry :: JobPayloadRegistry) a = TestOrville {unTestOrville :: ReaderT (OrvilleTestEnv registry) IO a}
-  deriving newtype
-    (Applicative, Functor, Monad, MonadCatch, MonadFail, MonadIO, MonadMask, MonadThrow, MonadUnliftIO, O.MonadOrville)
-
-instance O.HasOrvilleState (TestOrville registry) where
-  askOrvilleState = TestOrville $ asks testOrvilleState
-  localOrvilleState adjust (TestOrville action) = TestOrville $ ReaderT $ \env ->
-    runReaderT action (env {testOrvilleState = adjust (testOrvilleState env)})
-
-instance O.MonadOrvilleControl (TestOrville registry) where
-  liftWithConnection = O.liftWithConnectionViaUnliftIO
-  liftCatch = O.liftCatchViaUnliftIO
-  liftMask = O.liftMaskViaUnliftIO
-
-instance MonadArbiter (TestOrville registry) where
-  type RegistryOf (TestOrville registry) = registry
-  type Handler (TestOrville registry) job result = job -> TestOrville registry result
-  getSchema = TestOrville $ asks testSchema
-  executeQuery = orvilleExecuteQuery
-  executeStatement = orvilleExecuteStatement
-  withDbTransaction = orvilleWithDbTransaction
-  runHandlerWithConnection = orvilleRunHandlerWithConnection
-  getListener = TestOrville $ asks testListen
+-- | 'OrvilleDb' over a reader of the env's 'O.OrvilleState'
+type TestOrville registry = OrvilleDb registry (ReaderT O.OrvilleState IO)
 
 setupOrvilleTest :: ByteString -> Text -> Text -> Int -> IO (OrvilleTestEnv registry)
 setupOrvilleTest connStr schemaName tableName maxConns = do
@@ -114,4 +82,11 @@ cleanupOrvilleTest env = TestSetup.cleanupOnce (testConnStr env) (testSchema env
 
 -- | Run a TestOrville action with the test environment
 runOrvilleTest :: OrvilleTestEnv registry -> TestOrville registry a -> IO a
-runOrvilleTest env (TestOrville action) = runReaderT action env
+runOrvilleTest env = flip runReaderT (testOrvilleState env) . runOrvilleDb (arbiterEnv env)
+
+-- | A handler written in 'TestOrville' against the given schema, run in its base monad
+orvilleTestHandler :: Text -> (job -> TestOrville registry result) -> job -> ReaderT O.OrvilleState IO result
+orvilleTestHandler schemaName handler = runOrvilleDb OrvilleEnv {schema = schemaName, listener = Nothing} . handler
+
+arbiterEnv :: OrvilleTestEnv registry -> OrvilleEnv registry
+arbiterEnv env = OrvilleEnv {schema = testSchema env, listener = testListen env}

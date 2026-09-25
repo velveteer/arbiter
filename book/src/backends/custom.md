@@ -1,7 +1,7 @@
 # Writing a Backend
 
-A backend is a `MonadArbiter` instance. [arbiter-orville](orville.md)
-applications define one.
+A backend is a `MonadArbiter` instance. An [arbiter-orville](orville.md)
+application can define one on its own monad in place of `OrvilleDb`.
 
 | Member | |
 | --- | --- |

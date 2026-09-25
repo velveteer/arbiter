@@ -23,13 +23,7 @@ import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.Orville
-  ( createOrvilleConnectionOptions
-  , orvilleExecuteQuery
-  , orvilleExecuteStatement
-  , orvilleRunHandlerWithConnection
-  , orvilleWithDbTransaction
-  )
+import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), createOrvilleConnectionOptions, runOrvilleDb)
 import Arbiter.Otel qualified as Otel
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
@@ -46,9 +40,8 @@ import Control.Concurrent.Async (mapConcurrently_, race, race_)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (finally)
 import Control.Monad (replicateM, void, when)
-import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Trans.Reader (ReaderT (..), asks)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList, traverse_)
@@ -83,13 +76,11 @@ import OpenTelemetry.Trace.Core
   , setGlobalTracerProvider
   )
 import Orville.PostgreSQL qualified as O
-import Orville.PostgreSQL.UnliftIO qualified as O
 import System.Exit (die)
 import System.IO.Unsafe (unsafePerformIO)
 import Test.Tasty (localOption, mkTimeout)
 import Test.Tasty.Bench
 import Test.Tasty.Providers (IsTest (..), singleTest, testPassed)
-import UnliftIO (MonadUnliftIO)
 
 import BenchHasql (hasqlTransports)
 
@@ -559,31 +550,7 @@ type RunM m = forall a. m a -> IO a
 type SimpleM = SimpleDb BenchRegistry IO
 type HasqlM = HasqlDb BenchRegistry IO
 
-newtype BenchOrville a = BenchOrville {unBenchOrville :: ReaderT (Text, O.OrvilleState) IO a}
-  deriving newtype
-    (Applicative, Functor, Monad, MonadCatch, MonadIO, MonadMask, MonadThrow, MonadUnliftIO, O.MonadOrville)
-
-instance O.HasOrvilleState BenchOrville where
-  askOrvilleState = BenchOrville $ asks snd
-  localOrvilleState adjust (BenchOrville action) = BenchOrville $ ReaderT $ \(schema, state) ->
-    runReaderT action (schema, adjust state)
-
-instance O.MonadOrvilleControl BenchOrville where
-  liftWithConnection = O.liftWithConnectionViaUnliftIO
-  liftCatch = O.liftCatchViaUnliftIO
-  liftMask = O.liftMaskViaUnliftIO
-
-instance MonadArbiter BenchOrville where
-  type RegistryOf BenchOrville = BenchRegistry
-  type Handler BenchOrville job result = job -> BenchOrville result
-  getSchema = BenchOrville $ asks fst
-  executeQuery = orvilleExecuteQuery
-  executeStatement = orvilleExecuteStatement
-  withDbTransaction = orvilleWithDbTransaction
-  runHandlerWithConnection = orvilleRunHandlerWithConnection
-  getListener = pure Nothing
-
-type OrvilleM = BenchOrville
+type OrvilleM = OrvilleDb BenchRegistry (ReaderT O.OrvilleState IO)
 
 -- | @numPools@ copies of a backend's config, tuned for benching.
 benchConfigs
@@ -1099,7 +1066,7 @@ main = do
             ]
 
       orvilleRun :: RunM OrvilleM
-      orvilleRun action = runReaderT (unBenchOrville action) (benchSchema, orvilleState)
+      orvilleRun action = runReaderT (runOrvilleDb OrvilleEnv {schema = benchSchema, listener = Nothing} action) orvilleState
 
   defaultMain
     $ map
