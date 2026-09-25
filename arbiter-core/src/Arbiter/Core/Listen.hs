@@ -72,7 +72,7 @@ data Notification = Notification
   }
   deriving stock (Eq, Show)
 
--- | How a registrant wants hub events reported.
+-- | Hub event reporting preferences for a registrant.
 data HubLog = HubLog
   { hubRecovered :: Text -> IO ()
   -- ^ The hub's connection came back.
@@ -81,10 +81,10 @@ data HubLog = HubLog
   , hubError :: Text -> IO ()
   -- ^ The hub's connection failed.
   , hubRepeatInterval :: NominalDiffTime
-  -- ^ How often a standing connection failure says so again.
+  -- ^ Repeat interval for a persistent connection failure.
   }
 
--- | Everything the worker needs to run a shared listener for one env.
+-- | Shared listener configuration for one environment.
 data Listener = Listener
   { listenerSlot :: MVar (Maybe RunningHub)
   -- ^ Rendezvous, lazily started and refcounted. Shared across an env's pools.
@@ -268,7 +268,7 @@ connectionLoop hub conn onReady = do
               unless consumed $ throwInternal "consumeInput failed"
               if changed then reconcile hub conn >>= loop else loop desired
 
--- | Bring the wire's subscriptions in line with the registered channels.
+-- | Synchronize wire subscriptions with registered channels.
 reconcile :: RunningHub -> ListenConn -> IO (Set ByteString)
 reconcile hub conn = do
   (desired, subd) <-

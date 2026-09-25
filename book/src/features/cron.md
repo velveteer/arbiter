@@ -41,8 +41,8 @@ let configWithCron =
 The builder receives a `TickKind` (`Live` for the current minute, `Replay` for
 a catch-up tick) and the tick time.
 
-A schedule enqueues one job per tick on its pool's queue. For a tree, have the
-job [spawn its children](job-trees.md#spawning-children-at-runtime).
+A schedule enqueues one job per tick on its pool's queue. Tree jobs
+[spawn children](job-trees.md#spawning-children-at-runtime) at runtime.
 
 **Time zones.** Expressions are UTC. `cronJobInTimezone` takes an
 [IANA name](https://www.iana.org/time-zones). `30 2 * * *` skips a spring
@@ -52,9 +52,12 @@ through both 01:00 hours.
 
 **Backfill.** `Backfill n` replays ticks missed in the last `n` seconds after
 downtime or a scheduler pause.
+If a tick fails to insert, the scheduler logs the failure and continues with
+later ticks. A failed tick is skipped once a later tick fires. For a `Backfill` schedule, a failed
+newest tick is retried on the next pass.
 
 **Runtime overrides.** The REST API and admin UI set a schedule's expression,
 overlap policy, time zone, and enabled state. An override of `null` restores
 the value from code.
 
-See the [`Arbiter.Worker.Cron` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Cron.html) for the schedule type.
+Schedule type: [`Arbiter.Worker.Cron` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Cron.html).

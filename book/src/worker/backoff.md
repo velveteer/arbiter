@@ -17,4 +17,4 @@ before the first retry.
 A nack skips the backoff. The job stays invisible for the rest of its lease.
 Set the visibility timeout before the nack to change that.
 
-See the [`Arbiter.Worker.BackoffStrategy` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-BackoffStrategy.html) for every strategy and jitter mode.
+Strategies and jitter modes: [`Arbiter.Worker.BackoffStrategy` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-BackoffStrategy.html).

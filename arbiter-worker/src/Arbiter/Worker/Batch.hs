@@ -1,12 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | A batch's lifecycle: the handoff, the settle ordering, the outcome report and
--- the force-cancel finalizer.
+-- | Batch settlement, outcome reporting, and force-cancel finalization.
 --
--- The pool supplies every statement and hook as an 'Effects' action. Each
--- transactional unit is one effect, so the lifecycle never composes across a
--- transaction. Written against io-classes, so the pool runs it in IO and the
--- tests run it under io-sim.
+-- Each 'Effects' action runs one transaction or hook. The pool runs the
+-- lifecycle in IO. Tests use io-sim.
 module Arbiter.Worker.Batch
   ( -- * The pool's side
     Effects (..)
@@ -96,9 +93,8 @@ type Failure = (Text, FailureKind)
 data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled
   deriving stock (Eq, Show)
 
--- | The statements and hooks a batch drives, each in the context @ctx@ it is
--- called from. A callback runs in the handler's own context, so a statement it
--- drives joins a transaction the handler holds. Each is one transaction or one hook.
+-- | Batch statements and hooks. Callbacks use the handler's context and join
+-- its active transaction. Each effect is one transaction or one hook.
 data Effects n ctx job kids stored = Effects
   { effectAmbient :: ctx
   -- ^ The context the batch runs in, outside the handler.
@@ -144,7 +140,7 @@ data Callbacks n ctx job kids stored = Callbacks
 -- The handoff
 -- ---------------------------------------------------------------------------
 
--- | What a batch has settled so far.
+-- | Batch settlement progress.
 data Progress n = Progress
   { progressHandled :: !(Set JobId)
   -- ^ Jobs whose outcome has been recorded.
@@ -152,6 +148,8 @@ data Progress n = Progress
   -- ^ Jobs a batch ack found under another claim.
   , progressCancelled :: !(Set JobId)
   -- ^ Jobs a force-cancel accounted for.
+  , progressClaimed :: !(Set JobId)
+  -- ^ Jobs whose claim report fired.
   , progressReported :: !(Set JobId)
   -- ^ Jobs whose terminal report fired.
   , progressSpawned :: !(Set JobId)
@@ -163,24 +161,26 @@ data Progress n = Progress
   }
 
 -- | Finalization state shared by the handler and the force-cancel finalizer, with
--- the batch's job key.
+-- the batch's job key and start time.
 data Handoff n job = Handoff
   { handoffKey :: job -> JobId
+  , handoffStart :: UTCTime
   , handoffVar :: TVar n (Progress n)
   }
 
--- | A handoff keyed the way the guard keys its jobs.
-newHandoff :: (MonadSTM n) => HeartbeatGuard n job -> n (Handoff n job)
+-- | A handoff keyed the way the guard keys its jobs, starting now.
+newHandoff :: (MonadSTM n, MonadTime n) => HeartbeatGuard n job -> n (Handoff n job)
 {-# SPECIALIZE newHandoff :: HeartbeatGuard IO job -> IO (Handoff IO job) #-}
-newHandoff guard = Handoff (guardKey guard) <$> newTVarIO emptyProgress
+newHandoff guard = Handoff (guardKey guard) <$> getCurrentTime <*> newTVarIO emptyProgress
 
--- | A batch that has settled nothing.
+-- | Initial settlement state.
 emptyProgress :: Progress n
 emptyProgress =
   Progress
     { progressHandled = mempty
     , progressUnowned = mempty
     , progressCancelled = mempty
+    , progressClaimed = mempty
     , progressReported = mempty
     , progressSpawned = mempty
     , progressDeferred = Nothing
@@ -196,8 +196,7 @@ alterProgress handoff = atomically . modifyTVar' (handoffVar handoff)
 onProgress :: (MonadSTM n) => Handoff n job -> (Progress n -> (a, Progress n)) -> n a
 onProgress handoff = atomically . stateTVar (handoffVar handoff)
 
--- | What a settle accounted for: the jobs it finalized, and the jobs it found under
--- another claim.
+-- | Finalized jobs and jobs held under another claim.
 data Settled job = Settled [job] [job]
 
 finalized :: [job] -> Settled job
@@ -221,8 +220,7 @@ record handoff = alterProgress handoff . recorded handoff
 hasIdIn :: Handoff n job -> Set JobId -> job -> Bool
 hasIdIn handoff ids job = Set.member (handoffKey handoff job) ids
 
--- | Select jobs from the batch in descending identifier order. This gives ack,
--- force-cancel and heartbeat operations the same row-lock order.
+-- | Sort jobs by descending id for consistent row-lock ordering.
 byIdDesc :: Handoff n job -> (job -> Bool) -> NonEmpty job -> [job]
 byIdDesc handoff keep = sortOn (Down . handoffKey handoff) . filter keep . toList
 
@@ -236,7 +234,7 @@ jobsBy handoff recordedSet member jobs = do
 pendingJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 pendingJobs handoff = jobsBy handoff progressHandled not
 
--- | The batch's jobs a settle found under another claim.
+-- | Jobs found under another claim.
 unownedJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 unownedJobs handoff = jobsBy handoff progressUnowned id
 
@@ -246,7 +244,7 @@ recordSpawned handoff job =
   alterProgress handoff $ \progress ->
     progress {progressSpawned = Set.insert (handoffKey handoff job) (progressSpawned progress)}
 
--- | Add to the jobs a force-cancel accounted for, returning every id recorded so far.
+-- | Record force-cancelled jobs and return all recorded ids.
 recordCancelled :: (MonadSTM n) => Handoff n job -> Set JobId -> n (Set JobId)
 recordCancelled handoff ids =
   onProgress handoff $ \progress ->
@@ -299,8 +297,8 @@ runBatch
   -> IO ()
   #-}
 runBatch effects guard mode handoff jobs = do
-  startTime <- getCurrentTime
-  let run = ambientRun effects handoff
+  let startTime = handoffStart handoff
+      run = ambientRun effects handoff
       (firstJob :| _) = jobs
       -- Rethrown as it came. The flag is set last. An interrupted finalizer
       -- leaves the rest to 'afterBatch'.
@@ -311,10 +309,10 @@ runBatch effects guard mode handoff jobs = do
   -- The span covers the claim hooks, the outcome report and the force-cancel
   -- finalizer.
   effectSpan effects $ \inherit -> (`catch` onForceCancel) $ do
-    traverse_ (\job -> report run (Claimed job startTime)) jobs
     result <-
       trySync $
-        guardBatch guard (Batch jobs (pendingJobs handoff jobs) startTime inherit) $
+        guardBatch guard (Batch jobs (pendingJobs handoff jobs) startTime inherit) $ do
+          traverse_ (reportClaimed run) jobs
           case mode of
             -- The commit stays interruptible. The transaction contains the handler.
             SingleMode transaction ->
@@ -387,18 +385,31 @@ settle
   => Run n ctx job kids stored -> Settled job -> n a -> (Run n ctx job kids stored -> a -> n ()) -> n a
 settle run settled commit = settleWith run (\_ -> commit) (const settled)
 
--- | Fire a job's terminal report, once per batch. The claim and the report are one
--- unit against a signal.
-reportOnce :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> job -> n () -> n ()
-reportOnce run job fire = mask_ $ do
-  fresh <- onProgress handoff $ \progress ->
-    ( not (Set.member key (progressReported progress))
-    , progress {progressReported = Set.insert key (progressReported progress)}
-    )
-  when fresh fire
+-- | Mark a job in one of the progress sets. Whether it was unmarked.
+markOnce
+  :: (MonadSTM n)
+  => Handoff n job -> (Progress n -> Set JobId) -> (Set JobId -> Progress n -> Progress n) -> job -> n Bool
+markOnce handoff get put job = onProgress handoff $ \progress ->
+  (not (Set.member key (get progress)), put (Set.insert key (get progress)) progress)
+  where
+    key = handoffKey handoff job
+
+-- | Fire a job's claim report, once per batch. Left unmasked so the guard can
+-- interrupt a blocked claim hook.
+reportClaimed :: (MonadSTM n) => Run n ctx job kids stored -> job -> n ()
+reportClaimed run job = do
+  fresh <- markOnce handoff progressClaimed (\ids progress -> progress {progressClaimed = ids}) job
+  when fresh (report run (Claimed job (handoffStart handoff)))
   where
     handoff = runHandoff run
-    key = handoffKey handoff job
+
+-- | Fire a job's terminal report, once per batch, after its claim report. A batch
+-- the guard refused, or interrupted before every claim hook ran, still pairs the
+-- two. Marking and firing are one unit against a signal.
+reportOnce :: (MonadMask n, MonadSTM n) => Run n ctx job kids stored -> job -> n () -> n ()
+reportOnce run job fire = mask_ $ do
+  fresh <- markOnce (runHandoff run) progressReported (\ids progress -> progress {progressReported = ids}) job
+  when fresh (reportClaimed run job *> fire)
 
 reportSuccess :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> job -> n ()
 reportSuccess run startTime job = reportOnce run job (getCurrentTime >>= report run . Succeeded job startTime)

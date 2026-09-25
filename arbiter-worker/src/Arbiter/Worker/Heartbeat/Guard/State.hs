@@ -126,6 +126,7 @@ data Status n = Status
   }
 
 -- | The extend statement in flight. The loop issues it, the extend thread lands and clears it.
+-- The loop abandons it past its give-up and settle grace.
 data InFlight = InFlight
   { issuedAt :: !Time
   , givesUp :: !Time
@@ -142,6 +143,9 @@ data HeartbeatGuard n job = HeartbeatGuard
   , guardEntries :: TVar n (Map Int (Guarded n job))
   , guardNextToken :: TVar n Int
   , guardInFlight :: TVar n (Maybe InFlight)
+  , guardAbandoned :: TVar n (Maybe Time)
+  -- ^ The issue time of the abandoned extend still running. The loop sets it,
+  -- that extend's thread clears it.
   , guardWake :: Wake n
   }
 
@@ -158,6 +162,7 @@ newHeartbeatGuard config =
   HeartbeatGuard config
     <$> newTVarIO Map.empty
     <*> newTVarIO 0
+    <*> newTVarIO Nothing
     <*> newTVarIO Nothing
     <*> (Wake <$> newTVarIO 0 <*> newTVarIO Nothing)
 

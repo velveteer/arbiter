@@ -1,5 +1,4 @@
--- | The pool's batch queue, with the counts the free-worker reading and the drain
--- need, and the signal a freed slot sends the dispatcher.
+-- | Batch queue with in-flight counts and a slot-availability signal.
 module Arbiter.Worker.WorkQueue
   ( WorkQueue
   , newWorkQueue
@@ -30,16 +29,16 @@ data WorkQueue a = WorkQueue
 newWorkQueue :: (MonadIO m) => m (WorkQueue a)
 newWorkQueue = WorkQueue <$> newChan <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO False
 
--- | Enqueue in order. The count rises before the writes, so a reading never overshoots.
+-- | Enqueue in order. Masking keeps the count consistent with channel writes.
 pushWork :: (MonadUnliftIO m) => WorkQueue a -> [a] -> m ()
 pushWork _ [] = pure ()
 pushWork queue items = mask_ $ do
   atomically (modifyTVar' (wqQueued queue) (+ length items))
   traverse_ (writeChan (wqChan queue)) items
 
--- | Take the next item, moving it from queued to busy in one transaction.
-popWork :: (MonadIO m) => WorkQueue a -> m a
-popWork queue = do
+-- | Take the next item and transfer its count from queued to busy without interruption.
+popWork :: (MonadUnliftIO m) => WorkQueue a -> m a
+popWork queue = mask_ $ do
   item <- readChan (wqChan queue)
   item <$ atomically (modifyTVar' (wqQueued queue) (subtract 1) *> modifyTVar' (wqBusy queue) (+ 1))
 

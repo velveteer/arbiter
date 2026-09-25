@@ -50,4 +50,4 @@ instance MonadArbiter AppM where
   getListener = asks (Just . appListen)
 ```
 
-See the [arbiter-orville haddocks](https://arbiterq.dev/arbiter-orville/Arbiter-Orville.html) for the connection options.
+Connection options: [arbiter-orville Haddocks](https://arbiterq.dev/arbiter-orville/Arbiter-Orville.html).

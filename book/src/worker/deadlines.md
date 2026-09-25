@@ -6,10 +6,19 @@ config { Worker.jobHeartbeatInterval = 30 }  -- how often the worker renews that
 config { Worker.maxJobDuration = Just 300 }  -- longest a handler may run (default: Nothing)
 ```
 
-A claim is a lease on the row's `not_visible_until`. A heartbeat thread renews
-it every `jobHeartbeatInterval` while the handler runs.
+A claim is a lease on the row's `not_visible_until`. One guard per worker pool
+renews due jobs in a shared statement at the `jobHeartbeatInterval` cadence.
+The guard continues fencing leases if an extension stalls.
 
-Three things end a handler before it returns:
+An extension that remains stuck past its timeout and settlement grace releases
+the guard's renewal slot so later batches can be renewed. Its late response
+cannot update a replacement attempt's timers or clear its slot. The stuck driver
+call retains its checked-out connection until it exits, so recovery still requires
+another available pool connection. The guard abandons one extension at a time. If
+the replacement also stalls, renewal waits for the abandoned call to exit, so a
+wedged backend holds at most two of the pool's connections.
+
+Early handler termination:
 
 | Ends it | When | How the job settles |
 | --- | --- | --- |
@@ -17,8 +26,17 @@ Three things end a handler before it returns:
 | Lease fence | the lease expires after heartbeat failures | unavailable, no retry |
 | Duration deadline | the handler exceeds `maxJobDuration` | retryable failure, then backoff or DLQ |
 
-The lease fence uses the local deadline, needs no database reply, and is
-always on.
+The lease fence uses a local deadline and requires no database response.
+It is always active.
+
+A batch whose lease has already expired when it reaches the guard is rejected
+before its handler runs. Each of its jobs fires `onJobClaimed`, then
+`onJobUnavailable`. Keep worker and database clocks synchronized.
+An expired timestamp is not treated as evidence of clock skew.
+
+The guard registers before `onJobClaimed` runs. Claim hooks receive heartbeat
+protection, and their runtime counts toward `maxJobDuration`. A blocked claim hook
+is interrupted by the duration deadline or by lease loss, just like a handler.
 
 ## maxJobDuration
 
@@ -43,4 +61,4 @@ After the database goes away, a handler continues for at most one
 difference between the two settings. Failed extensions retry until the lease
 expires.
 
-See the [`WorkerConfig` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html) for every timing field.
+Timing fields: [`WorkerConfig` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html).

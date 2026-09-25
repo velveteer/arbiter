@@ -2,10 +2,9 @@
 
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
--- 'JobException' is the decision a handler throws to say how its failure is settled.
--- The options are retry, DLQ, or cancel the tree or branch. 'JobNackException' asks for
--- a reprocess with no failure recorded. The engine's own signals are separate types. A
--- user handler does not throw them.
+-- 'JobException' selects retry, DLQ, or tree/branch cancellation.
+-- 'JobNackException' requests reprocessing without a recorded failure.
+-- Engine signals use separate exception types.
 module Arbiter.Core.Exceptions
   ( -- * User-facing job decisions
     JobException (..)

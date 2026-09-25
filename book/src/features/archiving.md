@@ -15,4 +15,4 @@ archived jobs.
 A re-enqueued job keeps its payload and settings and has no parent. Retry a
 failed [tree](job-trees.md) from the [dead-letter queue](dead-letter-queue.md).
 
-See the [`Arbiter.Core.Job.Archive` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Archive.html) for the archive row and its queries.
+Archive row and queries: [`Arbiter.Core.Job.Archive` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Archive.html).

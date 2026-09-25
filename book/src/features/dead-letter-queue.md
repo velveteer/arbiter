@@ -1,7 +1,7 @@
 # Dead-Letter Queue
 
 A job moves to its queue's DLQ after its last attempt or after
-`throwPermanent`. See [Error Handling](error-handling.md).
+`throwPermanent`. Failure modes: [Error Handling](error-handling.md).
 
 `dlqPrimaryKey` is the DLQ row id, which `retryFromDLQ` and `deleteDLQJob`
 take. `jobSnapshot` is the failed job.
@@ -49,4 +49,4 @@ are permanent.
 
 The [REST API and admin UI](../rest-api.md) expose list, retry, and delete.
 
-See the [`Arbiter.Core.Job.DLQ` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-DLQ.html) for the entry type.
+Entry type: [`Arbiter.Core.Job.DLQ` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-DLQ.html).

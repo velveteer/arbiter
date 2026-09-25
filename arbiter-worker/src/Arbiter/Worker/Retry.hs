@@ -11,10 +11,9 @@ import Arbiter.Core.Threads (labelArbiterThread)
 import Control.Monad (unless)
 import Control.Monad.Trans.Cont (ContT (..))
 import Data.Text qualified as T
-import UnliftIO (MonadUnliftIO, liftIO)
+import UnliftIO (MonadUnliftIO, liftIO, tryAny)
 import UnliftIO.Async (Async, race, withAsync)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.Exception (tryAny)
 import UnliftIO.STM (TVar, atomically, readTVar, readTVarIO, retrySTM)
 
 import Arbiter.Worker.Logger (LogConfig, LogLevel (..), tryLog)

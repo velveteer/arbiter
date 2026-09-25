@@ -11,6 +11,7 @@ module Arbiter.Worker.Heartbeat.Guard.Signal
   , signal
   ) where
 
+import Arbiter.Core.Exceptions (JobGoneException (..))
 import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, modifyTVar', newTVarIO, stateTVar)
 import Control.Exception (asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad (unless, void, when)
@@ -18,12 +19,10 @@ import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
 import Control.Monad.Class.MonadThrow (Exception (..), MonadCatch (..), MonadMask (..), MonadThrow (..), SomeException)
 import Control.Monad.Class.MonadTime.SI (MonadMonotonicTime (..), MonadTime (..), Time, addTime, diffTime, diffUTCTime)
 import Data.Foldable (toList, traverse_)
-import Data.List (partition)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, maybeToList)
 
 import Arbiter.Worker.Heartbeat.Guard.State
-import Arbiter.Worker.Logger (LogLevel (..))
 
 -- | A guard signal, rethrown as sync at the handler boundary.
 newtype GuardSignal = GuardSignal SomeException
@@ -57,17 +56,14 @@ guardBatch guard batch action =
             | job <- toList (batchJobs batch)
             , Just at <- [configLease config job]
             ]
-          -- The claim just leased these rows in full. One already past is the clocks disagreeing.
-          (past, current) = partition ((<= monoNow) . snd) rowLeases
-          leaseUntil = minimum (addTime (configTimeout config - elapsed) monoNow : map snd current)
+          leaseUntil = minimum (addTime (configTimeout config - elapsed) monoNow : map snd rowLeases)
           firstBeat = addTime (heartbeatWait (configInterval config) True (leaseUntil `diffTime` monoNow)) monoNow
           deadline = (`addTime` monoNow) <$> configMaxDuration config
-      unless (null past) $
-        configLog
-          config
-          Warning
-          (map fst past)
-          "Lease already expired as the batch registered. The worker and database clocks disagree."
+      -- A delayed claim response or queueing pause can outlive the row's lease.
+      -- Refuse synchronously: an asynchronous fence could lose to a fast handler.
+      -- Clock skew alone is not proof that this worker still owns the claim.
+      when (leaseUntil <= monoNow) $
+        throwIO (JobGoneException leaseExpiredReason (map (configKey config) (toList (batchJobs batch))))
       status <-
         newTVarIO
           Status

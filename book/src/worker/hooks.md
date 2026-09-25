@@ -49,9 +49,12 @@ let instrumented = Worker.withHooks (myHooks <>) config
 A hook's return value is ignored. If a hook throws, the worker logs the
 exception at `Warning` and carries on.
 
-`onJobSuccess` can fire for a job that is later redelivered. See
+`onJobSuccess` reports a completed ack operation, not a durable outer
+transaction commit. In a batched handler's outer transaction, it fires when
+the callback's savepoint is released. If the outer transaction rolls back, the
+job is redelivered and the hook may fire again. See
 [Batched Handlers](batched-handlers.md).
 
 Reaper activity reports through `onMaintenance` on `WorkerConfig`.
 
-See the [`ObservabilityHooks` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Types.html#t:ObservabilityHooks) for each callback's arguments.
+Callback arguments: [`ObservabilityHooks` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-Job-Types.html#t:ObservabilityHooks).

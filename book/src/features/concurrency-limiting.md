@@ -20,7 +20,7 @@ instance HasConcurrency SyncPayload where
 
 Selectors: `noConcurrency`, `concurrencyBy`, `globalConcurrency`,
 `concurrencyByCase`. An operator can override the limit from the API or admin
-UI. If you clear the override, the declared default applies. Limit 0 admits
+UI. Clearing the override restores the declared default. Limit 0 admits
 nothing.
 
 ## Concurrency Limit 1 and Group Keys
@@ -64,4 +64,4 @@ syncHandler _conn job = do
 `clearConcurrencyLimit syncPool` removes the override. In a transactional
 handler the override commits with the ack.
 
-See the [`Arbiter.Concurrency` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Concurrency.html) for the selector DSL and the pool type.
+Selector DSL and pool type: [`Arbiter.Concurrency` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Concurrency.html).

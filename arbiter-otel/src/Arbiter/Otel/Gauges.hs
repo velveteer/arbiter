@@ -122,7 +122,7 @@ refreshLoop logCfg refreshGate source refreshInterval cache advance = forever $ 
       Published age snap -> Just (Cached (now - age) snap)
       Unreadable _ -> Nothing
 
--- | What a scan says about the database. An abandoned scan says nothing.
+-- | Scan reachability. An abandoned scan returns 'Nothing'.
 reachabilityOf :: Either SomeException (Maybe a) -> Maybe Bool
 reachabilityOf = either (const (Just False)) (True <$)
 

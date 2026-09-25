@@ -1,7 +1,7 @@
 # Job Results
 
-A handler can return a **result**. With `transactionalWorkerConfig`, return it.
-With a manual or batched configuration, pass it to `ackWith` or `ackAllWith`.
+`transactionalWorkerConfig` stores a handler's return value. Manual and
+batched handlers pass results to `ackWith` or `ackAllWith`.
 
 | Job | Where the result goes |
 | --- | --- |
@@ -36,4 +36,4 @@ syncHandler _conn job = do
   pure $ if rowsChanged report == 0 then Nothing else Just report
 ```
 
-See the [`Arbiter.Core.JobResult` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-JobResult.html) for the encoding.
+Result encoding: [`Arbiter.Core.JobResult` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-JobResult.html).

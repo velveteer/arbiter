@@ -23,7 +23,7 @@ import Control.Monad.Class.MonadAsync (MonadAsync (..))
 import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadThrow (MonadThrow (..), SomeException, fromException, toException)
-import Control.Monad.Class.MonadTime.SI (DiffTime, Time (..), addTime, getMonotonicTime)
+import Control.Monad.Class.MonadTime.SI (DiffTime, Time (..), addTime, getCurrentTime, getMonotonicTime)
 import Control.Monad.Class.MonadTimer.SI (threadDelay)
 import Control.Monad.IOSim (IOSim)
 import Data.Foldable (for_, toList)
@@ -124,6 +124,7 @@ data Ending = Returned | Threw String | Escaped String
 
 data Event
   = Reported JobId Kind Time
+  | ClaimReported JobId Time
   | Landed JobId Op Time
   | Acted Move Time
   | Ended Ending Time
@@ -362,7 +363,7 @@ modelEffects rows recorder =
         spawned <- landing rows recorder Spawned spawnRow job
         unless spawned (throwIO (JobGoneException reclaimedReason [jobId job]))
     , effectReport = \() -> \case
-        Claimed _ _ -> pure ()
+        Claimed job _ -> recorder (ClaimReported (jobId job))
         Succeeded job _ _ -> reported job SuccessK
         Failed job _ _ _ outcome -> reported job (kindOf outcome)
         Cancelled job _ -> reported job CancelledK
@@ -423,6 +424,7 @@ data Thrown
   | ThrowTreeCancel
   | ThrowBranchCancel
   | ThrowGone Int
+  | ThrowGoneAll
   | ThrowNack
   | ThrowOther
   deriving stock (Eq, Show)
@@ -511,6 +513,7 @@ thrownException jobs = \case
   ThrowTreeCancel -> toException (TreeCancel (TreeCancelException "cancel the tree"))
   ThrowBranchCancel -> toException (BranchCancel (BranchCancelException "cancel the branch"))
   ThrowGone index -> toException (JobGoneException handlerGone [jobId (toList jobs !! (index - 1))])
+  ThrowGoneAll -> toException (JobGoneException handlerGone (map jobId (toList jobs)))
   ThrowNack -> toException JobNackException
   ThrowOther -> toException (userError "handler crashed")
 
@@ -678,6 +681,9 @@ judgePlan (plan, events, table) =
     judgeJob job =
       conjoin
         [ counterexample ("job " <> show job <> " was reported more than once") (length reports <= 1)
+        , counterexample ("job " <> show job <> " fired its claim hook more than once") (length claims <= 1)
+        , counterexample ("job " <> show job <> " was reported without its claim hook first") $
+            and [any (< index) claims | (index, _) <- reports]
         , counterexample ("job " <> show job <> " was reported successful without its ack landing") $
             SuccessK `notElem` kinds || landed job Acked || landed job Spawned
         , counterexample ("job " <> show job <> " was reported retried without its retry landing") $
@@ -729,6 +735,7 @@ judgePlan (plan, events, table) =
         cancelledAndFlagged = CancelledK `elem` kinds && maybe False rowFlagged (row job)
         heldExplained = UnavailableK handlerGone `elem` kinds || not (stranded job) || cancelledAndFlagged
         reportedAt = [(index, at) | (index, Reported j _ at) <- indexed, j == job]
+        claims = [index | (index, ClaimReported j _) <- indexed, j == job]
 
 -- | A force-cancel of one sibling lands after another sibling's ack commits.
 ackThenSiblingCancel :: Plan
@@ -761,6 +768,15 @@ goneThenSiblingCancel = Plan 2 Nothing [Sleep 0.005, Throw (ThrowGone 1)] [(0.00
 -- spawn.
 spawnThenForceCancel :: Plan
 spawnThenForceCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, SpawnOne 1] [(1.5, Flag 2)] [Extends] Nothing
+
+-- | Later callbacks cannot overwrite a job the handler already spawned.
+spawnThenRepeatedCallbacks :: Plan
+spawnThenRepeatedCallbacks =
+  Plan 1 Nothing [SpawnOne 1, AckOne 1, AckMany [1], FailOne RetryFailure 1, NackOne 1, SpawnOne 1] [] [Extends] Nothing
+
+-- | A stale guard signal names a job the handler already acked.
+goneAfterSiblingAck :: Plan
+goneAfterSiblingAck = Plan 2 Nothing [AckMany [2], Throw ThrowGoneAll] [] [Extends] Nothing
 
 -- | The share of explored schedules in which the cancel lands after the spawn.
 spawnInterruptedTarget :: Double
@@ -807,6 +823,47 @@ scenario plan label target reached =
 
 spec :: Spec
 spec = describe "Batch simulation" $ do
+  it "heartbeats jobs while their claim hook runs" $
+    exploreScenario
+      (\events -> [jobs | Issued jobs _ <- events, not (null jobs)] === [[1], [1]])
+      (claimHookScenario Nothing Extends 2.5)
+  it "bounds a blocked claim hook by the duration deadline" $
+    exploreScenario
+      ( \events ->
+          conjoin
+            [ map snd (reportedKinds events 1) === [RetryK]
+            , [at < Time 1 | Ended _ at <- events] === [True]
+            ]
+      )
+      (claimHookScenario (Just 0.5) Extends 10)
+  it "fences a blocked claim hook when renewal fails" $
+    exploreScenario
+      ( \events ->
+          conjoin
+            [ map snd (reportedKinds events 1) === [UnavailableK leaseExpiredReason]
+            , [at < Time 4 | Ended _ at <- events] === [True]
+            ]
+      )
+      (claimHookScenario Nothing Refuses 10)
+  it "pairs claim hooks with the reports of a batch refused on arrival" $
+    exploreScenario
+      ( \events ->
+          catMaybes [hookOf event | event <- events]
+            === concat [[(j, Nothing), (j, Just (UnavailableK leaseExpiredReason))] | j <- [2, 1]]
+      )
+      expiredOnArrivalScenario
+  it "ignores every callback after a job spawns children" $
+    exploreScenario judgePlan (runPlan spawnThenRepeatedCallbacks)
+  it "preserves an acked sibling named by a stale gone signal" $
+    exploreScenario
+      ( \result@(_, events, _) ->
+          conjoin
+            [ judgePlan result
+            , map snd (reportedKinds events 1) === [UnavailableK handlerGone]
+            , map snd (reportedKinds events 2) === [SuccessK]
+            ]
+      )
+      (runPlan goneAfterSiblingAck)
   it "reports an acked sibling when a force-cancel interrupts the report" $
     scenario ackThenSiblingCancel "the cancel landed after the ack" reportInterruptedTarget $ \(_, events, _) ->
       batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
@@ -829,3 +886,44 @@ spec = describe "Batch simulation" $ do
       ( \result@(plan, events, _) -> cover unfinalizedTarget (any (unfinalized events) (jobsOf plan)) "a job left unfinalized" (judgePlan result)
       )
       (runPlan <$> genPlan)
+
+-- | A job's claim hook as 'Nothing', its terminal report as its kind.
+hookOf :: Event -> Maybe (JobId, Maybe Kind)
+hookOf = \case
+  ClaimReported j _ -> Just (j, Nothing)
+  Reported j kind _ -> Just (j, Just kind)
+  _ -> Nothing
+
+-- | The claim response arrives after the row's lease ran out.
+expiredOnArrivalScenario :: IOSim s [Event]
+expiredOnArrivalScenario = do
+  exploreRaces
+  (recorder, events) <- newRecorder
+  rows <- newTVarIO Map.empty
+  script <- newTVarIO [Extends]
+  leasedUntil <- getCurrentTime
+  threadDelay 1
+  guard <- startGuard (guardConfigFor rows recorder script Nothing) {configLease = const (Just leasedUntil)}
+  handlerVar <- newTVarIO Nothing
+  let batch = Job 1 1 1 :| [Job 2 1 1]
+  worker (modelEffects rows recorder) guard (SingleMode (ackOrGone rows recorder)) handlerVar batch recorder
+  events
+
+-- | The claim hook runs before user processing but already owns a database lease.
+claimHookScenario :: Maybe DiffTime -> ExtendReply -> DiffTime -> IOSim s [Event]
+claimHookScenario deadline reply hookDelay = do
+  exploreRaces
+  (recorder, events) <- newRecorder
+  rows <- newTVarIO (Map.singleton 1 (Row 1 (Just Us) (Just (Time leaseTimeout)) False 1 False))
+  script <- newTVarIO [reply]
+  guard <- startGuard (guardConfigFor rows recorder script deadline)
+  handlerVar <- newTVarIO Nothing
+  let base = modelEffects rows recorder
+      effects =
+        base
+          { effectReport = \ctx report -> case report of
+              Claimed _ _ -> threadDelay hookDelay
+              _ -> effectReport base ctx report
+          }
+  worker effects guard (SingleMode (ackOrGone rows recorder)) handlerVar (Job 1 1 1 :| []) recorder
+  events

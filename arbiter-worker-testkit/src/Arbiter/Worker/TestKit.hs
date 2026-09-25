@@ -1428,6 +1428,50 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
           waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
 
+    it "reprocesses a rolled-back bulk ack and reports each savepoint release" $ \env -> do
+      callsRef <- newIORef (0 :: Int)
+      successesRef <- newIORef (0 :: Int)
+      batchSizesRef <- newIORef ([] :: [Int])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobSuccess = \_ _ _ ->
+                  liftIO $ atomicModifyIORef' successesRef (\count -> (count + 1, ()))
+              }
+          batchHandler jobs cbs = do
+            call <- liftIO $ atomicModifyIORef' callsRef (\count -> (count + 1, count + 1))
+            liftIO $ atomicModifyIORef' batchSizesRef (\sizes -> (length jobs : sizes, ()))
+            if call == 1
+              then withDbTransaction $ do
+                ackAllWith cbs [(job, Just ["rolled back"]) | job <- toList jobs]
+                throwRetryable "rolling back the batch"
+              else ackAllWith cbs [(job, Just ["committed"]) | job <- toList jobs]
+      let archivedJob name = setArchiveFor (Just dayRetention) $ setGroupKey (Just "sp-bulk") $ defaultJob (mkSimple name)
+      runM env $ traverse_ (void . HL.insertJob . archivedJob) ["sp-bulk-1", "sp-bulk-2"]
+      config <- mkBatchedConfig 1 2 batchHandler
+
+      withAsync
+        ( runM env $
+            runWorkerPool
+              config
+                { pollInterval = 0.1
+                , visibilityTimeout = 2
+                , jobHeartbeatInterval = 1
+                , jitter = NoJitter
+                , observabilityHooks = hooks
+                }
+        )
+        $ \_ -> do
+          waitUntil 15_000 $ (>= 2) <$> readIORef callsRef
+          waitUntil 15_000 $ (== 0) <$> runM env (HL.countJobs @payload)
+          waitUntil 5_000 $ (>= 4) <$> readIORef successesRef
+
+      arch <- archived env
+      let resultFor name = Archive.archivedResult =<< find ((== mkSimple name) . payload . Archive.jobSnapshot) arch
+      resultFor "sp-bulk-1" `shouldBe` Just (toJSON ["committed" :: Text])
+      resultFor "sp-bulk-2" `shouldBe` Just (toJSON ["committed" :: Text])
+      readIORef batchSizesRef `shouldReturn` [2, 2]
+      readIORef successesRef `shouldReturn` 4
+
     it "cancelTree callback deletes the entire tree" $ \env -> do
       Right (root :| _) <-
         runM env

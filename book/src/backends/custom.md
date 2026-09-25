@@ -9,9 +9,9 @@ applications define one.
 | `Handler` | the handler type, with a connection argument if the library has one |
 | `getSchema` | the Arbiter schema |
 | `executeQuery`, `executeStatement` | run a `Query`: SQL with `?` placeholders, the same with `$n` for libpq, parameters, decoder |
-| `withDbTransaction` | a transaction, or a savepoint when nested. See [Worker Configuration](../worker/configuration.md). |
+| `withDbTransaction` | transaction, or a savepoint when nested. See [worker configuration](../worker/configuration.md) |
 | `runHandlerWithConnection` | check out a connection and run a handler |
-| `getListener` | the shared `LISTEN/NOTIFY` listener, or `Nothing` for polling. See [Wakeups](../worker/wakeups.md). |
-| `executeQueryPrepared` | optional. Defaults to `executeQuery`. Override to prepare once per connection. The claim uses it. See the numbers in [Backend Integration](index.md). |
+| `getListener` | shared `LISTEN/NOTIFY` listener, or `Nothing` for polling. See [wakeups](../worker/wakeups.md) |
+| `executeQueryPrepared` | optional. Defaults to `executeQuery`. Claims use it. Prepared once per connection when overridden. See [benchmarks](index.md). |
 
-See the [`MonadArbiter` haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-MonadArbiter.html) for each method's signature.
+Method signatures: [`MonadArbiter` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Core-MonadArbiter.html).

@@ -51,7 +51,7 @@ reaperLoop
 reaperLoop logCfg report pace stmtTimeout =
   forever $ do
     void $ runMaintenancePass logCfg report pace stmtTimeout
-    threadDelay (ceiling (paceWindow pace) * 1_000_000)
+    threadDelay (Ops.micros (paceWindow pace))
 
 -- | Gaps a caller holds between runs of each kind of work. A zero gap runs it every pass.
 data MaintenancePace = MaintenancePace

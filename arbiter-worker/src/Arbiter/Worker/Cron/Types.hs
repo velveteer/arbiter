@@ -52,7 +52,7 @@ import GHC.Generics (Generic)
 import System.Cron (CronSchedule, nextMatch, parseCronSchedule, scheduleMatches)
 import System.Cron.Types qualified as Cron
 
--- | How overlapping cron ticks are deduplicated.
+-- | Cron tick overlap policy.
 data OverlapPolicy
   = -- | At most one pending or running job per schedule.
     SkipOverlap

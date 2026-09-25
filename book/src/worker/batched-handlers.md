@@ -31,16 +31,37 @@ batchHandler jobs cbs =
       Worker.ackWith cbs job score
 ```
 
-`onJobSuccess` fires outside that transaction and can fire for a job that is
-later redelivered. Put once-only effects in the ack's transaction.
+`onJobSuccess` fires after the callback's transaction or savepoint completes.
+Inside an outer transaction, this is before the outer commit. Put once-only
+database effects in the ack's transaction rather than in the success hook.
+
+### If an outer transaction rolls back
+
+A settlement callback can return successfully and still have its database changes
+rolled back by a later failure:
+
+```haskell
+Arb.withDbTransaction $ do
+  Worker.ack cbs job   -- succeeds and releases its savepoint
+  updateSomethingElse  -- if this throws, the outer transaction rolls back
+```
+
+In this case, let the exception escape the handler. Catching it to log and then
+rethrow is fine. Do not catch it and continue processing or settling those jobs.
+PostgreSQL restores the job, but the worker still considers it settled and no
+longer heartbeats it. Another worker can reclaim it after its lease expires.
+
+This restriction concerns an outer rollback **after a callback returned
+successfully**, not every exception thrown by a callback. It also applies to
+transactions opened directly through the driver. Success hooks already fired at
+savepoint release are not undone by the rollback and may fire on redelivery.
+They are not proof that the outer transaction committed.
 
 | Callback | Effect |
 | --- | --- |
 | `ack`, `ackAll` | complete, no result |
 | `ackWith`, `ackAllWith` | complete and store the queue [result](../features/results.md) |
 | `failRetry`, `failPermanent`, `cancelBranch`, `cancelTree`, `nack` | see [Error Handling](../features/error-handling.md) |
-| `spawn` | insert children under the job and suspend it. See [Spawning Children at Runtime](../features/job-trees.md#spawning-children-at-runtime). |
+| `spawn` | insert children under the job and suspend it. See [runtime spawning](../features/job-trees.md#spawning-children-at-runtime) |
 
-A callback affects one job. See the
-[`BatchCallbacks` haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks)
-for each signature.
+Callback signatures: [`BatchCallbacks` Haddocks](https://arbiterq.dev/arbiter-worker/Arbiter-Worker-Config.html#t:BatchCallbacks).

@@ -166,7 +166,7 @@ bracketSignal :: Text -> IO r -> (r -> IO ()) -> (Either Text r -> IO a) -> IO a
 bracketSignal signal acquire release inner =
   bracket (tryAny acquire) (traverse_ release) (inner . first (signalFailed signal))
 
--- | Why a selection leaves metrics off, for the selections that do.
+-- | Reason metrics are disabled, when applicable.
 metricsOffNote :: Maybe MetricsExporterSelection -> Maybe Text
 metricsOffNote = \case
   Just MetricsExporterNone -> Just "metrics off, OTEL_METRICS_EXPORTER=none"
@@ -189,7 +189,7 @@ detectResources = fromRight emptyMaterializedResources <$> tryAny detect
 signalFailed :: Text -> SomeException -> Text
 signalFailed signal exception = signal <> " exporter did not start: " <> displayEx exception
 
--- | Why a signal is off, for the ones that are.
+-- | Reason a signal is disabled, when applicable.
 noteOf :: Either Text r -> Maybe Text
 noteOf = either Just (const Nothing)
 
@@ -197,7 +197,7 @@ noteOf = either Just (const Nothing)
 arbiterInstruments :: MeterProvider -> IO (Either Text ArbiterMeters)
 arbiterInstruments meterProvider = first (signalFailed "metrics") <$> tryAny (newArbiterMeters meterProvider)
 
--- | One line for the caller to log at startup, with whatever could not be started.
+-- | Startup log line listing unavailable telemetry components.
 summarize :: Maybe Text -> [Text] -> Text
 summarize service notes =
   T.intercalate ", " (("telemetry on, service.name=" <> fromMaybe "unset" service) : notes)

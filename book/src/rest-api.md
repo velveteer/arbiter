@@ -27,7 +27,7 @@ type MyAPI =
     :<|> "arbiter" :> (Servant.ArbiterAPI AppRegistry :<|> ServantUI.AdminUI)
 ```
 
-See the [arbiter-servant-ui haddocks](https://arbiterq.dev/arbiter-servant-ui/Arbiter-Servant-UI.html) for the UI's route type.
+UI route type: [arbiter-servant-ui Haddocks](https://arbiterq.dev/arbiter-servant-ui/Arbiter-Servant-UI.html).
 
 `POST jobs` and `POST jobs/batch` enqueue from any language.
 
@@ -137,8 +137,8 @@ The server does not renew an HTTP lease. After it expires another consumer can
 claim the job.
 
 > [!IMPORTANT]
-> These routes have no authentication. Add WAI middleware, a Servant
-> authentication combinator, or an authenticating proxy before you expose them.
+> These routes have no authentication. Protect them with WAI middleware, a
+> Servant authentication combinator, or an authenticating proxy.
 
 ## Maintenance
 
@@ -160,5 +160,5 @@ names of failed operations. Skipped operations appear in neither:
 {"ops": {"sweep-stale-workers": 2, "purge-archives": 140}, "failed": []}
 ```
 
-Worker pools run the same pass in their reaper. Use the endpoint when no pool
-runs.
+Worker pools run the same pass in their reaper. The endpoint supports
+deployments without worker pools.

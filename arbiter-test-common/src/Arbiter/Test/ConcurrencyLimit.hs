@@ -51,10 +51,10 @@ import Arbiter.Core.Selector (runSelector)
 import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Foldable (traverse_)
+import Data.Foldable (for_, traverse_)
 import Data.Int (Int32, Int64)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (listToMaybe)
@@ -631,6 +631,26 @@ concurrencyLimitSpec runM = do
     enqueue env [groupedJob "coldg" "declpool" "gcold"]
     _ <- claimAs env
     inFlight env (fullKey "declpool" "gcold") `shouldReturn` Just 1
+
+  for_ [False, True] $ \due ->
+    it ("finds an admissible group beyond a capacity-one candidate window (" <> (if due then "due" else "ready") <> ")") $ \env -> do
+      seed env 2
+      enqueue env (replicate 2 (job "declpool" "window-hot"))
+      filled <- claimAs env
+      length filled `shouldBe` 2
+      enqueue env [groupedJob ("window-" <> tshow index) "declpool" "window-hot" | index <- [1 .. 12]]
+      enqueue env [groupedJob "window-cold" "declpool" "window-cold"]
+      when due $ runM env $ do
+        schema <- getSchema
+        void $
+          execStatement
+            ( "UPDATE "
+                <> jobQueueTable schema concurrencyTable
+                <> " SET not_visible_until = NOW() - interval '1 second' WHERE group_key IS NOT NULL"
+            )
+            []
+      claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 wid) :: IO [JobRead CLPayload]
+      map payload claimed `shouldBe` [CLPayload "declpool:window-cold"]
 
   it "gates a group on the row it would claim" $ \env -> do
     -- A failed job keeps the head of its group's line. The head gate judges that
