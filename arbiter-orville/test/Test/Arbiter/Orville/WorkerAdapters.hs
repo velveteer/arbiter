@@ -59,8 +59,9 @@ spec connStr =
   beforeAll
     ( TestSetup.setupOnce connStr adapterSchema adapterSchema True
         >> createOrvilleTestEnv connStr adapterSchema adapterSchema 10
-    ) $
-    afterAll destroyOrvilleTestEnv $ do
+    )
+    $ afterAll destroyOrvilleTestEnv
+    $ do
       it "runs a handler and hooks written in the base monad" $ \env -> do
         cleanupOrvilleTest env
         successRef <- newIORef []

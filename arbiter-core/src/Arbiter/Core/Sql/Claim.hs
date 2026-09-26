@@ -221,11 +221,17 @@ allocatedSlotCtes batchBudget =
     )
   |]
 
+-- | Keeps @alias@'s scan on the primary key, bounded by the ids in @source@.
+idsIn :: Text -> Text -> Text
+idsIn alias source = alias <> ".id = ANY(ARRAY(SELECT id FROM " <> source <> "))"
+
 -- | Candidate stage four. Resolves the allocated slots to rows and locks the claimable set.
 -- Each ungrouped pool locks as many rows as its allocated batches hold, skipping locked rows.
 lockedCandidateCtes :: Text -> Text -> Text -> Text -> Text
 lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
   let claimable = claimablePred "job"
+      heldIds = idsIn "job" "ungrouped_allocated"
+      selectedIds = idsIn "job" "selected"
       unheld = ccGate <> " AND job.id NOT IN (SELECT id FROM ungrouped_held)"
       ready = readyScan tbl unheld "(SELECT ready_rows FROM ungrouped_shortfall)"
       due = dueScan tbl unheld "(SELECT due_rows FROM ungrouped_shortfall)"
@@ -255,7 +261,8 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
       SELECT job.id, allocated.ready
       FROM ${tbl} job
       INNER JOIN ungrouped_allocated allocated ON allocated.id = job.id
-      WHERE job.group_key IS NULL
+      WHERE ${heldIds}
+        AND job.group_key IS NULL
         AND ${claimable}
       FOR UPDATE OF job SKIP LOCKED
     ),
@@ -284,17 +291,19 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
       SELECT id, NULL::text
       FROM (SELECT id FROM ungrouped_due_locked LIMIT ${ungroupedLimit}) due_locked
     ),
+    selected AS (
+      SELECT id, expected_group FROM grouped_candidates
+      UNION ALL
+      SELECT id, expected_group FROM ungrouped_candidates
+    ),
     locked AS (
       SELECT job.id, job.priority, job.group_key,
              job.concurrency_key, job.claimed_by,
              job.rate_limit_key, job.rate_limit_prefix, job.rate_limit_cost
-      FROM (
-        SELECT id, expected_group FROM grouped_candidates
-        UNION ALL
-        SELECT id, expected_group FROM ungrouped_candidates
-      ) selected
+      FROM selected
       INNER JOIN ${tbl} job ON job.id = selected.id
-      WHERE ${claimable}
+      WHERE ${selectedIds}
+        AND ${claimable}
         AND job.group_key IS NOT DISTINCT FROM selected.expected_group
       ORDER BY job.priority ASC, job.id ASC
       FOR UPDATE OF job SKIP LOCKED
@@ -566,6 +575,7 @@ claimedCte admission tbl timeout claimant
                 (CASE WHEN verdict._admit THEN #{claimant :: CUuid} ELSE NULL END)::uuid
           FROM decision verdict
           WHERE job.id = verdict.id
+            AND ${decisionIds}
           RETURNING job.*, verdict._admit
         )
       |]
@@ -579,11 +589,13 @@ claimedCte admission tbl timeout claimant
               last_attempted_at = NOW(),
               updated_at = NOW(),
               claimed_by = #{claimant :: CUuid}::uuid
-          FROM admitted admitted_row
-          WHERE job.id = admitted_row.id
+          WHERE ${admittedIds}
           RETURNING job.*
         )
       |]
+  where
+    decisionIds = idsIn "job" "decision"
+    admittedIds = idsIn "job" "admitted"
 
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
 -- any unsuspended visible job, rollup children and woken rollup parents included.

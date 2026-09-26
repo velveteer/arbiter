@@ -103,7 +103,9 @@ recheck guard jobId = do
   atomically $ do
     entries <- readTVar (guardEntries guard)
     let holding = filter (any ((== jobId) . guardKey guard) . batchJobs . guardedBatch) (Map.elems entries)
-    traverse_ (\entry -> modifyTVar' (guardedStatus entry) (\status -> status {beatAt = min now (beatAt status), recheckAsked = True})) holding
+    traverse_
+      (\entry -> modifyTVar' (guardedStatus entry) (\status -> status {beatAt = min now (beatAt status), recheckAsked = True}))
+      holding
     unless (null holding) (wakeFor guard now)
 
 -- | Ask the handler to stop, from a courier thread. A second ask within one beat is dropped.
