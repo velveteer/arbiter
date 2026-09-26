@@ -750,7 +750,7 @@ jobQueueMigrationsForTable schemaName tableName admission =
         , script "create-group-retried-index" $ createJobQueueGroupRetriedIndexSQL schemaName tableName
         , script "create-grouped-due-index" $ createJobQueueGroupedDueIndexSQL schemaName tableName
         , script "create-group-in-flight-index" $ createJobQueueGroupInFlightIndexSQL schemaName tableName
-        , script "create-groups-trigger-functions-v10" $ createGroupsTriggerFunctionsSQL schemaName tableName
+        , script "create-groups-trigger-functions-v11" $ createGroupsTriggerFunctionsSQL schemaName tableName
         , script "create-groups-triggers" $ createGroupsTriggersSQL schemaName tableName
         , script "add-kind-column" $ addKindColumnSQL schemaName tableName
         ]

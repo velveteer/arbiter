@@ -102,11 +102,22 @@ operationsSpec mkMessage mkResult runM = do
             execStatement
               ("UPDATE " <> tbl <> " SET job_count = ? WHERE group_key = ?")
               [pval CInt4 count, pval CText key]
-      groupCount env key =
+      groupColumn column env key =
         runM env $ do
           tbl <- groupsTable
-          rows <- execQuery ("SELECT job_count FROM " <> tbl <> " WHERE group_key = ?") [pval CText key] (col "job_count" CInt4)
+          rows <- execQuery ("SELECT " <> column <> " FROM " <> tbl <> " WHERE group_key = ?") [pval CText key] (col column CInt4)
           pure (listToMaybe rows :: Maybe Int32)
+      groupCount = groupColumn "job_count"
+      groupHasNextDue env key =
+        runM env $ do
+          tbl <- groupsTable
+          rows <-
+            execQuery
+              ("SELECT next_due IS NOT NULL AS due FROM " <> tbl <> " WHERE group_key = ?")
+              [pval CText key]
+              (col "due" CBool)
+          pure (listToMaybe rows :: Maybe Bool)
+      groupReadyCount = groupColumn "ready_count"
 
   describe "job kind" $ do
     it "stores the label its payload derives" $ \env -> do
@@ -523,6 +534,24 @@ operationsSpec mkMessage mkResult runM = do
       -- The job is re-claimable now
       claimed' <- claimJobs env 1
       length claimed' `shouldBe` 1
+
+    it "releases a row with attempts left into its group's ready count" $ \env -> do
+      void $ runM env (HL.insertJob (setMaxAttempts (Just 2) $ defaultGroupedJob "release-ready" (mkMessage "retryable")))
+      [claimed] <- claimJobs env 1
+      groupReadyCount env "release-ready" `shouldReturn` Just 0
+      void $ runM env (HL.setVisibilityTimeout 0 claimed)
+      groupReadyCount env "release-ready" `shouldReturn` Just 1
+
+    it "keeps a lapsed lease with no attempts left out of its group's next due" $ \env -> do
+      void $ runM env (HL.insertJob (setMaxAttempts (Just 1) $ defaultGroupedJob "lapse-exhausted" (mkMessage "exhausted")))
+      [_] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      groupHasNextDue env "lapse-exhausted" `shouldReturn` Just False
+
+    it "keeps a released row with no attempts left out of its group's ready count" $ \env -> do
+      void $ runM env (HL.insertJob (setMaxAttempts (Just 1) $ defaultGroupedJob "release-exhausted" (mkMessage "exhausted")))
+      [claimed] <- claimJobs env 1
+      void $ runM env (HL.setVisibilityTimeout 0 claimed)
+      groupReadyCount env "release-exhausted" `shouldReturn` Just 0
 
     it "supports fractional timeouts" $ \env -> do
       let job = defaultJob (mkMessage "fractional-timeout")
@@ -2842,6 +2871,30 @@ operationsSpec mkMessage mkResult runM = do
       length claimedParent `shouldBe` 1
       primaryKey (head claimedParent) `shouldBe` primaryKey parent
       void $ runM env (HL.ackJob (head claimedParent))
+
+    it "a finalizer its ack suspends after a DLQ retry is claimable for its next round" $ \env -> do
+      Right (parent :| _) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (setMaxAttempts (Just 1) $ defaultJob (mkMessage "LastAttemptFinalizer"))
+            (JT.leaf (defaultJob (mkMessage "LastAttemptChild")) :| [])
+
+      [child] <- claimJobs env 1
+      runM env (HL.moveToDLQ "child failed" child) `shouldReturn` 1
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+      void $ runM env (HL.ackJob claimedParent)
+      assertSuspended env (primaryKey parent)
+
+      [retried] <- claimJobs env 1
+      void $ runM env (HL.ackJob retried)
+      assertNotSuspended env (primaryKey parent)
+
+      map primaryKey <$> claimJobs env 1 `shouldReturn` [primaryKey parent]
 
     it "retryFromDLQ auto-retries parent from DLQ when retrying child" $ \env -> do
       Right (parent :| _children) <-

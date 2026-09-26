@@ -59,7 +59,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueDLQTable
   , jobQueueTable
   )
-import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
+import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 
@@ -194,12 +194,13 @@ jobStatusCaseSQL =
 -- and within the attempt budget.
 claimablePred :: Text -> Text
 claimablePred alias =
-  [text|
-    NOT ${alias}.suspended
-    AND ${alias}.cancel_requested_at IS NULL
-    AND (${alias}.not_visible_until IS NULL OR ${alias}.not_visible_until <= NOW())
-    AND ${alias}.attempts < COALESCE(${alias}.max_attempts, ${defaultMaxAttemptsSQL})
-  |]
+  let attemptsLeft = attemptsLeftSQL (alias <> ".")
+   in [text|
+        NOT ${alias}.suspended
+        AND ${alias}.cancel_requested_at IS NULL
+        AND (${alias}.not_visible_until IS NULL OR ${alias}.not_visible_until <= NOW())
+        AND ${attemptsLeft}
+      |]
 
 -- | All job columns plus the derived @status@ column, aliased @job@, for filtering.
 jobsWithStatusSubquery :: Text -> Text -> Text

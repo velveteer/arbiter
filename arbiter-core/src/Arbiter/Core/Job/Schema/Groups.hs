@@ -36,6 +36,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   , maintenanceFunctionNames
   )
+import Arbiter.Core.Job.Types (attemptsLeftSQL)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
@@ -214,12 +215,26 @@ groupAggregates col =
 
 -- | Whether a job counts toward its group's ready total. @col@ prefixes each column.
 readyPredicate :: Text -> Text
-readyPredicate col = col <> "not_visible_until IS NULL AND NOT " <> col <> "suspended"
+readyPredicate col =
+  col
+    <> "not_visible_until IS NULL AND NOT "
+    <> col
+    <> "suspended AND "
+    <> col
+    <> "cancel_requested_at IS NULL AND "
+    <> attemptsLeftSQL col
 
 -- | Whether a job's deadline counts toward its group's next due time. @col@ prefixes
 -- each column.
 scheduledPredicate :: Text -> Text
-scheduledPredicate col = col <> "not_visible_until IS NOT NULL AND NOT " <> col <> "suspended"
+scheduledPredicate col =
+  col
+    <> "not_visible_until IS NOT NULL AND NOT "
+    <> col
+    <> "suspended AND "
+    <> col
+    <> "cancel_requested_at IS NULL AND "
+    <> attemptsLeftSQL col
 
 -- | Whether a job still holds its group's in-flight slot. @col@ prefixes each column.
 inFlightPredicate :: Text -> Text
@@ -241,6 +256,8 @@ summaryValueChanged =
     <> " OR n.not_visible_until IS DISTINCT FROM o.not_visible_until"
     <> " OR n.suspended IS DISTINCT FROM o.suspended"
     <> " OR n.attempts IS DISTINCT FROM o.attempts"
+    <> " OR n.max_attempts IS DISTINCT FROM o.max_attempts"
+    <> " OR n.cancel_requested_at IS DISTINCT FROM o.cancel_requested_at"
     <> " OR n.throttled_until IS DISTINCT FROM o.throttled_until"
 
 -- | Apply a group's count deltas and replace all four extrema with indexed point

@@ -1051,18 +1051,18 @@ main = do
 
       hasqlRun :: RunM HasqlM
       hasqlRun = runHasqlDb (snd (NE.head hasqlEnvs))
-      hasqlGroups (label, env) =
-        let run :: RunM HasqlM
-            run = runHasqlDb env
+      hasqlGroups (label, env') =
+        let run' :: RunM HasqlM
+            run' = runHasqlDb env'
          in [ bgroup ("Worker Throughput (" <> label <> ")") $
-                mkWorkerBenches simpleEnv (hasqlWorkerTrial run statsConn)
+                mkWorkerBenches simpleEnv (hasqlWorkerTrial run' statsConn)
             , bgroup ("Steady-State Throughput (" <> label <> ")") $
                 steadyStateBenches $
-                  steadyStateTrial run producerRun statsConn $ \workers counter ->
+                  steadyStateTrial run' producerRun statsConn $ \workers counter ->
                     transactionalWorkerConfig workers $ \(_conn :: Hasql.Connection) job ->
                       flakyGate (countProcessed counter) job
             , bgroup ("Gating Overhead (" <> label <> ")") $
-                gatingBenches settleGated (hasqlGatedSteadyTrial run producerRun statsConn)
+                gatingBenches settleGated (hasqlGatedSteadyTrial run' producerRun statsConn)
             ]
 
       orvilleRun :: RunM OrvilleM

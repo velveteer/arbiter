@@ -63,6 +63,7 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   , defaultMaxAttempts
+  , defaultMaxAttemptsSQL
   , notVisibleUntil
   , primaryKey
   , priority
@@ -286,8 +287,14 @@ driftViolations schema table withConn = withConn $ \conn -> do
         <> ", MIN(priority)::int AS min_priority"
         <> ", (MIN(ARRAY[priority::bigint, id]))[2]::bigint AS min_id"
         <> ", COUNT(*)::bigint AS job_count"
-        <> ", COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended)::bigint AS ready_count"
-        <> ", MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due"
+        <> ", COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended AND cancel_requested_at IS NULL"
+        <> " AND attempts < COALESCE(max_attempts, "
+        <> defaultMaxAttemptsSQL
+        <> "))::bigint AS ready_count"
+        <> ", MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended AND cancel_requested_at IS NULL"
+        <> " AND attempts < COALESCE(max_attempts, "
+        <> defaultMaxAttemptsSQL
+        <> ")) AS next_due"
         <> ", MAX(not_visible_until) FILTER (WHERE "
         <> inFlightPredicate ""
         <> ") AS in_flight_until FROM "

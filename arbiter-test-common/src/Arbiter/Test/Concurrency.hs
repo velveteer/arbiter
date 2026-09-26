@@ -210,6 +210,20 @@ concurrencySpec mkMessage runM = do
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]
 
+    it "claims healthy work beyond exhausted due group heads" $ \env -> do
+      void
+        $ runM env
+        $ HL.insertJobsBatch
+          [ setMaxAttempts (Just 1) $ defaultGroupedJob ("exhausted-due-" <> T.pack (show i)) (mkMessage "old")
+          | i <- [1 .. 12 :: Int]
+          ]
+      exhausted <- runM env (HL.claimNextVisibleJobs 12 0.2) :: IO [JobRead payload]
+      length exhausted `shouldBe` 12
+      threadDelay 400_000
+      Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy-due" (mkMessage "healthy"))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      map primaryKey claimed `shouldBe` [primaryKey healthy]
+
     it "concurrent workers claim disjoint ungrouped jobs" $ \env -> do
       -- Insert 6 ungrouped jobs, remembering their ids.
       inserted <- runM env $ HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))

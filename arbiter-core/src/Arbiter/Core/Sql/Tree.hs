@@ -344,7 +344,7 @@ beginSpawnSQL schema tableName jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
-        SET parent_state = '{}'::jsonb, attempts = GREATEST(attempts - 1, 0), updated_at = NOW()
+        SET parent_state = '{}'::jsonb, updated_at = NOW()
         WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
           AND NOT suspended AND claimed_by IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})

@@ -52,6 +52,7 @@ module Arbiter.Core.Job.Types
   , mapPayload
   , defaultMaxAttempts
   , defaultMaxAttemptsSQL
+  , attemptsLeftSQL
   , minMaxAttempts
   , minMaxAttemptsSQL
   , dayRetention
@@ -183,6 +184,10 @@ defaultMaxAttempts = 10
 -- | 'defaultMaxAttempts' as a SQL literal.
 defaultMaxAttemptsSQL :: Text
 defaultMaxAttemptsSQL = T.pack (show defaultMaxAttempts)
+
+-- | Whether a row has attempts left. @col@ prefixes each column.
+attemptsLeftSQL :: Text -> Text
+attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
 
 -- | Lowest attempt limit a job is stamped with. Every job gets at least one attempt.
 minMaxAttempts :: Int32

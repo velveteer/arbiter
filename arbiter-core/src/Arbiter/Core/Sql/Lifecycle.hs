@@ -41,7 +41,8 @@ smartAckJobSQL archiveEnabled schema tableName =
         ${archived}
         suspend AS (
           UPDATE ${tbl}
-          SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
+          SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL,
+              attempts = GREATEST(attempts - 1, 0), updated_at = NOW()
           WHERE id = #{jobId :: CInt8} AND claim_seq = #{cseq :: CInt8}
             AND NOT EXISTS (SELECT 1 FROM ack)
             AND EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = #{jobId :: CInt8})
@@ -93,7 +94,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
         ${archived}
         suspend AS (
           UPDATE ${tbl} job
-          SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL, updated_at = NOW()
+          SET suspended = TRUE, not_visible_until = NULL, claimed_by = NULL,
+              attempts = GREATEST(job.attempts - 1, 0), updated_at = NOW()
           FROM input input_row
           WHERE job.id = input_row.id AND job.claim_seq = input_row.cseq
             AND job.id IN (SELECT id FROM locked)

@@ -18,7 +18,7 @@ import NeatInterpolation (text)
 import Arbiter.Core.Admission (effectivePolicyCol)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
-import Arbiter.Core.Job.Types (defaultMaxAttemptsSQL)
+import Arbiter.Core.Job.Types (attemptsLeftSQL)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
 import Arbiter.Core.Sql.Jobs (claimablePred, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
@@ -108,36 +108,21 @@ gatedHeadPred tbl groupKey batchLimit headGate =
 groupCandidateCtes :: Text -> Text -> Text -> Text -> Text
 groupCandidateCtes groupsTbl tbl overfetch headGate =
   let claimable = claimablePred "job"
-      headLateral =
-        [text|
-          CROSS JOIN LATERAL (
-            SELECT job.priority AS min_priority, job.id AS min_id
-            FROM ${tbl} job
-            WHERE job.group_key = candidate_group.group_key
-              AND ${claimable}
-            ORDER BY job.priority ASC, job.id ASC
-            LIMIT 1
-          ) head
-        |]
    in [text|
     group_candidates AS (
       (
-        SELECT candidate_group.group_key, head.min_priority, head.min_id
-        FROM ${groupsTbl} candidate_group
-        ${headLateral}
-        WHERE candidate_group.ready_count > 0 AND candidate_group.in_flight_until IS NULL
+        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
+        WHERE ready_count > 0 AND in_flight_until IS NULL
           ${headGate}
-        ORDER BY candidate_group.min_priority ASC, candidate_group.min_id ASC
+        ORDER BY min_priority ASC, min_id ASC
         LIMIT ${overfetch}
       )
       UNION
       (
-        SELECT candidate_group.group_key, head.min_priority, head.min_id
-        FROM ${groupsTbl} candidate_group
-        ${headLateral}
-        WHERE candidate_group.next_due <= NOW()
+        SELECT candidate_group.group_key FROM ${groupsTbl} candidate_group
+        WHERE next_due <= NOW()
           ${headGate}
-        ORDER BY candidate_group.next_due ASC
+        ORDER BY next_due ASC
         LIMIT ${overfetch}
       )
     ),
@@ -151,23 +136,31 @@ groupCandidateCtes groupsTbl tbl overfetch headGate =
       FOR UPDATE SKIP LOCKED
     ),
     eligible_heads AS (
-      SELECT eligible.group_key, candidate.min_priority, candidate.min_id
+      SELECT eligible.group_key, head.min_priority, head.min_id
       FROM eligible_groups eligible
-      INNER JOIN group_candidates candidate ON candidate.group_key = eligible.group_key
+      CROSS JOIN LATERAL (
+        SELECT job.priority AS min_priority, job.id AS min_id
+        FROM ${tbl} job
+        WHERE job.group_key = eligible.group_key
+          AND ${claimable}
+        ORDER BY job.priority ASC, job.id ASC
+        LIMIT 1
+      ) head
     )
   |]
 
 -- | One ungrouped pool in its index order, ready or due, over alias @job@.
 ungroupedScan :: Text -> Text -> Text -> Text -> Text -> Text
 ungroupedScan tbl ccGate visible order limit =
-  [text|
+  let attemptsLeft = attemptsLeftSQL "job."
+   in [text|
     SELECT job.id, job.priority
     FROM ${tbl} job
     WHERE job.group_key IS NULL
       AND NOT job.suspended
       AND job.cancel_requested_at IS NULL
       AND ${visible}
-      AND job.attempts < COALESCE(job.max_attempts, ${defaultMaxAttemptsSQL})
+      AND ${attemptsLeft}
       ${ccGate}
     ORDER BY ${order}
     LIMIT ${limit}
@@ -233,8 +226,9 @@ allocatedSlotCtes batchBudget =
 lockedCandidateCtes :: Text -> Text -> Text -> Text -> Text
 lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
   let claimable = claimablePred "job"
-      ready = readyScan tbl ccGate "(SELECT ready_rows FROM ungrouped_allocated)"
-      due = dueScan tbl ccGate "(SELECT due_rows FROM ungrouped_allocated)"
+      unheld = ccGate <> " AND job.id NOT IN (SELECT id FROM ungrouped_held)"
+      ready = readyScan tbl unheld "(SELECT ready_rows FROM ungrouped_shortfall)"
+      due = dueScan tbl unheld "(SELECT due_rows FROM ungrouped_shortfall)"
    in [text|
     grouped_candidates AS (
       SELECT batch.id, target_group.group_key AS expected_group
@@ -249,14 +243,28 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
       ) batch
     ),
     ungrouped_allocated AS (
-      SELECT COUNT(*) FILTER (WHERE ready) AS ready_rows,
-             COUNT(*) FILTER (WHERE NOT ready) AS due_rows
+      SELECT id, ready
       FROM ungrouped_numbered
       WHERE batch_num IN (
         SELECT ungrouped_batch
         FROM allocated_slots
         WHERE ungrouped_batch IS NOT NULL
       )
+    ),
+    ungrouped_held AS MATERIALIZED (
+      SELECT job.id, allocated.ready
+      FROM ${tbl} job
+      INNER JOIN ungrouped_allocated allocated ON allocated.id = job.id
+      WHERE job.group_key IS NULL
+        AND ${claimable}
+      FOR UPDATE OF job SKIP LOCKED
+    ),
+    ungrouped_shortfall AS (
+      SELECT COUNT(*) FILTER (WHERE allocated.ready) AS ready_rows,
+             COUNT(*) FILTER (WHERE NOT allocated.ready) AS due_rows
+      FROM ungrouped_allocated allocated
+      LEFT JOIN ungrouped_held held ON held.id = allocated.id
+      WHERE held.id IS NULL
     ),
     ungrouped_ready_locked AS MATERIALIZED (
       ${ready}
@@ -268,6 +276,9 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
     ),
     ungrouped_candidates AS (
       SELECT id, NULL::text AS expected_group
+      FROM (SELECT id FROM ungrouped_held LIMIT ${ungroupedLimit}) held
+      UNION ALL
+      SELECT id, NULL::text
       FROM (SELECT id FROM ungrouped_ready_locked LIMIT ${ungroupedLimit}) ready_locked
       UNION ALL
       SELECT id, NULL::text

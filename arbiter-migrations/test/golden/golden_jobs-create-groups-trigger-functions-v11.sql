@@ -14,8 +14,8 @@ BEGIN
     MIN(priority) AS min_priority,
     (MIN(ARRAY[priority::bigint, id]))[2] AS min_id,
     COUNT(*) AS job_count,
-    COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended) AS ready_count,
-    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended) AS next_due
+    COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended AND cancel_requested_at IS NULL AND attempts < COALESCE(max_attempts, 10)) AS ready_count,
+    MIN(not_visible_until) FILTER (WHERE not_visible_until IS NOT NULL AND NOT suspended AND cancel_requested_at IS NULL AND attempts < COALESCE(max_attempts, 10)) AS next_due
   FROM new_table
   WHERE group_key IS NOT NULL
   GROUP BY group_key
@@ -54,7 +54,7 @@ BEGIN
       fi.not_visible_until AS in_flight_until
     FROM (
       SELECT group_key, (-COUNT(*))::int AS count_delta,
-        (-COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended))::int AS ready_delta
+        (-COUNT(*) FILTER (WHERE not_visible_until IS NULL AND NOT suspended AND cancel_requested_at IS NULL AND attempts < COALESCE(max_attempts, 10)))::int AS ready_delta
       FROM old_table WHERE group_key IS NOT NULL GROUP BY group_key
     ) d
     JOIN "arbiter"."golden_jobs_groups" g0 ON g0.group_key = d.group_key
@@ -65,7 +65,7 @@ BEGIN
     ) hp ON TRUE
     LEFT JOIN LATERAL (
       SELECT q.not_visible_until FROM "arbiter"."golden_jobs" q
-      WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended
+      WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended AND q.cancel_requested_at IS NULL AND q.attempts < COALESCE(q.max_attempts, 10)
       ORDER BY q.not_visible_until ASC LIMIT 1
     ) nd ON TRUE
     LEFT JOIN LATERAL (
@@ -99,7 +99,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM new_table n JOIN old_table o ON o.id = n.id
     WHERE (n.group_key IS NOT NULL OR o.group_key IS NOT NULL)
-      AND (n.group_key IS DISTINCT FROM o.group_key OR n.priority IS DISTINCT FROM o.priority OR n.not_visible_until IS DISTINCT FROM o.not_visible_until OR n.suspended IS DISTINCT FROM o.suspended OR n.attempts IS DISTINCT FROM o.attempts OR n.throttled_until IS DISTINCT FROM o.throttled_until)
+      AND (n.group_key IS DISTINCT FROM o.group_key OR n.priority IS DISTINCT FROM o.priority OR n.not_visible_until IS DISTINCT FROM o.not_visible_until OR n.suspended IS DISTINCT FROM o.suspended OR n.attempts IS DISTINCT FROM o.attempts OR n.max_attempts IS DISTINCT FROM o.max_attempts OR n.cancel_requested_at IS DISTINCT FROM o.cancel_requested_at OR n.throttled_until IS DISTINCT FROM o.throttled_until)
     LIMIT 1
   ) THEN
     RETURN NULL;
@@ -128,7 +128,7 @@ BEGIN
         fi.not_visible_until AS in_flight_until
       FROM (
         SELECT o.group_key, (-COUNT(*))::int AS count_delta,
-          (-COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended))::int AS ready_delta
+          (-COUNT(*) FILTER (WHERE o.not_visible_until IS NULL AND NOT o.suspended AND o.cancel_requested_at IS NULL AND o.attempts < COALESCE(o.max_attempts, 10)))::int AS ready_delta
         FROM old_table o JOIN new_table n ON n.id = o.id
         WHERE o.group_key IS NOT NULL AND o.group_key IS DISTINCT FROM n.group_key
         GROUP BY o.group_key
@@ -141,7 +141,7 @@ BEGIN
       ) hp ON TRUE
       LEFT JOIN LATERAL (
         SELECT q.not_visible_until FROM "arbiter"."golden_jobs" q
-        WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended
+        WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended AND q.cancel_requested_at IS NULL AND q.attempts < COALESCE(q.max_attempts, 10)
         ORDER BY q.not_visible_until ASC LIMIT 1
       ) nd ON TRUE
       LEFT JOIN LATERAL (
@@ -167,8 +167,8 @@ BEGIN
       MIN(n.priority) AS min_priority,
       (MIN(ARRAY[n.priority::bigint, n.id]))[2] AS min_id,
       COUNT(*) AS job_count,
-      COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended) AS ready_count,
-      MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended) AS next_due
+      COUNT(*) FILTER (WHERE n.not_visible_until IS NULL AND NOT n.suspended AND n.cancel_requested_at IS NULL AND n.attempts < COALESCE(n.max_attempts, 10)) AS ready_count,
+      MIN(n.not_visible_until) FILTER (WHERE n.not_visible_until IS NOT NULL AND NOT n.suspended AND n.cancel_requested_at IS NULL AND n.attempts < COALESCE(n.max_attempts, 10)) AS next_due
     FROM new_table n JOIN old_table o ON o.id = n.id
     WHERE n.group_key IS NOT NULL AND o.group_key IS DISTINCT FROM n.group_key
     GROUP BY n.group_key ORDER BY n.group_key
@@ -202,7 +202,7 @@ BEGIN
       ) hp ON TRUE
       LEFT JOIN LATERAL (
         SELECT q.not_visible_until FROM "arbiter"."golden_jobs" q
-        WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended
+        WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended AND q.cancel_requested_at IS NULL AND q.attempts < COALESCE(q.max_attempts, 10)
         ORDER BY q.not_visible_until ASC LIMIT 1
       ) nd ON TRUE
       LEFT JOIN LATERAL (
@@ -233,11 +233,11 @@ BEGIN
       fi.not_visible_until AS in_flight_until
     FROM (
       SELECT n.group_key, 0 AS count_delta,
-        SUM((n.not_visible_until IS NULL AND NOT n.suspended)::int - (o.not_visible_until IS NULL AND NOT o.suspended)::int)::int AS ready_delta
+        SUM((n.not_visible_until IS NULL AND NOT n.suspended AND n.cancel_requested_at IS NULL AND n.attempts < COALESCE(n.max_attempts, 10))::int - (o.not_visible_until IS NULL AND NOT o.suspended AND o.cancel_requested_at IS NULL AND o.attempts < COALESCE(o.max_attempts, 10))::int)::int AS ready_delta
       FROM new_table n JOIN old_table o ON o.id = n.id
       WHERE n.group_key IS NOT NULL
         AND n.group_key IS NOT DISTINCT FROM o.group_key
-        AND (n.priority IS DISTINCT FROM o.priority OR n.not_visible_until IS DISTINCT FROM o.not_visible_until OR n.suspended IS DISTINCT FROM o.suspended OR n.attempts IS DISTINCT FROM o.attempts OR n.throttled_until IS DISTINCT FROM o.throttled_until)
+        AND (n.priority IS DISTINCT FROM o.priority OR n.not_visible_until IS DISTINCT FROM o.not_visible_until OR n.suspended IS DISTINCT FROM o.suspended OR n.attempts IS DISTINCT FROM o.attempts OR n.max_attempts IS DISTINCT FROM o.max_attempts OR n.cancel_requested_at IS DISTINCT FROM o.cancel_requested_at OR n.throttled_until IS DISTINCT FROM o.throttled_until)
       GROUP BY n.group_key
     ) d
     JOIN "arbiter"."golden_jobs_groups" g0 ON g0.group_key = d.group_key
@@ -248,7 +248,7 @@ BEGIN
     ) hp ON TRUE
     LEFT JOIN LATERAL (
       SELECT q.not_visible_until FROM "arbiter"."golden_jobs" q
-      WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended
+      WHERE q.group_key = d.group_key AND q.not_visible_until IS NOT NULL AND NOT q.suspended AND q.cancel_requested_at IS NULL AND q.attempts < COALESCE(q.max_attempts, 10)
       ORDER BY q.not_visible_until ASC LIMIT 1
     ) nd ON TRUE
     LEFT JOIN LATERAL (
