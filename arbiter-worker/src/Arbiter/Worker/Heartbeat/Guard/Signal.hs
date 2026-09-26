@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The handler side of the guard: registering a batch and asking it to stop.
+-- | The handler side of the guard: registering a batch, asking for its extend,
+-- and asking it to stop.
 --
 -- A signal is thrown from a courier thread, so a masked handler cannot stall
 -- the guard. Unregister kills the couriers, which revokes a signal still in
@@ -8,11 +9,13 @@
 -- is dropped.
 module Arbiter.Worker.Heartbeat.Guard.Signal
   ( guardBatch
+  , recheck
   , signal
   ) where
 
 import Arbiter.Core.Exceptions (JobGoneException (..))
-import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, modifyTVar', newTVarIO, stateTVar)
+import Arbiter.Core.Job.Types (JobId)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, modifyTVar', newTVarIO, readTVar, stateTVar)
 import Control.Exception (asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad (unless, void, when)
 import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
@@ -69,6 +72,7 @@ guardBatch guard batch action =
           Status
             { leaseAt = leaseUntil
             , beatAt = firstBeat
+            , recheckAsked = False
             , leaseLapsed = False
             , deadlineSent = False
             , signalledAt = Nothing
@@ -91,6 +95,16 @@ guardBatch guard batch action =
         carrying <$ traverse_ killThread carrying
       -- A signal a courier had already sent lands here, inside the boundary, and is dropped.
       unless (null carrying) $ interruptible (pure ()) `catch` \GuardSignal {} -> pure ()
+
+-- | Extend the batch that holds the job now. The extend's verdict signals its handler.
+recheck :: (MonadMonotonicTime n, MonadSTM n) => HeartbeatGuard n job -> JobId -> n ()
+recheck guard jobId = do
+  now <- getMonotonicTime
+  atomically $ do
+    entries <- readTVar (guardEntries guard)
+    let holding = filter (any ((== jobId) . guardKey guard) . batchJobs . guardedBatch) (Map.elems entries)
+    traverse_ (\entry -> modifyTVar' (guardedStatus entry) (\status -> status {beatAt = min now (beatAt status), recheckAsked = True})) holding
+    unless (null holding) (wakeFor guard now)
 
 -- | Ask the handler to stop, from a courier thread. A second ask within one beat is dropped.
 signal :: (MonadFork n, MonadSTM n) => HeartbeatGuard n job -> Time -> Guarded n job -> SomeException -> n ()

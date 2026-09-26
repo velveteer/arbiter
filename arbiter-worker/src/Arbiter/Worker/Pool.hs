@@ -27,7 +27,6 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
 import Data.Foldable (traverse_)
-import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -102,7 +101,6 @@ runWorkerPool config = do
 
   schemaName <- getSchema
   workQueue <- newWorkQueue
-  runningJobs <- STM.newTVarIO Map.empty
   guard <- newHeartbeatGuard config
   statements <-
     Arb.mkJobStatements @payload (handlerBatchSize config) workerCap (visibilityTimeout config) (workerId config)
@@ -127,7 +125,7 @@ runWorkerPool config = do
       handlers =
         [ (createChannel, atomically . STM.writeTVar dispatcherNotifVar . Just)
         , (pauseChannel, handlePauseNotif config)
-        , (cancelChannel, handleCancelNotif config runningJobs)
+        , (cancelChannel, handleCancelNotif config guard)
         ]
           <> [(cronRunChannel, handleCronRunNotif cronNames cronRunVar) | not (null (cronJobs config))]
 
@@ -155,7 +153,7 @@ runWorkerPool config = do
     workers <-
       replicateM workerCap
         $ spawn "Worker thread"
-        $ workerLoop config runningJobs guard mode effectsFor workQueue
+        $ workerLoop config guard mode effectsFor workQueue
     crons <-
       sequence
         [ spawn "Cron scheduler" $

@@ -14,6 +14,7 @@ module Arbiter.Worker.Heartbeat.Guard
   , guardKey
   , Batch (..)
   , guardBatch
+  , recheck
   , trySync
   , toDiffTime
   , minRetryPause
@@ -23,7 +24,7 @@ module Arbiter.Worker.Heartbeat.Guard
   ) where
 
 import Arbiter.Worker.Heartbeat.Guard.Loop (runHeartbeatGuard, trySync)
-import Arbiter.Worker.Heartbeat.Guard.Signal (guardBatch)
+import Arbiter.Worker.Heartbeat.Guard.Signal (guardBatch, recheck)
 import Arbiter.Worker.Heartbeat.Guard.State
   ( Batch (..)
   , GuardConfig (..)

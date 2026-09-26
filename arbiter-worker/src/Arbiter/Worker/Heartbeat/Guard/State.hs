@@ -19,6 +19,7 @@ module Arbiter.Worker.Heartbeat.Guard.State
   , wakeFor
   , wake
   , heartbeatWait
+  , rebeat
   , toDiffTime
   , minRetryPause
   , settleGrace
@@ -71,6 +72,10 @@ heartbeatWait beat extended remaining
   | extended, remaining > beat = beat
   | otherwise = min beat (max minRetryPause (remaining / 2))
 
+-- | Set the next extend. An earlier one a recheck asked for stands.
+rebeat :: Time -> Status n -> Status n
+rebeat at status = status {beatAt = if recheckAsked status then min at (beatAt status) else at}
+
 -- | What the guard needs from the pool.
 data GuardConfig n job = GuardConfig
   { configInterval :: DiffTime
@@ -114,7 +119,9 @@ data Status n = Status
   { leaseAt :: !Time
   -- ^ When the lease runs out. Register and settle write it.
   , beatAt :: !Time
-  -- ^ When the next extend is due. Register, settle and a failed extend write it.
+  -- ^ When the next extend is due. Register, settle, a failed extend and a recheck write it.
+  , recheckAsked :: !Bool
+  -- ^ A recheck asked for an extend that no issued extend covers yet. A recheck sets it, issue clears it.
   , leaseLapsed :: !Bool
   -- ^ The lease lapsed and the batch gets no further extend. The fence writes it.
   , deadlineSent :: !Bool

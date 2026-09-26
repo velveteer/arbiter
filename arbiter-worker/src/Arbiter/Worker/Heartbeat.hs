@@ -6,11 +6,12 @@ module Arbiter.Worker.Heartbeat
   ( HeartbeatGuard
   , newHeartbeatGuard
   , runHeartbeatGuard
+  , recheckJob
   ) where
 
 import Arbiter.Core.HighLevel (JobOperation)
 import Arbiter.Core.HighLevel qualified as Arb
-import Arbiter.Core.Job.Types (JobRead, ObservabilityHooks (..), notVisibleUntil, primaryKey)
+import Arbiter.Core.Job.Types (JobId, JobRead, ObservabilityHooks (..), notVisibleUntil, primaryKey)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Void (Void)
 import UnliftIO (UnliftIO (..), askUnliftIO)
@@ -42,3 +43,7 @@ newHeartbeatGuard config = do
 
 runHeartbeatGuard :: (MonadIO m) => HeartbeatGuard payload -> m Void
 runHeartbeatGuard = liftIO . Guard.runHeartbeatGuard
+
+-- | Extend the batch that holds the job now.
+recheckJob :: (MonadIO m) => HeartbeatGuard payload -> JobId -> m ()
+recheckJob guard = liftIO . Guard.recheck guard

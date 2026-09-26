@@ -19,7 +19,6 @@ module Arbiter.Worker.Batch
   , Handoff
   , newHandoff
   , runBatch
-  , afterBatch
   ) where
 
 import Arbiter.Core.Exceptions
@@ -152,12 +151,8 @@ data Progress n = Progress
   -- ^ Jobs whose claim report fired.
   , progressReported :: !(Set JobId)
   -- ^ Jobs whose terminal report fired.
-  , progressSpawned :: !(Set JobId)
-  -- ^ Jobs a spawn suspended.
   , progressDeferred :: !(Maybe (n ()))
   -- ^ The hooks of a settle a signal can interrupt.
-  , progressFinalized :: !Bool
-  -- ^ Whether the force-cancel finalizer ran to completion.
   }
 
 -- | Finalization state shared by the handler and the force-cancel finalizer, with
@@ -182,9 +177,7 @@ emptyProgress =
     , progressCancelled = mempty
     , progressClaimed = mempty
     , progressReported = mempty
-    , progressSpawned = mempty
     , progressDeferred = Nothing
-    , progressFinalized = False
     }
 
 readProgress :: (MonadSTM n) => Handoff n job -> n (Progress n)
@@ -238,12 +231,6 @@ pendingJobs handoff = jobsBy handoff progressHandled not
 unownedJobs :: (MonadSTM n) => Handoff n job -> NonEmpty job -> n [job]
 unownedJobs handoff = jobsBy handoff progressUnowned id
 
--- | Record that a spawn suspended a job.
-recordSpawned :: (MonadSTM n) => Handoff n job -> job -> n ()
-recordSpawned handoff job =
-  alterProgress handoff $ \progress ->
-    progress {progressSpawned = Set.insert (handoffKey handoff job) (progressSpawned progress)}
-
 -- | Record force-cancelled jobs and return all recorded ids.
 recordCancelled :: (MonadSTM n) => Handoff n job -> Set JobId -> n (Set JobId)
 recordCancelled handoff ids =
@@ -258,9 +245,6 @@ clearDeferred handoff = alterProgress handoff $ \progress -> progress {progressD
 -- | Run the hooks a signal interrupted.
 finishDeferred :: (MonadSTM n) => Handoff n job -> n ()
 finishDeferred handoff = readProgress handoff >>= traverse_ (*> clearDeferred handoff) . progressDeferred
-
-markFinalized :: (MonadSTM n) => Handoff n job -> n ()
-markFinalized handoff = alterProgress handoff $ \progress -> progress {progressFinalized = True}
 
 -- ---------------------------------------------------------------------------
 -- Running a batch
@@ -300,11 +284,9 @@ runBatch effects guard mode handoff jobs = do
   let startTime = handoffStart handoff
       run = ambientRun effects handoff
       (firstJob :| _) = jobs
-      -- Rethrown as it came. The flag is set last. An interrupted finalizer
-      -- leaves the rest to 'afterBatch'.
+      -- Rethrown as it came.
       onForceCancel exc@(JobForceCancelled cancelledIds goneIds) = do
         finalizeForceCancelled run jobs cancelledIds goneIds
-        markFinalized handoff
         throwIO exc
   -- The span covers the claim hooks, the outcome report and the force-cancel
   -- finalizer.
@@ -321,17 +303,6 @@ runBatch effects guard mode handoff jobs = do
             BatchedMode handler -> handler jobs (callbacks run startTime)
     endTime <- getCurrentTime
     reportBatchOutcome run jobs startTime endTime result
-
--- | Finalize a force-cancel that the batch left undone: one delivered before the
--- catch in 'runBatch', or one that interrupted its finalizer.
-afterBatch
-  :: (MonadMask n, MonadSTM n) => Effects n ctx job kids stored -> Handoff n job -> NonEmpty job -> JobForceCancelled -> n ()
-{-# SPECIALIZE afterBatch ::
-  Effects IO ctx job kids stored -> Handoff IO job -> NonEmpty job -> JobForceCancelled -> IO ()
-  #-}
-afterBatch effects handoff jobs (JobForceCancelled cancelledIds goneIds) = do
-  already <- progressFinalized <$> readProgress handoff
-  unless already $ finalizeForceCancelled (ambientRun effects handoff) jobs cancelledIds goneIds
 
 -- ---------------------------------------------------------------------------
 -- Settling
@@ -429,12 +400,12 @@ callbacks
   :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> Callbacks n ctx job kids stored
 callbacks base startTime =
   Callbacks
-    { callbackAck = \ctx job stored -> unlessSpawned "ack" job $ within ctx $ \run ->
+    { callbackAck = \ctx job stored -> unlessHandled "ack" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectAck run job stored) $ \at () ->
           reportSuccess at startTime job
     , -- Only the commit knows which jobs it acked and which had moved.
       callbackAckAll = \ctx pairs -> within ctx $ \run -> do
-        fresh <- dropSpawned pairs
+        fresh <- dropHandled pairs
         unless (null fresh) $
           void $
             settleWith run (\_ -> effect effectAckAll run fresh) (uncurry Settled) $
@@ -443,30 +414,29 @@ callbacks base startTime =
                 unless (null reclaimed) $ do
                   logAt at Info reclaimed ("Jobs " <> unownedReason <> " during bulk completion, skipped")
                   void (settleGoneJobs at unownedReason reclaimed)
-    , callbackFail = \ctx failure@(msg, _) job -> unlessSpawned "failure" job $ within ctx $ \run -> do
+    , callbackFail = \ctx failure@(msg, _) job -> unlessHandled "failure" job $ within ctx $ \run -> do
         endTime <- getCurrentTime
         void $ settle run (finalized [job]) (effect effectFail run failure job) $ \at outcome -> do
           reportFailed at msg startTime endTime job outcome
           settleUnwritten at [(job, outcome)]
-    , callbackNack = \ctx job -> unlessSpawned "nack" job $ within ctx $ \run -> releaseJobs run [job]
-    , callbackSpawn = \ctx job kids -> unlessSpawned "spawn" job $ within ctx $ \run ->
-        settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () -> do
-          recordSpawned (runHandoff at) job
+    , callbackNack = \ctx job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run [job]
+    , callbackSpawn = \ctx job kids -> unlessHandled "spawn" job $ within ctx $ \run ->
+        settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () ->
           reportSuccess at startTime job
     }
   where
     within ctx body = body base {runContext = ctx}
-    spawnedIds = progressSpawned <$> readProgress (runHandoff base)
-    unlessSpawned label job act = do
-      spawned <- spawnedIds
-      if hasIdIn (runHandoff base) spawned job
-        then logAt base Warning [job] ("Ignoring " <> label <> " on a job its handler already spawned")
+    handledIds = progressHandled <$> readProgress (runHandoff base)
+    unlessHandled label job act = do
+      handled <- handledIds
+      if hasIdIn (runHandoff base) handled job
+        then logAt base Warning [job] ("Ignoring " <> label <> " on a job its handler already finalized")
         else act
-    dropSpawned pairs = do
-      spawned <- spawnedIds
-      let (ignored, fresh) = partition (hasIdIn (runHandoff base) spawned . fst) pairs
+    dropHandled pairs = do
+      handled <- handledIds
+      let (ignored, fresh) = partition (hasIdIn (runHandoff base) handled . fst) pairs
       unless (null ignored) $
-        logAt base Warning (map fst ignored) "Ignoring bulk completion on jobs their handler already spawned"
+        logAt base Warning (map fst ignored) "Ignoring bulk completion on jobs their handler already finalized"
       pure fresh
 
 unownedReason :: Text

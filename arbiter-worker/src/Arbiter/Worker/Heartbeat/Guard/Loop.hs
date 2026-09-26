@@ -164,10 +164,11 @@ issue
   -> n ()
 issue guard woke leased due = do
   issued <- getMonotonicTime
-  atomically $
+  atomically $ do
     writeTVar
       (guardInFlight guard)
       (Just (InFlight issued (addTime bound issued) (Set.fromList (map guardedToken due)) False))
+    traverse_ (\entry -> modifyTVar' (guardedStatus entry) (\status -> status {recheckAsked = False})) due
   void . forkIO $ (extend guard issued bound due `finally` finish guard issued) >>= traverse_ (report guard due)
   where
     bound =
@@ -251,7 +252,7 @@ retryLater guard issued entry = do
   atomically $ do
     current <- ownsAttempt guard issued
     when current $ modifyTVar' (guardedStatus entry) $ \status ->
-      status {beatAt = addTime (heartbeatWait (configInterval (guardConfig guard)) False (leaseAt status `diffTime` now)) now}
+      rebeat (addTime (heartbeatWait (configInterval (guardConfig guard)) False (leaseAt status `diffTime` now)) now) status
 
 -- | 'try' for synchronous exceptions only.
 trySync :: (MonadCatch n) => n a -> n (Either SomeException a)
@@ -287,7 +288,7 @@ settle guard issued currentTime byJob (entry, live) = do
               then addTime (configTimeout config) issued
               else leaseAt status
           beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
-       in if not current || leaseLapsed status then (False, status) else (True, status {leaseAt = lease, beatAt = beat})
+       in if not current || leaseLapsed status then (False, status) else (True, rebeat beat status {leaseAt = lease})
   when applied $ do
     now <- getMonotonicTime
     case (cancelledJobs, stolenJobs) of

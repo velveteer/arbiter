@@ -17,12 +17,11 @@ import Arbiter.Core.Exceptions
   )
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.Job.Types (JobId)
-import Control.Concurrent.Class.MonadSTM (TVar, atomically, newTVarIO, readTVarIO, stateTVar, writeTVar)
-import Control.Monad (unless, void, when)
-import Control.Monad.Class.MonadAsync (MonadAsync (..))
-import Control.Monad.Class.MonadFork (MonadFork (..), MonadThread (..))
+import Control.Concurrent.Class.MonadSTM (TVar, atomically, newTVarIO, readTVarIO, stateTVar)
+import Control.Monad (unless, when)
+import Control.Monad.Class.MonadFork (MonadFork (..))
 import Control.Monad.Class.MonadTest (exploreRaces)
-import Control.Monad.Class.MonadThrow (MonadThrow (..), SomeException, fromException, toException)
+import Control.Monad.Class.MonadThrow (MonadCatch (..), MonadThrow (..), SomeException, fromException, toException)
 import Control.Monad.Class.MonadTime.SI (DiffTime, Time (..), addTime, getCurrentTime, getMonotonicTime)
 import Control.Monad.Class.MonadTimer.SI (threadDelay)
 import Control.Monad.IOSim (IOSim)
@@ -154,6 +153,10 @@ leaseTimeout = 3
 -- | How long a statement takes. A signal can land while it runs.
 statementLatency :: DiffTime
 statementLatency = 0.01
+
+-- | How long a flag's cancel waits for the extend that finds it.
+recheckLag :: DiffTime
+recheckLag = statementLatency
 
 -- | How long a terminal hook takes. A signal can land after it fires.
 reportLatency :: DiffTime
@@ -517,8 +520,8 @@ thrownException jobs = \case
   ThrowNack -> toException JobNackException
   ThrowOther -> toException (userError "handler crashed")
 
--- | Run a plan: claim the rows, run the batch on a handler thread as the pool
--- does, let the actors move, and wait past everything.
+-- | Run a plan: claim the rows, run the batch as the pool does, let the actors
+-- move, and wait past everything.
 runPlan :: Plan -> IOSim s (Plan, [Event], Map JobId Row)
 runPlan plan = do
   exploreRaces
@@ -542,50 +545,42 @@ runPlan plan = do
   rows <- newTVarIO claimed
   script <- newTVarIO (planReplies plan)
   guard <- startGuard (guardConfigFor rows recorder script (planDeadline plan))
-  handlerVar <- newTVarIO Nothing
   for_ (planMoves plan) $ \(delay, move) -> forkIO $ do
     threadDelay delay
-    act rows recorder handlerVar move
-  worker (modelEffects rows recorder) guard (modeFor rows recorder batch plan) handlerVar batch recorder
+    act rows recorder guard move
+  worker (modelEffects rows recorder) guard (modeFor rows recorder batch plan) batch recorder
   threadDelay horizon
   events <- readEvents
   table <- readTVarIO rows
   pure (plan, events, table)
 
--- | The worker thread: run the batch on its own thread, then finish what it left.
+-- | The worker thread: run the batch and record how it ended.
 worker
   :: Effects (IOSim s) () Job () ()
   -> HeartbeatGuard (IOSim s) Job
   -> Mode (IOSim s) () Job () ()
-  -> TVar (IOSim s) (Maybe (ThreadId (IOSim s)))
   -> NonEmpty Job
   -> Recorder s Event
   -> IOSim s ()
-worker effects guard mode handlerVar batch recorder = do
+worker effects guard mode batch recorder = do
   handoff <- newHandoff guard
-  handler <- async (runBatch effects guard mode handoff batch)
-  atomically (writeTVar handlerVar (Just (asyncThreadId handler)))
-  result <- waitCatch handler
+  result <- try (runBatch effects guard mode handoff batch)
   case result of
     Right () -> recorder (Ended Returned)
-    Left exception -> do
-      for_ (fromException exception) (afterBatch effects handoff batch)
-      recorder (Ended (ending exception))
+    Left exception -> recorder (Ended (ending exception))
   where
     ending exception
       | Just JobForceCancelled {} <- fromException exception = Threw "force-cancelled"
       | Just message <- escaped exception = Escaped message
       | otherwise = Threw (show exception)
 
-act :: Rows s -> Recorder s Event -> TVar (IOSim s) (Maybe (ThreadId (IOSim s))) -> Move -> IOSim s ()
-act rows recorder handlerVar move = case move of
+act :: Rows s -> Recorder s Event -> HeartbeatGuard (IOSim s) Job -> Move -> IOSim s ()
+act rows recorder guard move = case move of
   Flag job -> do
     (holder, _) <- statement rows (flagRow job)
     recorder (Acted move)
-    -- The NOTIFY, carried to the holder's handler thread.
-    when (holder == Just Us) $ do
-      target <- readTVarIO handlerVar
-      for_ target $ \tid -> void (forkIO (throwTo tid (JobForceCancelled [job] [])))
+    -- The NOTIFY, as the holder's guard takes it.
+    when (holder == Just Us) (recheck guard job)
   Steal job -> do
     stolen <- statement rows (stealRow job)
     when stolen (recorder (Acted move))
@@ -739,7 +734,7 @@ judgePlan (plan, events, table) =
 
 -- | A force-cancel of one sibling lands after another sibling's ack commits.
 ackThenSiblingCancel :: Plan
-ackThenSiblingCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, AckMany [1]] [(1.5, Flag 2)] [Extends] Nothing
+ackThenSiblingCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, AckMany [1]] [(1.5 - recheckLag, Flag 2)] [Extends] Nothing
 
 -- | A stolen job's failure write finds no row, and a sibling's force-cancel lands
 -- inside the statement that resolves why.
@@ -749,7 +744,7 @@ unwrittenThenSiblingCancel =
     3
     Nothing
     [Sleep 1, Sleep 0.5, FailOne RetryFailure 3, Throw ThrowRetryable]
-    [(1.5, Flag 2), (1.5, Steal 3), (1.5, Steal 3)]
+    [(1.5 - recheckLag / 2, Flag 2), (1.5 - recheckLag / 2, Steal 3), (1.5 - recheckLag / 2, Steal 3)]
     [Extends]
     Nothing
 
@@ -757,22 +752,27 @@ unwrittenThenSiblingCancel =
 -- past the settle nested inside the resolution.
 unwrittenThenLateCancel :: Plan
 unwrittenThenLateCancel =
-  Plan 2 Nothing [Sleep 1, FailOne RetryFailure 2] [(0.5, Steal 2), (1.01, Flag 1)] [Extends] Nothing
-
--- | The handler calls one job gone, and a sibling's force-cancel lands while the
--- lifecycle reports it.
-goneThenSiblingCancel :: Plan
-goneThenSiblingCancel = Plan 2 Nothing [Sleep 0.005, Throw (ThrowGone 1)] [(0.005, Flag 2)] [Extends] Nothing
+  Plan 2 Nothing [Sleep 1, FailOne RetryFailure 2] [(0.5, Steal 2), (1.01 - recheckLag, Flag 1)] [Extends] Nothing
 
 -- | A force-cancel of one sibling lands while the lifecycle reports the other's
 -- spawn.
 spawnThenForceCancel :: Plan
-spawnThenForceCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, SpawnOne 1] [(1.5, Flag 2)] [Extends] Nothing
+spawnThenForceCancel = Plan 2 Nothing [Sleep 1, Sleep 0.5, SpawnOne 1] [(1.5 - recheckLag, Flag 2)] [Extends] Nothing
 
--- | Later callbacks cannot overwrite a job the handler already spawned.
-spawnThenRepeatedCallbacks :: Plan
-spawnThenRepeatedCallbacks =
-  Plan 1 Nothing [SpawnOne 1, AckOne 1, AckMany [1], FailOne RetryFailure 1, NackOne 1, SpawnOne 1] [] [Extends] Nothing
+-- | Later callbacks cannot overwrite a job the handler already finalized.
+repeatedCallbacksAfter :: Step -> Plan
+repeatedCallbacksAfter first =
+  Plan 1 Nothing [first, AckOne 1, AckMany [1], FailOne RetryFailure 1, NackOne 1, SpawnOne 1] [] [Extends] Nothing
+
+-- | The warnings a job's ignored callbacks log.
+ignoredCallbackLogs :: [Text]
+ignoredCallbackLogs =
+  [ "Ignoring ack on a job its handler already finalized"
+  , "Ignoring bulk completion on jobs their handler already finalized"
+  , "Ignoring failure on a job its handler already finalized"
+  , "Ignoring nack on a job its handler already finalized"
+  , "Ignoring spawn on a job its handler already finalized"
+  ]
 
 -- | A stale guard signal names a job the handler already acked.
 goneAfterSiblingAck :: Plan
@@ -793,10 +793,6 @@ reportInterruptedTarget = 20
 -- | The share of explored schedules in which the cancel lands inside the resolution.
 resolutionInterruptedTarget :: Double
 resolutionInterruptedTarget = 5
-
--- | The share of explored schedules in which the cancel lands inside the gone report.
-goneReportInterruptedTarget :: Double
-goneReportInterruptedTarget = 5
 
 -- | The share of explored schedules in which the cancel lands past the nested settle.
 lateCancelTarget :: Double
@@ -852,8 +848,16 @@ spec = describe "Batch simulation" $ do
             === concat [[(j, Nothing), (j, Just (UnavailableK leaseExpiredReason))] | j <- [2, 1]]
       )
       expiredOnArrivalScenario
-  it "ignores every callback after a job spawns children" $
-    exploreScenario judgePlan (runPlan spawnThenRepeatedCallbacks)
+  for_ [("acks", AckOne 1), ("spawns children", SpawnOne 1), ("fails", FailOne RetryFailure 1), ("is nacked", NackOne 1)] $ \(label, first) ->
+    it ("ignores every callback after a job " <> label) $
+      exploreScenario
+        ( \result@(_, events, _) ->
+            conjoin
+              [ judgePlan result
+              , [message | Logged _ message _ <- events, message `elem` ignoredCallbackLogs] === ignoredCallbackLogs
+              ]
+        )
+        (runPlan (repeatedCallbacksAfter first))
   it "preserves an acked sibling named by a stale gone signal" $
     exploreScenario
       ( \result@(_, events, _) ->
@@ -873,9 +877,6 @@ spec = describe "Batch simulation" $ do
   it "logs a stolen sibling's resolution when a force-cancel lands past its nested settle" $
     scenario unwrittenThenLateCancel "the cancel landed past the nested settle" lateCancelTarget $ \(_, events, _) ->
       batchThrew events && UnavailableK unwrittenRetry `elem` map snd (reportedKinds events 2)
-  it "reports a job the handler called gone when a force-cancel interrupts the report" $
-    scenario goneThenSiblingCancel "the cancel landed inside the gone report" goneReportInterruptedTarget $ \(_, events, _) ->
-      batchThrew events && UnavailableK handlerGone `elem` map snd (reportedKinds events 1)
   it "reports a spawned job when a force-cancel interrupts the report" $
     scenario spawnThenForceCancel "the cancel landed after the spawn" spawnInterruptedTarget $ \(_, events, _) ->
       batchThrew events && SuccessK `elem` map snd (reportedKinds events 1)
@@ -904,9 +905,8 @@ expiredOnArrivalScenario = do
   leasedUntil <- getCurrentTime
   threadDelay 1
   guard <- startGuard (guardConfigFor rows recorder script Nothing) {configLease = const (Just leasedUntil)}
-  handlerVar <- newTVarIO Nothing
   let batch = Job 1 1 1 :| [Job 2 1 1]
-  worker (modelEffects rows recorder) guard (SingleMode (ackOrGone rows recorder)) handlerVar batch recorder
+  worker (modelEffects rows recorder) guard (SingleMode (ackOrGone rows recorder)) batch recorder
   events
 
 -- | The claim hook runs before user processing but already owns a database lease.
@@ -917,7 +917,6 @@ claimHookScenario deadline reply hookDelay = do
   rows <- newTVarIO (Map.singleton 1 (Row 1 (Just Us) (Just (Time leaseTimeout)) False 1 False))
   script <- newTVarIO [reply]
   guard <- startGuard (guardConfigFor rows recorder script deadline)
-  handlerVar <- newTVarIO Nothing
   let base = modelEffects rows recorder
       effects =
         base
@@ -925,5 +924,5 @@ claimHookScenario deadline reply hookDelay = do
               Claimed _ _ -> threadDelay hookDelay
               _ -> effectReport base ctx report
           }
-  worker effects guard (SingleMode (ackOrGone rows recorder)) handlerVar (Job 1 1 1 :| []) recorder
+  worker effects guard (SingleMode (ackOrGone rows recorder)) (Job 1 1 1 :| []) recorder
   events

@@ -867,6 +867,18 @@ spec = describe "Guard simulation" $ do
     simulate (plainSetup 1 20 Nothing [Answer 0 [(1, Cancel)]]) (\w -> handler w 1 0 (swallowing w 1 10) >> threadDelay 4.5) $ \events ->
       property (length [() | Caught 1 _ <- events] >= 3)
 
+  it "extends a rechecked batch before its next beat" $
+    simulate
+      (plainSetup 5 20 Nothing [Answer 0 [(1, Cancel)]])
+      (\w -> handler w 1 0 (threadDelay 10) >> threadDelay 1 >> recheck (worldGuard w) 1 >> threadDelay 12)
+    $ \events -> [() | (1, Cancelled, at) <- endings events, at == Time 1] `is` 1
+
+  it "extends a batch rechecked during an extend again once it lands" $
+    simulate
+      (plainSetup 5 20 Nothing [Answer 1 [], Answer 0 [(1, Cancel)]])
+      (\w -> handler w 1 0 (threadDelay 20) >> threadDelay 5.5 >> recheck (worldGuard w) 1 >> threadDelay 16)
+    $ \events -> [() | (1, Cancelled, at) <- endings events, at == Time 6] `is` 1
+
   it "revokes a signal a masked handler outlives"
     $ simulate
       (plainSetup 10 20 (Just 1) [])
