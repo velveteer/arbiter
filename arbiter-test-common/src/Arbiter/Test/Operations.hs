@@ -708,6 +708,16 @@ operationsSpec mkMessage mkResult runM = do
       runM env (HL.setVisibilityTimeoutBatch 120 [live])
         >>= (`shouldBe` [JobCancelled jobId])
 
+    it "reports a job force-cancelled twice as cancelled" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "double-flag")))
+      let jobId = primaryKey inserted
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+      runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+
+      runM env (HL.setVisibilityTimeoutBatch 120 [held])
+        >>= (`shouldBe` [JobCancelled jobId])
+
   describe "Handoff windows" $ do
     it "refuses the retry write for a claim that was stolen" $ \env -> do
       -- Window 2.

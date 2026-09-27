@@ -261,7 +261,9 @@ flagRow job now rows = case Map.lookup job rows of
   Just row
     | isJust (rowHolder row)
     , maybe False (> now) (rowLease row) ->
-        ((rowHolder row, Just Flagged), Map.insert job row {rowFlagged = True, rowSeq = rowSeq row + 1} rows)
+        ( (rowHolder row, Just Flagged)
+        , Map.insert job row {rowFlagged = True, rowSeq = rowSeq row + if rowFlagged row then 0 else 1} rows
+        )
     | otherwise -> ((rowHolder row, Just Deleted), Map.delete job rows)
   Nothing -> ((Nothing, Nothing), rows)
 

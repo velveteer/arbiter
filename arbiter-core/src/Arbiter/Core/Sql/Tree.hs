@@ -210,7 +210,7 @@ cancelJobCascadeSQL schema tableName jobId =
       |]
 
 -- | Force-cancel a job subtree. Flags still-live claimed jobs and bumps their claim
--- token, deletes the rest, and NOTIFYs every claimed job affected.
+-- token once, deletes the rest, and NOTIFYs every claimed job affected.
 forceCancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 forceCancelJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -226,7 +226,9 @@ forceCancelJobSQL schema tableName jobId =
           FOR UPDATE
         ),
         cancelled AS (
-          UPDATE ${tbl} job SET cancel_requested_at = NOW(), claim_seq = job.claim_seq + 1
+          UPDATE ${tbl} job
+          SET cancel_requested_at = COALESCE(job.cancel_requested_at, NOW()),
+              claim_seq = job.claim_seq + CASE WHEN job.cancel_requested_at IS NULL THEN 1 ELSE 0 END
           FROM locked held
           WHERE job.id = held.id
             AND held.claimed_by IS NOT NULL
