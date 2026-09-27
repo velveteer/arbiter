@@ -8,16 +8,43 @@ module Arbiter.Core.Sql.Groups
   , lockGroupsSQL
   , refreshGroupsSQL
   , insertMissingGroupsSQL
+  , settleGroupLocksCte
+  , lockGroupKeysSQL
   ) where
 
 import Data.Int (Int64)
 import Data.Text (Text)
+import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Schema.Groups (groupAggregates, inFlightPredicate)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
+
+-- | A @group_locks@ CTE over the group rows of the @deleted@ and @updated@ CTEs, in key
+-- order, taken only when an @updated@ CTE changed a row. The DELETE trigger and the
+-- UPDATE trigger each lock in key order, but the DELETE trigger runs first.
+settleGroupLocksCte :: Text -> Text -> Text -> [Text] -> Text
+settleGroupLocksCte schema tableName deleted updated =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+      anyUpdated = T.intercalate " OR " ["EXISTS (SELECT 1 FROM " <> cte <> ")" | cte <- updated]
+      touched = T.intercalate " UNION " ["SELECT group_key FROM " <> cte | cte <- deleted : updated]
+   in [text|
+        group_locks AS (
+          SELECT 1 FROM ${groupsTbl} locked_group
+          WHERE (${anyUpdated})
+            AND locked_group.group_key IN (${touched})
+          ORDER BY locked_group.group_key
+          FOR UPDATE
+        )
+      |]
+
+-- | Create the missing group summaries among @keys@ and lock them all, in key order.
+lockGroupKeysSQL :: Text -> Text -> [Text] -> Query ()
+lockGroupKeysSQL schema tableName keys =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+   in [sql|INSERT INTO ${groupsTbl} (group_key) SELECT DISTINCT unnest(#{keys :: [CText]}::text[]) AS group_key ORDER BY group_key ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE|]
 
 -- | At most @limit@ groups keys past @cursor@, in the database's key order, unlocked.
 -- Its last key is the caller's resume cursor.

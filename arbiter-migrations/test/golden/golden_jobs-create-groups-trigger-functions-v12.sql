@@ -5,9 +5,9 @@ BEGIN
     RETURN NULL;
   END IF;
 
-  PERFORM 1 FROM "arbiter"."golden_jobs_groups" g
-  WHERE g.group_key IN (SELECT group_key FROM new_table WHERE group_key IS NOT NULL)
-  ORDER BY g.group_key FOR UPDATE;
+  INSERT INTO "arbiter"."golden_jobs_groups" (group_key)
+  SELECT DISTINCT group_key FROM (SELECT group_key FROM new_table WHERE group_key IS NOT NULL) created ORDER BY group_key
+  ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE;
 
   INSERT INTO "arbiter"."golden_jobs_groups" (group_key, min_priority, min_id, job_count, ready_count, next_due)
   SELECT group_key,
@@ -105,15 +105,15 @@ BEGIN
     RETURN NULL;
   END IF;
 
-  PERFORM 1 FROM "arbiter"."golden_jobs_groups" g
-  WHERE g.group_key IN (SELECT group_key
+  INSERT INTO "arbiter"."golden_jobs_groups" (group_key)
+  SELECT DISTINCT group_key FROM (SELECT group_key
   FROM new_table
   WHERE group_key IS NOT NULL
   UNION
   SELECT group_key
   FROM old_table
-  WHERE group_key IS NOT NULL)
-  ORDER BY g.group_key FOR UPDATE;
+  WHERE group_key IS NOT NULL) created ORDER BY group_key
+  ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE;
   IF EXISTS (
     SELECT 1 FROM new_table n JOIN old_table o ON o.id = n.id
     WHERE o.group_key IS DISTINCT FROM n.group_key LIMIT 1

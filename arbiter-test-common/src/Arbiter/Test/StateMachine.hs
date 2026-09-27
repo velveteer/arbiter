@@ -90,7 +90,7 @@ import Arbiter.Core.RateLimit.Spec
   )
 import Barbies qualified as B
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (SomeException, finally, throwIO)
 import Control.Monad (replicateM_, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -120,7 +120,7 @@ import Hedgehog.Range qualified as Range
 import System.Timeout (timeout)
 import Test.Hspec
 import UnliftIO (MonadUnliftIO, tryAny)
-import UnliftIO.Async (async, mapConcurrently, mapConcurrently_, wait)
+import UnliftIO.Async (async, link, mapConcurrently, mapConcurrently_, wait, withAsync)
 
 import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
 
@@ -1519,6 +1519,178 @@ deadlockGuard run reset = do
   -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
   deadlockCount `shouldSatisfy` (<= rounds `div` 100)
 
+lockWaitSecs :: Int
+lockWaitSecs = 5
+
+lockPollMicros :: Int
+lockPollMicros = 10_000
+
+-- | Wait until @count@ backends on this database wait on a lock.
+awaitLockWaiters :: (forall a. (PG.Connection -> IO a) -> IO a) -> Int64 -> IO ()
+awaitLockWaiters withConn count = withinSecs lockWaitSecs go
+  where
+    go = do
+      waiting <-
+        countQuery
+          withConn
+          "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()"
+      when (waiting < count) (threadDelay lockPollMicros >> go)
+
+-- | Open the gate when the action ends, so a paused worker finishes before it is cancelled.
+releasing :: MVar () -> IO a -> IO a
+releasing gate action = action `finally` void (tryPutMVar gate ())
+
+-- | A settle that wakes a parent in an earlier group, against a batch insert across both
+-- groups. A held middle group stops the insert between its two group locks.
+crossGroupWakeLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (JobRead SMPayload -> sm ())
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+crossGroupWakeLockOrder settle run schema table withConn reset = do
+  reset
+  later <- addUTCTime 3600 <$> getCurrentTime
+  let scheduled group = setNotVisibleUntil (Just later) (smJob (Just group) "sm scheduled")
+  void (run (HL.insertJobTree @SMPayload (smJob (Just "aa") "sm parent" <~~ (smJob (Just "zz") "sm child" :| []))))
+  void (run (HL.insertJob (scheduled "mm")))
+  [child] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  held <- newEmptyMVar
+  release <- newEmptyMVar
+  let holder = withConn $ \conn -> do
+        PG.begin conn
+        void
+          ( PG.query_
+              conn
+              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> "_groups WHERE group_key = 'mm' FOR UPDATE")))
+              :: IO [Only Int]
+          )
+        putMVar held ()
+        takeMVar release
+        PG.commit conn
+      inserter = tryAny (run (void (HL.insertJobsBatch_ [scheduled "aa", scheduled "mm", scheduled "zz"])))
+      acker = tryAny (run (settle child))
+  withAsync holder $ \holding -> do
+    link holding
+    takeMVar held
+    withAsync inserter $ \insertDone -> releasing release $ do
+      awaitLockWaiters withConn 1
+      withAsync acker $ \ackDone -> releasing release $ do
+        awaitLockWaiters withConn 2
+        putMVar release ()
+        outcomes <- (,) <$> wait insertDone <*> wait ackDone
+        let failures = [show err | Left err <- [fst outcomes, snd outcomes]]
+        failures `shouldBe` []
+
+-- | A transaction that creates a group row and then touches a later group, against a batch
+-- insert across both. The insert cannot see the uncommitted group row when it locks.
+newGroupLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+newGroupLockOrder run withConn reset = do
+  reset
+  later <- addUTCTime 3600 <$> getCurrentTime
+  let scheduled group = setNotVisibleUntil (Just later) (smJob (Just group) "sm scheduled")
+  void (run (HL.insertJob (scheduled "zz")))
+  created <- newEmptyMVar
+  proceed <- newEmptyMVar
+  let creator = tryAny . run . withDbTransaction $ do
+        void (HL.insertJob (scheduled "aa"))
+        liftIO (putMVar created () >> takeMVar proceed)
+        void (HL.insertJob (scheduled "zz"))
+      inserter = tryAny (run (void (HL.insertJobsBatch_ [scheduled "aa", scheduled "zz"])))
+  withAsync creator $ \creatorDone -> do
+    takeMVar created
+    withAsync inserter $ \insertDone -> releasing proceed $ do
+      awaitLockWaiters withConn 1
+      putMVar proceed ()
+      outcomes <- (,) <$> wait creatorDone <*> wait insertDone
+      [show err | Left err <- [fst outcomes, snd outcomes]] `shouldBe` []
+
+-- | A spawn whose children land in a later group than the parent, against a batch insert
+-- across both groups. The spawn pauses between its children insert and its settle.
+spawnGroupLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+spawnGroupLockOrder run withConn reset = do
+  reset
+  later <- addUTCTime 3600 <$> getCurrentTime
+  let scheduled group = setNotVisibleUntil (Just later) (smJob (Just group) "sm scheduled")
+  void (run (HL.insertJobsBatch_ [smJob (Just "aa") "sm parent", scheduled "zz"]))
+  [parent] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  spawned <- newEmptyMVar
+  proceed <- newEmptyMVar
+  let spawner = tryAny . run . withDbTransaction $ do
+        void (HL.spawnChildren parent (smChildren (Just "zz") "sm spawn child" 1))
+        liftIO (putMVar spawned () >> takeMVar proceed)
+        void (HL.ackJob parent)
+      inserter = tryAny (run (void (HL.insertJobsBatch_ [scheduled "aa", scheduled "zz"])))
+  withAsync spawner $ \spawnDone -> do
+    takeMVar spawned
+    withAsync inserter $ \insertDone -> releasing proceed $ do
+      awaitLockWaiters withConn 1
+      putMVar proceed ()
+      outcomes <- (,) <$> wait spawnDone <*> wait insertDone
+      [show err | Left err <- [fst outcomes, snd outcomes]] `shouldBe` []
+
+-- | A rollup's next spawn round, against a delete of its dead-lettered child. A held parent
+-- row stops the spawn after it takes the parent lock and before it detaches the child.
+respawnDLQDeleteLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+respawnDLQDeleteLockOrder run schema table withConn reset = do
+  reset
+  void (run (HL.insertJobTree @SMPayload (smJob Nothing "sm parent" <~~ smChildren Nothing "sm child" 2)))
+  [failed, done] <- run (HL.claimNextVisibleJobs 2 60) :: IO [JobRead SMPayload]
+  void (run (HL.moveToDLQ "sm dlq" failed))
+  void (run (HL.ackJob done))
+  [parent] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  dlqId <- lookupDlqId schema table withConn (primaryKey failed)
+  held <- newEmptyMVar
+  release <- newEmptyMVar
+  let holder = withConn $ \conn -> do
+        PG.begin conn
+        void
+          ( PG.query
+              conn
+              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE id = ? FOR UPDATE")))
+              (Only (primaryKey parent))
+              :: IO [Only Int]
+          )
+        putMVar held ()
+        takeMVar release
+        PG.commit conn
+      spawner = tryAny (run (void (HL.spawnChildren parent (smChildren Nothing "sm respawn" 1))))
+      deleter = tryAny (run (void (HL.deleteDLQJob @SMPayload dlqId)))
+  withAsync holder $ \holding -> do
+    link holding
+    takeMVar held
+    withAsync spawner $ \spawnDone -> releasing release $ do
+      awaitLockWaiters withConn 1
+      withAsync deleter $ \deleteDone -> releasing release $ do
+        awaitLockWaiters withConn 2
+        putMVar release ()
+        outcomes <- (,) <$> wait spawnDone <*> wait deleteDone
+        [show err | Left err <- [fst outcomes, snd outcomes]] `shouldBe` []
+
 -- | Guard for the tree lock order a spawn shares with a dead-letter move and a
 -- cascade cancel.
 spawnDeadlockGuard
@@ -2156,6 +2328,20 @@ stateMachineSpec run schema table withConn reset = do
       passed `shouldBe` True
   it "concurrent cross-group operations never deadlock" $
     withinSecs 150 (deadlockGuard @sm run reset)
+  it "an ack waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs 30 (crossGroupWakeLockOrder @sm (void . HL.ackJob) run schema table withConn reset)
+  it "a batch ack waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs 30 (crossGroupWakeLockOrder @sm (void . HL.ackJobsBatch . pure) run schema table withConn reset)
+  it "a transaction creating a group row does not deadlock with a multi-group insert" $
+    withinSecs 30 (newGroupLockOrder @sm run withConn reset)
+  it "a spawn into a later group does not deadlock with a multi-group insert" $
+    withinSecs 30 (spawnGroupLockOrder @sm run withConn reset)
+  it "a rollup respawn does not deadlock with a delete of its dead-lettered child" $
+    withinSecs 30 (respawnDLQDeleteLockOrder @sm run schema table withConn reset)
+  it "a cancel waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs
+      30
+      (crossGroupWakeLockOrder @sm (void . HL.cancelJob @SMPayload . primaryKey) run schema table withConn reset)
   it "concurrent spawns, dead-letter moves and cascade cancels never deadlock" $
     withinSecs 150 (spawnDeadlockGuard @sm run schema table withConn reset)
   it "concurrent dedup moves and claims never double-claim a group" $

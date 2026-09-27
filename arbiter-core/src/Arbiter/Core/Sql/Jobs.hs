@@ -60,6 +60,7 @@ import Arbiter.Core.Job.Schema
   , jobQueueTable
   )
 import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
+import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 
@@ -536,12 +537,13 @@ getJobByDedupKeySQL schema tableName key =
 cancelJobSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
+      groupLocks = settleGroupLocksCte schema tableName "cancel" ["wake_parent"]
    in [sql|
         WITH cancel AS (
           DELETE FROM ${tbl}
           WHERE id = #{jobId :: CInt8}
             AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{jobId :: CInt8})
-          RETURNING id, parent_id
+          RETURNING id, parent_id, group_key
         ),
         wake_parent AS (
           UPDATE ${tbl}
@@ -553,9 +555,11 @@ cancelJobSQL schema tableName jobId =
               WHERE child.parent_id = (SELECT parent_id FROM cancel WHERE parent_id IS NOT NULL)
                 AND child.id NOT IN (SELECT id FROM cancel)
             )
-          RETURNING id
-        )
+          RETURNING id, group_key
+        ),
+        ${groupLocks}
         SELECT (SELECT count(*) FROM cancel) AS @{result :: CInt8}
+        FROM (SELECT count(*) FROM group_locks) held
       |]
 
 -- | @UNION ALL@ of @body@ over each job table, passing its raw name and schema-qualified reference.

@@ -18,6 +18,7 @@ import Data.Text (Text)
 
 import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
+import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql, stmt)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
@@ -29,8 +30,9 @@ import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
 smartAckJobSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
-      returning = if archiveEnabled then "*" else "id, parent_id" :: Text
+      returning = if archiveEnabled then "*" else "id, parent_id, group_key" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
+      groupLocks = settleGroupLocksCte schema tableName "ack" ["wake_parent"]
    in [stmt|
         WITH ack AS (
           DELETE FROM ${tbl}
@@ -58,10 +60,12 @@ smartAckJobSQL archiveEnabled schema tableName =
               WHERE child.parent_id = (SELECT parent_id FROM ack WHERE parent_id IS NOT NULL)
                 AND child.id NOT IN (SELECT id FROM ack)
             )
-          RETURNING id
-        )
+          RETURNING id, group_key
+        ),
+        ${groupLocks}
         SELECT
           (SELECT count(*) FROM ack) + (SELECT count(*) FROM suspend) AS @{result :: CInt8}
+        FROM (SELECT count(*) FROM group_locks) held
       |]
 
 -- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays. Deletes leaves,
@@ -72,8 +76,9 @@ smartAckJobSQL archiveEnabled schema tableName =
 smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
 smartAckJobsBatchSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
-      returning = if archiveEnabled then "job.*" else "job.id, job.parent_id" :: Text
+      returning = if archiveEnabled then "job.*" else "job.id, job.parent_id, job.group_key" :: Text
       archived = mwhen archiveEnabled (archiveAckCte schema tableName "ack")
+      groupLocks = settleGroupLocksCte schema tableName "ack" ["suspend", "wake_parent"]
    in [stmt|
         WITH input AS (
           SELECT unnest(#{ids :: [CInt8]}::bigint[]) AS id, unnest(#{cseqs :: [CInt8]}::bigint[]) AS cseq
@@ -101,7 +106,7 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
             AND job.id IN (SELECT id FROM locked)
             AND NOT EXISTS (SELECT 1 FROM ack acked WHERE acked.id = job.id)
             AND EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = job.id)
-          RETURNING job.id
+          RETURNING job.id, job.group_key
         ),
         wake_parent AS (
           UPDATE ${tbl} parent
@@ -113,11 +118,11 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
               WHERE child.parent_id = parent.id
                 AND NOT EXISTS (SELECT 1 FROM ack acked WHERE acked.id = child.id)
             )
-          RETURNING parent.id
-        )
-        SELECT @{id :: CInt8} FROM ack
-        UNION
-        SELECT id FROM suspend
+          RETURNING parent.id, parent.group_key
+        ),
+        ${groupLocks}
+        SELECT @{id :: CInt8} FROM (SELECT id FROM ack UNION SELECT id FROM suspend) settled
+        CROSS JOIN (SELECT count(*) FROM group_locks) held
       |]
 
 -- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows

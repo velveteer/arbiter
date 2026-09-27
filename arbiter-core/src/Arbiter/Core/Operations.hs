@@ -583,6 +583,9 @@ spawnChildren schemaName tableName job children = withDbTransaction $ do
   lockJobsAndParents schemaName tableName [(jobId, parentId job)]
   marked <- MA.executeStatement (Tmpl.beginSpawnSQL schemaName tableName jobId (claimSeq job))
   when (marked == 0) refuseSpawn
+  when (Set.size groups > 1)
+    $ void
+    $ MA.executeStatement (Tmpl.lockGroupKeysSQL schemaName tableName (Set.toAscList groups))
   -- A job with no previous round has no children, so neither statement can match.
   when (isRollup job) $ do
     void $ MA.executeStatement (Tmpl.deleteResultsByParentSQL schemaName tableName jobId)
@@ -604,6 +607,7 @@ spawnChildren schemaName tableName job children = withDbTransaction $ do
           <> " hit a dedup conflict"
   where
     jobId = primaryKey job
+    groups = Set.fromList (catMaybes (groupKey job : map JT.groupKey (toList children)))
 
     scopedRetry :: forall a. Text -> m a
     scopedRetry msg = throwScopedFailure (Retryable (JobRetryableException msg)) [jobId]
@@ -1833,7 +1837,8 @@ deleteDLQJobsBatch
   -> [Int64]
   -- ^ DLQ job ids
   -> m Int64
-deleteDLQJobsBatch schemaName tableName dlqIds =
+deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
+  lockJobParents schemaName tableName =<< MA.executeQuery (Tmpl.dlqParentIdsSQL schemaName tableName dlqIds)
   fromIntegral . length
     <$> deleteJobsResumingParents schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
 

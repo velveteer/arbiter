@@ -224,6 +224,21 @@ concurrencySpec mkMessage runM = do
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]
 
+    it "claims healthy work beyond force-cancelled heads whose lease lapsed" $ \env -> do
+      void
+        $ runM env
+        $ HL.insertJobsBatch
+          [defaultGroupedJob ("flagged-due-" <> T.pack (show i)) (mkMessage "old") | i <- [1 .. 12 :: Int]]
+      flagged <- runM env (HL.claimNextVisibleJobs 12 0.2) :: IO [JobRead payload]
+      length flagged `shouldBe` 12
+      forM_ flagged $ \job -> runM env (HL.forceCancelJob @payload (primaryKey job))
+      threadDelay 400_000
+      Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy-flagged" (mkMessage "healthy"))
+      claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+      map primaryKey claimed `shouldBe` [primaryKey healthy]
+      live <- runM env (HL.listJobs @payload 20 0)
+      length live `shouldBe` 13
+
     it "concurrent workers claim disjoint ungrouped jobs" $ \env -> do
       -- Insert 6 ungrouped jobs, remembering their ids.
       inserted <- runM env $ HL.insertJobsBatch (replicate 6 $ defaultJob (mkMessage "Concurrent"))

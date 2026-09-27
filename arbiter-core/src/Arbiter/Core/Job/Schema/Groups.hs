@@ -157,8 +157,7 @@ groupsMergeSet groupsTbl =
     next_due = LEAST(${groupsTbl}.next_due, EXCLUDED.next_due)
   |]
 
--- | Lock a queue's group summaries in @group_key@ order. Every maintenance function
--- takes them this way.
+-- | Lock a queue's existing group summaries in @group_key@ order.
 groupsLock :: Text -> Text -> Text
 groupsLock groupsTbl keys =
   [text|
@@ -167,11 +166,21 @@ groupsLock groupsTbl keys =
     ORDER BY g.group_key FOR UPDATE;
   |]
 
+-- | Create the missing group summaries and lock the existing ones, in one @group_key@
+-- order pass. A row another transaction is creating is waited on in its turn.
+groupsCreateLock :: Text -> Text -> Text
+groupsCreateLock groupsTbl keys =
+  [text|
+    INSERT INTO ${groupsTbl} (group_key)
+    SELECT DISTINCT group_key FROM (${keys}) created ORDER BY group_key
+    ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE;
+  |]
+
 groupsInsertFunction :: Text -> Text -> Text -> Text
 groupsInsertFunction funcName groupsTbl dollarQuote =
   let mergeSet = groupsMergeSet groupsTbl
       aggs = groupAggregates ""
-      lockRows = groupsLock groupsTbl "SELECT group_key FROM new_table WHERE group_key IS NOT NULL"
+      lockRows = groupsCreateLock groupsTbl "SELECT group_key FROM new_table WHERE group_key IS NOT NULL"
    in [text|
     CREATE OR REPLACE FUNCTION ${funcName}()
     RETURNS TRIGGER AS ${dollarQuote}
@@ -352,7 +361,7 @@ groupsUpdateFunction funcName groupsTbl tbl dollarQuote =
       aggsN = groupAggregates "n."
       mergeSet = groupsMergeSet groupsTbl
       lockRows =
-        groupsLock
+        groupsCreateLock
           groupsTbl
           [text|
             SELECT group_key

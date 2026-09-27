@@ -10,6 +10,7 @@ module Arbiter.Core.Sql.DLQ
   , dlqJobExistsSQL
   , moveToDLQBatchSQL
   , deleteDLQJobsBatchSQL
+  , dlqParentIdsSQL
   , cascadeChildrenToDLQSQL
   , countDLQChildrenBatchSQL
   ) where
@@ -213,6 +214,12 @@ deleteDLQJobsBatchSQL schema tableName dlqIds =
         DELETE FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]})
         RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}
       |]
+
+-- | The parents of the given DLQ rows.
+dlqParentIdsSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+dlqParentIdsSQL schema tableName dlqIds =
+  let dlqTbl = jobQueueDLQTable schema tableName
+   in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]})|]
 
 -- | Move every descendant of a rollup parent to the DLQ alongside it.
 cascadeChildrenToDLQSQL :: Text -> Text -> Int64 -> Text -> Query Int64
