@@ -170,7 +170,7 @@ runWorkerPool config = do
         lift $ tryLog (logConfig config) Error $ "Thread pool exception: " <> displayEx exception
       Right _ -> pure ()
 
-    lift $ shutdownPool config schemaName workQueue
+    lift $ shutdownPool config schemaName workQueue (void (Async.waitCatchSTM dispatcher))
 
 -- | Flip 'listenerReadyVar' once the pool's channels are subscribed. Runs
 -- alongside the pool. Startup does not wait on it.
@@ -207,20 +207,22 @@ shutdownPool
   => WorkerConfig n payload
   -> SchemaName
   -> WorkQueue a
+  -> STM ()
+  -- ^ Retries until the dispatcher has stopped claiming.
   -> m ()
-shutdownPool config schemaName workQueue = do
+shutdownPool config schemaName workQueue claimsStopped = do
   shutdownWorker config
   let wid = workerId config
       logCfg = logConfig config
   tryWarn logCfg "Failed to mark worker shutting down" (Ops.markWorkerShuttingDown schemaName wid)
-  drainPool logCfg (gracefulShutdownTimeout config) workQueue
+  drainPool logCfg (gracefulShutdownTimeout config) workQueue claimsStopped
   tryWarn logCfg "Failed to deregister worker" (Ops.deregisterWorker schemaName wid)
 
 -- | How often an unbounded drain logs its progress.
 drainProgressInterval :: NominalDiffTime
 drainProgressInterval = 10
 
--- | Wait for the work queue to drain and all worker threads to go idle,
+-- | Wait for the dispatcher to stop, the work queue to drain and all worker threads to go idle,
 -- optionally bounded by a timeout. Logs the entry, periodic progress (every
 -- 10s) when no timeout is set, and the result.
 drainPool
@@ -228,8 +230,9 @@ drainPool
   => LogConfig
   -> Maybe NominalDiffTime
   -> WorkQueue a
+  -> STM ()
   -> m ()
-drainPool logCfg mTimeout workQueue = do
+drainPool logCfg mTimeout workQueue claimsStopped = do
   tryLog logCfg Info "Starting graceful shutdown. Draining in-flight jobs..."
   result <- case mTimeout of
     Nothing -> Right () <$ drainLoop
@@ -239,7 +242,7 @@ drainPool logCfg mTimeout workQueue = do
     Right () -> tryLog logCfg Info "All workers are now idle. Graceful shutdown complete."
     Left () -> tryLog logCfg Warning "Graceful shutdown timed out. Some jobs may still be in-flight."
   where
-    waitForDrain = atomically (inFlight workQueue >>= checkSTM . (== 0))
+    waitForDrain = atomically (claimsStopped *> (inFlight workQueue >>= checkSTM . (== 0)))
     drainLoop = do
       drainOrTick <- Async.race (threadDelay (Ops.micros drainProgressInterval)) waitForDrain
       case drainOrTick of

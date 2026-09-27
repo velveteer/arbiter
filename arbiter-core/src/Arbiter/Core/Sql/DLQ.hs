@@ -162,7 +162,7 @@ retryFromDLQSQL schema tableName dlqId =
         -- got fresh children re-inserted under them.
         parent_resuspend AS (
           UPDATE ${tbl}
-          SET suspended = TRUE, updated_at = NOW()
+          SET suspended = TRUE, claimed_by = NULL, updated_at = NOW()
           WHERE parent_state IS NOT NULL
             AND id IN (SELECT DISTINCT parent_id FROM inserted WHERE parent_id IS NOT NULL)
             AND NOT suspended

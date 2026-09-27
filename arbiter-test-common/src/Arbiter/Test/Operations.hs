@@ -776,6 +776,122 @@ operationsSpec mkMessage mkResult runM = do
       deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [jobId])
       assertGone env jobId
 
+  describe "Guard pins" $ do
+    let stealAfterLapse env inserted = do
+          [held] <- claimJobsAs env 1 UUID.nil
+          void $ runM env (HL.setVisibilityTimeout 0 held)
+          [stolen] <- claimJobsAs env 1 (UUID.fromWords 5 5 5 5)
+          primaryKey stolen `shouldBe` primaryKey inserted
+          pure (held, stolen)
+        suspendedFinalizer env name = do
+          Just _ <- runM env (HL.insertJob (defaultJob (mkMessage name)))
+          [held] <- claimJobsAs env 1 UUID.nil
+          runM env . MA.withDbTransaction $ do
+            void (HL.spawnChildren held (defaultJob (mkMessage (name <> "-kid")) :| []))
+            void (HL.ackJob held)
+          assertSuspended env (primaryKey held)
+          pure held
+
+    it "the cancelled delete leaves an unflagged sibling its holder still runs" $ \env -> do
+      Just flagged <- runM env (HL.insertJob (defaultJob (mkMessage "pin-flagged")))
+      Just sibling <- runM env (HL.insertJob (defaultJob (mkMessage "pin-sibling")))
+      claimed <- claimJobsAs env 2 UUID.nil
+      length claimed `shouldBe` 2
+      runM env (HL.forceCancelJob @payload (primaryKey flagged)) `shouldReturn` 1
+
+      deleteCancelledAs env UUID.nil [primaryKey flagged, primaryKey sibling]
+        >>= (`shouldBe` [primaryKey flagged])
+      isJust <$> getJob env (primaryKey sibling) `shouldReturn` True
+
+    it "a replace-dedup over a lapsed lease leaves the old holder no token to ack with" $ \env -> do
+      let keyed name = setDedupKey (Just (ReplaceDuplicate "pin-replace")) (defaultJob (mkMessage name))
+      Just _ <- runM env (HL.insertJob (keyed "pin-original"))
+      [held] <- claimJobsAs env 1 UUID.nil
+      void $ runM env (HL.setVisibilityTimeout 0 held)
+      Just replaced <- runM env (HL.insertJob (keyed "pin-replacement"))
+      primaryKey replaced `shouldBe` primaryKey held
+
+      runM env (HL.ackJob held) `shouldReturn` 0
+      (fmap payload <$> getJob env (primaryKey held)) `shouldReturn` Just (mkMessage "pin-replacement")
+
+    it "does not claim a flagged job whose lease lapsed" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-flag-lapsed")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
+      Just flaggedRow <- getJob env (primaryKey inserted)
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+
+      claimJobs env 10 `shouldReturn` []
+      primaryKey held `shouldBe` primaryKey inserted
+
+    it "does not claim a flagged grouped head whose lease lapsed ahead of a ready sibling" $ \env -> do
+      Just flagged <- runM env (HL.insertJob (defaultGroupedJob "pin-flag-group" (mkMessage "pin-flag-head")))
+      Just sibling <- runM env (HL.insertJob (defaultGroupedJob "pin-flag-group" (mkMessage "pin-flag-next")))
+      [held] <- claimJobsAs env 1 UUID.nil
+      primaryKey held `shouldBe` primaryKey flagged
+      runM env (HL.forceCancelJob @payload (primaryKey flagged)) `shouldReturn` 1
+      Just flaggedRow <- getJob env (primaryKey flagged)
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+
+      claimed <- claimJobs env 10
+      map primaryKey claimed `shouldNotContain` [primaryKey flagged]
+      map primaryKey claimed `shouldSatisfy` all (== primaryKey sibling)
+
+    it "does not claim a scheduled grouped job ahead of a ready sibling" $ \env -> do
+      now <- getCurrentTime
+      let future = truncateToMicros (addUTCTime 3600 now)
+      Just scheduled <-
+        runM env . HL.insertJob $
+          setNotVisibleUntil (Just future) (setPriority 0 (defaultGroupedJob "pin-sched-group" (mkMessage "pin-sched")))
+      Just ready <- runM env (HL.insertJob (setPriority 10 (defaultGroupedJob "pin-sched-group" (mkMessage "pin-ready"))))
+
+      claimed <- claimJobs env 10
+      map primaryKey claimed `shouldBe` [primaryKey ready]
+      (notVisibleUntil =<<) <$> getJob env (primaryKey scheduled) `shouldReturn` Just future
+
+    it "the exhausted sweep leaves a final attempt that is still running" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (setMaxAttempts (Just 1) (defaultJob (mkMessage "pin-last-attempt"))))
+      [held] <- claimJobsAs env 1 UUID.nil
+      attempts held `shouldBe` 1
+
+      runM env (getSchema >>= \schemaName -> Ops.sweepExhaustedJobs schemaName [HL.queueTable @payload @m])
+        `shouldReturn` (0, [])
+      isJust <$> getJob env (primaryKey inserted) `shouldReturn` True
+      dlqAll env `shouldReturn` []
+
+    it "a stale nack leaves the claim that replaced it" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-stale-nack")))
+      (held, stolen) <- stealAfterLapse env inserted
+
+      runM env (HL.nackJob held) `shouldReturn` 0
+      Just reread <- getJob env (primaryKey inserted)
+      claimedBy reread `shouldBe` claimedBy stolen
+      attempts reread `shouldBe` attempts stolen
+
+    it "a stale extend leaves the claim that replaced it" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "pin-stale-extend")))
+      (held, _) <- stealAfterLapse env inserted
+      before' <- getJob env (primaryKey inserted)
+
+      runM env (HL.setVisibilityTimeout 3600 held) `shouldReturn` 0
+      (notVisibleUntil <$>) <$> getJob env (primaryKey inserted) `shouldReturn` (notVisibleUntil <$> before')
+
+    it "an extend under the suspended finalizer's own token leaves it without a deadline" $ \env -> do
+      held <- suspendedFinalizer env "pin-susp-extend"
+      runM env (HL.setVisibilityTimeout 3600 held) `shouldReturn` 0
+      (notVisibleUntil =<<) <$> getJob env (primaryKey held) `shouldReturn` Nothing
+
+    it "a retry under the suspended finalizer's own token leaves it without a deadline" $ \env -> do
+      held <- suspendedFinalizer env "pin-susp-retry"
+      runM env (HL.updateJobForRetry 3600 "boom" held) `shouldReturn` 0
+      (notVisibleUntil =<<) <$> getJob env (primaryKey held) `shouldReturn` Nothing
+      assertSuspended env (primaryKey held)
+
+    it "a batch extend under the suspended finalizer's own token leaves it without a deadline" $ \env -> do
+      held <- suspendedFinalizer env "pin-susp-beat"
+      void $ runM env (HL.setVisibilityTimeoutBatch 3600 [held])
+      (notVisibleUntil =<<) <$> getJob env (primaryKey held) `shouldReturn` Nothing
+
   describe "Tree locks" $
     it "locks an orphaned job's own subtree when its parent row is gone" $ \env -> do
       Right (root :| [mid, leaf]) <-

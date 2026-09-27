@@ -46,6 +46,7 @@ module Arbiter.Test.StateMachine
   , removeHolDetector
   ) where
 
+import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
 import Arbiter.Core.Concurrency.Spec
   ( HasConcurrency (..)
   , concurrencyBy
@@ -99,7 +100,7 @@ import Data.Foldable (traverse_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int32, Int64)
 import Data.Kind (Type)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -225,6 +226,7 @@ checkInvariantsL lbl schema table withConn = do
           [ exactViolations schema table withConn
           , orphanViolations schema table withConn
           , driftViolations schema table withConn
+          , claimViolations schema table withConn
           ]
   map (("[after " <> lbl <> "] ") <>) violations === []
 
@@ -257,7 +259,39 @@ truncateHol schema table withConn = withConn $ \conn ->
 -- interpolates them unquoted.
 queryViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
 queryViolations schema table withConn =
-  (<>) <$> exactViolations schema table withConn <*> driftViolations schema table withConn
+  mconcat
+    <$> sequence
+      [ exactViolations schema table withConn
+      , driftViolations schema table withConn
+      , claimViolations schema table withConn
+      ]
+
+-- | Claim bookkeeping that must hold between statements:
+--
+--   * a suspended job names no holder
+--   * each concurrency key's stored @in_flight@ equals a recount of claimed rows
+claimViolations :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO [String]
+claimViolations schema table withConn = withConn $ \conn -> do
+  held <- PG.query_ conn (fromString (T.unpack heldSql))
+  counts <- PG.query_ conn (fromString (T.unpack countSql))
+  pure $
+    ["suspended job " <> show (jid :: Int64) <> " still names a holder" | Only jid <- held]
+      <> [ "concurrency key " <> T.unpack key <> " stores in_flight " <> show stored <> ", recount " <> show live
+         | (key, stored, live) <- counts :: [(Text, Int64, Int64)]
+         ]
+  where
+    tbl = schema <> "." <> table
+    concTbl = arbiterConcurrencyTable schema
+    heldSql = "SELECT id FROM " <> tbl <> " WHERE suspended AND claimed_by IS NOT NULL"
+    countSql =
+      "SELECT COALESCE(stored.concurrency_key, live.concurrency_key), COALESCE(stored.in_flight, 0)::bigint, COALESCE(live.claimed, 0)::bigint"
+        <> " FROM (SELECT concurrency_key, in_flight FROM "
+        <> concTbl
+        <> " WHERE in_flight > 0) stored FULL OUTER JOIN (SELECT concurrency_key, COUNT(*) AS claimed FROM "
+        <> tbl
+        <> " WHERE concurrency_key IS NOT NULL AND claimed_by IS NOT NULL GROUP BY concurrency_key) live"
+        <> " ON stored.concurrency_key = live.concurrency_key"
+        <> " WHERE COALESCE(stored.in_flight, 0) <> COALESCE(live.claimed, 0)"
 
 -- | Summary-drift oracle. Full-join the stored @_groups@ row against a fresh
 -- recompute and report any column that disagrees.
@@ -591,6 +625,63 @@ mkInsert deco group delay prio maxAtts = do
   pure (primaryKey (fromJust inserted))
   where
     payload = smPayload "sm"
+
+data Crash (v :: Type -> Type) = Crash
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (B.FunctorB, B.TraversableB)
+
+-- | Every live lease lapses, as when every worker dies. Each row keeps its holder.
+cCrash
+  :: forall gen m
+   . (MonadGen gen, MonadIO m, MonadTest m)
+  => Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> Command gen m Model
+cCrash schema table withConn =
+  Command
+    (\_ -> Just (pure Crash))
+    ( \Crash -> do
+        evalIO (lapseLeases schema table withConn)
+        checkInvariantsL "Crash" schema table withConn
+    )
+    []
+
+-- | Backdate every live lease, leaving each row's holder in place.
+lapseLeases :: Text -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
+lapseLeases schema table withConn = withConn $ \conn ->
+  void . PG.execute_ conn . fromString . T.unpack $
+    "UPDATE "
+      <> schema
+      <> "."
+      <> table
+      <> " SET not_visible_until = NOW() - interval '1 second'"
+      <> " WHERE claimed_by IS NOT NULL AND NOT suspended AND not_visible_until > NOW()"
+
+data SuspendLapsed (v :: Type -> Type) = SuspendLapsed
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (B.FunctorB, B.TraversableB)
+
+-- | Claim, let every lease lapse, then suspend what was claimed. An admin pause of a job
+-- whose worker died.
+cSuspendLapsed
+  :: forall gen m sm
+   . (ArbiterC sm, MonadGen gen, MonadIO m, MonadTest m)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> Command gen m Model
+cSuspendLapsed run schema table withConn =
+  Command
+    (\_ -> Just (pure SuspendLapsed))
+    ( \SuspendLapsed -> do
+        ids <- evalIO (run (mkClaim @sm))
+        evalIO (lapseLeases schema table withConn)
+        evalIO (run (traverse_ (void . HL.suspendJob @SMPayload) ids))
+        checkInvariantsL "SuspendLapsed" schema table withConn
+    )
+    []
 
 data Claim (v :: Type -> Type) = Claim
   deriving stock (Eq, Generic, Show)
@@ -1097,6 +1188,7 @@ runReaper
 runReaper schema table = do
   void (HL.refreshAllGroupsFully @sm)
   void (Ops.sweepExhaustedJobs schema [table])
+  void (Ops.sweepCancelledJobs schema [table])
 
 cRefresh
   :: forall gen m sm
@@ -1388,10 +1480,10 @@ withRetry act = go (5 :: Int)
           | remaining > 0 && isRetryableError err -> go (remaining - 1)
           | otherwise -> throwIO err
 
--- | Detect a transient serialization or deadlock abort by the SQLSTATE in the
--- rendered message.
+-- | Detect a transient serialization abort by the SQLSTATE in the rendered message.
+-- A deadlock is a lock-order defect, so it fails the test.
 isRetryableError :: SomeException -> Bool
-isRetryableError err = any (`isInfixOf` show err) ["40P01", "40001"]
+isRetryableError err = "40001" `isInfixOf` show err
 
 -- | Install the gap-free HOL violation detector on a raw connection.
 installHolDetector :: PG.Connection -> Text -> Text -> IO ()
@@ -1449,6 +1541,8 @@ prop_engine run schema table withConn reset = withTests 300 $ property $ do
         , cBatchDLQ @_ @_ @sm run schema table withConn
         , cDedup @_ @_ @sm run schema table withConn
         , cRefresh @_ @_ @sm run schema table withConn
+        , cCrash schema table withConn
+        , cSuspendLapsed @_ @_ @sm run schema table withConn
         ]
   evalIO (resetSeeded reset schema withConn)
   executeSequential initialModel actions
@@ -1516,8 +1610,7 @@ deadlockGuard run reset = do
           [1 .. rounds]
   mapConcurrently_ id [actorA, actorB]
   deadlockCount <- readIORef deadlocks
-  -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
-  deadlockCount `shouldSatisfy` (<= rounds `div` 100)
+  deadlockCount `shouldBe` 0
 
 lockWaitSecs :: Int
 lockWaitSecs = 5
@@ -1552,13 +1645,28 @@ crossGroupWakeLockOrder
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -> IO ()
   -> IO ()
-crossGroupWakeLockOrder settle run schema table withConn reset = do
+crossGroupWakeLockOrder = crossGroupWakeLockOrderAfter (const (pure ()))
+
+-- | 'crossGroupWakeLockOrder' with @prepare@ run on the claimed child before the insert.
+crossGroupWakeLockOrderAfter
+  :: forall sm
+   . (ArbiterC sm)
+  => (JobRead SMPayload -> sm ())
+  -> (JobRead SMPayload -> sm ())
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+crossGroupWakeLockOrderAfter prepare settle run schema table withConn reset = do
   reset
   later <- addUTCTime 3600 <$> getCurrentTime
   let scheduled group = setNotVisibleUntil (Just later) (smJob (Just group) "sm scheduled")
   void (run (HL.insertJobTree @SMPayload (smJob (Just "aa") "sm parent" <~~ (smJob (Just "zz") "sm child" :| []))))
   void (run (HL.insertJob (scheduled "mm")))
   [child] <- run (HL.claimNextVisibleJobs 1 60) :: IO [JobRead SMPayload]
+  run (prepare child)
   held <- newEmptyMVar
   release <- newEmptyMVar
   let holder = withConn $ \conn -> do
@@ -1585,6 +1693,52 @@ crossGroupWakeLockOrder settle run schema table withConn reset = do
         outcomes <- (,) <$> wait insertDone <*> wait ackDone
         let failures = [show err | Left err <- [fst outcomes, snd outcomes]]
         failures `shouldBe` []
+
+-- | A batch settle over two claimed rows, against a transaction that locks the higher row
+-- and then the lower one, as every multi-row statement does.
+descendingSettleLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => ([JobRead SMPayload] -> sm ())
+  -> (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+descendingSettleLockOrder settle run schema table withConn reset = do
+  reset
+  void (run (HL.insertJobsBatch_ [smJob Nothing "sm low", smJob Nothing "sm high"]))
+  claimed <- sortOn primaryKey <$> (run (HL.claimNextVisibleJobs 2 60) :: IO [JobRead SMPayload])
+  [low, high] <- pure claimed
+  let lockRow conn job =
+        void
+          ( PG.query_
+              conn
+              ( fromString
+                  ( T.unpack
+                      ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE id = " <> T.pack (show (primaryKey job)) <> " FOR UPDATE")
+                  )
+              )
+              :: IO [Only Int]
+          )
+  held <- newEmptyMVar
+  proceed <- newEmptyMVar
+  let holder = tryAny . withConn $ \conn -> do
+        PG.begin conn
+        lockRow conn high
+        putMVar held ()
+        takeMVar proceed
+        lockRow conn low
+        PG.commit conn
+      settler = tryAny (run (settle claimed))
+  withAsync holder $ \holding -> releasing proceed $ do
+    takeMVar held
+    withAsync settler $ \settleDone -> releasing proceed $ do
+      awaitLockWaiters withConn 1
+      putMVar proceed ()
+      outcomes <- (,) <$> wait holding <*> wait settleDone
+      [show err | Left err <- [void (fst outcomes), snd outcomes]] `shouldBe` []
 
 -- | A transaction that creates a group row and then touches a later group, against a batch
 -- insert across both. The insert cannot see the uncommitted group row when it locks.
@@ -1721,8 +1875,7 @@ spawnDeadlockGuard run schema table withConn reset = do
   -- A saturated run commits a few hundred spawns. Refuse a run that raced itself idle.
   readIORef spawns >>= (`shouldSatisfy` (>= rounds `div` 2))
   deadlockCount <- readIORef deadlocks
-  -- Tolerate the rare residual race. A regression produces hundreds of deadlocks.
-  deadlockCount `shouldSatisfy` (<= rounds `div` 100)
+  deadlockCount `shouldBe` 0
 
 -- | Guard for the dedup group-move double-claim. Saturates the hot groups with
 -- concurrent dedup moves and claims under the gap-free HOL detector, with the
@@ -2342,6 +2495,38 @@ stateMachineSpec run schema table withConn reset = do
     withinSecs
       30
       (crossGroupWakeLockOrder @sm (void . HL.cancelJob @SMPayload . primaryKey) run schema table withConn reset)
+  it "a dead-letter move waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs 30 (crossGroupWakeLockOrder @sm (void . HL.moveToDLQ "sm dlq") run schema table withConn reset)
+  it "a batch dead-letter move waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs
+      30
+      (crossGroupWakeLockOrder @sm (\job -> void (HL.moveToDLQBatch [(job, "sm dlq")])) run schema table withConn reset)
+  it "a cascade cancel waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs
+      30
+      (crossGroupWakeLockOrder @sm (void . HL.cancelJobCascade @SMPayload . primaryKey) run schema table withConn reset)
+  it "a batch cancel waking a parent in an earlier group does not deadlock with a multi-group insert" $
+    withinSecs
+      30
+      (crossGroupWakeLockOrder @sm (void . HL.cancelJobsBatch @SMPayload . pure . primaryKey) run schema table withConn reset)
+  it "a flagged-job delete waking a parent in an earlier group does not deadlock with a multi-group insert"
+    $ withinSecs 30
+    $ crossGroupWakeLockOrderAfter @sm
+      (void . HL.forceCancelJob @SMPayload . primaryKey)
+      (\job -> void (Ops.deleteCancelledJobs schema table (Job.claimedBy job) [primaryKey job]))
+      run
+      schema
+      table
+      withConn
+      reset
+  it "a batch nack locks its rows descending" $
+    withinSecs 30 (descendingSettleLockOrder @sm (void . HL.nackJobsBatch) run schema table withConn reset)
+  it "a batch ack locks its rows descending" $
+    withinSecs 30 (descendingSettleLockOrder @sm (void . HL.ackJobsBatch) run schema table withConn reset)
+  it "a batch dead-letter move locks its rows descending" $
+    withinSecs
+      30
+      (descendingSettleLockOrder @sm (void . HL.moveToDLQBatch . map (,"sm dlq")) run schema table withConn reset)
   it "concurrent spawns, dead-letter moves and cascade cancels never deadlock" $
     withinSecs 150 (spawnDeadlockGuard @sm run schema table withConn reset)
   it "concurrent dedup moves and claims never double-claim a group" $

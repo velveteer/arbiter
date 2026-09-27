@@ -42,8 +42,10 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   , payload
+  , primaryKey
   , setDedupKey
   )
+import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (HasRegistry, getSchema, withDbTransaction)
 import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.QueueRegistry (Queue)
@@ -430,6 +432,43 @@ concurrencyLimitSpec runM = do
     reclaimed <- claimAs env
     length reclaimed `shouldBe` 1
     inFlight env (fullKey "dlq" "a") `shouldReturn` Just 1
+
+  it "a DLQ retry that re-suspends a lapsed rollup leaves the key free for its child" $ \env -> do
+    seed env 1
+    void (runM env (HL.insertJobTree (job "resus" "a" <~~ (job "resus" "a" NE.:| []))))
+    children <- claimAs env
+    runM env (traverse_ (void . HL.moveToDLQ "boom") children)
+    parents <- claimAs env
+    length parents `shouldBe` 1
+    timeOut env 120
+    dlqs <- runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob CLPayload]
+    runM
+      env
+      (traverse_ (\dlqJob -> void (HL.retryFromDLQ (DLQ.dlqPrimaryKey dlqJob) :: m (Maybe (JobRead CLPayload)))) dlqs)
+    reconcile env
+    retried <- claimAs env
+    map payload retried `shouldBe` map payload children
+
+  it "suspending a job whose lease lapsed frees its key" $ \env -> do
+    seed env 1
+    enqueue env [job "susp" "a", job "susp" "a"]
+    [held] <- claimAs env
+    timeOut env 120
+    void (runM env (HL.suspendJob @CLPayload (primaryKey held)) :: IO Int64)
+    reconcile env
+    others <- claimAs env
+    map primaryKey others `shouldNotContain` [primaryKey held]
+    length others `shouldBe` 1
+
+  it "pausing the children of a parent frees the keys of lapsed leases" $ \env -> do
+    seed env 1
+    Right (root NE.:| _) <-
+      runM env (HL.insertJobTree (job "pause" "p" <~~ (job "pausekid" "a" NE.:| [job "pausekid" "a"])))
+    _ <- claimAs env
+    timeOut env 120
+    void (runM env (HL.pauseChildren @CLPayload (primaryKey root)) :: IO Int64)
+    reconcile env
+    inFlight env (fullKey "pausekid" "a") `shouldReturn` Just 0
 
   it "reconcile repairs a drifted in_flight count" $ \env -> do
     seed env 5

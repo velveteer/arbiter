@@ -39,7 +39,14 @@ import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as WR
 import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup (execStatement, execute_, withConn)
-import Arbiter.Worker (WorkerState (..), mergedChildResults, runReaperOp, runWorkerPool)
+import Arbiter.Worker
+  ( MaintenancePace (..)
+  , WorkerState (..)
+  , mergedChildResults
+  , runMaintenancePass
+  , runReaperOp
+  , runWorkerPool
+  )
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
   , ackAll
@@ -52,6 +59,7 @@ import Arbiter.Worker.Config
   , shutdownWorker
   , transactionalWorkerConfig
   )
+import Arbiter.Worker.Cron (OverlapPolicy (AllowOverlap), cronJob)
 import Arbiter.Worker.Logger (silentLogConfig)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -113,6 +121,19 @@ lifecycleSpec
   -> Spec
 lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mkHandler, runCommand, runM} =
   before mkEnv $ do
+    describe "Maintenance pass" $
+      it "deletes a flagged job whose lease lapsed" $ \env -> do
+        Just inserted <- runM env (HL.insertJob (defaultJob (mkSimple "orphan-flagged")))
+        [_] <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
+        runM env (HL.forceCancelJob @payload (primaryKey inserted)) `shouldReturn` 1
+        Just flaggedRow <- runM env (HL.getJobById @payload (primaryKey inserted))
+        void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+
+        let everyPass = MaintenancePace {paceWindow = 0, paceSparseWindow = 0, paceBucketIdle = 0}
+        failed <- runM env (runMaintenancePass silentLogConfig (\_ _ -> pure ()) everyPass 5)
+        failed `shouldBe` []
+        runM env (HL.getJobById @payload (primaryKey inserted)) `shouldReturn` Nothing
+
     describe "Reaper op bounding" $ do
       it "completes an op longer than the timeout when each statement is within it" $ \env -> do
         let sleep = runCommand "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$"
@@ -290,6 +311,40 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         -- The job did not complete. The timeout cancelled it.
         completed <- readIORef completedRef
         completed `shouldBe` False
+
+      it "graceful shutdown hands a claim in flight to a worker" $ \env -> do
+        ranRef <- newIORef False
+        let handler :: JobRead payload -> m ()
+            handler _job = liftIO $ writeIORef ranRef True
+            idleCron = either error id (cronJob "shutdown-idle" "0 3 1 1 *" AllowOverlap (\_ _ -> defaultJob (mkSimple "cron")))
+            queueTable = schema <> "." <> table
+        void $ runM env $ HL.insertJob (defaultJob (mkSimple "claimed-at-shutdown"))
+
+        config :: WorkerConfig m payload <- transactionalWorkerConfig 10 (mkHandler (noResult handler))
+        let cfg = config {workerCount = 1, gracefulShutdownTimeout = Just 10, cronJobs = [idleCron]}
+            claimWaiting =
+              withConn connStr $ \conn -> do
+                [Only waiting] <-
+                  query
+                    conn
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%group_candidates%'"
+                    ()
+                pure (waiting > (0 :: Int64))
+
+        withConn connStr $ \lockConn -> do
+          PG.begin lockConn
+          void $ PG.execute_ lockConn (fromString (T.unpack ("LOCK TABLE " <> queueTable <> " IN ACCESS EXCLUSIVE MODE")))
+          withLinkedAsync (runM env $ runWorkerPool cfg) $ \worker -> do
+            waitUntil 10_000 claimWaiting
+            shutdownWorker cfg
+            threadDelay 500_000
+            PG.commit lockConn
+            Async.wait worker
+
+        readIORef ranRef `shouldReturn` True
+        remaining <- withConn connStr $ \conn ->
+          query conn (fromString (T.unpack ("SELECT count(*) FROM " <> queueTable))) ()
+        remaining `shouldBe` [Only (0 :: Int64)]
 
     describe "Liveness Probe" $ do
       it "creates a health check file when liveness is enabled" $ \env -> do

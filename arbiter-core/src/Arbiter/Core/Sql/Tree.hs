@@ -44,6 +44,7 @@ import Arbiter.Core.Job.Schema
   , TableName
   , cancelNotifyChannel
   , jobQueueDLQTable
+  , jobQueueGroupsTable
   , jobQueueResultsTable
   , jobQueueTable
   )
@@ -62,7 +63,7 @@ pauseChildrenSQL schema tableName parentId =
         ${cte},
         ${locked}
         UPDATE ${tbl}
-        SET suspended = TRUE, updated_at = NOW()
+        SET suspended = TRUE, claimed_by = NULL, updated_at = NOW()
         WHERE id IN (SELECT id FROM locked)
           AND NOT suspended
           AND (not_visible_until IS NULL OR not_visible_until <= NOW())
@@ -161,17 +162,38 @@ descendantsOfCte tbl jobIds =
   |]
 
 -- | Lock the named jobs and all their descendants descending, to match ack and
--- force-cancel. Several trees at once, their union in one pass.
+-- force-cancel. Several trees at once, their union in one pass. Then 'lockTreeGroupsCte'.
 lockJobTreesSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
       cte = descendantsOfCte tbl jobIds
       locked = lockDescendantsCte tbl
+      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schema tableName)
    in [sql|
         ${cte},
-        ${locked}
-        SELECT count(*) AS @{count :: CInt8} FROM locked
+        ${locked},
+        ${groups}
+        SELECT (SELECT count(*) FROM locked) AS @{count :: CInt8}
+        FROM (SELECT count(*) FROM tree_groups) held
       |]
+
+-- | CTE binding @tree_groups@ to the group summaries of the @locked@ rows and of their
+-- parents, locked in key order after the rows.
+lockTreeGroupsCte :: Text -> Text -> Query ()
+lockTreeGroupsCte tbl groupsTbl =
+  [sql|
+    tree_groups AS (
+      SELECT 1 FROM ${groupsTbl} tree_group
+      WHERE tree_group.group_key IN (
+        SELECT job.group_key FROM ${tbl} job WHERE job.id IN (SELECT id FROM locked)
+        UNION
+        SELECT parent.group_key FROM ${tbl} job JOIN ${tbl} parent ON parent.id = job.parent_id
+        WHERE job.id IN (SELECT id FROM locked)
+      )
+      ORDER BY tree_group.group_key
+      FOR UPDATE
+    )
+  |]
 
 -- | Extend 'lockJobTreesSQL' to the complete tree of each named job. This locks
 -- all rows that tree cancellation can delete. The named identifiers also start
@@ -181,6 +203,7 @@ lockJobTreesFromRootSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
       cte = rootsFromCte tbl [sql|id = ANY(#{jobIds :: [CInt8]})|]
       locked = lockDescendantsCte tbl
+      groups = lockTreeGroupsCte tbl (jobQueueGroupsTable schema tableName)
    in [sql|
         ${cte},
         descendants AS (
@@ -188,8 +211,10 @@ lockJobTreesFromRootSQL schema tableName jobIds =
           UNION
           SELECT job.id FROM ${tbl} job JOIN descendants descendant ON job.parent_id = descendant.id
         ),
-        ${locked}
-        SELECT count(*) AS @{count :: CInt8} FROM locked
+        ${locked},
+        ${groups}
+        SELECT (SELECT count(*) FROM locked) AS @{count :: CInt8}
+        FROM (SELECT count(*) FROM tree_groups) held
       |]
 
 -- | Cancel a job and all its descendants recursively, locking descending to match
@@ -377,7 +402,7 @@ suspendJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|
         UPDATE ${tbl}
-        SET suspended = TRUE, updated_at = NOW()
+        SET suspended = TRUE, claimed_by = NULL, updated_at = NOW()
         WHERE id = #{jobId :: CInt8}
           AND NOT suspended
           AND NOT (attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW())

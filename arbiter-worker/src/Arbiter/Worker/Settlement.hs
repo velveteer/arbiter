@@ -106,9 +106,9 @@ poolEffects config statements consumeSpan = do
                       queue
                       [fromMaybe (Job.primaryKey job) (Job.parentId job) | job <- unhandled <> unowned]
                   else Ops.lockJobParents schemaName queue (map Job.parentId unhandled)
-                lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
+                held <- lockTrees schemaName queue (map Job.primaryKey (unhandled <> unowned))
                 outcomes <-
-                  traverse (\job -> (job,) <$> handleJobFailure config Ops.LocksHeld failure job) unhandled
+                  traverse (\job -> (job,) <$> handleJobFailure config (Ops.LocksHeld held) failure job) unhandled
                 traverse_ (void . cancelJobFor kind) unowned
                 pure outcomes
           , effectDeleteCancelled = \(UnliftIO runIn) gone ->
