@@ -419,8 +419,8 @@ heldReason job status
   | status == Job.Cancelled = Just "Job is cancelled - it waits for removal"
   | otherwise = Nothing
 
--- | Set when a job next becomes visible. Refuses an in-flight, suspended or
--- cancel-flagged job.
+-- | Set when a job next becomes visible. Refuses an in-flight, suspended,
+-- cancel-flagged or exhausted job.
 rescheduleJobHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -432,7 +432,9 @@ rescheduleJobHandler
 rescheduleJobHandler tableName config jobId request =
   mutateJob tableName config jobId (\schemaName -> Ops.rescheduleJob schemaName tableName jobId (runAt request)) refuse
   where
-    refuse job status = fromMaybe "Job could not be rescheduled (concurrent modification)" (heldReason job status)
+    refuse job status
+      | status == Job.Exhausted = "Job is exhausted - it waits for the dead letter queue"
+      | otherwise = fromMaybe "Job could not be rescheduled (concurrent modification)" (heldReason job status)
 
 -- | Move a job to the dead letter queue.
 moveToDLQHandler

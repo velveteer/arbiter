@@ -89,7 +89,7 @@ document.addEventListener('alpine:init', () => {
         if (isStale()) return;
         this._setAppliedFilters(f);
         this.groups = data.groups || [];
-        this.total = data.groupsTotal || 0;
+        this.total = data.total || 0;
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
         if (this.offset > 0 && this.offset >= this.total && this.total > 0) {

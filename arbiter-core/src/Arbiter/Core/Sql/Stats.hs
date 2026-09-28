@@ -135,7 +135,7 @@ groupHeadsSQL :: SchemaName -> TableName -> Text
 groupHeadsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      headBatch = groupHeadBatch tbl "summary.group_key" [] (claimablePred "job") headOnly
+      headBatch = groupHeadBatch tbl "summary.group_key" [] headOnly
    in [text|
         SELECT head.id
         FROM ${groupsTbl} summary
@@ -255,7 +255,7 @@ groupListHeadSQL :: SchemaName -> TableName -> Text
 groupListHeadSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       inFlight = inFlightPredicate "job."
-      headBatch = groupHeadBatch tbl "summary.group_key" gateColumns (claimablePred "job") headOnly
+      headBatch = groupHeadBatch tbl "summary.group_key" gateColumns headOnly
       ready = textLiteral (jobStatusToText Ready)
       concOk = concHeadroomPred (arbiterConcurrencyTable schema) (arbiterConcurrencyPoliciesTable schema) "head_batch"
       rlOk = rateLimitHeadroomPred (arbiterRateLimitsTable schema) (arbiterRateLimitPoliciesTable schema) "head_batch"

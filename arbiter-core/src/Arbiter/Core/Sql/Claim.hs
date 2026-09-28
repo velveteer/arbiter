@@ -49,12 +49,12 @@ grpRankExpr =
 clampedCostExpr :: Text
 clampedCostExpr = "LEAST(GREATEST(candidate.rate_limit_cost, 0), bucket.max_tokens)"
 
--- | A group's rows in claim order over the rows @rowPred@ admits: the two
--- index-served head runs, merged with retried rows first. Projects @extras@,
--- @priority@ and @id@ over alias @job@.
-groupHeadBatch :: Text -> Text -> [Text] -> Text -> Text -> Text
-groupHeadBatch tbl groupKey extras rowPred limit =
-  let runCols = T.intercalate ", " (map ("job." <>) (extras <> ["attempts", "priority", "id"]))
+-- | A group's claimable rows in claim order: the two index-served head runs,
+-- merged with retried rows first. Projects @extras@, @priority@ and @id@ over alias @job@.
+groupHeadBatch :: Text -> Text -> [Text] -> Text -> Text
+groupHeadBatch tbl groupKey extras limit =
+  let claimable = claimablePred "job"
+      runCols = T.intercalate ", " (map ("job." <>) (extras <> ["attempts", "priority", "id"]))
       mergedCols = T.intercalate ", " (map ("merged." <>) (extras <> ["priority", "id"]))
    in [text|
     SELECT ${mergedCols}
@@ -63,7 +63,7 @@ groupHeadBatch tbl groupKey extras rowPred limit =
         SELECT ${runCols}
         FROM ${tbl} job
         WHERE job.group_key = ${groupKey}
-          AND ${rowPred}
+          AND ${claimable}
           AND job.attempts > 0
         ORDER BY job.attempts DESC, job.priority ASC, job.id ASC
         LIMIT ${limit}
@@ -73,7 +73,7 @@ groupHeadBatch tbl groupKey extras rowPred limit =
         SELECT ${runCols}
         FROM ${tbl} job
         WHERE job.group_key = ${groupKey}
-          AND ${rowPred}
+          AND ${claimable}
           AND job.attempts = 0
         ORDER BY job.priority ASC, job.id ASC
         LIMIT ${limit}
@@ -87,7 +87,7 @@ groupHeadBatch tbl groupKey extras rowPred limit =
 -- and the headroom check on that row.
 gatedHeadPred :: Text -> Text -> Text -> Text -> Text
 gatedHeadPred tbl groupKey batchLimit headGate =
-  let headBatch = groupHeadBatch tbl groupKey ["concurrency_key", "claimed_by"] (claimablePred "job") batchLimit
+  let headBatch = groupHeadBatch tbl groupKey ["concurrency_key", "claimed_by"] batchLimit
    in [text|
     EXISTS (
       SELECT 1

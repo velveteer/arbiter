@@ -917,8 +917,8 @@ promoteJob
   -> m Int64
 promoteJob jobId = onQueue @payload $ \schemaName tableName -> Ops.promoteJob schemaName tableName jobId
 
--- | Set when a job next becomes visible. Refuses an in-flight, suspended or
--- cancel-flagged job.
+-- | Set when a job next becomes visible. Refuses an in-flight, suspended,
+-- cancel-flagged or exhausted job.
 rescheduleJob
   :: forall payload m
    . (QueueOperation m payload)

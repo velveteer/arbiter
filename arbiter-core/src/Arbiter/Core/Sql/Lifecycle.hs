@@ -19,6 +19,7 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 
 import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Types (attemptsLeftSQL)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql, stmt)
@@ -272,10 +273,11 @@ promoteJobSQL schema tableName jobId =
       |]
 
 -- | Set when a job next becomes visible, clear its throttle marker and void a lapsed
--- claim. Refuses an in-flight, suspended or cancel-flagged job.
+-- claim. Refuses an in-flight, suspended, cancel-flagged or exhausted job.
 rescheduleJobSQL :: Text -> Text -> Int64 -> UTCTime -> Query ()
 rescheduleJobSQL schema tableName jobId runAt =
   let tbl = jobQueueTable schema tableName
+      attemptsLeft = attemptsLeftSQL ""
    in [sql|
         UPDATE ${tbl}
         SET not_visible_until = CASE WHEN #{runAt :: CTimestamptz}::timestamptz > NOW() THEN #{runAt :: CTimestamptz}::timestamptz END,
@@ -287,4 +289,5 @@ rescheduleJobSQL schema tableName jobId runAt =
           AND NOT suspended
           AND (claimed_by IS NULL OR not_visible_until <= NOW())
           AND cancel_requested_at IS NULL
+          AND ${attemptsLeft}
       |]

@@ -49,7 +49,7 @@ const JOB_ACTIONS_HTML = `
 </li>`;
 
 // Statuses a reschedule is refused for.
-const RESCHEDULE_REFUSED = ['in_flight', 'suspended', 'cancelled'];
+const RESCHEDULE_REFUSED = ['in_flight', 'suspended', 'cancelled', 'exhausted'];
 
 // Quick choices for a reschedule, measured from now.
 const RESCHEDULE_DELAYS = [
@@ -274,7 +274,7 @@ document.addEventListener('alpine:init', () => {
       return job.status === 'scheduled' || job.status === 'backoff';
     },
 
-    // The server refuses a job that is in flight, suspended or flagged for cancel.
+    // The server refuses a job that is in flight, suspended, flagged for cancel or exhausted.
     canReschedule(job) {
       return !RESCHEDULE_REFUSED.includes(job.status);
     },

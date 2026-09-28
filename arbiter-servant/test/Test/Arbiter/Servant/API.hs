@@ -59,8 +59,8 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LB
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Foldable (toList)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -1243,6 +1243,12 @@ spec connStr = do
       liftIO $ setColumns "cancel_requested_at = NOW()" jobId
       reschedule jobId at `shouldRespondWith` statusWithBody 409 "Job is cancelled - it waits for removal"
 
+    it "POST /:id/reschedule refuses an exhausted job" $ do
+      at <- later
+      jobId <- insertedId "reschedule exhausted"
+      liftIO $ setColumns "attempts = 3, max_attempts = 3" jobId
+      reschedule jobId at `shouldRespondWith` statusWithBody 409 "Job is exhausted - it waits for the dead letter queue"
+
     it "POST /:id/reschedule returns 404 for non-existent job" $ do
       at <- later
       reschedule 99999 at `shouldRespondWith` 404
@@ -1320,8 +1326,9 @@ spec connStr = do
         (Ops.readyJobs queueStats, Ops.blockedJobs queueStats) `shouldBe` (0, 1)
         body :: Value <- decodeBody resp
         let heads = case body of
-              Object top | Just (Array page) <- KM.lookup "groups" top ->
-                [(KM.lookup "headJobId" group, KM.lookup "headBlocked" group) | Object group <- toList page]
+              Object top
+                | Just (Array page) <- KM.lookup "groups" top ->
+                    [(KM.lookup "headJobId" group, KM.lookup "headBlocked" group) | Object group <- toList page]
               _ -> []
         heads `shouldBe` [(Just (toJSON jobId), Just (Bool True))]
 

@@ -294,7 +294,19 @@ data GroupsResponse = GroupsResponse
   , groupsLimit :: Int
   }
   deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+
+instance ToJSON GroupsResponse where
+  toJSON response =
+    object
+      [ "groups" .= groups response
+      , "total" .= groupsTotal response
+      , "offset" .= groupsOffset response
+      , "limit" .= groupsLimit response
+      ]
+
+instance FromJSON GroupsResponse where
+  parseJSON = withObject "GroupsResponse" $ \obj ->
+    GroupsResponse <$> obj .: "groups" <*> obj .: "total" <*> obj .: "offset" <*> obj .: "limit"
 
 -- | Response wrapper for DLQ jobs.
 data DLQResponse payload = DLQResponse
