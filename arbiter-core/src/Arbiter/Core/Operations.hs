@@ -1480,8 +1480,10 @@ retryFromDLQEditing
   -> Int64
   -> Maybe RowEdit
   -> m (Maybe (JobRead (Stored payload)))
-retryFromDLQEditing schemaName tableName dlqId edit =
-  withDbTransaction $ listToMaybe <$> MA.executeQuery (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)
+retryFromDLQEditing schemaName tableName dlqId edit = withDbTransaction $ do
+  void (MA.executeQuery (Tmpl.lockDLQRetryParentSQL schemaName tableName dlqId))
+  void (MA.executeStatement (Tmpl.lockDLQRetryGroupsSQL schemaName tableName dlqId))
+  listToMaybe <$> MA.executeQuery (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)
 
 -- | The edit that writes a payload and every column derived from it, as an insert does.
 payloadEdit :: (JobPayload payload) => payload -> RowEdit

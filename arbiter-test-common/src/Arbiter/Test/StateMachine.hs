@@ -1845,6 +1845,50 @@ respawnDLQDeleteLockOrder run schema table withConn reset = do
         outcomes <- (,) <$> wait spawnDone <*> wait deleteDone
         [show err | Left err <- [fst outcomes, snd outcomes]] `shouldBe` []
 
+-- | A retry of a dead-lettered child that re-suspends its woken parent, against a delete of
+-- the same DLQ row. A held parent row stops the delete at its tree lock.
+retryDLQDeleteLockOrder
+  :: forall sm
+   . (ArbiterC sm)
+  => (forall a. sm a -> IO a)
+  -> Text
+  -> Text
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -> IO ()
+  -> IO ()
+retryDLQDeleteLockOrder run schema table withConn reset = do
+  reset
+  void (run (HL.insertJobTree @SMPayload (smJob Nothing "sm parent" <~~ smChildren Nothing "sm child" 2)))
+  [failed, done] <- run (HL.claimNextVisibleJobs 2 60) :: IO [JobRead SMPayload]
+  void (run (HL.moveToDLQ "sm dlq" failed))
+  void (run (HL.ackJob done))
+  dlqId <- lookupDlqId schema table withConn (primaryKey failed)
+  held <- newEmptyMVar
+  release <- newEmptyMVar
+  let holder = withConn $ \conn -> do
+        PG.begin conn
+        void
+          ( PG.query_
+              conn
+              (fromString (T.unpack ("SELECT 1 FROM " <> schema <> "." <> table <> " WHERE parent_id IS NULL FOR UPDATE")))
+              :: IO [Only Int]
+          )
+        putMVar held ()
+        takeMVar release
+        PG.commit conn
+      deleter = tryAny (run (void (HL.deleteDLQJob @SMPayload dlqId)))
+      retrier = tryAny (run (void (HL.retryFromDLQ dlqId :: sm (Maybe (JobRead SMPayload)))))
+  withAsync holder $ \holding -> do
+    link holding
+    takeMVar held
+    withAsync deleter $ \deleteDone -> releasing release $ do
+      awaitLockWaiters withConn 1
+      withAsync retrier $ \retryDone -> releasing release $ do
+        awaitLockWaiters withConn 2
+        putMVar release ()
+        outcomes <- (,) <$> wait deleteDone <*> wait retryDone
+        [show err | Left err <- [fst outcomes, snd outcomes]] `shouldBe` []
+
 -- | Guard for the tree lock order a spawn shares with a dead-letter move and a
 -- cascade cancel.
 spawnDeadlockGuard
@@ -2491,6 +2535,8 @@ stateMachineSpec run schema table withConn reset = do
     withinSecs 30 (spawnGroupLockOrder @sm run withConn reset)
   it "a rollup respawn does not deadlock with a delete of its dead-lettered child" $
     withinSecs 30 (respawnDLQDeleteLockOrder @sm run schema table withConn reset)
+  it "a DLQ retry re-suspending its parent does not deadlock with a delete of the same row" $
+    withinSecs 30 (retryDLQDeleteLockOrder @sm run schema table withConn reset)
   it "a cancel waking a parent in an earlier group does not deadlock with a multi-group insert" $
     withinSecs
       30

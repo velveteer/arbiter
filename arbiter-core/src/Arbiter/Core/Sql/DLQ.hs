@@ -7,6 +7,8 @@ module Arbiter.Core.Sql.DLQ
   , moveToDLQSQL
   , selectExhaustedJobsSQL
   , retryFromDLQSQL
+  , lockDLQRetryParentSQL
+  , lockDLQRetryGroupsSQL
   , dlqJobExistsSQL
   , moveToDLQBatchSQL
   , deleteDLQJobsBatchSQL
@@ -21,7 +23,7 @@ import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (jobRowCodec)
-import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueTable)
+import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored, defaultMaxAttemptsSQL)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
 import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeuedValsEditing)
@@ -91,36 +93,11 @@ retryFromDLQSQL schema tableName dlqId edit =
       tbl = jobQueueTable schema tableName
       joinedEdit = editJoin edit
       vals = requeuedValsEditing (foldMap editColumns edit) targetEdited
+      walk = dlqRetryTreeCte dlqTbl tbl dlqId
    in rows
         (jobRowCodec tableName)
         [sql|
-        WITH RECURSIVE
-        target AS (
-          SELECT * FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}
-        ),
-        -- Walk up through DLQ ancestors to find the root of the tree.
-        -- Stops when parent_id IS NULL, parent is in main queue, or
-        -- parent is not found in DLQ (orphaned).
-        ancestors AS (
-          SELECT dead.job_id, dead.parent_id, 0 AS depth
-          FROM ${dlqTbl} dead
-          WHERE dead.job_id = (SELECT parent_id FROM target)
-            AND (SELECT parent_id FROM target) IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE id = (SELECT parent_id FROM target))
-          UNION ALL
-          SELECT dead.job_id, dead.parent_id, ancestor.depth + 1
-          FROM ${dlqTbl} dead
-          JOIN ancestors ancestor ON dead.job_id = ancestor.parent_id
-          WHERE ancestor.parent_id IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE id = ancestor.parent_id)
-        ),
-        -- Root is the topmost DLQ ancestor, or the target itself
-        root_job_id AS (
-          SELECT COALESCE(
-            (SELECT job_id FROM ancestors ORDER BY depth DESC LIMIT 1),
-            (SELECT job_id FROM target)
-          ) AS job_id
-        ),
+        ${walk},
         -- The root's parent is NULL or exists in the main queue
         can_retry AS (
           SELECT EXISTS (
@@ -130,16 +107,6 @@ retryFromDLQSQL schema tableName dlqId edit =
             WHERE dead.parent_id IS NULL
                OR EXISTS (SELECT 1 FROM ${tbl} WHERE id = dead.parent_id)
           ) AS val
-        ),
-        -- Walk down from root to collect all DLQ tree members
-        tree AS (
-          SELECT dead.id AS dlq_id, dead.job_id
-          FROM ${dlqTbl} dead
-          WHERE dead.job_id = (SELECT job_id FROM root_job_id)
-          UNION ALL
-          SELECT dead.id AS dlq_id, dead.job_id
-          FROM ${dlqTbl} dead
-          JOIN tree member ON dead.parent_id = member.job_id
         ),
         -- Delete all tree members from DLQ (guarded by can_retry)
         deleted AS (
@@ -173,6 +140,86 @@ retryFromDLQSQL schema tableName dlqId edit =
             AND NOT (attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
         )
         SELECT ${jobColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
+      |]
+
+-- | Recursive CTEs binding @root_job_id@ to the root of the DLQ tree that holds
+-- @dlqId@, and @tree@ to that tree's members.
+dlqRetryTreeCte :: Text -> Text -> Int64 -> Query ()
+dlqRetryTreeCte dlqTbl tbl dlqId =
+  [sql|
+    WITH RECURSIVE
+    target AS (
+      SELECT * FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}
+    ),
+    -- Walk up through DLQ ancestors to find the root of the tree.
+    -- Stops when parent_id IS NULL, parent is in main queue, or
+    -- parent is not found in DLQ (orphaned).
+    ancestors AS (
+      SELECT dead.job_id, dead.parent_id, 0 AS depth
+      FROM ${dlqTbl} dead
+      WHERE dead.job_id = (SELECT parent_id FROM target)
+        AND (SELECT parent_id FROM target) IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE id = (SELECT parent_id FROM target))
+      UNION ALL
+      SELECT dead.job_id, dead.parent_id, ancestor.depth + 1
+      FROM ${dlqTbl} dead
+      JOIN ancestors ancestor ON dead.job_id = ancestor.parent_id
+      WHERE ancestor.parent_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ${tbl} WHERE id = ancestor.parent_id)
+    ),
+    -- Root is the topmost DLQ ancestor, or the target itself
+    root_job_id AS (
+      SELECT COALESCE(
+        (SELECT job_id FROM ancestors ORDER BY depth DESC LIMIT 1),
+        (SELECT job_id FROM target)
+      ) AS job_id
+    ),
+    -- Walk down from root to collect all DLQ tree members
+    tree AS (
+      SELECT dead.id AS dlq_id, dead.job_id
+      FROM ${dlqTbl} dead
+      WHERE dead.job_id = (SELECT job_id FROM root_job_id)
+      UNION ALL
+      SELECT dead.id AS dlq_id, dead.job_id
+      FROM ${dlqTbl} dead
+      JOIN tree member ON dead.parent_id = member.job_id
+    )
+  |]
+
+-- | Lock the main-queue parent of the tree a DLQ retry restores.
+lockDLQRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
+lockDLQRetryParentSQL schema tableName dlqId =
+  let dlqTbl = jobQueueDLQTable schema tableName
+      tbl = jobQueueTable schema tableName
+      walk = dlqRetryTreeCte dlqTbl tbl dlqId
+   in [sql|
+        ${walk}
+        SELECT @{id :: CInt8} FROM ${tbl}
+        WHERE id = (SELECT dead.parent_id FROM ${dlqTbl} dead WHERE dead.job_id = (SELECT job_id FROM root_job_id))
+        FOR UPDATE
+      |]
+
+-- | Create and lock, in key order, the group summaries of the tree a DLQ retry restores
+-- and of its parent.
+lockDLQRetryGroupsSQL :: Text -> Text -> Int64 -> Query ()
+lockDLQRetryGroupsSQL schema tableName dlqId =
+  let dlqTbl = jobQueueDLQTable schema tableName
+      tbl = jobQueueTable schema tableName
+      groupsTbl = jobQueueGroupsTable schema tableName
+      walk = dlqRetryTreeCte dlqTbl tbl dlqId
+   in [sql|
+        ${walk}
+        INSERT INTO ${groupsTbl} (group_key)
+        SELECT DISTINCT group_key FROM (
+          SELECT dead.group_key FROM ${dlqTbl} dead WHERE dead.job_id IN (SELECT job_id FROM tree)
+          UNION
+          SELECT parent.group_key FROM ${tbl} parent
+          JOIN ${dlqTbl} dead ON parent.id = dead.parent_id
+          WHERE dead.job_id = (SELECT job_id FROM root_job_id)
+        ) keys
+        WHERE group_key IS NOT NULL
+        ORDER BY group_key
+        ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE
       |]
 
 -- | An edited column, taken from the edit on the target row and kept on the others.
