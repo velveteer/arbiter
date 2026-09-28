@@ -64,7 +64,9 @@ module Arbiter.Core.HighLevel
   , deleteArchiveJob
   , deleteArchiveJobsBatch
   , reEnqueueFromArchive
+  , reEnqueueFromArchiveWithPayload
   , retryFromDLQ
+  , retryFromDLQWithPayload
   , dlqJobExists
   , deleteDLQJob
   , deleteDLQJobsBatch
@@ -79,6 +81,7 @@ module Arbiter.Core.HighLevel
   , cancelJobsBatch
   , forceCancelJob
   , promoteJob
+  , rescheduleJob
   , Ops.QueueStats (..)
   , getQueueStats
 
@@ -157,7 +160,7 @@ import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime)
+import Data.Time (NominalDiffTime, UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
@@ -282,16 +285,16 @@ claimNextVisibleJobs
 claimNextVisibleJobs limit timeout = onQueue @payload $ \schemaName tableName -> Ops.claimNextVisibleJobs schemaName tableName limit timeout
 
 -- | Add tokens to a key's bucket, capped at max, and wake any of its jobs parked
--- mid-wait. A no-op without a policy.
+-- mid-wait. A no-op without a policy. Returns the number of jobs woken.
 addRateLimitTokens
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => RateLimitKey
   -> Double
-  -> m ()
+  -> m Int64
 addRateLimitTokens key amount =
   withDbTransaction $ onRegistry $ \schemaName queues ->
-    Ops.addRateLimitTokens schemaName key amount >> void (Ops.wakeThrottledJobsForKey schemaName queues key)
+    Ops.addRateLimitTokens schemaName key amount >> Ops.wakeThrottledJobsForKey schemaName queues key
 
 -- | Override a policy with this shape, until it is cleared. Returns rows affected.
 setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => Policy -> m Int64
@@ -695,6 +698,19 @@ reEnqueueFromArchive
 reEnqueueFromArchive archiveId = onQueue @payload $ \schemaName tableName ->
   withDbTransaction (Ops.reEnqueueFromArchive schemaName tableName archiveId >>= traverse Ops.typedRow)
 
+-- | 'reEnqueueFromArchive' with a replacement payload. The columns the payload
+-- derives are derived again from it.
+reEnqueueFromArchiveWithPayload
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Archive primary key
+  -> payload
+  -> m (Maybe (JobRead payload))
+reEnqueueFromArchiveWithPayload archiveId replacement = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction
+    (Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (Just replacement) >>= traverse Ops.typedRow)
+
 -- | Retry a DLQ job, re-inserting it into the queue with a fresh attempt count.
 -- 'Nothing' when the DLQ row is gone.
 retryFromDLQ
@@ -705,6 +721,18 @@ retryFromDLQ
   -> m (Maybe (JobRead payload))
 retryFromDLQ dlqId = onQueue @payload $ \schemaName tableName ->
   withDbTransaction (Ops.retryFromDLQ schemaName tableName dlqId >>= traverse Ops.typedRow)
+
+-- | 'retryFromDLQ' with a replacement payload. The columns the payload derives are
+-- derived again from it.
+retryFromDLQWithPayload
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ DLQ job id
+  -> payload
+  -> m (Maybe (JobRead payload))
+retryFromDLQWithPayload dlqId replacement = onQueue @payload $ \schemaName tableName ->
+  withDbTransaction (Ops.retryFromDLQWithPayload schemaName tableName dlqId (Just replacement) >>= traverse Ops.typedRow)
 
 -- | Whether a DLQ job with the given id exists.
 dlqJobExists
@@ -888,6 +916,18 @@ promoteJob
   -- ^ Job id
   -> m Int64
 promoteJob jobId = onQueue @payload $ \schemaName tableName -> Ops.promoteJob schemaName tableName jobId
+
+-- | Set when a job next becomes visible. Refuses an in-flight, suspended or
+-- cancel-flagged job.
+rescheduleJob
+  :: forall payload m
+   . (QueueOperation m payload)
+  => Int64
+  -- ^ Job id
+  -> UTCTime
+  -- ^ When the job becomes visible
+  -> m Int64
+rescheduleJob jobId runAt = onQueue @payload $ \schemaName tableName -> Ops.rescheduleJob schemaName tableName jobId runAt
 
 -- | A queue's per-status counts and backlog ages.
 getQueueStats

@@ -23,7 +23,8 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (jobRowCodec)
 import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored, defaultMaxAttemptsSQL)
-import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeuedVals)
+import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
+import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeuedValsEditing)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
@@ -82,11 +83,14 @@ selectExhaustedJobsSQL schema tableName limit =
 -- identifies the tree. Restore the root, all descendants in the DLQ, and their
 -- finalizers. Keep a finalizer suspended when it has restored children. Make it
 -- ready when it has no children. Refuse a root whose parent is absent from the
--- main queue. Remove the deduplication key during the retry.
-retryFromDLQSQL :: Text -> Text -> Int64 -> Query (JobRead (Stored payload))
-retryFromDLQSQL schema tableName dlqId =
+-- main queue. Remove the deduplication key during the retry. An @edit@ replaces
+-- its columns on the target row only.
+retryFromDLQSQL :: Text -> Text -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
+retryFromDLQSQL schema tableName dlqId edit =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
+      joinedEdit = editJoin edit
+      vals = requeuedValsEditing (foldMap editColumns edit) targetEdited
    in rows
         (jobRowCodec tableName)
         [sql|
@@ -154,8 +158,8 @@ retryFromDLQSQL schema tableName dlqId =
                      OR EXISTS (SELECT 1 FROM ${tbl} WHERE parent_id = dead.job_id)
                    ELSE FALSE
                  END,
-                 ${requeuedVals}
-          FROM deleted dead
+                 ${vals}
+          FROM deleted dead ${joinedEdit}
           RETURNING *
         ),
         -- Re-suspend any rollup parents already in the main queue that just
@@ -170,6 +174,11 @@ retryFromDLQSQL schema tableName dlqId =
         )
         SELECT ${jobColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
+
+-- | An edited column, taken from the edit on the target row and kept on the others.
+targetEdited :: Text -> Text
+targetEdited column =
+  [text|CASE WHEN dead.job_id = (SELECT job_id FROM target) THEN edit.${column} ELSE dead.${column} END|]
 
 -- | Whether a DLQ job with the given id exists.
 dlqJobExistsSQL :: Text -> Text -> Int64 -> Query Bool

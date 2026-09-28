@@ -12,6 +12,7 @@ import Arbiter.Core.Exceptions (ParsingException (..))
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Archive (archivePrimaryKey)
+import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema qualified as Schema
 import Arbiter.Core.Job.Types
@@ -28,6 +29,7 @@ import Arbiter.Core.Sql.Tree qualified as TreeTmpl
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson qualified as Aeson
+import Data.Foldable (traverse_)
 import Data.Int (Int32, Int64)
 import Data.List (find, sort)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -142,6 +144,17 @@ operationsSpec mkMessage mkResult runM = do
       Just kind <- pure (kindOf counted)
       stats <- runM env (HL.getQueueStats @payload)
       Map.lookup kind (Ops.kindCounts stats) `shouldBe` Just 2
+
+    it "counts dead letters by label" $ \env -> do
+      let dead = mkMessage "dead-counted" :: payload
+      void $ runM env (HL.insertJob (setGroupKey (Just "kind-dlq-a") (defaultJob dead)))
+      void $ runM env (HL.insertJob (setGroupKey (Just "kind-dlq-b") (defaultJob dead)))
+      claimed <- claimJobs env 2
+      traverse_ (void . runM env . HL.moveToDLQ "boom") claimed
+      Just kind <- pure (kindOf dead)
+      stats <- runM env (HL.getQueueStats @payload)
+      Map.lookup kind (Ops.dlqKindCounts stats) `shouldBe` Just 2
+      Ops.dlqJobs stats `shouldBe` 2
 
     it "carries the label into the dead-letter queue" $ \env -> do
       let job = setGroupKey (Just "kind-dlq") $ defaultJob (mkMessage "dead")
@@ -1472,6 +1485,19 @@ operationsSpec mkMessage mkResult runM = do
       dlqJobs2 <- dlqAll env
       length dlqJobs2 `shouldBe` 0
 
+    it "retryFromDLQWithPayload re-inserts the replacement payload and its label" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (setGroupKey (Just "dlq-edit") (defaultJob (mkMessage "Original"))))
+      claimed <- claimJobs env 1
+      void $ runM env (HL.moveToDLQ "Failed" (head claimed))
+      dlqJobs <- dlqAll env
+      Just retried <- runM env (HL.retryFromDLQWithPayload (DLQ.dlqPrimaryKey (head dlqJobs)) (mkMessage "Edited"))
+      primaryKey retried `shouldBe` primaryKey inserted
+      attempts retried `shouldBe` 0
+      groupKey retried `shouldBe` Just "dlq-edit"
+      payload retried `shouldBe` mkMessage "Edited"
+      jobKind (payloadKeys retried) `shouldBe` kindOf (mkMessage "Edited" :: payload)
+      fmap payload <$> getJob env (primaryKey inserted) `shouldReturn` Just (mkMessage "Edited")
+
     it "retryFromDLQ advances the claim token, so the pre-DLQ claim cannot ack it" $ \env -> do
       Just _inserted <- runM env (HL.insertJob (defaultJob (mkMessage "dlq-retry-token")))
       claimed <- claimJobs env 1
@@ -2227,6 +2253,18 @@ operationsSpec mkMessage mkResult runM = do
       dlqJobs <- dlqAll env
       Just retried <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey (head dlqJobs)))
       maxAttempts retried `shouldBe` Just defaultMaxAttempts
+
+    it "reEnqueueFromArchiveWithPayload enqueues the replacement and keeps the archive row" $ \env -> do
+      Just inserted <-
+        runM env (HL.insertJob (setArchiveFor (Just dayRetention) (defaultJob (mkMessage "ArchivedOriginal"))))
+      claimed <- claimJobs env 1
+      void $ runM env (HL.ackJob (head claimed))
+      Just archived <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just again <- runM env (HL.reEnqueueFromArchiveWithPayload (archivePrimaryKey archived) (mkMessage "ArchivedEdited"))
+      payload again `shouldBe` mkMessage "ArchivedEdited"
+      jobKind (payloadKeys again) `shouldBe` kindOf (mkMessage "ArchivedEdited" :: payload)
+      Just kept <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      payload (Archive.jobSnapshot kept) `shouldBe` mkMessage "ArchivedOriginal"
 
     it "reEnqueueFromArchive stamps a stored null attempt limit with the default" $ \env -> do
       Just inserted <-

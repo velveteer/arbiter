@@ -36,6 +36,7 @@ module Arbiter.Core.Codec
   , cScalar
   , cArray
   , jobCodec
+  , payloadWriteCodec
   , JobWriteSource (..)
   , writeColumnNames
 
@@ -275,7 +276,6 @@ jobCodecWith idColumn queueName =
   Job
     <$> ro (col idColumn CInt8)
     <*> ro (col "payload" CStored)
-    <* wo "payload" CJsonb sourceEncoded
     <*> pure queueName
     <*> lmap (JT.groupKey . sourceJob) (rwN "group_key" CText)
     <*> ro (col "inserted_at" CTimestamptz)
@@ -294,7 +294,7 @@ jobCodecWith idColumn queueName =
     <*> ro (ncol "claimed_by" CUuid)
     <*> ro (col "claim_seq" CInt8)
     <*> lmap (JT.archiveFor . sourceJob) (rwN "archive_for" CInt4)
-    <*> lmap sourceColumns payloadCodec
+    <*> lmap (\source -> (sourceEncoded source, sourceColumns source)) payloadWriteCodec
 
 -- | Decoder for a main-table job row.
 jobRowCodec :: forall payload. Text -> RowCodec (JobRead (Stored payload))
@@ -315,6 +315,10 @@ dedupCodec =
     toDedupKey Nothing _ = Nothing
     toDedupKey (Just key) (Just "replace") = Just (ReplaceDuplicate key)
     toDedupKey (Just key) _ = Just (IgnoreDuplicate key)
+
+-- | An encoded payload and the columns derived from it, as every job write stores them.
+payloadWriteCodec :: Codec (Value, PayloadColumns) PayloadKeys
+payloadWriteCodec = wo "payload" CJsonb fst *> lmap snd payloadCodec
 
 payloadCodec :: Codec PayloadColumns PayloadKeys
 payloadCodec =

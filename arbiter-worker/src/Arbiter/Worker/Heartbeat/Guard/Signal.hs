@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | The handler side of the guard: registering a batch, asking for its extend,
 -- and asking it to stop.
 --

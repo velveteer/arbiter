@@ -566,8 +566,8 @@ createNotifyTriggerSQL schemaName tableName =
 -- ---------------------------------------------------------------------------
 
 -- | Event-streaming function that receives the logical queue name and DLQ flag
--- from each trigger. Queue names ending in @_dlq@ stay unambiguous. A lease-extend
--- update emits no event.
+-- from each trigger. Queue names ending in @_dlq@ stay unambiguous. A DLQ row
+-- reports its original job id. A lease-extend update emits no event.
 createEventStreamingFunctionSQL :: SchemaName -> Text
 createEventStreamingFunctionSQL schemaName =
   let funcName = quoteIdentifier schemaName <> "." <> quoteIdentifier eventStreamingFunctionName
@@ -588,8 +588,13 @@ createEventStreamingFunctionSQL schemaName =
         , "  END IF;"
         , "  CASE TG_OP"
         , "    WHEN 'INSERT' THEN"
-        , "      event_type := CASE WHEN is_dlq THEN 'job_dlq' ELSE 'job_inserted' END;"
-        , "      job_id := NEW.id;"
+        , "      IF is_dlq THEN"
+        , "        event_type := 'job_dlq';"
+        , "        job_id := NEW.job_id;"
+        , "      ELSE"
+        , "        event_type := 'job_inserted';"
+        , "        job_id := NEW.id;"
+        , "      END IF;"
         , "    WHEN 'UPDATE' THEN"
         , "      event_type := 'job_updated';"
         , "      job_id := NEW.id;"
@@ -602,7 +607,8 @@ createEventStreamingFunctionSQL schemaName =
         , "    json_build_object("
         , "      'event', event_type,"
         , "      'table', queue_name,"
-        , "      'job_id', job_id"
+        , "      'job_id', job_id,"
+        , "      'dlq', is_dlq"
         , "    )::text);"
         , "  RETURN NULL;"
         , "END;"

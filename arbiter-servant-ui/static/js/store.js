@@ -6,11 +6,11 @@ const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency', 'cron', 'workers'];
 
 // A drilled-into queue's sub-tabs, in the order the tab strip lists them. The first
 // is the default a URL with no hash lands on.
-const QUEUE_SUB_TABS = ['stats', 'jobs', 'dlq', 'archive', 'cron', 'workers'];
+const QUEUE_SUB_TABS = ['stats', 'jobs', 'groups', 'dlq', 'archive', 'cron', 'workers'];
 
 // The sub-tabs that own filter params. Each reads them on load and writes its own
 // back, so the URL keeps them across a step onto one of these tabs.
-const FILTERED_SUB_TABS = ['jobs', 'dlq', 'archive'];
+const FILTERED_SUB_TABS = ['jobs', 'groups', 'dlq', 'archive'];
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('app', {
@@ -219,6 +219,11 @@ document.addEventListener('alpine:init', () => {
       this._deepLinkPending = false;
       this.initialized = true;
       this.connectSSE();
+      // A page in the back/forward cache must not hold a connection from the per-host pool.
+      window.addEventListener('pagehide', () => this.closeSSE());
+      window.addEventListener('pageshow', (e) => {
+        if (e.persisted) this.connectSSE();
+      });
 
       // Sync tab → hash. A tab the reader clicked is a navigation, so it pushes; one
       // a history step activated is not, and _restoring holds the push back.
@@ -285,15 +290,16 @@ document.addEventListener('alpine:init', () => {
       this._drillInto(queue, () => this._updateUrl(tab, true), true);
     },
 
-    // Drill into a queue's Jobs tab pre-filtered. Takes a bare status, or any of the
-    // filter keys, so a worker row or a policy row can open the jobs it accounts for.
-    openQueueJobs(queue, filters) {
-      this._drillInto(queue, () => this._writeUrl(queueJobsUrl(queue, filters)));
+    // Drill into a queue's Jobs tab, or the filtered tab named, pre-filtered. Takes a
+    // bare status, or any of the filter keys, so a worker row or a policy row can open
+    // the jobs it accounts for.
+    openQueueJobs(queue, filters, tab) {
+      this._drillInto(queue, () => this._writeUrl(queueJobsUrl(queue, filters, tab)));
     },
 
-    // Drill into a queue's Jobs tab showing one job (from the event log).
-    openQueueJob(queue, jobId) {
-      this._drillInto(queue, () => this._writeUrl(queueJobUrl(queue, jobId)));
+    // Drill into a queue's Jobs or DLQ tab showing one job (from the event log).
+    openQueueJob(queue, jobId, tab) {
+      this._drillInto(queue, () => this._writeUrl(queueJobUrl(queue, jobId, tab)));
     },
 
     // Open a policy view focused on one gate prefix, from a job's Gates cell.

@@ -335,6 +335,18 @@ migrationReconciliationTests connStr =
             nextEvent lconn >>= assertEvent "job_updated"
             _ <- PG.execute_ conn (sql ("UPDATE " <> tbl <> " SET last_error = 'boom', claimed_by = NULL"))
             nextEvent lconn >>= assertEvent "job_updated"
+    , testCase "streams a DLQ insert with the job id and the DLQ flag" $
+        withFreshSchema connStr reconciliationSchema $ \conn -> do
+          migrate triggerOn
+          let tbl = reconciliationSchema <> ".migration_reconciliation_q"
+          bracket (PG.connectPostgreSQL connStr) PG.close $ \lconn -> do
+            _ <- PG.execute_ lconn "LISTEN arbiter_job_events"
+            _ <- PG.execute_ conn (sql ("INSERT INTO " <> tbl <> " (payload) VALUES ('{}')"))
+            nextEvent lconn >>= assertEvent "\"dlq\" : false"
+            _ <- PG.execute_ conn (sql ("INSERT INTO " <> tbl <> "_dlq (job_id, payload) VALUES (4242, '{}')"))
+            dlqEvent <- nextEvent lconn
+            assertEvent "\"job_id\" : 4242" dlqEvent
+            assertEvent "\"dlq\" : true" dlqEvent
     , testCase "preserves queue names ending in the DLQ suffix" $
         withFreshSchema connStr reconciliationSchema $ \conn -> do
           runMigrationsForRegistry (Proxy @DLQSuffixRegistry) connStr reconciliationSchema triggerOn >>= shouldMigrate

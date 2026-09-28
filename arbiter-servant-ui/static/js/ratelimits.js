@@ -45,6 +45,7 @@ document.addEventListener('alpine:init', () => {
       drawerId: 'rateLimitDrawer',
       fetchPolicies: () => ArbiterAPI.listRateLimits(),
       fetchItems: (prefix, opts) => ArbiterAPI.listRateLimitBuckets(prefix, opts),
+      onClear() { this.cancelGrant(); },
     }),
     ...rowDetail('displayPolicies', 'prefix', 'selectedPolicy', { drawer: 'rateLimitDrawer' }),
     detailActionsHtml: RL_ACTIONS_HTML,
@@ -58,6 +59,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     fmtCount: formatCompact,
+    grant: { key: null, tokens: '', saving: false },
 
     // Static header, so the count is fixed.
     colCount() {
@@ -224,6 +226,54 @@ document.addEventListener('alpine:init', () => {
           if (e.intervalOn && (body.overrideInterval == null || body.overrideInterval <= 0)) return { error: 'Interval must be a number > 0' };
           return { body };
         },
+      });
+    },
+
+    // The form opens with what refills the bucket to its burst.
+    openGrant(b) {
+      const missing = Math.max(0, (b.maxTokens ?? 0) - (b.tokens ?? 0));
+      this.grant = { key: b.key, tokens: String(Math.ceil(missing) || 1), saving: false };
+    },
+
+    cancelGrant() {
+      this.grant = { key: null, tokens: '', saving: false };
+    },
+
+    async submitGrant() {
+      const g = this.grant;
+      const prefix = this.selectedPolicy?.prefix;
+      const tokens = Number(g.tokens);
+      if (g.saving || !g.key || !prefix) return;
+      if (!(tokens > 0)) {
+        showToast('Tokens must be a number more than 0', 'warning');
+        return;
+      }
+      g.saving = true;
+      try {
+        const res = await ArbiterAPI.addRateLimitTokens(prefix, g.key, tokens);
+        const woken = res?.woken ?? 0;
+        showToast(`Added ${this.fmtNum(tokens)} tokens to ${g.key}. ${woken} ${pluralize(woken, 'job')} woken.`, 'success');
+        this.cancelGrant();
+        await this.loadPolicies();
+      } catch (e) {
+        showToast(`Failed to add tokens to ${g.key}: ${e.message}`);
+      } finally {
+        g.saving = false;
+      }
+    },
+
+    async pruneIdle() {
+      if (this.busyRows['prune']) return;
+      if (!this.confirmArmed('prune')) return;
+      await this.withBusyRow('prune', async () => {
+        try {
+          const res = await ArbiterAPI.pruneRateLimitBuckets();
+          const n = res?.pruned ?? 0;
+          showToast(`Pruned ${n} idle ${pluralize(n, 'bucket')}`, 'success');
+          await this.loadPolicies();
+        } catch (e) {
+          showToast(`Failed to prune buckets: ${e.message}`);
+        }
       });
     },
 

@@ -7,6 +7,7 @@
 
 module Test.Arbiter.Servant.API (spec) where
 
+import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable)
 import Arbiter.Core.CronSchedule qualified as CS
 import Arbiter.Core.Exceptions (ParsingException (..))
 import Arbiter.Core.HighLevel qualified as HL
@@ -27,11 +28,14 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   , groupKey
+  , jobKind
   , notVisibleUntil
   , payload
+  , payloadKeys
   , primaryKey
   , setArchiveFor
   , setDedupKey
+  , setMaxAttempts
   , setNotVisibleUntil
   , suspended
   )
@@ -41,20 +45,22 @@ import Arbiter.Core.QueueRegistry (QueueSpec (QueueWithResult))
 import Arbiter.Core.Queues qualified as Q
 import Arbiter.Core.Worker qualified as W
 import Arbiter.Simple (createSimpleEnvWithPool, runSimpleDb)
-import Arbiter.Test.RateLimit (RLReg, rateLimitTable, setupRateLimitPolicy)
+import Arbiter.Test.RateLimit (RLPayload (..), RLReg, rateLimitTable, setupRateLimitPolicy)
 import Arbiter.Test.Setup (cleanupData, createSharedPool, setupOnce, truncateToMicros)
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), defaultLogConfig)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_, void)
-import Data.Aeson (FromJSON, ToJSON, Value, decode, encode, object, toJSON, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value (..), decode, encode, object, toJSON, (.=))
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LB
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.Foldable (toList)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -82,11 +88,14 @@ import Arbiter.Servant.Types
   ( AckRequest (..)
   , ApiJobWithStatus (..)
   , ApiJobWrite (..)
+  , ArchiveResponse (..)
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
   , ClaimResponse (ClaimResponse)
   , DLQResponse (..)
+  , GroupSummary (..)
+  , GroupsResponse (..)
   , JobLease (..)
   , JobResponse (..)
   , JobsResponse (..)
@@ -123,6 +132,22 @@ jobVerbPath :: Text -> JobRead ServantTestPayload -> ByteString
 jobVerbPath verb job =
   TE.encodeUtf8 $
     "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show (primaryKey job)) <> "/" <> verb
+
+-- | A path under the test queue.
+queuePath :: Text -> ByteString
+queuePath rest = TE.encodeUtf8 ("/api/v1/arbiter_servant_test/" <> rest)
+
+-- | A route on one row, e.g. @rowPath "dlq" 4 "retry"@.
+rowPath :: Text -> Int64 -> Text -> ByteString
+rowPath collection rowId verb = queuePath (collection <> "/" <> T.pack (show rowId) <> "/" <> verb)
+
+-- | A response with this status and exactly this body.
+statusWithBody :: Int -> LB.ByteString -> ResponseMatcher
+statusWithBody code expected =
+  ResponseMatcher
+    code
+    []
+    (MatchBody (\_ body -> if body == expected then Nothing else Just ("unexpected body: " <> show body)))
 
 jsonMatch :: Value -> ResponseMatcher
 jsonMatch expected = ResponseMatcher 200 [] (MatchBody matcher)
@@ -176,6 +201,29 @@ spec connStr = do
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
+
+      -- Set columns on one test-queue row.
+      setColumns :: Text -> Int64 -> IO ()
+      setColumns assignments jobId =
+        void . withResource sharedPool $ \conn ->
+          PG.execute
+            conn
+            ( fromString . T.unpack $
+                "UPDATE " <> Schema.jobQueueTable testSchema testTable <> " SET " <> assignments <> " WHERE id = ?"
+            )
+            (PG.Only jobId)
+
+      throttleMarked :: Int64 -> IO Bool
+      throttleMarked jobId =
+        withResource sharedPool $ \conn -> do
+          [PG.Only marked] <-
+            PG.query
+              conn
+              ( fromString . T.unpack $
+                  "SELECT throttled_until IS NOT NULL FROM " <> Schema.jobQueueTable testSchema testTable <> " WHERE id = ?"
+              )
+              (PG.Only jobId)
+          pure marked
 
       corruptPayload :: Text -> Text -> Int64 -> IO ()
       corruptPayload tbl idColumn jobId =
@@ -906,6 +954,134 @@ spec connStr = do
     it "DELETE /api/v1/arbiter_servant_test/dlq/:id returns 404 for non-existent DLQ job" $ do
       delete "/api/v1/arbiter_servant_test/dlq/99999" `shouldRespondWith` 404
 
+    it "GET /api/v1/arbiter_servant_test/dlq searches the payload and the last error" $ do
+      liftIO $ do
+        Just first <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "invoice 50%_off"))
+        Just second <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "receipt"))
+        void $ runSimpleDb mkEnv $ HL.moveToDLQ "SMTP timeout" first
+        void $ runSimpleDb mkEnv $ HL.moveToDLQ "template missing" second
+      let totalFor query = do
+            resp <- get (queuePath ("dlq?" <> query))
+            liftIO (dlqTotal <$> (decodeBody resp :: IO (DLQResponse ServantTestPayload)))
+      totalFor "payload=50%25_off" >>= liftIO . (`shouldBe` 1)
+      totalFor "payload=5_%25" >>= liftIO . (`shouldBe` 0)
+      totalFor "error=smtp" >>= liftIO . (`shouldBe` 1)
+      totalFor "error=missing&payload=receipt" >>= liftIO . (`shouldBe` 1)
+      totalFor "error=missing&payload=invoice" >>= liftIO . (`shouldBe` 0)
+      totalFor "error=" >>= liftIO . (`shouldBe` 2)
+
+    it "POST /api/v1/arbiter_servant_test/dlq/:id/retry with a payload replaces it and its kind" $ do
+      (jobId, dlqId) <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "edit-group" (TestMessage "wrong"))
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" jobRead
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        pure (primaryKey jobRead, dlqPrimaryKey (head dlqs))
+
+      postJson (rowPath "dlq" dlqId "retry") (encode [aesonQQ|{"payload": {"tag": "TestCalculation", "contents": [2, 3]}}|])
+        `shouldRespondWith` 204
+
+      liftIO $ do
+        Just retried :: Maybe (JobRead (Stored ServantTestPayload)) <-
+          runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        decodeStored (payload retried) `shouldBe` Right (TestCalculation 2 3)
+        jobKind (payloadKeys retried) `shouldBe` Just "TestCalculation"
+        groupKey retried `shouldBe` Just "edit-group"
+        attempts retried `shouldBe` 0
+
+    it "POST /api/v1/arbiter_servant_test/dlq/:id/retry with an empty JSON body retries the stored payload" $ do
+      (jobId, dlqId) <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "as stored"))
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" jobRead
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        pure (primaryKey jobRead, dlqPrimaryKey (head dlqs))
+
+      postJson (rowPath "dlq" dlqId "retry") "" `shouldRespondWith` 204
+
+      liftIO $ do
+        Just retried :: Maybe (JobRead (Stored ServantTestPayload)) <-
+          runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        decodeStored (payload retried) `shouldBe` Right (TestMessage "as stored")
+
+    it "POST /api/v1/arbiter_servant_test/dlq/:id/retry refuses a payload with no content type" $ do
+      (jobId, dlqId) <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "as stored"))
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" jobRead
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        pure (primaryKey jobRead, dlqPrimaryKey (head dlqs))
+
+      post (rowPath "dlq" dlqId "retry") (encode [aesonQQ|{"payload": {"tag": "TestMessage", "contents": "edited"}}|])
+        `shouldRespondWith` 400
+      liftIO $ do
+        retried :: Maybe (JobRead (Stored ServantTestPayload)) <-
+          runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        retried `shouldBe` Nothing
+
+    it "POST /api/v1/arbiter_servant_test/dlq/:id/retry refuses a payload the queue's type rejects" $ do
+      dlqId <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "keep"))
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "Test error" jobRead
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        pure $ dlqPrimaryKey (head dlqs)
+
+      postJson (rowPath "dlq" dlqId "retry") (encode [aesonQQ|{"payload": {"tag": "NoSuchTag"}}|]) `shouldRespondWith` 400
+      resp <- get (queuePath "dlq")
+      liftIO $ do
+        body :: DLQResponse ServantTestPayload <- decodeBody resp
+        dlqTotal body `shouldBe` 1
+
+    it "POST /api/v1/arbiter_servant_test/dlq/:id/retry with a payload keeps the DLQ row unchanged on a 409" $ do
+      dlqId <- liftIO $ do
+        Right (parent :| _children) <-
+          runSimpleDb mkEnv
+            $ HL.insertJobTree
+            $ JT.rollup
+              (defaultGroupedJob "edit-orphan-parent" (TestMessage "parent"))
+              (JT.leaf (defaultJob (TestMessage "edit-orphan-child")) :| [])
+        claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
+        _ <- runSimpleDb mkEnv $ HL.moveToDLQ "child failed" (head claimed)
+        _ <- runSimpleDb mkEnv $ HL.cancelJobCascade @ServantTestPayload (primaryKey parent)
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        pure $ dlqPrimaryKey (head dlqs)
+
+      postJson (rowPath "dlq" dlqId "retry") (encode [aesonQQ|{"payload": {"tag": "TestMessage", "contents": "edited"}}|])
+        `shouldRespondWith` 409
+      liftIO $ do
+        dlqs :: [DLQJob ServantTestPayload] <- runSimpleDb mkEnv $ HL.listDLQJobs 1 0
+        map (payload . jobSnapshot) dlqs `shouldBe` [TestMessage "edit-orphan-child"]
+
+    it "GET /api/v1/arbiter_servant_test/archive searches the payload" $ do
+      liftIO $ do
+        forM_ ["archived invoice", "archived receipt"] $ \message ->
+          runSimpleDb mkEnv $ HL.insertJob (setArchiveFor (Just 86400) (defaultJob (TestMessage message)))
+        claimed <- runSimpleDb mkEnv $ HL.claimNextVisibleJobsAs @ServantTestPayload 2 60 UUID.nil
+        forM_ claimed $ runSimpleDb mkEnv . HL.ackJob
+      resp <- get (queuePath "archive?payload=INVOICE")
+      liftIO $ do
+        body :: ArchiveResponse ServantTestPayload <- decodeBody resp
+        archiveTotal body `shouldBe` 1
+
+    it "POST /api/v1/arbiter_servant_test/archive/:id/reenqueue with a payload enqueues it" $ do
+      archiveId <- liftIO $ do
+        Just jobRead <- runSimpleDb mkEnv $ HL.insertJob (setArchiveFor (Just 86400) (defaultJob (TestMessage "ran once")))
+        [claimed] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobsAs @ServantTestPayload 1 60 UUID.nil
+        _ <- runSimpleDb mkEnv $ HL.ackJob claimed
+        Just archived :: Maybe (ArchiveJob (Stored ServantTestPayload)) <-
+          runSimpleDb mkEnv $ Ops.getArchivedJobById testSchema testTable (primaryKey jobRead)
+        pure $ archivePrimaryKey archived
+
+      postJson
+        (rowPath "archive" archiveId "reenqueue")
+        (encode [aesonQQ|{"payload": {"tag": "TestCalculation", "contents": [4, 5]}}|])
+        `shouldRespondWith` 204
+      post (rowPath "archive" archiveId "reenqueue") "" `shouldRespondWith` 204
+
+      resp <- get (queuePath "jobs")
+      liftIO $ do
+        body :: JobsResponse ServantTestPayload <- decodeBody resp
+        let queued = map ajwsJob (jobs body)
+        map (decodeStored . payload) queued `shouldMatchList` [Right (TestCalculation 4 5), Right (TestMessage "ran once")]
+        map (jobKind . payloadKeys) queued `shouldMatchList` [Just "TestCalculation", Just "TestMessage"]
+
   describe "Suspend/Resume API" $ with (cleanupDb >> pure app) $ do
     it "POST /:id/suspend suspends a job" $ do
       jobId <- liftIO $ do
@@ -1008,6 +1184,158 @@ spec connStr = do
         length visible `shouldBe` 1
         primaryKey (head visible) `shouldBe` jobId
 
+  describe "Reschedule API" $ with (cleanupDb >> pure app) $ do
+    let reschedule jobId at = postJson (rowPath "jobs" jobId "reschedule") (encode (object ["runAt" .= at]))
+        insertedId message = liftIO $ do
+          Just inserted <- runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage message))
+          pure (primaryKey inserted)
+        later = liftIO $ truncateToMicros . addUTCTime 7200 <$> getCurrentTime
+
+    it "POST /:id/reschedule sets when the job becomes visible and clears its throttle marker" $ do
+      at <- later
+      jobId <- insertedId "reschedule me"
+      liftIO $ setColumns "throttled_until = NOW() + interval '1 hour', not_visible_until = NOW() + interval '1 hour'" jobId
+
+      reschedule jobId at `shouldRespondWith` 204
+
+      liftIO $ do
+        Just job :: Maybe (JobRead (Stored ServantTestPayload)) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        notVisibleUntil job `shouldBe` Just at
+        throttleMarked jobId `shouldReturn` False
+
+    it "POST /:id/reschedule refuses an in-flight job" $ do
+      at <- later
+      jobId <- insertedId "reschedule in-flight"
+      liftIO . void $ runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
+      reschedule jobId at `shouldRespondWith` statusWithBody 409 "Job is in flight - wait for its lease to lapse"
+
+    it "POST /:id/reschedule takes a job whose lease lapsed" $ do
+      at <- later
+      jobId <- insertedId "reschedule lapsed"
+      liftIO $ do
+        void $ runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
+        setColumns "not_visible_until = NOW() - INTERVAL '1 second'" jobId
+      reschedule jobId at `shouldRespondWith` 204
+      liftIO $ do
+        Just job :: Maybe (JobRead (Stored ServantTestPayload)) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        (notVisibleUntil job, claimedBy job) `shouldBe` (Just at, Nothing)
+
+    it "POST /:id/reschedule voids the lapsed claim" $ do
+      at <- later
+      jobId <- insertedId "reschedule voids"
+      [claimed] <- liftIO $ runSimpleDb mkEnv $ Ops.claimNextVisibleJobs @_ @ServantTestPayload testSchema testTable 1 60
+      liftIO $ setColumns "not_visible_until = NOW() - INTERVAL '1 second'" jobId
+      reschedule jobId at `shouldRespondWith` 204
+      liftIO $ do
+        runSimpleDb mkEnv (Ops.updateJobForRetry testSchema testTable 1 "late failure" claimed) `shouldReturn` 0
+        Just job :: Maybe (JobRead (Stored ServantTestPayload)) <- runSimpleDb mkEnv $ Ops.getJobById testSchema testTable jobId
+        notVisibleUntil job `shouldBe` Just at
+
+    it "POST /:id/reschedule refuses a suspended job" $ do
+      at <- later
+      jobId <- insertedId "reschedule suspended"
+      liftIO . void $ runSimpleDb mkEnv $ Ops.suspendJob testSchema testTable jobId
+      reschedule jobId at `shouldRespondWith` statusWithBody 409 "Job is suspended - use resume endpoint"
+
+    it "POST /:id/reschedule refuses a cancel-flagged job" $ do
+      at <- later
+      jobId <- insertedId "reschedule cancelled"
+      liftIO $ setColumns "cancel_requested_at = NOW()" jobId
+      reschedule jobId at `shouldRespondWith` statusWithBody 409 "Job is cancelled - it waits for removal"
+
+    it "POST /:id/reschedule returns 404 for non-existent job" $ do
+      at <- later
+      reschedule 99999 at `shouldRespondWith` 404
+
+  describe "Groups API" $ with (cleanupDb >> pure app) $ do
+    let seedGroups = liftIO $ do
+          forM_ ["big-1", "big-2", "big-3"] $ \message ->
+            runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "big" (TestMessage message))
+          void . runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "small" (TestMessage "small-1"))
+          [held] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
+          pure (primaryKey held)
+        groupsAt query = do
+          resp <- get (queuePath ("groups" <> query))
+          liftIO (decodeBody resp :: IO GroupsResponse)
+
+    it "GET /groups lists open groups largest first with the job at each head" $ do
+      heldId <- seedGroups
+      body <- groupsAt ""
+      liftIO $ do
+        groupsTotal body `shouldBe` 2
+        map gsGroupKey (groups body) `shouldBe` ["big", "small"]
+        map gsJobCount (groups body) `shouldBe` [3, 1]
+        map gsInFlight (groups body) `shouldBe` [True, False]
+        map gsHeadStatus (groups body) `shouldBe` [Just InFlight, Just Ready]
+        map gsHeadJobId (take 1 (groups body)) `shouldBe` [Just heldId]
+
+    it "GET /groups reports the holder as the head of a held group" $ do
+      heldId <- liftIO $ do
+        void . runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "hd" (TestMessage "hd-1"))
+        Just sibling <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "hd" (TestMessage "hd-2"))
+        [held] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
+        -- A visible sibling with more attempts ranks ahead of the holder in claim order.
+        setColumns "attempts = 2" (primaryKey sibling)
+        pure (primaryKey held)
+      body <- groupsAt "?group_key=hd"
+      liftIO $ do
+        map gsInFlight (groups body) `shouldBe` [True]
+        map gsHeadJobId (groups body) `shouldBe` [Just heldId]
+        map gsHeadStatus (groups body) `shouldBe` [Just InFlight]
+
+    it "GET /groups narrows to one key and pages" $ do
+      _ <- seedGroups
+      narrowed <- groupsAt "?group_key=small"
+      paged <- groupsAt "?limit=1&offset=1"
+      liftIO $ do
+        (groupsTotal narrowed, map gsGroupKey (groups narrowed)) `shouldBe` (1, ["small"])
+        (groupsTotal paged, groupsLimit paged, groupsOffset paged) `shouldBe` (2, 1, 1)
+        map gsGroupKey (groups paged) `shouldBe` ["small"]
+
+    it "GET /groups skips an exhausted row the claim skips" $ do
+      nextId <- liftIO $ do
+        void . runSimpleDb mkEnv $ HL.insertJob (setMaxAttempts (Just 1) (defaultGroupedJob "ex" (TestMessage "ex-1")))
+        Just next <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "ex" (TestMessage "ex-2"))
+        [spent] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobs 1 60 :: IO [JobRead ServantTestPayload]
+        -- The last attempt's lease lapses, so the row waits for the reaper.
+        setColumns "not_visible_until = NOW() - INTERVAL '1 second'" (primaryKey spent)
+        pure (primaryKey next)
+      body <- groupsAt "?group_key=ex"
+      liftIO $ do
+        map gsHeadJobId (groups body) `shouldBe` [Just nextId]
+        map gsHeadStatus (groups body) `shouldBe` [Just Ready]
+
+    it "GET /groups marks a head that a full concurrency key holds back" $ do
+      jobId <- liftIO $ do
+        Just job <- runSimpleDb mkEnv $ HL.insertJob (defaultGroupedJob "gated" (TestMessage "gated-1"))
+        setColumns "concurrency_key = 'cc:full', concurrency_prefix = 'cc'" (primaryKey job)
+        void . withResource sharedPool $ \conn ->
+          PG.execute_ conn . fromString . T.unpack $
+            "INSERT INTO " <> arbiterConcurrencyPoliciesTable testSchema <> " VALUES ('cc', 1, 0)"
+        pure (primaryKey job)
+      statsResp <- get (queuePath "stats")
+      resp <- get (queuePath "groups?group_key=gated")
+      liftIO $ do
+        queueStats <- stats <$> (decodeBody statsResp :: IO StatsResponse)
+        (Ops.readyJobs queueStats, Ops.blockedJobs queueStats) `shouldBe` (0, 1)
+        body :: Value <- decodeBody resp
+        let heads = case body of
+              Object top | Just (Array page) <- KM.lookup "groups" top ->
+                [(KM.lookup "headJobId" group, KM.lookup "headBlocked" group) | Object group <- toList page]
+              _ -> []
+        heads `shouldBe` [(Just (toJSON jobId), Just (Bool True))]
+
+    it "GET /groups counts a job rescheduled into the past as ready" $ do
+      jobId <- liftIO $ do
+        inAnHour <- addUTCTime 3600 <$> getCurrentTime
+        Just job <-
+          runSimpleDb mkEnv $ HL.insertJob (setNotVisibleUntil (Just inAnHour) (defaultGroupedJob "rs" (TestMessage "rs-1")))
+        pure (primaryKey job)
+      past <- liftIO $ addUTCTime (-60) <$> getCurrentTime
+      postJson (rowPath "jobs" jobId "reschedule") (encode (object ["runAt" .= past])) `shouldRespondWith` 204
+      body <- groupsAt "?group_key=rs"
+      liftIO $ map gsReadyCount (groups body) `shouldBe` [1]
+
   -- QueueOverview's instances also carry a gauge snapshot through the shared gate.
   describe "Job wire contract" $ do
     -- A job object as a server predating the trace and claim fields sends it.
@@ -1037,8 +1365,23 @@ spec connStr = do
           Ops.QueueOverview
             { Ops.overviewQueue = "greetings"
             , Ops.overviewStats =
-                Ops.QueueStats 8 3 2 1 1 0 1 0 0 0 (Just 12.5) (Just 4.5) 2 $
-                  Map.fromList [("TestMessage", 5), ("TestCalculation", 3)]
+                Ops.QueueStats
+                  { Ops.totalJobs = 8
+                  , Ops.readyJobs = 3
+                  , Ops.inFlightJobs = 2
+                  , Ops.scheduledJobs = 1
+                  , Ops.backoffJobs = 1
+                  , Ops.throttledJobs = 0
+                  , Ops.suspendedJobs = 1
+                  , Ops.cancelledJobs = 0
+                  , Ops.exhaustedJobs = 0
+                  , Ops.blockedJobs = 0
+                  , Ops.oldestReadyAgeSeconds = Just 12.5
+                  , Ops.oldestInFlightAgeSeconds = Just 4.5
+                  , Ops.dlqJobs = 2
+                  , Ops.kindCounts = Map.fromList [("TestMessage", 5), ("TestCalculation", 3)]
+                  , Ops.dlqKindCounts = Map.fromList [("TestMessage", 2)]
+                  }
             , Ops.overviewQueuePaused = True
             , Ops.overviewWorkersLive = 4
             , Ops.overviewWorkersPaused = 1
@@ -1066,6 +1409,7 @@ spec connStr = do
               , "oldestReadyAgeSeconds": 12.5
               , "oldestInFlightAgeSeconds": 4.5
               , "kindCounts": { "TestMessage": 5, "TestCalculation": 3 }
+              , "dlqKindCounts": { "TestMessage": 2 }
               }
           }
         |]
@@ -1560,11 +1904,11 @@ spec connStr = do
         awaitChunk "\"event\":\"ping\"" `shouldReturn` True
 
   describe "Maintenance API" $ do
-    pacedConfig <- runIO $ do
+    (pacedEnv, pacedConfig) <- runIO $ do
       setupOnce connStr pacedSchema rateLimitTable False
       setupRateLimitPolicy connStr pacedSchema
       pacedEnv <- createSimpleEnvWithPool (Proxy @RLReg) sharedPool pacedSchema
-      initArbiterServer (runSimpleDb pacedEnv)
+      (,) pacedEnv <$> initArbiterServer (runSimpleDb pacedEnv)
     let pacedCleanup = withResource sharedPool $ cleanupData pacedSchema rateLimitTable
 
     with (pacedCleanup >> pure (arbiterApp @RLReg pacedConfig)) $
@@ -1579,6 +1923,42 @@ spec connStr = do
           Map.member "prune-rate-limit-buckets" (maintenanceOps firstPass) `shouldBe` True
           Map.member "prune-rate-limit-buckets" (maintenanceOps secondPass) `shouldBe` False
           Map.member "sweep-stale-workers" (maintenanceOps secondPass) `shouldBe` True
+
+    with (pacedCleanup >> pure (arbiterApp @RLReg pacedConfig)) $ do
+      let grant key amount =
+            postJson
+              (TE.encodeUtf8 ("/api/v1/rate-limits/rl/buckets/" <> key <> "/tokens"))
+              (encode (object ["tokens" .= (amount :: Double)]))
+
+      it "POST /rate-limits/:prefix/buckets/:key/tokens wakes the key's throttled jobs" $ do
+        liftIO $ do
+          void
+            (runSimpleDb pacedEnv (HL.insertJobsBatch (replicate 5 (defaultJob (RLPayload "tenant" 1)))) :: IO [JobRead RLPayload])
+          admitted <- runSimpleDb pacedEnv (HL.claimNextVisibleJobs 100 60) :: IO [JobRead RLPayload]
+          length admitted `shouldBe` 3
+        grant "rl:tenant" 2 `shouldRespondWith` jsonMatch [aesonQQ|{"woken": 2}|]
+        liftIO $ do
+          woken <- runSimpleDb pacedEnv (HL.claimNextVisibleJobs 100 60) :: IO [JobRead RLPayload]
+          length woken `shouldBe` 2
+
+      it "POST /rate-limits/:prefix/buckets/:key/tokens refuses an unknown prefix and a key outside it" $ do
+        postJson "/api/v1/rate-limits/nope/buckets/nope:x/tokens" (encode (object ["tokens" .= (1 :: Double)]))
+          `shouldRespondWith` 404
+        grant "other:x" 1 `shouldRespondWith` 400
+
+      it "POST /rate-limits/:prefix/buckets/:key/tokens refuses an amount that is not positive" $ do
+        grant "rl:tenant" 0 `shouldRespondWith` 400
+        grant "rl:tenant" (-5) `shouldRespondWith` 400
+
+      it "POST /rate-limits/prune deletes full buckets idle past the given age" $ do
+        -- A top-up seeds an absent bucket at full.
+        grant "rl:idle" 1 `shouldRespondWith` jsonMatch [aesonQQ|{"woken": 0}|]
+        post "/api/v1/rate-limits/prune" "" `shouldRespondWith` jsonMatch [aesonQQ|{"pruned": 0}|]
+        post "/api/v1/rate-limits/prune?idle=0" "" `shouldRespondWith` jsonMatch [aesonQQ|{"pruned": 1}|]
+        post "/api/v1/rate-limits/prune?idle=-1" "" `shouldRespondWith` 400
+
+      it "POST /concurrency/prune reports the rows it deleted" $
+        post "/api/v1/concurrency/prune" "" `shouldRespondWith` jsonMatch [aesonQQ|{"pruned": 0}|]
 
     missingConfig <- runIO $ do
       missingEnv <- createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool missingSchema

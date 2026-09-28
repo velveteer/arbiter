@@ -36,7 +36,7 @@ import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.Jobs (JobFilter (..))
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query (..), sepBy)
-import Arbiter.Core.Sql.Stats (getQueueStatsSQL)
+import Arbiter.Core.Sql.Stats (allQueueStatsSQL, getQueueStatsSQL)
 import Arbiter.Core.Sql.Tree (lockJobTreesFromRootSQL)
 import Arbiter.Core.Sql.Workers (workerColumnList)
 import Arbiter.Core.Worker (WorkerHealth (Live), workerHealthFromText)
@@ -88,6 +88,7 @@ allFilters =
   [ FilterClaimedBy UUID.nil
   , FilterKind "SendWelcome"
   , FilterPayloadText "term"
+  , FilterErrorText "boom"
   , FilterRateLimitPrefix "smtp"
   , FilterConcurrencyPrefix "tenant"
   , FilterInsertedAfter epoch
@@ -302,14 +303,19 @@ main = hspec $ do
       let rendered = squished (buildWhereClause allFilters)
       rendered
         `shouldBe` "WHERE claimed_by = ? AND kind = ? AND payload::text ILIKE ? ESCAPE '\\' \
+                   \AND last_error ILIKE ? ESCAPE '\\' \
                    \AND rate_limit_prefix = ? AND concurrency_prefix = ? \
                    \AND inserted_at >= ? AND inserted_at < ? \
                    \AND completed_at >= ? AND completed_at < ?"
       paramTags (qParams (buildWhereClause allFilters))
-        `shouldBe` ["uuid", "text", "text", "text", "text", "ts", "ts", "ts", "ts"]
+        `shouldBe` ["uuid", "text", "text", "text", "text", "text", "ts", "ts", "ts", "ts"]
 
     it "matches a payload search literally, so its wildcards are not pattern syntax" $ do
       let param = qParams (buildWhereClause [FilterPayloadText "50%_off"])
+      textParams param `shouldBe` ["%50\\%\\_off%"]
+
+    it "matches an error search literally, so its wildcards are not pattern syntax" $ do
+      let param = qParams (buildWhereClause [FilterErrorText "50%_off"])
       textParams param `shouldBe` ["%50\\%\\_off%"]
 
     it "narrows nothing when no filter is given" $
@@ -325,6 +331,16 @@ main = hspec $ do
     it "rolls up only the labels the payload declares" $
       squished (statsSQL (kindsFor @KindPayload))
         `shouldSatisfy` T.isInfixOf "CASE WHEN kind IN ('SendWelcome', 'SendReceipt') THEN kind END AS kind"
+
+    it "counts the DLQ by label in one grouped pass" $ do
+      let rendered = squished (statsSQL (kindsFor @KindPayload))
+      T.count "FROM \"arbiter\".\"jobs_dlq\"" rendered `shouldBe` 1
+      rendered `shouldSatisfy` T.isInfixOf "AS dlq_count FROM \"arbiter\".\"jobs_dlq\" GROUP BY 1"
+
+    it "counts every queue's DLQ from the index, without the per-label pass" $ do
+      let rendered = squished (allQueueStatsSQL statsRowCodec "arbiter" [("jobs", kindsFor @KindPayload)])
+      rendered `shouldSatisfy` T.isInfixOf "(SELECT COUNT(*)::int8 FROM \"arbiter\".\"jobs_dlq\") AS dlq_jobs"
+      rendered `shouldSatisfy` (not . T.isInfixOf "dlq_by_kind")
 
     it "rolls up nothing for a payload that declares no label" $
       squished (statsSQL (kindsFor @PlainPayload)) `shouldSatisfy` T.isInfixOf "NULL::text AS kind"

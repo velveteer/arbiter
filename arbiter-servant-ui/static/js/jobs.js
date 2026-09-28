@@ -25,8 +25,11 @@ const JOB_COLUMNS = [
 // cannot drift. Binds `job`, which each site supplies.
 const JOB_ACTIONS_HTML = `
 <li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job.primaryKey); closeDropdown($el)">Detail</a></li>
-<li x-show="job.status === 'scheduled' || job.status === 'backoff'">
+<li x-show="canPromote(job)">
   <a class="dropdown-item" href="#" @click.prevent="promoteJob(job.primaryKey); closeDropdown($el)">Promote</a>
+</li>
+<li x-show="canReschedule(job)">
+  <a class="dropdown-item" href="#" @click.prevent="openReschedule(job); closeDropdown($el)">Reschedule</a>
 </li>
 <li x-show="canSuspend(job)">
   <a class="dropdown-item" href="#" @click.prevent="pauseAction(job); closeDropdown($el)" x-text="job._childCount > 0 ? 'Pause descendants' : 'Suspend'"></a>
@@ -45,47 +48,35 @@ const JOB_ACTIONS_HTML = `
   <a class="dropdown-item" href="#" @click.prevent="moveToDLQ(job.primaryKey, $el)" :class="{ 'text-warning fw-semibold': isArmed('movedlq:' + job.primaryKey) }" x-text="isArmed('movedlq:' + job.primaryKey) ? ('Confirm move to DLQ' + (job._childCount ? ' (+' + job._childCount + ' children)' : '')) : 'Move to DLQ'"></a>
 </li>`;
 
+// Statuses a reschedule is refused for.
+const RESCHEDULE_REFUSED = ['in_flight', 'suspended', 'cancelled'];
+
+// Quick choices for a reschedule, measured from now.
+const RESCHEDULE_DELAYS = [
+  { label: '+5m', secs: 5 * SECONDS_PER_MINUTE },
+  { label: '+15m', secs: 15 * SECONDS_PER_MINUTE },
+  { label: '+1h', secs: SECONDS_PER_HOUR },
+  { label: '+6h', secs: 6 * SECONDS_PER_HOUR },
+  { label: '+1d', secs: SECONDS_PER_DAY },
+];
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('jobsTab', () => withPagination(withSelection({
     ...columnPrefs(JOB_COLUMNS, 'arb.jobCols.v2'),
     ...rowDetail('selectableJobs', 'primaryKey', 'selectedJob', { openWith: (row) => row.primaryKey, drawer: 'jobDetailDrawer' }),
     ...tableTab('loadJobs', 'arb.jobsRefresh'),
+    // The shared fields, plus the ones only a job table can answer: which worker holds
+    // a job, what its payload says, and which policy gates it.
+    ...tableFilters('group', 'parent', 'job', 'worker', 'kind', 'payload', 'rate', 'conc'),
     loadNoun: 'jobs',
     bulkBusy: false,
     rowNoun: 'job',
     rowNounPlural: '',
     jobs: [],
     total: 0,
-    groupKeyFilter: '',
-    parentIdFilter: '',
-    jobIdFilter: '',
-    claimedByFilter: '',
-    kindFilter: '',
-    payloadFilter: '',
-    ratePrefixFilter: '',
-    concPrefixFilter: '',
     stateFilter: '',
-    _appliedGroupKey: '',
-    _appliedParentId: '',
-    _appliedJobId: '',
-    _appliedClaimedBy: '',
-    _appliedKind: '',
-    _appliedPayload: '',
-    _appliedRatePrefix: '',
-    _appliedConcPrefix: '',
 
-    // The shared three, plus the ones only a job table can answer: which worker holds
-    // a job, what its payload says, and which policy gates it.
-    filterFields: [
-      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
-      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
-      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
-      { field: 'worker', label: 'Worker', param: 'claimed_by', model: 'claimedByFilter', applied: '_appliedClaimedBy', format: shortId },
-      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
-      { field: 'payload', label: 'Payload', param: 'payload', model: 'payloadFilter', applied: '_appliedPayload' },
-      { field: 'rate', label: 'Rate limit', param: 'rate_limit_prefix', model: 'ratePrefixFilter', applied: '_appliedRatePrefix' },
-      { field: 'conc', label: 'Concurrency', param: 'concurrency_prefix', model: 'concPrefixFilter', applied: '_appliedConcPrefix' },
-    ],
+    sortColumns: ['id', 'priority', 'attempts', 'inserted_at', 'not_visible_until', 'group_key', 'parent_id', 'last_attempted_at'],
     _onFilterJobs: null,
     childCounts: {},
     dlqChildCounts: {},
@@ -93,7 +84,6 @@ document.addEventListener('alpine:init', () => {
     _expandSeq: {},
     viewMode: 'tree',
     ...loadState((s) => s.displayJobs.length === 0),
-    active: false,
     selectedJob: null,
     sortBy: '',
     sortDir: '',
@@ -194,10 +184,12 @@ document.addEventListener('alpine:init', () => {
     get detailRows() {
       if (!this.selectedJob) return [];
       const k = this.selectedJob.primaryKey;
+      // The rendered row carries the counts of whichever level it sits at.
+      const row = this.selectableJobs.find((r) => String(r.primaryKey) === String(k));
       return [Object.assign({}, this.selectedJob, {
         _id: k,
-        _childCount: this.childCounts[k] || 0,
-        _dlqChildCount: this.dlqChildCounts[k] || 0,
+        _childCount: row ? row._childCount : this.childCounts[k] || 0,
+        _dlqChildCount: row ? row._dlqChildCount : this.dlqChildCounts[k] || 0,
         _inDrawer: true,
       })];
     },
@@ -228,6 +220,22 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // Drop selections for rows no longer on screen. Expanded children are
+    // selectable too, so this spans every rendered row, not just the roots.
+    _pruneSelection() {
+      const present = new Set(this.selectableJobs.map((j) => String(j.primaryKey)));
+      const kept = {};
+      for (const id of Object.keys(this.selected)) {
+        if (present.has(id)) kept[id] = true;
+      }
+      this.selected = kept;
+    },
+
+    _collapseAll() {
+      this.expandedParents = {};
+      this._expandSeq = {};
+    },
+
     isExpanded(id) {
       return !!this.expandedParents[id];
     },
@@ -239,6 +247,7 @@ document.addEventListener('alpine:init', () => {
         const copy = { ...this.expandedParents };
         delete copy[id];
         this.expandedParents = copy;
+        this._pruneSelection();
         return;
       }
       const queue = Alpine.store('app').selectedQueue;
@@ -259,6 +268,67 @@ document.addEventListener('alpine:init', () => {
         if (this._expandSeq[id] !== seq) return;
         showToast('Could not load children: ' + e.message);
       }
+    },
+
+    canPromote(job) {
+      return job.status === 'scheduled' || job.status === 'backoff';
+    },
+
+    // The server refuses a job that is in flight, suspended or flagged for cancel.
+    canReschedule(job) {
+      return !RESCHEDULE_REFUSED.includes(job.status);
+    },
+
+    reschedule: { job: null, at: '', error: '', saving: false },
+    rescheduleDelays: RESCHEDULE_DELAYS,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+
+    openReschedule(job) {
+      const current = job.notVisibleUntil && new Date(job.notVisibleUntil) > new Date() ? job.notVisibleUntil : '';
+      this.reschedule = { job, at: toLocalInput(current), error: '', saving: false };
+      showModal('rescheduleModal');
+    },
+
+    setRescheduleDelay(secs) {
+      this.reschedule.at = toLocalInput(new Date(Date.now() + secs * MS_PER_SECOND));
+      this.reschedule.error = '';
+    },
+
+    // How far off the chosen time is, for the line under the field.
+    rescheduleIn() {
+      const iso = toIsoInstant(this.reschedule.at);
+      if (!iso) return '';
+      const secs = (new Date(iso) - Date.now()) / MS_PER_SECOND;
+      return secs <= 0 ? 'Visible now' : 'Visible in ' + formatDurationSecs(secs);
+    },
+
+    async submitReschedule() {
+      const r = this.reschedule;
+      if (r.saving || !r.job) return;
+      const runAt = toIsoInstant(r.at);
+      if (!runAt) {
+        r.error = 'Set a date and time.';
+        return;
+      }
+      const id = r.job.primaryKey;
+      r.error = '';
+      r.saving = true;
+      try {
+        await ArbiterAPI.rescheduleJob(Alpine.store('app').selectedQueue, id, runAt);
+        hideModal('rescheduleModal');
+        showToast('Job ' + id + ' rescheduled', 'success');
+      } catch (e) {
+        if (e.status !== 409) {
+          r.error = e.message;
+          return;
+        }
+        hideModal('rescheduleModal');
+        showToast('Job ' + id + ' not rescheduled: ' + e.message, 'warning');
+      } finally {
+        r.saving = false;
+      }
+      await this.loadJobs();
+      await this.refreshOpenDetail();
     },
 
     canSuspend(job) {
@@ -315,8 +385,7 @@ document.addEventListener('alpine:init', () => {
 
     get insertPayloadInvalid() {
       const raw = this.insertPayload.trim();
-      if (!raw || !/^[\[{]/.test(raw)) return false;
-      try { JSON.parse(raw); return false; } catch { return true; }
+      return !!raw && !!parsePayloadInput(raw).error;
     },
 
     init() {
@@ -335,7 +404,7 @@ document.addEventListener('alpine:init', () => {
       });
       this._bindTableEvents({
         hashName: 'jobs',
-        onQueueReset: () => { this.stateFilter = ''; this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
+        onQueueReset: () => this._collapseAll(),
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
           // Inserts land as ready/scheduled (or suspended for rollup parents), but
@@ -345,7 +414,7 @@ document.addEventListener('alpine:init', () => {
             ? ['job_inserted', 'job_updated', 'job_deleted']
             : ['job_updated', 'job_deleted'];
           return events.filter(evt =>
-            evt.table === queue && relevantTypes.includes(evt.event)
+            evt.table === queue && !evt.dlq && relevantTypes.includes(evt.event)
           ).length;
         },
       });
@@ -366,15 +435,9 @@ document.addEventListener('alpine:init', () => {
     showStatus(status) {
       this.disarm();
       this.stateFilter = status;
-      this.groupKeyFilter = '';
-      this._appliedGroupKey = '';
-      this.parentIdFilter = '';
-      this._appliedParentId = '';
-      this.jobIdFilter = '';
-      this._appliedJobId = '';
+      this._clearFilters();
       this.offset = 0;
-      this.expandedParents = {};
-      this._expandSeq = {};
+      this._collapseAll();
       // Branch on the tab's own class, the same fact Bootstrap checks before
       // deciding whether to fire shown.bs.tab. Reading the cached `active`
       // instead can leave a showing tab with no load: show() no-ops and onShow
@@ -390,31 +453,24 @@ document.addEventListener('alpine:init', () => {
     async loadJobs(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = this.filterValue('group', filterOverrides);
-      const pid = this.filterValue('parent', filterOverrides);
-      const jid = this.filterValue('job', filterOverrides);
-      const worker = this.filterValue('worker', filterOverrides);
-      const kind = this.filterValue('kind', filterOverrides);
-      const payload = this.filterValue('payload', filterOverrides);
-      const rate = this.filterValue('rate', filterOverrides);
-      const conc = this.filterValue('conc', filterOverrides);
+      const f = this.filterValues(filterOverrides);
       const startingPending = this.pendingChanges;
       await guardedLoad(this, async (seq, isStale) => {
         // Any filter that can match a child renders flat, so a match is never hidden
         // behind a parent the filter itself excluded.
-        const narrowed = !!(pid || gk || jid || worker || kind || payload || rate || conc);
+        const narrowed = Object.values(f).some(Boolean);
         const rootsOnly = !this.stateFilter && this.viewMode === 'tree' && !narrowed;
         const data = await ArbiterAPI.listJobs(queue, {
           limit: this.limit,
           offset: this.offset,
-          groupKey: gk || undefined,
-          parentId: pid || undefined,
-          jobId: jid || undefined,
-          claimedBy: worker || undefined,
-          kind: kind || undefined,
-          payload: payload || undefined,
-          ratePrefix: rate || undefined,
-          concPrefix: conc || undefined,
+          groupKey: f.group || undefined,
+          parentId: f.parent || undefined,
+          jobId: f.job || undefined,
+          claimedBy: f.worker || undefined,
+          kind: f.kind || undefined,
+          payload: f.payload || undefined,
+          ratePrefix: f.rate || undefined,
+          concPrefix: f.conc || undefined,
           status: this.stateFilter || undefined,
           rootsOnly,
           sortBy: this.sortBy || undefined,
@@ -422,14 +478,7 @@ document.addEventListener('alpine:init', () => {
         });
         if (isStale()) return;
         const jobs = data.jobs || [];
-        this._appliedGroupKey = gk;
-        this._appliedParentId = pid;
-        this._appliedJobId = jid;
-        this._appliedClaimedBy = worker;
-        this._appliedKind = kind;
-        this._appliedPayload = payload;
-        this._appliedRatePrefix = rate;
-        this._appliedConcPrefix = conc;
+        this._setAppliedFilters(f);
         this.jobs = jobs;
         this.total = data.jobsTotal || 0;
         this.childCounts = data.childCounts || {};
@@ -438,14 +487,7 @@ document.addEventListener('alpine:init', () => {
         this.resyncDetailSelection();
         this.pendingChanges = Math.max(0, this.pendingChanges - startingPending);
         this._syncFiltersToUrl();
-        // Drop selections for rows this page no longer carries. Expanded children
-        // are selectable too, so this spans every rendered row, not just the roots.
-        const present = new Set(this.selectableJobs.map((j) => String(j.primaryKey)));
-        const keptSel = {};
-        for (const id of Object.keys(this.selected)) {
-          if (present.has(id)) keptSel[id] = true;
-        }
-        this.selected = keptSel;
+        this._pruneSelection();
 
         if (this.offset > 0 && this.offset >= this.total && this.total > 0) {
           this.offset = Math.max(0, (Math.ceil(this.total / this.limit) - 1) * this.limit);
@@ -520,8 +562,7 @@ document.addEventListener('alpine:init', () => {
 
     _resetView(filterOverrides) {
       this.offset = 0;
-      this.expandedParents = {};
-      this._expandSeq = {};
+      this._collapseAll();
       this.loadJobs(filterOverrides);
       this._startTimer();
     },
@@ -726,15 +767,12 @@ document.addEventListener('alpine:init', () => {
         return;
       }
 
-      let payload = raw;
-      if (/^[\[{]/.test(raw)) {
-        try {
-          payload = JSON.parse(raw);
-        } catch (e) {
-          this.insertError = 'Invalid JSON: ' + e.message;
-          return;
-        }
+      const parsed = parsePayloadInput(raw);
+      if (parsed.error) {
+        this.insertError = 'Invalid JSON: ' + parsed.error;
+        return;
       }
+      const payload = parsed.value;
 
       // datetime-local is wall-clock in the browser's zone. Send it as UTC ISO.
       let notVisibleUntil = null;

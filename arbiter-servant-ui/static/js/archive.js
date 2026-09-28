@@ -20,6 +20,7 @@ const ARCHIVE_COLUMNS = [
 // Row actions, stamped into both the row menu and the drawer header.
 const ARCHIVE_ACTIONS_HTML = `
 <li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job); closeDropdown($el)">Detail</a></li>
+<li><a class="dropdown-item" href="#" @click.prevent="openPayloadEdit(job, job.archivePrimaryKey, job.jobSnapshot?.payload); closeDropdown($el)">Edit and re-enqueue</a></li>
 <li><a class="dropdown-item" href="#" @click.prevent="reEnqueueJob(job.archivePrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('reenq:' + job.archivePrimaryKey) }" x-text="isArmed('reenq:' + job.archivePrimaryKey) ? 'Confirm re-enqueue' : 'Re-enqueue'"></a></li>
 <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.archivePrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('del:' + job.archivePrimaryKey) }" x-text="isArmed('del:' + job.archivePrimaryKey) ? 'Confirm purge' : 'Purge'"></a></li>`;
 
@@ -28,6 +29,16 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(ARCHIVE_COLUMNS, 'arb.archiveCols'),
     ...rowDetail('archiveJobs', 'archivePrimaryKey', 'selectedArchiveJob', { drawer: 'archiveDetailDrawer' }),
     ...tableTab('loadArchive', 'arb.archiveRefresh'),
+    // The completion window finds rows in an archive that holds months of jobs.
+    ...tableFilters('group', 'parent', 'job', 'kind', 'payload', 'after', 'before'),
+    ...payloadEditor({
+      verb: 'Re-enqueue',
+      doneText: 'Re-enqueued',
+      send: (queue, id, payload) => ArbiterAPI.reEnqueueArchive(queue, id, payload),
+      done(id) {
+        this.closeDetailIfOpen(id);
+      },
+    }),
     loadNoun: 'archived jobs',
     archiveJobs: [],
     rowNoun: 'archived job',
@@ -35,34 +46,11 @@ document.addEventListener('alpine:init', () => {
     rowNounPlural: '',
     total: 0,
     ...loadState((s) => s.archiveJobs.length === 0),
-    active: false,
     selectedArchiveJob: null,
     bulkBusy: false,
-    parentIdFilter: '',
-    groupKeyFilter: '',
-    jobIdFilter: '',
-    kindFilter: '',
-    completedAfterFilter: '',
-    completedBeforeFilter: '',
-    _appliedParentId: '',
-    _appliedGroupKey: '',
-    _appliedJobId: '',
-    _appliedKind: '',
-    _appliedCompletedAfter: '',
-    _appliedCompletedBefore: '',
     sortBy: '',
     sortDir: '',
-
-    // The shared three, plus the completion window, which is the only way to find
-    // anything in an archive that has been accumulating for months.
-    filterFields: [
-      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
-      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
-      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
-      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
-      { field: 'after', label: 'Completed after', param: 'completed_after', model: 'completedAfterFilter', applied: '_appliedCompletedAfter', type: 'datetime-local', format: formatTime },
-      { field: 'before', label: 'Completed before', param: 'completed_before', model: 'completedBeforeFilter', applied: '_appliedCompletedBefore', type: 'datetime-local', format: formatTime },
-    ],
+    sortColumns: ['id', 'completed_at', 'inserted_at', 'job_id', 'attempts', 'group_key', 'parent_id'],
 
     init() {
       this._loadColPrefs();
@@ -74,6 +62,7 @@ document.addEventListener('alpine:init', () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           releaseInitialLoad(this);
           this.closeDetail();
+          this.cancelPayloadEdit();
           this._stopTimer();
         },
       });
@@ -81,7 +70,6 @@ document.addEventListener('alpine:init', () => {
       // reconnects trigger a reload. Routine updates ride the refresh timer.
       this._bindTableEvents({
         hashName: 'archive',
-        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
         relevant: () => 0,
       });
     },
@@ -95,32 +83,23 @@ document.addEventListener('alpine:init', () => {
     async loadArchive(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = this.filterValue('group', filterOverrides);
-      const pid = this.filterValue('parent', filterOverrides);
-      const jid = this.filterValue('job', filterOverrides);
-      const kind = this.filterValue('kind', filterOverrides);
-      const after = this.filterValue('after', filterOverrides);
-      const before = this.filterValue('before', filterOverrides);
+      const f = this.filterValues(filterOverrides);
       await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listArchive(queue, {
           limit: this.limit,
           offset: this.offset,
-          parentId: pid || undefined,
-          jobId: jid || undefined,
-          groupKey: gk || undefined,
-          kind: kind || undefined,
-          completedAfter: toIsoInstant(after),
-          completedBefore: toIsoInstant(before),
+          parentId: f.parent || undefined,
+          jobId: f.job || undefined,
+          groupKey: f.group || undefined,
+          kind: f.kind || undefined,
+          payload: f.payload || undefined,
+          completedAfter: toIsoInstant(f.after),
+          completedBefore: toIsoInstant(f.before),
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
         if (isStale()) return;
-        this._appliedGroupKey = gk;
-        this._appliedParentId = pid;
-        this._appliedJobId = jid;
-        this._appliedKind = kind;
-        this._appliedCompletedAfter = after;
-        this._appliedCompletedBefore = before;
+        this._setAppliedFilters(f);
         this.archiveJobs = data.archiveJobs || [];
         this.resyncDetailSelection();
         this.total = data.archiveTotal || 0;
@@ -231,6 +210,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     viewDetail(job) {
+      this.cancelPayloadEdit();
       this.selectedArchiveJob = job;
       showDrawer('archiveDetailDrawer');
     },

@@ -28,9 +28,9 @@ module Arbiter.Core.Sql.Jobs
   , jobColsExceptId
   , dlqCarriedCols
   , requeuedCols
-  , requeuedVals
+  , requeuedValsEditing
   , enqueuedAgainCols
-  , enqueuedAgainVals
+  , enqueuedAgainValsEditing
   , jobColumns
   , dedupUpdateSet
   , insertJobSQL
@@ -76,6 +76,7 @@ data JobFilter
   | FilterClaimedBy UUID
   | FilterKind Text
   | FilterPayloadText Text
+  | FilterErrorText Text
   | FilterRateLimitPrefix Text
   | FilterConcurrencyPrefix Text
   | FilterInsertedAfter UTCTime
@@ -390,9 +391,10 @@ requeuedColumnNames =
 requeuedCols :: Text
 requeuedCols = joinColumns requeuedColumnNames
 
--- | 'requeuedCols' as select expressions, with the attempt limit clamped.
-requeuedVals :: Text
-requeuedVals = joinColumns (map clampedAttemptLimit requeuedColumnNames)
+-- | 'requeuedCols' as select expressions, with the attempt limit clamped. Each
+-- column in @edited@ is read through @reader@.
+requeuedValsEditing :: [Text] -> (Text -> Text) -> Text
+requeuedValsEditing edited reader = valsEditing edited reader requeuedColumnNames
 
 -- | 'requeuedColumnNames' for an archive re-enqueue, without the parent link.
 enqueuedAgainColumnNames :: [Text]
@@ -401,9 +403,17 @@ enqueuedAgainColumnNames = filter (`notElem` ["parent_id", "parent_state"]) requ
 enqueuedAgainCols :: Text
 enqueuedAgainCols = joinColumns enqueuedAgainColumnNames
 
--- | 'enqueuedAgainCols' as select expressions, with the attempt limit clamped.
-enqueuedAgainVals :: Text
-enqueuedAgainVals = joinColumns (map clampedAttemptLimit enqueuedAgainColumnNames)
+-- | 'enqueuedAgainCols' as select expressions, with the attempt limit clamped. Each
+-- column in @edited@ is read through @reader@.
+enqueuedAgainValsEditing :: [Text] -> (Text -> Text) -> Text
+enqueuedAgainValsEditing edited reader = valsEditing edited reader enqueuedAgainColumnNames
+
+valsEditing :: [Text] -> (Text -> Text) -> [Text] -> Text
+valsEditing edited reader = joinColumns . map pick
+  where
+    pick column
+      | column `elem` edited = reader column
+      | otherwise = clampedAttemptLimit column
 
 clampedAttemptLimit :: Text -> Text
 clampedAttemptLimit column

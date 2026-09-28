@@ -114,7 +114,7 @@ ${LOAD_ERROR_HTML}
                 x-text="job.metadata ? JSON.stringify(job.metadata) : EMPTY"></td>
           </template>
           <td>
-            <span :class="healthClass(job)" x-text="healthLabel(job)"></span>
+            <span :class="healthClass(job)" :title="healthTitle(job)" x-text="healthLabel(job)"></span>
             <template x-if="job.paused"><span class="badge paused-badge ms-1">paused</span></template>
           </td>
           <td class="cell-actions">
@@ -169,7 +169,7 @@ const WORKER_ACTIONS_HTML = `
 <li><a class="dropdown-item" :href="jobsUrl(job)" @click="openJobs($event, job)">View held jobs</a></li>
 <li>
   <a class="dropdown-item" href="#" :class="{ 'text-warning fw-semibold': job.paused && isArmed('toggle:' + job.workerId), 'disabled': job.shuttingDown }"
-    @click.prevent="togglePause(job)"
+    @click.prevent="job.paused || closeDropdown($el); togglePause(job)"
     x-text="job.paused ? (isArmed('toggle:' + job.workerId) ? 'Click to confirm' : 'Resume') : 'Pause'"></a>
 </li>`;
 
@@ -297,11 +297,19 @@ document.addEventListener('alpine:init', () => {
       return w.health || 'live';
     },
 
+    healthTitle(w) {
+      return {
+        live: 'Heartbeat is current',
+        stale: 'No heartbeat inside the stale threshold',
+        draining: 'Stops claiming, finishes its in-flight jobs, then stops',
+      }[w.health] || '';
+    },
+
     healthClass(w) {
       switch (w.health) {
         case 'live': return 'badge bg-success-subtle text-success-emphasis';
         case 'stale': return 'badge bg-danger-subtle text-danger-emphasis';
-        case 'draining': return 'badge bg-secondary-subtle text-secondary-emphasis';
+        case 'draining': return 'badge draining-badge';
         default: return 'badge bg-secondary-subtle text-secondary-emphasis';
       }
     },

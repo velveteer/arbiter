@@ -34,10 +34,11 @@ import Arbiter.Core.Job.Types (DedupKey (..), JobPayload, JobStatus, isRollup, k
 import Arbiter.Core.Job.Types qualified as Job
 import Arbiter.Core.JobResult (EncodeJobResult, encodeJobResult)
 import Arbiter.Core.Listen (Notification (..), withChannels)
-import Arbiter.Core.MonadArbiter (HasRegistry, getListener, getSchema, withDbTransaction)
+import Arbiter.Core.MonadArbiter (HasRegistry, MonadArbiter, getListener, getSchema, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, RegistryTables (..), SpecName, SpecPayload, SpecResult)
 import Arbiter.Core.Queues qualified as Queues
+import Arbiter.Core.RateLimit.Spec (RateLimitKey (..))
 import Arbiter.Core.Sql.Jobs (ArchiveSortColumn, DLQSortColumn, JobFilter (..), JobSortColumn, SortDir)
 import Arbiter.Core.Trace (withPublishSpan)
 import Arbiter.Worker (MaintenancePace (..), runMaintenancePass, storeEncodedResult)
@@ -77,7 +78,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (clamp)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -174,7 +175,7 @@ noContentOr :: Either ServerError () -> Handler NoContent
 noContentOr = either throwError (const (pure NoContent))
 
 -- | Run a job mutation. When it touches no row, re-read the job and answer 404, or
--- the 409 that @refuse@ derives from the job's state.
+-- the 409 that @refuse@ derives from the job and its status.
 mutateJob
   :: forall (payload :: Type) registry m
    . (HasRegistry m registry)
@@ -182,7 +183,7 @@ mutateJob
   -> ArbiterServerConfig m registry
   -> Int64
   -> (Text -> m Int64)
-  -> (Job.JobRead (Job.Stored payload) -> LBS.ByteString)
+  -> (Job.JobRead (Job.Stored payload) -> JobStatus -> LBS.ByteString)
   -> Handler NoContent
 mutateJob tableName config jobId mutate refuse =
   noContentOr =<< runDb config (mutate schemaName >>= diagnose)
@@ -191,8 +192,8 @@ mutateJob tableName config jobId mutate refuse =
     diagnose rowsAffected
       | rowsAffected > 0 = pure (Right ())
       | otherwise =
-          maybe (Left err404 {errBody = "Job not found"}) (\job -> Left err409 {errBody = refuse job})
-            <$> Ops.getJobById @_ @payload schemaName tableName jobId
+          maybe (Left err404 {errBody = "Job not found"}) (\(job, status) -> Left err409 {errBody = refuse job status})
+            <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
 -- event-streaming triggers, which 'Arbiter.Migrations.runMigrationsForRegistry' installs
@@ -245,6 +246,7 @@ jobsServer table config =
     , cancelJob = cancelJobHandler @registry table config
     , forceCancelJob = forceCancelJobHandler @registry table config
     , promoteJob = promoteJobHandler @registry table config
+    , rescheduleJob = rescheduleJobHandler @registry table config
     , moveToDLQ = moveToDLQHandler @registry table config
     , pauseChildren = pauseChildrenHandler @registry table config
     , resumeChildren = resumeChildrenHandler @registry table config
@@ -277,21 +279,18 @@ listJobsHandler
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
 listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mKind mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
-  let (limit, offset) = validatePagination 50 mLimit mOffset
+  let (limit, offset) = validatePagination defaultPageLimit mLimit mOffset
       schemaName = serverSchema config
       filters =
-        catMaybes
-          [ FilterGroupKey <$> mGroupKey
-          , FilterParentId <$> mParentId
-          , FilterId <$> mJobId
-          , FilterRootsOnly <$ guard rootsOnly
-          , FilterStatus <$> mStatus
-          , FilterClaimedBy <$> mClaimedBy
-          , FilterKind <$> nonBlank mKind
-          , FilterPayloadText <$> nonBlank mPayload
-          , FilterRateLimitPrefix <$> mRatePrefix
-          , FilterConcurrencyPrefix <$> mConcPrefix
-          ]
+        catMaybes $
+          listingFilters mParentId mGroupKey mKind mPayload
+            <> [ FilterId <$> mJobId
+               , FilterRootsOnly <$ guard rootsOnly
+               , FilterStatus <$> mStatus
+               , FilterClaimedBy <$> mClaimedBy
+               , FilterRateLimitPrefix <$> mRatePrefix
+               , FilterConcurrencyPrefix <$> mConcPrefix
+               ]
 
   (jobs, total, combined, dlqCounts) <- runDb config $ withDbTransaction $ do
     page <- Ops.listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset
@@ -410,10 +409,30 @@ promoteJobHandler
 promoteJobHandler tableName config jobId =
   mutateJob tableName config jobId (\schemaName -> Ops.promoteJob schemaName tableName jobId) refuse
   where
-    refuse job
-      | Job.suspended job = "Job is suspended - use resume endpoint"
-      | isJust (Job.claimedBy job) = "Job is in flight - wait for its lease to lapse"
-      | otherwise = "Job is already visible"
+    refuse job status = fromMaybe "Job is already visible" (heldReason job status)
+
+-- | Why a job cannot be moved in time: it is suspended, in flight, or flagged for cancel.
+heldReason :: Job.JobRead p -> JobStatus -> Maybe LBS.ByteString
+heldReason job status
+  | Job.suspended job = Just "Job is suspended - use resume endpoint"
+  | status == Job.InFlight = Just "Job is in flight - wait for its lease to lapse"
+  | status == Job.Cancelled = Just "Job is cancelled - it waits for removal"
+  | otherwise = Nothing
+
+-- | Set when a job next becomes visible. Refuses an in-flight, suspended or
+-- cancel-flagged job.
+rescheduleJobHandler
+  :: forall registry m
+   . (HasRegistry m registry)
+  => Text
+  -> ArbiterServerConfig m registry
+  -> Int64
+  -> RescheduleRequest
+  -> Handler NoContent
+rescheduleJobHandler tableName config jobId request =
+  mutateJob tableName config jobId (\schemaName -> Ops.rescheduleJob schemaName tableName jobId (runAt request)) refuse
+  where
+    refuse job status = fromMaybe "Job could not be rescheduled (concurrent modification)" (heldReason job status)
 
 -- | Move a job to the dead letter queue.
 moveToDLQHandler
@@ -469,7 +488,7 @@ suspendJobHandler
 suspendJobHandler tableName config jobId =
   mutateJob tableName config jobId (\schemaName -> Ops.suspendJob schemaName tableName jobId) refuse
   where
-    refuse job
+    refuse job _
       | Job.suspended job = "Job is already suspended"
       | otherwise = "Job is in-flight - cannot suspend"
 
@@ -485,7 +504,7 @@ resumeJobHandler
 resumeJobHandler tableName config jobId =
   mutateJob tableName config jobId (\schemaName -> Ops.resumeJob schemaName tableName jobId) refuse
   where
-    refuse job
+    refuse job _
       | not (Job.suspended job) = "Job is not suspended"
       | isRollup job = "Cannot resume a rollup finalizer with active children"
       | otherwise = "Job could not be resumed (concurrent modification)"
@@ -517,47 +536,39 @@ listDLQHandler
   -> Maybe Int64
   -> Maybe Text
   -> Maybe Text
+  -> Maybe Text
+  -> Maybe Text
   -> Maybe DLQSortColumn
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
-listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mSortBy mSortDir = do
-  let (limit, offset) = validatePagination 50 mLimit mOffset
-      schemaName = serverSchema config
-      filters =
-        catMaybes
-          [ FilterParentId <$> mParentId
-          , FilterJobId <$> mJobId
-          , FilterGroupKey <$> mGroupKey
-          , FilterKind <$> nonBlank mKind
-          ]
+listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mError mSortBy mSortDir =
+  readPage config mLimit mOffset toResponse page (Ops.countDLQFiltered schemaName tableName filters)
+  where
+    toResponse entries total offset limit =
+      DLQResponse {dlqJobs = entries, dlqTotal = total, dlqOffset = offset, dlqLimit = limit}
+    schemaName = serverSchema config
+    page = Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir
+    filters =
+      catMaybes $
+        listingFilters mParentId mGroupKey mKind mPayload
+          <> [FilterJobId <$> mJobId, FilterErrorText <$> nonBlank mError]
 
-  (entries, total) <- runDb config $ withDbTransaction $ do
-    page <- Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offset
-    matching <- Ops.countDLQFiltered schemaName tableName filters
-    pure (page, matching)
-
-  pure $
-    DLQResponse
-      { dlqJobs = entries
-      , dlqTotal = fromIntegral total
-      , dlqOffset = offset
-      , dlqLimit = limit
-      }
-
--- | Retry a DLQ job back into the main queue. 409 when its parent is gone.
+-- | Retry a DLQ job back into the main queue, with its payload replaced when the
+-- request carries one. 409 when its parent is gone.
 retryFromDLQHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry, JobPayload payload)
   => Text
   -> ArbiterServerConfig m registry
   -> Int64
+  -> Maybe (PayloadEdit payload)
   -> Handler NoContent
-retryFromDLQHandler tableName config dlqId =
+retryFromDLQHandler tableName config dlqId edit =
   noContentOr =<< runDb config (withDbTransaction retried)
   where
     schemaName = serverSchema config
     retried =
-      Ops.retryFromDLQ schemaName tableName dlqId
+      Ops.retryFromDLQWithPayload schemaName tableName dlqId (editPayload <$> edit)
         >>= traverse (Ops.typedRow @payload)
         >>= maybe missing (const (pure (Right ())))
     missing = refuse <$> Ops.dlqJobExists schemaName tableName dlqId
@@ -617,50 +628,43 @@ listArchiveHandler
   -> Maybe Int64
   -> Maybe Text
   -> Maybe Text
+  -> Maybe Text
   -> Maybe UTCTime
   -> Maybe UTCTime
   -> Maybe ArchiveSortColumn
   -> Maybe SortDir
   -> Handler (ArchiveResponse payload)
-listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mCompletedAfter mCompletedBefore mSortBy mSortDir = do
-  let (limit, offset) = validatePagination 50 mLimit mOffset
-      schemaName = serverSchema config
-      filters =
-        catMaybes
-          [ FilterParentId <$> mParentId
-          , FilterJobId <$> mJobId
-          , FilterGroupKey <$> mGroupKey
-          , FilterKind <$> nonBlank mKind
-          , FilterCompletedAfter <$> mCompletedAfter
-          , FilterCompletedBefore <$> mCompletedBefore
-          ]
+listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mCompletedAfter mCompletedBefore mSortBy mSortDir =
+  readPage config mLimit mOffset toResponse page (Ops.countArchiveFiltered schemaName tableName filters)
+  where
+    toResponse archived total offset limit =
+      ArchiveResponse {archiveJobs = archived, archiveTotal = total, archiveOffset = offset, archiveLimit = limit}
+    schemaName = serverSchema config
+    page = Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir
+    filters =
+      catMaybes $
+        listingFilters mParentId mGroupKey mKind mPayload
+          <> [ FilterJobId <$> mJobId
+             , FilterCompletedAfter <$> mCompletedAfter
+             , FilterCompletedBefore <$> mCompletedBefore
+             ]
 
-  (archived, total) <- runDb config $ withDbTransaction $ do
-    page <- Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset
-    matching <- Ops.countArchiveFiltered schemaName tableName filters
-    pure (page, matching)
-
-  pure $
-    ArchiveResponse
-      { archiveJobs = archived
-      , archiveTotal = fromIntegral total
-      , archiveOffset = offset
-      , archiveLimit = limit
-      }
-
--- | Re-enqueue an archived job as a fresh job. 404 if the archive row is gone.
+-- | Re-enqueue an archived job as a fresh job, with its payload replaced when the
+-- request carries one. 404 if the archive row is gone.
 reEnqueueArchiveHandler
   :: forall registry (payload :: Type) m
    . (HasRegistry m registry, JobPayload payload)
   => Text
   -> ArbiterServerConfig m registry
   -> Int64
+  -> Maybe (PayloadEdit payload)
   -> Handler NoContent
-reEnqueueArchiveHandler tableName config archiveId = do
+reEnqueueArchiveHandler tableName config archiveId edit = do
   let schemaName = serverSchema config
+      reEnqueue = Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (editPayload <$> edit)
   mJob <-
     runDb config $
-      withDbTransaction (Ops.reEnqueueFromArchive schemaName tableName archiveId >>= traverse (Ops.typedRow @payload))
+      withDbTransaction (reEnqueue >>= traverse (Ops.typedRow @payload))
   case mJob of
     Just _ -> pure NoContent
     Nothing -> throwError err404 {errBody = "Archived job not found"}
@@ -747,7 +751,48 @@ tableServer table config =
     , archive = archiveServer @registry @payload table config
     , stats = statsServer @registry @payload table config
     , listKinds = pure (kindsFor @payload)
+    , listGroups = listGroupsHandler @registry table config
     }
+
+-- | A page of a queue's open groups, largest first.
+listGroupsHandler
+  :: forall registry m
+   . (HasRegistry m registry)
+  => Text
+  -> ArbiterServerConfig m registry
+  -> Maybe Int
+  -> Maybe Int
+  -> Maybe Text
+  -> Handler GroupsResponse
+listGroupsHandler tableName config mLimit mOffset mGroupKey =
+  readPage
+    config
+    mLimit
+    mOffset
+    toResponse
+    (Ops.listGroups schemaName tableName key)
+    (Ops.countGroups schemaName tableName key)
+  where
+    toResponse page total offset limit =
+      GroupsResponse {groups = page, groupsTotal = total, groupsOffset = offset, groupsLimit = limit}
+    schemaName = serverSchema config
+    key = nonBlank mGroupKey
+
+-- | Read one page and the total it pages through in one transaction, then build
+-- the response from the page, the total, the offset and the limit.
+readPage
+  :: (MonadArbiter m)
+  => ArbiterServerConfig m registry
+  -> Maybe Int
+  -> Maybe Int
+  -> ([a] -> Int -> Int -> Int -> response)
+  -> (Int -> Int -> m [a])
+  -> m Int64
+  -> Handler response
+readPage config mLimit mOffset toResponse page count = do
+  let (limit, offset) = validatePagination defaultPageLimit mLimit mOffset
+  (rows, total) <- runDb config . withDbTransaction $ (,) <$> page limit offset <*> count
+  pure (toResponse rows (fromIntegral total) offset limit)
 
 -- | Lease visible jobs to a consumer outside a worker pool. Each returned job
 -- contains the claim sequence and claimant required for finalization.
@@ -912,6 +957,14 @@ defaultLeaseSeconds = 60
 -- | Bounds on page size.
 pageLimitRange :: (Int, Int)
 pageLimitRange = (1, 1000)
+
+-- | Page size of a job, DLQ, archive or group listing when the request omits it.
+defaultPageLimit :: Int
+defaultPageLimit = 50
+
+-- | Page size of a bucket or key listing when the request omits it.
+defaultKeyPageLimit :: Int
+defaultKeyPageLimit = 100
 
 -- | Queues API handler.
 queuesServer
@@ -1133,6 +1186,8 @@ rateLimitsServer config =
     , listRateLimitBuckets = listRateLimitBucketsHandler config
     , updateRateLimitPolicy = updateRateLimitPolicyHandler config
     , resetRateLimitBuckets = resetRateLimitBucketsHandler config
+    , addRateLimitTokens = addRateLimitTokensHandler config
+    , pruneRateLimitBuckets = pruneRateLimitBucketsHandler config
     }
 
 -- | Liveness and readiness handlers.
@@ -1271,6 +1326,10 @@ cachedForKey ttl cell key produce
 invalidate :: CacheCell a -> Handler ()
 invalidate cell = liftIO $ atomically $ modifyTVar' (cacheEntries cell) $ \(epoch, _) -> (epoch + 1, Map.empty)
 
+-- | Run an operator mutation, then 'invalidate' the cache it makes stale.
+invalidating :: CacheCell a -> Handler b -> Handler b
+invalidating cell mutation = mutation <* invalidate cell
+
 -- | List policies with bucket stats and currently-throttled job counts.
 listRateLimitsHandler
   :: forall registry m
@@ -1292,7 +1351,7 @@ listRateLimitBucketsHandler
   -> Maybe Int
   -> Handler RateLimitBucketsResponse
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination 100 mLimit mOffset
+  let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
   pure $ RateLimitBucketsResponse {buckets = rows}
 
@@ -1324,9 +1383,8 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
   let update = case (mMax, mRefill, mInterval) of
         (Nothing, Nothing, Nothing) -> pure ()
         _ -> void $ HL.updateRateLimitPolicyOverrides prefix upd
-  view <- updateThenView config (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
-  invalidate (rateLimitPoliciesCache config)
-  pure view
+  invalidating (rateLimitPoliciesCache config) $
+    updateThenView config (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
 
 -- | Clear every bucket for a prefix. Returns the number reset. 404s an unknown prefix.
 resetRateLimitBucketsHandler
@@ -1335,12 +1393,49 @@ resetRateLimitBucketsHandler
   => ArbiterServerConfig m registry
   -> Text
   -> Handler RateLimitResetResponse
-resetRateLimitBucketsHandler config prefix = do
-  let action =
-        HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> HL.resetRateLimitBuckets prefix else pure Nothing
-  count <- updateThenView config action "Rate-limit policy not found"
-  invalidate (rateLimitPoliciesCache config)
-  pure $ RateLimitResetResponse {reset = count}
+resetRateLimitBucketsHandler config prefix =
+  invalidating (rateLimitPoliciesCache config) $
+    RateLimitResetResponse
+      <$> updateThenView config (onRateLimitPolicy prefix (HL.resetRateLimitBuckets prefix)) "Rate-limit policy not found"
+
+-- | Run an action for a rate-limit policy. 'Nothing' for an unknown prefix.
+onRateLimitPolicy :: (MonadArbiter m) => Text -> m a -> m (Maybe a)
+onRateLimitPolicy prefix action =
+  HL.rateLimitPolicyExists prefix >>= \exists -> if exists then Just <$> action else pure Nothing
+
+-- | Add tokens to one bucket, named by its full key as the bucket listing shows it,
+-- and wake the key's throttled jobs. 404s an unknown prefix. 400s a key outside it.
+addRateLimitTokensHandler
+  :: forall registry m
+   . (HasRegistry m registry, RegistryTables registry)
+  => ArbiterServerConfig m registry
+  -> Text
+  -> Text
+  -> AddTokensRequest
+  -> Handler AddTokensResponse
+addRateLimitTokensHandler config prefix key request = do
+  when (addedTokens request <= 0) $ throwError err400 {errBody = "tokens must be > 0"}
+  suffix <-
+    maybe
+      (throwError err400 {errBody = "The bucket key does not start with the policy prefix"})
+      pure
+      (T.stripPrefix (prefix <> ":") key)
+  let grant = HL.addRateLimitTokens RateLimitKey {rlkPrefix = prefix, rlkSuffix = suffix} (addedTokens request)
+  invalidating (rateLimitPoliciesCache config) $
+    AddTokensResponse <$> updateThenView config (onRateLimitPolicy prefix grant) "Rate-limit policy not found"
+
+-- | Delete full buckets idle for @idle@ seconds, the maintenance idle age by default.
+pruneRateLimitBucketsHandler
+  :: forall registry m
+   . (HasRegistry m registry)
+  => ArbiterServerConfig m registry
+  -> Maybe Double
+  -> Handler PruneResponse
+pruneRateLimitBucketsHandler config mIdle = do
+  let idle = maybe (maintenanceBucketIdle config) realToFrac mIdle
+  when (idle < 0) $ throwError err400 {errBody = "idle must be >= 0"}
+  invalidating (rateLimitPoliciesCache config) $
+    PruneResponse <$> runDb config (HL.pruneRateLimitBuckets idle)
 
 -- | Concurrency management/observability handlers.
 concurrencyServer
@@ -1354,6 +1449,7 @@ concurrencyServer config =
     , listConcurrencyKeys = listConcurrencyKeysHandler config
     , updateConcurrencyPolicy = updateConcurrencyPolicyHandler config
     , reconcileConcurrency = reconcileConcurrencyHandler config
+    , pruneConcurrencyKeys = pruneConcurrencyKeysHandler config
     }
 
 -- | List pools with their default/override limit and live key/in-flight stats.
@@ -1377,7 +1473,7 @@ listConcurrencyKeysHandler
   -> Maybe Int
   -> Handler ConcurrencyKeysResponse
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination 100 mLimit mOffset
+  let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
   pure $ ConcurrencyKeysResponse {keys = rows}
 
@@ -1395,9 +1491,8 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit
   let action = case mLimit of
         Nothing -> HL.getConcurrencyPolicy prefix
         Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
-  view <- updateThenView config action "Concurrency pool not found"
-  invalidate (concurrencyPoliciesCache config)
-  pure view
+  invalidating (concurrencyPoliciesCache config) $
+    updateThenView config action "Concurrency pool not found"
 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler
@@ -1405,10 +1500,19 @@ reconcileConcurrencyHandler
    . (HasRegistry m registry, RegistryTables registry)
   => ArbiterServerConfig m registry
   -> Handler ConcurrencyReconcileResponse
-reconcileConcurrencyHandler config = do
-  repaired <- runDb config HL.reconcileConcurrencyCounts
-  invalidate (concurrencyPoliciesCache config)
-  pure $ ConcurrencyReconcileResponse {reconciled = repaired}
+reconcileConcurrencyHandler config =
+  invalidating (concurrencyPoliciesCache config) $
+    ConcurrencyReconcileResponse <$> runDb config HL.reconcileConcurrencyCounts
+
+-- | Delete drained concurrency keys with no live job. Returns rows deleted.
+pruneConcurrencyKeysHandler
+  :: forall registry m
+   . (HasRegistry m registry, RegistryTables registry)
+  => ArbiterServerConfig m registry
+  -> Handler PruneResponse
+pruneConcurrencyKeysHandler config =
+  invalidating (concurrencyPoliciesCache config) $
+    PruneResponse <$> runDb config HL.pruneConcurrencyKeys
 
 -- | Server for the shared top-level routes.
 sharedServer
@@ -1499,6 +1603,15 @@ runArbiterAPI port config = do
   putStrLn $ "Starting Arbiter API server on port " <> show port
   let settings = setPort port defaultSettings
   runSettings settings (arbiterApp config)
+
+-- | The filters every listing takes: parent, group, kind and payload search.
+listingFilters :: Maybe Int64 -> Maybe Text -> Maybe Text -> Maybe Text -> [Maybe JobFilter]
+listingFilters mParentId mGroupKey mKind mPayload =
+  [ FilterParentId <$> mParentId
+  , FilterGroupKey <$> mGroupKey
+  , FilterKind <$> nonBlank mKind
+  , FilterPayloadText <$> nonBlank mPayload
+  ]
 
 -- | Remove an empty search parameter.
 nonBlank :: Maybe Text -> Maybe Text

@@ -74,6 +74,7 @@ module Arbiter.Core.Operations
   , moveToDLQFields
   , moveToDLQBatch
   , retryFromDLQ
+  , retryFromDLQWithPayload
   , dlqJobExists
   , listDLQJobs
   , deleteDLQJob
@@ -90,6 +91,7 @@ module Arbiter.Core.Operations
   , deleteArchiveJob
   , deleteArchiveJobsBatch
   , reEnqueueFromArchive
+  , reEnqueueFromArchiveWithPayload
   , updateArchiveResult
   , updateArchiveResultsBatch
 
@@ -118,12 +120,16 @@ module Arbiter.Core.Operations
   , cancelJob
   , cancelJobsBatch
   , promoteJob
+  , rescheduleJob
   , QueueStats (..)
   , statsRowCodec
   , queueStatusCounts
   , QueueOverview (..)
   , getQueueStats
   , getAllQueueStats
+  , GroupSummary (..)
+  , listGroups
+  , countGroups
 
     -- * Count Operations
   , countJobs
@@ -249,6 +255,7 @@ import Arbiter.Core.Codec
   , jobCodec
   , jobRowCodec
   , ncol
+  , payloadWriteCodec
   )
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyKey (..)
@@ -335,7 +342,7 @@ import Arbiter.Core.Sql.Concurrency qualified as Tmpl
 import Arbiter.Core.Sql.Cron qualified as Tmpl
 import Arbiter.Core.Sql.DLQ qualified as Tmpl
 import Arbiter.Core.Sql.Groups qualified as Tmpl
-import Arbiter.Core.Sql.Insert (batchFrag, insertFrag)
+import Arbiter.Core.Sql.Insert (RowEdit, batchFrag, insertFrag, rowEdit)
 import Arbiter.Core.Sql.Jobs qualified as Tmpl
 import Arbiter.Core.Sql.Lifecycle qualified as Tmpl
 import Arbiter.Core.Sql.QQ qualified as QQ
@@ -419,7 +426,12 @@ filterToClause (Tmpl.FilterInsertedAfter time) = [QQ.sql|inserted_at >= #{time :
 filterToClause (Tmpl.FilterInsertedBefore time) = [QQ.sql|inserted_at < #{time :: CTimestamptz}|]
 filterToClause (Tmpl.FilterCompletedAfter time) = [QQ.sql|completed_at >= #{time :: CTimestamptz}|]
 filterToClause (Tmpl.FilterCompletedBefore time) = [QQ.sql|completed_at < #{time :: CTimestamptz}|]
-filterToClause (Tmpl.FilterPayloadText needle) = [QQ.sql|payload::text ILIKE #{pat :: CText} ESCAPE '\' |]
+filterToClause (Tmpl.FilterPayloadText needle) = containsClause "payload::text" needle
+filterToClause (Tmpl.FilterErrorText needle) = containsClause "last_error" needle
+
+-- | A case-insensitive match of any @column@ text that contains @needle@ literally.
+containsClause :: Text -> Text -> Q.Query ()
+containsClause column needle = [QQ.sql|${column} ILIKE #{pat :: CText} ESCAPE '\' |]
   where
     pat = "%" <> likeEscape needle <> "%"
 
@@ -465,6 +477,11 @@ payloadColumns payloadValue =
         , pcConcurrencyPrefix = ckPrefix <$> ccKey
         }
 
+-- | A payload's stored encoding and the columns derived from it, as every job write
+-- stores them.
+payloadWrite :: (JobPayload payload) => payload -> (Value, PayloadColumns)
+payloadWrite value = (toJSON value, payloadColumns value)
+
 -- | What an insert path puts on its jobs, carrying the ambient trace context.
 type TraceStamp payload = JobWrite payload -> JobWrite payload
 
@@ -489,11 +506,11 @@ internalStampedRow
   -> JobWriteSource payload
 internalStampedRow stamp parent state suspended job =
   let stamped = stamp job
-      encoded = toJSON (JT.payload stamped)
+      (encoded, derived) = payloadWrite (JT.payload stamped)
    in JobWriteSource
         { sourceJob = stamped
         , sourceEncoded = encoded
-        , sourceColumns = payloadColumns (JT.payload stamped)
+        , sourceColumns = derived
         , sourceParentId = parent
         , sourceParentState = state
         , sourceSuspended = suspended
@@ -1440,8 +1457,35 @@ retryFromDLQ
   -> Int64
   -- ^ DLQ job id
   -> m (Maybe (JobRead (Stored payload)))
-retryFromDLQ schemaName tableName dlqId = withDbTransaction $ do
-  listToMaybe <$> MA.executeQuery (Tmpl.retryFromDLQSQL schemaName tableName dlqId)
+retryFromDLQ schemaName tableName dlqId = retryFromDLQEditing schemaName tableName dlqId Nothing
+
+-- | 'retryFromDLQ' with an optional replacement payload. The columns the payload
+-- derives are derived again from it. 'Nothing' retries the stored payload.
+retryFromDLQWithPayload
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int64
+  -- ^ DLQ job id
+  -> Maybe payload
+  -> m (Maybe (JobRead (Stored payload)))
+retryFromDLQWithPayload schemaName tableName dlqId =
+  retryFromDLQEditing schemaName tableName dlqId . fmap payloadEdit
+
+retryFromDLQEditing
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int64
+  -> Maybe RowEdit
+  -> m (Maybe (JobRead (Stored payload)))
+retryFromDLQEditing schemaName tableName dlqId edit =
+  withDbTransaction $ listToMaybe <$> MA.executeQuery (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)
+
+-- | The edit that writes a payload and every column derived from it, as an insert does.
+payloadEdit :: (JobPayload payload) => payload -> RowEdit
+payloadEdit = rowEdit payloadWriteCodec . payloadWrite
 
 -- | Whether a DLQ job with the given id exists.
 dlqJobExists
@@ -1703,8 +1747,23 @@ reEnqueueFromArchive
   :: forall m payload
    . (MonadArbiter m)
   => SchemaName -> TableName -> Int64 -> m (Maybe (JobRead (Stored payload)))
-reEnqueueFromArchive schemaName tableName archiveId = withDbTransaction $ do
-  listToMaybe <$> MA.executeQuery (Tmpl.reEnqueueFromArchiveSQL schemaName tableName archiveId)
+reEnqueueFromArchive schemaName tableName archiveId = reEnqueueFromArchiveEditing schemaName tableName archiveId Nothing
+
+-- | 'reEnqueueFromArchive' with an optional replacement payload. The columns the
+-- payload derives are derived again from it. The archive row keeps its payload.
+-- 'Nothing' re-enqueues the stored payload.
+reEnqueueFromArchiveWithPayload
+  :: forall m payload
+   . (JobPayload payload, MonadArbiter m)
+  => SchemaName -> TableName -> Int64 -> Maybe payload -> m (Maybe (JobRead (Stored payload)))
+reEnqueueFromArchiveWithPayload schemaName tableName archiveId =
+  reEnqueueFromArchiveEditing schemaName tableName archiveId . fmap payloadEdit
+
+reEnqueueFromArchiveEditing
+  :: (MonadArbiter m)
+  => SchemaName -> TableName -> Int64 -> Maybe RowEdit -> m (Maybe (JobRead (Stored payload)))
+reEnqueueFromArchiveEditing schemaName tableName archiveId edit =
+  withDbTransaction $ listToMaybe <$> MA.executeQuery (Tmpl.reEnqueueFromArchiveSQL schemaName tableName archiveId edit)
 
 -- | Store a completed root job's result on its archive row. No-ops when the job
 -- was not archived. Returns rows updated.
@@ -2000,6 +2059,22 @@ promoteJob schemaName tableName jobId =
   MA.executeStatement
     (Tmpl.promoteJobSQL schemaName tableName jobId)
 
+-- | Set when a job next becomes visible. Refuses an in-flight, suspended or
+-- cancel-flagged job.
+rescheduleJob
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Int64
+  -- ^ Job id
+  -> UTCTime
+  -- ^ When the job becomes visible
+  -> m Int64
+  -- ^ Number of rows updated
+rescheduleJob schemaName tableName jobId runAt =
+  MA.executeStatement
+    (Tmpl.rescheduleJobSQL schemaName tableName jobId runAt)
+
 -- | Per-status breakdown of a queue. The per-status counts partition the queue
 -- and sum to 'totalJobs', mirroring the derived job status taxonomy.
 data QueueStats = QueueStats
@@ -2032,6 +2107,9 @@ data QueueStats = QueueStats
   -- ^ Entries in the companion DLQ table. Outside the status partition and 'totalJobs'.
   , kindCounts :: Map Text Int64
   -- ^ Depth by declared payload variant. Rows with no declared label are left out.
+  , dlqKindCounts :: Map Text Int64
+  -- ^ DLQ entries by declared payload variant. Rows with no declared label are left out.
+  -- Empty in 'getAllQueueStats'.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -2052,6 +2130,7 @@ instance ToJSON QueueStats where
       , "oldestInFlightAgeSeconds" .= oldestInFlightAgeSeconds stats
       , "dlqJobs" .= dlqJobs stats
       , "kindCounts" .= kindCounts stats
+      , "dlqKindCounts" .= dlqKindCounts stats
       ]
 
 instance FromJSON QueueStats where
@@ -2071,10 +2150,28 @@ instance FromJSON QueueStats where
       <*> obj .:? "oldestInFlightAgeSeconds"
       <*> obj .: "dlqJobs"
       <*> obj .:? "kindCounts" .!= Map.empty
+      <*> obj .:? "dlqKindCounts" .!= Map.empty
 
 -- | All-zero counts, the fallback for an aggregate query that returned no row.
 emptyQueueStats :: QueueStats
-emptyQueueStats = QueueStats 0 0 0 0 0 0 0 0 0 0 Nothing Nothing 0 Map.empty
+emptyQueueStats =
+  QueueStats
+    { totalJobs = 0
+    , readyJobs = 0
+    , inFlightJobs = 0
+    , scheduledJobs = 0
+    , backoffJobs = 0
+    , throttledJobs = 0
+    , suspendedJobs = 0
+    , cancelledJobs = 0
+    , exhaustedJobs = 0
+    , blockedJobs = 0
+    , oldestReadyAgeSeconds = Nothing
+    , oldestInFlightAgeSeconds = Nothing
+    , dlqJobs = 0
+    , kindCounts = Map.empty
+    , dlqKindCounts = Map.empty
+    }
 
 -- | The per-status depths a 'QueueStats' carries, labelled by wire name. Blocked is
 -- a stats partition only. A row's own status reads ready.
@@ -2114,6 +2211,7 @@ statsRowCodec =
     <*> ncol "oldest_in_flight_age_seconds" CFloat8
     <*> col "dlq_jobs" CInt8
     <*> (decodeKindCounts <$> ncol "kind_counts" CJsonb)
+    <*> (decodeKindCounts <$> ncol "dlq_kind_counts" CJsonb)
 
 -- | The @jsonb_object_agg@ rollup as a map.
 decodeKindCounts :: Maybe Value -> Map Text Int64
@@ -2188,6 +2286,97 @@ getAllQueueStats
 getAllQueueStats _ [] = pure []
 getAllQueueStats schemaName queueKinds =
   MA.executeQuery (Tmpl.allQueueStatsSQL allStatsRowCodec schemaName queueKinds)
+
+-- | One open group, read from the queue's groups summary.
+data GroupSummary = GroupSummary
+  { gsGroupKey :: Text
+  , gsJobCount :: Int64
+  , gsReadyCount :: Int64
+  -- ^ Jobs a claim could take now, before the group's in-flight gate.
+  , gsNextDue :: Maybe UTCTime
+  -- ^ When the group's earliest scheduled job becomes visible.
+  , gsInFlightUntil :: Maybe UTCTime
+  -- ^ When the lease of the job that holds the group runs out.
+  , gsInFlight :: Bool
+  -- ^ A job holds the group now.
+  , gsHeadJobId :: Maybe Int64
+  -- ^ The job that holds the group or that its next claim takes.
+  , gsHeadStatus :: Maybe JobStatus
+  , gsHeadBlocked :: Bool
+  -- ^ A full concurrency key or a short rate-limit bucket holds the ready head back.
+  }
+  deriving stock (Eq, Show)
+
+instance ToJSON GroupSummary where
+  toJSON summary =
+    object
+      [ "groupKey" .= gsGroupKey summary
+      , "jobCount" .= gsJobCount summary
+      , "readyCount" .= gsReadyCount summary
+      , "nextDue" .= gsNextDue summary
+      , "inFlightUntil" .= gsInFlightUntil summary
+      , "inFlight" .= gsInFlight summary
+      , "headJobId" .= gsHeadJobId summary
+      , "headStatus" .= gsHeadStatus summary
+      , "headBlocked" .= gsHeadBlocked summary
+      ]
+
+instance FromJSON GroupSummary where
+  parseJSON = withObject "GroupSummary" $ \obj ->
+    GroupSummary
+      <$> obj .: "groupKey"
+      <*> obj .: "jobCount"
+      <*> obj .: "readyCount"
+      <*> obj .:? "nextDue"
+      <*> obj .:? "inFlightUntil"
+      <*> obj .: "inFlight"
+      <*> obj .:? "headJobId"
+      <*> obj .:? "headStatus"
+      <*> obj .:? "headBlocked" .!= False
+
+-- | A group row with its head status still raw.
+groupSummaryCodec :: RowCodec (GroupSummary, Maybe Text)
+groupSummaryCodec =
+  (,)
+    <$> ( GroupSummary
+            <$> col "group_key" CText
+            <*> col "job_count" CInt8
+            <*> col "ready_count" CInt8
+            <*> ncol "next_due" CTimestamptz
+            <*> ncol "in_flight_until" CTimestamptz
+            <*> col "in_flight" CBool
+            <*> ncol "head_id" CInt8
+            <*> pure Nothing
+            <*> col "head_blocked" CBool
+        )
+    <*> ncol "head_status" CText
+
+-- | A page of a queue's open groups, largest first, optionally narrowed to one key.
+listGroups
+  :: (MonadArbiter m)
+  => SchemaName
+  -> TableName
+  -> Maybe Text
+  -- ^ Group key
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [GroupSummary]
+listGroups schemaName tableName key limit offset = do
+  found <-
+    MA.executeQuery
+      (Tmpl.listGroupsSQL groupSummaryCodec schemaName tableName key (fromIntegral limit) (fromIntegral offset))
+  traverse withStatus found
+  where
+    withStatus (summary, rawStatus) = do
+      status <- traverse (either throwParsing pure . jobStatusFromText) rawStatus
+      pure summary {gsHeadStatus = status}
+
+-- | The number of open groups 'listGroups' pages through.
+countGroups :: (MonadArbiter m) => SchemaName -> TableName -> Maybe Text -> m Int64
+countGroups schemaName tableName key =
+  countStrict "countGroups" (Tmpl.countGroupsSQL schemaName tableName key)
 
 -- ---------------------------------------------------------------------------
 -- Count Operations

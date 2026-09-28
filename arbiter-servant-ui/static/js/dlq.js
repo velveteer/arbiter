@@ -21,6 +21,7 @@ const DLQ_COLUMNS = [
 const DLQ_ACTIONS_HTML = `
 <li x-show="!job._inDrawer"><a class="dropdown-item" href="#" @click.prevent="viewDetail(job); closeDropdown($el)">Detail</a></li>
 <li><a class="dropdown-item" href="#" @click.prevent="retryJob(job.dlqPrimaryKey); closeDropdown($el)">Retry</a></li>
+<li><a class="dropdown-item" href="#" @click.prevent="openPayloadEdit(job, job.dlqPrimaryKey, job.jobSnapshot?.payload); closeDropdown($el)">Edit and retry</a></li>
 <li><a class="dropdown-item text-danger" href="#" @click.prevent="deleteJob(job.dlqPrimaryKey, $el)" :class="{ 'fw-semibold': isArmed('del:' + job.dlqPrimaryKey) }" x-text="isArmed('del:' + job.dlqPrimaryKey) ? 'Confirm delete permanently' : 'Delete'"></a></li>`;
 
 document.addEventListener('alpine:init', () => {
@@ -28,6 +29,16 @@ document.addEventListener('alpine:init', () => {
     ...columnPrefs(DLQ_COLUMNS, 'arb.dlqCols.v2'),
     ...rowDetail('dlqJobs', 'dlqPrimaryKey', 'selectedDLQJob', { drawer: 'dlqDetailDrawer' }),
     ...tableTab('loadDLQ', 'arb.dlqRefresh'),
+    ...tableFilters('group', 'parent', 'job', 'kind', 'payload', 'error'),
+    ...payloadEditor({
+      verb: 'Retry',
+      doneText: 'Retried',
+      send: (queue, id, payload) => ArbiterAPI.retryFromDLQ(queue, id, payload),
+      async done(id) {
+        this.closeDetailIfOpen(id);
+        await this.loadDLQ();
+      },
+    }),
     loadNoun: 'DLQ entries',
     dlqJobs: [],
     rowNoun: 'DLQ entry',
@@ -35,26 +46,11 @@ document.addEventListener('alpine:init', () => {
     rowNounPlural: 'DLQ entries',
     total: 0,
     ...loadState((s) => s.dlqJobs.length === 0),
-    active: false,
     selectedDLQJob: null,
     bulkBusy: false,
-    parentIdFilter: '',
-    groupKeyFilter: '',
-    jobIdFilter: '',
-    kindFilter: '',
-    _appliedParentId: '',
-    _appliedGroupKey: '',
-    _appliedJobId: '',
-    _appliedKind: '',
     sortBy: '',
     sortDir: '',
-
-    filterFields: [
-      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
-      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
-      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
-      { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
-    ],
+    sortColumns: ['id', 'failed_at', 'job_id', 'priority', 'attempts', 'inserted_at', 'group_key', 'parent_id', 'last_attempted_at'],
 
     init() {
       this._loadColPrefs();
@@ -66,15 +62,15 @@ document.addEventListener('alpine:init', () => {
           this._loadSeq = (this._loadSeq || 0) + 1;
           releaseInitialLoad(this);
           this.closeDetail();
+          this.cancelPayloadEdit();
           this._stopTimer();
         },
       });
       this._bindTableEvents({
         hashName: 'dlq',
-        onQueueReset: () => { this.selected = {}; this.resetAutoEmpty(); this.loadKinds(); },
         relevant: (events) => {
           const queue = Alpine.store('app').selectedQueue;
-          return events.filter(evt => evt.table === queue && evt.event === 'job_dlq').length;
+          return events.filter(evt => evt.table === queue && evt.dlq).length;
         },
       });
     },
@@ -88,27 +84,23 @@ document.addEventListener('alpine:init', () => {
     async loadDLQ(filterOverrides) {
       const queue = Alpine.store('app').selectedQueue;
       if (!queue) return;
-      const gk = this.filterValue('group', filterOverrides);
-      const pid = this.filterValue('parent', filterOverrides);
-      const jid = this.filterValue('job', filterOverrides);
-      const kind = this.filterValue('kind', filterOverrides);
+      const f = this.filterValues(filterOverrides);
       const startingPending = this.pendingChanges;
       await guardedLoad(this, async (seq, isStale) => {
         const data = await ArbiterAPI.listDLQ(queue, {
           limit: this.limit,
           offset: this.offset,
-          parentId: pid || undefined,
-          jobId: jid || undefined,
-          groupKey: gk || undefined,
-          kind: kind || undefined,
+          parentId: f.parent || undefined,
+          jobId: f.job || undefined,
+          groupKey: f.group || undefined,
+          kind: f.kind || undefined,
+          payload: f.payload || undefined,
+          error: f.error || undefined,
           sortBy: this.sortBy || undefined,
           sortDir: this.sortDir || undefined,
         });
         if (isStale()) return;
-        this._appliedGroupKey = gk;
-        this._appliedParentId = pid;
-        this._appliedJobId = jid;
-        this._appliedKind = kind;
+        this._setAppliedFilters(f);
         this.dlqJobs = data.dlqJobs || [];
         this.total = data.dlqTotal || 0;
         this.resyncDetailSelection();
@@ -228,6 +220,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     viewDetail(job) {
+      this.cancelPayloadEdit();
       this.selectedDLQJob = job;
       showDrawer('dlqDetailDrawer');
     },

@@ -376,7 +376,7 @@ rateLimitSpec runM = do
       remaining `shouldBe` Just 0
       -- The top-up refills the frozen bucket and wakes the two parked jobs. They
       -- run on their first attempt.
-      runM env (HL.addRateLimitTokens (RateLimitKey "rl" "debit") 3)
+      void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "debit") 3)
       woken <- claim env
       map attempts woken `shouldBe` [1, 1]
 
@@ -384,7 +384,7 @@ rateLimitSpec runM = do
     enqueue env (replicate 3 (job "topup"))
     drained <- claim env
     length drained `shouldBe` 3
-    runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topup") 3)
+    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topup") 3)
     enqueue env (replicate 3 (job "topup"))
     toppedUp <- claim env
     length toppedUp `shouldBe` 3
@@ -394,13 +394,13 @@ rateLimitSpec runM = do
     admitted <- claim env
     length admitted `shouldBe` 3
     -- The top-up refills the bucket and wakes the parked jobs.
-    runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topupwake") 3)
+    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "topupwake") 3)
     woken <- claim env
     length woken `shouldBe` 3
 
   it "seeds an absent bucket at full on a top-up" $ \env -> do
     -- An absent bucket is full. A top-up of 1 leaves it full.
-    runM env (HL.addRateLimitTokens (RateLimitKey "rl" "seedfull") 1)
+    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "seedfull") 1)
     enqueue env (replicate 5 (job "seedfull"))
     kept <- claim env
     length kept `shouldBe` 3
@@ -436,7 +436,7 @@ rateLimitSpec runM = do
     -- Cost 5 exceeds the bucket max 3. The spend clamps to the max. The first job
     -- drains a full bucket and runs. The second is deferred. The pre-fund seeds
     -- the bucket through the top-up path.
-    runM env (HL.addRateLimitTokens (RateLimitKey "rl" "cmax") 3)
+    void $ runM env (HL.addRateLimitTokens (RateLimitKey "rl" "cmax") 3)
     enqueue env [costJob "cmax" 5, costJob "cmax" 5]
     kept <- claim env
     length kept `shouldBe` 1
@@ -553,7 +553,7 @@ rateLimitSpec runM = do
               granted === expected
               pure next
             TopUp amt -> do
-              evalIO (runM env (HL.addRateLimitTokens modelKey (fromIntegral amt)))
+              evalIO (void (runM env (HL.addRateLimitTokens modelKey (fromIntegral amt))))
               pure (modelTopUp balance amt)
             Prune -> do
               evalIO (void (runM env (HL.pruneRateLimitBuckets 0)))

@@ -70,6 +70,7 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.OpenApi
   ( Definitions
   , Info (..)
+  , MediaTypeObject (..)
   , NamedSchema (..)
   , OpenApi (..)
   , OpenApiType (..)
@@ -171,6 +172,8 @@ streamOperation =
     , _operationDescription =
         Just
           "Streams an event per insert, update, delete and dead-letter, as they happen. \
+          \Each event names its queue and the job id. A dead-letter event carries the id the \
+          \job had in its queue and sets dlq. The stream starts with one \"connected\" event. \
           \Sends a keepalive comment every 15 seconds. A server with streaming switched \
           \off answers one \"disabled\" event and closes."
     , _operationResponses =
@@ -181,11 +184,37 @@ streamOperation =
                 ( Inline
                     mempty
                       { _responseDescription = "An event stream."
-                      , _responseContent = InsOrd.singleton "text/event-stream" mempty
+                      , _responseContent =
+                          InsOrd.singleton "text/event-stream" mempty {_mediaTypeObjectSchema = Just (Inline jobEventSchema)}
                       }
                 )
           }
     }
+
+-- | The JSON in one job event's data line.
+jobEventSchema :: Schema
+jobEventSchema =
+  (schemaOver ["event"] props)
+    { _schemaDescription = Just "One job event. The connected and disabled events carry no job fields."
+    }
+  where
+    props =
+      [ ("event", Inline (stringEnum ["job_inserted", "job_updated", "job_deleted", "job_dlq", "connected", "disabled"]))
+      , ("table", Inline mempty {_schemaType = Just OpenApiString, _schemaDescription = Just "The queue name."})
+      ,
+        ( "job_id"
+        , Inline
+            mempty
+              { _schemaType = Just OpenApiInteger
+              , _schemaDescription = Just "The job id. A DLQ row gives the id of the job it holds."
+              }
+        )
+      ,
+        ( "dlq"
+        , Inline mempty {_schemaType = Just OpenApiBoolean, _schemaDescription = Just "The event comes from the DLQ table."}
+        )
+      , ("message", Inline mempty {_schemaType = Just OpenApiString})
+      ]
 
 -- | Put every operation on a path into that path's section.
 tagPath :: TagName -> PathItem -> PathItem
@@ -212,7 +241,7 @@ describeSection name =
     , _tagExternalDocs = Nothing
     }
   where
-    queueDescription queueName = "Jobs, dead letters, archive and stats for the " <> queueName <> " queue."
+    queueDescription queueName = "Jobs, dead letters, archive, groups and stats for the " <> queueName <> " queue."
 
 -- | What each schema-wide section is for. A section not named here is a queue.
 sectionDescriptions :: [(TagName, Text)]
@@ -220,8 +249,8 @@ sectionDescriptions =
   [ ("queues", "The registered queues, their counters, and pausing them.")
   , ("cron", "Cron schedules, their overrides, and out-of-band runs.")
   , ("workers", "The worker registry, and pausing a pool.")
-  , ("rate-limits", "Token-bucket policies, their live buckets, and overrides.")
-  , ("concurrency", "Concurrency pools, their live keys, and overrides.")
+  , ("rate-limits", "Token-bucket policies, their live buckets, overrides, token grants and pruning.")
+  , ("concurrency", "Concurrency pools, their live keys, overrides and pruning.")
   , ("maintenance", "The sweep a worker pool's reaper runs, on demand.")
   , ("events", "A server-sent stream of job events.")
   , ("health", "Liveness and readiness.")
@@ -471,6 +500,27 @@ leaseFields = JobLease <$> prop @Int64 "claimSeq" <*> prop @UUID "claimedBy"
 leaseRequired :: [Text]
 leaseRequired = ["claimSeq", "claimedBy"]
 
+instance (ToSchema payload) => ToSchema (PayloadEdit payload) where
+  declareNamedSchema _ =
+    closedSchema (carrying @payload "PayloadEdit") (PayloadEdit <$> prop @payload "payload")
+
+instance ToSchema AddTokensRequest where
+  declareNamedSchema _ = closedSchema "AddTokensRequest" (AddTokensRequest <$> prop @Double "tokens")
+
+instance ToSchema GroupSummary where
+  declareNamedSchema _ =
+    closedSchema "GroupSummary" $
+      GroupSummary
+        <$> prop @Text "groupKey"
+        <*> prop @Int64 "jobCount"
+        <*> prop @Int64 "readyCount"
+        <*> prop @(Maybe UTCTime) "nextDue"
+        <*> prop @(Maybe UTCTime) "inFlightUntil"
+        <*> prop @Bool "inFlight"
+        <*> prop @(Maybe Int64) "headJobId"
+        <*> prop @(Maybe JobStatus) "headStatus"
+        <*> prop @Bool "headBlocked"
+
 instance ToSchema MaintenanceResponse where
   declareNamedSchema _ =
     closedSchema "MaintenanceResponse" $
@@ -575,6 +625,10 @@ instance ToSchema ConcurrencyKeysResponse
 instance ToSchema ConcurrencyReconcileResponse
 instance ToSchema HealthResponse
 instance ToSchema LivenessResponse
+instance ToSchema RescheduleRequest
+instance ToSchema AddTokensResponse
+instance ToSchema PruneResponse
+instance ToSchema GroupsResponse
 
 instance (ToSchema payload) => ToSchema (JobsResponse payload) where
   declareNamedSchema = renamed (carrying @payload "JobsResponse")

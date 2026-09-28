@@ -54,45 +54,69 @@ function formatClock(iso, fallback = '') {
   }
 }
 
+const MS_PER_SECOND = 1000;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = 3600;
+const SECONDS_PER_DAY = 86400;
+
+// Duration units, largest first, and how many of them a humanized duration shows
+// when each one leads.
+const DURATION_UNITS = [['d', SECONDS_PER_DAY], ['h', SECONDS_PER_HOUR], ['m', SECONDS_PER_MINUTE], ['s', 1]];
+const DURATION_PARTS = { d: 2, h: 2, m: 1, s: 1 };
+
+// A second count as [value, unit] pairs from its leading unit down. It is rounded
+// at the smallest unit shown, and the carry moves up: 3599 is 1h, never 60m.
+function durationParts(secs, partsFor) {
+  const smallest = DURATION_UNITS.length - 1;
+  const leadAt = (n) => {
+    const i = DURATION_UNITS.findIndex(([, size]) => n >= size);
+    return i < 0 ? smallest : i;
+  };
+  const lastAt = (i) => Math.min(i + partsFor(DURATION_UNITS[i][0]) - 1, smallest);
+  const raw = Math.max(0, secs);
+  const step = DURATION_UNITS[lastAt(leadAt(raw))][1];
+  let rest = Math.round(raw / step) * step;
+  const lead = leadAt(rest);
+  return DURATION_UNITS.slice(lead, lastAt(lead) + 1).map(([unit, size]) => {
+    const value = Math.floor(rest / size);
+    rest -= value * size;
+    return [value, unit];
+  });
+}
+
 function formatAge(iso, fallback = EMPTY) {
   if (!iso) return fallback;
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return iso;
-  const ageSecs = Math.max(0, (Date.now() - t) / 1000);
-  if (ageSecs < 60) return `${Math.round(ageSecs)}s ago`;
-  if (ageSecs < 3600) return `${Math.round(ageSecs / 60)}m ago`;
-  if (ageSecs < 86400) return `${Math.round(ageSecs / 3600)}h ago`;
-  return `${Math.round(ageSecs / 86400)}d ago`;
+  const [[value, unit]] = durationParts((Date.now() - t) / MS_PER_SECOND, () => 1);
+  return `${value}${unit} ago`;
 }
 
 // Humanized duration from a second count: 45s / 12m / 3h 20m / 2d 4h.
 function formatDurationSecs(secs, fallback = EMPTY) {
   if (secs == null || Number.isNaN(secs)) return fallback;
-  const s = Math.max(0, Math.round(secs));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) {
-    const h = Math.floor(s / 3600);
-    const m = Math.round((s % 3600) / 60);
-    return m ? `${h}h ${m}m` : `${h}h`;
-  }
-  const d = Math.floor(s / 86400);
-  const h = Math.round((s % 86400) / 3600);
-  return h ? `${d}d ${h}h` : `${d}d`;
+  return durationParts(secs, (unit) => DURATION_PARTS[unit])
+    .filter(([value], i) => i === 0 || value)
+    .map(([value, unit]) => value + unit)
+    .join(' ');
+}
+
+// A clock field: two digits, zero-padded.
+function padTwo(n) {
+  return String(n).padStart(2, '0');
 }
 
 function formatCountdown(iso, fallback = '') {
   if (!iso) return fallback;
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return iso;
-  const delta = Math.round((t - Date.now()) / 1000);
+  const delta = Math.round((t - Date.now()) / MS_PER_SECOND);
   if (delta <= 0) return 'ready';
-  const days = Math.floor(delta / 86400);
-  const h = Math.floor((delta % 86400) / 3600);
-  const m = Math.floor((delta % 3600) / 60);
-  const s = delta % 60;
-  const pad = (n) => String(n).padStart(2, '0');
-  const hms = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  const days = Math.floor(delta / SECONDS_PER_DAY);
+  const h = Math.floor((delta % SECONDS_PER_DAY) / SECONDS_PER_HOUR);
+  const m = Math.floor((delta % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  const s = delta % SECONDS_PER_MINUTE;
+  const hms = `${padTwo(h)}:${padTwo(m)}:${padTwo(s)}`;
   return days > 0 ? `${days}d ${hms}` : hms;
 }
 
@@ -132,4 +156,15 @@ function toIsoInstant(localValue) {
   if (!localValue) return undefined;
   const at = new Date(localValue);
   return Number.isNaN(at.getTime()) ? undefined : at.toISOString();
+}
+
+// An instant as a datetime-local field's value, in the reader's own zone: the
+// inverse of toIsoInstant. An unparseable value comes back blank.
+function toLocalInput(value) {
+  if (!value) return '';
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return '';
+  const date = `${at.getFullYear()}-${padTwo(at.getMonth() + 1)}-${padTwo(at.getDate())}`;
+  const time = `${padTwo(at.getHours())}:${padTwo(at.getMinutes())}`;
+  return `${date}T${time}` + (at.getSeconds() ? ':' + padTwo(at.getSeconds()) : '');
 }

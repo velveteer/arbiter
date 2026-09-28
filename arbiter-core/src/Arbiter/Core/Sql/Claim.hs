@@ -49,13 +49,13 @@ grpRankExpr =
 clampedCostExpr :: Text
 clampedCostExpr = "LEAST(GREATEST(candidate.rate_limit_cost, 0), bucket.max_tokens)"
 
--- | The batch a group's next claim takes: the two index-served head runs, merged with
--- retried rows first. Projects @extras@, @priority@ and @id@ over alias @job@.
-groupHeadBatch :: Text -> Text -> [Text] -> Text -> Text
-groupHeadBatch tbl groupKey extras limit =
+-- | A group's rows in claim order over the rows @rowPred@ admits: the two
+-- index-served head runs, merged with retried rows first. Projects @extras@,
+-- @priority@ and @id@ over alias @job@.
+groupHeadBatch :: Text -> Text -> [Text] -> Text -> Text -> Text
+groupHeadBatch tbl groupKey extras rowPred limit =
   let runCols = T.intercalate ", " (map ("job." <>) (extras <> ["attempts", "priority", "id"]))
       mergedCols = T.intercalate ", " (map ("merged." <>) (extras <> ["priority", "id"]))
-      claimable = claimablePred "job"
    in [text|
     SELECT ${mergedCols}
     FROM (
@@ -63,7 +63,7 @@ groupHeadBatch tbl groupKey extras limit =
         SELECT ${runCols}
         FROM ${tbl} job
         WHERE job.group_key = ${groupKey}
-          AND ${claimable}
+          AND ${rowPred}
           AND job.attempts > 0
         ORDER BY job.attempts DESC, job.priority ASC, job.id ASC
         LIMIT ${limit}
@@ -73,7 +73,7 @@ groupHeadBatch tbl groupKey extras limit =
         SELECT ${runCols}
         FROM ${tbl} job
         WHERE job.group_key = ${groupKey}
-          AND ${claimable}
+          AND ${rowPred}
           AND job.attempts = 0
         ORDER BY job.priority ASC, job.id ASC
         LIMIT ${limit}
@@ -87,7 +87,7 @@ groupHeadBatch tbl groupKey extras limit =
 -- and the headroom check on that row.
 gatedHeadPred :: Text -> Text -> Text -> Text -> Text
 gatedHeadPred tbl groupKey batchLimit headGate =
-  let headBatch = groupHeadBatch tbl groupKey ["concurrency_key", "claimed_by"] batchLimit
+  let headBatch = groupHeadBatch tbl groupKey ["concurrency_key", "claimed_by"] (claimablePred "job") batchLimit
    in [text|
     EXISTS (
       SELECT 1

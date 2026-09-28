@@ -164,6 +164,21 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    async pruneKeys() {
+      if (this.busyRows['prune']) return;
+      if (!this.confirmArmed('prune')) return;
+      await this.withBusyRow('prune', async () => {
+        try {
+          const res = await ArbiterAPI.pruneConcurrencyKeys();
+          const n = res?.pruned ?? 0;
+          showToast(`Pruned ${n} ${pluralize(n, 'key')}`, 'success');
+          await this.loadPolicies();
+        } catch (e) {
+          showToast(`Failed to prune keys: ${e.message}`);
+        }
+      });
+    },
+
     async reconcile() {
       if (this.busyRows['reconcile']) return;
       if (!this.confirmArmed('reconcile')) return;

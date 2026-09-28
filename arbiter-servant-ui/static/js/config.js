@@ -9,6 +9,7 @@ const ARB_TIMING = {
   // One turn of the .spin animation in dashboard.css. Keep the two in step.
   spinPeriodMs: 800,
   armWindowMs: 5000,
+  countdownTickMs: 1000,
   cronPollMs: 60000,
   workerPollMs: 30000,
   queueListPollMs: 10000,

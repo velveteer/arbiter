@@ -1047,16 +1047,35 @@ label.queue-sort-label,
 }
 
 /* ---- Queue landing: instance roll-up + layout toolbar ---- */
-/* A view that had a roll-up last time holds its slot while the load runs, so the
-   numbers fade into place rather than pushing the table down. A view that had
-   none holds nothing, so an empty one never opens a gap and closes it again. */
-.is-pending {
-  opacity: 0;
-  visibility: hidden;
+/* A view that had a roll-up last time draws it at once, with skeleton bars for the
+   numbers until the load lands. A view that had none holds nothing, so an empty
+   one never opens a gap and closes it again. */
+.is-pending .qs-val {
+  position: relative;
+  display: inline-block;
+  min-width: 2.5ch;
+  color: transparent !important;
+  text-shadow: none;
+}
+
+/* Gives an empty value a line box, so it sits on the label's baseline. */
+.is-pending .qs-val::before {
+  content: "\00a0";
+}
+
+.is-pending .qs-val::after {
+  content: "";
+  position: absolute;
+  /* Sits on the baseline at cap height, where the digits land. */
+  inset: auto 0 0.5em;
+  height: 0.7em;
+  border-radius: 0.25rem;
+  background: linear-gradient(90deg, var(--arb-surface-hover) 25%, var(--arb-border) 50%, var(--arb-surface-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.2s ease-in-out infinite;
 }
 
 .queue-summary {
-  transition: opacity 0.18s ease-out;
   min-height: 3.25rem;
   box-sizing: border-box;
   display: flex;
@@ -1081,6 +1100,7 @@ label.queue-sort-label,
   font-weight: 600;
   color: var(--arb-text);
   font-variant-numeric: tabular-nums;
+  transition: color 0.18s ease-out;
 }
 
 .qs-lbl {
@@ -1626,6 +1646,12 @@ tr:hover .btn-row-actions:not(:disabled) {
   background-color: var(--arb-pause-bg);
   color: var(--arb-pause-fg);
   border: 1px solid var(--arb-pause-border);
+}
+
+.pause-unknown-badge {
+  background-color: var(--arb-inert-bg);
+  color: var(--arb-inert-fg);
+  border: 1px dashed var(--arb-inert-border);
 }
 
 /* ---- Rate-limit fill bars: muted so they don't glare, especially in dark mode ---- */
@@ -2592,4 +2618,310 @@ th.sortable:focus-visible {
 
 .empty-state-link:hover {
   text-decoration: underline;
+}
+
+/* ---- Worker draining: on its way out, so it reads apart from live and stale ---- */
+.badge.draining-badge {
+  background-color: color-mix(in srgb, var(--arb-purple) 12%, transparent);
+  color: var(--arb-gate-conc-fg);
+  border: 1px dashed var(--arb-gate-conc-border);
+}
+
+/* ---- Blocked: ready, but a gate holds it back. Purple, as the blocked counts. ---- */
+.badge.blocked-badge {
+  background-color: color-mix(in srgb, var(--arb-purple) 12%, transparent);
+  color: var(--arb-gate-conc-fg);
+}
+
+/* ---- Payload editor in a drawer ---- */
+.arb-edit .edit-label {
+  color: var(--arb-text-muted);
+  font-weight: 500;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.payload-edit-text {
+  min-height: 14rem;
+  font-size: 0.85rem;
+  color: var(--arb-teal-on-bg);
+  background-color: var(--arb-input-bg);
+  resize: vertical;
+}
+
+.payload-edit-error {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+/* ---- Reschedule ---- */
+.reschedule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--arb-text-muted);
+}
+
+.reschedule-in {
+  color: var(--arb-teal-on-bg);
+  font-variant-numeric: tabular-nums;
+}
+
+.delay-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+}
+
+.delay-chip {
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--arb-border-accent);
+  border-radius: 999px;
+  background-color: var(--arb-surface);
+  color: var(--arb-text);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  transition: color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.delay-chip:hover {
+  color: var(--arb-teal-on-bg);
+  border-color: var(--arb-teal-dim);
+  box-shadow: var(--arb-glow);
+}
+
+.delay-chip:focus-visible {
+  outline: 2px solid var(--arb-focus-outline);
+  outline-offset: 1px;
+}
+
+/* ---- Rate-limit bucket grant ---- */
+.grant-btn,
+.grant-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid var(--arb-border);
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--arb-text-muted);
+  line-height: 1;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.grant-cancel {
+  border-color: transparent;
+  font-size: 0.75rem;
+}
+
+.grant-btn:hover,
+.grant-cancel:hover {
+  color: var(--arb-teal-on-bg);
+  border-color: var(--arb-teal-dim);
+}
+
+.grant-btn:focus-visible,
+.grant-cancel:focus-visible {
+  outline: 2px solid var(--arb-focus-outline);
+  outline-offset: 1px;
+}
+
+.grant-form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.grant-form .form-control {
+  flex: 1 1 5rem;
+  min-width: 0;
+}
+
+.grant-form .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.drill-table tr.is-granting > td {
+  background-color: var(--arb-hover);
+}
+
+/* ---- Stats: depth by kind ---- */
+.kind-list {
+  padding: 0.35rem 1rem 0.6rem;
+  background-color: var(--arb-surface);
+  border: 1px solid var(--arb-border-accent);
+  border-radius: 0.375rem;
+  box-shadow: var(--arb-glow);
+}
+
+.kind-list-head,
+.kind-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, 14rem) 1fr 4.5rem 4.5rem;
+  align-items: center;
+  gap: 1rem;
+}
+
+.kind-list-head {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--arb-border);
+  color: var(--arb-teal-dim);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.kind-row {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--arb-border);
+}
+
+.kind-row:last-child {
+  border-bottom: 0;
+}
+
+.kind-list .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.kind-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Electrolize', sans-serif;
+  letter-spacing: 0.02em;
+}
+
+.kind-bar {
+  height: 0.45rem;
+  border-radius: 999px;
+  background-color: var(--arb-inert-bg);
+  overflow: hidden;
+}
+
+.kind-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--arb-teal-dim), var(--arb-teal-on-bg));
+  transition: width 0.3s ease;
+}
+
+[data-bs-theme="dark"] .kind-bar-fill {
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.35);
+}
+
+.kind-count {
+  color: var(--arb-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.kind-count:hover {
+  color: var(--arb-teal-on-bg);
+  text-decoration: underline;
+}
+
+.kind-count.is-zero {
+  font-weight: 400;
+}
+
+.kind-count.bad {
+  color: var(--arb-danger-on-bg);
+}
+
+/* ---- Groups ---- */
+#tab-groups table {
+  min-width: 760px;
+}
+
+.groups-table th.num,
+.groups-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.groups-table th.num + th:not(.num),
+.groups-table td.num + td:not(.num) {
+  padding-left: 1.5rem;
+}
+
+.group-key-link {
+  font-family: 'Electrolize', sans-serif;
+  letter-spacing: 0.02em;
+  color: var(--arb-teal-on-bg);
+  text-decoration: none;
+}
+
+.group-key-link:hover {
+  text-decoration: underline;
+}
+
+.group-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.group-lease {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--arb-teal-on-bg);
+  font-variant-numeric: tabular-nums;
+}
+
+.group-lease-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background-color: var(--arb-teal-on-bg);
+  box-shadow: 0 0 6px var(--arb-teal-on-bg);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+.group-lease.is-lapsed {
+  color: var(--arb-gold-on-bg);
+}
+
+.group-lease.is-lapsed .group-lease-dot {
+  background-color: var(--arb-gold-on-bg);
+  box-shadow: none;
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group-lease-dot {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .kind-list {
+    padding: 0.25rem 0.75rem 0.5rem;
+  }
+
+  .kind-list-head,
+  .kind-row {
+    grid-template-columns: minmax(5rem, 1fr) 3.5rem 3.5rem;
+    gap: 0.6rem;
+  }
+
+  .kind-list-head > :nth-child(2),
+  .kind-row .kind-bar {
+    display: none;
+  }
 }

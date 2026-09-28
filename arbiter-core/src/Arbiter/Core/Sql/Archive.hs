@@ -24,7 +24,8 @@ import NeatInterpolation (text)
 import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec, joinColumns)
 import Arbiter.Core.Job.Schema (jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored)
-import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, enqueuedAgainVals, jobColsExceptId, jobColumns)
+import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
+import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, enqueuedAgainValsEditing, jobColsExceptId, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
@@ -115,16 +116,19 @@ deleteArchiveJobsBatchSQL schema tableName archiveIds =
 
 -- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
 -- row. Carries 'enqueuedAgainCols' and resets the other columns to their defaults.
-reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Query (JobRead (Stored payload))
-reEnqueueFromArchiveSQL schema tableName archiveId =
+-- An @edit@ replaces its columns.
+reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
+reEnqueueFromArchiveSQL schema tableName archiveId edit =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName
+      joinedEdit = editJoin edit
+      vals = enqueuedAgainValsEditing (foldMap editColumns edit) ("edit." <>)
    in rows
         (jobRowCodec tableName)
         [sql|
           INSERT INTO ${tbl} (${enqueuedAgainCols})
-          SELECT ${enqueuedAgainVals}
-          FROM ${archiveTbl}
+          SELECT ${vals}
+          FROM ${archiveTbl} ${joinedEdit}
           WHERE id = #{archiveId :: CInt8}
           RETURNING ${jobColumns}
         |]

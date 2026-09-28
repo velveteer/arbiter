@@ -83,6 +83,10 @@ instance FromHttpApiData JobStatus where
 instance ToHttpApiData JobStatus where
   toUrlPiece = jobStatusToText
 
+-- | How the optional retry and re-enqueue body reads.
+type PayloadEditNote =
+  "Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload."
+
 -- | One queue's job routes.
 data JobsAPI payload result mode = JobsAPI
   { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...
@@ -157,6 +161,13 @@ data JobsAPI payload result mode = JobsAPI
         :- Capture "id" Int64
           :> "promote"
           :> PostNoContent
+  , -- POST /:table/jobs/:id/reschedule
+    rescheduleJob
+      :: mode
+        :- Capture "id" Int64
+          :> "reschedule"
+          :> ReqBody '[JSON] RescheduleRequest
+          :> PostNoContent
   , -- POST /:table/jobs/:id/move-to-dlq
     moveToDLQ
       :: mode
@@ -192,7 +203,7 @@ data JobsAPI payload result mode = JobsAPI
 
 -- | One queue's DLQ routes.
 data DLQAPI payload mode = DLQAPI
-  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&sort_by=...&sort_dir=...
+  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...
     listDLQ
       :: mode
         :- QueryParam "limit" Int
@@ -201,14 +212,17 @@ data DLQAPI payload mode = DLQAPI
           :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
           :> QueryParam "kind" Text
+          :> QueryParam "payload" Text
+          :> QueryParam "error" Text
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
-  , -- POST /:table/dlq/:id/retry (move back to main queue)
+  , -- POST /:table/dlq/:id/retry (move back to main queue, optionally with a new payload)
     retryFromDLQ
       :: mode
         :- Capture "id" Int64
           :> "retry"
+          :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
   , -- DELETE /:table/dlq/:id (permanently delete)
     deleteDLQ
@@ -226,7 +240,7 @@ data DLQAPI payload mode = DLQAPI
 
 -- | One queue's archive routes.
 data ArchiveAPI payload mode = ArchiveAPI
-  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&completed_after=T&completed_before=T&sort_by=...&sort_dir=...
+  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...
     listArchive
       :: mode
         :- QueryParam "limit" Int
@@ -235,16 +249,18 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "job_id" Int64
           :> QueryParam "group_key" Text
           :> QueryParam "kind" Text
+          :> QueryParam "payload" Text
           :> QueryParam "completed_after" UTCTime
           :> QueryParam "completed_before" UTCTime
           :> QueryParam "sort_by" ArchiveSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (ArchiveResponse payload)
-  , -- POST /:table/archive/:id/reenqueue (re-run as a fresh job)
+  , -- POST /:table/archive/:id/reenqueue (re-run as a fresh job, optionally with a new payload)
     reEnqueueArchive
       :: mode
         :- Capture "id" Int64
           :> "reenqueue"
+          :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
   , -- DELETE /:table/archive/:id (purge one)
     deleteArchive
@@ -291,6 +307,14 @@ data TableAPI payload result mode = TableAPI
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
   , listKinds :: mode :- "kinds" :> Get '[JSON] [Text]
+  , -- GET /:table/groups?limit=N&offset=N&group_key=X
+    listGroups
+      :: mode
+        :- "groups"
+          :> QueryParam "limit" Int
+          :> QueryParam "offset" Int
+          :> QueryParam "group_key" Text
+          :> Get '[JSON] GroupsResponse
   }
   deriving stock (Generic)
 
@@ -407,6 +431,21 @@ data RateLimitsAPI mode = RateLimitsAPI
         :- Capture "prefix" Text
           :> "reset"
           :> Post '[JSON] RateLimitResetResponse
+  , -- POST /rate-limits/:prefix/buckets/:key/tokens
+    addRateLimitTokens
+      :: mode
+        :- Capture "prefix" Text
+          :> "buckets"
+          :> Capture "key" Text
+          :> "tokens"
+          :> ReqBody '[JSON] AddTokensRequest
+          :> Post '[JSON] AddTokensResponse
+  , -- POST /rate-limits/prune?idle=seconds
+    pruneRateLimitBuckets
+      :: mode
+        :- "prune"
+          :> QueryParam "idle" Double
+          :> Post '[JSON] PruneResponse
   }
   deriving stock (Generic)
 
@@ -431,6 +470,11 @@ data ConcurrencyAPI mode = ConcurrencyAPI
       :: mode
         :- "reconcile"
           :> Post '[JSON] ConcurrencyReconcileResponse
+  , -- POST /concurrency/prune
+    pruneConcurrencyKeys
+      :: mode
+        :- "prune"
+          :> Post '[JSON] PruneResponse
   }
   deriving stock (Generic)
 

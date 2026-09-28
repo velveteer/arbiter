@@ -11,12 +11,20 @@ document.addEventListener('alpine:init', () => {
       job_dlq: true,
     },
 
-    queueJobUrl,
+    // The tab that lists an event's job: the DLQ for a DLQ-table event, else Jobs.
+    // A deleted row is no longer where the event saw it, so it gets none.
+    eventTab(evt) {
+      if (!evt.table || !evt.job_id || evt.event === 'job_deleted') return '';
+      return evt.dlq ? 'dlq' : 'jobs';
+    },
 
-    navToJob(ev, queue, jobId) {
+    eventUrl(evt) {
+      return queueJobUrl(evt.table, evt.job_id, this.eventTab(evt));
+    },
+
+    navToJob(ev, evt) {
       if (!plainNavClick(ev)) return;
-      ev.preventDefault();
-      Alpine.store('app').openQueueJob(queue, jobId);
+      Alpine.store('app').openQueueJob(evt.table, evt.job_id, this.eventTab(evt));
     },
 
     get events() {

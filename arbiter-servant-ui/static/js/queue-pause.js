@@ -6,6 +6,9 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('queuePauseToggle', () => ({
     paused: false,
+    // The last read failed, so neither pause nor resume is known to be right.
+    stateUnknown: false,
+    stateError: '',
     _refreshSeq: 0,
     _pollTimer: null,
     pausedAt: null,
@@ -18,7 +21,7 @@ document.addEventListener('alpine:init', () => {
 
     // In 'off' mode the pause affordance is hidden, but resume stays available.
     get showPauseToggle() {
-      return this.paused || this.confirmMode() !== 'off';
+      return !this.stateUnknown && (this.paused || this.confirmMode() !== 'off');
     },
 
     init() {
@@ -28,6 +31,7 @@ document.addEventListener('alpine:init', () => {
           this.resetConfirm();
           this.paused = false;
           this.pausedAt = null;
+          this.stateUnknown = false;
           if (Alpine.store('app').selectedQueue) this.refresh();
         },
         // A gap in the stream is a gap in everything, so resync on its return.
@@ -56,13 +60,17 @@ document.addEventListener('alpine:init', () => {
         if (seq !== this._refreshSeq) return;
         this.paused = details && !!details.paused;
         this.pausedAt = details && details.pausedAt || null;
+        this.stateUnknown = false;
       } catch (e) {
         if (seq !== this._refreshSeq) return;
         if (e.status === 404) {
           this.paused = false;
           this.pausedAt = null;
+          this.stateUnknown = false;
         } else {
           console.error('Could not load queue details:', e);
+          this.stateUnknown = true;
+          this.stateError = e.message;
         }
       }
       // Recompute every refresh so the relative age string ticks (formatAge reads

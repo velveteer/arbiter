@@ -37,13 +37,14 @@ Per-queue endpoints under `/api/v1/:queue/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `jobs` | List jobs |
+| `GET` | `jobs` | List jobs. `payload` searches the payload text |
 | `POST` | `jobs` | Insert a job |
 | `POST` | `jobs/batch` | Insert multiple jobs |
 | `GET` | `jobs/:id` | Get a job by ID |
 | `DELETE` | `jobs/:id` | Cancel a job and delete its children |
 | `POST` | `jobs/:id/force-cancel` | Cancel a job, delete its children, and interrupt the running handler |
 | `POST` | `jobs/:id/promote` | Make a delayed job immediately visible |
+| `POST` | `jobs/:id/reschedule` | Set when a job becomes visible |
 | `POST` | `jobs/:id/move-to-dlq` | Move a job to the dead-letter queue |
 | `POST` | `claim` | Lease visible jobs and return each job with its lease |
 | `POST` | `jobs/:id/ack` | Complete a job the lease still holds and store its result |
@@ -53,16 +54,17 @@ Per-queue endpoints under `/api/v1/:queue/`:
 | `POST` | `jobs/:id/resume` | Resume a suspended job |
 | `POST` | `jobs/:id/pause-children` | Pause all visible children of a job |
 | `POST` | `jobs/:id/resume-children` | Resume all suspended children |
-| `GET` | `dlq` | List DLQ entries |
-| `POST` | `dlq/:id/retry` | Retry a job from the DLQ |
+| `GET` | `dlq` | List DLQ entries. `payload` and `error` search the payload and the last error |
+| `POST` | `dlq/:id/retry` | Retry a job from the DLQ, optionally with a new payload |
 | `DELETE` | `dlq/:id` | Delete one DLQ entry |
 | `POST` | `dlq/batch-delete` | Delete multiple DLQ entries |
-| `GET` | `archive` | List archived jobs |
-| `POST` | `archive/:id/reenqueue` | Re-enqueue an archived job as a new job |
+| `GET` | `archive` | List archived jobs. `payload` searches the payload text |
+| `POST` | `archive/:id/reenqueue` | Re-enqueue an archived job as a new job, optionally with a new payload |
 | `DELETE` | `archive/:id` | Delete one archive entry |
 | `POST` | `archive/batch-delete` | Delete multiple archive entries |
 | `GET` | `stats` | Queue statistics |
 | `GET` | `kinds` | List the kind labels the queue declares |
+| `GET` | `groups` | List the queue's open groups, largest first |
 
 Global endpoints under `/api/v1/`:
 
@@ -84,13 +86,47 @@ Global endpoints under `/api/v1/`:
 | `GET` | `rate-limits/:prefix/buckets` | List a prefix's per-key buckets |
 | `PATCH` | `rate-limits/:prefix` | Set or clear a policy's override params |
 | `POST` | `rate-limits/:prefix/reset` | Reset a prefix's buckets |
+| `POST` | `rate-limits/:prefix/buckets/:key/tokens` | Add tokens to one bucket and wake its throttled jobs |
+| `POST` | `rate-limits/prune` | Delete full buckets idle for `idle` seconds |
 | `GET` | `concurrency` | List pools with limit and in-flight stats |
 | `GET` | `concurrency/:prefix/keys` | List a pool's per-key in-flight counts |
 | `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
 | `POST` | `concurrency/reconcile` | Repair the in-flight counts of every pool |
+| `POST` | `concurrency/prune` | Delete drained keys that have no live job |
 | `POST` | `maintenance` | Run one gated maintenance pass |
 | `GET` | `health` | Readiness check. Returns 503 when the database is unavailable |
 | `GET` | `health/live` | Liveness check. Does not query the database |
+
+## Operating jobs
+
+`dlq/:id/retry` and `archive/:id/reenqueue` take an optional replacement
+payload:
+
+```http
+POST /api/v1/email_queue/dlq/12/retry
+Content-Type: application/json
+
+{"payload": {"tag": "SendWelcome", "contents": "alice@example.com"}}
+```
+
+| Body | Effect |
+| --- | --- |
+| empty | the stored payload runs again |
+| `payload` | the new payload runs. Its kind, rate-limit and concurrency keys come from it |
+| a payload the queue's type rejects | 400. Nothing changes |
+| a body with no `Content-Type` | 400. Nothing changes |
+| a body with a content type that is not `application/json` | 415. Nothing changes |
+
+`jobs/:id/reschedule` sets when a job becomes visible:
+
+```http
+POST /api/v1/email_queue/jobs/41/reschedule
+Content-Type: application/json
+
+{"runAt": "2026-10-01T09:00:00Z"}
+```
+
+An in-flight, suspended or cancelled job returns 409.
 
 ## Consuming over HTTP
 

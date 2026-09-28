@@ -11,10 +11,12 @@ module Arbiter.Core.Sql.Lifecycle
   , nackJobSQL
   , nackJobsBatchSQL
   , promoteJobSQL
+  , rescheduleJobSQL
   ) where
 
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 
 import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
@@ -267,4 +269,22 @@ promoteJobSQL schema tableName jobId =
           AND not_visible_until IS NOT NULL
           AND not_visible_until > NOW()
           AND claimed_by IS NULL
+      |]
+
+-- | Set when a job next becomes visible, clear its throttle marker and void a lapsed
+-- claim. Refuses an in-flight, suspended or cancel-flagged job.
+rescheduleJobSQL :: Text -> Text -> Int64 -> UTCTime -> Query ()
+rescheduleJobSQL schema tableName jobId runAt =
+  let tbl = jobQueueTable schema tableName
+   in [sql|
+        UPDATE ${tbl}
+        SET not_visible_until = CASE WHEN #{runAt :: CTimestamptz}::timestamptz > NOW() THEN #{runAt :: CTimestamptz}::timestamptz END,
+            throttled_until = NULL,
+            claimed_by = NULL,
+            claim_seq = claim_seq + 1,
+            updated_at = NOW()
+        WHERE id = #{jobId :: CInt8}
+          AND NOT suspended
+          AND (claimed_by IS NULL OR not_visible_until <= NOW())
+          AND cancel_requested_at IS NULL
       |]

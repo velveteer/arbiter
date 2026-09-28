@@ -6,6 +6,9 @@
 module Arbiter.Core.Sql.Insert
   ( insertFrag
   , batchFrag
+  , RowEdit (..)
+  , rowEdit
+  , editJoin
   ) where
 
 import Data.Text (Text)
@@ -36,3 +39,23 @@ batchFrag codec rows =
 
 columnList :: Codec s a -> Text
 columnList = joinColumns . map fst . cColumns
+
+-- | Columns a statement reads from a one-row source aliased @edit@ in place of its own.
+data RowEdit = RowEdit
+  { editColumns :: [Text]
+  , editSource :: Query ()
+  }
+
+-- | A codec's written columns as a 'RowEdit': @(SELECT ?::t1 AS c1, ...) edit@.
+rowEdit :: Codec s a -> s -> RowEdit
+rowEdit codec value =
+  let selected = sepBy ", " (zipWith castAs (cColumns codec) (cScalar codec value))
+   in RowEdit {editColumns = map fst (cColumns codec), editSource = [sql|(SELECT ${selected}) edit|]}
+  where
+    castAs (name, sqlType) columnValue =
+      let hole = param columnValue
+       in [sql|${hole}::${sqlType} AS ${name}|]
+
+-- | @CROSS JOIN@ an edit's source, or nothing without an edit.
+editJoin :: Maybe RowEdit -> Query ()
+editJoin = foldMap (\RowEdit {editSource = source} -> [sql|CROSS JOIN ${source}|])

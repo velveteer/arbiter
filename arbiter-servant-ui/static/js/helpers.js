@@ -427,6 +427,83 @@ function confirmArm() {
   };
 }
 
+// An insert payload: any JSON value, or bare text taken as a string. Text that
+// opens like a JSON string, object or array must parse.
+function parsePayloadInput(raw) {
+  try {
+    return { value: JSON.parse(raw) };
+  } catch (e) {
+    return /^["\[{]/.test(raw) ? { error: e.message } : { value: raw };
+  }
+}
+
+// The drawer editor that sends a job again with a changed payload. cfg.verb and
+// cfg.doneText name the action, cfg.send(queue, id, payload) calls the API, and
+// cfg.done(id) runs once it lands.
+function payloadEditor(cfg) {
+  return {
+    payloadEdit: { id: null, text: '', error: '', saving: false },
+    payloadEditVerb: cfg.verb,
+
+    // Opens the drawer on the row first, since the editor lives there.
+    openPayloadEdit(row, id, payload) {
+      this.viewDetail(row);
+      this.payloadEdit = { id, text: formatJson(payload), error: '', saving: false };
+    },
+
+    cancelPayloadEdit() {
+      this.payloadEdit = { id: null, text: '', error: '', saving: false };
+    },
+
+    payloadEditInvalid() {
+      const raw = this.payloadEdit.text.trim();
+      return !raw || !!parsePayloadInput(raw).error;
+    },
+
+    async submitPayloadEdit() {
+      const edit = this.payloadEdit;
+      if (edit.saving || edit.id == null) return;
+      const parsed = parsePayloadInput(edit.text.trim());
+      if (parsed.error) {
+        edit.error = 'Invalid JSON: ' + parsed.error;
+        return;
+      }
+      const queue = Alpine.store('app').selectedQueue;
+      edit.error = '';
+      edit.saving = true;
+      try {
+        await cfg.send(queue, edit.id, parsed.value);
+        const id = edit.id;
+        this.cancelPayloadEdit();
+        showToast(cfg.doneText + ' with the changed payload', 'success');
+        await cfg.done.call(this, id);
+      } catch (e) {
+        // A 400 is the queue refusing the payload. Its body says why.
+        edit.error = e.status === 400 && e.body ? e.body : e.message;
+      } finally {
+        edit.saving = false;
+      }
+    },
+  };
+}
+
+// Payload editor markup for a drawer body. Bindings resolve against payloadEditor.
+const PAYLOAD_EDIT_HTML = `
+  <div class="edit-field">
+    <label class="form-label edit-label" for="payloadEditText">Payload (JSON)</label>
+    <textarea id="payloadEditText" class="form-control font-monospace payload-edit-text" rows="12" spellcheck="false"
+      x-model="payloadEdit.text" :class="{ 'is-invalid': payloadEditInvalid() }"
+      @keydown.ctrl.enter.prevent="submitPayloadEdit()" @keydown.meta.enter.prevent="submitPayloadEdit()"></textarea>
+    <small class="edit-hint">The queue reads the payload again. Its kind, rate-limit key and concurrency key come from the new payload.</small>
+  </div>
+  <div class="alert alert-danger py-2 mt-3 payload-edit-error" role="alert" x-show="payloadEdit.error" x-text="payloadEdit.error"></div>
+  <div class="edit-actions">
+    <button type="button" class="btn btn-outline-secondary btn-sm" @click="cancelPayloadEdit()">Cancel</button>
+    <button type="button" class="btn btn-primary btn-sm payload-edit-submit" @click="submitPayloadEdit()"
+      :disabled="payloadEdit.saving || payloadEditInvalid()"
+      x-text="payloadEdit.saving ? 'Sending…' : payloadEditVerb"></button>
+  </div>`;
+
 // Type-the-name confirmation, keyed on an ARB_CONFIG mode flag. Methods, not
 // getters: a spread evaluates a getter once and copies the result as a value.
 function typeToConfirm(configKey) {
@@ -705,6 +782,43 @@ function refreshControl(loadMethod, storageKey, defaultMode = '5s') {
   };
 }
 
+const SORT_DIRS = ['asc', 'desc'];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const WHOLE_NUMBER_PATTERN = /^\d+$/;
+
+// Why the server would refuse a filter value, or '' when it takes it.
+function filterValueError(f, v) {
+  if (!v) return '';
+  if (f.numeric && !WHOLE_NUMBER_PATTERN.test(v)) return f.label + ' must be a positive integer';
+  if (f.uuid && !UUID_PATTERN.test(v)) return f.label + ' must be a UUID';
+  return '';
+}
+
+// Every filter a table can offer. `param` names the field's query-string and API
+// key, and `model` and `applied` name the slots holding its typed and loaded values.
+const FILTER_FIELDS = {
+  group: { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
+  parent: { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
+  // Job ID locates a single row, so it does not combine with the others.
+  job: { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
+  worker: { field: 'worker', label: 'Worker', param: 'claimed_by', model: 'claimedByFilter', applied: '_appliedClaimedBy', format: shortId, uuid: true },
+  kind: { field: 'kind', label: 'Kind', param: 'kind', model: 'kindFilter', applied: '_appliedKind', options: 'kindOptions' },
+  payload: { field: 'payload', label: 'Payload', param: 'payload', model: 'payloadFilter', applied: '_appliedPayload' },
+  error: { field: 'error', label: 'Error', param: 'error', model: 'errorFilter', applied: '_appliedError' },
+  rate: { field: 'rate', label: 'Rate limit', param: 'rate_limit_prefix', model: 'ratePrefixFilter', applied: '_appliedRatePrefix' },
+  conc: { field: 'conc', label: 'Concurrency', param: 'concurrency_prefix', model: 'concPrefixFilter', applied: '_appliedConcPrefix' },
+  after: { field: 'after', label: 'Completed after', param: 'completed_after', model: 'completedAfterFilter', applied: '_appliedCompletedAfter', type: 'datetime-local', format: formatTime, toUrl: toIsoInstant, fromUrl: toLocalInput },
+  before: { field: 'before', label: 'Completed before', param: 'completed_before', model: 'completedBeforeFilter', applied: '_appliedCompletedBefore', type: 'datetime-local', format: formatTime, toUrl: toIsoInstant, fromUrl: toLocalInput },
+};
+
+// A tab's filter builder over the named fields, with every slot they write declared.
+function tableFilters(...names) {
+  const filterFields = names.map((n) => FILTER_FIELDS[n]);
+  const slots = {};
+  filterFields.forEach((f) => { slots[f.model] = ''; slots[f.applied] = ''; });
+  return { ...slots, filterFields, newFilterField: names[0] };
+}
+
 // Shared jobs/dlq table mixin.
 function tableTab(loadMethod, refreshStorageKey) {
   return {
@@ -727,14 +841,17 @@ function tableTab(loadMethod, refreshStorageKey) {
       this._hashName = hashName;
       if (location.hash.replace('#', '') !== hashName) return;
       const p = new URLSearchParams(location.search);
+      // A value the server would refuse is dropped, so a bad link still opens the list.
+      const valid = (v, ok) => (v && ok(v) ? v : '');
       this.filterFields.forEach((f) => {
-        const v = p.get(f.param) || '';
+        const raw = p.get(f.param);
+        const v = valid(f.fromUrl ? f.fromUrl(raw) : raw, (x) => !filterValueError(f, x));
         this[f.model] = v;
         this[f.applied] = v;
       });
-      this.sortBy = p.get('sort_by') || '';
-      this.sortDir = p.get('sort_dir') || '';
-      if (this.stateFilter !== undefined) this.stateFilter = p.get('status') || '';
+      this.sortBy = valid(p.get('sort_by'), (x) => this.sortColumns.includes(x));
+      this.sortDir = valid(p.get('sort_dir'), (x) => SORT_DIRS.includes(x));
+      if (this.stateFilter !== undefined) this.stateFilter = valid(p.get('status'), (x) => JOB_STATUSES.includes(x));
     },
 
     // Write this tab's applied filters into the address bar, so the view is a link.
@@ -747,7 +864,8 @@ function tableTab(loadMethod, refreshStorageKey) {
       const url = new URL(location.href);
       for (const k of _filterKeys) url.searchParams.delete(k);
       this.filterFields.forEach((f) => {
-        if (this[f.applied]) url.searchParams.set(f.param, this[f.applied]);
+        const v = this[f.applied];
+        if (v) url.searchParams.set(f.param, f.toUrl ? f.toUrl(v) : v);
       });
       if (this.stateFilter) url.searchParams.set('status', this.stateFilter);
       if (this.sortBy) url.searchParams.set('sort_by', this.sortBy);
@@ -759,7 +877,7 @@ function tableTab(loadMethod, refreshStorageKey) {
     kindOptions: [],
     async loadKinds() {
       const queue = Alpine.store('app').selectedQueue;
-      if (!queue) return;
+      if (!queue || !this.filterFields.some((f) => f.options === 'kindOptions')) return;
       try {
         this.kindOptions = (await ArbiterAPI.listKinds(queue)) || [];
       } catch {
@@ -768,15 +886,11 @@ function tableTab(loadMethod, refreshStorageKey) {
     },
 
     // Filter builder: one chip per applied filter, plus a "field + value" adder.
-    // `param` names the field's query-string and API key, so a tab adds a filter by
-    // declaring it here and reading it in its own loader.
-    filterFields: [
-      { field: 'group', label: 'Group', param: 'group_key', model: 'groupKeyFilter', applied: '_appliedGroupKey' },
-      { field: 'parent', label: 'Parent ID', param: 'parent_id', model: 'parentIdFilter', applied: '_appliedParentId', numeric: true },
-      // Job ID locates a single row, so it does not combine with the others.
-      { field: 'job', label: 'Job ID', param: 'job_id', model: 'jobIdFilter', applied: '_appliedJobId', numeric: true, exclusive: true },
-    ],
-    newFilterField: 'group',
+    // A tab declares its fields with tableFilters and reads them in its loader.
+    filterFields: [],
+    // The sort keys the server accepts for this list.
+    sortColumns: [],
+    newFilterField: '',
     newFilterValue: '',
     _lastInvalid: {},
 
@@ -786,6 +900,18 @@ function tableTab(loadMethod, refreshStorageKey) {
       const f = this.filterFields.find((x) => x.field === field);
       if (!f) return '';
       return (overrides?.[field] ?? this[f.applied]) || '';
+    },
+
+    // Every filter's value for a load, keyed by field.
+    filterValues(overrides) {
+      const values = {};
+      this.filterFields.forEach((f) => { values[f.field] = this.filterValue(f.field, overrides); });
+      return values;
+    },
+
+    // Record the filters a load used, once its answer lands.
+    _setAppliedFilters(values) {
+      this.filterFields.forEach((f) => { this[f.applied] = values[f.field] || ''; });
     },
 
     // Apply one filter and clear the rest. Backs the links that jump straight to a
@@ -826,8 +952,9 @@ function tableTab(loadMethod, refreshStorageKey) {
       const f = this.currentFilterField();
       const v = (this.newFilterValue || '').trim();
       if (!v) return;
-      if (f.numeric && !/^\d+$/.test(v)) {
-        showToast(f.label + ' must be a positive integer', 'warning');
+      const err = filterValueError(f, v);
+      if (err) {
+        showToast(err, 'warning');
         return;
       }
       // An exclusive field (Job ID) clears every other filter. Any other field
@@ -839,6 +966,10 @@ function tableTab(loadMethod, refreshStorageKey) {
       this[f.model] = v;
       this.newFilterValue = '';
       this.applyFilter();
+    },
+
+    _clearFilters() {
+      this.filterFields.forEach((f) => { this[f.model] = ''; this[f.applied] = ''; });
     },
 
     removeFilter(field) {
@@ -883,9 +1014,10 @@ function tableTab(loadMethod, refreshStorageKey) {
       for (const f of this.filterFields) {
         const v = (this[f.model] || '').trim();
         // Auto-apply fires from both Enter and change/blur. Only warn once per value.
-        if (f.numeric && v && !/^\d+$/.test(v)) {
+        const err = filterValueError(f, v);
+        if (err) {
           if (this._lastInvalid[f.field] !== v) {
-            showToast(f.label + ' must be a positive integer', 'warning');
+            showToast(err, 'warning');
             this._lastInvalid[f.field] = v;
           }
           return;
@@ -909,7 +1041,7 @@ function tableTab(loadMethod, refreshStorageKey) {
       // a history step lands on a URL that carries both a new queue and its filters.
       this._onQueueChanged = () => {
         this.disarm();
-        this.filterFields.forEach((f) => { this[f.model] = ''; this[f.applied] = ''; });
+        this._clearFilters();
         this._lastInvalid = {};
         this.newFilterValue = '';
         this.sortBy = '';
@@ -918,6 +1050,10 @@ function tableTab(loadMethod, refreshStorageKey) {
         // queue rather than a leftover offset (offset lives only in _resetView, which
         // is active-gated).
         this.offset = 0;
+        if (this.stateFilter !== undefined) this.stateFilter = '';
+        this.selected = {};
+        this.resetAutoEmpty();
+        this.loadKinds();
         if (opts.onQueueReset) opts.onQueueReset();
         this.readUrlFilters(opts.hashName);
         if (this.active) this._resetView();
@@ -1094,6 +1230,9 @@ function treeIndentStyle(depth) {
   return `background: linear-gradient(to right, ${stops.join(', ')}); padding-left: calc(var(--bs-table-cell-padding-x, 0.5rem) + ${indent}px)`;
 }
 
+// Every status the server can filter jobs by.
+const JOB_STATUSES = ['ready', 'in_flight', 'backoff', 'scheduled', 'throttled', 'exhausted', 'suspended', 'cancelled'];
+
 // Badge classes for a job status, shared by the tables and the detail drawers.
 function statusBadgeClass(status) {
   return {
@@ -1105,6 +1244,7 @@ function statusBadgeClass(status) {
     throttled: 'bg-info-subtle text-info-emphasis',
     exhausted: 'bg-danger-subtle text-danger-emphasis',
     ready: 'bg-success-subtle text-success-emphasis',
+    blocked: 'blocked-badge',
   }[status] || 'bg-secondary-subtle text-secondary-emphasis';
 }
 
@@ -1328,10 +1468,20 @@ function drillDownTab(cfg) {
     },
 
     _clearDrill() {
+      cfg.onClear?.call(this);
       this.selectedPolicy = null;
       this[cfg.listField] = [];
       this[cfg.loadingField] = false;
       this.editing = false;
+      this._syncPrefixToUrl('');
+    },
+
+    // The address bar names the open policy, so the drawer is a link.
+    _syncPrefixToUrl(prefix) {
+      const url = new URL(location.href);
+      if (prefix) url.searchParams.set('prefix', prefix);
+      else url.searchParams.delete('prefix');
+      Alpine.store('app')._writeUrl(url);
     },
 
     // The drawer is the editor's home, so open it on this policy first.
@@ -1387,6 +1537,7 @@ function drillDownTab(cfg) {
       const same = this.selectedPolicy?.prefix === p.prefix;
       this.selectedPolicy = p;
       this.editing = false;
+      this._syncPrefixToUrl(p.prefix);
       showDrawer(cfg.drawerId);
       if (same) return;
       // Drop the previous policy's rows so they never render under the new heading.
@@ -1698,6 +1849,7 @@ const _filterKeys = [
   'claimed_by',
   'kind',
   'payload',
+  'error',
   'rate_limit_prefix',
   'concurrency_prefix',
   'completed_after',
@@ -1707,22 +1859,22 @@ const _filterKeys = [
   'sort_dir',
 ];
 
-// Relative URL to a queue's Jobs tab, narrowed by any of the filter keys. One source
-// of truth for the deep-link shape used by the queue cards, the stat cards, the worker
-// rows, the policy tables, and the store's in-app navigation.
-function queueJobsUrl(queue, filters) {
+// Relative URL to a queue's Jobs tab, or the tab named, narrowed by any of the filter
+// keys. One source of truth for the deep-link shape used by the queue cards, the stat
+// cards, the worker rows, the policy tables, and the store's in-app navigation.
+function queueJobsUrl(queue, filters, tab = 'jobs') {
   const p = new URLSearchParams({ queue });
   // A bare status keeps the older one-argument form the stat cards call.
   const named = typeof filters === 'string' ? { status: filters } : filters || {};
   for (const [k, v] of Object.entries(named)) {
     if (v) p.set(k, String(v));
   }
-  return '?' + p.toString() + '#jobs';
+  return '?' + p.toString() + '#' + tab;
 }
 
-// Relative URL to one job in a queue's Jobs tab, for the event log's job column.
-function queueJobUrl(queue, jobId) {
-  return queueJobsUrl(queue, { job_id: jobId });
+// Relative URL to one job in a queue's Jobs or DLQ tab, for the event log's job column.
+function queueJobUrl(queue, jobId, tab) {
+  return queueJobsUrl(queue, { job_id: jobId }, tab);
 }
 
 // Anchor click guard: true if this is a plain left-click to handle as an SPA nav
@@ -1738,9 +1890,10 @@ function plainNavClick(e) {
 // Tab-active tracking
 // ---------------------------------------------------------------------------
 
-// Listener slots for trackTabActive.
+// The flag and listener slots trackTabActive sets.
 function tabActive() {
   return {
+    active: false,
     _tabShownHandler: null,
     _tabHiddenHandler: null,
   };

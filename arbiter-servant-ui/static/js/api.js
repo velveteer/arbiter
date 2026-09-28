@@ -132,6 +132,13 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/jobs/${id}/promote`, { method: 'POST' });
   },
 
+  rescheduleJob(table, id, runAt) {
+    return this._fetch(`/${table}/jobs/${id}/reschedule`, {
+      method: 'POST',
+      body: JSON.stringify({ runAt }),
+    });
+  },
+
   moveToDLQ(table, id) {
     return this._fetch(`/${table}/jobs/${id}/move-to-dlq`, { method: 'POST' });
   },
@@ -153,19 +160,26 @@ const ArbiterAPI = {
   },
 
   // DLQ
-  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, sortBy, sortDir } = {}) {
+  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, payload, error, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
+    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
+    if (error) qs += `&error=${encodeURIComponent(error)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
     if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return this._fetch(`/${table}/dlq${qs}`);
   },
 
-  retryFromDLQ(table, id) {
-    return this._fetch(`/${table}/dlq/${id}/retry`, { method: 'POST' });
+  // With a payload, the job runs on it in place of the stored one.
+  retryFromDLQ(table, id, payload) {
+    return this._fetch(`/${table}/dlq/${id}/retry`, { method: 'POST', ...this._payloadBody(payload) });
+  },
+
+  _payloadBody(payload) {
+    return payload === undefined ? {} : { body: JSON.stringify({ payload }) };
   },
 
   deleteDLQ(table, id) {
@@ -180,12 +194,13 @@ const ArbiterAPI = {
   },
 
   // Archive (completed jobs)
-  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, completedAfter, completedBefore, sortBy, sortDir } = {}) {
+  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, payload, completedAfter, completedBefore, sortBy, sortDir } = {}) {
     let qs = `?limit=${limit}&offset=${offset}`;
     if (parentId) qs += `&parent_id=${parentId}`;
     if (jobId) qs += `&job_id=${jobId}`;
     if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
     if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
+    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
     if (completedAfter) qs += `&completed_after=${encodeURIComponent(completedAfter)}`;
     if (completedBefore) qs += `&completed_before=${encodeURIComponent(completedBefore)}`;
     if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
@@ -193,8 +208,8 @@ const ArbiterAPI = {
     return this._fetch(`/${table}/archive${qs}`);
   },
 
-  reEnqueueArchive(table, id) {
-    return this._fetch(`/${table}/archive/${id}/reenqueue`, { method: 'POST' });
+  reEnqueueArchive(table, id, payload) {
+    return this._fetch(`/${table}/archive/${id}/reenqueue`, { method: 'POST', ...this._payloadBody(payload) });
   },
 
   deleteArchive(table, id) {
@@ -216,6 +231,13 @@ const ArbiterAPI = {
   // Per-queue stats for every queue in one request (landing overview).
   getAllStats() {
     return this._fetch('/queues/stats');
+  },
+
+  // A queue's open groups, largest first.
+  listGroups(table, { limit, offset, groupKey } = {}) {
+    let qs = this._pageQuery({ limit, offset });
+    if (groupKey) qs += `${qs ? '&' : '?'}group_key=${encodeURIComponent(groupKey)}`;
+    return this._fetch(`/${table}/groups${qs}`);
   },
 
   // Cron
@@ -289,6 +311,20 @@ const ArbiterAPI = {
     return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/reset`, { method: 'POST' });
   },
 
+  // key is the full bucket key, as the bucket listing shows it.
+  addRateLimitTokens(prefix, key, tokens) {
+    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/buckets/${encodeURIComponent(key)}/tokens`, {
+      method: 'POST',
+      body: JSON.stringify({ tokens }),
+    });
+  },
+
+  // Without idleSeconds the server uses its own idle age.
+  pruneRateLimitBuckets(idleSeconds) {
+    const qs = idleSeconds == null ? '' : `?idle=${encodeURIComponent(idleSeconds)}`;
+    return this._fetch(`/rate-limits/prune${qs}`, { method: 'POST' });
+  },
+
   // Concurrency
   listConcurrency() {
     return this._fetch('/concurrency');
@@ -307,6 +343,10 @@ const ArbiterAPI = {
 
   reconcileConcurrency() {
     return this._fetch('/concurrency/reconcile', { method: 'POST' });
+  },
+
+  pruneConcurrencyKeys() {
+    return this._fetch('/concurrency/prune', { method: 'POST' });
   },
 
   // SSE

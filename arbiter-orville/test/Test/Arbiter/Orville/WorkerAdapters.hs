@@ -24,7 +24,7 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Reader (ReaderT)
 import Data.ByteString (ByteString)
-import Data.Foldable (toList, traverse_)
+import Data.Foldable (for_, toList)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
@@ -92,7 +92,7 @@ spec connStr =
         let
           handler :: NonEmpty (JobRead OrvilleWorkerTestPayload) -> BatchCallbacks Base OrvilleWorkerTestPayload () -> Base ()
           handler jobs callbacks =
-            flip traverse_ jobs $ \job -> do
+            for_ jobs $ \job -> do
               outcome <- try (O.withTransaction (ack callbacks job *> throwIO RollbackAck))
               liftIO $ putMVar settled (primaryKey job, either (\RollbackAck -> True) (const False) outcome)
 

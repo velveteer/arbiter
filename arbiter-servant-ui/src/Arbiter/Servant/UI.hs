@@ -57,10 +57,10 @@ import Data.List (isSuffixOf)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.HTTP.Types (HeaderName, status200, status301, status404)
-import Network.Wai (pathInfo, rawPathInfo, responseLBS)
+import Network.Wai (pathInfo, rawPathInfo, rawQueryString, responseLBS)
 import Numeric (showHex)
 import Servant
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 
 -- | The dashboard's static files, embedded at compile time.
 staticFiles :: [(FilePath, ByteString)]
@@ -132,6 +132,7 @@ devAdminApplication dir = serveStaticApp AlwaysFresh $ \filePath ->
 
 -- | Serve files through a resolver. The root returns @index.html@ and other
 -- paths return the named file. Redirect a root path without a trailing slash.
+-- Refuse a path with a segment that could leave the served directory.
 --
 -- Cache versioned assets as immutable. Do not cache @index.html@. A version
 -- prefix is valid for asset paths.
@@ -144,8 +145,9 @@ serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
     filePath = if isIndex then indexPath else T.unpack path
     reply
       | isIndex && versioned = pure notFound
+      | any unsafeSegment segments = pure notFound
       | T.null path && not ("/" `BS.isSuffixOf` rawPathInfo req) =
-          pure $ responseLBS status301 [("Location", rawPathInfo req <> "/")] ""
+          pure $ responseLBS status301 [("Location", rawPathInfo req <> "/" <> rawQueryString req)] ""
       | otherwise = maybe notFound found <$> resolveFile filePath
     found content =
       responseLBS
@@ -153,6 +155,11 @@ serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
         (securityHeaders ++ cacheHeaders caching versioned ++ [contentTypeHeader filePath])
         (LBS.fromStrict content)
     notFound = responseLBS status404 [("Content-Type", "text/plain")] "Not found"
+
+-- | A decoded path segment that could name a file outside the served directory.
+unsafeSegment :: Text -> Bool
+unsafeSegment segment =
+  segment `elem` [".", ".."] || T.any (`elem` ['/', '\\']) segment || isAbsolute (T.unpack segment)
 
 -- | Response caching mode. Embedded, versioned files are immutable while the
 -- server runs. Files read from disk can change between requests.

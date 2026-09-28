@@ -18,6 +18,7 @@ module Arbiter.Servant.Types
   , ConcurrencyKeyView (..)
   , ConcurrencyPolicyUpdate (..)
   , PgDbHealth (..)
+  , GroupSummary (..)
   ) where
 
 import Arbiter.Core.Concurrency.Stats
@@ -31,7 +32,7 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (JobRead, JobStatus, JobWrite, Stored, jobReadPairs, jobReadSeries)
 import Arbiter.Core.Job.Types qualified as Arb
-import Arbiter.Core.Operations (QueueOverview (..), QueueStats)
+import Arbiter.Core.Operations (GroupSummary (..), QueueOverview (..), QueueStats)
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Stats
   ( RateLimitBucketView (..)
@@ -43,6 +44,7 @@ import Data.Aeson
   ( FromJSON (..)
   , ToJSON (..)
   , Value (Object)
+  , eitherDecode
   , object
   , pairs
   , withObject
@@ -55,12 +57,17 @@ import Data.Aeson
   )
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair)
+import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Char (isSpace)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
+import Data.Proxy (Proxy (..))
+import Data.String (IsString)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
+import Servant.API (Accept (..), JSON, MimeUnrender (..))
 
 -- | A job row plus its SQL-derived status, for the list endpoint.
 data ApiJobWithStatus payload = ApiJobWithStatus
@@ -219,6 +226,75 @@ instance ToJSON MaintenanceResponse where
 instance FromJSON MaintenanceResponse where
   parseJSON = withObject "MaintenanceResponse" $ \obj ->
     MaintenanceResponse <$> obj .: "ops" <*> obj .:? "failed" .!= []
+
+-- | JSON that a request can leave out. An empty body decodes as 'Nothing'. A request
+-- with no content type is read as this type and must have an empty body.
+data OptionalJSON
+
+-- | The type Servant gives a request that has no content type.
+bodylessContentType :: (IsString s) => s
+bodylessContentType = "application/octet-stream"
+
+instance Accept OptionalJSON where
+  contentTypes _ = contentTypes (Proxy @JSON) <> pure bodylessContentType
+
+instance (FromJSON a) => MimeUnrender OptionalJSON (Maybe a) where
+  mimeUnrender proxy = mimeUnrenderWithType proxy bodylessContentType
+  mimeUnrenderWithType _ mediaType body
+    | LBS8.all isSpace body = Right Nothing
+    | mediaType == bodylessContentType = Left "a request body needs a JSON content type"
+    | otherwise = Just <$> eitherDecode body
+
+-- | A replacement payload for a retry or a re-enqueue.
+newtype PayloadEdit payload = PayloadEdit {editPayload :: payload}
+  deriving stock (Eq, Show)
+
+instance (FromJSON payload) => FromJSON (PayloadEdit payload) where
+  parseJSON = withObject "PayloadEdit" $ \obj -> PayloadEdit <$> obj .: "payload"
+
+instance (ToJSON payload) => ToJSON (PayloadEdit payload) where
+  toJSON edit = object ["payload" .= editPayload edit]
+
+-- | When a rescheduled job becomes visible.
+data RescheduleRequest = RescheduleRequest
+  { runAt :: UTCTime
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Tokens to add to one rate-limit bucket.
+newtype AddTokensRequest = AddTokensRequest {addedTokens :: Double}
+  deriving stock (Eq, Show)
+
+instance FromJSON AddTokensRequest where
+  parseJSON = withObject "AddTokensRequest" $ \obj -> AddTokensRequest <$> obj .: "tokens"
+
+instance ToJSON AddTokensRequest where
+  toJSON request = object ["tokens" .= addedTokens request]
+
+-- | Jobs a token grant made claimable again.
+data AddTokensResponse = AddTokensResponse
+  { woken :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | Rows a prune deleted.
+data PruneResponse = PruneResponse
+  { pruned :: Int64
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | A page of a queue's open groups.
+data GroupsResponse = GroupsResponse
+  { groups :: [GroupSummary]
+  , groupsTotal :: Int
+  , groupsOffset :: Int
+  , groupsLimit :: Int
+  }
+  deriving stock (Eq, Generic, Show)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Response wrapper for DLQ jobs.
 data DLQResponse payload = DLQResponse

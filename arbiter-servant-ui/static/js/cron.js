@@ -24,6 +24,17 @@ function safeCronDescribe(expr) {
 // identified by reference.
 let cronHostSeq = 0;
 
+// The newer of a schedule's last scheduled fire and its last manual run.
+function cronLastFired(s) {
+  const manual = s.lastManualRunAt;
+  // Both timestamps are minute floors server-side, so a same-minute manual
+  // run ties the scheduled fire. Break the tie toward the manual run.
+  if (manual && (!s.lastFiredAt || Date.parse(manual) >= Date.parse(s.lastFiredAt))) {
+    return { at: manual, manual: true };
+  }
+  return { at: s.lastFiredAt, manual: false };
+}
+
 // Sort readers for the schedule table.
 const CRON_SORT_KEYS = {
   name: (s) => s.name,
@@ -32,7 +43,7 @@ const CRON_SORT_KEYS = {
   timezone: (s) => s.overrideTimezone ?? s.defaultTimezone ?? '',
   enabled: (s) => (s.enabled ? 1 : 0),
   nextRun: (s) => Date.parse(s.nextRunAt || '') || Number.MAX_SAFE_INTEGER,
-  lastFired: (s) => Date.parse(s.lastManualRunAt || s.lastFiredAt || '') || -1,
+  lastFired: (s) => Date.parse(cronLastFired(s).at || '') || -1,
   lastChecked: (s) => Date.parse(s.lastCheckedAt || '') || -1,
 };
 
@@ -358,7 +369,6 @@ document.addEventListener('alpine:init', () => {
     selectedSchedule: null,
     detailActionsHtml: CRON_ACTIONS_HTML,
     ...loadState((s) => s.schedules.length === 0),
-    active: false,
 
     // Roll-up for the global header strip.
     get enabledCount() {
@@ -526,14 +536,6 @@ document.addEventListener('alpine:init', () => {
       return s?.nextRunAt ? formatTime(s.nextRunAt) : '';
     },
 
-    lastFired(s) {
-      const manual = s.lastManualRunAt;
-      // Both timestamps are minute floors server-side, so a same-minute manual
-      // run ties the scheduled fire. Break the tie toward the manual run.
-      if (manual && (!s.lastFiredAt || Date.parse(manual) >= Date.parse(s.lastFiredAt))) {
-        return { at: manual, manual: true };
-      }
-      return { at: s.lastFiredAt, manual: false };
-    },
+    lastFired: cronLastFired,
   }));
 });

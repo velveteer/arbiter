@@ -6,6 +6,8 @@ module Arbiter.Core.Sql.Stats
   ( getQueueStatsSQL
   , allQueueStatsSQL
   , countChildrenBatchSQL
+  , listGroupsSQL
+  , countGroupsSQL
   ) where
 
 import Data.Int (Int64)
@@ -18,12 +20,14 @@ import Arbiter.Core.Admission (effectivePolicyCol)
 import Arbiter.Core.Codec (RowCodec)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Schema.Groups (inFlightPredicate)
+import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusToText)
 import Arbiter.Core.Queues (arbiterQueuesTable)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable)
 import Arbiter.Core.Sql.Claim (concHeadroomPred, groupHeadBatch)
 import Arbiter.Core.Sql.Jobs (claimablePred, jobStatusCaseSQL, unionAllOverQueueTables)
 import Arbiter.Core.Sql.QQ (sql)
-import Arbiter.Core.Sql.Query (Query, rawRows)
+import Arbiter.Core.Sql.Query (Query, rawRows, rows)
 import Arbiter.Core.Sql.RateLimit (refilledBucketTokens)
 import Arbiter.Core.SqlLiterals (textLiteral)
 import Arbiter.Core.Worker (arbiterWorkersTable)
@@ -32,19 +36,31 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 -- The ready age covers ready and blocked rows and runs from when the row became visible.
 -- Counts follow the 'jobStatusCaseSQL' taxonomy and sum to @total_jobs@.
 getQueueStatsSQL :: RowCodec a -> SchemaName -> TableName -> [Text] -> Query a
-getQueueStatsSQL codec schema tableName kinds = rawRows codec (queueStatsSelect schema tableName kinds)
+getQueueStatsSQL codec schema tableName kinds = rawRows codec (queueStatsSelect DlqByKind schema tableName kinds)
+
+-- | How a stats row counts the DLQ. A count by label reads every DLQ row, where a
+-- plain count reads only the primary key index.
+data DlqCount = DlqByKind | DlqTotal
 
 -- | One queue's stats row. The classified rows are aggregated once per kind and once
 -- over the whole table in one pass. @total_row@ marks the whole-table row. A ready
 -- row a claim would skip counts as blocked instead.
-queueStatsSelect :: SchemaName -> TableName -> [Text] -> Text
-queueStatsSelect schema tableName kinds =
+queueStatsSelect :: DlqCount -> SchemaName -> TableName -> [Text] -> Text
+queueStatsSelect dlqCount schema tableName kinds =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
       kindExpr = declaredKindSQL kinds
       heads = groupHeadsSQL schema tableName
       blocked = blockedExpr schema
+      (dlqCte, dlqTotal, dlqKinds) = case dlqCount of
+        DlqByKind ->
+          ( [text|WITH dlq_by_kind AS (SELECT ${kindExpr} AS kind, COUNT(*)::int8 AS dlq_count FROM ${dlqTbl} GROUP BY 1)|]
+          , "(SELECT COALESCE(SUM(dlq_count), 0)::int8 FROM dlq_by_kind)"
+          , "(SELECT jsonb_object_agg(kind, dlq_count) FILTER (WHERE kind IS NOT NULL) FROM dlq_by_kind)"
+          )
+        DlqTotal -> ("", [text|(SELECT COUNT(*)::int8 FROM ${dlqTbl})|], "NULL::jsonb")
    in [text|
+        ${dlqCte}
         SELECT MAX(total_jobs) FILTER (WHERE total_row = 1) AS total_jobs,
                MAX(ready_jobs) FILTER (WHERE total_row = 1) AS ready_jobs,
                MAX(in_flight_jobs) FILTER (WHERE total_row = 1) AS in_flight_jobs,
@@ -57,8 +73,9 @@ queueStatsSelect schema tableName kinds =
                MAX(blocked_jobs) FILTER (WHERE total_row = 1) AS blocked_jobs,
                MAX(oldest_ready_age_seconds) FILTER (WHERE total_row = 1) AS oldest_ready_age_seconds,
                MAX(oldest_in_flight_age_seconds) FILTER (WHERE total_row = 1) AS oldest_in_flight_age_seconds,
-               (SELECT COUNT(*)::int8 FROM ${dlqTbl}) AS dlq_jobs,
-               jsonb_object_agg(kind, total_jobs) FILTER (WHERE total_row = 0 AND kind IS NOT NULL) AS kind_counts
+               ${dlqTotal} AS dlq_jobs,
+               jsonb_object_agg(kind, total_jobs) FILTER (WHERE total_row = 0 AND kind IS NOT NULL) AS kind_counts,
+               ${dlqKinds} AS dlq_kind_counts
         FROM (
           SELECT kind, GROUPING(kind) AS total_row,
                  COUNT(*)::int8 AS total_jobs,
@@ -109,12 +126,16 @@ blockedExpr schema =
 headOnly :: Text
 headOnly = "1"
 
+-- | The job columns the gate predicates read.
+gateColumns :: [Text]
+gateColumns = ["claimed_by", "concurrency_key", "rate_limit_key", "rate_limit_prefix", "rate_limit_cost"]
+
 -- | The id of each open group's head, the row a claim of that group takes first.
 groupHeadsSQL :: SchemaName -> TableName -> Text
 groupHeadsSQL schema tableName =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
-      headBatch = groupHeadBatch tbl "summary.group_key" [] headOnly
+      headBatch = groupHeadBatch tbl "summary.group_key" [] (claimablePred "job") headOnly
    in [text|
         SELECT head.id
         FROM ${groupsTbl} summary
@@ -157,7 +178,7 @@ allQueueStatsSQL codec schema queueKinds =
   let queuesTbl = arbiterQueuesTable schema
       workersTbl = arbiterWorkersTable schema
    in rawRows codec $ unionAllOverQueueTables schema (map fst queueKinds) $ \tableName _ ->
-        let stats = queueStatsSelect schema tableName (fromMaybe [] (lookup tableName queueKinds))
+        let stats = queueStatsSelect DlqTotal schema tableName (fromMaybe [] (lookup tableName queueKinds))
          in [text|
           SELECT '${tableName}' AS queue, stats.*,
                  COALESCE((SELECT paused FROM ${queuesTbl} WHERE queue_name = '${tableName}'), FALSE) AS queue_paused,
@@ -188,4 +209,73 @@ countChildrenBatchSQL schema tableName jobIds =
         FROM ${tbl}
         WHERE parent_id = ANY(#{jobIds :: [CInt8]})
         GROUP BY parent_id
+      |]
+
+-- ---------------------------------------------------------------------------
+-- Group Listing
+-- ---------------------------------------------------------------------------
+
+-- | A page of a queue's open groups from the summary table, largest first, each with
+-- its head: the job that holds the group or that its next claim takes.
+listGroupsSQL :: RowCodec a -> SchemaName -> TableName -> Maybe Text -> Int64 -> Int64 -> Query a
+listGroupsSQL codec schema tableName groupKey limit offset =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+      keyFilter = openGroupKeyFilter groupKey
+      heads = groupListHeadSQL schema tableName
+   in rows
+        codec
+        [sql|
+          SELECT summary.group_key, summary.job_count::int8 AS job_count,
+                 summary.ready_count::int8 AS ready_count, summary.next_due, summary.in_flight_until,
+                 COALESCE(summary.in_flight_until > NOW(), FALSE) AS in_flight,
+                 head.id AS head_id, COALESCE(head.blocked, FALSE) AS head_blocked, head.status AS head_status
+          FROM (
+            SELECT * FROM ${groupsTbl} summary
+            WHERE summary.job_count > 0 ${keyFilter}
+            ORDER BY summary.job_count DESC, summary.group_key ASC
+            LIMIT #{limit :: CInt8} OFFSET #{offset :: CInt8}
+          ) summary
+          LEFT JOIN LATERAL (${heads}) head ON TRUE
+          ORDER BY summary.job_count DESC, summary.group_key ASC
+        |]
+
+-- | The number of open groups 'listGroupsSQL' pages through.
+countGroupsSQL :: SchemaName -> TableName -> Maybe Text -> Query Int64
+countGroupsSQL schema tableName groupKey =
+  let groupsTbl = jobQueueGroupsTable schema tableName
+      keyFilter = openGroupKeyFilter groupKey
+   in [sql|SELECT COUNT(*)::int8 AS @{count :: CInt8} FROM ${groupsTbl} summary WHERE summary.job_count > 0 ${keyFilter}|]
+
+openGroupKeyFilter :: Maybe Text -> Query ()
+openGroupKeyFilter = foldMap (\key -> [sql|AND summary.group_key = #{key :: CText}|])
+
+-- | A group's head with its status: the job that holds the group, else the first row
+-- a claim takes, and whether a gate holds that row back.
+groupListHeadSQL :: SchemaName -> TableName -> Text
+groupListHeadSQL schema tableName =
+  let tbl = jobQueueTable schema tableName
+      inFlight = inFlightPredicate "job."
+      headBatch = groupHeadBatch tbl "summary.group_key" gateColumns (claimablePred "job") headOnly
+      ready = textLiteral (jobStatusToText Ready)
+      concOk = concHeadroomPred (arbiterConcurrencyTable schema) (arbiterConcurrencyPoliciesTable schema) "head_batch"
+      rlOk = rateLimitHeadroomPred (arbiterRateLimitsTable schema) (arbiterRateLimitPoliciesTable schema) "head_batch"
+   in [text|
+        SELECT head.id, head.status, head.blocked
+        FROM (
+          (
+            SELECT 0 AS rank, job.id, ${jobStatusCaseSQL} AS status, FALSE AS blocked
+            FROM ${tbl} job
+            WHERE summary.in_flight_until > NOW() AND job.group_key = summary.group_key AND ${inFlight}
+            ORDER BY job.not_visible_until DESC NULLS LAST LIMIT 1
+          )
+          UNION ALL
+          (
+            SELECT 1, head_batch.id, ${ready}, NOT (${concOk} AND ${rlOk})
+            FROM (
+              ${headBatch}
+            ) head_batch
+          )
+        ) head
+        ORDER BY head.rank
+        LIMIT 1
       |]
