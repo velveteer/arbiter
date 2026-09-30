@@ -59,7 +59,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LB
-import Data.Foldable (toList)
+import Data.Foldable (for_, toList)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -197,7 +197,7 @@ spec connStr = do
   sharedPool <- runIO (createSharedPool connStr)
   mkEnv <- runIO (createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema)
   serverConfig <- runIO (initArbiterServer (runSimpleDb mkEnv))
-  let app = arbiterApp @ServantTestRegistry serverConfig {queueStatsCacheTtl = 0}
+  let app = arbiterApp @ServantTestRegistry serverConfig
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
@@ -490,17 +490,18 @@ spec connStr = do
         pure $ map primaryKey [job1, job2, job3]
       let sorted = [minimum ids, maximum ids]
 
-      ascResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=ASC"
+      ascResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=asc"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody ascResp
         let returned = map (primaryKey . ajwsJob) (jobs body)
         [head returned, last returned] `shouldBe` sorted
 
-      descResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=DESC"
-      liftIO $ do
-        body :: JobsResponse ServantTestPayload <- decodeBody descResp
-        let returned = map (primaryKey . ajwsJob) (jobs body)
-        [head returned, last returned] `shouldBe` reverse sorted
+      for_ ["desc", "DESC"] $ \dir -> do
+        descResp <- get ("/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=" <> dir)
+        liftIO $ do
+          body :: JobsResponse ServantTestPayload <- decodeBody descResp
+          let returned = map (primaryKey . ajwsJob) (jobs body)
+          [head returned, last returned] `shouldBe` reverse sorted
 
     it "GET /api/v1/arbiter_servant_test/jobs roots_only and parent_id filter the tree" $ do
       (parentId, childIds) <- liftIO $ do

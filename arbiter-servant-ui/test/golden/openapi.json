@@ -1,0 +1,4128 @@
+{
+    "components": {
+        "schemas": {
+            "AckRequest_AnyJson": {
+                "properties": {
+                    "claimSeq": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "claimedBy": {
+                        "$ref": "#/components/schemas/UUID"
+                    },
+                    "result": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    }
+                },
+                "required": [
+                    "claimSeq",
+                    "claimedBy"
+                ],
+                "type": "object"
+            },
+            "AddTokensRequest": {
+                "properties": {
+                    "tokens": {
+                        "format": "double",
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "tokens"
+                ],
+                "type": "object"
+            },
+            "AddTokensResponse": {
+                "properties": {
+                    "woken": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "woken"
+                ],
+                "type": "object"
+            },
+            "AllStatsResponse": {
+                "properties": {
+                    "queues": {
+                        "items": {
+                            "$ref": "#/components/schemas/QueueOverview"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "queues"
+                ],
+                "type": "object"
+            },
+            "AnyJson": {
+                "description": "Caller-defined JSON."
+            },
+            "ArchiveEntry_AnyJson": {
+                "properties": {
+                    "archivePrimaryKey": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "completedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "jobSnapshot": {
+                        "$ref": "#/components/schemas/Job_AnyJson"
+                    },
+                    "result": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    }
+                },
+                "required": [
+                    "archivePrimaryKey",
+                    "completedAt",
+                    "jobSnapshot",
+                    "result"
+                ],
+                "type": "object"
+            },
+            "ArchiveResponse_AnyJson": {
+                "properties": {
+                    "archiveJobs": {
+                        "items": {
+                            "$ref": "#/components/schemas/ArchiveEntry_AnyJson"
+                        },
+                        "type": "array"
+                    },
+                    "archiveLimit": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "archiveOffset": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "archiveTotal": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "archiveJobs",
+                    "archiveTotal",
+                    "archiveOffset",
+                    "archiveLimit"
+                ],
+                "type": "object"
+            },
+            "BatchDeleteRequest": {
+                "properties": {
+                    "ids": {
+                        "items": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "ids"
+                ],
+                "type": "object"
+            },
+            "BatchDeleteResponse": {
+                "properties": {
+                    "deleted": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "deleted"
+                ],
+                "type": "object"
+            },
+            "BatchInsertRequest_AnyJson": {
+                "properties": {
+                    "jobWrites": {
+                        "items": {
+                            "$ref": "#/components/schemas/JobWrite_AnyJson"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "jobWrites"
+                ],
+                "type": "object"
+            },
+            "BatchInsertResponse_AnyJson": {
+                "properties": {
+                    "inserted": {
+                        "items": {
+                            "$ref": "#/components/schemas/Job_AnyJson"
+                        },
+                        "type": "array"
+                    },
+                    "insertedCount": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "inserted",
+                    "insertedCount"
+                ],
+                "type": "object"
+            },
+            "ClaimRequest": {
+                "properties": {
+                    "leaseSeconds": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "maxJobs": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "nullable": true,
+                        "type": "integer"
+                    }
+                },
+                "type": "object"
+            },
+            "ClaimResponse_AnyJson": {
+                "properties": {
+                    "jobs": {
+                        "items": {
+                            "$ref": "#/components/schemas/Job_AnyJson"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "jobs"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyKey": {
+                "properties": {
+                    "prefix": {
+                        "type": "string"
+                    },
+                    "suffix": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "prefix",
+                    "suffix"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyKeyView": {
+                "properties": {
+                    "effectiveLimit": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "fillFraction": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "inFlight": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "key": {
+                        "type": "string"
+                    },
+                    "prefix": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "key",
+                    "prefix",
+                    "inFlight",
+                    "effectiveLimit",
+                    "fillFraction"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyKeysResponse": {
+                "properties": {
+                    "keys": {
+                        "items": {
+                            "$ref": "#/components/schemas/ConcurrencyKeyView"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "keys"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyPoliciesResponse": {
+                "properties": {
+                    "policies": {
+                        "items": {
+                            "$ref": "#/components/schemas/ConcurrencyPolicyView"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "policies"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyPolicyUpdate": {
+                "properties": {
+                    "overrideLimit": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    }
+                },
+                "type": "object"
+            },
+            "ConcurrencyPolicyView": {
+                "properties": {
+                    "defaultLimit": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "keyCount": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "maxInFlight": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "overrideLimit": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "prefix": {
+                        "type": "string"
+                    },
+                    "totalInFlight": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "prefix",
+                    "defaultLimit",
+                    "keyCount",
+                    "totalInFlight"
+                ],
+                "type": "object"
+            },
+            "ConcurrencyReconcileResponse": {
+                "properties": {
+                    "reconciled": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "reconciled"
+                ],
+                "type": "object"
+            },
+            "CronScheduleRow": {
+                "properties": {
+                    "createdAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "defaultExpression": {
+                        "type": "string"
+                    },
+                    "defaultOverlap": {
+                        "type": "string"
+                    },
+                    "defaultTimezone": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    },
+                    "lastCheckedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "lastFiredAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "lastManualRunAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "name": {
+                        "type": "string"
+                    },
+                    "overrideExpression": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "overrideOverlap": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "overrideTimezone": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "queueName": {
+                        "type": "string"
+                    },
+                    "runRequestedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "updatedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    }
+                },
+                "required": [
+                    "name",
+                    "queueName",
+                    "defaultExpression",
+                    "defaultOverlap",
+                    "enabled",
+                    "createdAt",
+                    "updatedAt"
+                ],
+                "type": "object"
+            },
+            "CronScheduleUpdate": {
+                "properties": {
+                    "enabled": {
+                        "nullable": true,
+                        "type": "boolean"
+                    },
+                    "overrideExpression": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "overrideOverlap": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "overrideTimezone": {
+                        "nullable": true,
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "CronScheduleView": {
+                "allOf": [
+                    {
+                        "$ref": "#/components/schemas/CronScheduleRow"
+                    },
+                    {
+                        "properties": {
+                            "nextRunAt": {
+                                "anyOf": [
+                                    {
+                                        "$ref": "#/components/schemas/UTCTime"
+                                    },
+                                    {
+                                        "enum": [
+                                            null
+                                        ],
+                                        "nullable": true,
+                                        "type": "object"
+                                    }
+                                ]
+                            }
+                        },
+                        "required": [
+                            "nextRunAt"
+                        ],
+                        "type": "object"
+                    }
+                ],
+                "description": "A schedule row plus the next tick it fires at. It is null when the schedule is disabled or has no next tick."
+            },
+            "CronSchedulesResponse": {
+                "properties": {
+                    "cronSchedules": {
+                        "items": {
+                            "$ref": "#/components/schemas/CronScheduleView"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "cronSchedules"
+                ],
+                "type": "object"
+            },
+            "DLQEntry_AnyJson": {
+                "properties": {
+                    "dlqPrimaryKey": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "failedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "jobSnapshot": {
+                        "$ref": "#/components/schemas/Job_AnyJson"
+                    }
+                },
+                "required": [
+                    "dlqPrimaryKey",
+                    "failedAt",
+                    "jobSnapshot"
+                ],
+                "type": "object"
+            },
+            "DLQResponse_AnyJson": {
+                "properties": {
+                    "dlqJobs": {
+                        "items": {
+                            "$ref": "#/components/schemas/DLQEntry_AnyJson"
+                        },
+                        "type": "array"
+                    },
+                    "dlqLimit": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "dlqOffset": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "dlqTotal": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "dlqJobs",
+                    "dlqTotal",
+                    "dlqOffset",
+                    "dlqLimit"
+                ],
+                "type": "object"
+            },
+            "DedupKey": {
+                "properties": {
+                    "key": {
+                        "type": "string"
+                    },
+                    "strategy": {
+                        "enum": [
+                            "ignore",
+                            "replace"
+                        ],
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "key",
+                    "strategy"
+                ],
+                "type": "object"
+            },
+            "ExtendRequest": {
+                "properties": {
+                    "claimSeq": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "claimedBy": {
+                        "$ref": "#/components/schemas/UUID"
+                    },
+                    "seconds": {
+                        "format": "double",
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "claimSeq",
+                    "claimedBy",
+                    "seconds"
+                ],
+                "type": "object"
+            },
+            "GroupSummary": {
+                "properties": {
+                    "groupKey": {
+                        "type": "string"
+                    },
+                    "headBlocked": {
+                        "type": "boolean"
+                    },
+                    "headJobId": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "headStatus": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/JobStatus"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "inFlight": {
+                        "type": "boolean"
+                    },
+                    "inFlightUntil": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "jobCount": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "nextDue": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "readyCount": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "groupKey",
+                    "jobCount",
+                    "readyCount",
+                    "nextDue",
+                    "inFlightUntil",
+                    "inFlight",
+                    "headJobId",
+                    "headStatus",
+                    "headBlocked"
+                ],
+                "type": "object"
+            },
+            "GroupsResponse": {
+                "properties": {
+                    "groups": {
+                        "items": {
+                            "$ref": "#/components/schemas/GroupSummary"
+                        },
+                        "type": "array"
+                    },
+                    "limit": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "total": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "groups",
+                    "total",
+                    "offset",
+                    "limit"
+                ],
+                "type": "object"
+            },
+            "HealthResponse": {
+                "properties": {
+                    "checkedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "db": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/PgDbHealth"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "dbLatencyMs": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "schemaName": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/HealthStatus"
+                    }
+                },
+                "required": [
+                    "status",
+                    "schemaName",
+                    "checkedAt"
+                ],
+                "type": "object"
+            },
+            "HealthStatus": {
+                "enum": [
+                    "ok",
+                    "down"
+                ],
+                "type": "string"
+            },
+            "JobLease": {
+                "properties": {
+                    "claimSeq": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "claimedBy": {
+                        "$ref": "#/components/schemas/UUID"
+                    }
+                },
+                "required": [
+                    "claimSeq",
+                    "claimedBy"
+                ],
+                "type": "object"
+            },
+            "JobResponse_AnyJson": {
+                "properties": {
+                    "job": {
+                        "$ref": "#/components/schemas/Job_AnyJson"
+                    }
+                },
+                "required": [
+                    "job"
+                ],
+                "type": "object"
+            },
+            "JobStatus": {
+                "enum": [
+                    "ready",
+                    "in_flight",
+                    "backoff",
+                    "scheduled",
+                    "suspended",
+                    "throttled",
+                    "cancelled",
+                    "exhausted"
+                ],
+                "type": "string"
+            },
+            "JobWithStatusResponse_AnyJson": {
+                "properties": {
+                    "job": {
+                        "$ref": "#/components/schemas/JobWithStatus_AnyJson"
+                    }
+                },
+                "required": [
+                    "job"
+                ],
+                "type": "object"
+            },
+            "JobWithStatus_AnyJson": {
+                "properties": {
+                    "archiveFor": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "attempts": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "claimSeq": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "claimedBy": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UUID"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "concurrency": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/ConcurrencyKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "dedupKey": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/DedupKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "groupKey": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "insertedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "isRollup": {
+                        "type": "boolean"
+                    },
+                    "kind": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "lastAttemptedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "lastError": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "maxAttempts": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "notVisibleUntil": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "parentId": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "parentState": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "payload": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "primaryKey": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "priority": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "queueName": {
+                        "type": "string"
+                    },
+                    "rateLimit": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/RateLimitKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/JobStatus"
+                    },
+                    "suspended": {
+                        "type": "boolean"
+                    },
+                    "traceparent": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "tracestate": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "updatedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    }
+                },
+                "required": [
+                    "primaryKey",
+                    "payload",
+                    "queueName",
+                    "groupKey",
+                    "insertedAt",
+                    "updatedAt",
+                    "attempts",
+                    "lastError",
+                    "priority",
+                    "lastAttemptedAt",
+                    "notVisibleUntil",
+                    "dedupKey",
+                    "maxAttempts",
+                    "parentId",
+                    "parentState",
+                    "traceparent",
+                    "tracestate",
+                    "suspended",
+                    "claimedBy",
+                    "claimSeq",
+                    "archiveFor",
+                    "kind",
+                    "rateLimit",
+                    "concurrency",
+                    "isRollup",
+                    "status"
+                ],
+                "type": "object"
+            },
+            "JobWrite_AnyJson": {
+                "properties": {
+                    "archiveFor": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "dedupKey": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/DedupKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "groupKey": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "maxAttempts": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "notVisibleUntil": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "payload": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "priority": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "payload"
+                ],
+                "type": "object"
+            },
+            "Job_AnyJson": {
+                "properties": {
+                    "archiveFor": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "attempts": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "claimSeq": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "claimedBy": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UUID"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "concurrency": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/ConcurrencyKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "dedupKey": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/DedupKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "groupKey": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "insertedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "isRollup": {
+                        "type": "boolean"
+                    },
+                    "kind": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "lastAttemptedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "lastError": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "maxAttempts": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "notVisibleUntil": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "parentId": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "parentState": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "payload": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "primaryKey": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "priority": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "type": "integer"
+                    },
+                    "queueName": {
+                        "type": "string"
+                    },
+                    "rateLimit": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/RateLimitKey"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "suspended": {
+                        "type": "boolean"
+                    },
+                    "traceparent": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "tracestate": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "updatedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    }
+                },
+                "required": [
+                    "primaryKey",
+                    "payload",
+                    "queueName",
+                    "groupKey",
+                    "insertedAt",
+                    "updatedAt",
+                    "attempts",
+                    "lastError",
+                    "priority",
+                    "lastAttemptedAt",
+                    "notVisibleUntil",
+                    "dedupKey",
+                    "maxAttempts",
+                    "parentId",
+                    "parentState",
+                    "traceparent",
+                    "tracestate",
+                    "suspended",
+                    "claimedBy",
+                    "claimSeq",
+                    "archiveFor",
+                    "kind",
+                    "rateLimit",
+                    "concurrency",
+                    "isRollup"
+                ],
+                "type": "object"
+            },
+            "JobsResponse_AnyJson": {
+                "properties": {
+                    "childCounts": {
+                        "additionalProperties": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "object"
+                    },
+                    "dlqChildCounts": {
+                        "additionalProperties": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "object"
+                    },
+                    "jobs": {
+                        "items": {
+                            "$ref": "#/components/schemas/JobWithStatus_AnyJson"
+                        },
+                        "type": "array"
+                    },
+                    "jobsLimit": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "jobsOffset": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "jobsTotal": {
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "pausedParents": {
+                        "items": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "jobs",
+                    "jobsTotal",
+                    "jobsOffset",
+                    "jobsLimit",
+                    "childCounts",
+                    "pausedParents",
+                    "dlqChildCounts"
+                ],
+                "type": "object"
+            },
+            "LivenessResponse": {
+                "properties": {
+                    "alive": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "alive"
+                ],
+                "type": "object"
+            },
+            "MaintenanceResponse": {
+                "properties": {
+                    "failed": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array"
+                    },
+                    "ops": {
+                        "additionalProperties": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "object"
+                    }
+                },
+                "required": [
+                    "ops",
+                    "failed"
+                ],
+                "type": "object"
+            },
+            "PayloadEdit_AnyJson": {
+                "properties": {
+                    "payload": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    }
+                },
+                "required": [
+                    "payload"
+                ],
+                "type": "object"
+            },
+            "PgDbHealth": {
+                "properties": {
+                    "connActive": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "connBlocked": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "connIdle": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "connIdleInTxn": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "connIdleInTxnAborted": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "connOther": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "numBackends": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "oldestQueryAge": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "oldestTxnAge": {
+                        "format": "double",
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "numBackends",
+                    "connActive",
+                    "connIdle",
+                    "connIdleInTxn",
+                    "connIdleInTxnAborted",
+                    "connBlocked",
+                    "connOther",
+                    "oldestTxnAge",
+                    "oldestQueryAge"
+                ],
+                "type": "object"
+            },
+            "PruneResponse": {
+                "properties": {
+                    "pruned": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "pruned"
+                ],
+                "type": "object"
+            },
+            "QueueOverview": {
+                "properties": {
+                    "paused": {
+                        "type": "boolean"
+                    },
+                    "queue": {
+                        "type": "string"
+                    },
+                    "stats": {
+                        "$ref": "#/components/schemas/QueueStats"
+                    },
+                    "workersLive": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "workersPaused": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "queue",
+                    "stats",
+                    "paused",
+                    "workersLive",
+                    "workersPaused"
+                ],
+                "type": "object"
+            },
+            "QueueRow": {
+                "properties": {
+                    "createdAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "metadata": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "paused": {
+                        "type": "boolean"
+                    },
+                    "pausedAt": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/UTCTime"
+                            },
+                            {
+                                "enum": [
+                                    null
+                                ],
+                                "nullable": true,
+                                "type": "object"
+                            }
+                        ]
+                    },
+                    "queueName": {
+                        "type": "string"
+                    },
+                    "updatedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    }
+                },
+                "required": [
+                    "queueName",
+                    "paused",
+                    "createdAt",
+                    "updatedAt"
+                ],
+                "type": "object"
+            },
+            "QueueStats": {
+                "properties": {
+                    "backoffJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "blockedJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "cancelledJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "dlqJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "dlqKindCounts": {
+                        "additionalProperties": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "object"
+                    },
+                    "exhaustedJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "inFlightJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "kindCounts": {
+                        "additionalProperties": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        },
+                        "type": "object"
+                    },
+                    "oldestInFlightAgeSeconds": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "oldestReadyAgeSeconds": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "readyJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "scheduledJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "suspendedJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "throttledJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "totalJobs": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "totalJobs",
+                    "readyJobs",
+                    "inFlightJobs",
+                    "scheduledJobs",
+                    "backoffJobs",
+                    "throttledJobs",
+                    "suspendedJobs",
+                    "cancelledJobs",
+                    "exhaustedJobs",
+                    "blockedJobs",
+                    "dlqJobs",
+                    "kindCounts",
+                    "dlqKindCounts"
+                ],
+                "type": "object"
+            },
+            "QueuesResponse": {
+                "properties": {
+                    "queues": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "queues"
+                ],
+                "type": "object"
+            },
+            "RateLimitBucketView": {
+                "properties": {
+                    "fillFraction": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "key": {
+                        "type": "string"
+                    },
+                    "lastRefill": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "maxTokens": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "prefix": {
+                        "type": "string"
+                    },
+                    "tokens": {
+                        "format": "double",
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "key",
+                    "prefix",
+                    "tokens",
+                    "maxTokens",
+                    "fillFraction",
+                    "lastRefill"
+                ],
+                "type": "object"
+            },
+            "RateLimitBucketsResponse": {
+                "properties": {
+                    "buckets": {
+                        "items": {
+                            "$ref": "#/components/schemas/RateLimitBucketView"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "buckets"
+                ],
+                "type": "object"
+            },
+            "RateLimitKey": {
+                "properties": {
+                    "prefix": {
+                        "type": "string"
+                    },
+                    "suffix": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "prefix",
+                    "suffix"
+                ],
+                "type": "object"
+            },
+            "RateLimitPoliciesResponse": {
+                "properties": {
+                    "policies": {
+                        "items": {
+                            "$ref": "#/components/schemas/RateLimitPolicyView"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "policies"
+                ],
+                "type": "object"
+            },
+            "RateLimitPolicyUpdate": {
+                "properties": {
+                    "overrideInterval": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "overrideMaxTokens": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "overrideRefillAmount": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    }
+                },
+                "type": "object"
+            },
+            "RateLimitPolicyView": {
+                "properties": {
+                    "avgTokens": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "bucketCount": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    },
+                    "defaultInterval": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "defaultMaxTokens": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "defaultRefillAmount": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "minTokens": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "overrideInterval": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "overrideMaxTokens": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "overrideRefillAmount": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                    },
+                    "prefix": {
+                        "type": "string"
+                    },
+                    "throttledCount": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "prefix",
+                    "defaultMaxTokens",
+                    "defaultRefillAmount",
+                    "defaultInterval",
+                    "bucketCount",
+                    "throttledCount"
+                ],
+                "type": "object"
+            },
+            "RateLimitResetResponse": {
+                "properties": {
+                    "reset": {
+                        "format": "int64",
+                        "maximum": 9223372036854775807,
+                        "minimum": -9223372036854775808,
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "reset"
+                ],
+                "type": "object"
+            },
+            "RescheduleRequest": {
+                "properties": {
+                    "runAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    }
+                },
+                "required": [
+                    "runAt"
+                ],
+                "type": "object"
+            },
+            "StatsResponse": {
+                "properties": {
+                    "stats": {
+                        "$ref": "#/components/schemas/QueueStats"
+                    },
+                    "timestamp": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "stats",
+                    "timestamp"
+                ],
+                "type": "object"
+            },
+            "UTCTime": {
+                "example": "2016-07-22T00:00:00Z",
+                "format": "yyyy-mm-ddThh:MM:ssZ",
+                "type": "string"
+            },
+            "UUID": {
+                "example": "00000000-0000-0000-0000-000000000000",
+                "format": "uuid",
+                "type": "string"
+            },
+            "WorkerHealth": {
+                "enum": [
+                    "live",
+                    "stale",
+                    "draining"
+                ],
+                "type": "string"
+            },
+            "WorkerRow": {
+                "properties": {
+                    "health": {
+                        "$ref": "#/components/schemas/WorkerHealth"
+                    },
+                    "hostName": {
+                        "nullable": true,
+                        "type": "string"
+                    },
+                    "lastHeartbeat": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "metadata": {
+                        "$ref": "#/components/schemas/AnyJson"
+                    },
+                    "paused": {
+                        "type": "boolean"
+                    },
+                    "queueName": {
+                        "type": "string"
+                    },
+                    "shuttingDown": {
+                        "type": "boolean"
+                    },
+                    "staleThresholdSecs": {
+                        "format": "double",
+                        "type": "number"
+                    },
+                    "startedAt": {
+                        "$ref": "#/components/schemas/UTCTime"
+                    },
+                    "workerCount": {
+                        "format": "int32",
+                        "maximum": 2147483647,
+                        "minimum": -2147483648,
+                        "nullable": true,
+                        "type": "integer"
+                    },
+                    "workerId": {
+                        "$ref": "#/components/schemas/UUID"
+                    }
+                },
+                "required": [
+                    "workerId",
+                    "queueName",
+                    "startedAt",
+                    "lastHeartbeat",
+                    "shuttingDown",
+                    "paused",
+                    "staleThresholdSecs",
+                    "health"
+                ],
+                "type": "object"
+            },
+            "WorkersResponse": {
+                "properties": {
+                    "workers": {
+                        "items": {
+                            "$ref": "#/components/schemas/WorkerRow"
+                        },
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "workers"
+                ],
+                "type": "object"
+            }
+        }
+    },
+    "info": {
+        "description": "The Arbiter job queue over HTTP. Each registered queue has its own section, and a service in any language can use all three sides of it: enqueue jobs, run them by claiming a lease and acking, nacking or extending it, and operate the queue itself. The schema-wide sections cover queues, cron, workers, rate limits, concurrency, maintenance and health.\n\nThe document is derived from the server's own route types. Every payload and result below is the queue's real schema. The server ships no authentication. Put it behind your own.",
+        "title": "Arbiter",
+        "version": "v1"
+    },
+    "openapi": "3.0.0",
+    "paths": {
+        "/api/v1/concurrency": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConcurrencyPoliciesResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "concurrency"
+                ]
+            }
+        },
+        "/api/v1/concurrency/prune": {
+            "post": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PruneResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "concurrency"
+                ]
+            }
+        },
+        "/api/v1/concurrency/reconcile": {
+            "post": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConcurrencyReconcileResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "concurrency"
+                ]
+            }
+        },
+        "/api/v1/concurrency/{prefix}": {
+            "patch": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ConcurrencyPolicyUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConcurrencyPolicyView"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`prefix` not found"
+                    }
+                },
+                "tags": [
+                    "concurrency"
+                ]
+            }
+        },
+        "/api/v1/concurrency/{prefix}/keys": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConcurrencyKeysResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `offset` or `limit`"
+                    },
+                    "404": {
+                        "description": "`prefix` not found"
+                    }
+                },
+                "tags": [
+                    "concurrency"
+                ]
+            }
+        },
+        "/api/v1/cron/schedules": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "queue",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CronSchedulesResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `queue`"
+                    }
+                },
+                "tags": [
+                    "cron"
+                ]
+            }
+        },
+        "/api/v1/cron/schedules/{name}": {
+            "patch": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CronScheduleUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CronScheduleView"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`name` not found"
+                    }
+                },
+                "tags": [
+                    "cron"
+                ]
+            }
+        },
+        "/api/v1/cron/schedules/{name}/run": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`name` not found"
+                    }
+                },
+                "tags": [
+                    "cron"
+                ]
+            }
+        },
+        "/api/v1/events/stream": {
+            "get": {
+                "description": "Streams an event per insert, update, delete and dead-letter, as they happen. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one \"connected\" event. Sends a keepalive comment every 15 seconds. A server with streaming switched off answers one \"disabled\" event and closes.",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "text/event-stream": {
+                                "schema": {
+                                    "description": "One job event. The connected and disabled events carry no job fields.",
+                                    "properties": {
+                                        "dlq": {
+                                            "description": "The event comes from the DLQ table.",
+                                            "type": "boolean"
+                                        },
+                                        "event": {
+                                            "enum": [
+                                                "job_inserted",
+                                                "job_updated",
+                                                "job_deleted",
+                                                "job_dlq",
+                                                "connected",
+                                                "disabled"
+                                            ],
+                                            "type": "string"
+                                        },
+                                        "job_id": {
+                                            "description": "The job id. A DLQ row gives the id of the job it holds.",
+                                            "type": "integer"
+                                        },
+                                        "message": {
+                                            "type": "string"
+                                        },
+                                        "table": {
+                                            "description": "The queue name.",
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "event"
+                                    ],
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "description": "An event stream."
+                    }
+                },
+                "summary": "Server-sent stream of job events",
+                "tags": [
+                    "events"
+                ]
+            }
+        },
+        "/api/v1/health": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HealthResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "health"
+                ]
+            }
+        },
+        "/api/v1/health/live": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LivenessResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "health"
+                ]
+            }
+        },
+        "/api/v1/maintenance": {
+            "post": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/MaintenanceResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "maintenance"
+                ]
+            }
+        },
+        "/api/v1/queue/archive": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "parent_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "job_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "group_key",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "kind",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "payload",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "completed_after",
+                        "required": false,
+                        "schema": {
+                            "format": "yyyy-mm-ddThh:MM:ssZ",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "completed_before",
+                        "required": false,
+                        "schema": {
+                            "format": "yyyy-mm-ddThh:MM:ssZ",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_by",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "id",
+                                "completed_at",
+                                "inserted_at",
+                                "job_id",
+                                "attempts",
+                                "group_key",
+                                "parent_id"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_dir",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ArchiveResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `sort_dir` or `sort_by` or `completed_before` or `completed_after` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/archive/batch-delete": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/BatchDeleteRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BatchDeleteResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/archive/{id}": {
+            "delete": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/archive/{id}/reenqueue": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PayloadEdit_AnyJson"
+                            }
+                        }
+                    },
+                    "description": "Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload."
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/claim": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ClaimRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ClaimResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/dlq": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "parent_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "job_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "group_key",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "kind",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "payload",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "error",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_by",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "id",
+                                "failed_at",
+                                "job_id",
+                                "priority",
+                                "attempts",
+                                "inserted_at",
+                                "group_key",
+                                "parent_id",
+                                "last_attempted_at"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_dir",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/DLQResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `sort_dir` or `sort_by` or `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/dlq/batch-delete": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/BatchDeleteRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BatchDeleteResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/dlq/{id}": {
+            "delete": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/dlq/{id}/retry": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PayloadEdit_AnyJson"
+                            }
+                        }
+                    },
+                    "description": "Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload."
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/groups": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "group_key",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/GroupsResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `group_key` or `offset` or `limit`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "group_key",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "parent_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "job_id",
+                        "required": false,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "allowEmptyValue": true,
+                        "in": "query",
+                        "name": "roots_only",
+                        "schema": {
+                            "default": false,
+                            "type": "boolean"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "status",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "ready",
+                                "in_flight",
+                                "backoff",
+                                "scheduled",
+                                "suspended",
+                                "throttled",
+                                "cancelled",
+                                "exhausted"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "claimed_by",
+                        "required": false,
+                        "schema": {
+                            "format": "uuid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "kind",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "payload",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "rate_limit_prefix",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "concurrency_prefix",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_by",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "id",
+                                "priority",
+                                "attempts",
+                                "inserted_at",
+                                "not_visible_until",
+                                "group_key",
+                                "parent_id",
+                                "last_attempted_at"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "sort_dir",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/JobsResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `sort_dir` or `sort_by` or `concurrency_prefix` or `rate_limit_prefix` or `payload` or `kind` or `claimed_by` or `status` or `roots_only` or `job_id` or `parent_id` or `group_key` or `offset` or `limit`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            },
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/JobWrite_AnyJson"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/JobResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/batch": {
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/BatchInsertRequest_AnyJson"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BatchInsertResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}": {
+            "delete": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            },
+            "get": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/JobWithStatusResponse_AnyJson"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/ack": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AckRequest_AnyJson"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/extend": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ExtendRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/force-cancel": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/move-to-dlq": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/nack": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/JobLease"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/pause-children": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/promote": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/reschedule": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RescheduleRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/resume": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/resume-children": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/jobs/{id}/suspend": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "int64",
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/kinds": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queue/stats": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatsResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/v1/queues": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/QueuesResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/queues/stats": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AllStatsResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/queues/{queue}/details": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "queue",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/QueueRow"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`queue` not found"
+                    }
+                },
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/queues/{queue}/pause": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "queue",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`queue` not found"
+                    }
+                },
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/queues/{queue}/resume": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "queue",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`queue` not found"
+                    }
+                },
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/rate-limits": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RateLimitPoliciesResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/rate-limits/prune": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "idle",
+                        "required": false,
+                        "schema": {
+                            "format": "double",
+                            "type": "number"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PruneResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `idle`"
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/rate-limits/{prefix}": {
+            "patch": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RateLimitPolicyUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RateLimitPolicyView"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`prefix` not found"
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/rate-limits/{prefix}/buckets": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "offset",
+                        "required": false,
+                        "schema": {
+                            "maximum": 9223372036854775807,
+                            "minimum": -9223372036854775808,
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RateLimitBucketsResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `offset` or `limit`"
+                    },
+                    "404": {
+                        "description": "`prefix` not found"
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/rate-limits/{prefix}/buckets/{key}/tokens": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "path",
+                        "name": "key",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json;charset=utf-8": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AddTokensRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AddTokensResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `body`"
+                    },
+                    "404": {
+                        "description": "`prefix` or `key` not found"
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/rate-limits/{prefix}/reset": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "prefix",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RateLimitResetResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`prefix` not found"
+                    }
+                },
+                "tags": [
+                    "rate-limits"
+                ]
+            }
+        },
+        "/api/v1/workers": {
+            "get": {
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "queue",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "query",
+                        "name": "live",
+                        "required": false,
+                        "schema": {
+                            "format": "double",
+                            "type": "number"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WorkersResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "400": {
+                        "description": "Invalid `live` or `queue`"
+                    }
+                },
+                "tags": [
+                    "workers"
+                ]
+            }
+        },
+        "/api/v1/workers/{id}/pause": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "uuid",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "workers"
+                ]
+            }
+        },
+        "/api/v1/workers/{id}/resume": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "format": "uuid",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": ""
+                    },
+                    "404": {
+                        "description": "`id` not found"
+                    }
+                },
+                "tags": [
+                    "workers"
+                ]
+            }
+        }
+    },
+    "tags": [
+        {
+            "description": "Jobs, dead letters, archive, groups and stats for the queue queue.",
+            "name": "queue"
+        },
+        {
+            "description": "The registered queues, their counters, and pausing them.",
+            "name": "queues"
+        },
+        {
+            "description": "The sweep a worker pool's reaper runs, on demand.",
+            "name": "maintenance"
+        },
+        {
+            "description": "A server-sent stream of job events.",
+            "name": "events"
+        },
+        {
+            "description": "Cron schedules, their overrides, and out-of-band runs.",
+            "name": "cron"
+        },
+        {
+            "description": "The worker registry, and pausing a pool.",
+            "name": "workers"
+        },
+        {
+            "description": "Token-bucket policies, their live buckets, overrides, token grants and pruning.",
+            "name": "rate-limits"
+        },
+        {
+            "description": "Concurrency pools, their live keys, overrides and pruning.",
+            "name": "concurrency"
+        },
+        {
+            "description": "Liveness and readiness.",
+            "name": "health"
+        }
+    ]
+}

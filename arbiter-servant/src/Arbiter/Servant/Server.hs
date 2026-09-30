@@ -17,7 +17,7 @@ module Arbiter.Servant.Server
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
-  , defaultQueueStatsCacheTtl
+  , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
   , defaultMaintenanceSparseInterval
@@ -129,16 +129,16 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   -- The admin UI then polls. A backend with no listener answers the same way.
   -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
-  -- ^ Short-TTL cache for the rate-limit policy list.
+  -- ^ Cache for the rate-limit policy list, used when 'statsCacheTtl' is positive.
   , concurrencyPoliciesCache :: CacheCell ConcurrencyPoliciesResponse
-  -- ^ Short-TTL cache for the concurrency policy list.
+  -- ^ Cache for the concurrency policy list, used when 'statsCacheTtl' is positive.
   , allQueueStatsCache :: CacheCell AllStatsResponse
-  -- ^ Short-TTL cache for the all-queues overview aggregate.
+  -- ^ Cache for the all-queues overview, used when 'statsCacheTtl' is positive.
   , queueStatsCache :: CacheCell StatsResponse
-  -- ^ Per-queue stats cache.
-  , queueStatsCacheTtl :: NominalDiffTime
-  -- ^ Per-queue stats staleness, or zero to always hit the database.
-  -- Default: 'defaultQueueStatsCacheTtl'.
+  -- ^ Per-queue stats cache, used when 'statsCacheTtl' is positive.
+  , statsCacheTtl :: NominalDiffTime
+  -- ^ How old the queue stats, the overview and the policy lists can be. Zero
+  -- reads the database on each request. Default: 'defaultStatsCacheTtl'.
   , healthCache :: CacheCell HealthResponse
   -- ^ Short-TTL cache for the readiness probe.
   , maintenanceInterval :: NominalDiffTime
@@ -220,7 +220,7 @@ initArbiterServer run = do
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
       , queueStatsCache = perQueueCache
-      , queueStatsCacheTtl = defaultQueueStatsCacheTtl
+      , statsCacheTtl = defaultStatsCacheTtl
       , healthCache = healthCell
       , maintenanceInterval = defaultMaintenanceInterval
       , maintenanceSparseInterval = defaultMaintenanceSparseInterval
@@ -717,7 +717,7 @@ getStatsHandler
   -> ArbiterServerConfig m registry
   -> Handler StatsResponse
 getStatsHandler tableName kinds config =
-  liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
+  liftIO $ cachedForKey (statsCacheTtl config) (queueStatsCache config) tableName $ do
     let schemaName = serverSchema config
 
     queueStats <- runDb config $ Ops.getQueueStats schemaName tableName kinds
@@ -734,7 +734,7 @@ getAllStatsHandler
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
-  liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (allQueueStatsCache config) $ do
     let schemaName = serverSchema config
     AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName queueKinds)
 
@@ -1019,7 +1019,7 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 -- backend's shared listener for the response's lifetime and gets a @connected@
 -- event once its channel is subscribed. If 'enableSSE' is false or the backend
 -- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then stops reconnection attempts.
+-- then probes again at a slow backoff.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
@@ -1254,17 +1254,9 @@ healthCacheTtl = 2
 healthProbeMicros :: Int
 healthProbeMicros = 5_000_000
 
--- | Poll-collapsing TTL for the dashboard list-policy stats.
-policyStatsCacheTtl :: NominalDiffTime
-policyStatsCacheTtl = 10
-
--- | Shorter TTL for the faster-polling all-queues overview.
-overviewStatsCacheTtl :: NominalDiffTime
-overviewStatsCacheTtl = 5
-
--- | Default floor between per-queue stats scans.
-defaultQueueStatsCacheTtl :: NominalDiffTime
-defaultQueueStatsCacheTtl = 2
+-- | Stats are read live by default.
+defaultStatsCacheTtl :: NominalDiffTime
+defaultStatsCacheTtl = 0
 
 -- | No minimum gap. An explicit maintenance call runs every operation.
 -- Concurrent callers exclude each other on the gate.
@@ -1339,7 +1331,7 @@ listRateLimitsHandler
   => ArbiterServerConfig m registry
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (rateLimitPoliciesCache config) $ do
     views <- runDb config HL.listRateLimitPolicies
     pure $ RateLimitPoliciesResponse {policies = views}
 
@@ -1461,7 +1453,7 @@ listConcurrencyHandler
   => ArbiterServerConfig m registry
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (concurrencyPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (concurrencyPoliciesCache config) $ do
     views <- runDb config HL.listConcurrencyPolicies
     pure $ ConcurrencyPoliciesResponse {policies = views}
 

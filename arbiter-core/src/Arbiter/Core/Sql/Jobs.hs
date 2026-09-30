@@ -12,6 +12,7 @@ module Arbiter.Core.Sql.Jobs
   , archiveSortColumnName
   , SortDir (..)
   , sortDirSql
+  , sortDirName
   , throttledPredicateSQL
   , jobStatusCaseSQL
   , claimablePred
@@ -167,6 +168,10 @@ data SortDir = SortAsc | SortDesc
 sortDirSql :: SortDir -> Text
 sortDirSql SortAsc = "ASC"
 sortDirSql SortDesc = "DESC"
+
+-- | A sort direction as a query parameter.
+sortDirName :: SortDir -> Text
+sortDirName = T.toLower . sortDirSql
 
 -- | A throttle-deferred job with a live marker, still parked. Shared by status,
 -- count, and wake. Claiming clears the marker.

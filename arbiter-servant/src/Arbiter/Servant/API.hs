@@ -33,7 +33,7 @@ import Arbiter.Core.Sql.Jobs
   , archiveSortColumnName
   , dlqSortColumnName
   , jobSortColumnName
-  , sortDirSql
+  , sortDirName
   )
 import Data.Int (Int64)
 import Data.Kind (Type)
@@ -72,10 +72,10 @@ instance ToHttpApiData ArchiveSortColumn where
   toUrlPiece = archiveSortColumnName
 
 instance FromHttpApiData SortDir where
-  parseQueryParam = parseEnum sortDirSql
+  parseQueryParam = parseEnum sortDirName
 
 instance ToHttpApiData SortDir where
-  toUrlPiece = sortDirSql
+  toUrlPiece = sortDirName
 
 instance FromHttpApiData JobStatus where
   parseQueryParam = parseEnum jobStatusToText

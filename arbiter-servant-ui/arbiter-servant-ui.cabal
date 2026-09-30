@@ -29,12 +29,14 @@ extra-source-files:
   static/favicon.svg
   static/index.html
   static/js/*.js
+  static/js/views/*.js
   static/vendor/*.css
+  static/vendor/*.d.ts
   static/vendor/*.js
   static/vendor/fonts/*.css
   static/vendor/fonts/*.woff2
-  static/vendor/licenses/*.md
   static/vendor/licenses/*.txt
+  test/golden/*.json
 
 homepage:           https://github.com/velveteer/arbiter
 bug-reports:        https://github.com/velveteer/arbiter/issues
@@ -61,14 +63,16 @@ library
     , arbiter-core     >=0.1    && <0.2
     , arbiter-servant  >=0.1    && <0.2
     , base             >=4.20   && <5
-    , bytestring       >=0.10   && <0.13
+    , bytestring       >=0.10.12 && <0.13
     , file-embed       >=0.0.10 && <0.1
     , filepath         >=1.4    && <1.6
     , hashable         >=1.4    && <1.6
+    , http-media       >=0.8    && <0.9
     , http-types       >=0.12   && <0.13
     , servant-server   >=0.19   && <0.21
     , text             >=1.2    && <2.2
     , wai              >=3.2    && <3.3
+    , zlib             >=0.6    && <0.8
 
 test-suite arbiter-servant-ui-tests
   import:         shared-properties
@@ -78,9 +82,26 @@ test-suite arbiter-servant-ui-tests
   build-depends:
     , arbiter-servant-ui
     , base
+    , bytestring
     , directory
     , filepath
     , hspec
     , hspec-wai
+    , http-types
     , servant-server
     , temporary
+    , zlib
+
+test-suite arbiter-servant-ui-openapi
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        OpenApiSpec.hs
+  build-depends:
+    , aeson
+    , aeson-pretty             >=0.8 && <0.9
+    , arbiter-core
+    , arbiter-servant-openapi
+    , base
+    , tasty                    >=1.4 && <1.6
+    , tasty-golden             >=2.3 && <2.4
