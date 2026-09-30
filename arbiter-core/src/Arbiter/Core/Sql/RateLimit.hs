@@ -32,6 +32,7 @@ import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyView)
 import Arbiter.Core.Sql.Jobs (throttledPredicateSQL, unionAllOverQueueTables)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows, sepBy)
+import Arbiter.Core.SqlLiterals (textLiteral)
 
 -- | Deny-path wait (seconds) when no refill interval yields a real wait.
 defaultThrottleWaitSeconds :: Double
@@ -164,9 +165,10 @@ rateLimitPoliciesSQL :: SchemaName -> [TableName] -> Maybe Text -> Query RateLim
 rateLimitPoliciesSQL schema tableNames mPrefix =
   let policies = arbiterRateLimitPoliciesTable schema
       buckets = arbiterRateLimitsTable schema
-      throttledPerTable = unionAllOverQueueTables schema tableNames $ \_ table ->
-        [text|
-          SELECT rate_limit_prefix AS prefix, COUNT(*)::int8 AS throttled
+      throttledPerTable = unionAllOverQueueTables schema tableNames $ \tableName table ->
+        let queue = textLiteral tableName
+         in [text|
+          SELECT ${queue} AS queue, rate_limit_prefix AS prefix, COUNT(*)::int8 AS throttled
           FROM ${table}
           WHERE ${throttledPredicateSQL} AND NOT suspended AND rate_limit_prefix IS NOT NULL
             AND ((SELECT prefix FROM target) IS NULL OR rate_limit_prefix = (SELECT prefix FROM target))
@@ -175,15 +177,18 @@ rateLimitPoliciesSQL schema tableNames mPrefix =
       throttledJoin =
         [text|
           LEFT JOIN (
-            SELECT prefix, SUM(throttled)::int8 AS throttled
+            SELECT prefix, SUM(throttled)::int8 AS throttled, jsonb_agg(queue ORDER BY throttled DESC, queue) AS queues
             FROM (${throttledPerTable}) per_table
             GROUP BY prefix
           ) throttled ON throttled.prefix = policy.prefix_id
         |]
       throttledCol, throttledJoinClause :: Text
       (throttledCol, throttledJoinClause) = case tableNames of
-        [] -> ("0::int8 AS throttled_count", "")
-        _ -> ("COALESCE(throttled.throttled, 0) AS throttled_count", throttledJoin)
+        [] -> ("0::int8 AS throttled_count, '[]'::jsonb AS throttled_queues", "")
+        _ ->
+          ( "COALESCE(throttled.throttled, 0) AS throttled_count, COALESCE(throttled.queues, '[]'::jsonb) AS throttled_queues"
+          , throttledJoin
+          )
    in rows
         rateLimitPolicyViewCodec
         [sql|

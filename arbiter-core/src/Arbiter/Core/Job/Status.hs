@@ -12,6 +12,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 
+import Arbiter.Core.Enum (enumFromText)
+
 -- | Effective job status. Arbiter derives status from the stored fields. The status SQL
 -- in "Arbiter.Core.Sql.Jobs" is its source of truth.
 data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled | Cancelled | Exhausted
@@ -30,9 +32,7 @@ jobStatusToText Exhausted = "exhausted"
 
 -- | Strict inverse of 'jobStatusToText'. Unknown values are rejected.
 jobStatusFromText :: Text -> Either Text JobStatus
-jobStatusFromText name =
-  maybe (Left ("unknown job status: " <> name)) Right $
-    lookup name [(jobStatusToText status, status) | status <- [minBound .. maxBound]]
+jobStatusFromText = enumFromText "job status" jobStatusToText
 
 instance ToJSON JobStatus where
   toJSON = toJSON . jobStatusToText

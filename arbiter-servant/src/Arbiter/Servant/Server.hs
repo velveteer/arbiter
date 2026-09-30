@@ -17,7 +17,7 @@ module Arbiter.Servant.Server
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
-  , defaultQueueStatsCacheTtl
+  , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
   , defaultMaintenanceSparseInterval
@@ -129,16 +129,16 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   -- The admin UI then polls. A backend with no listener answers the same way.
   -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
-  -- ^ Short-TTL cache for the rate-limit policy list.
+  -- ^ Cache for the rate-limit policy list, used when 'statsCacheTtl' is positive.
   , concurrencyPoliciesCache :: CacheCell ConcurrencyPoliciesResponse
-  -- ^ Short-TTL cache for the concurrency policy list.
+  -- ^ Cache for the concurrency policy list, used when 'statsCacheTtl' is positive.
   , allQueueStatsCache :: CacheCell AllStatsResponse
-  -- ^ Short-TTL cache for the all-queues overview aggregate.
+  -- ^ Cache for the all-queues overview, used when 'statsCacheTtl' is positive.
   , queueStatsCache :: CacheCell StatsResponse
-  -- ^ Per-queue stats cache.
-  , queueStatsCacheTtl :: NominalDiffTime
-  -- ^ Per-queue stats staleness, or zero to always hit the database.
-  -- Default: 'defaultQueueStatsCacheTtl'.
+  -- ^ Per-queue stats cache, used when 'statsCacheTtl' is positive.
+  , statsCacheTtl :: NominalDiffTime
+  -- ^ How old the queue stats, the overview and the policy lists can be. Zero
+  -- reads the database on each request. Default: 'defaultStatsCacheTtl'.
   , healthCache :: CacheCell HealthResponse
   -- ^ Short-TTL cache for the readiness probe.
   , maintenanceInterval :: NominalDiffTime
@@ -220,7 +220,7 @@ initArbiterServer run = do
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
       , queueStatsCache = perQueueCache
-      , queueStatsCacheTtl = defaultQueueStatsCacheTtl
+      , statsCacheTtl = defaultStatsCacheTtl
       , healthCache = healthCell
       , maintenanceInterval = defaultMaintenanceInterval
       , maintenanceSparseInterval = defaultMaintenanceSparseInterval
@@ -310,10 +310,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
       apiJobs = map (uncurry ApiJobWithStatus) jobs
   pure $
     JobsResponse
-      { jobs = apiJobs
-      , jobsTotal = fromIntegral total
-      , jobsOffset = offset
-      , jobsLimit = limit
+      { jobsPage = toPage (limit, offset) total apiJobs
       , childCounts = childCounts
       , pausedParents = pausedParents
       , dlqChildCounts = dlqCounts
@@ -544,10 +541,8 @@ listDLQHandler
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
 listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mError mSortBy mSortDir =
-  readPage config mLimit mOffset toResponse page (Ops.countDLQFiltered schemaName tableName filters)
+  readPage config mLimit mOffset page (Ops.countDLQFiltered schemaName tableName filters)
   where
-    toResponse entries total offset limit =
-      DLQResponse {dlqJobs = entries, dlqTotal = total, dlqOffset = offset, dlqLimit = limit}
     schemaName = serverSchema config
     page = Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir
     filters =
@@ -637,10 +632,8 @@ listArchiveHandler
   -> Maybe SortDir
   -> Handler (ArchiveResponse payload)
 listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mCompletedAfter mCompletedBefore mSortBy mSortDir =
-  readPage config mLimit mOffset toResponse page (Ops.countArchiveFiltered schemaName tableName filters)
+  readPage config mLimit mOffset page (Ops.countArchiveFiltered schemaName tableName filters)
   where
-    toResponse archived total offset limit =
-      ArchiveResponse {archiveJobs = archived, archiveTotal = total, archiveOffset = offset, archiveLimit = limit}
     schemaName = serverSchema config
     page = Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir
     filters =
@@ -717,7 +710,7 @@ getStatsHandler
   -> ArbiterServerConfig m registry
   -> Handler StatsResponse
 getStatsHandler tableName kinds config =
-  liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
+  liftIO $ cachedForKey (statsCacheTtl config) (queueStatsCache config) tableName $ do
     let schemaName = serverSchema config
 
     queueStats <- runDb config $ Ops.getQueueStats schemaName tableName kinds
@@ -734,7 +727,7 @@ getAllStatsHandler
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
-  liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (allQueueStatsCache config) $ do
     let schemaName = serverSchema config
     AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName queueKinds)
 
@@ -767,34 +760,29 @@ listGroupsHandler
   -> Maybe Text
   -> Handler GroupsResponse
 listGroupsHandler tableName config mLimit mOffset mGroupKey =
-  readPage
-    config
-    mLimit
-    mOffset
-    toResponse
-    (Ops.listGroups schemaName tableName key)
-    (Ops.countGroups schemaName tableName key)
+  readPage config mLimit mOffset (Ops.listGroups schemaName tableName key) (Ops.countGroups schemaName tableName key)
   where
-    toResponse page total offset limit =
-      GroupsResponse {groups = page, groupsTotal = total, groupsOffset = offset, groupsLimit = limit}
     schemaName = serverSchema config
     key = nonBlank mGroupKey
 
--- | Read one page and the total it pages through in one transaction, then build
--- the response from the page, the total, the offset and the limit.
+-- | Read one page and the total it pages through in one transaction.
 readPage
   :: (MonadArbiter m)
   => ArbiterServerConfig m registry
   -> Maybe Int
   -> Maybe Int
-  -> ([a] -> Int -> Int -> Int -> response)
   -> (Int -> Int -> m [a])
   -> m Int64
-  -> Handler response
-readPage config mLimit mOffset toResponse page count = do
-  let (limit, offset) = validatePagination defaultPageLimit mLimit mOffset
+  -> Handler (Page a)
+readPage config mLimit mOffset page count = do
+  let pagination@(limit, offset) = validatePagination defaultPageLimit mLimit mOffset
   (rows, total) <- runDb config . withDbTransaction $ (,) <$> page limit offset <*> count
-  pure (toResponse rows (fromIntegral total) offset limit)
+  pure (toPage pagination total rows)
+
+-- | Rows read at a limit and offset, and the total they page through.
+toPage :: (Int, Int) -> Int64 -> [a] -> Page a
+toPage (limit, offset) total rows =
+  Page {pageItems = rows, pageTotal = fromIntegral total, pageOffset = offset, pageLimit = limit}
 
 -- | Lease visible jobs to a consumer outside a worker pool. Each returned job
 -- contains the claim sequence and claimant required for finalization.
@@ -1019,7 +1007,7 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 -- backend's shared listener for the response's lifetime and gets a @connected@
 -- event once its channel is subscribed. If 'enableSSE' is false or the backend
 -- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then stops reconnection attempts.
+-- then reconnects with an exponential backoff.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
@@ -1254,17 +1242,9 @@ healthCacheTtl = 2
 healthProbeMicros :: Int
 healthProbeMicros = 5_000_000
 
--- | Poll-collapsing TTL for the dashboard list-policy stats.
-policyStatsCacheTtl :: NominalDiffTime
-policyStatsCacheTtl = 10
-
--- | Shorter TTL for the faster-polling all-queues overview.
-overviewStatsCacheTtl :: NominalDiffTime
-overviewStatsCacheTtl = 5
-
--- | Default floor between per-queue stats scans.
-defaultQueueStatsCacheTtl :: NominalDiffTime
-defaultQueueStatsCacheTtl = 2
+-- | Stats are read live by default.
+defaultStatsCacheTtl :: NominalDiffTime
+defaultStatsCacheTtl = 0
 
 -- | No minimum gap. An explicit maintenance call runs every operation.
 -- Concurrent callers exclude each other on the gate.
@@ -1339,7 +1319,7 @@ listRateLimitsHandler
   => ArbiterServerConfig m registry
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (rateLimitPoliciesCache config) $ do
     views <- runDb config HL.listRateLimitPolicies
     pure $ RateLimitPoliciesResponse {policies = views}
 
@@ -1355,7 +1335,7 @@ listRateLimitBucketsHandler
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
-  pure $ RateLimitBucketsResponse {buckets = rows}
+  pure Items {items = rows}
 
 updateThenView
   :: ArbiterServerConfig m registry
@@ -1461,7 +1441,7 @@ listConcurrencyHandler
   => ArbiterServerConfig m registry
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (concurrencyPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (concurrencyPoliciesCache config) $ do
     views <- runDb config HL.listConcurrencyPolicies
     pure $ ConcurrencyPoliciesResponse {policies = views}
 
@@ -1477,7 +1457,7 @@ listConcurrencyKeysHandler
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
-  pure $ ConcurrencyKeysResponse {keys = rows}
+  pure Items {items = rows}
 
 -- | Set or clear a pool's override limit, then return the updated view.
 updateConcurrencyPolicyHandler

@@ -32,6 +32,8 @@ data RateLimitPolicyView = RateLimitPolicyView
   , overrideInterval :: Maybe Double
   , bucketCount :: Int64
   , throttledCount :: Int64
+  , throttledQueues :: [Text]
+  -- ^ The queues that hold throttled jobs, the most first.
   , minTokens :: Maybe Double
   , avgTokens :: Maybe Double
   }

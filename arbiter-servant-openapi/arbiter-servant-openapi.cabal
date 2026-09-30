@@ -54,3 +54,22 @@ library
     , text                       >=1.2  && <2.2
     , time                       >=1.9  && <1.16
     , uuid-types                 >=1.0  && <1.1
+
+test-suite arbiter-servant-openapi-tests
+  import:         shared-properties
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  build-depends:
+    , aeson
+    , arbiter-core
+    , arbiter-servant
+    , arbiter-servant-openapi
+    , base
+    , containers
+    , insert-ordered-containers
+    , openapi3
+    , tasty                    >=1.4  && <1.6
+    , text
+    , time
+    , tasty-hunit              >=0.10 && <0.11

@@ -6,6 +6,7 @@
 module Arbiter.Core.Worker
   ( WorkerRow (..)
   , WorkerHealth (..)
+  , workerHealthToText
   , workerHealthFromText
   , arbiterWorkersTable
   , arbiterWorkersTableName
@@ -24,6 +25,7 @@ import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
 
+import Arbiter.Core.Enum (enumFromText)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueTable)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
@@ -32,24 +34,24 @@ data WorkerHealth
   = Live
   | Stale
   | Draining
-  deriving stock (Eq, Generic, Show)
+  deriving stock (Bounded, Enum, Eq, Generic, Show)
 
 instance ToJSON WorkerHealth where
-  toJSON = \case
-    Live -> Aeson.String "live"
-    Stale -> Aeson.String "stale"
-    Draining -> Aeson.String "draining"
+  toJSON = Aeson.String . workerHealthToText
+
+-- | The @health@ SQL token of a 'WorkerHealth'.
+workerHealthToText :: WorkerHealth -> Text
+workerHealthToText = \case
+  Live -> "live"
+  Stale -> "stale"
+  Draining -> "draining"
 
 instance FromJSON WorkerHealth where
   parseJSON = withText "WorkerHealth" $ either (fail . T.unpack) pure . workerHealthFromText
 
 -- | Decode the @health@ SQL token into a 'WorkerHealth'.
 workerHealthFromText :: Text -> Either Text WorkerHealth
-workerHealthFromText = \case
-  "live" -> Right Live
-  "stale" -> Right Stale
-  "draining" -> Right Draining
-  other -> Left ("unknown worker health: " <> other)
+workerHealthFromText = enumFromText "worker health" workerHealthToText
 
 -- | A row in the worker registry. One row per running worker pool.
 data WorkerRow = WorkerRow

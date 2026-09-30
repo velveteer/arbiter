@@ -23,6 +23,7 @@ module Arbiter.Servant.API
   , ConcurrencyAPI (..)
   ) where
 
+import Arbiter.Core.Enum (enumFromTextCI)
 import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, jobStatusToText)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload, SpecResult)
 import Arbiter.Core.Sql.Jobs
@@ -33,12 +34,11 @@ import Arbiter.Core.Sql.Jobs
   , archiveSortColumnName
   , dlqSortColumnName
   , jobSortColumnName
-  , sortDirSql
+  , sortDirName
   )
 import Data.Int (Int64)
 import Data.Kind (Type)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
@@ -46,39 +46,32 @@ import Servant.API
 
 import Arbiter.Servant.Types
 
--- | Case-insensitive lookup of an enum value by its canonical name.
-parseEnum :: (Bounded a, Enum a) => (a -> Text) -> Text -> Either Text a
-parseEnum toName input =
-  maybe (Left $ "unknown value: " <> input) Right (lookup (T.toLower input) table)
-  where
-    table = [(T.toLower (toName value), value) | value <- [minBound .. maxBound]]
-
 instance FromHttpApiData JobSortColumn where
-  parseQueryParam = parseEnum jobSortColumnName
+  parseQueryParam = enumFromTextCI "job sort column" jobSortColumnName
 
 instance ToHttpApiData JobSortColumn where
   toUrlPiece = jobSortColumnName
 
 instance FromHttpApiData DLQSortColumn where
-  parseQueryParam = parseEnum dlqSortColumnName
+  parseQueryParam = enumFromTextCI "DLQ sort column" dlqSortColumnName
 
 instance ToHttpApiData DLQSortColumn where
   toUrlPiece = dlqSortColumnName
 
 instance FromHttpApiData ArchiveSortColumn where
-  parseQueryParam = parseEnum archiveSortColumnName
+  parseQueryParam = enumFromTextCI "archive sort column" archiveSortColumnName
 
 instance ToHttpApiData ArchiveSortColumn where
   toUrlPiece = archiveSortColumnName
 
 instance FromHttpApiData SortDir where
-  parseQueryParam = parseEnum sortDirSql
+  parseQueryParam = enumFromTextCI "sort direction" sortDirName
 
 instance ToHttpApiData SortDir where
-  toUrlPiece = sortDirSql
+  toUrlPiece = sortDirName
 
 instance FromHttpApiData JobStatus where
-  parseQueryParam = parseEnum jobStatusToText
+  parseQueryParam = enumFromTextCI "job status" jobStatusToText
 
 instance ToHttpApiData JobStatus where
   toUrlPiece = jobStatusToText

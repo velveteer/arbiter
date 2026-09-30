@@ -10,6 +10,35 @@ on:
     branches: [main]
 
 jobs:
+  dashboard:
+    name: Dashboard types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: arbiter-servant-ui
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: arbiter-servant-ui/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Generated types match the golden spec
+        run: |
+          npm run types
+          git diff --exit-code types/
+
+      - name: Type check
+        run: npm run check
+
+      - name: Format check
+        run: npm run format:check
+
   build:
     name: GHC ${{ matrix.ghc }}
     runs-on: ubuntu-latest

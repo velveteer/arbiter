@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI'. The route types
@@ -46,7 +47,7 @@ import Arbiter.Core.Job.Types
   , setPriority
   )
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
-import Arbiter.Core.Operations (QueueStats)
+import Arbiter.Core.Operations (QueueStats (QueueStats))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (RateLimitKey))
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
@@ -56,12 +57,12 @@ import Arbiter.Core.Sql.Jobs
   , archiveSortColumnName
   , dlqSortColumnName
   , jobSortColumnName
-  , sortDirSql
+  , sortDirName
   )
-import Arbiter.Core.Worker (WorkerHealth)
+import Arbiter.Core.Worker (WorkerHealth, workerHealthToText)
 import Arbiter.Servant.API (ArbiterAPI)
 import Arbiter.Servant.Types
-import Data.Aeson (ToJSON (..), Value)
+import Data.Aeson (ToJSON (..), Value (Null))
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.Int (Int32, Int64)
@@ -98,6 +99,7 @@ import Data.Time (UTCTime)
 import Data.Typeable (Typeable)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Rep)
+import GHC.TypeLits (ErrorMessage (Text), TypeError)
 import Servant (Get, JSON, Server, (:>))
 import Servant.OpenApi (HasOpenApi, toOpenApi)
 
@@ -127,7 +129,8 @@ openApiSpec = toJSON (sectioned described)
 sectioned :: OpenApi -> OpenApi
 sectioned spec =
   spec
-    { _openApiPaths = InsOrd.mapWithKey (\path -> tagPath (section path) . describeRaw) (_openApiPaths spec)
+    { _openApiPaths =
+        InsOrd.mapWithKey (tagPath . section) (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
     , _openApiTags = InsOrdSet.fromList (map describeSection sections)
     }
   where
@@ -144,25 +147,12 @@ section path =
 mountSegments :: [Text]
 mountSegments = ["api", "v1"]
 
--- | Add a description for the event stream. 'toOpenApi' adds no operation for
--- a @Raw@ route.
-describeRaw :: PathItem -> PathItem
-describeRaw item
-  | any ($ item) operationFields = item
-  | otherwise = item {_pathItemGet = Just streamOperation}
-  where
-    operationFields =
-      map
-        (isJust .)
-        [ _pathItemGet
-        , _pathItemPut
-        , _pathItemPost
-        , _pathItemDelete
-        , _pathItemOptions
-        , _pathItemHead
-        , _pathItemPatch
-        , _pathItemTrace
-        ]
+-- | The event stream's @Raw@ route, which 'toOpenApi' gives no operation.
+eventStreamPath :: FilePath
+eventStreamPath = T.unpack (T.concat (map ("/" <>) (mountSegments <> ["events", "stream"])))
+
+describeStream :: PathItem -> PathItem
+describeStream item = item {_pathItemGet = Just streamOperation}
 
 -- | Description of the continuous @text/event-stream@ response.
 streamOperation :: Operation
@@ -285,13 +275,39 @@ instance Applicative Fields where
   pure _ = Fields (pure [])
   Fields left <*> Fields right = Fields (liftA2 (<>) left right)
 
--- | One field, named here and typed by the schema of @a@.
-prop :: forall a. (ToSchema a) => Text -> Fields a
-prop name = Fields (pure . (,) name <$> declareSchemaRef (Proxy @a))
+-- | One field, named here and typed by the schema of @a@. A 'Maybe' field takes 'opt'.
+prop :: forall a. (ToSchema a) => Text -> Fields (NotMaybe a)
+prop name = Fields declared
+  where
+    Fields declared = payloadProp @a name
+
+-- | Refuse a 'Maybe' field in 'prop'.
+type family NotMaybe a where
+  NotMaybe (Maybe _a) = TypeError ('Text "A Maybe field takes opt, not prop.")
+  NotMaybe a = a
+
+-- | One 'Maybe' field, which encodes 'Nothing' as null.
+opt :: forall a. (ToSchema a) => Text -> Fields (Maybe a)
+opt name = Fields (pure . (,) name . nullable <$> declareSchemaRef (Proxy @a))
+
+-- | One payload field, typed by the payload's own schema.
+payloadProp :: forall payload. (ToSchema payload) => Text -> Fields payload
+payloadProp name = Fields (pure . (,) name <$> declareSchemaRef (Proxy @payload))
+
+-- | Admit null. A reference or untyped schema takes a null-only branch.
+nullable :: Referenced Schema -> Referenced Schema
+nullable (Inline schema)
+  | isJust (_schemaType schema) =
+      Inline schema {_schemaNullable = Just True, _schemaEnum = (<> [Null]) <$> _schemaEnum schema}
+nullable ref = Inline mempty {_schemaAnyOf = Just [ref, Inline nullOnly]}
+
+nullOnly :: Schema
+nullOnly =
+  mempty {_schemaType = Just OpenApiObject, _schemaNullable = Just True, _schemaEnum = Just [Null]}
 
 -- | One patch field, whose value distinguishes an absent field from an explicit null.
 patch :: forall a. (ToSchema a) => Text -> Fields (Maybe (Maybe a))
-patch name = Just <$> prop @(Maybe a) name
+patch name = Just <$> opt @a name
 
 -- | One field with an inline schema for a shape used in one location.
 inlineProp :: forall a. Text -> Schema -> Fields a
@@ -317,9 +333,16 @@ schemaOver required props =
     }
 
 -- | Qualify a schema name with its payload type. Different payload types use
--- different job definitions.
-carrying :: forall payload. (ToSchema payload) => Text -> Text
-carrying base = maybe base ((base <> "_") <>) (OpenApi.schemaName (Proxy @payload))
+-- different job definitions. A payload with no name leaves the schema inline.
+carrying
+  :: forall payload
+   . (ToSchema payload)
+  => Declare (Definitions Schema) NamedSchema
+  -> Declare (Definitions Schema) NamedSchema
+carrying = fmap qualify
+  where
+    qualify (NamedSchema base schema) =
+      NamedSchema (liftA2 (\b p -> b <> "_" <> p) base (OpenApi.schemaName (Proxy @payload))) schema
 
 -- | A string schema accepting exactly the names an enum round-trips through.
 enumSchema :: forall a p. (Bounded a, Enum a) => (a -> Text) -> p a -> Schema
@@ -347,7 +370,7 @@ instance ToParamSchema ArchiveSortColumn where
   toParamSchema = enumSchema archiveSortColumnName
 
 instance ToParamSchema SortDir where
-  toParamSchema = enumSchema sortDirSql
+  toParamSchema = enumSchema sortDirName
 
 -- ---------------------------------------------------------------------------
 -- Hand-encoded types
@@ -357,17 +380,13 @@ instance ToParamSchema SortDir where
 instance ToSchema Value where
   declareNamedSchema _ =
     pure . NamedSchema (Just "AnyJson") $
-      mempty
-        { _schemaType = Just OpenApiObject
-        , _schemaDescription = Just "Caller-defined JSON."
-        }
+      mempty {_schemaDescription = Just "Caller-defined JSON."}
 
 instance ToSchema JobStatus where
   declareNamedSchema = pure . NamedSchema (Just "JobStatus") . toParamSchema
 
 instance ToSchema WorkerHealth where
-  declareNamedSchema _ =
-    pure (NamedSchema (Just "WorkerHealth") (stringEnum ["live", "stale", "draining"]))
+  declareNamedSchema = pure . NamedSchema (Just "WorkerHealth") . enumSchema workerHealthToText
 
 instance ToSchema HealthStatus where
   declareNamedSchema = pure . NamedSchema (Just "HealthStatus") . enumSchema healthStatusToText
@@ -399,29 +418,29 @@ jobFields :: forall payload. (ToSchema payload) => Fields (JobRead payload)
 jobFields =
   Job
     <$> prop @Int64 "primaryKey"
-    <*> prop @payload "payload"
+    <*> payloadProp @payload "payload"
     <*> prop @Text "queueName"
-    <*> prop @(Maybe Text) "groupKey"
+    <*> opt @Text "groupKey"
     <*> prop @UTCTime "insertedAt"
-    <*> prop @(Maybe UTCTime) "updatedAt"
+    <*> opt @UTCTime "updatedAt"
     <*> prop @Int32 "attempts"
-    <*> prop @(Maybe Text) "lastError"
+    <*> opt @Text "lastError"
     <*> prop @Int32 "priority"
-    <*> prop @(Maybe UTCTime) "lastAttemptedAt"
-    <*> prop @(Maybe UTCTime) "notVisibleUntil"
-    <*> prop @(Maybe DedupKey) "dedupKey"
-    <*> prop @(Maybe Int32) "maxAttempts"
-    <*> prop @(Maybe Int64) "parentId"
-    <*> prop @(Maybe Value) "parentState"
-    <*> (toTraceContext <$> prop @(Maybe Text) "traceparent" <*> prop @(Maybe Text) "tracestate")
+    <*> opt @UTCTime "lastAttemptedAt"
+    <*> opt @UTCTime "notVisibleUntil"
+    <*> opt @DedupKey "dedupKey"
+    <*> opt @Int32 "maxAttempts"
+    <*> opt @Int64 "parentId"
+    <*> opt @Value "parentState"
+    <*> (toTraceContext <$> opt @Text "traceparent" <*> opt @Text "tracestate")
     <*> prop @Bool "suspended"
-    <*> prop @(Maybe UUID) "claimedBy"
+    <*> opt @UUID "claimedBy"
     <*> prop @Int64 "claimSeq"
-    <*> prop @(Maybe Int32) "archiveFor"
+    <*> opt @Int32 "archiveFor"
     <*> ( PayloadKeys
-            <$> prop @(Maybe Text) "kind"
-            <*> prop @(Maybe RateLimitKey) "rateLimit"
-            <*> prop @(Maybe ConcurrencyKey) "concurrency"
+            <$> opt @Text "kind"
+            <*> opt @RateLimitKey "rateLimit"
+            <*> opt @ConcurrencyKey "concurrency"
         )
     <* prop @Bool "isRollup"
 
@@ -430,53 +449,54 @@ instance (ToSchema payload) => ToSchema (Stored payload) where
   declareNamedSchema _ = declareNamedSchema (Proxy @payload)
 
 instance (ToSchema payload) => ToSchema (JobRead payload) where
-  declareNamedSchema _ = objectSchema (carrying @payload "Job") [] (jobFields @payload)
+  declareNamedSchema _ = carrying @payload $ closedSchema "Job" (jobFields @payload)
 
 instance (ToSchema payload) => ToSchema (ApiJobWithStatus payload) where
   declareNamedSchema _ =
-    objectSchema
-      (carrying @payload "JobWithStatus")
-      []
-      (jobFields @payload <* prop @JobStatus "status")
+    carrying @payload $
+      closedSchema
+        "JobWithStatus"
+        (jobFields @payload <* prop @JobStatus "status")
 
 instance (ToSchema payload) => ToSchema (ApiJobWrite payload) where
   declareNamedSchema _ =
-    objectSchema (carrying @payload "JobWrite") ["payload"] $
-      ( \value group priority visibleAt dedup attempts retention ->
-          setArchiveFor retention
-            . setMaxAttempts attempts
-            . setDedupKey dedup
-            . setNotVisibleUntil visibleAt
-            . setPriority priority
-            . setGroupKey group
-            $ defaultJob value
-      )
-        <$> prop @payload "payload"
-        <*> prop @(Maybe Text) "groupKey"
+    carrying @payload
+      $ objectSchema "JobWrite" ["payload"]
+      $ ( \value group priority visibleAt dedup attempts retention ->
+            setArchiveFor retention
+              . setMaxAttempts attempts
+              . setDedupKey dedup
+              . setNotVisibleUntil visibleAt
+              . setPriority priority
+              . setGroupKey group
+              $ defaultJob value
+        )
+        <$> payloadProp @payload "payload"
+        <*> opt @Text "groupKey"
         <*> prop @Int32 "priority"
-        <*> prop @(Maybe UTCTime) "notVisibleUntil"
-        <*> prop @(Maybe DedupKey) "dedupKey"
-        <*> prop @(Maybe Int32) "maxAttempts"
-        <*> prop @(Maybe Int32) "archiveFor"
+        <*> opt @UTCTime "notVisibleUntil"
+        <*> opt @DedupKey "dedupKey"
+        <*> opt @Int32 "maxAttempts"
+        <*> opt @Int32 "archiveFor"
 
 instance (ToSchema payload) => ToSchema (DLQ.DLQJob payload) where
   declareNamedSchema _ =
-    closedSchema (carrying @payload "DLQEntry") $
-      DLQ.DLQJob
+    carrying @payload
+      $ closedSchema "DLQEntry"
+      $ DLQ.DLQJob
         <$> prop @Int64 "dlqPrimaryKey"
         <*> prop @UTCTime "failedAt"
         <*> prop @(JobRead payload) "jobSnapshot"
 
 instance (ToSchema payload) => ToSchema (Archive.ArchiveJob payload) where
   declareNamedSchema _ =
-    objectSchema
-      (carrying @payload "ArchiveEntry")
-      ["archivePrimaryKey", "completedAt", "jobSnapshot"]
+    carrying @payload
+      $ closedSchema "ArchiveEntry"
       $ Archive.ArchiveJob
         <$> prop @Int64 "archivePrimaryKey"
         <*> prop @UTCTime "completedAt"
         <*> prop @(JobRead payload) "jobSnapshot"
-        <*> prop @(Maybe Value) "result"
+        <*> opt @Value "result"
 
 instance ToSchema JobLease where
   declareNamedSchema _ = closedSchema "JobLease" leaseFields
@@ -484,10 +504,11 @@ instance ToSchema JobLease where
 -- | Ack request with an optional queue result.
 instance (ToSchema result) => ToSchema (AckRequest result) where
   declareNamedSchema _ =
-    objectSchema
-      (carrying @result "AckRequest")
-      leaseRequired
-      (AckRequest <$> leaseFields <*> prop @(Maybe result) "result")
+    carrying @result $
+      objectSchema
+        "AckRequest"
+        leaseRequired
+        (AckRequest <$> leaseFields <*> opt @result "result")
 
 instance ToSchema ExtendRequest where
   declareNamedSchema _ =
@@ -502,7 +523,7 @@ leaseRequired = ["claimSeq", "claimedBy"]
 
 instance (ToSchema payload) => ToSchema (PayloadEdit payload) where
   declareNamedSchema _ =
-    closedSchema (carrying @payload "PayloadEdit") (PayloadEdit <$> prop @payload "payload")
+    carrying @payload $ closedSchema "PayloadEdit" (PayloadEdit <$> payloadProp @payload "payload")
 
 instance ToSchema AddTokensRequest where
   declareNamedSchema _ = closedSchema "AddTokensRequest" (AddTokensRequest <$> prop @Double "tokens")
@@ -514,11 +535,11 @@ instance ToSchema GroupSummary where
         <$> prop @Text "groupKey"
         <*> prop @Int64 "jobCount"
         <*> prop @Int64 "readyCount"
-        <*> prop @(Maybe UTCTime) "nextDue"
-        <*> prop @(Maybe UTCTime) "inFlightUntil"
+        <*> opt @UTCTime "nextDue"
+        <*> opt @UTCTime "inFlightUntil"
         <*> prop @Bool "inFlight"
-        <*> prop @(Maybe Int64) "headJobId"
-        <*> prop @(Maybe JobStatus) "headStatus"
+        <*> opt @Int64 "headJobId"
+        <*> opt @JobStatus "headStatus"
         <*> prop @Bool "headBlocked"
 
 instance ToSchema MaintenanceResponse where
@@ -529,13 +550,33 @@ instance ToSchema MaintenanceResponse where
 instance ToSchema CronScheduleView where
   declareNamedSchema _ = do
     row <- declareSchemaRef (Proxy @CronScheduleRow)
-    NamedSchema _ added <- objectSchema "" [] (prop @(Maybe UTCTime) "nextRunAt")
+    NamedSchema _ added <- closedSchema "" (opt @UTCTime "nextRunAt")
     pure . NamedSchema (Just "CronScheduleView") $
       mempty
         { _schemaAllOf = Just [row, Inline added]
         , _schemaDescription =
-            Just "A schedule row plus the next tick it fires at, absent when it is disabled."
+            Just "A schedule row plus the next tick it fires at. It is null when the schedule is disabled or has no next tick."
         }
+
+instance ToSchema QueueStats where
+  declareNamedSchema _ =
+    closedSchema "QueueStats" $
+      QueueStats
+        <$> prop @Int64 "totalJobs"
+        <*> prop @Int64 "readyJobs"
+        <*> prop @Int64 "inFlightJobs"
+        <*> prop @Int64 "scheduledJobs"
+        <*> prop @Int64 "backoffJobs"
+        <*> prop @Int64 "throttledJobs"
+        <*> prop @Int64 "suspendedJobs"
+        <*> prop @Int64 "cancelledJobs"
+        <*> prop @Int64 "exhaustedJobs"
+        <*> prop @Int64 "blockedJobs"
+        <*> opt @Double "oldestReadyAgeSeconds"
+        <*> opt @Double "oldestInFlightAgeSeconds"
+        <*> prop @Int64 "dlqJobs"
+        <*> prop @(Map Text Int64) "kindCounts"
+        <*> prop @(Map Text Int64) "dlqKindCounts"
 
 instance ToSchema QueueOverview where
   declareNamedSchema _ =
@@ -555,7 +596,7 @@ instance ToSchema RateLimitBucketView where
         <*> prop @Text "prefix"
         <*> prop @Double "tokens"
         <*> prop @Double "maxTokens"
-        <*> prop @(Maybe Double) "fillFraction"
+        <*> opt @Double "fillFraction"
         <*> prop @UTCTime "lastRefill"
 
 instance ToSchema RateLimitPolicyUpdate where
@@ -566,7 +607,7 @@ instance ToSchema RateLimitPolicyUpdate where
       RateLimitPolicyUpdate
         <$> patch @Double "overrideMaxTokens"
         <*> patch @Double "overrideRefillAmount"
-        <*> patch @Double "overrideRefillIntervalSecs"
+        <*> patch @Double "overrideInterval"
 
 instance ToSchema ConcurrencyKeyView where
   declareNamedSchema _ =
@@ -576,7 +617,7 @@ instance ToSchema ConcurrencyKeyView where
         <*> prop @Text "prefix"
         <*> prop @Int32 "inFlight"
         <*> prop @Int32 "effectiveLimit"
-        <*> prop @(Maybe Double) "fillFraction"
+        <*> opt @Double "fillFraction"
 
 instance ToSchema ConcurrencyPolicyUpdate where
   declareNamedSchema _ =
@@ -595,61 +636,87 @@ renamed
   => Text
   -> Proxy a
   -> Declare (Definitions Schema) NamedSchema
-renamed name proxy = rename <$> genericDeclareNamedSchema defaultSchemaOptions proxy
+renamed name proxy = rename <$> generic proxy
   where
     rename (NamedSchema _ schema) = NamedSchema (Just name) schema
 
-instance ToSchema QueueStats
-instance ToSchema QueueRow
-instance ToSchema WorkerRow
-instance ToSchema CronScheduleRow
-instance ToSchema CronScheduleUpdate
-instance ToSchema PgDbHealth
-instance ToSchema PgTableHealth
-instance ToSchema RateLimitPolicyView
-instance ToSchema ConcurrencyPolicyView
+-- | A generic schema whose optional fields accept null, as generic JSON encodes 'Nothing'.
+generic
+  :: forall a
+   . (GToSchema (Rep a), Generic a, Typeable a)
+  => Proxy a
+  -> Declare (Definitions Schema) NamedSchema
+generic proxy = orNull <$> genericDeclareNamedSchema defaultSchemaOptions proxy
+  where
+    orNull (NamedSchema name schema) =
+      NamedSchema name schema {_schemaProperties = InsOrd.mapWithKey (optional schema) (_schemaProperties schema)}
+    optional schema field ref
+      | field `elem` _schemaRequired schema = ref
+      | otherwise = nullable ref
 
-instance ToSchema ClaimRequest
-instance ToSchema BatchDeleteRequest
-instance ToSchema BatchDeleteResponse
-instance ToSchema StatsResponse
-instance ToSchema AllStatsResponse
-instance ToSchema QueuesResponse
-instance ToSchema CronSchedulesResponse
-instance ToSchema WorkersResponse
-instance ToSchema RateLimitPoliciesResponse
-instance ToSchema RateLimitBucketsResponse
-instance ToSchema RateLimitResetResponse
-instance ToSchema ConcurrencyPoliciesResponse
-instance ToSchema ConcurrencyKeysResponse
-instance ToSchema ConcurrencyReconcileResponse
-instance ToSchema HealthResponse
-instance ToSchema LivenessResponse
-instance ToSchema RescheduleRequest
-instance ToSchema AddTokensResponse
-instance ToSchema PruneResponse
-instance ToSchema GroupsResponse
+instance ToSchema QueueRow where declareNamedSchema = generic
+instance ToSchema WorkerRow where declareNamedSchema = generic
+instance ToSchema CronScheduleRow where declareNamedSchema = generic
+instance ToSchema CronScheduleUpdate where declareNamedSchema = generic
+instance ToSchema PgDbHealth where declareNamedSchema = generic
+instance ToSchema PgTableHealth where declareNamedSchema = generic
+instance ToSchema RateLimitPolicyView where declareNamedSchema = generic
+instance ToSchema ConcurrencyPolicyView where declareNamedSchema = generic
+
+instance ToSchema ClaimRequest where declareNamedSchema = generic
+instance ToSchema BatchDeleteRequest where declareNamedSchema = generic
+instance ToSchema BatchDeleteResponse where declareNamedSchema = generic
+instance ToSchema StatsResponse where declareNamedSchema = generic
+instance ToSchema AllStatsResponse where declareNamedSchema = generic
+instance ToSchema QueuesResponse where declareNamedSchema = generic
+instance ToSchema CronSchedulesResponse where declareNamedSchema = generic
+instance ToSchema WorkersResponse where declareNamedSchema = generic
+instance ToSchema RateLimitPoliciesResponse where declareNamedSchema = generic
+instance ToSchema RateLimitBucketsResponse where declareNamedSchema = renamed "RateLimitBucketsResponse"
+instance ToSchema RateLimitResetResponse where declareNamedSchema = generic
+instance ToSchema ConcurrencyPoliciesResponse where declareNamedSchema = generic
+instance ToSchema ConcurrencyKeysResponse where declareNamedSchema = renamed "ConcurrencyKeysResponse"
+instance ToSchema ConcurrencyReconcileResponse where declareNamedSchema = generic
+instance ToSchema HealthResponse where declareNamedSchema = generic
+instance ToSchema LivenessResponse where declareNamedSchema = generic
+instance ToSchema RescheduleRequest where declareNamedSchema = generic
+instance ToSchema AddTokensResponse where declareNamedSchema = generic
+instance ToSchema PruneResponse where declareNamedSchema = generic
+
+instance ToSchema GroupsResponse where
+  declareNamedSchema _ = closedSchema "GroupsResponse" (pageFields @GroupSummary)
+
+-- | The keys every paged response shares.
+pageFields :: forall a. (ToSchema [a]) => Fields (Page a)
+pageFields = Page <$> prop @[a] "items" <*> prop @Int "total" <*> prop @Int "offset" <*> prop @Int "limit"
 
 instance (ToSchema payload) => ToSchema (JobsResponse payload) where
-  declareNamedSchema = renamed (carrying @payload "JobsResponse")
+  declareNamedSchema _ =
+    carrying @payload
+      $ closedSchema "JobsResponse"
+      $ JobsResponse @payload
+        <$> pageFields
+        <*> prop @(Map Int64 Int64) "childCounts"
+        <*> prop @[Int64] "pausedParents"
+        <*> prop @(Map Int64 Int64) "dlqChildCounts"
 
 instance (ToSchema payload) => ToSchema (JobResponse (JobRead payload)) where
-  declareNamedSchema = renamed (carrying @payload "JobResponse")
+  declareNamedSchema = carrying @payload . renamed "JobResponse"
 
 instance (ToSchema payload) => ToSchema (ClaimResponse payload) where
-  declareNamedSchema = renamed (carrying @payload "ClaimResponse")
+  declareNamedSchema = carrying @payload . renamed "ClaimResponse"
 
 instance (ToSchema payload) => ToSchema (JobResponse (ApiJobWithStatus payload)) where
-  declareNamedSchema = renamed (carrying @payload "JobWithStatusResponse")
+  declareNamedSchema = carrying @payload . renamed "JobWithStatusResponse"
 
 instance (ToSchema payload) => ToSchema (BatchInsertRequest payload) where
-  declareNamedSchema = renamed (carrying @payload "BatchInsertRequest")
+  declareNamedSchema = carrying @payload . renamed "BatchInsertRequest"
 
 instance (ToSchema payload) => ToSchema (BatchInsertResponse payload) where
-  declareNamedSchema = renamed (carrying @payload "BatchInsertResponse")
+  declareNamedSchema = carrying @payload . renamed "BatchInsertResponse"
 
 instance (ToSchema payload) => ToSchema (DLQResponse payload) where
-  declareNamedSchema = renamed (carrying @payload "DLQResponse")
+  declareNamedSchema _ = carrying @payload $ closedSchema "DLQResponse" (pageFields @(DLQ.DLQJob (Stored payload)))
 
 instance (ToSchema payload) => ToSchema (ArchiveResponse payload) where
-  declareNamedSchema = renamed (carrying @payload "ArchiveResponse")
+  declareNamedSchema _ = carrying @payload $ closedSchema "ArchiveResponse" (pageFields @(Archive.ArchiveJob (Stored payload)))

@@ -15,9 +15,8 @@
   --arb-gold: #d97706;
   --arb-gold-dim: #92400e;
 
-  /* Semantic accents. These were written literally in a dozen rules while two of them
-     also existed as theme-scoped tokens, so the palette named a colour it did not
-     govern. Both themes share these; the dark theme reaches for the brighter pair. */
+  /* Semantic accents shared by both themes. The dark theme uses the bright green
+     and the deep red. */
   --arb-ok: #16a34a;
   --arb-ok-bright: #34d399;
   --arb-danger: #dc2626;
@@ -161,6 +160,14 @@ label.queue-sort-label,
   gap: 0.375rem;
 }
 
+.filter-builder .filter-value {
+  min-width: 150px;
+}
+
+.page-jump {
+  width: 70px;
+}
+
 .filter-chip {
   display: inline-flex;
   align-items: center;
@@ -257,6 +264,10 @@ label.queue-sort-label,
   content: "\2713";
 }
 
+.event-queue-select {
+  max-width: 200px;
+}
+
 .event-log {
   max-height: 500px;
   overflow-y: auto;
@@ -288,9 +299,8 @@ label.queue-sort-label,
   border-bottom-color: var(--arb-teal-dim);
 }
 
-/* SSE status indicator: shape + color distinguish each state */
 /* One pip vocabulary, shared by the health indicator and the events stream.
-   Shape carries the state, so neither reads by colour alone. */
+   Shape carries the state, so neither reads by color alone. */
 .status-pip {
   display: inline-flex;
   align-items: center;
@@ -325,12 +335,6 @@ label.queue-sort-label,
   background-color: transparent;
   border: 2px solid var(--arb-danger);
   animation: pulse-dot 1.5s infinite;
-}
-
-/* Square: the server serves no stream. */
-.status-pip.polling .status-dot {
-  border-radius: 2px;
-  background-color: #d97706;
 }
 
 /* Bar: switched off here. */
@@ -453,7 +457,7 @@ label.queue-sort-label,
   margin: 1.5rem 0 0.75rem;
 }
 
-/* Stat cards link to the filtered job list. No underline: the whole card lifts
+/* Stat cards link to the rows they count. No underline. The whole card lifts
    and glows on hover, and presses in on click. */
 .stat-card {
   position: relative;
@@ -528,25 +532,26 @@ label.queue-sort-label,
 }
 
 #tab-dlq table {
-  min-width: 1300px;
+  min-width: 1200px;
 }
 
-/* Rate-limit and concurrency policy tables (not the narrow drill-downs) get a
-   smaller floor so they scroll rather than crush their columns on mobile. */
-#tab-ratelimits table.table-striped,
-#tab-concurrency table.table-striped {
-  min-width: 900px;
-}
-
-/* Cron tables carry timestamps and a two-button action column; give them a
-   floor so those columns keep their width and the table scrolls on mobile. */
+/* Cron tables carry timestamps. A floor keeps those columns at their width,
+   and the table scrolls on mobile. */
 #tab-cron table,
-#tab-cron-overview table {
+#view-cron table {
   min-width: 1100px;
 }
 
-#tab-workers-overview table {
+#view-workers table {
   min-width: 1100px;
+}
+
+/* Phones show only the narrow columns, so nothing compresses. */
+@media (max-width: 640px) {
+  #tab-jobs table,
+  #tab-dlq table {
+    min-width: 0;
+  }
 }
 
 /* Indeterminate top-bar loader for a view's first data load. */
@@ -567,6 +572,11 @@ label.queue-sort-label,
 @keyframes top-loader-slide {
   0% { background-position: -40% 0; }
   100% { background-position: 140% 0; }
+}
+
+/* Fits the widest interval, so a change does not shift the toolbar. */
+.refresh-interval {
+  min-width: 4.2em;
 }
 
 /* Spinning refresh glyph while a poll is in flight. */
@@ -665,30 +675,44 @@ label.queue-sort-label,
   mask-image: linear-gradient(to right, transparent 0, #000 2.25rem, #000 calc(100% - 2.25rem), transparent 100%);
 }
 
-/* ---- Breadcrumb (queue detail header) ---- */
-.breadcrumb {
-  --bs-breadcrumb-divider-color: var(--arb-text-muted);
-  margin-bottom: 0;
-  font-size: 0.95rem;
-}
-
-.breadcrumb-item a {
-  color: var(--arb-teal-on-bg);
-  text-decoration: none;
-}
-
-.breadcrumb-item a:hover {
-  text-decoration: underline;
-}
-
-.breadcrumb-item.active {
-  color: var(--arb-text);
+/* ---- Queue detail header: the name is the title and the switcher ---- */
+.queue-title {
+  margin: 0;
+  padding: 0.3rem 0.6rem;
   font-family: 'Electrolize', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 400;
   letter-spacing: 0.02em;
+  line-height: 1.3;
+  color: var(--arb-text);
 }
 
-.breadcrumb-item + .breadcrumb-item::before {
+.queue-switch {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.queue-switch::after {
+  margin-left: 0.5em;
   color: var(--arb-text-muted);
+  vertical-align: 0.15em;
+}
+
+.queue-switch:hover,
+.queue-switch[aria-expanded="true"] {
+  border-color: var(--arb-border-accent);
+  background: var(--arb-nav-active);
+}
+
+.queue-switch-menu .dropdown-item {
+  padding-inline: 0.6rem 1.25rem;
+}
+
+.queue-switch:focus-visible {
+  outline: 2px solid var(--arb-focus-outline);
+  outline-offset: 1px;
 }
 
 /* Breathing room below the last content row (matters most on mobile). */
@@ -803,8 +827,9 @@ label.queue-sort-label,
   background-color: var(--arb-pause-bg);
 }
 
-/* Header links to the queue overview. Each count below links to its filtered
-   Jobs view. All are real anchors, so cmd/middle-click opens a new tab. */
+/* The header links to the queue overview. The waiting count, the state counts
+   and the ages link to the filtered Jobs view. All are real anchors, so
+   cmd/middle-click opens a new tab. */
 .queue-card-head,
 .queue-card-hero,
 .queue-card-stat {
@@ -895,8 +920,8 @@ label.queue-sort-label,
   text-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
 }
 
-/* The ready number is already teal, so hover brightens it and lights up the
-   otherwise-muted label rather than relying on a color swap. */
+/* The waiting number is already teal, so hover brightens it and lights up the
+   muted label. It does not change color. */
 .queue-card-hero:hover .queue-card-ready {
   filter: brightness(1.12);
 }
@@ -1046,7 +1071,7 @@ label.queue-sort-label,
   text-shadow: none;
 }
 
-/* ---- Queue landing: instance roll-up + layout toolbar ---- */
+/* ---- Roll-up strip and toolbars ---- */
 /* A view that had a roll-up last time draws it at once, with skeleton bars for the
    numbers until the load lands. A view that had none holds nothing, so an empty
    one never opens a gap and closes it again. */
@@ -1116,8 +1141,8 @@ label.queue-sort-label,
   background-color: var(--arb-border);
 }
 
-/* Every view's control strip. One definition, so gap and wrapping cannot drift
-   between the tabs the way stacked utility classes did. */
+/* Every view's control strip. One definition keeps the gap and the wrap the same
+   on every tab. */
 .toolbar,
 .queue-toolbar {
   display: flex;
@@ -1409,10 +1434,12 @@ label.queue-sort-label,
   width: 100%;
 }
 
-.queue-table th.num,
-.queue-table td.num {
+.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.queue-table .num {
   white-space: nowrap;
 }
 
@@ -1442,7 +1469,7 @@ label.queue-sort-label,
   color: var(--arb-teal-on-bg);
 }
 
-/* Semantic colours for a count, wherever one is shown. */
+/* Semantic colors for a count, wherever one is shown. */
 .qc-val.warn,
 .qs-val.warn,
 .queue-row-num.warn,
@@ -1468,7 +1495,7 @@ label.queue-sort-label,
 }
 
 /* ---- Buttons ---- */
-/* A disabled button keeps its variant's own colours and reads as disabled through
+/* A disabled button keeps its variant's own colors and reads as disabled through
    opacity alone, rather than falling back to Bootstrap's grey. */
 .btn:disabled {
   --bs-btn-disabled-color: var(--bs-btn-color);
@@ -1576,11 +1603,6 @@ tr:hover .btn-row-actions:not(:disabled) {
 }
 
 /* ---- Badges ---- */
-.badge.bg-success {
-  background-color: var(--arb-ok-bg) !important;
-  color: var(--arb-ok-fg);
-}
-
 /* Terminal, inert: outlined instead of filled. The ring is inset so this badge
    keeps the height of every other one. */
 .bg-dark-subtle {
@@ -1601,47 +1623,7 @@ tr:hover .btn-row-actions:not(:disabled) {
   color: var(--arb-ok-fg) !important;
 }
 
-.badge.bg-danger {
-  background-color: var(--arb-danger-deep) !important;
-  color: #fca5a5;
-}
-
-[data-bs-theme="light"] .badge.bg-danger {
-  background-color: #fee2e2 !important;
-  color: var(--arb-danger-deep);
-}
-
-.badge.bg-primary {
-  background-color: var(--arb-purple-dim) !important;
-  color: #c4b5fd;
-}
-
-[data-bs-theme="light"] .badge.bg-primary {
-  background-color: #ede9fe !important;
-  color: #5b21b6;
-}
-
-.badge.bg-warning {
-  background-color: var(--arb-gold-dim) !important;
-  color: #fcd34d;
-}
-
-[data-bs-theme="light"] .badge.bg-warning {
-  background-color: #fef3c7 !important;
-  color: var(--arb-gold-dim);
-}
-
-.badge.bg-secondary {
-  background-color: var(--arb-surface-hover) !important;
-  color: var(--arb-text);
-}
-
-.badge.bg-info {
-  background-color: rgba(0, 212, 255, 0.15) !important;
-  color: var(--arb-teal-on-bg);
-}
-
-/* Paused state badge: readable in both modes (used by navbar + worker rows). */
+/* Paused badge, readable in both modes. Used by the queue header and worker rows. */
 .paused-badge {
   background-color: var(--arb-pause-bg);
   color: var(--arb-pause-fg);
@@ -1654,7 +1636,7 @@ tr:hover .btn-row-actions:not(:disabled) {
   border: 1px dashed var(--arb-inert-border);
 }
 
-/* ---- Rate-limit fill bars: muted so they don't glare, especially in dark mode ---- */
+/* ---- Fill bars: muted so they do not glare, mostly in dark mode ---- */
 .progress-bar.bg-success {
   background-color: var(--arb-fill-ok) !important;
 }
@@ -1694,8 +1676,8 @@ tr.policy-bad td:first-child::before {
   background-color: var(--arb-danger-on-bg);
 }
 
-/* Placeholder row while a prefix's rows are on the way. It fills the height one
-   row would, so the panel does not resize when they land. */
+/* Placeholder bar while rows are on the way. It fills the height of one row, so
+   the table does not resize when they land. */
 .skeleton-bar {
   display: block;
   height: 0.75rem;
@@ -1752,11 +1734,11 @@ tr.policy-bad td:first-child::before {
 
 /* The other tables carry a row-actions menu, which sets their row height. This one
    has no actions column, so hold that height rather than sitting shorter. */
-#tab-concurrency .detail-row > td {
+#view-concurrency .detail-row > td {
   height: 2.25rem;
 }
 
-/* ---- SSE dot glow in dark mode ---- */
+/* ---- Status pip glow in dark mode ---- */
 [data-bs-theme="dark"] .status-pip.connected .status-dot,
 [data-bs-theme="dark"] .status-pip.ok .status-dot {
   background-color: var(--arb-ok-bright);
@@ -1769,10 +1751,6 @@ tr.policy-bad td:first-child::before {
   box-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
 }
 
-[data-bs-theme="dark"] .status-pip.polling .status-dot {
-  background-color: #fbbf24;
-}
-
 /* ---- Dropdowns ---- */
 .dropdown-menu {
   background-color: var(--arb-surface) !important;
@@ -1782,6 +1760,10 @@ tr.policy-bad td:first-child::before {
 
 [data-bs-theme="dark"] .dropdown-menu {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.dropdown-menu > .dropdown-divider:first-child {
+  display: none;
 }
 
 .dropdown-item {
@@ -1857,7 +1839,7 @@ tr.policy-bad td:first-child::before {
 }
 
 /* The action names the modal, the subject sits under it. Aligning to the start keeps
-   the close button beside the title rather than centred on the block. */
+   the close button beside the title rather than centered on the block. */
 .modal-header {
   align-items: flex-start;
   gap: 1rem;
@@ -2283,7 +2265,6 @@ a.gate-badge.is-empty {
 
 /* Below 1025px the container is its own scroller, where sticky cannot apply. */
 @media (min-width: 1025px) {
-  /* Direct children only: a drill-down table nested in a row is not the head. */
   .table.sticky-head > thead > tr > th {
     position: sticky;
     top: 0;
@@ -2341,6 +2322,11 @@ th.sortable:focus-visible {
   overflow: visible;
 }
 
+.table-fixed {
+  table-layout: fixed;
+  width: 100%;
+}
+
 /* ---- Scrollbar (thin, themed for both modes via theme variables) ---- */
 * {
   scrollbar-width: thin;
@@ -2365,7 +2351,7 @@ th.sortable:focus-visible {
   background: var(--arb-purple-dim);
 }
 
-/* Brand on the left, queue picker + controls clustered on the right. */
+/* Brand on the left, then the primary nav, then the controls on the right. */
 .navbar .container-fluid {
   gap: 0.75rem;
 }
@@ -2386,9 +2372,9 @@ th.sortable:focus-visible {
     overflow-x: auto;
     margin-bottom: 0.75rem;
   }
-  .table-responsive table[style*="table-layout: fixed"] {
-    table-layout: auto !important;
-    width: auto !important;
+  .table-responsive .table-fixed {
+    table-layout: auto;
+    width: auto;
     min-width: 100%;
   }
   /* Headers stay on one line, so the sort caret stays beside the label. */
@@ -2417,8 +2403,8 @@ th.sortable:focus-visible {
   .navbar-brand {
     font-size: 1rem;
   }
-  /* Brand + controls share the top row (controls pushed right by the brand's
-     auto margin). The primary nav drops to its own scrollable row below. */
+  /* Brand and controls share the top row. The auto margin on the controls pushes
+     them right. The primary nav drops to its own scrollable row below. */
   .nav-controls {
     order: 2;
   }
@@ -2466,7 +2452,7 @@ th.sortable:focus-visible {
 }
 
 /* ---- Light-mode contrast ----
-   Bootstrap's outline variants take their text colour from the mid-weight palette,
+   Bootstrap's outline variants take their text color from the mid-weight palette,
    which is tuned for a dark ground. On the light one they fall under the 4.5:1 floor,
    so the light theme names darker ones. */
 [data-bs-theme="light"] .btn-outline-success {
@@ -2550,23 +2536,6 @@ th.sortable:focus-visible {
   }
 }
 
-/* ---- Phones: tables show what identifies a row ----
-   The column registry drops the rest (narrow: false), and the select cell goes with
-   them: it is unconditional in the markup, so the registry cannot reach it.
-   The width floors above exist so a full column set scrolls rather than compresses.
-   A reduced set has nothing to compress, so the floor comes off and the table fits. */
-@media (max-width: 640px) {
-  .table .select-cell {
-    display: none;
-  }
-
-  #tab-jobs table,
-  #tab-dlq table,
-  #tab-archive table {
-    min-width: 0;
-  }
-}
-
 /* ---- Empty state: the first screen a new install shows ---- */
 .empty-state {
   display: flex;
@@ -2600,7 +2569,7 @@ th.sortable:focus-visible {
   line-height: 1.6;
 }
 
-/* The same panel says a load failed, in the one colour a failure is drawn in. */
+/* The same panel says a load failed, in the one color a failure is drawn in. */
 .empty-state-icon.is-error {
   color: var(--arb-danger-on-bg);
   opacity: 0.85;
@@ -2792,11 +2761,6 @@ th.sortable:focus-visible {
   border-bottom: 0;
 }
 
-.kind-list .num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
 .kind-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2846,12 +2810,6 @@ th.sortable:focus-visible {
 /* ---- Groups ---- */
 #tab-groups table {
   min-width: 760px;
-}
-
-.groups-table th.num,
-.groups-table td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
 .groups-table th.num + th:not(.num),

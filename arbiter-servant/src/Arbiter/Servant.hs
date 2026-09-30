@@ -31,7 +31,7 @@ module Arbiter.Servant
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
-  , defaultQueueStatsCacheTtl
+  , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
   , defaultMaintenanceSparseInterval

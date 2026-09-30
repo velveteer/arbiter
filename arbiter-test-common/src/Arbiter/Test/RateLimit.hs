@@ -357,6 +357,12 @@ rateLimitSpec runM = do
     throttled <- runM env (HL.countJobsFiltered @RLPayload [HL.FilterStatus Throttled])
     throttled `shouldBe` 2
 
+  it "names the queues that hold a policy's throttled jobs" $ \env -> do
+    enqueue env (replicate 5 (job "holder"))
+    _ <- claim env
+    policyView <- runM env (HL.getRateLimitPolicy "rl")
+    fmap throttledQueues policyView `shouldBe` Just [rateLimitTable]
+
   it "spends a job's full cost" $ \env -> do
     -- The bucket holds 3. Of two cost-2 jobs only the first fits.
     enqueue env [costJob "weighted" 2, costJob "weighted" 2]
