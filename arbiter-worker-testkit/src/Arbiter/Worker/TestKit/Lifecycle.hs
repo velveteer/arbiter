@@ -52,7 +52,7 @@ import Arbiter.Worker.Config
   , ackAll
   , ackAllWith
   , ackWith
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , getListenerReady
   , getWorkerState
   , nack
@@ -399,7 +399,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
               , setGroupKey (Just "ca") $ defaultJob (mkSimple "ca-keep2")
               ]
         void $ runM env $ HL.insertJobsBatch jobs
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 batchHandler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
         withLinkedAsync (runM env $ runWorkerPool (config {pollInterval = 0.05, observabilityHooks = hooks})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
           successes <- readIORef successRef
@@ -427,7 +427,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ HL.insertJobTree
           $ defaultJob (mkSimple "rb-reducer")
             <~~ (defaultJob (mkSimple "rb-ca") :| [defaultJob (mkSimple "rb-cb")])
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 handler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 handler
         withLinkedAsync (runM env $ runWorkerPool (config {pollInterval = 0.1})) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef finalRef
           final <- readIORef finalRef
@@ -553,7 +553,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                     :| [defaultJob (mkSimple "child-b")]
                 )
 
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 3 1 handler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 3 1 handler
 
         withLinkedAsync
           ( runM env $
@@ -610,7 +610,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           $ defaultJob (mkSimple "reducer-2")
             <~~ (defaultJob (mkSimple "child-2a") :| [defaultJob (mkSimple "child-2b")])
 
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 handler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 handler
 
         withLinkedAsync
           ( runM env $
@@ -1172,7 +1172,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         inserted <- runM env $ HL.insertJobsBatch jobs
         let firstId = primaryKey (head inserted)
 
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 batchHandler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
         threadDelay 100_000
 
         withLinkedAsync (runM env $ runWorkerPool config {pollInterval = 0.1}) $ \_ -> do
@@ -1340,7 +1340,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
               ]
         inserted <- runM env $ HL.insertJobsBatch jobs
         let ids = map primaryKey inserted
-        config :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 batchHandler
+        config :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
 
         withLinkedAsync
           (runM env $ runWorkerPool config {pollInterval = 0.05, jobHeartbeatInterval = 30, visibilityTimeout = 60})
@@ -1385,7 +1385,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                   Just job <- runM env $ HL.insertJob (defaultJob (mkSimple "branch-lock-order"))
                   pure (primaryKey job, primaryKey job)
             let handler _jobs _callbacks = throwBranchCancel "cancel branch"
-            base :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 1 handler
+            base :: WorkerConfig m payload <- batchedWorkerConfig 1 1 handler
             let config = base {pollInterval = 0.05, logConfig = silentLogConfig}
             withConn connStr $ \conn -> do
               void $ PG.execute_ conn "BEGIN"
@@ -1438,7 +1438,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
               liftIO $ writeIORef nackedRef True
               liftIO $ threadDelay 30_000_000
 
-        baseConfig :: WorkerConfig m payload <- defaultBatchedWorkerConfig 1 10 batchHandler
+        baseConfig :: WorkerConfig m payload <- batchedWorkerConfig 1 10 batchHandler
         let config = baseConfig {pollInterval = 0.1, jobHeartbeatInterval = 0.3, visibilityTimeout = 60}
 
         withLinkedAsync (runM env $ runWorkerPool config) $ \_ -> do
@@ -1502,7 +1502,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         void $ lockRow connA cid
 
         (etc, epA) <-
-          withAsync (try (runM env $ Ops.cancelJobTree schema table cid) :: IO (Either SomeException Int64)) $ \cancelAsync -> do
+          withAsync (try (runM env $ Ops.cancelJobTree schema table cid) :: IO (Either SomeException [Int64])) $ \cancelAsync -> do
             threadDelay 300_000
             epA <- lockRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))

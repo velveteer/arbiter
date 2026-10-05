@@ -203,10 +203,11 @@ defaultMigrationConfig =
 -- main :: IO ()
 -- main = do
 --   result <- runMigrationsForRegistry
---               (Proxy @AppRegistry)
+--               (Proxy \@AppRegistry)
 --               "host=localhost dbname=mydb"
 --               "arbiter"
 --               defaultMigrationConfig
+--   print result
 -- @
 runMigrationsForRegistry
   :: forall registry
@@ -232,37 +233,39 @@ runMigrationsForRegistry proxy connStr schemaName config = do
           , tableRateLimit = Map.findWithDefault False table rlTables
           }
       tables = [(table, admissionFor table) | table <- registryTableNames proxy]
-      -- Policies are collected from each payload's 'rateLimitFor' selector.
+      -- Policies come from each payload's 'rateLimitFor' and 'concurrencyFor' selectors.
       seeds =
         AdmissionSeeds
           { seedRateLimitPolicies = Set.toList (registryRateLimitPolicies @registry)
           , seedConcurrencyPolicies = Set.toList (registryConcurrencyPolicies @registry)
-          , seedDurability = rateLimitDurability config
           }
   runMigrationsTrackedForTables connStr schemaName tables config seeds
 
 -- | Admission policy rows to seed after a successful migration.
 data AdmissionSeeds = AdmissionSeeds
   { seedRateLimitPolicies :: [Policy]
+  -- ^ Rate-limit policies to upsert into the policies table.
   , seedConcurrencyPolicies :: [ConcurrencyPolicy]
-  , seedDurability :: Durability
+  -- ^ Concurrency pools to upsert into the policies table.
   }
 
 -- | Seeds for a deployment with no admission policies.
 noAdmissionSeeds :: AdmissionSeeds
-noAdmissionSeeds = AdmissionSeeds [] [] Unlogged
+noAdmissionSeeds = AdmissionSeeds {seedRateLimitPolicies = [], seedConcurrencyPolicies = []}
 
 -- | Which admission trigger kinds a table's payload declares. Trigger migrations
 -- are install-only. A kind removed from a payload keeps its triggers.
 data TableAdmission = TableAdmission
   { tableConcurrency :: Bool
+  -- ^ Install the concurrency triggers.
   , tableRateLimit :: Bool
+  -- ^ Install the rate-limit bucket triggers.
   }
   deriving stock (Eq, Show)
 
 -- | Install every admission trigger kind.
 allTableAdmission :: TableAdmission
-allTableAdmission = TableAdmission True True
+allTableAdmission = TableAdmission {tableConcurrency = True, tableRateLimit = True}
 
 -- | The longest queue name whose generated identifiers survive PostgreSQL's 63-byte
 -- truncation distinct. Derived by rendering a probe queue's own DDL at each length.
@@ -323,9 +326,9 @@ validateRegistryNames schemaName tables
     -- The first generated name more than one queue claims.
     sharedName = listToMaybe . conflictingPrefixes fst snd
 
--- | Run migrations for multiple tables within a single schema, seeding the given
--- rate-limit policies. On migration success, reconciles the policy and bucket
--- tables on the same connection. The table list must be the schema's whole queue
+-- | Run migrations for multiple tables within a single schema. On migration success,
+-- seeds the rate-limit and concurrency policies, then reconciles durability and
+-- optional triggers on the same connection. The table list must be the schema's whole queue
 -- set. Reconciliation treats an omitted queue as removed and drops its notify and
 -- event-streaming objects.
 runMigrationsTrackedForTables
@@ -384,7 +387,7 @@ migrateSchema
   -> MigrationConfig
   -> AdmissionSeeds
   -> IO (MigrationResult String)
-migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concRows durability) = do
+migrateSchema conn schemaName tableNames config seeds = do
   withConnection conn $ \libpqConn ->
     LibPQ.disableNoticeReporting libpqConn
 
@@ -427,9 +430,9 @@ migrateSchema conn schemaName tableNames config (AdmissionSeeds policyRows concR
     MigrationSuccess -> do
       reconciled <-
         try $ do
-          reconcileRateLimitPolicies conn schemaName policyRows
-          reconcileConcurrencyPolicies conn schemaName concRows
-          reconcileRateLimitDurability conn schemaName durability
+          reconcileRateLimitPolicies conn schemaName (seedRateLimitPolicies seeds)
+          reconcileConcurrencyPolicies conn schemaName (seedConcurrencyPolicies seeds)
+          reconcileRateLimitDurability conn schemaName (rateLimitDurability config)
           reconcileOptionalTriggers conn schemaName (map fst tableNames) config
       case reconciled of
         Right () -> pure MigrationSuccess
@@ -446,7 +449,7 @@ reconcileRateLimitPolicies :: PG.Connection -> SchemaName -> [Policy] -> IO ()
 reconcileRateLimitPolicies =
   reconcilePolicyRows "rate-limit policy" "parameters" policyPrefix policyParamsKey upsertPolicyRowSQL
 
--- | 'conflictingPrefixes' specialized to policy rows.
+-- | Rate-limit policy prefixes declared with more than one parameter set.
 conflictingPolicyPrefixes :: [Policy] -> [Text]
 conflictingPolicyPrefixes = conflictingPrefixes policyPrefix policyParamsKey
 
@@ -502,7 +505,7 @@ conflictingPrefixes prefixOf paramsOf rows =
       Map.fromListWith Set.union [(prefixOf row, Set.singleton (paramsOf row)) | row <- rows]
 
 -- | Converge the bucket table's WAL persistence to the declared durability. Reads
--- the current @pg_class.relpersistence@ and issues @SET LOGGED@/@SET UNLOGGED@ on a
+-- the current @pg_class.relpersistence@ and issues @SET LOGGED@ or @SET UNLOGGED@ on a
 -- change. The ALTER rewrites the table under @ACCESS EXCLUSIVE@. Token consumes block
 -- briefly while a switch runs.
 reconcileRateLimitDurability :: PG.Connection -> SchemaName -> Durability -> IO ()
@@ -678,9 +681,8 @@ commentTriggerSelect :: Query
 commentTriggerSelect =
   "SELECT format('COMMENT ON TRIGGER %I ON %I.%I IS %L;', trigger.tgname, namespace.nspname, relation.relname, ?::text) "
 
--- | The schema-level migrations, run once per schema. Exposed for the golden suite.
--- 'reconcileOptionalTriggers' owns the optional notification and event-streaming
--- objects.
+-- | The schema-level migrations, run once per schema. The optional notification and
+-- event-streaming objects are reconciled after the migrations run.
 schemaLevelMigrations :: SchemaName -> [MigrationCommand]
 schemaLevelMigrations schemaName =
   [ MigrationScript "create-cron-schedules" (encodeUtf8 $ createCronSchedulesTableSQL schemaName)
@@ -699,7 +701,7 @@ schemaLevelMigrations schemaName =
   ]
 
 -- | One queue's tracked migrations, each under its own version identifier.
--- 'reconcileOptionalTriggers' owns the optional notify and event-streaming objects.
+-- The optional notify and event-streaming objects are reconciled after the migrations run.
 jobQueueMigrationsForTable
   :: SchemaName
   -- ^ Schema name

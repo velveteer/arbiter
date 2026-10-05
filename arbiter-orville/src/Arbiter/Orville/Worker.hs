@@ -19,7 +19,8 @@ import Control.Monad.Trans.Reader (ReaderT (..))
 import Arbiter.Orville.OrvilleDb (OrvilleDb (..), runOrvilleDb)
 
 -- | A batched or manual handler written in the base monad. Its callbacks run in the
--- worker's own 'OrvilleDb' env, on the handler's connection and inside its transaction.
+-- worker's own 'OrvilleDb' env, on the handler's connection and inside any
+-- transaction the handler opens.
 orvilleBatchedHandler
   :: (jobs -> BatchCallbacks m payload result -> m ())
   -> jobs

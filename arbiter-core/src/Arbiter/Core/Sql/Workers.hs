@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Workers SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Workers SQL templates.
 module Arbiter.Core.Sql.Workers
   ( workerColumnList
   , upsertWorkerSQL
@@ -47,7 +50,7 @@ workerHealthCaseSQL =
     END
   |]
 
--- | Upsert a worker registration and return its effective paused state (worker OR queue).
+-- | Upsert a worker registration and return its effective paused state (worker or queue).
 upsertWorkerSQL :: SchemaName -> UUID -> Text -> Maybe Text -> Maybe Int32 -> Double -> Maybe Value -> Query Bool
 upsertWorkerSQL schemaName workerId queue host threads staleThreshold metadata =
   let tbl = arbiterWorkersTable schemaName
@@ -82,7 +85,7 @@ workerRegisteredSQL schemaName workerId =
         SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE worker_id = #{workerId :: CUuid}) AS @{registered :: CBool}
       |]
 
--- | Bump last_heartbeat and return the worker's effective paused state (worker OR queue).
+-- | Bump @last_heartbeat@ and return the worker's effective paused state (worker or queue).
 heartbeatWorkerSQL :: SchemaName -> UUID -> Query Bool
 heartbeatWorkerSQL schemaName workerId =
   let tbl = arbiterWorkersTable schemaName

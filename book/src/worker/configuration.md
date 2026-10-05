@@ -31,7 +31,7 @@ ARBITER_ENABLED_QUEUES=email_queue,image_queue
 | --- | --- | --- |
 | `transactionalWorkerConfig` | wraps the handler | a return acks and stores the result. An exception rolls back, then retries or moves to the DLQ. |
 | `manualWorkerConfig` | none | callbacks, one job per call |
-| `defaultBatchedWorkerConfig` | none | callbacks, up to `batchSize` jobs per call |
+| `batchedWorkerConfig` | none | callbacks, up to `batchSize` jobs per call |
 
 A manual or batched handler must ack, fail, or nack each job. An unfinalized
 job is redelivered after its visibility timeout.

@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Rendering Haskell values as inline SQL literals for statements that cannot
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Rendering Haskell values as inline SQL literals for statements that cannot
 -- use parameter binding, such as migrations and seed upserts.
 module Arbiter.Core.SqlLiterals
   ( textLiteral

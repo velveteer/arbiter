@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | The pool's dispatcher: claims jobs and hands them to worker threads.
 module Arbiter.Worker.Dispatcher
   ( runDispatcher
   ) where

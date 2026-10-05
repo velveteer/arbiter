@@ -18,39 +18,39 @@ import System.Random (randomRIO)
 -- | Multiplier and ceiling for exponential backoff.
 data ExponentialConfig = ExponentialConfig
   { exponentialBase :: Double
-  -- ^ Multiplier per attempt, 2.0 to double
+  -- ^ Multiplier per attempt. Use @2.0@ to double.
   , exponentialCap :: NominalDiffTime
-  -- ^ Maximum delay in seconds
+  -- ^ Maximum delay in seconds.
   }
   deriving stock (Eq, Show)
 
 -- | Step and ceiling for linear backoff.
 data LinearConfig = LinearConfig
   { linearIncrement :: NominalDiffTime
-  -- ^ Seconds added per attempt
+  -- ^ Seconds added per attempt.
   , linearCap :: NominalDiffTime
-  -- ^ Maximum delay in seconds
+  -- ^ Maximum delay in seconds.
   }
   deriving stock (Eq, Show)
 
 -- | Strategy for calculating retry delays based on attempt count.
 data BackoffStrategy
-  = -- | delay = base^attempts (e.g., 2s, 4s, 8s...)
+  = -- | @delay = base ^ attempts@, for example 2s, 4s, 8s.
     Exponential ExponentialConfig
-  | -- | delay = increment * attempts (e.g., 30s, 60s, 90s...)
+  | -- | @delay = increment * attempts@, for example 30s, 60s, 90s.
     Linear LinearConfig
-  | -- | Same delay for all attempts
+  | -- | Same delay for all attempts.
     Constant NominalDiffTime
-  | -- | User-provided function (attempts -> delay)
+  | -- | User-provided function from attempts to delay.
     Custom (Int32 -> NominalDiffTime)
 
 -- | Jitter randomizes retry delays to spread out simultaneous retries.
 data Jitter
-  = -- | Use exact calculated delay
+  = -- | Use the exact calculated delay.
     NoJitter
-  | -- | delay = random(0, calculated_delay)
+  | -- | @delay = random(0, calculated_delay)@.
     FullJitter
-  | -- | delay = calculated_delay/2 + random(0, calculated_delay/2). Recommended.
+  | -- | @delay = calculated_delay \/ 2 + random(0, calculated_delay \/ 2)@. Recommended.
     EqualJitter
   deriving stock (Eq, Show)
 

@@ -1,359 +1,159 @@
+// API client. The API lives under the page's own path: /foo/ serves /foo/api/v1/.
+// Types come from the OpenAPI document. Queue routes are typed as /api/v1/queue/...
+/** @import { Res, Query, Body } from '../../types/client' */
+import { TIMING } from './config.js';
+import { parseJson } from './format.js';
+import { listUrl, qs } from './router.js';
+
+const BASE = listUrl().replace(/\/(index\.html)?$/, '') + '/api/v1';
+// Longest plain-text error body used as the message as it is.
+const MAX_TEXT_ERROR = 200;
+const enc = encodeURIComponent;
+
+function fail(message, status, body) {
+  return Object.assign(new Error(message), { status, body });
+}
+
 /**
- * Arbiter API client - centralized fetch wrappers.
- * Base URL auto-discovered from the admin UI path.
- * If the page loads at /foo/, the API is at /foo/api/v1/.
+ * @param {string} path
+ * @param {{ method?: string, body?: unknown }} [opts]
+ * @returns {Promise<any>}
  */
-const ArbiterAPI = {
-  baseUrl() {
-    const base = location.pathname.replace(/\/(index\.html)?$/, '');
-    return `${location.protocol}//${location.host}${base}/api/v1`;
-  },
-
-  async _fetch(path, options = {}) {
-    const url = `${this.baseUrl()}${path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ARB_TIMING.fetchTimeoutMs);
-    try {
-      const res = await fetch(url, {
-        headers: { 'Content-Type': 'application/json', ...options.headers },
-        ...options,
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        let message = `${res.status} ${res.statusText}`.trim();
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed && (parsed.error || parsed.message)) message = parsed.error || parsed.message;
-        } catch {
-          if (text && text.length <= 200) message = text;
-        }
-        const err = new Error(message);
-        err.status = res.status;
-        err.body = text;
-        throw err;
-      }
-      if (res.status === 204) return null;
-      const text = await res.text();
-      if (!text) return null;
+async function call(path, { method = 'GET', body } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMING.fetchTimeoutMs);
+  try {
+    const res = await fetch(BASE + path, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`.trim();
       try {
-        return JSON.parse(text);
+        const parsed = JSON.parse(text);
+        message = parsed?.error || parsed?.message || message;
       } catch {
-        const err = new Error('Invalid JSON response');
-        err.status = res.status;
-        err.body = text;
-        throw err;
+        if (text && text.length <= MAX_TEXT_ERROR) message = text;
       }
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        const err = new Error('Request timed out');
-        err.status = 0;
-        throw err;
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
+      throw fail(message, res.status, text);
     }
-  },
-
-  // Readiness. A 503 carries the same body as a 200, and an unreachable API is
-  // itself the answer, so neither raises. Anything else between here and the
-  // server answers with its own JSON, so only a recognised status is a report.
-  async getHealth() {
+    if (!text) return null;
     try {
-      return await this._fetch('/health');
+      return parseJson(text);
+    } catch {
+      throw fail('Invalid JSON response', res.status, text);
+    }
+  } catch (e) {
+    throw e.name === 'AbortError' ? fail('Request timed out', 0) : e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** @type {(path: string, params?: object) => Promise<any>} */
+const get = (path, params) => call(path + qs(params));
+const post = (path, body) => call(path, { method: 'POST', body });
+const patch = (path, body) => call(path, { method: 'PATCH', body });
+const del = (path) => call(path, { method: 'DELETE' });
+// With a payload the job runs on it in place of the stored one.
+const withPayload = (payload) => (payload === undefined ? undefined : { payload });
+
+export const api = {
+  // A 503 carries the same body as a 200, and an unreachable API is itself the answer.
+  /** @returns {Promise<Res<'/api/v1/health'> | { status: 'down', reachable: false }>} */
+  async health() {
+    try {
+      return await call('/health');
     } catch (e) {
-      if (e.body) {
-        try {
-          const parsed = JSON.parse(e.body);
-          if (parsed && (parsed.status === 'ok' || parsed.status === 'down')) return parsed;
-        } catch {
-          // Not the health body, so fall through to the unreachable answer.
-        }
+      try {
+        const parsed = JSON.parse(e.body);
+        if (parsed?.status === 'ok' || parsed?.status === 'down') return parsed;
+      } catch {
+        // Not the health body.
       }
-      return { status: 'down', reachable: false, schemaName: '', checkedAt: null, dbLatencyMs: null, db: null };
+      return { status: 'down', reachable: false };
     }
   },
 
-  _pageQuery({ limit, offset } = {}) {
-    const qs = [];
-    if (limit != null) qs.push(`limit=${encodeURIComponent(limit)}`);
-    if (offset != null) qs.push(`offset=${encodeURIComponent(offset)}`);
-    return qs.length ? `?${qs.join('&')}` : '';
-  },
+  /** @returns {Promise<Res<'/api/v1/queues'>>} */
+  queues: () => get('/queues'),
+  /** @returns {Promise<Res<'/api/v1/queues/stats'>>} */
+  allStats: () => get('/queues/stats'),
+  /** @returns {Promise<Res<'/api/v1/queues/{queue}/details'>>} */
+  queueDetails: (q) => get(`/queues/${enc(q)}/details`),
+  setQueuePaused: (q, paused) => post(`/queues/${enc(q)}/${paused ? 'pause' : 'resume'}`),
+  /** @returns {Promise<Res<'/api/v1/maintenance', 'post'>>} */
+  maintenance: () => post('/maintenance'),
 
-  // Queues
-  listQueues() {
-    return this._fetch('/queues');
-  },
+  /** @returns {Promise<Res<'/api/v1/queue/kinds'>>} */
+  kinds: (q) => get(`/${enc(q)}/kinds`),
+  /** @returns {Promise<Res<'/api/v1/queue/stats'>>} */
+  stats: (q) => get(`/${enc(q)}/stats`),
+  /** @type {(q: string, params: Query<'/api/v1/queue/groups'>) => Promise<Res<'/api/v1/queue/groups'>>} */
+  groups: (q, params) => get(`/${enc(q)}/groups`, params),
 
-  listKinds(table) {
-    return this._fetch(`/${table}/kinds`);
-  },
+  /** @type {(q: string, params: Query<'/api/v1/queue/jobs'>) => Promise<Res<'/api/v1/queue/jobs'>>} */
+  jobs: (q, params) => get(`/${enc(q)}/jobs`, params),
+  /** @returns {Promise<Res<'/api/v1/queue/jobs/{id}'>>} */
+  job: (q, id) => get(`/${enc(q)}/jobs/${id}`),
+  /** @type {(q: string, body: Body<'/api/v1/queue/jobs', 'post'>) => Promise<Res<'/api/v1/queue/jobs', 'post'>>} */
+  insertJob: (q, body) => post(`/${enc(q)}/jobs`, body),
+  /** @type {(q: string, id: number, action: 'promote' | 'force-cancel' | 'move-to-dlq' | 'suspend' | 'resume' | 'pause-children' | 'resume-children') => Promise<null>} */
+  jobAction: (q, id, action) => post(`/${enc(q)}/jobs/${id}/${action}`),
+  cancelJob: (q, id) => del(`/${enc(q)}/jobs/${id}`),
+  /** @type {(q: string, id: number, runAt: string) => Promise<null>} */
+  rescheduleJob: (q, id, runAt) => post(`/${enc(q)}/jobs/${id}/reschedule`, /** @type {Body<'/api/v1/queue/jobs/{id}/reschedule', 'post'>} */ ({ runAt })),
 
-  // Jobs
-  listJobs(table, { limit = 50, offset = 0, groupKey, parentId, jobId, status, rootsOnly, claimedBy, kind, payload, ratePrefix, concPrefix, sortBy, sortDir } = {}) {
-    let qs = `?limit=${limit}&offset=${offset}`;
-    if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
-    if (parentId) qs += `&parent_id=${parentId}`;
-    if (jobId) qs += `&job_id=${jobId}`;
-    if (status) qs += `&status=${encodeURIComponent(status)}`;
-    if (rootsOnly) qs += `&roots_only=true`;
-    if (claimedBy) qs += `&claimed_by=${encodeURIComponent(claimedBy)}`;
-    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
-    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
-    if (ratePrefix) qs += `&rate_limit_prefix=${encodeURIComponent(ratePrefix)}`;
-    if (concPrefix) qs += `&concurrency_prefix=${encodeURIComponent(concPrefix)}`;
-    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
-    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
-    return this._fetch(`/${table}/jobs${qs}`);
-  },
+  /** @type {(q: string, params: Query<'/api/v1/queue/dlq'>) => Promise<Res<'/api/v1/queue/dlq'>>} */
+  dlq: (q, params) => get(`/${enc(q)}/dlq`, params),
+  retryDlq: (q, id, payload) => post(`/${enc(q)}/dlq/${id}/retry`, withPayload(payload)),
+  deleteDlq: (q, id) => del(`/${enc(q)}/dlq/${id}`),
+  /** @returns {Promise<Res<'/api/v1/queue/dlq/batch-delete', 'post'>>} */
+  deleteDlqMany: (q, ids) => post(`/${enc(q)}/dlq/batch-delete`, { ids }),
 
-  getJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}`);
-  },
+  /** @type {(q: string, params: Query<'/api/v1/queue/archive'>) => Promise<Res<'/api/v1/queue/archive'>>} */
+  archive: (q, params) => get(`/${enc(q)}/archive`, params),
+  requeueArchive: (q, id, payload) => post(`/${enc(q)}/archive/${id}/reenqueue`, withPayload(payload)),
+  deleteArchive: (q, id) => del(`/${enc(q)}/archive/${id}`),
+  /** @returns {Promise<Res<'/api/v1/queue/archive/batch-delete', 'post'>>} */
+  deleteArchiveMany: (q, ids) => post(`/${enc(q)}/archive/batch-delete`, { ids }),
 
-  insertJob(table, body) {
-    return this._fetch(`/${table}/jobs`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
-  },
+  /** @returns {Promise<Res<'/api/v1/cron/schedules'>>} */
+  cron: (queue) => get('/cron/schedules', { queue }),
+  /** @type {(name: string, body: Body<'/api/v1/cron/schedules/{name}', 'patch'>) => Promise<Res<'/api/v1/cron/schedules/{name}', 'patch'>>} */
+  updateCron: (name, body) => patch(`/cron/schedules/${enc(name)}`, body),
+  runCron: (name) => post(`/cron/schedules/${enc(name)}/run`),
 
-  cancelJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}`, { method: 'DELETE' });
-  },
+  /** @returns {Promise<Res<'/api/v1/workers'>>} */
+  workers: (queue) => get('/workers', { queue }),
+  setWorkerPaused: (id, paused) => post(`/workers/${enc(id)}/${paused ? 'pause' : 'resume'}`),
 
-  forceCancelJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/force-cancel`, { method: 'POST' });
-  },
+  /** @returns {Promise<Res<'/api/v1/rate-limits'>>} */
+  rateLimits: () => get('/rate-limits'),
+  /** @type {(prefix: string, params: Query<'/api/v1/rate-limits/{prefix}/buckets'>) => Promise<Res<'/api/v1/rate-limits/{prefix}/buckets'>>} */
+  buckets: (prefix, params) => get(`/rate-limits/${enc(prefix)}/buckets`, params),
+  /** @type {(prefix: string, body: Body<'/api/v1/rate-limits/{prefix}', 'patch'>) => Promise<Res<'/api/v1/rate-limits/{prefix}', 'patch'>>} */
+  updateRateLimit: (prefix, body) => patch(`/rate-limits/${enc(prefix)}`, body),
+  /** @returns {Promise<Res<'/api/v1/rate-limits/{prefix}/reset', 'post'>>} */
+  resetBuckets: (prefix) => post(`/rate-limits/${enc(prefix)}/reset`),
+  /** @returns {Promise<Res<'/api/v1/rate-limits/{prefix}/buckets/{key}/tokens', 'post'>>} */
+  addTokens: (prefix, key, tokens) => post(`/rate-limits/${enc(prefix)}/buckets/${enc(key)}/tokens`, { tokens }),
+  /** @returns {Promise<Res<'/api/v1/rate-limits/prune', 'post'>>} */
+  pruneBuckets: () => post('/rate-limits/prune'),
 
-  promoteJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/promote`, { method: 'POST' });
-  },
+  /** @returns {Promise<Res<'/api/v1/concurrency'>>} */
+  concurrency: () => get('/concurrency'),
+  /** @type {(prefix: string, params: Query<'/api/v1/concurrency/{prefix}/keys'>) => Promise<Res<'/api/v1/concurrency/{prefix}/keys'>>} */
+  concurrencyKeys: (prefix, params) => get(`/concurrency/${enc(prefix)}/keys`, params),
+  /** @type {(prefix: string, body: Body<'/api/v1/concurrency/{prefix}', 'patch'>) => Promise<Res<'/api/v1/concurrency/{prefix}', 'patch'>>} */
+  updateConcurrency: (prefix, body) => patch(`/concurrency/${enc(prefix)}`, body),
+  /** @returns {Promise<Res<'/api/v1/concurrency/reconcile', 'post'>>} */
+  reconcileConcurrency: () => post('/concurrency/reconcile'),
+  /** @returns {Promise<Res<'/api/v1/concurrency/prune', 'post'>>} */
+  pruneConcurrencyKeys: () => post('/concurrency/prune'),
 
-  rescheduleJob(table, id, runAt) {
-    return this._fetch(`/${table}/jobs/${id}/reschedule`, {
-      method: 'POST',
-      body: JSON.stringify({ runAt }),
-    });
-  },
-
-  moveToDLQ(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/move-to-dlq`, { method: 'POST' });
-  },
-
-  pauseChildren(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/pause-children`, { method: 'POST' });
-  },
-
-  resumeChildren(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/resume-children`, { method: 'POST' });
-  },
-
-  suspendJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/suspend`, { method: 'POST' });
-  },
-
-  resumeJob(table, id) {
-    return this._fetch(`/${table}/jobs/${id}/resume`, { method: 'POST' });
-  },
-
-  // DLQ
-  listDLQ(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, payload, error, sortBy, sortDir } = {}) {
-    let qs = `?limit=${limit}&offset=${offset}`;
-    if (parentId) qs += `&parent_id=${parentId}`;
-    if (jobId) qs += `&job_id=${jobId}`;
-    if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
-    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
-    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
-    if (error) qs += `&error=${encodeURIComponent(error)}`;
-    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
-    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
-    return this._fetch(`/${table}/dlq${qs}`);
-  },
-
-  // With a payload, the job runs on it in place of the stored one.
-  retryFromDLQ(table, id, payload) {
-    return this._fetch(`/${table}/dlq/${id}/retry`, { method: 'POST', ...this._payloadBody(payload) });
-  },
-
-  _payloadBody(payload) {
-    return payload === undefined ? {} : { body: JSON.stringify({ payload }) };
-  },
-
-  deleteDLQ(table, id) {
-    return this._fetch(`/${table}/dlq/${id}`, { method: 'DELETE' });
-  },
-
-  deleteDLQBatch(table, ids) {
-    return this._fetch(`/${table}/dlq/batch-delete`, {
-      method: 'POST',
-      body: JSON.stringify({ ids }),
-    });
-  },
-
-  // Archive (completed jobs)
-  listArchive(table, { limit = 50, offset = 0, parentId, jobId, groupKey, kind, payload, completedAfter, completedBefore, sortBy, sortDir } = {}) {
-    let qs = `?limit=${limit}&offset=${offset}`;
-    if (parentId) qs += `&parent_id=${parentId}`;
-    if (jobId) qs += `&job_id=${jobId}`;
-    if (groupKey) qs += `&group_key=${encodeURIComponent(groupKey)}`;
-    if (kind) qs += `&kind=${encodeURIComponent(kind)}`;
-    if (payload) qs += `&payload=${encodeURIComponent(payload)}`;
-    if (completedAfter) qs += `&completed_after=${encodeURIComponent(completedAfter)}`;
-    if (completedBefore) qs += `&completed_before=${encodeURIComponent(completedBefore)}`;
-    if (sortBy) qs += `&sort_by=${encodeURIComponent(sortBy)}`;
-    if (sortDir) qs += `&sort_dir=${encodeURIComponent(sortDir)}`;
-    return this._fetch(`/${table}/archive${qs}`);
-  },
-
-  reEnqueueArchive(table, id, payload) {
-    return this._fetch(`/${table}/archive/${id}/reenqueue`, { method: 'POST', ...this._payloadBody(payload) });
-  },
-
-  deleteArchive(table, id) {
-    return this._fetch(`/${table}/archive/${id}`, { method: 'DELETE' });
-  },
-
-  deleteArchiveBatch(table, ids) {
-    return this._fetch(`/${table}/archive/batch-delete`, {
-      method: 'POST',
-      body: JSON.stringify({ ids }),
-    });
-  },
-
-  // Stats
-  getStats(table) {
-    return this._fetch(`/${table}/stats`);
-  },
-
-  // Per-queue stats for every queue in one request (landing overview).
-  getAllStats() {
-    return this._fetch('/queues/stats');
-  },
-
-  // A queue's open groups, largest first.
-  listGroups(table, { limit, offset, groupKey } = {}) {
-    let qs = this._pageQuery({ limit, offset });
-    if (groupKey) qs += `${qs ? '&' : '?'}group_key=${encodeURIComponent(groupKey)}`;
-    return this._fetch(`/${table}/groups${qs}`);
-  },
-
-  // Cron
-  listCronSchedules({ queue } = {}) {
-    const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';
-    return this._fetch(`/cron/schedules${qs}`);
-  },
-
-  updateCronSchedule(name, body) {
-    return this._fetch(`/cron/schedules/${encodeURIComponent(name)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-  },
-
-  runCronSchedule(name) {
-    return this._fetch(`/cron/schedules/${encodeURIComponent(name)}/run`, {
-      method: 'POST',
-    });
-  },
-
-  // Queue details (pause/resume)
-  getQueueDetails(queue) {
-    return this._fetch(`/queues/${encodeURIComponent(queue)}/details`);
-  },
-
-  pauseQueue(queue) {
-    return this._fetch(`/queues/${encodeURIComponent(queue)}/pause`, { method: 'POST' });
-  },
-
-  resumeQueue(queue) {
-    return this._fetch(`/queues/${encodeURIComponent(queue)}/resume`, { method: 'POST' });
-  },
-
-  // Workers
-  listWorkers({ queue } = {}) {
-    const qs = queue ? `?queue=${encodeURIComponent(queue)}` : '';
-    return this._fetch(`/workers${qs}`);
-  },
-
-  pauseWorker(workerId) {
-    return this._fetch(`/workers/${encodeURIComponent(workerId)}/pause`, { method: 'POST' });
-  },
-
-  resumeWorker(workerId) {
-    return this._fetch(`/workers/${encodeURIComponent(workerId)}/resume`, { method: 'POST' });
-  },
-
-  // One gated maintenance pass, the work a worker pool's reaper would do.
-  runMaintenance() {
-    return this._fetch('/maintenance', { method: 'POST' });
-  },
-
-  // Rate limits
-  listRateLimits() {
-    return this._fetch('/rate-limits');
-  },
-
-  listRateLimitBuckets(prefix, page = {}) {
-    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/buckets${this._pageQuery(page)}`);
-  },
-
-  updateRateLimitPolicy(prefix, body) {
-    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-  },
-
-  resetRateLimitBuckets(prefix) {
-    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/reset`, { method: 'POST' });
-  },
-
-  // key is the full bucket key, as the bucket listing shows it.
-  addRateLimitTokens(prefix, key, tokens) {
-    return this._fetch(`/rate-limits/${encodeURIComponent(prefix)}/buckets/${encodeURIComponent(key)}/tokens`, {
-      method: 'POST',
-      body: JSON.stringify({ tokens }),
-    });
-  },
-
-  // Without idleSeconds the server uses its own idle age.
-  pruneRateLimitBuckets(idleSeconds) {
-    const qs = idleSeconds == null ? '' : `?idle=${encodeURIComponent(idleSeconds)}`;
-    return this._fetch(`/rate-limits/prune${qs}`, { method: 'POST' });
-  },
-
-  // Concurrency
-  listConcurrency() {
-    return this._fetch('/concurrency');
-  },
-
-  listConcurrencyKeys(prefix, page = {}) {
-    return this._fetch(`/concurrency/${encodeURIComponent(prefix)}/keys${this._pageQuery(page)}`);
-  },
-
-  updateConcurrencyPolicy(prefix, body) {
-    return this._fetch(`/concurrency/${encodeURIComponent(prefix)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-  },
-
-  reconcileConcurrency() {
-    return this._fetch('/concurrency/reconcile', { method: 'POST' });
-  },
-
-  pruneConcurrencyKeys() {
-    return this._fetch('/concurrency/prune', { method: 'POST' });
-  },
-
-  // SSE
-  connectSSE(onMessage, onError) {
-    const es = new EventSource(`${this.baseUrl()}/events/stream`);
-    es.onmessage = onMessage;
-    es.onerror = onError;
-    return es;
-  },
+  events: () => new EventSource(BASE + '/events/stream'),
 };

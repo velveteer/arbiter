@@ -42,7 +42,7 @@ import Arbiter.Orville qualified as ArbO
 main :: IO ()
 main = do
   poolCfg <- Worker.poolConfigForWorkers workers
-  orvillePool <- O.createConnectionPool (ArbO.createOrvilleConnectionOptions connStr poolCfg)
+  orvillePool <- O.createConnectionPool (ArbO.toOrvilleConnectionOptions connStr poolCfg)
   listen <- newLibPQListener connStr
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
       arbiterEnv = ArbO.OrvilleEnv {ArbO.schema = "arbiter", ArbO.listener = Just listen}

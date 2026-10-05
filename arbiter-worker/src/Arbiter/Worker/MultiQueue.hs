@@ -63,7 +63,9 @@ data NamedWorkerPool m
   ) =>
   NamedWorkerPool
   { workerPoolName :: Text
+  -- ^ The queue name from the registry.
   , workerPoolConfig :: WorkerConfig m payload
+  -- ^ The pool's config.
   }
 
 -- | Name a pool from its payload's registry entry.

@@ -1,7 +1,9 @@
-// Timing/config constants, gathered so cadence is tunable in one place.
-const ARB_TIMING = {
+// Timing constants, gathered so cadence is tunable in one place.
+export const TIMING = {
   sseRetryMs: 3000,
   sseRetryMaxMs: 60000,
+  queuesRetryMs: 3000,
+  queuesRetryMaxMs: 60000,
   healthPollMs: 10000,
   fetchTimeoutMs: 30000,
   flushMs: 250,
@@ -10,42 +12,32 @@ const ARB_TIMING = {
   spinPeriodMs: 800,
   armWindowMs: 5000,
   countdownTickMs: 1000,
-  cronPollMs: 60000,
-  workerPollMs: 30000,
-  queueListPollMs: 10000,
-  queuePausePollMs: 15000,
-  rateLimitPollMs: 30000,
-  concurrencyPollMs: 30000,
+  copiedFlashMs: 1200,
+  drawerSlideMs: 300,
   bulkConcurrency: 5,
   childPageLimit: 50,
   pageLimit: 50,
   pageSizes: [25, 50, 100, 200],
   // Above this many queues the landing page opens as a list rather than cards.
   queueListThreshold: 12,
+  maxEventsPerQueue: 200,
+  // The Events view renders the newest this many.
+  maxEventRows: 500,
   toastMaxVisible: 5,
   toastDelays: { danger: 8000, warning: 6000, success: 4000, info: 4000 },
   refreshModes: { '1s': 1000, '5s': 5000, '10s': 10000, '30s': 30000, '1m': 60000 },
 };
 
-// Behavioral config. pauseConfirm gates how a queue is paused (resume always uses
-// the light two-click arm): 'type' — modal, must type the queue name; 'arm' — inline
-// two-click; 'off' — hide the pause button entirely.
-// cronConfirm gates disabling a cron schedule (enabling always applies
-// immediately): 'type' — modal, must type the schedule name; 'off' — immediate.
-const ARB_CONFIG = {
+// How a destructive toggle is confirmed. pauseConfirm: 'type' opens a modal that
+// asks for the queue name, 'arm' takes a second click, 'off' hides pause. Resume
+// always takes the second click. cronConfirm: 'type' or 'off', only to disable a schedule.
+export const CONFIG = {
   pauseConfirm: 'type',
   cronConfirm: 'type',
 };
 
-// The width below which a table shows only its identifying columns. Matches the
-// phone breakpoint in dashboard.css.
-const ARB_NARROW_MQ = '(max-width: 640px)';
+// Below this width a table shows only the columns that identify a row. Matches dashboard.css.
+export const NARROW_MQ = '(max-width: 640px)';
 
-// Registry of window-dispatched event-bus names.
-const ARB_EVENTS = {
-  queueChanged: 'queue-changed',
-  sseEvent: 'sse-event',
-  sseReconnect: 'sse-reconnect',
-  filterJobs: 'filter-jobs',
-  urlChanged: 'url-changed',
-};
+// Below this width a drawer covers the list, so it goes full width.
+export const DRAWER_MODAL_MQ = '(max-width: 1200px)';

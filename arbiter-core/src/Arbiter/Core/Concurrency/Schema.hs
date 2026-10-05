@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | DDL for the concurrency-limit feature: the seeded per-prefix pool policies (with
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- DDL for the concurrency-limit feature: the seeded per-prefix pool policies (with
 -- the operator override), the global per-key count table, job columns, and the
 -- per-queue delta triggers that maintain the count. No database execution here.
 module Arbiter.Core.Concurrency.Schema
@@ -107,7 +110,7 @@ createConcurrencyIndexSQL schemaName tableName =
     "concurrency_key"
     (Just "concurrency_key IS NOT NULL")
 
--- | Per-queue triggers maintaining each key's @in_flight@.
+-- | Per-queue trigger functions maintaining each key's @in_flight@.
 createConcurrencyTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createConcurrencyTriggerFunctionsSQL schemaName tableName =
   let concTbl = arbiterConcurrencyTable schemaName

@@ -25,7 +25,7 @@ Admission limits apply to every worker pool in every process and to
 
 Delivery is at least once. Non-transactional side effects must be idempotent.
 
-With `manualWorkerConfig` and `defaultBatchedWorkerConfig`, step 2 has no
+With `manualWorkerConfig` and `batchedWorkerConfig`, step 2 has no
 transaction and the handler finalizes each job through callbacks.
 
 ## Group Ordering

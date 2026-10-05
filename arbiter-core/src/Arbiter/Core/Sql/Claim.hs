@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Claim-time SQL: candidate selection, admission gates, and the batched claim.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Claim-time SQL: candidate selection, admission gates, and the batched claim.
 module Arbiter.Core.Sql.Claim
   ( ClaimAdmission (..)
   , claimJobsBatchedSQL
@@ -29,7 +32,9 @@ import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
 -- no policy of a kind gets no filter for it.
 data ClaimAdmission = ClaimAdmission
   { admitRateLimited :: Bool
+  -- ^ Render the rate-limit gate.
   , admitConcurrent :: Bool
+  -- ^ Render the concurrency gate.
   }
   deriving stock (Eq, Show)
 
@@ -598,8 +603,8 @@ claimedCte admission tbl timeout claimant
     admittedIds = idsIn "job" "admitted"
 
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
--- any unsuspended visible job, rollup children and woken rollup parents included.
--- Each gate's CTEs render when the payload declares that kind of policy.
+-- any unsuspended, uncancelled, visible job within its attempt budget, rollup children
+-- and woken rollup parents included. Each gate's CTEs render from the 'ClaimAdmission' flags.
 claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> UUID -> Query ()
 claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName

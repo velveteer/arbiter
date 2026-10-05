@@ -1,16 +1,16 @@
 cabal-version:   3.0
 name:            arbiter-orville
 version:         0.1.0.0
-synopsis:        Orville backend integration for arbiter
+synopsis:        Orville backend for Arbiter
 description:
-  An Orville backend for Arbiter, an opinionated PostgreSQL job queue for
+  An Orville backend for Arbiter, a PostgreSQL job queue for
   Haskell.
 
   Provides @OrvilleDb@, a @MonadArbiter@ transformer over any @MonadOrville@
   monad. Arbiter queries run on the application's Orville connection and share
   the transaction Orville is already managing. The query, statement,
   transaction, and handler primitives are exported for applications that write
-  their own instance. @Arbiter.Orville.Worker@ adapts handlers and hooks written
+  their own instance. "Arbiter.Orville.Worker" adapts handlers and hooks written
   in the application monad to a worker running in @OrvilleDb@.
 
 license:         MIT
@@ -19,7 +19,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -30,6 +30,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-orville
 
 common shared-properties
   default-language: GHC2024
@@ -60,7 +61,7 @@ library
     , bytestring          >=0.10 && <0.13
     , exceptions          >=0.10 && <0.11
     , orville-postgresql  >=1.0  && <1.2
-    , postgresql-libpq    >=0.9  && <0.12
+    , postgresql-libpq    >=0.10 && <0.12
     , text                >=1.2  && <2.2
     , transformers        >=0.5  && <0.7
     , unliftio            >=0.2  && <0.3
@@ -90,7 +91,7 @@ test-suite arbiter-orville-tests
     , arbiter-test-common     >=0.1 && <0.2
     , arbiter-worker
     , arbiter-worker-testkit  >=0.1 && <0.2
-    , base
+    , base >=4.20 && <5
     , bytestring
     , hspec                   >=2.0 && <2.12
     , orville-postgresql

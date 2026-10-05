@@ -1,19 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskellQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | The @sql@ quasiquoter. It builds a 'Arbiter.Core.Sql.Query.Query' whose text, parameters, and row
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- The @sql@ quasiquoter. It builds a 'Arbiter.Core.Sql.Query.Query' whose text, parameters, and row
 -- decoder all come from one template.
 --
 -- Holes reference in-scope identifiers, like @NeatInterpolation@'s @${var}@:
 --
 --   * @${x}@ splices a fragment: 'Text' (raw clause or table name) or a
---     @Query ()@ (its parameters interleave at the splice site), via @ToFragment@.
+--     @Query ()@ (its parameters interleave at the splice site), via 'Arbiter.Core.Sql.Query.ToFragment'.
 --   * @#{ident :: CInt8}@ emits one parameter hole and binds in-scope @ident@ as
 --     its value. @Maybe CInt8@, @[CInt8]@, and @[Maybe CInt8]@ pick the
 --     nullable, array, and nullable-array encoders.
 --   * @\@{name :: CInt8}@ emits the identifier @name@ and adds @col \"name\"
 --     CInt8@ to the decoder (@Maybe CInt8@ uses @ncol@). The quote's result type
---     is @Query@ of the tuple of these holes, or @Query ()@ when there are none.
+--     is @Query ()@ with no holes, @Query@ of the bare value with one, and @Query@ of
+--     a tuple with 2 to 8.
 --
 -- A @?@ in the template is literal SQL, so PostgreSQL's jsonb operators are usable.
 module Arbiter.Core.Sql.QQ

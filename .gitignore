@@ -5,3 +5,4 @@ tags
 cabal.project.freeze
 haddocks
 book/book
+node_modules

@@ -50,10 +50,12 @@ data CronScheduleRow = CronScheduleRow
   , queueName :: Text
   , defaultExpression :: Text
   , defaultOverlap :: Text
+  -- ^ Code-defined overlap policy: @SkipOverlap@ or @AllowOverlap@.
   , defaultTimezone :: Maybe Text
   -- ^ Code-defined IANA tz name. @NULL@ = UTC.
   , overrideExpression :: Maybe Text
   , overrideOverlap :: Maybe Text
+  -- ^ User override: @SkipOverlap@ or @AllowOverlap@. @NULL@ = use default.
   , overrideTimezone :: Maybe Text
   -- ^ User override. @NULL@ = use default. To force UTC when the default is
   -- not UTC, set to @\"UTC\"@.

@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | The pool's heartbeat guard, run in IO. The guard itself is
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- The pool's heartbeat guard, run in IO. These are the IO wrappers over
 -- "Arbiter.Worker.Heartbeat.Guard".
 module Arbiter.Worker.Heartbeat
   ( HeartbeatGuard
@@ -22,8 +25,10 @@ import Arbiter.Worker.Heartbeat.Guard (GuardConfig (..), toDiffTime)
 import Arbiter.Worker.Heartbeat.Guard qualified as Guard
 import Arbiter.Worker.Logger.Internal (jobHook, poolLog)
 
+-- | The pool's guard, run in IO and keyed on the job.
 type HeartbeatGuard payload = Guard.HeartbeatGuard IO (JobRead payload)
 
+-- | Build the pool's guard from its config. IO wrapper over 'Arbiter.Worker.Heartbeat.Guard.newHeartbeatGuard'.
 newHeartbeatGuard :: (JobOperation m payload) => WorkerConfig m payload -> m (HeartbeatGuard payload)
 newHeartbeatGuard config = do
   UnliftIO run <- askUnliftIO
@@ -41,6 +46,7 @@ newHeartbeatGuard config = do
           run (jobHook (logConfig config) job "onJobHeartbeat" (onJobHeartbeat (observabilityHooks config) job now start))
       }
 
+-- | Run the guard loop. IO wrapper over 'Arbiter.Worker.Heartbeat.Guard.runHeartbeatGuard'.
 runHeartbeatGuard :: (MonadIO m) => HeartbeatGuard payload -> m Void
 runHeartbeatGuard = liftIO . Guard.runHeartbeatGuard
 

@@ -3,12 +3,13 @@
 -- | Convenience re-exports for the @postgresql-simple@ backend.
 --
 -- @
+-- import Arbiter.Core
 -- import Arbiter.Simple
 -- import Data.Proxy (Proxy (..))
 --
 -- main :: IO ()
 -- main = do
---   env <- createSimpleEnv (Proxy @MyRegistry) connStr "public"
+--   env <- createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
 --   runSimpleDb env $ do
 --     insertJob (defaultJob myPayload)
 -- @

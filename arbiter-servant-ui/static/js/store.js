@@ -1,497 +1,371 @@
-/**
- * Alpine.js global store: queues, selected queue, SSE state, theme.
- */
-// Top-level views that aren't queue-scoped (each a nav destination after Queues).
-const SYSTEM_VIEWS = ['events', 'ratelimits', 'concurrency', 'cron', 'workers'];
+// App-wide state: the queue set, health, the event stream, the top loader and toasts.
+import { markRaw, reactive, watch } from '../vendor/vue.esm-browser.prod.js';
+import { api } from './api.js';
+import { TIMING, NARROW_MQ } from './config.js';
+import { route, navigate, listUrl, SYSTEM_VIEWS } from './router.js';
 
-// A drilled-into queue's sub-tabs, in the order the tab strip lists them. The first
-// is the default a URL with no hash lands on.
-const QUEUE_SUB_TABS = ['stats', 'jobs', 'groups', 'dlq', 'archive', 'cron', 'workers'];
+/** @typedef {{ id: number, message: string, type: string, count: number, timer: any, held: boolean }} Toast */
 
-// The sub-tabs that own filter params. Each reads them on load and writes its own
-// back, so the URL keeps them across a step onto one of these tabs.
-const FILTERED_SUB_TABS = ['jobs', 'groups', 'dlq', 'archive'];
+// Storage throws where site data is blocked. State then lasts for the page only.
+function stored(use) {
+  try {
+    return use(localStorage);
+  } catch {
+    return null;
+  }
+}
 
-document.addEventListener('alpine:init', () => {
-  Alpine.store('app', {
-    queues: [],
-    selectedQueue: '',
-    view: 'queues',
-    initialized: false,
-    showLoader: false,
-    _loaderClaims: new Set(),
-    _loaderSeq: 0,
-    _loaderTimer: null,
-    _deepLinkPending: false,
-    // Reactive, so a table re-renders its columns when the window crosses the
-    // breakpoint rather than only on the next load.
-    narrow: window.matchMedia(ARB_NARROW_MQ).matches,
-    _pushing: false,
-    _restoring: false,
-    detailReady: false,
-    connected: false,
-    sseDisabled: false,
-    eventSource: null,
-    events: [],
-    maxEventsPerQueue: 200,
-    _eventSeq: 0,
-    _eventBuffer: [],
-    _flushScheduled: false,
-    _hasConnected: false,
-    _dropped: false,
-    _sseRetryTimer: null,
-    _sseRetryMs: 0,
-    theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
-    // Off unless switched on, so a reader opts into the stream rather than out.
-    sseOff: localStorage.getItem('arb.eventsOff') !== '0',
-    health: null,
-    _healthInterval: null,
-    _healthInFlight: false,
+// Reads JSON, or the raw string a value was saved as before.
+export function load(key, fallback) {
+  const raw = stored((s) => s.getItem(key));
+  if (raw == null) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
 
-    // ok / down / unknown, the last only before the first probe answers.
-    get healthState() {
-      return this.health ? this.health.status : 'unknown';
-    },
+export function save(key, value) {
+  stored((s) => s.setItem(key, JSON.stringify(value)));
+}
 
-    get healthTitle() {
-      if (this.health && this.health.reachable === false) return 'Cannot reach the server';
-      return {
-        ok: 'Server healthy',
-        down: 'Server cannot reach its database',
-        unknown: 'Checking server health',
-      }[this.healthState];
-    },
+export function forget(key) {
+  stored((s) => s.removeItem(key));
+}
 
-    // Runs on its own timer, so it reports even with live updates switched off.
-    startHealthPolling() {
-      if (this._healthInterval) return;
-      this.loadHealth();
-      this._healthInterval = setInterval(() => this.loadHealth(), ARB_TIMING.healthPollMs);
-    },
+const narrowQuery = matchMedia(NARROW_MQ);
 
-    async loadHealth() {
-      if (this._healthInFlight) return;
-      this._healthInFlight = true;
-      try {
-        this.health = await ArbiterAPI.getHealth();
-      } finally {
-        this._healthInFlight = false;
-      }
-    },
+export const app = reactive({
+  queues: /** @type {string[]} */ ([]),
+  queuesFailed: false,
+  narrow: narrowQuery.matches,
+  theme: document.documentElement.getAttribute('data-bs-theme') || 'dark',
+  health: /** @type {Awaited<ReturnType<typeof api.health>> | null} */ (null),
+  // Off unless switched on, so a reader opts into the stream.
+  sseOff: load('arb.eventsOff', 1) !== 0,
+  sseDisabled: false,
+  connected: false,
+  dropped: false,
+  events: /** @type {any[]} */ ([]),
+  loaders: 0,
+  showLoader: false,
+  toasts: /** @type {Toast[]} */ ([]),
 
-    // connected / connecting / disconnected / polling / off, for the nav indicator.
-    // A stream that has not answered yet is connecting. Only one that was live
-    // and went away is disconnected.
-    get sseState() {
-      if (this.sseOff) return 'off';
-      if (this.sseDisabled) return 'polling';
-      if (this.connected) return 'connected';
-      return this._dropped ? 'disconnected' : 'connecting';
-    },
+  // The drilled-into queue, once the queue set confirms it exists.
+  get queue() {
+    return route.view === 'queues' && this.queues.includes(route.queue) ? route.queue : '';
+  },
 
-    get sseTitle() {
-      return {
-        off: 'Live updates off',
-        polling: 'Live updates unavailable on this server',
-        connected: 'Live updates connected',
-        connecting: 'Connecting to live updates',
-        disconnected: 'Reconnecting to live updates',
-      }[this.sseState];
-    },
+  get pageTitle() {
+    if (this.queue) return this.queue;
+    return SYSTEM_VIEWS[route.view] || 'Queues';
+  },
 
-    // Why the log is empty, which depends on whether a stream is feeding it.
-    get eventsEmptyText() {
-      return {
-        off: 'Live updates are off. Switch them on to stream events.',
-        polling: 'This server does not stream events.',
-        connected: 'No events yet. They appear here as they happen.',
-        connecting: 'Connecting to the event stream.',
-        disconnected: 'Reconnecting. Events resume when the stream is back.',
-      }[this.sseState];
-    },
+  get healthState() {
+    return this.health ? this.health.status : 'unknown';
+  },
 
-    toggleSSE() {
-      if (this.sseDisabled) return;
-      this.sseOff = !this.sseOff;
-      localStorage.setItem('arb.eventsOff', this.sseOff ? '1' : '0');
-      if (this.sseOff) {
-        this.closeSSE();
-      } else {
-        this._sseRetryMs = 0;
-        this.connectSSE();
-      }
-    },
+  get healthTitle() {
+    if (this.health && 'reachable' in this.health) return 'Cannot reach the server';
+    return { ok: 'Server healthy', down: 'Server cannot reach its database', unknown: 'Checking server health' }[this.healthState];
+  },
 
-    // Tears the stream down without the retry that a dropped connection gets.
-    closeSSE() {
-      if (this._sseRetryTimer) { clearTimeout(this._sseRetryTimer); this._sseRetryTimer = null; }
-      if (this.eventSource) { this.eventSource.close(); this.eventSource = null; }
-      this.connected = false;
-      this._dropped = false;
-    },
-
-    // Names where the reader is, for the page heading and the browser tab. A drilled-into
-    // queue takes the name; otherwise the nav destination does. The queue area remembers
-    // its selection while a system view is open, so the view has to agree before the
-    // queue can name the page.
-    get pageTitle() {
-      if (this.view === 'queues' && this.selectedQueue) return this.selectedQueue;
-      return {
-        queues: 'Queues',
-        ratelimits: 'Rate Limits',
-        concurrency: 'Concurrency',
-        cron: 'Cron',
-        workers: 'Workers',
-        events: 'Events',
-      }[this.view] || 'Queues';
-    },
-
-    // Outstanding first-time loads, one token per claimant. The bar only renders
-    // once loads have been pending past a threshold, so fast connections never
-    // flash it.
-    claimLoader() {
-      const token = ++this._loaderSeq;
-      this._loaderClaims.add(token);
-      if (this._loaderClaims.size === 1 && !this._loaderTimer) {
-        this._loaderTimer = setTimeout(() => {
-          this._loaderTimer = null;
-          if (this._loaderClaims.size) this.showLoader = true;
-        }, ARB_TIMING.loaderDelayMs);
-      }
-      return token;
-    },
-    // A token spends once, so releasing a claim twice cannot drop another view's.
-    releaseLoader(token) {
-      if (!this._loaderClaims.delete(token)) return;
-      if (this._loaderClaims.size) return;
-      if (this._loaderTimer) { clearTimeout(this._loaderTimer); this._loaderTimer = null; }
-      this.showLoader = false;
-    },
-
-    async init() {
-      this.startHealthPolling();
-      const narrowQuery = window.matchMedia(ARB_NARROW_MQ);
-      narrowQuery.addEventListener('change', (e) => { this.narrow = e.matches; });
-      // Mount the detail one frame after the list unmounts. A same-flush
-      // list-unmount plus detail-mount skips the last tab pane's Alpine init.
-      Alpine.effect(() => {
-        const show = this.view === 'queues' && !!this.selectedQueue;
-        if (!show) {
-          this.detailReady = false;
-          return;
-        }
-        requestAnimationFrame(() => {
-          if (this.view === 'queues' && this.selectedQueue) this.detailReady = true;
-        });
-      });
-      // A system view is queue-independent, so resolve it up front. A deep-linked
-      // queue is mounted only after listQueues confirms it exists, so a stale link
-      // never mounts a detail view or fires sub-tab loads against a missing table.
-      // While that validation is in flight, _deepLinkPending holds the queue list
-      // back so it doesn't flash before the detail view takes over.
-      const params = new URLSearchParams(location.search);
-      const urlQueue = params.get('queue');
-      const urlView = params.get('view');
-      if (urlView && SYSTEM_VIEWS.includes(urlView)) {
-        this.view = urlView;
-      } else if (urlQueue) {
-        this._deepLinkPending = true;
-      }
-
-      const loaderToken = this.claimLoader();
-      try {
-        const data = await ArbiterAPI.listQueues();
-        this.queues = (data && data.queues) || [];
-        if (urlQueue && this.view === 'queues') {
-          if (this.queues.includes(urlQueue)) {
-            this.selectedQueue = urlQueue;
-          } else {
-            showToast(`Queue "${urlQueue}" not found`, 'warning');
-            this._updateUrl('');
-          }
-        }
-      } catch (e) {
-        console.error('Could not load queues:', e);
-        showToast('Could not load queues: ' + e.message);
-      } finally {
-        this.releaseLoader(loaderToken);
-      }
-      this._deepLinkPending = false;
-      this.initialized = true;
-      this.connectSSE();
-      // A page in the back/forward cache must not hold a connection from the per-host pool.
-      window.addEventListener('pagehide', () => this.closeSSE());
-      window.addEventListener('pageshow', (e) => {
-        if (e.persisted) this.connectSSE();
-      });
-
-      // Sync tab → hash. A tab the reader clicked is a navigation, so it pushes; one
-      // a history step activated is not, and _restoring holds the push back.
-      document.addEventListener('shown.bs.tab', (e) => {
-        const target = e.target.getAttribute('data-bs-target');
-        if (!target) return;
-        const tab = target.replace('#tab-', '');
-        // A sub-tab that owns no filter params must clear them, else a stale filter
-        // desyncs the URL from the view.
-        this._pushing = !this._restoring;
-        try {
-          this._updateUrl(tab, !FILTERED_SUB_TABS.includes(tab));
-        } finally {
-          this._pushing = false;
-        }
-      });
-
-      window.addEventListener('popstate', () => {
-        this._restoring = true;
-        try {
-          this._applyUrl();
-        } finally {
-          requestAnimationFrame(() => { this._restoring = false; });
-        }
-      });
-    },
-
-    // Drill into a queue (view + selection + queueChanged), writing the URL via `setUrl`.
-    // forceReset dispatches queueChanged even when the queue is unchanged, so re-opening
-    // the current queue still resets tab filters to match the freshly cleared URL.
-    _drillInto(queue, setUrl, forceReset = false) {
-      const changed = this.selectedQueue !== queue;
-      dismissOpenModals();
-      this.selectedQueue = queue;
-      this.view = 'queues';
-      this._pushing = true;
-      try {
-        setUrl();
-      } finally {
-        this._pushing = false;
-      }
-      // A different queue (or an explicit reset) clears the tabs, and the detail view
-      // mounts against the new URL. Staying in the same queue leaves it mounted, so
-      // nothing reads the URL or opens the sub-tab it names unless this does: the tabs
-      // adopt its filters first, then the one it points at is brought to the front.
-      if (changed || forceReset) {
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: queue }));
-      } else {
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.urlChanged));
-        this.restoreSubTab(QUEUE_SUB_TABS);
-      }
-    },
-
-    // Drill into a queue's detail view (from the queue list or the quick-switcher).
-    // A lateral switch from within a detail keeps the current sub-tab; drilling in from
-    // the list resets to the default (Stats) by clearing the hash.
-    openQueue(queue) {
-      const wasInDetail = !!this.selectedQueue;
-      this._drillInto(queue, () => this._updateUrl(wasInDetail ? undefined : '', true), true);
-    },
-
-    // Drill into a named sub-tab of a queue's detail view (from a queue card badge).
-    openQueueTab(queue, tab) {
-      this._drillInto(queue, () => this._updateUrl(tab, true), true);
-    },
-
-    // Drill into a queue's Jobs tab, or the filtered tab named, pre-filtered. Takes a
-    // bare status, or any of the filter keys, so a worker row or a policy row can open
-    // the jobs it accounts for.
-    openQueueJobs(queue, filters, tab) {
-      this._drillInto(queue, () => this._writeUrl(queueJobsUrl(queue, filters, tab)));
-    },
-
-    // Drill into a queue's Jobs or DLQ tab showing one job (from the event log).
-    openQueueJob(queue, jobId, tab) {
-      this._drillInto(queue, () => this._writeUrl(queueJobUrl(queue, jobId, tab)));
-    },
-
-    // Open a policy view focused on one gate prefix, from a job's Gates cell.
-    openPolicy(view, prefix) {
-      dismissOpenModals();
-      this.view = view;
-      this.selectedQueue = '';
-      const url = new URL(location.href);
-      for (const k of ['queue', ..._filterKeys]) url.searchParams.delete(k);
-      url.searchParams.set('view', view);
-      url.searchParams.set('prefix', prefix);
-      url.hash = '';
-      this._writeUrl(url, true);
-    },
-
-    // Switch to a top-level view: 'queues' (the queue area) or one of SYSTEM_VIEWS.
-    setView(view) {
-      dismissOpenModals();
-      this.view = view;
-      // Returning to the Queues section always lands on the list, so the nav
-      // button is never a no-op while a queue is open.
-      if (view === 'queues') this.selectedQueue = '';
-      // Clear any sub-tab hash left over from a queue detail view.
-      this._pushing = true;
-      try {
-        this._updateUrl('', true);
-      } finally {
-        this._pushing = false;
-      }
-    },
-
-    _updateUrl(newHash, dropFilters = false) {
-      const url = new URL(location.href);
-      url.searchParams.delete('view');
-      url.searchParams.delete('queue');
-      url.searchParams.delete('prefix');
-      // Cleared on the URL being built, never on the one being left: rewriting the
-      // outgoing entry would strip the filters Back is supposed to return to.
-      if (dropFilters) for (const k of _filterKeys) url.searchParams.delete(k);
-      if (this.view === 'queues') {
-        if (this.selectedQueue) url.searchParams.set('queue', this.selectedQueue);
-      } else {
-        url.searchParams.set('view', this.view);
-      }
-      if (newHash !== undefined) {
-        url.hash = newHash;
-      }
-      this._writeUrl(url);
-    },
-
-    // Write the address bar. A navigation pushes, so the browser's Back button walks
-    // the views the reader visited; everything else (a filter, a sort, a page) rewrites
-    // the current entry, so Back is never spent on a step nobody would call one.
-    // A push onto the identical URL is dropped, so a repeated click adds nothing.
-    _writeUrl(url, forcePush = false) {
-      const next = new URL(url, location.href);
-      if (next.href === location.href) return;
-      if (this._pushing || forcePush) history.pushState(null, '', next);
-      else history.replaceState(null, '', next);
-    },
-
-    // Activate the sub-tab the URL names without pushing an entry for it. A mount is
-    // part of the navigation that already pushed, not a step of its own, so this is
-    // what keeps one Back press out of a queue rather than two.
-    restoreSubTab(tabs) {
-      this._restoring = true;
-      try {
-        activateSubTabFromHash(tabs);
-      } finally {
-        requestAnimationFrame(() => { this._restoring = false; });
-      }
-    },
-
-    // Restore whatever the URL names, without writing history back. The browser has
-    // already moved the address bar, so this only brings the view into line with it.
-    _applyUrl() {
-      const params = new URLSearchParams(location.search);
-      const urlView = params.get('view');
-      const urlQueue = params.get('queue');
-      const nextView = SYSTEM_VIEWS.includes(urlView) ? urlView : 'queues';
-      const nextQueue =
-        nextView === 'queues' && urlQueue && this.queues.includes(urlQueue) ? urlQueue : '';
-      const queueChanged = this.selectedQueue !== nextQueue;
-      dismissOpenModals();
-      this.view = nextView;
-      this.selectedQueue = nextQueue;
-      if (!nextQueue) return;
-      // The detail view survives a step within one queue, so its sub-tab and filters
-      // are restored here rather than by a fresh mount. A step that lands on a
-      // different queue resets the tabs first, then reads the URL's own filters.
-      // A queue change already resets the tabs and has them read the new URL, so only
-      // a step within one queue needs telling separately. Dispatching both would load
-      // the same list twice.
-      if (queueChanged) {
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.queueChanged, { detail: nextQueue }));
-      }
-      requestAnimationFrame(() => {
-        this.restoreSubTab(QUEUE_SUB_TABS);
-        if (!queueChanged) window.dispatchEvent(new CustomEvent(ARB_EVENTS.urlChanged));
-      });
-    },
-
-    toggleTheme() {
-      this.theme = this.theme === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-bs-theme', this.theme);
-      localStorage.setItem('arbiter-theme', this.theme);
-    },
-
-    // The browser retries a stream that drops on its own. One the server refuses
-    // closes for good, so re-arm it here and back off to a slow re-probe.
-    _scheduleSSE() {
-      if (this.sseOff || this._sseRetryTimer) return;
-      this._sseRetryMs = Math.min(
-        this._sseRetryMs ? this._sseRetryMs * 2 : ARB_TIMING.sseRetryMs,
-        ARB_TIMING.sseRetryMaxMs
-      );
-      this._sseRetryTimer = setTimeout(() => {
-        this._sseRetryTimer = null;
-        this.connectSSE();
-      }, this._sseRetryMs);
-    },
-
-    connectSSE() {
-      if (this.sseOff) return;
-      if (this.eventSource) {
-        this.eventSource.close();
-      }
-      this.eventSource = ArbiterAPI.connectSSE(
-        (event) => {
-          this.connected = true;
-          try {
-            const data = JSON.parse(event.data);
-            if (data.event === 'disabled') {
-              this.eventSource.close();
-              this.eventSource = null;
-              this.connected = false;
-              this.sseDisabled = true;
-              this._scheduleSSE();
-              return;
-            }
-            if (data.event === 'connected') {
-              // Reconnect (not first connect) — refetch all tabs
-              if (this._hasConnected) {
-                window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseReconnect));
-              }
-              this._hasConnected = true;
-              this._dropped = false;
-              this._sseRetryMs = 0;
-              if (this._sseRetryTimer) { clearTimeout(this._sseRetryTimer); this._sseRetryTimer = null; }
-              this.sseDisabled = false;
-              return;
-            }
-            this._eventBuffer.push({
-              ...data,
-              receivedAt: new Date().toISOString(),
-              _seq: ++this._eventSeq,
-            });
-            this._scheduleFlush();
-          } catch (e) {
-            // Non-JSON event (keep-alive)
-          }
-        },
-        () => {
-          this.connected = false;
-          this._dropped = true;
-          if (!this.eventSource || this.eventSource.readyState === EventSource.CLOSED) this._scheduleSSE();
-        }
-      );
-    },
-
-    _scheduleFlush() {
-      if (this._flushScheduled) return;
-      this._flushScheduled = true;
-      setTimeout(() => {
-        this._flushScheduled = false;
-        if (this._eventBuffer.length === 0) return;
-        const batch = this._eventBuffer.splice(0);
-        this.events = this._retainEvents([...batch].reverse().concat(this.events));
-        window.dispatchEvent(new CustomEvent(ARB_EVENTS.sseEvent, { detail: batch }));
-      }, ARB_TIMING.flushMs);
-    },
-
-    // Retention is per queue, so a busy queue does not evict a quiet one's tail
-    // before it can be read. The list arrives newest first, so counting down it
-    // keeps each queue's newest.
-    _retainEvents(events) {
-      const kept = {};
-      return events.filter((e) => {
-        const queue = e.table || '';
-        kept[queue] = (kept[queue] || 0) + 1;
-        return kept[queue] <= this.maxEventsPerQueue;
-      });
-    },
-  });
+  // A stream that has not answered yet connects. Only one that was live and went away is disconnected.
+  get sseState() {
+    if (this.sseOff) return 'off';
+    if (this.connected) return 'connected';
+    return this.dropped ? 'disconnected' : 'connecting';
+  },
 });
+
+narrowQuery.addEventListener('change', (e) => {
+  app.narrow = e.matches;
+});
+
+// ---- Bus ----
+
+const handlers = {};
+
+function emit(name, data) {
+  handlers[name]?.forEach((fn) => fn(data));
+}
+
+export function on(name, fn) {
+  (handlers[name] ??= new Set()).add(fn);
+  return () => handlers[name].delete(fn);
+}
+
+// ---- Top loader ----
+
+// Holds the top bar while a first load is out. The release spends once.
+export function claimLoader() {
+  let held = true;
+  app.loaders++;
+  return () => {
+    if (held) app.loaders--;
+    held = false;
+  };
+}
+
+// The bar shows only once loads outlast a delay, so fast ones never flash it.
+let loaderTimer = null;
+watch(
+  () => app.loaders > 0,
+  (busy) => {
+    clearTimeout(loaderTimer);
+    if (busy)
+      loaderTimer = setTimeout(() => {
+        app.showLoader = app.loaders > 0;
+      }, TIMING.loaderDelayMs);
+    else app.showLoader = false;
+  },
+);
+
+// ---- Toasts ----
+
+let toastSeq = 0;
+
+// A repeat of a toast on screen bumps its count and restarts its timer. It adds no second toast.
+export function toast(message, type = 'danger') {
+  const same = app.toasts.find((t) => t.type === type && t.message === message);
+  if (same) {
+    same.count++;
+    if (!same.held) holdToast(same, false);
+    return;
+  }
+  while (app.toasts.length >= TIMING.toastMaxVisible) clearTimeout(app.toasts.shift()?.timer);
+  const t = { id: ++toastSeq, message, type, count: 1, timer: null, held: false };
+  app.toasts.push(t);
+  holdToast(t, false);
+}
+
+export function dismissToast(t) {
+  clearTimeout(t.timer);
+  const i = app.toasts.findIndex((x) => x.id === t.id);
+  if (i >= 0) app.toasts.splice(i, 1);
+}
+
+// A hovered or focused toast stays until the pointer and the focus leave.
+export function holdToast(t, held) {
+  t.held = held;
+  clearTimeout(t.timer);
+  if (!held) t.timer = setTimeout(() => dismissToast(t), TIMING.toastDelays[t.type] ?? TIMING.toastDelays.danger);
+}
+
+// ---- Theme ----
+
+export function toggleTheme() {
+  app.theme = app.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-bs-theme', app.theme);
+  // Raw, since theme-boot.js reads it before any module runs.
+  stored((s) => s.setItem('arbiter-theme', app.theme));
+}
+
+// ---- Event stream ----
+
+let source = null;
+let hasConnected = false;
+let retryTimer = null;
+let retryMs = 0;
+let buffer = [];
+let flushTimer = null;
+let eventSeq = 0;
+
+export function toggleSSE() {
+  app.sseOff = !app.sseOff;
+  save('arb.eventsOff', app.sseOff ? 1 : 0);
+  if (app.sseOff) closeSSE();
+  else {
+    retryMs = 0;
+    connectSSE();
+  }
+}
+
+function closeSSE() {
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  source?.close();
+  source = null;
+  app.connected = false;
+  app.dropped = false;
+}
+
+// Doubles the last delay from base, up to max.
+const nextBackoff = (prev, base, max) => Math.min(prev ? prev * 2 : base, max);
+
+// The browser retries a stream that drops. One the server refuses closes for
+// good, so re-arm it here and back off to a slow re-probe.
+function retrySSE() {
+  if (app.sseOff || retryTimer) return;
+  retryMs = nextBackoff(retryMs, TIMING.sseRetryMs, TIMING.sseRetryMaxMs);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    connectSSE();
+  }, retryMs);
+}
+
+// A message that is not JSON is skipped.
+function parseEvent(event) {
+  try {
+    return JSON.parse(event.data);
+  } catch {
+    return null;
+  }
+}
+
+function onMessage(event) {
+  app.connected = true;
+  const data = parseEvent(event);
+  if (!data) return;
+  if (data.event === 'disabled') {
+    closeSSE();
+    app.sseDisabled = true;
+    retrySSE();
+  } else if (data.event === 'connected') {
+    // A reconnect missed events, so every view reloads.
+    if (hasConnected) emit('reconnect');
+    hasConnected = true;
+    app.dropped = false;
+    app.sseDisabled = false;
+    retryMs = 0;
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  } else {
+    buffer.push(markRaw({ ...data, receivedAt: new Date().toISOString(), _seq: ++eventSeq }));
+    flushTimer ??= setTimeout(flush, TIMING.flushMs);
+  }
+}
+
+function connectSSE() {
+  if (app.sseOff) return;
+  source?.close();
+  source = api.events();
+  source.onmessage = onMessage;
+  source.onerror = () => {
+    if (app.connected) app.dropped = true;
+    app.connected = false;
+    if (!source || source.readyState === EventSource.CLOSED) retrySSE();
+  };
+}
+
+// The stream's first answer says whether the server streams events at all. A refusal asks again at the slow backoff.
+function probeSSE() {
+  if (!app.sseOff) return;
+  const probe = api.events();
+  probe.onmessage = (event) => {
+    probe.close();
+    app.sseDisabled = parseEvent(event)?.event === 'disabled';
+    if (app.sseDisabled) setTimeout(probeSSE, TIMING.sseRetryMaxMs);
+  };
+  probe.onerror = () => probe.close();
+}
+
+// Retention is per queue, so a busy queue does not evict a quiet one's tail.
+function flush() {
+  flushTimer = null;
+  const batch = buffer;
+  buffer = [];
+  const kept = new Map();
+  app.events = [...batch]
+    .reverse()
+    .concat(app.events)
+    .filter((e) => {
+      const q = e.table || '';
+      const n = (kept.get(q) ?? 0) + 1;
+      kept.set(q, n);
+      return n <= TIMING.maxEventsPerQueue;
+    });
+  emit('sse', batch);
+}
+
+// ---- Boot ----
+
+// A tick is skipped while a probe is out, so a slow server does not collect them.
+let healthReq = null;
+function loadHealth() {
+  healthReq ??= api
+    .health()
+    .then((h) => {
+      app.health = h;
+    })
+    .finally(() => {
+      healthReq = null;
+    });
+}
+
+// The registry fixes the queue set, so one good fetch holds until a queue in the URL is missing from it. A failed fetch asks again after a delay.
+let queuesReq = null;
+let queuesTimer = null;
+let queuesRetryMs = 0;
+let queuesLanded = false;
+function loadQueues() {
+  clearTimeout(queuesTimer);
+  queuesReq ??= api
+    .queues()
+    .then((r) => {
+      // An unchanged set keeps its array, so the watchers on it stay quiet.
+      if (!queuesLanded || r.queues.length !== app.queues.length || r.queues.some((q, i) => q !== app.queues[i])) app.queues = r.queues;
+      queuesLanded = true;
+      app.queuesFailed = false;
+      queuesRetryMs = 0;
+      return true;
+    })
+    .catch((e) => {
+      queuesReq = null;
+      app.queuesFailed = true;
+      queuesRetryMs = nextBackoff(queuesRetryMs, TIMING.queuesRetryMs, TIMING.queuesRetryMaxMs);
+      queuesTimer = setTimeout(loadQueues, queuesRetryMs);
+      toast('Could not load queues: ' + e.message);
+      return false;
+    });
+  return queuesReq;
+}
+
+// A redeploy can add a queue while the page stays open.
+function reloadQueues() {
+  queuesReq = null;
+  return loadQueues();
+}
+
+// A queue in the URL mounts only once the queue set confirms it. Each navigation
+// and each landed queue set asks again.
+async function confirmQueue() {
+  if (!route.queue || app.queuesFailed || app.queues.includes(route.queue)) return;
+  if (!(await loadQueues())) return;
+  if (!route.queue || app.queues.includes(route.queue)) return;
+  if (!(await reloadQueues())) return;
+  if (!route.queue || app.queues.includes(route.queue)) return;
+  toast(`Queue "${route.queue}" not found`, 'warning');
+  navigate(listUrl(), { replace: true });
+}
+
+export async function boot() {
+  loadHealth();
+  setInterval(() => {
+    if (!document.hidden) loadHealth();
+  }, TIMING.healthPollMs);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) loadHealth();
+  });
+  watch([() => route.nav, () => app.queues, () => app.queuesFailed], confirmQueue);
+  watch(
+    () => app.sseDisabled && route.view === 'events',
+    (gone) => {
+      if (gone) navigate(listUrl(), { replace: true });
+    },
+  );
+  if (app.sseOff) probeSSE();
+  else connectSSE();
+  // A page in the back/forward cache must not hold a connection from the per-host pool.
+  addEventListener('pagehide', closeSSE);
+  addEventListener('pageshow', (e) => {
+    if (e.persisted) connectSSE();
+  });
+  const release = claimLoader();
+  try {
+    await loadQueues();
+  } finally {
+    release();
+  }
+}

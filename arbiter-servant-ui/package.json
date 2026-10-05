@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "description": "Type checking and formatting for the dashboard. Nothing here is built or served.",
+  "scripts": {
+    "types": "openapi-typescript test/golden/openapi.json -o types/api.d.ts",
+    "check": "tsc -p .",
+    "format": "prettier --write static/js",
+    "format:check": "prettier --check static/js"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "vue": "3.5.43"
+  }
+}

@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Completed-job archive SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Completed-job archive SQL templates.
 module Arbiter.Core.Sql.Archive
   ( archiveAckCte
   , updateArchiveResultSQL
@@ -36,6 +39,7 @@ allArchiveColumns = joinColumns (codecColumns (archiveRowCodec ""))
 
 -- | The @archived@ CTE teeing rows from the named @ack@ CTE into the archive, per-row
 -- on @archive_for@. @archive_expires_at@ is precomputed. Shared by single and batch ack.
+-- The fragment ends with a comma, so another CTE must follow it.
 archiveAckCte :: Text -> Text -> Text -> Text
 archiveAckCte schema tableName ackCte =
   let archiveTbl = jobQueueArchiveTable schema tableName
@@ -72,8 +76,7 @@ updateArchiveResultsBatchSQL schema tableName jobIds results =
 archivePurgeBatch :: Int
 archivePurgeBatch = 10000
 
--- | Delete up to @archivePurgeBatch@ archived jobs whose per-row
--- @archive_expires_at@ has passed.
+-- | Delete a bounded batch of archived jobs whose per-row @archive_expires_at@ has passed.
 purgeArchiveSQL :: Text -> Text -> Text
 purgeArchiveSQL schema tableName =
   let archiveTbl = jobQueueArchiveTable schema tableName

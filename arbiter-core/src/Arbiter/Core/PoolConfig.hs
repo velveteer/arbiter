@@ -16,7 +16,7 @@ data PoolConfig = PoolConfig
   deriving stock (Eq, Show)
 
 -- | 10 connections, 300s idle timeout, 1 stripe. For workers, size the pool
--- with 'Arbiter.Worker.poolConfigForWorkers'.
+-- with @Arbiter.Worker.poolConfigForWorkers@.
 defaultPoolConfig :: PoolConfig
 defaultPoolConfig =
   PoolConfig

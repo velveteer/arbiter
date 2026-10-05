@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | INSERT fragments derived from a profunctor 'Codec'. The column list, the
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- INSERT fragments derived from a profunctor 'Codec'. The column list, the
 -- placeholders, and the parameters all come from one value.
 module Arbiter.Core.Sql.Insert
   ( insertFrag
@@ -43,7 +46,9 @@ columnList = joinColumns . map fst . cColumns
 -- | Columns a statement reads from a one-row source aliased @edit@ in place of its own.
 data RowEdit = RowEdit
   { editColumns :: [Text]
+  -- ^ The columns read from @edit@.
   , editSource :: Query ()
+  -- ^ The one-row source, aliased @edit@.
   }
 
 -- | A codec's written columns as a 'RowEdit': @(SELECT ?::t1 AS c1, ...) edit@.

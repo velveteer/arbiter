@@ -139,7 +139,7 @@ spanning :: (MonadUnliftIO m) => Maybe Tracer -> Text -> SpanArguments -> m a ->
 spanning mTracer name args action =
   maybe action (\tracer -> inSpan'' tracer name args (const action)) mTracer
 
--- | Run an action inside a @publish \<queue\>@ producer span over @n@ jobs.
+-- | Run an action inside a @publish \<queue\>@ producer span over the given jobs.
 withPublishSpan :: (HasKind payload, MonadUnliftIO m) => TableName -> [JobWrite payload] -> m a -> m a
 withPublishSpan queue jobs action =
   resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue jobs) action
@@ -180,7 +180,11 @@ data ConsumeSpan = ConsumeSpan
   }
 
 -- | What one consumer span covers.
-data ConsumeShape = PerJob | PerBatch
+data ConsumeShape
+  = -- | One span for one job.
+    PerJob
+  | -- | One span for a batch of jobs.
+    PerBatch
   deriving stock (Eq, Show)
 
 -- | The shape over this many jobs. One job narrows the span to that job.

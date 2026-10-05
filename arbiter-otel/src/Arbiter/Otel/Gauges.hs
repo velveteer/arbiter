@@ -36,15 +36,21 @@ import Arbiter.Otel.Gauges.Instruments (registerInstruments)
 import Arbiter.Otel.Metrics (arbiterMeter)
 import Arbiter.Otel.Telemetry qualified as Tel
 
--- | Register gauge instruments and return their refresh loop.
+-- | Register gauge instruments and return their refresh loop. Run the loop on its own
+-- thread. It runs until it is stopped. A stopped loop retires the exported readings.
+-- With metrics off, the loop returns at once.
 startGauges
   :: (MonadArbiter m)
   => Tel.Telemetry
   -> LogConfig
+  -- ^ Base log config for the loop.
   -> (forall a. m a -> IO a)
+  -- ^ Runs a database action.
   -> SchemaName
   -> [(TableName, [Text])]
+  -- ^ Each queue table and its payload kind labels.
   -> NominalDiffTime
+  -- ^ Refresh interval. The minimum is one second.
   -> IO (IO ())
 startGauges tel baseLog runDb schema queueKinds refreshInterval = do
   (loop, stop) <- prepareGauges tel baseLog runDb schema queueKinds refreshInterval

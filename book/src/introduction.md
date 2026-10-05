@@ -18,6 +18,3 @@ A PostgreSQL job queue for Haskell applications.
 - REST API with SSE and an embedded admin UI
 - File-based liveness probes for Kubernetes and systemd
 
-> [!NOTE]
->
-> The API may change. A Hackage release following PVP is tentative.

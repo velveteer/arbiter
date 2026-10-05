@@ -18,7 +18,7 @@ import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Test.Poll (waitUntil, withLinkedAsync)
 import Arbiter.Test.Setup qualified as TestSetup
 import Arbiter.Worker (runWorkerPool)
-import Arbiter.Worker.Config (BatchCallbacks, WorkerConfig (..), ack, ackAll, defaultBatchedWorkerConfig)
+import Arbiter.Worker.Config (BatchCallbacks, WorkerConfig (..), ack, ackAll, batchedWorkerConfig)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
@@ -77,7 +77,7 @@ spec connStr =
               }
 
         void . run env $ HL.insertJobsBatch [defaultJob (SimpleTask "a"), defaultJob (SimpleTask "b")]
-        config <- defaultBatchedWorkerConfig 1 10 (orvilleBatchedHandler handler)
+        config <- batchedWorkerConfig 1 10 (orvilleBatchedHandler handler)
 
         withLinkedAsync (run env $ runWorkerPool config {pollInterval = 0.05, observabilityHooks = orvilleHooks hooks}) $ \_ -> do
           waitUntil 10_000 $ (== 2) . length <$> readIORef successRef
@@ -97,7 +97,7 @@ spec connStr =
               liftIO $ putMVar settled (primaryKey job, either (\RollbackAck -> True) (const False) outcome)
 
         void . run env $ HL.insertJobsBatch [defaultJob (SimpleTask "rolled-back")]
-        config <- defaultBatchedWorkerConfig 1 10 (orvilleBatchedHandler handler)
+        config <- batchedWorkerConfig 1 10 (orvilleBatchedHandler handler)
 
         withLinkedAsync (run env $ runWorkerPool config {pollInterval = 0.05}) $ \_ -> do
           (jobId, rolledBack) <- takeMVar settled

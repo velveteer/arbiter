@@ -1,12 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | DLQ SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- DLQ SQL templates.
 module Arbiter.Core.Sql.DLQ
   ( DLQMove (..)
   , moveToDLQSQL
   , selectExhaustedJobsSQL
   , retryFromDLQSQL
+  , dlqRetryParentSQL
   , lockDLQRetryParentSQL
   , lockDLQRetryGroupsSQL
   , dlqJobExistsSQL
@@ -32,7 +36,11 @@ import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
-data DLQMove = MoveNow | MoveIfExhausted
+data DLQMove
+  = -- | Move the job without a re-check.
+    MoveNow
+  | -- | Move the job only while it is still unsuspended, uncancelled, visible and out of attempts.
+    MoveIfExhausted
   deriving stock (Eq, Show)
 
 -- | The sweep's predicate. Claimable, uncancelled, and out of attempt budget.
@@ -186,9 +194,16 @@ dlqRetryTreeCte dlqTbl tbl dlqId =
     )
   |]
 
+-- | The main-queue parent of the tree a DLQ retry restores.
+dlqRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
+dlqRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId ""
+
 -- | Lock the main-queue parent of the tree a DLQ retry restores.
 lockDLQRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
-lockDLQRetryParentSQL schema tableName dlqId =
+lockDLQRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId "FOR UPDATE"
+
+dlqRetryParent :: Text -> Text -> Int64 -> Text -> Query Int64
+dlqRetryParent schema tableName dlqId lockClause =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
       walk = dlqRetryTreeCte dlqTbl tbl dlqId
@@ -196,7 +211,7 @@ lockDLQRetryParentSQL schema tableName dlqId =
         ${walk}
         SELECT @{id :: CInt8} FROM ${tbl}
         WHERE id = (SELECT dead.parent_id FROM ${dlqTbl} dead WHERE dead.job_id = (SELECT job_id FROM root_job_id))
-        FOR UPDATE
+        ${lockClause}
       |]
 
 -- | Create and lock, in key order, the group summaries of the tree a DLQ retry restores

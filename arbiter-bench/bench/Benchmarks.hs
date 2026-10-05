@@ -23,21 +23,21 @@ import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), createOrvilleConnectionOptions, runOrvilleDb)
+import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), toOrvilleConnectionOptions, runOrvilleDb)
 import Arbiter.Otel qualified as Otel
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
   ( BatchCallbacks (..)
   , EncodeJobResult
   , WorkerConfig (..)
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , runWorkerPool
   , silentLogConfig
   , transactionalWorkerConfig
   )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race, race_)
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (finally)
 import Control.Monad (replicateM, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -77,7 +77,6 @@ import OpenTelemetry.Trace.Core
   )
 import Orville.PostgreSQL qualified as O
 import System.Exit (die)
-import System.IO.Unsafe (unsafePerformIO)
 import Test.Tasty (localOption, mkTimeout)
 import Test.Tasty.Bench
 import Test.Tasty.Providers (IsTest (..), singleTest, testPassed)
@@ -198,18 +197,16 @@ data Instrumentation = Plain | Instrumented
   deriving stock (Eq)
 
 -- | The SDK the instrumented trials record into. Real span and metric machinery that
--- exports nowhere. Built once and shared by every trial.
+-- exports nowhere.
 benchTelemetry :: IO (TracerProvider, Otel.Telemetry)
-benchTelemetry = modifyMVar benchTelemetryVar $ \case
-  Just built -> pure (Just built, built)
-  Nothing -> do
-    processor <- batchProcessor batchTimeoutConfig discardSpans
-    tracerProvider <- createTracerProvider [processor] emptyTracerProviderOptions
-    (meterProvider, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
-    setGlobalMeterProvider meterProvider
-    -- The handle holds nothing bracketed and outlives the call.
-    tel <- Otel.withExternalTelemetry (Just meterProvider) Nothing pure
-    pure (Just (tracerProvider, tel), (tracerProvider, tel))
+benchTelemetry = do
+  processor <- batchProcessor batchTimeoutConfig discardSpans
+  tracerProvider <- createTracerProvider [processor] emptyTracerProviderOptions
+  (meterProvider, _env) <- createMeterProvider (materializeResources (mkResource [])) defaultSdkMeterProviderOptions
+  setGlobalMeterProvider meterProvider
+  -- The handle holds nothing bracketed and outlives the call.
+  tel <- Otel.withExternalTelemetry (Just meterProvider) Nothing pure
+  pure (tracerProvider, tel)
   where
     discardSpans =
       SpanExporter
@@ -218,19 +215,16 @@ benchTelemetry = modifyMVar benchTelemetryVar $ \case
         , spanExporterForceFlush = pure FlushSuccess
         }
 
-benchTelemetryVar :: MVar (Maybe (TracerProvider, Otel.Telemetry))
-benchTelemetryVar = unsafePerformIO (newMVar Nothing)
-{-# NOINLINE benchTelemetryVar #-}
-
 -- | Run @use@ over a trial's pools under the global tracer provider that trial
 -- measures, restoring the previous provider afterwards.
 withInstrumentedPools
   :: (QueueOperation m BenchPayload)
-  => Instrumentation
+  => IO (TracerProvider, Otel.Telemetry)
+  -> Instrumentation
   -> [WorkerConfig m BenchPayload]
   -> ([WorkerConfig m BenchPayload] -> IO a)
   -> IO a
-withInstrumentedPools otel configs use = do
+withInstrumentedPools telemetry otel configs use = do
   previous <- getGlobalTracerProvider
   instrumented `finally` setGlobalTracerProvider previous
   where
@@ -239,7 +233,7 @@ withInstrumentedPools otel configs use = do
         setGlobalTracerProvider =<< createTracerProvider [] emptyTracerProviderOptions
         use configs
       Instrumented -> do
-        (tracerProvider, tel) <- benchTelemetry
+        (tracerProvider, tel) <- telemetry
         setGlobalTracerProvider tracerProvider
         use (map (Otel.instrumentConfig tel) configs)
 
@@ -580,7 +574,7 @@ workerTrial runM statsConn mkSingle totalJobs durationUs numPools workersPerPool
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs callbacks -> void $ flakyBatch callbacks jobs)
+      batchedWorkerConfig workersPerPool batchSize (\jobs callbacks -> void $ flakyBatch callbacks jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
@@ -697,7 +691,8 @@ runSteadyStateTrial runM producerRunM statsConn configs processedCounter produce
 -- config, counting each job it processes.
 steadyStateTrial
   :: (HasRegistry m BenchRegistry, QueueOperation m BenchPayload)
-  => RunM m
+  => IO (TracerProvider, Otel.Telemetry)
+  -> RunM m
   -> RunM SimpleM
   -> Connection
   -> (Int -> IORef Int -> m (WorkerConfig m BenchPayload))
@@ -713,14 +708,14 @@ steadyStateTrial
   -> QueueFlavor
   -> Instrumentation
   -> IO SteadyResult
-steadyStateTrial runM producerRunM statsConn mkSingle durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
+steadyStateTrial telemetry runM producerRunM statsConn mkSingle durationUs numPools workersPerPool producerBatchSize modeConfig flavor otel = do
   processedCounter <- newIORef (0 :: Int)
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool processedCounter
-    BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs callbacks -> do
+    BenchBatchedJobsMode batchSize -> batchedWorkerConfig workersPerPool batchSize $ \jobs callbacks -> do
       acked <- flakyBatch callbacks jobs
       countProcessedN processedCounter acked
-  withInstrumentedPools otel configs $ \instrumented ->
+  withInstrumentedPools telemetry otel configs $ \instrumented ->
     runSteadyStateTrial
       runM
       producerRunM
@@ -781,13 +776,13 @@ quietBenchDb = do
   execute_ conn "CHECKPOINT"
   close conn
 
--- | Defer an action to the first time the returned trigger runs.
-once :: IO () -> IO (IO ())
+-- | Defer an action to the first time the returned trigger runs, then reuse its result.
+once :: IO a -> IO (IO a)
 once action = do
-  done <- newIORef False
-  pure $ do
-    already <- atomicModifyIORef' done (\old -> (True, old))
-    when (not already) action
+  memo <- newMVar Nothing
+  pure $ modifyMVar memo $ \built -> do
+    result <- maybe action pure built
+    pure (Just result, result)
 
 -- | Truncate a gated queue's tables and the shared bucket/count tables.
 cleanupGatedFresh :: Text -> IO ()
@@ -922,7 +917,7 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode pools table mkJob duratio
       transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         countProcessed processedCounter
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
+      batchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
         ackAll callbacks (toList jobs)
         countProcessedN processedCounter (length jobs)
   runGatedSteadyTrial runM producerRunM statsConn (map benchTune cfgs) processedCounter table mkJob durationUs
@@ -1018,7 +1013,7 @@ main = do
       )
       hasqlTransports
 
-  let orvilleOptions = createOrvilleConnectionOptions benchConnStr benchPoolConfig
+  let orvilleOptions = toOrvilleConnectionOptions benchConnStr benchPoolConfig
   orvillePool <- O.createConnectionPool orvilleOptions
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
 
@@ -1042,6 +1037,7 @@ main = do
 
   producerEnv <- createSimpleEnv (Proxy @BenchRegistry) benchConnStr benchSchema
   settleGated <- once quietBenchDb
+  telemetry <- once benchTelemetry
 
   let simpleRun :: RunM SimpleM
       simpleRun = runSimpleDb simpleEnv
@@ -1058,7 +1054,7 @@ main = do
                 mkWorkerBenches simpleEnv (hasqlWorkerTrial run' statsConn)
             , bgroup ("Steady-State Throughput (" <> label <> ")") $
                 steadyStateBenches $
-                  steadyStateTrial run' producerRun statsConn $ \workers counter ->
+                  steadyStateTrial telemetry run' producerRun statsConn $ \workers counter ->
                     transactionalWorkerConfig workers $ \(_conn :: Hasql.Connection) job ->
                       flakyGate (countProcessed counter) job
             , bgroup ("Gating Overhead (" <> label <> ")") $
@@ -1079,12 +1075,12 @@ main = do
           mkWorkerBenches simpleEnv (orvilleWorkerTrial orvilleRun statsConn)
       , bgroup "Steady-State Throughput (simple)" $
           steadyStateBenches $
-            steadyStateTrial simpleRun producerRun statsConn $ \workers counter ->
+            steadyStateTrial telemetry simpleRun producerRun statsConn $ \workers counter ->
               transactionalWorkerConfig workers $ \(_conn :: Connection) job ->
                 flakyGate (countProcessed counter) job
       , bgroup "Steady-State Throughput (orville)" $
           steadyStateBenches $
-            steadyStateTrial orvilleRun producerRun statsConn $ \workers counter ->
+            steadyStateTrial telemetry orvilleRun producerRun statsConn $ \workers counter ->
               transactionalWorkerConfig workers $ \job -> flakyGate (countProcessed counter) job
       ]
       <> concatMap hasqlGroups (NE.toList hasqlEnvs)

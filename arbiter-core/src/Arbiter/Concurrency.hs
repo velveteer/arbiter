@@ -2,6 +2,8 @@
 
 -- | Per-job concurrency limits.
 --
+-- This is the user-facing concurrency module. Import it, not the @Arbiter.Core.Concurrency.*@ modules.
+--
 -- Declare which pool (if any) caps each job with a 'HasConcurrency' instance,
 -- building the selector from 'noConcurrency' \/ 'concurrencyBy' \/
 -- 'globalConcurrency' \/ 'concurrencyByCase'. The migration collects every pool a

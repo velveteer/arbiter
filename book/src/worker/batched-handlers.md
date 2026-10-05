@@ -1,12 +1,12 @@
 # Batched Handlers
 
-`defaultBatchedWorkerConfig workers batchSize handler` passes up to
+`batchedWorkerConfig workers batchSize handler` passes up to
 `batchSize` jobs per call. A grouped batch holds one group. An ungrouped batch
 holds ready jobs.
 
 ```haskell
--- defaultBatchedWorkerConfig <workerCount> <batchSize> handler
-config <- Worker.defaultBatchedWorkerConfig 10 5 batchHandler
+-- batchedWorkerConfig <workerCount> <batchSize> handler
+config <- Worker.batchedWorkerConfig 10 5 batchHandler
 
 batchHandler
   :: NonEmpty (Arb.JobRead ImagePayload)

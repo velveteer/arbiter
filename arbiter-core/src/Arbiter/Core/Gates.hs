@@ -1,9 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Schema-scoped watermark gates for global tasks (refresh groups, sweep stale
--- workers). One row per task holding @last_run_at@. 'Arbiter.Core.Operations.runGated'
--- claims the row with @SELECT ... FOR UPDATE SKIP LOCKED@ once the interval has
--- elapsed. At most one worker pool runs the task per interval.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Schema-scoped watermark gates for global tasks (refresh groups, sweep stale
+-- workers). One row per task holds @last_run_at@ and an optional @metadata@ value.
+-- 'Arbiter.Core.Operations.runGated' claims the row with @SELECT ... FOR UPDATE SKIP LOCKED@
+-- once the interval has elapsed. At most one worker pool runs the task per interval.
 module Arbiter.Core.Gates
   ( arbiterGatesTable
   , arbiterGatesTableName
@@ -35,7 +38,7 @@ createGatesTableSQL schemaName =
     , ");"
     ]
 
--- | Add the column a task publishes its result into.
+-- | Add the @metadata@ column a task stores its result or resume state in.
 addGateMetadataColumnSQL :: SchemaName -> Text
 addGateMetadataColumnSQL schemaName =
   "ALTER TABLE " <> arbiterGatesTable schemaName <> " ADD COLUMN IF NOT EXISTS metadata JSONB;"

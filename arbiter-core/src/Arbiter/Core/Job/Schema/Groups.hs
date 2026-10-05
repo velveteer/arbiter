@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Schema for the per-queue group summary table and the statement-level triggers
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Schema for the per-queue group summary table and the statement-level triggers
 -- that maintain it. The summary carries each group's head, counts and visibility
 -- deadlines. The claim ranks groups from it.
 module Arbiter.Core.Job.Schema.Groups

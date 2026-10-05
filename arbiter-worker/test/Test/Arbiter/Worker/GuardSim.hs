@@ -454,6 +454,8 @@ judgePlan (plan, events) =
             outcome /= Cancelled || verdictBefore Cancel
         , counterexample ("job " <> show job <> " was reclaimed without a reclaim verdict") $
             outcome /= Gone reclaimedReason || verdictBefore Reclaim
+        , counterexample ("job " <> show job <> " was stopped as deleted without a gone verdict") $
+            outcome /= Gone deletedReason || verdictBefore Vanish
         , counterexample ("job " <> show job <> " was stopped although every extend landed") $
             not (promptlyExtended && elapsed batch == 0 && maxDuration setup == Nothing) || outcome == Done
         ]
@@ -626,11 +628,11 @@ spec = describe "Guard simulation" $ do
         , [() | Heartbeat 1 _ <- events] `is` 0
         ]
 
-  it "keeps the original lease when every heartbeat finds the row gone" $
+  it "stops a handler once a second heartbeat finds its row gone" $
     simulate (plainSetup 1 2 Nothing [Answer 0 [(1, Vanish)]]) (\w -> handler w 1 0 (threadDelay 5) >> threadDelay 3) $ \events ->
       conjoin
-        [ [() | (1, Gone reason, at) <- endings events, reason == leaseExpiredReason, withinPause (Time 2) at] `is` 1
-        , property (not (null [() | Finished _ [(1, Vanish)] _ <- events]))
+        [ [() | (1, Gone reason, at) <- endings events, reason == deletedReason, withinPause (Time 1) at] `is` 1
+        , [() | Finished _ [(1, Vanish)] _ <- events] `is` 2
         , [() | Heartbeat 1 _ <- events] `is` 0
         ]
 
@@ -643,6 +645,31 @@ spec = describe "Guard simulation" $ do
         [ [() | (1, Done, _) <- endings events] `is` 1
         , property (not (null [() | Finished _ [(1, Unchanged)] _ <- events]))
         , property (not (null [() | Heartbeat 1 _ <- events]))
+        ]
+
+  it "stops a batch at the beat that finds a pending job gone"
+    $ simulate
+      (plainSetup 1 2 Nothing [Answer 0 [(1, Vanish)]])
+      (\w -> guardedBatch w (1 :| [2]) (pure [1, 2]) (threadDelay 5) >> threadDelay 1)
+    $ \events ->
+      conjoin
+        [ [() | (1, Gone reason, at) <- endings events, reason == deletedReason, withinPause (Time 1) at] `is` 1
+        , property (any (\case Finished _ [(1, Vanish), (2, Extend)] at -> at == Time 1; _ -> False) events)
+        ]
+
+  it "keeps a batch whose gone job settles before the second heartbeat"
+    $ simulate
+      (plainSetup 1 2 Nothing [Answer 0 [(1, Vanish)]])
+      ( \w -> do
+          settled <- newTVarIO False
+          void . forkIO $ threadDelay 1.1 >> atomically (writeTVar settled True)
+          guardedBatch w (1 :| [2]) (readTVarIO settled >>= \done -> pure (if done then [2] else [1, 2])) (threadDelay 3)
+          threadDelay 1
+      )
+    $ \events ->
+      conjoin
+        [ [() | (1, Done, _) <- endings events] `is` 1
+        , property (any (\case Issued _ [2] at -> at == Time 1.25; _ -> False) events)
         ]
 
   it "keeps a batch when a gone sibling settled during the heartbeat"

@@ -14,7 +14,7 @@
 -- main = do
 --   -- Run migrations with event streaming enabled before starting the server.
 --   -- The server runs over any backend env.
---   env <- createSimpleEnv (Proxy @MyRegistry) connStr "public"
+--   env <- createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
 --   config <- initArbiterServer (runSimpleDb env)
 --
 --   -- Start API server on port 8080
@@ -27,16 +27,18 @@ module Arbiter.Servant
 
     -- * Server
   , arbiterServer
+  , arbiterServerHoisted
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
-  , defaultQueueStatsCacheTtl
+  , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
   , defaultMaintenanceSparseInterval
   , defaultMaintenanceTimeout
   , BuildServer (..)
+  , CacheCell
 
     -- * API Types
   , ArbiterAPI

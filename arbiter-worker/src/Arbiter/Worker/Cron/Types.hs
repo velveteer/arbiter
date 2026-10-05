@@ -233,7 +233,7 @@ ticksWearing zone local = case localTimeToUTCFull zone local of
   LTUAmbiguous first second _ _ -> [first, second]
   LTUNone _ _ -> []
 
--- | \'nextRunInTimezone\' over an unparsed expression. A bad one returns \'Nothing\'.
+-- | 'nextRunInTimezone' over an unparsed expression. A bad one returns 'Nothing'.
 nextRunFromExpression :: Maybe Text -> Text -> UTCTime -> Maybe UTCTime
 nextRunFromExpression tzName expr now =
   either (const Nothing) (\sched -> nextRunInTimezone tzName sched now) (parseCronSchedule expr)

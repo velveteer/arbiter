@@ -22,6 +22,7 @@ import Control.Monad.Class.MonadTime.SI (MonadMonotonicTime (..), MonadTime (..)
 import Data.Foldable (toList, traverse_)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, maybeToList)
+import Data.Set qualified as Set
 
 import Arbiter.Worker.Heartbeat.Guard.State
 
@@ -74,6 +75,7 @@ guardBatch guard batch action =
             , leaseLapsed = False
             , deadlineSent = False
             , signalledAt = Nothing
+            , goneSeen = Set.empty
             , couriers = Just []
             }
       atomically $ do

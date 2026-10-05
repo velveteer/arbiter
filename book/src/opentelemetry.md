@@ -43,7 +43,7 @@ enqueue made outside a handler.
 `arbiter-otel` reports job activity, queue depth, admission policies, reaper
 activity, Arbiter table health, and PostgreSQL health.
 [`Arbiter.Otel.MetricNames`](https://arbiterq.dev/arbiter-otel/Arbiter-Otel-MetricNames.html)
-lists each instrument with its unit.
+lists each instrument with its type, unit, and attributes.
 
 Admission metrics are keyed by policy, with `policy_kind` of `rate_limit` or
 `concurrency`.

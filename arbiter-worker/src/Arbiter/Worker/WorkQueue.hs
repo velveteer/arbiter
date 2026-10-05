@@ -1,4 +1,8 @@
--- | Batch queue with in-flight counts and a slot-availability signal.
+{-# OPTIONS_HADDOCK not-home #-}
+
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Batch queue with in-flight counts and a slot-availability signal.
 module Arbiter.Worker.WorkQueue
   ( WorkQueue
   , newWorkQueue
@@ -26,6 +30,7 @@ data WorkQueue a = WorkQueue
   , wqFinished :: TVar Bool
   }
 
+-- | An empty queue with no busy slots.
 newWorkQueue :: (MonadIO m) => m (WorkQueue a)
 newWorkQueue = WorkQueue <$> newChan <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO False
 
@@ -50,9 +55,11 @@ finishWork queue = modifyTVar' (wqBusy queue) (subtract 1) *> writeTVar (wqFinis
 awaitFinished :: WorkQueue a -> STM ()
 awaitFinished queue = readTVar (wqFinished queue) >>= checkSTM >> writeTVar (wqFinished queue) False
 
+-- | Batches queued and not yet taken by a worker.
 queuedCount :: WorkQueue a -> STM Int
 queuedCount = readTVar . wqQueued
 
+-- | Batches a worker holds.
 busyCount :: WorkQueue a -> STM Int
 busyCount = readTVar . wqBusy
 

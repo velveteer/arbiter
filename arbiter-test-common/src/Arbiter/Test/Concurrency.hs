@@ -229,10 +229,10 @@ concurrencySpec mkMessage runM = do
         $ runM env
         $ HL.insertJobsBatch
           [defaultGroupedJob ("flagged-due-" <> T.pack (show i)) (mkMessage "old") | i <- [1 .. 12 :: Int]]
-      flagged <- runM env (HL.claimNextVisibleJobs 12 0.2) :: IO [JobRead payload]
+      flagged <- runM env (HL.claimNextVisibleJobs 12 1) :: IO [JobRead payload]
       length flagged `shouldBe` 12
-      forM_ flagged $ \job -> runM env (HL.forceCancelJob @payload (primaryKey job))
-      threadDelay 400_000
+      runM env $ withDbTransaction $ forM_ flagged $ \job -> HL.forceCancelJob @payload (primaryKey job)
+      threadDelay 1_200_000
       Just healthy <- runM env $ HL.insertJob (defaultGroupedJob "healthy-flagged" (mkMessage "healthy"))
       claimed <- runM env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead payload]
       map primaryKey claimed `shouldBe` [primaryKey healthy]

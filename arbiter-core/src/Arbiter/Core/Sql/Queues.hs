@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Queues SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Queues SQL templates.
 module Arbiter.Core.Sql.Queues
   ( queueColumnList
   , ensureQueueSQL
@@ -25,7 +28,7 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 queueColumnList :: Text
 queueColumnList = joinColumns (codecColumns queueRowCodec)
 
--- | Insert an arbiter_queues row with defaults if one doesn't already exist.
+-- | Insert an @arbiter_queues@ row with defaults if one does not already exist.
 ensureQueueSQL :: SchemaName -> Text -> Query ()
 ensureQueueSQL schemaName queue =
   let tbl = arbiterQueuesTable schemaName
@@ -71,13 +74,13 @@ setQueuePausedSQL schemaName queue paused =
         WHERE (SELECT count(*) FROM notif) >= 0
       |]
 
--- | Get the arbiter_queues row for a single queue.
+-- | Get the @arbiter_queues@ row for a single queue.
 getQueueSQL :: SchemaName -> Text -> Query QueueRow
 getQueueSQL schemaName queue =
   let tbl = arbiterQueuesTable schemaName
    in rows queueRowCodec [sql|SELECT ${queueColumnList} FROM ${tbl} WHERE queue_name = #{queue :: CText}|]
 
--- | List all arbiter_queues rows.
+-- | List all @arbiter_queues@ rows.
 listQueuesSQL :: SchemaName -> Query QueueRow
 listQueuesSQL schemaName =
   let tbl = arbiterQueuesTable schemaName

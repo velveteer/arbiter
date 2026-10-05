@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Stats SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Stats SQL templates.
 module Arbiter.Core.Sql.Stats
   ( getQueueStatsSQL
   , allQueueStatsSQL

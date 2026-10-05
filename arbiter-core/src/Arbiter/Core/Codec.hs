@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Typed encoding and decoding for PostgreSQL queries.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Typed encoding and decoding for PostgreSQL queries.
 --
 --   * 'RowCodec' decodes result rows. It is a free applicative that each backend
 --     (postgresql-simple, hasql, orville) interprets natively.
@@ -60,7 +63,8 @@ module Arbiter.Core.Codec
   ) where
 
 import Control.Applicative.Free.Final (Ap, liftAp, runAp, runAp_)
-import Data.Aeson (Value)
+import Data.Aeson (Value, parseJSON)
+import Data.Aeson.Types (parseMaybe)
 import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -367,6 +371,10 @@ archiveRowCodec queueName =
     <$> jobEnvelopeCodec "completed_at" queueName
     <*> ncol "result" CJsonb
 
+-- | A jsonb array of text. Any other shape reads as empty.
+jsonTexts :: Value -> [Text]
+jsonTexts = fromMaybe [] . parseMaybe parseJSON
+
 -- | A policy row with bucket aggregates and live throttled count.
 rateLimitPolicyViewCodec :: RowCodec RateLimitPolicyView
 rateLimitPolicyViewCodec =
@@ -380,6 +388,7 @@ rateLimitPolicyViewCodec =
     <*> ncol "override_interval" CFloat8
     <*> col "bucket_count" CInt8
     <*> col "throttled_count" CInt8
+    <*> (jsonTexts <$> col "throttled_queues" CJsonb)
     <*> ncol "min_tokens" CFloat8
     <*> ncol "avg_tokens" CFloat8
 

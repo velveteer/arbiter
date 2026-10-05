@@ -12,9 +12,27 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 
+import Arbiter.Core.Enum (enumFromText)
+
 -- | Effective job status. Arbiter derives status from the stored fields. The status SQL
 -- in "Arbiter.Core.Sql.Jobs" is its source of truth.
-data JobStatus = Ready | InFlight | Backoff | Scheduled | Suspended | Throttled | Cancelled | Exhausted
+data JobStatus
+  = -- | Visible, with attempts left. A claim can take it.
+    Ready
+  | -- | Claimed by a worker, with the lease still running.
+    InFlight
+  | -- | Unclaimed after a failed attempt, waiting out a retry delay.
+    Backoff
+  | -- | Never attempted, delayed to a future time.
+    Scheduled
+  | -- | Not claimable until resumed, such as a rollup finalizer with children.
+    Suspended
+  | -- | Held by a rate limit until tokens refill.
+    Throttled
+  | -- | Force-cancel flagged, waiting for teardown.
+    Cancelled
+  | -- | Visible but out of attempts, waiting for the reaper's DLQ sweep.
+    Exhausted
   deriving stock (Bounded, Enum, Eq, Generic, Show)
 
 -- | The wire name for a status.
@@ -30,9 +48,7 @@ jobStatusToText Exhausted = "exhausted"
 
 -- | Strict inverse of 'jobStatusToText'. Unknown values are rejected.
 jobStatusFromText :: Text -> Either Text JobStatus
-jobStatusFromText name =
-  maybe (Left ("unknown job status: " <> name)) Right $
-    lookup name [(jobStatusToText status, status) | status <- [minBound .. maxBound]]
+jobStatusFromText = enumFromText "job status" jobStatusToText
 
 instance ToJSON JobStatus where
   toJSON = toJSON . jobStatusToText

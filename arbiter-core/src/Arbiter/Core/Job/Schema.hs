@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | SQL generation functions for job queue schemas. No database execution happens here.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- SQL generation functions for job queue schemas. No database execution happens here.
 module Arbiter.Core.Job.Schema
   ( -- * Name Types
     SchemaName
@@ -375,7 +378,7 @@ createArchiveExpiresAtIndexSQL schemaName tableName =
     "archive_expires_at"
     Nothing
 
--- | Index on archive @job_id@ for by-id lookups (@getArchivedJobById@).
+-- | Index on archive @job_id@ for by-id lookups ('Arbiter.Core.HighLevel.getArchivedJobById').
 createArchiveJobIdIndexSQL :: Text -> Text -> Text
 createArchiveJobIdIndexSQL schemaName tableName =
   indexSQL ("idx_" <> tableName <> "_archive_job_id") (jobQueueArchiveTable schemaName tableName) "job_id" Nothing
@@ -484,7 +487,7 @@ createResultsTableSQL schemaName tableName =
 -- Groups Maintenance Triggers
 -- ---------------------------------------------------------------------------
 
--- | The qualified @<baseName>_{insert,delete,update}@ maintenance-function names.
+-- | The qualified @\<baseName\>_{insert,delete,update}@ maintenance-function names.
 maintenanceFunctionNames :: Text -> Text -> (Text, Text, Text)
 maintenanceFunctionNames schemaName baseName =
   (func "_insert", func "_delete", func "_update")
@@ -492,7 +495,7 @@ maintenanceFunctionNames schemaName baseName =
     func suffix = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
 
 -- | One statement-level AFTER trigger. Drops then recreates, wiring the
--- @<baseName><suffix>@ function over @tbl@ with the given event and REFERENCING clause.
+-- @\<baseName\>\<suffix\>@ function over @tbl@ with the given event and REFERENCING clause.
 statementTriggerSQL :: Text -> Text -> Text -> Text -> Text -> Text -> Text
 statementTriggerSQL schemaName tbl baseName suffix event referencing =
   let func = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
@@ -506,8 +509,8 @@ statementTriggerSQL schemaName tbl baseName suffix event referencing =
         , "FOR EACH STATEMENT EXECUTE FUNCTION " <> func <> "();"
         ]
 
--- | The 3 statement-level AFTER triggers (insert/delete/update) wiring a table's
--- maintenance functions, named @<baseName>_{insert,delete,update}@.
+-- | The 3 statement-level AFTER triggers (insert\/delete\/update) wiring a table's
+-- maintenance functions, named @\<baseName\>_{insert,delete,update}@.
 createMaintenanceTriggersSQL :: Text -> Text -> Text -> Text
 createMaintenanceTriggersSQL schemaName tbl baseName =
   T.intercalate

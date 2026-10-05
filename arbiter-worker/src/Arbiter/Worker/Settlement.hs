@@ -34,7 +34,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (Value)
 import Data.Bifunctor (second)
 import Data.Foldable (traverse_)
-import Data.Int (Int32, Int64)
+import Data.Int (Int32)
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (fromMaybe)
@@ -131,7 +131,7 @@ poolEffects config statements consumeSpan = do
         fireFailure config shape job errorMsg startTime endTime
         case outcome of
           Retrying delay -> hook job "onJobRetry" $ Job.onJobRetry hooks job delay
-          _ -> hook job "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
+          _ -> hook job "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks job errorMsg
       Cancelled job reason -> fireCancelled config job reason
       Unavailable job reason -> hook job "onJobUnavailable" $ Job.onJobUnavailable hooks job reason
 
@@ -230,12 +230,12 @@ fireCancelled config job errorMsg = do
   jobHook (logConfig config) job "onJobCancelled" $
     Job.onJobCancelled (observabilityHooks config) job errorMsg
 
--- | Delete what a tree or branch cancel names, returning the rows deleted.
+-- | Delete what a tree or branch cancel names, returning the ids deleted.
 cancelJobFor
   :: (MonadArbiter m)
   => FailureKind
   -> Job.JobRead payload
-  -> m Int64
+  -> m [Job.JobId]
 cancelJobFor kind job = do
   schemaName <- getSchema
   case kind of
@@ -257,7 +257,7 @@ handleJobFailure
   -> m (Either Text Outcome)
 handleJobFailure config locks (errorMsg, failureKind) job
   -- A batch sibling's cancel takes out the whole tree. Zero rows still means gone.
-  | cancelsTree failureKind = Right TreeCancelled <$ cancelJobFor failureKind job
+  | cancelsTree failureKind = Right . TreeCancelled <$> cancelJobFor failureKind job
   | failureKind == PermanentFailure || Job.attempts job >= jobMaxAtts job = do
       schemaName <- getSchema
       wrote "no longer available for the dead-letter queue" DeadLettered

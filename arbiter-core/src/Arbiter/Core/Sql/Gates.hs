@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Gates SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Gates SQL templates.
 module Arbiter.Core.Sql.Gates
   ( ensureGateRowSQL
   , checkGateSQL
@@ -32,7 +35,7 @@ ensureGateRowSQL schemaName task =
         ON CONFLICT (task_name) DO NOTHING
       |]
 
--- | Read-only pre-transaction check. TRUE when last_run_at is older than the interval.
+-- | Read-only pre-transaction check. @TRUE@ when @last_run_at@ is older than the interval.
 checkGateSQL :: SchemaName -> Double -> Text -> Query Bool
 checkGateSQL schemaName intervalSecs task =
   let tbl = arbiterGatesTable schemaName
@@ -111,7 +114,7 @@ releaseGateSQL schemaName task claimedAt previous =
         WHERE task_name = #{task :: CText} AND last_run_at = #{claimedAt :: CTimestamptz}
       |]
 
--- | Bump last_run_at to NOW() inside the claim transaction.
+-- | Bump @last_run_at@ to @NOW()@ inside the claim transaction.
 bumpGateSQL :: SchemaName -> Text -> Query ()
 bumpGateSQL schemaName task =
   let tbl = arbiterGatesTable schemaName

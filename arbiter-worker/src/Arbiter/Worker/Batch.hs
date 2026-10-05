@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Batch settlement, outcome reporting, and force-cancel finalization.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Batch settlement, outcome reporting, and force-cancel finalization.
 --
 -- Each 'Effects' action runs one transaction or hook. The pool runs the
 -- lifecycle in IO. Tests use io-sim.
@@ -72,8 +75,10 @@ import Arbiter.Worker.Logger (LogLevel (..))
 
 -- | A hook the lifecycle fires.
 data Report job
-  = Claimed job UTCTime
-  | Succeeded job UTCTime UTCTime
+  = -- | The job was claimed. The batch start time.
+    Claimed job UTCTime
+  | -- | The job was acked. Its start and end times.
+    Succeeded job UTCTime UTCTime
   | -- | A handler failure, written as the outcome says.
     Failed job Text UTCTime UTCTime Outcome
   | -- | A force-cancel or a tree cancel took the job, for the reason given.
@@ -88,8 +93,8 @@ data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchC
 -- | A handler failure: its message and disposition.
 type Failure = (Text, FailureKind)
 
--- | Where a failure write left the job.
-data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled
+-- | Where a failure write left the job. A tree cancel carries the ids it deleted.
+data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled [JobId]
   deriving stock (Eq, Show)
 
 -- | Batch statements and hooks. Callbacks use the handler's context and join
@@ -116,7 +121,9 @@ data Effects n ctx job kids stored = Effects
   , effectSpawn :: ctx -> job -> kids -> n ()
   -- ^ Attach children to one job and settle it suspended, in one transaction.
   , effectReport :: ctx -> Report job -> n ()
+  -- ^ Fire the hook for one report.
   , effectLog :: LogLevel -> [job] -> Text -> n ()
+  -- ^ The pool log, with the jobs in context.
   }
 
 -- | How the pool runs a batch's handler.
@@ -129,10 +136,15 @@ data Mode n ctx job kids stored
 -- | The settle operations a batch handler drives its jobs through.
 data Callbacks n ctx job kids stored = Callbacks
   { callbackAck :: ctx -> job -> Maybe stored -> n ()
+  -- ^ Ack one job and store its result.
   , callbackAckAll :: ctx -> [(job, Maybe stored)] -> n ()
+  -- ^ Ack in bulk, storing each result.
   , callbackFail :: ctx -> Failure -> job -> n ()
+  -- ^ Write one job's failure.
   , callbackNack :: ctx -> job -> n ()
+  -- ^ Release one job for reprocessing.
   , callbackSpawn :: ctx -> job -> kids -> n ()
+  -- ^ Attach children to one job and suspend it.
   }
 
 -- ---------------------------------------------------------------------------
@@ -300,7 +312,7 @@ runBatch effects guard mode handoff jobs = do
             SingleMode transaction ->
               settleWith run (\restore -> restore (transaction firstJob)) (const (finalized [firstJob])) $ \at () ->
                 reportSuccess at startTime firstJob
-            BatchedMode handler -> handler jobs (callbacks run startTime)
+            BatchedMode handler -> handler jobs (callbacks run jobs startTime)
     endTime <- getCurrentTime
     reportBatchOutcome run jobs startTime endTime result
 
@@ -391,14 +403,15 @@ reportFailed
   => Run n ctx job kids stored -> Text -> UTCTime -> UTCTime -> job -> Either Text Outcome -> n ()
 reportFailed run msg startTime endTime job = traverse_ (reportOnce run job . report run . toReport)
   where
-    toReport TreeCancelled = Cancelled job msg
+    toReport (TreeCancelled _) = Cancelled job msg
     toReport outcome = Failed job msg startTime endTime outcome
 
 -- | The settle operations a batch handler drives its jobs through, each from the
 -- handler's context at the call.
 callbacks
-  :: (MonadMask n, MonadSTM n, MonadTime n) => Run n ctx job kids stored -> UTCTime -> Callbacks n ctx job kids stored
-callbacks base startTime =
+  :: (MonadMask n, MonadSTM n, MonadTime n)
+  => Run n ctx job kids stored -> NonEmpty job -> UTCTime -> Callbacks n ctx job kids stored
+callbacks base jobs startTime =
   Callbacks
     { callbackAck = \ctx job stored -> unlessHandled "ack" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectAck run job stored) $ \at () ->
@@ -416,9 +429,13 @@ callbacks base startTime =
                   void (settleGoneJobs at unownedReason reclaimed)
     , callbackFail = \ctx failure@(msg, _) job -> unlessHandled "failure" job $ within ctx $ \run -> do
         endTime <- getCurrentTime
-        void $ settle run (finalized [job]) (effect effectFail run failure job) $ \at outcome -> do
-          reportFailed at msg startTime endTime job outcome
-          settleUnwritten at [(job, outcome)]
+        pending <- pendingJobs (runHandoff base) jobs
+        let siblings = cancelledSiblings pending job
+        void $ settleWith run (\_ -> effect effectFail run failure job) (finalized . (job :) . siblings) $
+          \at outcome -> do
+            reportFailed at msg startTime endTime job outcome
+            traverse_ (\sibling -> reportOnce at sibling (report at (Cancelled sibling msg))) (siblings outcome)
+            settleUnwritten at [(job, outcome)]
     , callbackNack = \ctx job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run [job]
     , callbackSpawn = \ctx job kids -> unlessHandled "spawn" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () ->
@@ -426,6 +443,12 @@ callbacks base startTime =
     }
   where
     within ctx body = body base {runContext = ctx}
+    -- The pending jobs a tree cancel deleted, other than the one it failed.
+    cancelledSiblings pending job = \case
+      Right (TreeCancelled deleted) ->
+        filter (\sibling -> hasIdIn (runHandoff base) (Set.fromList deleted) sibling && key sibling /= key job) pending
+      _ -> []
+    key = handoffKey (runHandoff base)
     handledIds = progressHandled <$> readProgress (runHandoff base)
     unlessHandled label job act = do
       handled <- handledIds

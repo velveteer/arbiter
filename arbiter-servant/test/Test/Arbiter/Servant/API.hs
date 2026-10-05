@@ -59,7 +59,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Lazy qualified as LB
-import Data.Foldable (toList)
+import Data.Foldable (for_, toList)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty (..))
@@ -88,18 +88,19 @@ import Arbiter.Servant.Types
   ( AckRequest (..)
   , ApiJobWithStatus (..)
   , ApiJobWrite (..)
-  , ArchiveResponse (..)
+  , ArchiveResponse
   , BatchDeleteResponse (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
   , ClaimResponse (ClaimResponse)
-  , DLQResponse (..)
+  , DLQResponse
   , GroupSummary (..)
-  , GroupsResponse (..)
+  , GroupsResponse
   , JobLease (..)
   , JobResponse (..)
   , JobsResponse (..)
   , MaintenanceResponse (..)
+  , Page (..)
   , StatsResponse (..)
   , WorkersResponse (..)
   )
@@ -197,7 +198,7 @@ spec connStr = do
   sharedPool <- runIO (createSharedPool connStr)
   mkEnv <- runIO (createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema)
   serverConfig <- runIO (initArbiterServer (runSimpleDb mkEnv))
-  let app = arbiterApp @ServantTestRegistry serverConfig {queueStatsCacheTtl = 0}
+  let app = arbiterApp @ServantTestRegistry serverConfig
 
   let cleanupDb :: IO ()
       cleanupDb = withResource sharedPool $ \conn -> cleanupData testSchema testTable conn
@@ -239,10 +240,10 @@ spec connStr = do
       get "/api/v1/arbiter_servant_test/jobs"
         `shouldRespondWith` jsonMatch
           [aesonQQ|{
-              "jobs": [],
-              "jobsTotal": 0,
-              "jobsOffset": 0,
-              "jobsLimit": 50,
+              "items": [],
+              "total": 0,
+              "offset": 0,
+              "limit": 50,
               "childCounts": {},
               "pausedParents": [],
               "dlqChildCounts": {}
@@ -277,8 +278,8 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 1
-        length (jobs body) `shouldBe` 1
+        pageTotal (jobsPage body) `shouldBe` 1
+        length (pageItems (jobsPage body)) `shouldBe` 1
 
     it "POST /api/v1/arbiter_servant_test/jobs with notVisibleUntil creates a scheduled job" $ do
       futureTime <- liftIO $ truncateToMicros . addUTCTime 3600 <$> getCurrentTime
@@ -366,7 +367,7 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 3
+        pageTotal (jobsPage body) `shouldBe` 3
 
     it "POST /api/v1/arbiter_servant_test/jobs/batch with empty list returns empty result" $ do
       postResp <-
@@ -444,9 +445,9 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs?limit=2"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsLimit body `shouldBe` 2
-        jobsTotal body `shouldBe` 3
-        length (jobs body) `shouldBe` 2
+        pageLimit (jobsPage body) `shouldBe` 2
+        pageTotal (jobsPage body) `shouldBe` 3
+        length (pageItems (jobsPage body)) `shouldBe` 2
 
     it "GET /api/v1/arbiter_servant_test/jobs supports group_key filter" $ do
       -- Insert jobs with different group keys
@@ -459,10 +460,10 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs?group_key=groupA"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 1
-        length (jobs body) `shouldBe` 1
+        pageTotal (jobsPage body) `shouldBe` 1
+        length (pageItems (jobsPage body)) `shouldBe` 1
         -- Verify only groupA jobs returned
-        forM_ (jobs body) $ \listed -> groupKey (ajwsJob listed) `shouldBe` Just "groupA"
+        forM_ (pageItems (jobsPage body)) $ \listed -> groupKey (ajwsJob listed) `shouldBe` Just "groupA"
 
     it "GET /api/v1/arbiter_servant_test/jobs supports kind filter" $ do
       liftIO $ do
@@ -473,8 +474,8 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs?kind=TestCalculation"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 1
-        map (decodeStored . payload . ajwsJob) (jobs body) `shouldBe` [Right (TestCalculation 1 2)]
+        pageTotal (jobsPage body) `shouldBe` 1
+        map (decodeStored . payload . ajwsJob) (pageItems (jobsPage body)) `shouldBe` [Right (TestCalculation 1 2)]
 
     it "GET /api/v1/arbiter_servant_test/kinds lists every label the payload carries" $ do
       resp <- get "/api/v1/arbiter_servant_test/kinds"
@@ -490,17 +491,24 @@ spec connStr = do
         pure $ map primaryKey [job1, job2, job3]
       let sorted = [minimum ids, maximum ids]
 
-      ascResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=ASC"
+      ascResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=asc"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody ascResp
-        let returned = map (primaryKey . ajwsJob) (jobs body)
+        let returned = map (primaryKey . ajwsJob) (pageItems (jobsPage body))
         [head returned, last returned] `shouldBe` sorted
 
-      descResp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=DESC"
+      for_ ["desc", "DESC"] $ \dir -> do
+        descResp <- get ("/api/v1/arbiter_servant_test/jobs?sort_by=id&sort_dir=" <> dir)
+        liftIO $ do
+          body :: JobsResponse ServantTestPayload <- decodeBody descResp
+          let returned = map (primaryKey . ajwsJob) (pageItems (jobsPage body))
+          [head returned, last returned] `shouldBe` reverse sorted
+
+    it "GET /api/v1/arbiter_servant_test/jobs refuses an unknown sort column as sent" $ do
+      resp <- get "/api/v1/arbiter_servant_test/jobs?sort_by=No_Such_Col"
       liftIO $ do
-        body :: JobsResponse ServantTestPayload <- decodeBody descResp
-        let returned = map (primaryKey . ajwsJob) (jobs body)
-        [head returned, last returned] `shouldBe` reverse sorted
+        simpleStatus resp `shouldBe` status400
+        LB.toStrict (simpleBody resp) `shouldSatisfy` BS.isInfixOf "No_Such_Col"
 
     it "GET /api/v1/arbiter_servant_test/jobs roots_only and parent_id filter the tree" $ do
       (parentId, childIds) <- liftIO $ do
@@ -518,14 +526,14 @@ spec connStr = do
       rootsResp <- get "/api/v1/arbiter_servant_test/jobs?roots_only"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody rootsResp
-        map (primaryKey . ajwsJob) (jobs body) `shouldBe` [parentId]
+        map (primaryKey . ajwsJob) (pageItems (jobsPage body)) `shouldBe` [parentId]
 
       -- parent_id returns exactly the children of that parent
       childResp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs?parent_id=" <> T.pack (show parentId))
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody childResp
-        jobsTotal body `shouldBe` 2
-        let returned = map (primaryKey . ajwsJob) (jobs body)
+        pageTotal (jobsPage body) `shouldBe` 2
+        let returned = map (primaryKey . ajwsJob) (pageItems (jobsPage body))
         forM_ childIds $ \childId -> (childId `elem` returned) `shouldBe` True
 
     it "GET /api/v1/arbiter_servant_test/jobs clamps out-of-range limit and offset" $ do
@@ -537,14 +545,14 @@ spec connStr = do
       highResp <- get "/api/v1/arbiter_servant_test/jobs?limit=5000&offset=-10"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody highResp
-        jobsLimit body `shouldBe` 1000
-        jobsOffset body `shouldBe` 0
+        pageLimit (jobsPage body) `shouldBe` 1000
+        pageOffset (jobsPage body) `shouldBe` 0
 
       -- limit below 1 clamps to 1
       lowResp <- get "/api/v1/arbiter_servant_test/jobs?limit=0"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody lowResp
-        jobsLimit body `shouldBe` 1
+        pageLimit (jobsPage body) `shouldBe` 1
 
     it "GET /api/v1/arbiter_servant_test/jobs returns dlqChildCounts for parent with DLQ'd children" $ do
       -- Insert parent + child
@@ -570,8 +578,8 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs?status=in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 0
-        jobs body `shouldBe` []
+        pageTotal (jobsPage body) `shouldBe` 0
+        pageItems (jobsPage body) `shouldBe` []
 
     it "GET /api/v1/arbiter_servant_test/jobs?status=in_flight returns claimed jobs" $ do
       liftIO $ do
@@ -582,8 +590,8 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs?status=in_flight"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 1
-        length (jobs body) `shouldBe` 1
+        pageTotal (jobsPage body) `shouldBe` 1
+        length (pageItems (jobsPage body)) `shouldBe` 1
 
     it "GET /api/v1/arbiter_servant_test/jobs?status filters across all derived states" $ do
       future <- liftIO $ truncateToMicros . addUTCTime 3600 <$> getCurrentTime
@@ -608,8 +616,8 @@ spec connStr = do
             resp <- get (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs?status=" <> status)
             liftIO $ do
               body :: JobsResponse ServantTestPayload <- decodeBody resp
-              jobsTotal body `shouldBe` 1
-              map (decodeStored . payload . ajwsJob) (jobs body) `shouldBe` [Right pay]
+              pageTotal (jobsPage body) `shouldBe` 1
+              map (decodeStored . payload . ajwsJob) (pageItems (jobsPage body)) `shouldBe` [Right pay]
       expectOne "ready" (TestMessage "ready-job")
       expectOne "in_flight" (TestMessage "inflight-job")
       expectOne "backoff" (TestMessage "backoff-job")
@@ -698,8 +706,8 @@ spec connStr = do
       dlqResp <- get "/api/v1/arbiter_servant_test/dlq"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody dlqResp
-        dlqTotal body `shouldBe` 1
-        length (dlqJobs body) `shouldBe` 1
+        pageTotal body `shouldBe` 1
+        length (pageItems body) `shouldBe` 1
 
     it "GET jobs, job detail and dlq splice the stored payload bytes into the response" $ do
       -- JSONB spaces its output. A payload aeson re-encoded would carry no spaces.
@@ -780,7 +788,7 @@ spec connStr = do
   describe "DLQ API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/dlq returns empty list initially" $ do
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
 
     it "GET /api/v1/arbiter_servant_test/dlq supports pagination" $ do
       -- Insert multiple jobs and move to DLQ
@@ -797,17 +805,17 @@ spec connStr = do
       limitResp <- get "/api/v1/arbiter_servant_test/dlq?limit=2"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody limitResp
-        dlqLimit body `shouldBe` 2
-        dlqTotal body `shouldBe` 3
-        length (dlqJobs body) `shouldBe` 2
+        pageLimit body `shouldBe` 2
+        pageTotal body `shouldBe` 3
+        length (pageItems body) `shouldBe` 2
 
       -- Get with offset returns the 2 remaining jobs
       offsetResp <- get "/api/v1/arbiter_servant_test/dlq?offset=1"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody offsetResp
-        dlqOffset body `shouldBe` 1
-        dlqTotal body `shouldBe` 3
-        length (dlqJobs body) `shouldBe` 2
+        pageOffset body `shouldBe` 1
+        pageTotal body `shouldBe` 3
+        length (pageItems body) `shouldBe` 2
 
     it "POST /api/v1/arbiter_servant_test/dlq/batch-delete deletes multiple DLQ jobs" $ do
       -- Insert 3 jobs and move to DLQ
@@ -834,7 +842,7 @@ spec connStr = do
 
       -- Verify DLQ is empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
 
     it "POST /api/v1/arbiter_servant_test/dlq/:id/retry moves job back to main queue" $ do
       -- Insert a job, then move it to DLQ
@@ -851,7 +859,7 @@ spec connStr = do
 
       -- Verify DLQ is now empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
 
       -- Verify job is back in main queue
       liftIO $ do
@@ -874,11 +882,11 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/dlq"
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody resp
-        dlqTotal body `shouldBe` 1
+        pageTotal body `shouldBe` 1
       jobsResp <- get "/api/v1/arbiter_servant_test/jobs"
       liftIO $ do
         queued :: JobsResponse ServantTestPayload <- decodeBody jobsResp
-        jobsTotal queued `shouldBe` 0
+        pageTotal (jobsPage queued) `shouldBe` 0
 
     it "POST /api/v1/arbiter_servant_test/archive/:id/reenqueue enqueues nothing for a row its payload type rejects" $ do
       archiveId <- liftIO $ do
@@ -899,7 +907,7 @@ spec connStr = do
       resp <- get "/api/v1/arbiter_servant_test/jobs"
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        jobsTotal body `shouldBe` 0
+        pageTotal (jobsPage body) `shouldBe` 0
 
     it "DELETE /api/v1/arbiter_servant_test/dlq/:id permanently deletes job" $ do
       -- Insert a job, then move it to DLQ
@@ -916,7 +924,7 @@ spec connStr = do
 
       -- Verify DLQ is empty
       get "/api/v1/arbiter_servant_test/dlq"
-        `shouldRespondWith` jsonMatch [aesonQQ|{ "dlqJobs": [], "dlqTotal": 0, "dlqOffset": 0, "dlqLimit": 50 }|]
+        `shouldRespondWith` jsonMatch [aesonQQ|{ "items": [], "total": 0, "offset": 0, "limit": 50 }|]
 
       -- Verify job is absent from the main queue
       liftIO $ do
@@ -962,7 +970,7 @@ spec connStr = do
         void $ runSimpleDb mkEnv $ HL.moveToDLQ "template missing" second
       let totalFor query = do
             resp <- get (queuePath ("dlq?" <> query))
-            liftIO (dlqTotal <$> (decodeBody resp :: IO (DLQResponse ServantTestPayload)))
+            liftIO (pageTotal <$> (decodeBody resp :: IO (DLQResponse ServantTestPayload)))
       totalFor "payload=50%25_off" >>= liftIO . (`shouldBe` 1)
       totalFor "payload=5_%25" >>= liftIO . (`shouldBe` 0)
       totalFor "error=smtp" >>= liftIO . (`shouldBe` 1)
@@ -1027,7 +1035,7 @@ spec connStr = do
       resp <- get (queuePath "dlq")
       liftIO $ do
         body :: DLQResponse ServantTestPayload <- decodeBody resp
-        dlqTotal body `shouldBe` 1
+        pageTotal body `shouldBe` 1
 
     it "POST /api/v1/arbiter_servant_test/dlq/:id/retry with a payload keeps the DLQ row unchanged on a 409" $ do
       dlqId <- liftIO $ do
@@ -1058,7 +1066,7 @@ spec connStr = do
       resp <- get (queuePath "archive?payload=INVOICE")
       liftIO $ do
         body :: ArchiveResponse ServantTestPayload <- decodeBody resp
-        archiveTotal body `shouldBe` 1
+        pageTotal body `shouldBe` 1
 
     it "POST /api/v1/arbiter_servant_test/archive/:id/reenqueue with a payload enqueues it" $ do
       archiveId <- liftIO $ do
@@ -1078,7 +1086,7 @@ spec connStr = do
       resp <- get (queuePath "jobs")
       liftIO $ do
         body :: JobsResponse ServantTestPayload <- decodeBody resp
-        let queued = map ajwsJob (jobs body)
+        let queued = map ajwsJob (pageItems (jobsPage body))
         map (decodeStored . payload) queued `shouldMatchList` [Right (TestCalculation 4 5), Right (TestMessage "ran once")]
         map (jobKind . payloadKeys) queued `shouldMatchList` [Just "TestCalculation", Just "TestMessage"]
 
@@ -1268,12 +1276,12 @@ spec connStr = do
       heldId <- seedGroups
       body <- groupsAt ""
       liftIO $ do
-        groupsTotal body `shouldBe` 2
-        map gsGroupKey (groups body) `shouldBe` ["big", "small"]
-        map gsJobCount (groups body) `shouldBe` [3, 1]
-        map gsInFlight (groups body) `shouldBe` [True, False]
-        map gsHeadStatus (groups body) `shouldBe` [Just InFlight, Just Ready]
-        map gsHeadJobId (take 1 (groups body)) `shouldBe` [Just heldId]
+        pageTotal body `shouldBe` 2
+        map gsGroupKey (pageItems body) `shouldBe` ["big", "small"]
+        map gsJobCount (pageItems body) `shouldBe` [3, 1]
+        map gsInFlight (pageItems body) `shouldBe` [True, False]
+        map gsHeadStatus (pageItems body) `shouldBe` [Just InFlight, Just Ready]
+        map gsHeadJobId (take 1 (pageItems body)) `shouldBe` [Just heldId]
 
     it "GET /groups reports the holder as the head of a held group" $ do
       heldId <- liftIO $ do
@@ -1285,18 +1293,18 @@ spec connStr = do
         pure (primaryKey held)
       body <- groupsAt "?group_key=hd"
       liftIO $ do
-        map gsInFlight (groups body) `shouldBe` [True]
-        map gsHeadJobId (groups body) `shouldBe` [Just heldId]
-        map gsHeadStatus (groups body) `shouldBe` [Just InFlight]
+        map gsInFlight (pageItems body) `shouldBe` [True]
+        map gsHeadJobId (pageItems body) `shouldBe` [Just heldId]
+        map gsHeadStatus (pageItems body) `shouldBe` [Just InFlight]
 
     it "GET /groups narrows to one key and pages" $ do
       _ <- seedGroups
       narrowed <- groupsAt "?group_key=small"
       paged <- groupsAt "?limit=1&offset=1"
       liftIO $ do
-        (groupsTotal narrowed, map gsGroupKey (groups narrowed)) `shouldBe` (1, ["small"])
-        (groupsTotal paged, groupsLimit paged, groupsOffset paged) `shouldBe` (2, 1, 1)
-        map gsGroupKey (groups paged) `shouldBe` ["small"]
+        (pageTotal narrowed, map gsGroupKey (pageItems narrowed)) `shouldBe` (1, ["small"])
+        (pageTotal paged, pageLimit paged, pageOffset paged) `shouldBe` (2, 1, 1)
+        map gsGroupKey (pageItems paged) `shouldBe` ["small"]
 
     it "GET /groups skips an exhausted row the claim skips" $ do
       nextId <- liftIO $ do
@@ -1308,8 +1316,8 @@ spec connStr = do
         pure (primaryKey next)
       body <- groupsAt "?group_key=ex"
       liftIO $ do
-        map gsHeadJobId (groups body) `shouldBe` [Just nextId]
-        map gsHeadStatus (groups body) `shouldBe` [Just Ready]
+        map gsHeadJobId (pageItems body) `shouldBe` [Just nextId]
+        map gsHeadStatus (pageItems body) `shouldBe` [Just Ready]
 
     it "GET /groups marks a head that a full concurrency key holds back" $ do
       jobId <- liftIO $ do
@@ -1327,7 +1335,7 @@ spec connStr = do
         body :: Value <- decodeBody resp
         let heads = case body of
               Object top
-                | Just (Array page) <- KM.lookup "groups" top ->
+                | Just (Array page) <- KM.lookup "items" top ->
                     [(KM.lookup "headJobId" group, KM.lookup "headBlocked" group) | Object group <- toList page]
               _ -> []
         heads `shouldBe` [(Just (toJSON jobId), Just (Bool True))]
@@ -1341,7 +1349,7 @@ spec connStr = do
       past <- liftIO $ addUTCTime (-60) <$> getCurrentTime
       postJson (rowPath "jobs" jobId "reschedule") (encode (object ["runAt" .= past])) `shouldRespondWith` 204
       body <- groupsAt "?group_key=rs"
-      liftIO $ map gsReadyCount (groups body) `shouldBe` [1]
+      liftIO $ map gsReadyCount (pageItems body) `shouldBe` [1]
 
   -- QueueOverview's instances also carry a gauge snapshot through the shared gate.
   describe "Job wire contract" $ do

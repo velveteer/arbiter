@@ -87,7 +87,7 @@ import Arbiter.Worker.Config
   , ackWith
   , cancelBranch
   , cancelTree
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , failPermanent
   , failRetry
   , nack
@@ -133,10 +133,6 @@ statementCommand :: (MonadArbiter m) => Text -> m ()
 statementCommand = void . executeStatement . raw
 
 -- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
---
--- @mkSimple@/@mkFailing@ construct the backend's payload, @mkHandler@ adapts a
--- plain job action into the backend's 'JobHandler' shape (some backends pass a
--- connection, others do not), and @runM@ runs a backend action in 'IO'.
 --
 -- The queue under test declares @Maybe [Text]@ as its result type.
 workerSpec
@@ -779,7 +775,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       dlqRef <- newIORef []
       let hooks =
             defaultObservabilityHooks
-              { onJobFailedAndMovedToDLQ = \errMsg job ->
+              { onJobFailedAndMovedToDLQ = \job errMsg ->
                   liftIO $ atomicModifyIORef' dlqRef $ \seen -> ((errMsg, primaryKey job) : seen, ())
               }
       config <- mkConfig $ \_job -> throwRetryable "always fails"
@@ -1487,6 +1483,39 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           mJob <- runM env $ HL.getJobById @payload rootId
           pure (isNothing mJob)
 
+    it "reports a sibling the batch's own cancelTree deleted as cancelled" $ \env -> do
+      cancelledRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      batchSizesRef <- newIORef ([] :: [Int])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \seen -> (payload job : seen, ())
+              }
+          named name = find ((== mkSimple name) . payload)
+          batchHandler jobs cbs = do
+            liftIO $ atomicModifyIORef' batchSizesRef (\sizes -> (length jobs : sizes, ()))
+            traverse_ (\job -> cancelTree cbs job "abort") (named "cts-c1" jobs)
+            traverse_ (ack cbs) (named "cts-c2" jobs)
+          child name = setGroupKey (Just "cts") $ defaultJob (mkSimple name)
+      Right _ <-
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "cts-root") <~~ (child "cts-c1" :| [child "cts-c2"])
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05, observabilityHooks = hooks}) $ \_ ->
+        waitUntil 10_000 $ do
+          cancelled <- readIORef cancelledRef
+          unavailable <- readIORef unavailableRef
+          pure (length cancelled + length unavailable >= 2)
+
+      readIORef batchSizesRef `shouldReturn` [2]
+      readIORef unavailableRef `shouldReturn` []
+      readIORef cancelledRef >>= (`shouldMatchList` [mkSimple "cts-c1", mkSimple "cts-c2"])
+
     it "cancelBranch callback deletes the job's branch" $ \env -> do
       Right (root :| _) <-
         runM env
@@ -2079,11 +2108,11 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       -> Int
       -> (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
       -> IO (WorkerConfig m payload)
-    mkBatchedConfig = defaultBatchedWorkerConfig
+    mkBatchedConfig = batchedWorkerConfig
 
 -- | Env-owned LISTEN hub test suite, instantiated for each backend. Under a high
 -- @pollInterval@ only the NOTIFY can wake the dispatcher in time. Completion
--- proves the listener fired.
+-- proves the listener fired. The queue under test declares @()@ as its result type.
 listenerSpec
   :: forall payload m env
    . ( QueueOperation m payload

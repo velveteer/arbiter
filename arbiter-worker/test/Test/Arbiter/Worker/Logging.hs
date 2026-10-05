@@ -18,7 +18,7 @@ import Arbiter.Worker.Logger
   , LogDestination (LogCallback)
   , LogLevel (..)
   , defaultLogConfig
-  , hubLogFor
+  , toHubLog
   , newFailureGate
   , newFailureGates
   , tryReported
@@ -131,7 +131,7 @@ gateSpec = describe "Failure gates" $ do
             , additionalContext = pure ["service" .= ("checkout" :: Text)]
             , identityContext = ["pool" .= ("email_queue" :: Text)]
             }
-        hubLog = hubLogFor cfg
+        hubLog = toHubLog cfg
     hubError hubLog "arbiter listener: connect failed"
     hubRecovered hubLog "arbiter listener: reconnected"
     hubWarn hubLog "channel handler exception: boom"
@@ -139,7 +139,7 @@ gateSpec = describe "Failure gates" $ do
       `shouldReturn` [["service"], ["service"], ["pool", "service"]]
 
   it "takes the hub's repeat cadence from the pool's own setting" $
-    hubRepeatInterval (hubLogFor defaultLogConfig {failureRepeatInterval = 300})
+    hubRepeatInterval (toHubLog defaultLogConfig {failureRepeatInterval = 300})
       `shouldBe` 300
 
   it "gates each subject on its own" $ do

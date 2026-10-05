@@ -1,4 +1,8 @@
--- | The tables an arbiter schema contains that no single queue owns.
+{-# OPTIONS_HADDOCK not-home #-}
+
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Table-name lists for an arbiter schema.
 module Arbiter.Core.SchemaTables
   ( allSchemaTables
   , sharedArbiterTables

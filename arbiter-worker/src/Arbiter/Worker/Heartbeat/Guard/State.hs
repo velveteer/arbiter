@@ -1,8 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The guard's shared state. Three threads write it: the handler through
--- register and unregister, the guard loop, and the extend thread the loop
--- forks. Each field says who writes it.
+-- | The guard's shared state. The handler, the guard loop, and the extend
+-- thread the loop forks write it.
 module Arbiter.Worker.Heartbeat.Guard.State
   ( GuardConfig (..)
   , Batch (..)
@@ -25,6 +24,7 @@ module Arbiter.Worker.Heartbeat.Guard.State
   , settleGrace
   , leaseExpiredReason
   , reclaimedReason
+  , deletedReason
   ) where
 
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
@@ -60,6 +60,10 @@ leaseExpiredReason = "lease expired without renewal"
 reclaimedReason :: Text
 reclaimedReason = "reclaimed by another worker"
 
+-- | The reason a batch whose row was deleted under it is stopped.
+deletedReason :: Text
+deletedReason = "deleted while held by this worker"
+
 -- | A wall-clock span as a monotonic one. Exact, no Rational detour.
 toDiffTime :: NominalDiffTime -> DiffTime
 toDiffTime elapsed = picosecondsToDiffTime picos
@@ -79,9 +83,13 @@ rebeat at status = status {beatAt = if recheckAsked status then min at (beatAt s
 -- | What the guard needs from the pool.
 data GuardConfig n job = GuardConfig
   { configInterval :: DiffTime
+  -- ^ Gap between extends of a batch.
   , configTimeout :: DiffTime
+  -- ^ Lease length that each extend sets.
   , configMaxDuration :: Maybe DiffTime
+  -- ^ Interrupt a batch that runs longer than this. 'Nothing' sets no bound.
   , configKey :: job -> JobId
+  -- ^ The job's primary key.
   , configLease :: job -> Maybe UTCTime
   -- ^ The row's lease deadline, as the claim read it back.
   , configExtend :: [job] -> n [SetVisibilityResult]
@@ -97,9 +105,11 @@ data GuardConfig n job = GuardConfig
 -- | A batch under guard.
 data Batch n job = Batch
   { batchJobs :: NonEmpty job
+  -- ^ The jobs the batch claimed.
   , batchPending :: n [job]
   -- ^ Read on the guard's threads, for the jobs still awaiting an outcome.
   , batchStart :: UTCTime
+  -- ^ When the batch started.
   , batchInherit :: n () -> n ()
   -- ^ Runs the heartbeat hooks under the batch's context.
   }
@@ -128,6 +138,8 @@ data Status n = Status
   -- ^ The deadline signal went out. The fence writes it.
   , signalledAt :: !(Maybe Time)
   -- ^ When the last signal went out. Signal writes it.
+  , goneSeen :: !(Set JobId)
+  -- ^ Pending jobs the last settled extend found gone. Settle writes it.
   , couriers :: !(Maybe [ThreadId n])
   -- ^ Threads carrying a signal to the handler. Nothing once unregistered. Couriers and unregister write it.
   }
@@ -164,6 +176,7 @@ data Wake n = Wake
   -- ^ The time the loop sleeps until.
   }
 
+-- | A guard with no batches registered.
 newHeartbeatGuard :: (MonadSTM n) => GuardConfig n job -> n (HeartbeatGuard n job)
 newHeartbeatGuard config =
   HeartbeatGuard config
@@ -183,6 +196,7 @@ snapshot guard = do
   entries <- readTVar (guardEntries guard)
   traverse (\entry -> (,) entry <$> readTVar (guardedStatus entry)) (Map.elems entries)
 
+-- | Update a batch's status in one transaction.
 adjust :: (MonadSTM n) => Guarded n job -> (Status n -> Status n) -> n ()
 adjust entry = atomically . modifyTVar' (guardedStatus entry)
 
@@ -198,5 +212,6 @@ wakeFor guard at = do
   target <- readTVar (wakeTarget (guardWake guard))
   when (maybe True (at <) target) (wake guard)
 
+-- | Wake the loop now.
 wake :: (MonadSTM n) => HeartbeatGuard n job -> STM n ()
 wake guard = modifyTVar' (wakeCount (guardWake guard)) (+ 1)

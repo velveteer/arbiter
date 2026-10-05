@@ -76,7 +76,7 @@ class (MonadUnliftIO m) => MonadArbiter m where
     -> JobRead payload
     -> m (ResultOf m payload)
 
-  -- | The env's shared LISTEN/NOTIFY listener, or 'Nothing' for poll-only.
+  -- | The env's shared LISTEN\/NOTIFY listener, or 'Nothing' for poll-only.
   getListener :: m (Maybe Listener)
 
 -- | A handler for @payload@'s queue. @result@ is what its registry entry declares.
@@ -94,6 +94,7 @@ type ResultOf m (payload :: Type) = ResultFor payload (RegistryOf m)
 countOr0 :: (MonadArbiter m) => Query Int64 -> m Int64
 countOr0 = fmap singleCount . executeQuery
 
+-- | 'countOr0' over a prepared statement.
 countOr0Prepared :: (MonadArbiter m) => Query Int64 -> m Int64
 countOr0Prepared = fmap singleCount . executeQueryPrepared
 

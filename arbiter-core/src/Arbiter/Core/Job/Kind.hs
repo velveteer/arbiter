@@ -16,7 +16,8 @@ import Data.Text qualified as T
 import GHC.Generics (C1, D1, Generic (..), M1 (..), Meta (MetaCons), Rep, V1, (:+:) (..))
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
--- | A payload's per-job variant label. Defaults to unlabelled.
+-- | A payload's per-job variant label. With no instance, the job is unlabelled. An empty
+-- instance on a @Generic@ payload labels it with the constructor name.
 class HasKind payload where
   -- | The label stored for a job.
   kindOf :: payload -> Maybe Text

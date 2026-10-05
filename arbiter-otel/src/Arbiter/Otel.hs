@@ -10,12 +10,15 @@
 -- take a handle the caller installed itself.
 --
 -- @
+-- import Arbiter.Otel qualified as Otel
+--
 -- env <- createHasqlEnv ...
 -- runHasqlDb env $ Otel.runWorkerPools [namedWorkerPool emailCfg]
 -- @
 module Arbiter.Otel
   ( -- * Setup
     Telemetry (..)
+  , ArbiterMeters
   , withTelemetry
   , withTelemetryIf
   , withTelemetryFromEnv
@@ -38,6 +41,8 @@ module Arbiter.Otel
   , startGauges
 
     -- * Metric names
+  , MetricName (..)
+  , metricName
   , arbiterMetricNames
   ) where
 
@@ -57,8 +62,8 @@ import UnliftIO (MonadUnliftIO, withRunInIO)
 import UnliftIO.Async (withAsync)
 
 import Arbiter.Otel.Gauges (startGauges, withGaugeLoop)
-import Arbiter.Otel.MetricNames (arbiterMetricNames)
-import Arbiter.Otel.Metrics (otelHooks, otelMaintenance)
+import Arbiter.Otel.MetricNames (MetricName (..), arbiterMetricNames, metricName)
+import Arbiter.Otel.Metrics (ArbiterMeters, otelHooks, otelMaintenance)
 import Arbiter.Otel.Telemetry
   ( Telemetry (..)
   , telemetryLogConfig

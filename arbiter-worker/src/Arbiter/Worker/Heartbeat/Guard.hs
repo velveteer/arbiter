@@ -1,8 +1,10 @@
--- | One guard per pool. It fences every batch in flight and extends their leases.
+{-# OPTIONS_HADDOCK not-home #-}
+
+-- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- The state and who writes it is "Arbiter.Worker.Heartbeat.Guard.State". A
--- batch registers and is signalled through "Arbiter.Worker.Heartbeat.Guard.Signal".
--- The loop that fences and extends is "Arbiter.Worker.Heartbeat.Guard.Loop".
+-- One guard per pool. It fences every batch in flight and extends their leases.
+-- A batch registers through 'guardBatch' and is signalled through 'recheck'.
+-- 'runHeartbeatGuard' is the loop that fences and extends.
 --
 -- Written against io-classes, so the pool runs it in IO and the tests run it
 -- under io-sim.
@@ -21,6 +23,7 @@ module Arbiter.Worker.Heartbeat.Guard
   , settleGrace
   , leaseExpiredReason
   , reclaimedReason
+  , deletedReason
   ) where
 
 import Arbiter.Worker.Heartbeat.Guard.Loop (runHeartbeatGuard, trySync)
@@ -29,6 +32,7 @@ import Arbiter.Worker.Heartbeat.Guard.State
   ( Batch (..)
   , GuardConfig (..)
   , HeartbeatGuard
+  , deletedReason
   , guardKey
   , leaseExpiredReason
   , minRetryPause

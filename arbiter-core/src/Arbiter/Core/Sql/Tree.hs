@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Tree SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Tree SQL templates.
 module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
@@ -162,7 +165,8 @@ descendantsOfCte tbl jobIds =
   |]
 
 -- | Lock the named jobs and all their descendants descending, to match ack and
--- force-cancel. Several trees at once, their union in one pass. Then 'lockTreeGroupsCte'.
+-- force-cancel. Several trees at once, their union in one pass. Then lock the
+-- trees' group summaries.
 lockJobTreesSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
@@ -218,7 +222,7 @@ lockJobTreesFromRootSQL schema tableName jobIds =
       |]
 
 -- | Cancel a job and all its descendants recursively, locking descending to match
--- ack and force-cancel.
+-- ack and force-cancel. Returns the ids deleted.
 cancelJobCascadeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobCascadeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -231,7 +235,7 @@ cancelJobCascadeSQL schema tableName jobId =
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id
         )
-        SELECT count(*) AS @{count :: CInt8} FROM deleted
+        SELECT @{id :: CInt8} FROM deleted
       |]
 
 -- | Force-cancel a job subtree. Flags still-live claimed jobs and bumps their claim
@@ -317,7 +321,7 @@ selectCancelledReapableJobsSQL schema tableName limit =
 
 -- | Cancel an entire job tree by walking up from any node to the root,
 -- then cascade-deleting everything from the root down, locking descending to
--- match ack and force-cancel.
+-- match ack and force-cancel. Returns the ids deleted.
 cancelJobTreeSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
@@ -335,7 +339,7 @@ cancelJobTreeSQL schema tableName jobId =
           DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
           RETURNING id
         )
-        SELECT count(*) AS @{count :: CInt8} FROM deleted
+        SELECT @{id :: CInt8} FROM deleted
       |]
 
 -- | Resume a suspended parent for its completion round, once no child of it is left in
@@ -365,7 +369,8 @@ treeRollupIdsSQL schema tableName jobId =
         SELECT id AS @{result :: CInt8} FROM descendants WHERE parent_state IS NOT NULL
       |]
 
--- | Make a claimed job a rollup finalizer, handing back the attempt its claim consumed.
+-- | Mark a claimed, childless job as a rollup finalizer, matched on the claim token.
+-- The ack's suspend branch refunds the attempt.
 beginSpawnSQL :: Text -> Text -> Int64 -> Int64 -> Query ()
 beginSpawnSQL schema tableName jobId cseq =
   let tbl = jobQueueTable schema tableName

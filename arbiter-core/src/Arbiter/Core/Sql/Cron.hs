@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Cron SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Cron SQL templates.
 module Arbiter.Core.Sql.Cron
   ( allCronColumns
   , upsertCronDefaultSQL
@@ -158,7 +161,8 @@ cronRunRequestTtl = "INTERVAL '5 minutes'"
 cronRunPending :: Text
 cronRunPending = [text|(run_requested_at IS NOT NULL AND run_requested_at > NOW() - ${cronRunRequestTtl})|]
 
--- | Stamp a run request on an enabled schedule and NOTIFY, returning a status.
+-- | Stamp a run request on an enabled schedule and NOTIFY. Returns @stamped@,
+-- @pending@, @disabled@ or @not_found@.
 requestCronRunSQL :: Text -> Text -> Query Text
 requestCronRunSQL schemaName name =
   let tbl = cronSchedulesTable schemaName

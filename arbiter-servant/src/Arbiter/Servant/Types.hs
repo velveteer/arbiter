@@ -3,9 +3,68 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Response types for the Arbiter REST API.
+-- | Request and response types for the Arbiter REST API.
 module Arbiter.Servant.Types
-  ( module Arbiter.Servant.Types
+  ( -- * Jobs
+    ApiJobWithStatus (..)
+  , ApiJobWrite (..)
+  , JobResponse (..)
+  , JobsResponse (..)
+  , PayloadEdit (..)
+  , RescheduleRequest (..)
+  , BatchInsertRequest (..)
+  , BatchInsertResponse (..)
+  , BatchDeleteRequest (..)
+  , BatchDeleteResponse (..)
+
+    -- * Pages
+  , Page (..)
+  , Items (..)
+  , ArchiveResponse
+  , DLQResponse
+  , GroupsResponse
+
+    -- * Leases
+  , ClaimRequest (..)
+  , ClaimResponse (..)
+  , JobLease (..)
+  , jobLeasePairs
+  , AckRequest (..)
+  , ExtendRequest (..)
+
+    -- * Request bodies
+  , OptionalJSON
+  , bodylessContentType
+
+    -- * Queues and stats
+  , StatsResponse (..)
+  , AllStatsResponse (..)
+  , QueuesResponse (..)
+  , MaintenanceResponse (..)
+
+    -- * Cron and workers
+  , CronScheduleView (..)
+  , CronSchedulesResponse (..)
+  , WorkersResponse (..)
+
+    -- * Admission policies
+  , RateLimitPoliciesResponse (..)
+  , RateLimitBucketsResponse
+  , RateLimitResetResponse (..)
+  , AddTokensRequest (..)
+  , AddTokensResponse (..)
+  , PruneResponse (..)
+  , ConcurrencyPoliciesResponse (..)
+  , ConcurrencyKeysResponse
+  , ConcurrencyReconcileResponse (..)
+
+    -- * Health
+  , HealthStatus (..)
+  , healthStatusToText
+  , HealthResponse (..)
+  , LivenessResponse (..)
+
+    -- * Re-exported row types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   , QueueOverview (..)
@@ -27,6 +86,7 @@ import Arbiter.Core.Concurrency.Stats
   , ConcurrencyPolicyView (..)
   )
 import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
+import Arbiter.Core.Enum (enumFromText)
 import Arbiter.Core.Health (PgDbHealth (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
@@ -42,6 +102,7 @@ import Arbiter.Core.RateLimit.Stats
 import Arbiter.Core.Worker (WorkerRow (..))
 import Data.Aeson
   ( FromJSON (..)
+  , KeyValue
   , ToJSON (..)
   , Value (Object)
   , eitherDecode
@@ -56,20 +117,20 @@ import Data.Aeson
   , (.=)
   )
 import Data.Aeson.KeyMap qualified as KM
-import Data.Aeson.Types (Pair)
+import Data.Aeson.Types (Object, Pair, Parser)
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Char (isSpace)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Proxy (Proxy (..))
 import Data.String (IsString)
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.Time.Clock (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
 import Servant.API (Accept (..), JSON, MimeUnrender (..))
 
--- | A job row plus its SQL-derived status, for the list endpoint.
+-- | A job row plus its SQL-derived status, for the list and detail endpoints.
 data ApiJobWithStatus payload = ApiJobWithStatus
   { ajwsJob :: JobRead payload
   , ajwsStatus :: JobStatus
@@ -79,7 +140,7 @@ data ApiJobWithStatus payload = ApiJobWithStatus
 -- | Write-side job type for REST API insertion.
 --
 -- Accepts @payload@, @groupKey@, @priority@, @notVisibleUntil@, @dedupKey@,
--- and @maxAttempts@. Fields like @parentId@, @parentState@, and @suspended@
+-- @maxAttempts@, and @archiveFor@. Fields like @parentId@, @parentState@, and @suspended@
 -- are managed internally and cannot be set through the REST API.
 newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
   deriving newtype (Eq, Show)
@@ -121,15 +182,37 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
       $ Arb.setGroupKey group
       $ Arb.defaultJob payload
 
--- | Response wrapper for archived jobs.
-data ArchiveResponse payload = ArchiveResponse
-  { archiveJobs :: [Archive.ArchiveJob (Stored payload)]
-  , archiveTotal :: Int
-  , archiveOffset :: Int
-  , archiveLimit :: Int
+-- | One page of a list, with the size of the full list.
+data Page a = Page
+  { pageItems :: [a]
+  , pageTotal :: Int
+  -- ^ Rows that match the filters, across all pages.
+  , pageOffset :: Int
+  , pageLimit :: Int
+  -- ^ Page size. Default 50, range 1 to 1000.
   }
+  deriving stock (Eq, Show)
+
+instance (ToJSON a) => ToJSON (Page a) where
+  toJSON = object . pageKeys
+  toEncoding = pairs . mconcat . pageKeys
+
+pageKeys :: (KeyValue e kv, ToJSON a) => Page a -> [kv]
+pageKeys p = ["items" .= pageItems p, "total" .= pageTotal p, "offset" .= pageOffset p, "limit" .= pageLimit p]
+
+instance (FromJSON a) => FromJSON (Page a) where
+  parseJSON = withObject "Page" parsePage
+
+parsePage :: (FromJSON a) => Object -> Parser (Page a)
+parsePage obj = Page <$> obj .: "items" <*> obj .: "total" <*> obj .: "offset" <*> obj .: "limit"
+
+-- | A list of rows without a total.
+newtype Items a = Items {items :: [a]}
   deriving stock (Eq, Generic, Show)
-  deriving (FromJSON, ToJSON) via Generically (ArchiveResponse payload)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | A page of archived jobs.
+type ArchiveResponse payload = Page (Archive.ArchiveJob (Stored payload))
 
 -- | Single-job response envelope, parameterized over the job representation
 -- ('JobRead' for insert, 'ApiJobWithStatus' for the detail endpoint).
@@ -139,23 +222,37 @@ newtype JobResponse a = JobResponse
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically (JobResponse a)
 
--- | Response wrapper for multiple jobs.
+-- | A page of jobs with their tree counts.
 data JobsResponse payload = JobsResponse
-  { jobs :: [ApiJobWithStatus (Stored payload)]
-  , jobsTotal :: Int
-  , jobsOffset :: Int
-  , jobsLimit :: Int
+  { jobsPage :: Page (ApiJobWithStatus (Stored payload))
   , childCounts :: Map Int64 Int64
+  -- ^ Child count, keyed by the id of each parent on the page.
   , pausedParents :: [Int64]
+  -- ^ Ids of the parents on the page whose children are all paused.
   , dlqChildCounts :: Map Int64 Int64
+  -- ^ DLQ child count, keyed by the id of each parent on the page.
   }
-  deriving stock (Eq, Generic, Show)
-  deriving (FromJSON, ToJSON) via Generically (JobsResponse payload)
+  deriving stock (Eq, Show)
+
+instance ToJSON (JobsResponse payload) where
+  toJSON = object . jobsResponseKeys
+  toEncoding = pairs . mconcat . jobsResponseKeys
+
+jobsResponseKeys :: (KeyValue e kv) => JobsResponse payload -> [kv]
+jobsResponseKeys r =
+  pageKeys (jobsPage r)
+    <> ["childCounts" .= childCounts r, "pausedParents" .= pausedParents r, "dlqChildCounts" .= dlqChildCounts r]
+
+instance FromJSON (JobsResponse payload) where
+  parseJSON = withObject "JobsResponse" $ \obj ->
+    JobsResponse <$> parsePage obj <*> obj .: "childCounts" <*> obj .: "pausedParents" <*> obj .: "dlqChildCounts"
 
 -- | A consumer's request to lease visible jobs.
 data ClaimRequest = ClaimRequest
   { maxJobs :: Maybe Int
+  -- ^ Jobs to claim. Default 1, range 1 to 1000.
   , leaseSeconds :: Maybe Double
+  -- ^ Lease length in seconds. Default 60, range 1 to 3600.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -202,6 +299,7 @@ instance (ToJSON result) => ToJSON (AckRequest result) where
 data ExtendRequest = ExtendRequest
   { erLease :: JobLease
   , erSeconds :: Double
+  -- ^ Seconds, clamped to 1 to 3600.
   }
   deriving stock (Eq, Show)
 
@@ -287,41 +385,16 @@ data PruneResponse = PruneResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- | A page of a queue's open groups.
-data GroupsResponse = GroupsResponse
-  { groups :: [GroupSummary]
-  , groupsTotal :: Int
-  , groupsOffset :: Int
-  , groupsLimit :: Int
-  }
-  deriving stock (Eq, Generic, Show)
+type GroupsResponse = Page GroupSummary
 
-instance ToJSON GroupsResponse where
-  toJSON response =
-    object
-      [ "groups" .= groups response
-      , "total" .= groupsTotal response
-      , "offset" .= groupsOffset response
-      , "limit" .= groupsLimit response
-      ]
-
-instance FromJSON GroupsResponse where
-  parseJSON = withObject "GroupsResponse" $ \obj ->
-    GroupsResponse <$> obj .: "groups" <*> obj .: "total" <*> obj .: "offset" <*> obj .: "limit"
-
--- | Response wrapper for DLQ jobs.
-data DLQResponse payload = DLQResponse
-  { dlqJobs :: [DLQ.DLQJob (Stored payload)]
-  , dlqTotal :: Int
-  , dlqOffset :: Int
-  , dlqLimit :: Int
-  }
-  deriving stock (Eq, Generic, Show)
-  deriving (FromJSON, ToJSON) via Generically (DLQResponse payload)
+-- | A page of DLQ jobs.
+type DLQResponse payload = Page (DLQ.DLQJob (Stored payload))
 
 -- | Queue statistics response.
 data StatsResponse = StatsResponse
   { stats :: QueueStats
   , timestamp :: Text
+  -- ^ When the stats were read, as @YYYY-MM-DDTHH:MM:SS+HHMM@.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -355,14 +428,14 @@ data BatchInsertResponse payload = BatchInsertResponse
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically (BatchInsertResponse payload)
 
--- | Request body for batch DLQ delete.
+-- | Request body for a batch DLQ or archive delete.
 data BatchDeleteRequest = BatchDeleteRequest
   { ids :: [Int64]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response body for batch DLQ delete.
+-- | Response body for a batch DLQ or archive delete.
 data BatchDeleteResponse = BatchDeleteResponse
   { deleted :: Int64
   }
@@ -409,11 +482,7 @@ data RateLimitPoliciesResponse = RateLimitPoliciesResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Rate-limit buckets response (one prefix's keys).
-data RateLimitBucketsResponse = RateLimitBucketsResponse
-  { buckets :: [RateLimitBucketView]
-  }
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+type RateLimitBucketsResponse = Items RateLimitBucketView
 
 -- | Number of buckets cleared by a reset.
 data RateLimitResetResponse = RateLimitResetResponse
@@ -422,7 +491,7 @@ data RateLimitResetResponse = RateLimitResetResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Concurrency pools response.
+-- | Concurrency policies response.
 data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
   { policies :: [ConcurrencyPolicyView]
   }
@@ -430,11 +499,7 @@ data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Concurrency keys response (one prefix's keys).
-data ConcurrencyKeysResponse = ConcurrencyKeysResponse
-  { keys :: [ConcurrencyKeyView]
-  }
-  deriving stock (Eq, Generic, Show)
-  deriving anyclass (FromJSON, ToJSON)
+type ConcurrencyKeysResponse = Items ConcurrencyKeyView
 
 -- | Number of count rows repaired from live jobs.
 data ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
@@ -451,11 +516,9 @@ instance ToJSON HealthStatus where
   toJSON = toJSON . healthStatusToText
 
 instance FromJSON HealthStatus where
-  parseJSON = withText "HealthStatus" $ \txt -> case txt of
-    "ok" -> pure Ok
-    "down" -> pure Down
-    _ -> fail "expected ok or down"
+  parseJSON = withText "HealthStatus" $ either (fail . unpack) pure . enumFromText "health status" healthStatusToText
 
+-- | The JSON text of a status: @ok@ or @down@.
 healthStatusToText :: HealthStatus -> Text
 healthStatusToText = \case
   Ok -> "ok"
@@ -467,7 +530,7 @@ data HealthResponse = HealthResponse
   , schemaName :: Text
   , checkedAt :: UTCTime
   , dbLatencyMs :: Maybe Double
-  -- ^ Nothing when the database could not be reached.
+  -- ^ 'Nothing' when the database could not be reached.
   , db :: Maybe PgDbHealth
   -- ^ Connection and age counters, absent when the database is unreachable.
   }

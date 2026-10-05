@@ -2,6 +2,8 @@
 
 -- | Per-job rate limiting.
 --
+-- This is the user-facing rate-limit module. Import it, not the @Arbiter.Core.RateLimit.*@ modules.
+--
 -- Declare which policy (if any) limits each job with a 'HasRateLimit' instance,
 -- building the selector from 'noLimit' \/ 'limitBy' \/ 'globalLimit' \/
 -- 'chooseWhen' \/ 'limitByCase'. The migration statically collects every policy a

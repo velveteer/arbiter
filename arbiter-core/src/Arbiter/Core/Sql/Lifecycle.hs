@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Lifecycle SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Lifecycle SQL templates.
 module Arbiter.Core.Sql.Lifecycle
   ( smartAckJobSQL
   , smartAckJobsBatchSQL
@@ -129,7 +132,7 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
       |]
 
 -- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows
--- hold no lease.
+-- hold no lease. @secs@ at or below 0 clears the lease.
 setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -145,9 +148,10 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- | 'setVisibilityTimeoutSQL' over a batch, for the heartbeat. Extends every job still
 -- under this claim, held by the same worker and unsuspended, and reports per row whether
 -- the update landed alongside its claim token, cancel flag and suspension. @valuesFrag@
--- carries the input @(id, claim_seq, claimed_by)@ rows. The statement never waits on a
--- lock. It takes the group summaries first, then the rows, both with SKIP LOCKED, and a
--- row whose summary or row is busy reads back unchanged.
+-- carries the input @(id, claim_seq, claimed_by)@ rows. @secs@ at or below 0 clears the
+-- lease. The statement never waits on a lock. It takes the group summaries first, then
+-- the rows, both with SKIP LOCKED, and a row whose summary or row is busy reads back
+-- unchanged.
 setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName

@@ -15,7 +15,7 @@ A parent reads its children with one of:
 
 | Function | Returns |
 | --- | --- |
-| `Worker.childResults` | One `Either` per child. |
+| `Worker.childResults` | A map of one `Either` per child, and a map of the DLQ failures. |
 | `Worker.mergedChildResults` | The `Monoid` sum of the results and the DLQ failures. A result that fails to decode counts as `mempty`. |
 
 `Nothing` in a `Maybe` result stores nothing:

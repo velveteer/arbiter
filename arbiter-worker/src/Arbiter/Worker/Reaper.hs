@@ -58,7 +58,7 @@ data MaintenancePace = MaintenancePace
   { paceWindow :: NominalDiffTime
   -- ^ Gap between runs of one ordinary operation.
   , paceSparseWindow :: NominalDiffTime
-  -- ^ Gap between runs of one whole-schema operation.
+  -- ^ Gap between runs of the rate-limit bucket prune and the concurrency prune and reconcile.
   , paceBucketIdle :: NominalDiffTime
   -- ^ Idle age at which a prune collects a rate-limit bucket.
   }
@@ -77,6 +77,7 @@ runMaintenancePass
   -> (MaintenanceOp -> Int64 -> m ())
   -> MaintenancePace
   -> NominalDiffTime
+  -- ^ Statement timeout
   -> m [MaintenanceOp]
 runMaintenancePass logCfg report pace stmtTimeout = do
   let reaped operation count = runHook logCfg "onMaintenance" $ report operation count
@@ -145,8 +146,11 @@ runReaperOp
   => LogConfig
   -> SchemaName
   -> NominalDiffTime
+  -- ^ Statement timeout
   -> Text
+  -- ^ Task name
   -> NominalDiffTime
+  -- ^ Gate window: minimum gap between runs across all callers
   -> m a
   -> m (Maybe a)
 runReaperOp logCfg schema stmtTimeout task every work =

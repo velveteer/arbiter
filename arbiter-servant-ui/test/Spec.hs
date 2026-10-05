@@ -1,6 +1,12 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+import Codec.Compression.GZip (decompress)
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Lazy qualified as LBS
+import Network.HTTP.Types (methodGet, status200)
 import Servant (Proxy (..), serve, (:>))
 import System.Directory (createDirectory)
 import System.FilePath ((</>))
@@ -30,11 +36,60 @@ main = hspec $ do
       it "refuses a backslash in a segment" $ \dir ->
         served dir $
           get "/..%5Csecret.txt" `shouldRespondWith` 404
-  describe "adminUIServer"
-    $ with (pure (serve (Proxy @("arbiter" :> AdminUI)) adminUIServer))
-    $ it "keeps the query string on the trailing-slash redirect"
-    $ get "/arbiter?queue=emails"
-      `shouldRespondWith` 301 {matchHeaders = ["Location" <:> "/arbiter/?queue=emails"]}
+      it "does not serve the type checker's declarations" $ \dir ->
+        served dir $
+          get "/app.d.ts" `shouldRespondWith` 404
+  describe "adminUIServer" $
+    with (pure (serve (Proxy @("arbiter" :> AdminUI)) adminUIServer)) $
+      do
+        it "keeps the query string on the trailing-slash redirect" $
+          get "/arbiter?queue=emails"
+            `shouldRespondWith` 301 {matchHeaders = ["Location" <:> "/arbiter/?queue=emails"]}
+        it "does not serve the type checker's declarations" $
+          get "/arbiter/vendor/vue.esm-browser.prod.d.ts" `shouldRespondWith` 404
+        it "sends a script gzipped to a client that accepts gzip" $ do
+          plain <- get scriptPath
+          gzipped <- request methodGet scriptPath [("Accept-Encoding", "deflate, GZIP;q=1.0, br")] ""
+          liftIO $ do
+            lookup "Content-Encoding" (simpleHeaders gzipped) `shouldBe` Just "gzip"
+            lookup "Vary" (simpleHeaders gzipped) `shouldBe` Just "Accept-Encoding"
+            decompress (simpleBody gzipped) `shouldBe` simpleBody plain
+        it "sends a script plain to a client that does not accept gzip" $ do
+          plain <- get scriptPath
+          liftIO $ do
+            lookup "Content-Encoding" (simpleHeaders plain) `shouldBe` Nothing
+            lookup "Vary" (simpleHeaders plain) `shouldBe` Just "Accept-Encoding"
+        it "sends a script plain to a client that refuses gzip" $ do
+          refused <- request methodGet scriptPath [("Accept-Encoding", "gzip;q=0, identity")] ""
+          liftIO $ lookup "Content-Encoding" (simpleHeaders refused) `shouldBe` Nothing
+        it "sends a script gzipped to a client that accepts any coding" $ do
+          anyCoding <- request methodGet scriptPath [("Accept-Encoding", "*")] ""
+          liftIO $ lookup "Content-Encoding" (simpleHeaders anyCoding) `shouldBe` Just "gzip"
+        it "sends a script plain to a client that accepts any coding but gzip" $ do
+          refused <- request methodGet scriptPath [("Accept-Encoding", "*, gzip;q=0")] ""
+          liftIO $ lookup "Content-Encoding" (simpleHeaders refused) `shouldBe` Nothing
+        it "sends an image plain to a client that accepts gzip" $ do
+          image <- request methodGet "/arbiter/apple-touch-icon.png" [("Accept-Encoding", "gzip")] ""
+          liftIO $ lookup "Content-Encoding" (simpleHeaders image) `shouldBe` Nothing
+        it "serves an asset under the current build's version as immutable" $ do
+          page <- get "/arbiter/"
+          let version = stampedVersion (LBS.toStrict (simpleBody page))
+          asset <- get ("/arbiter/v/" <> version <> "/js/main.js")
+          liftIO $ do
+            simpleStatus asset `shouldBe` status200
+            fmap ("immutable" `BS.isSuffixOf`) (lookup "Cache-Control" (simpleHeaders asset)) `shouldBe` Just True
+        it "serves an asset under another build's version without a cache" $
+          get "/arbiter/v/stale/js/main.js" `shouldRespondWith` 200 {matchHeaders = ["Cache-Control" <:> "no-cache"]}
+
+-- | An embedded script.
+scriptPath :: ByteString
+scriptPath = "/arbiter/js/main.js"
+
+-- | The build version that index.html stamps into its script path.
+stampedVersion :: ByteString -> ByteString
+stampedVersion page = BS8.takeWhile (/= '/') (BS.drop (BS.length marker) (snd (BS.breakSubstring marker page)))
+  where
+    marker = "src=\"v/"
 
 -- | Run a session against the dashboard served from @dir@.
 served :: FilePath -> WaiSession () a -> IO a
@@ -47,5 +102,6 @@ withStaticDir action =
     let dir = root </> "static"
     createDirectory dir
     writeFile (dir </> "app.js") "ok"
+    writeFile (dir </> "app.d.ts") "declare const ok: string"
     writeFile (root </> "secret.txt") "secret"
     action dir

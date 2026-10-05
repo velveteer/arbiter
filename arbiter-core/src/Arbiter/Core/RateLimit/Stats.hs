@@ -24,16 +24,31 @@ import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 -- stats. The effective param is @override@ when set, else @default@.
 data RateLimitPolicyView = RateLimitPolicyView
   { prefix :: Text
+  -- ^ The policy's key prefix.
   , defaultMaxTokens :: Double
+  -- ^ The declared bucket capacity, in tokens.
   , defaultRefillAmount :: Double
+  -- ^ The declared tokens added per interval.
   , defaultInterval :: Double
+  -- ^ The declared refill interval, in seconds.
   , overrideMaxTokens :: Maybe Double
+  -- ^ The operator's bucket capacity, in tokens. 'Nothing' when unset.
   , overrideRefillAmount :: Maybe Double
+  -- ^ The operator's tokens added per interval. 'Nothing' when unset.
   , overrideInterval :: Maybe Double
+  -- ^ The operator's refill interval, in seconds. 'Nothing' when unset.
   , bucketCount :: Int64
+  -- ^ Buckets under the prefix.
   , throttledCount :: Int64
+  -- ^ Jobs the policy holds throttled, over every registry queue.
+  , throttledQueues :: [Text]
+  -- ^ The queues that hold throttled jobs, the most first.
   , minTokens :: Maybe Double
+  -- ^ The lowest token count of one bucket, refill included. 'Nothing' when the
+  -- prefix has no bucket.
   , avgTokens :: Maybe Double
+  -- ^ The mean token count over the buckets, refill included. 'Nothing' when the
+  -- prefix has no bucket.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -41,11 +56,17 @@ data RateLimitPolicyView = RateLimitPolicyView
 -- | A single key's bucket: current tokens, effective max, and fill fraction.
 data RateLimitBucketView = RateLimitBucketView
   { rateLimitKey :: Text
+  -- ^ The full @prefix:suffix@ key.
   , policyPrefix :: Text
+  -- ^ The policy's key prefix.
   , tokens :: Double
+  -- ^ Tokens available now, refill included.
   , maxTokens :: Double
+  -- ^ The effective bucket capacity, in tokens.
   , fillFraction :: Maybe Double
+  -- ^ Tokens divided by capacity. 'Nothing' when the capacity is 0.
   , lastRefill :: UTCTime
+  -- ^ When the bucket last stored a refill.
   }
   deriving stock (Eq, Generic, Show)
 

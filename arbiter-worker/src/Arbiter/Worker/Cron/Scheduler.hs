@@ -49,11 +49,20 @@ import Arbiter.Worker.Cron.Types
 import Arbiter.Worker.Logger (FailureGates, LogConfig, LogLevel (..), newFailureGates, tryLog, tryReportedOn)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
--- | Upsert default expression and overlap for each 'CronJob' into the
--- @cron_schedules@ table. Preserves any user overrides and enabled state.
+-- | Upsert the default expression, overlap, timezone and initial enabled flag of
+-- each 'CronJob' into the @cron_schedules@ table. Preserves user overrides. An
+-- existing row keeps its enabled state.
 initCronSchedules
   :: (MonadArbiter m)
-  => SchemaName -> Text -> [CronJob payload] -> LogConfig -> m ()
+  => SchemaName
+  -- ^ Schema name
+  -> Text
+  -- ^ Queue name
+  -> [CronJob payload]
+  -- ^ Schedules to upsert
+  -> LogConfig
+  -- ^ Log destination
+  -> m ()
 initCronSchedules schemaName queueName jobs logCfg = do
   for_ jobs $ \cron ->
     Ops.upsertCronDefault

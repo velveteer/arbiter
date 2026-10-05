@@ -17,12 +17,13 @@ module Arbiter.Servant.Server
   , runArbiterAPI
   , ArbiterServerConfig (..)
   , initArbiterServer
-  , defaultQueueStatsCacheTtl
+  , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
   , defaultMaintenanceSparseInterval
   , defaultMaintenanceTimeout
   , BuildServer (..)
+  , CacheCell
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
@@ -49,7 +50,7 @@ import Arbiter.Worker.Logger
   , LogConfig
   , LogLevel (..)
   , defaultLogConfig
-  , hubLogFor
+  , toHubLog
   , newFailureGates
   , tryReportedOn
   )
@@ -77,6 +78,7 @@ import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.Kind (Type)
+import Data.List (genericLength)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (clamp)
@@ -117,7 +119,7 @@ import Arbiter.Servant.API
 import Arbiter.Servant.Types
 
 -- | Configuration for the API server. @m@ is the backend monad every handler's
--- statements run in.
+-- statements run in. 'initArbiterServer' fills the cache fields.
 data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
   -- ^ Backend runner, e.g. @runSimpleDb env@ or @runHasqlDb env@.
@@ -126,19 +128,20 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   , enableSSE :: Bool
   -- ^ Enable the Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns one \"disabled\" event and closes.
-  -- The admin UI then polls. A backend with no listener answers the same way.
+  -- The admin UI then polls and retries the stream with an exponential backoff.
+  -- A backend with no listener answers the same way.
   -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
-  -- ^ Short-TTL cache for the rate-limit policy list.
+  -- ^ Cache for the rate-limit policy list, used when 'statsCacheTtl' is positive.
   , concurrencyPoliciesCache :: CacheCell ConcurrencyPoliciesResponse
-  -- ^ Short-TTL cache for the concurrency policy list.
+  -- ^ Cache for the concurrency policy list, used when 'statsCacheTtl' is positive.
   , allQueueStatsCache :: CacheCell AllStatsResponse
-  -- ^ Short-TTL cache for the all-queues overview aggregate.
+  -- ^ Cache for the all-queues overview, used when 'statsCacheTtl' is positive.
   , queueStatsCache :: CacheCell StatsResponse
-  -- ^ Per-queue stats cache.
-  , queueStatsCacheTtl :: NominalDiffTime
-  -- ^ Per-queue stats staleness, or zero to always hit the database.
-  -- Default: 'defaultQueueStatsCacheTtl'.
+  -- ^ Per-queue stats cache, used when 'statsCacheTtl' is positive.
+  , statsCacheTtl :: NominalDiffTime
+  -- ^ How old the queue stats, the overview and the policy lists can be. Zero
+  -- reads the database on each request. Default: 'defaultStatsCacheTtl'.
   , healthCache :: CacheCell HealthResponse
   -- ^ Short-TTL cache for the readiness probe.
   , maintenanceInterval :: NominalDiffTime
@@ -196,7 +199,7 @@ mutateJob tableName config jobId mutate refuse =
             <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
--- event-streaming triggers, which 'Arbiter.Migrations.runMigrationsForRegistry' installs
+-- event-streaming triggers, which @Arbiter.Migrations.runMigrationsForRegistry@ installs
 -- when @enableEventStreaming@ is set, and a backend with a listener.
 initArbiterServer
   :: forall m registry
@@ -220,7 +223,7 @@ initArbiterServer run = do
       , concurrencyPoliciesCache = ccCache
       , allQueueStatsCache = statsCache
       , queueStatsCache = perQueueCache
-      , queueStatsCacheTtl = defaultQueueStatsCacheTtl
+      , statsCacheTtl = defaultStatsCacheTtl
       , healthCache = healthCell
       , maintenanceInterval = defaultMaintenanceInterval
       , maintenanceSparseInterval = defaultMaintenanceSparseInterval
@@ -310,10 +313,7 @@ listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId roots
       apiJobs = map (uncurry ApiJobWithStatus) jobs
   pure $
     JobsResponse
-      { jobs = apiJobs
-      , jobsTotal = fromIntegral total
-      , jobsOffset = offset
-      , jobsLimit = limit
+      { jobsPage = toPage (limit, offset) total apiJobs
       , childCounts = childCounts
       , pausedParents = pausedParents
       , dlqChildCounts = dlqCounts
@@ -384,7 +384,7 @@ cancelJobHandler
   -> Handler NoContent
 cancelJobHandler tableName config jobId = do
   let schemaName = serverSchema config
-  runDb config (Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
+  runDb config (genericLength <$> Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler
@@ -544,10 +544,8 @@ listDLQHandler
   -> Maybe SortDir
   -> Handler (DLQResponse payload)
 listDLQHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mError mSortBy mSortDir =
-  readPage config mLimit mOffset toResponse page (Ops.countDLQFiltered schemaName tableName filters)
+  readPage config mLimit mOffset page (Ops.countDLQFiltered schemaName tableName filters)
   where
-    toResponse entries total offset limit =
-      DLQResponse {dlqJobs = entries, dlqTotal = total, dlqOffset = offset, dlqLimit = limit}
     schemaName = serverSchema config
     page = Ops.listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir
     filters =
@@ -637,10 +635,8 @@ listArchiveHandler
   -> Maybe SortDir
   -> Handler (ArchiveResponse payload)
 listArchiveHandler tableName config mLimit mOffset mParentId mJobId mGroupKey mKind mPayload mCompletedAfter mCompletedBefore mSortBy mSortDir =
-  readPage config mLimit mOffset toResponse page (Ops.countArchiveFiltered schemaName tableName filters)
+  readPage config mLimit mOffset page (Ops.countArchiveFiltered schemaName tableName filters)
   where
-    toResponse archived total offset limit =
-      ArchiveResponse {archiveJobs = archived, archiveTotal = total, archiveOffset = offset, archiveLimit = limit}
     schemaName = serverSchema config
     page = Ops.listArchiveFiltered schemaName tableName filters mSortBy mSortDir
     filters =
@@ -717,7 +713,7 @@ getStatsHandler
   -> ArbiterServerConfig m registry
   -> Handler StatsResponse
 getStatsHandler tableName kinds config =
-  liftIO $ cachedForKey (queueStatsCacheTtl config) (queueStatsCache config) tableName $ do
+  liftIO $ cachedForKey (statsCacheTtl config) (queueStatsCache config) tableName $ do
     let schemaName = serverSchema config
 
     queueStats <- runDb config $ Ops.getQueueStats schemaName tableName kinds
@@ -734,7 +730,7 @@ getAllStatsHandler
   -> [(Text, [Text])]
   -> Handler AllStatsResponse
 getAllStatsHandler config queueKinds =
-  liftIO $ cachedFor overviewStatsCacheTtl (allQueueStatsCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (allQueueStatsCache config) $ do
     let schemaName = serverSchema config
     AllStatsResponse <$> runDb config (Ops.getAllQueueStats schemaName queueKinds)
 
@@ -767,34 +763,29 @@ listGroupsHandler
   -> Maybe Text
   -> Handler GroupsResponse
 listGroupsHandler tableName config mLimit mOffset mGroupKey =
-  readPage
-    config
-    mLimit
-    mOffset
-    toResponse
-    (Ops.listGroups schemaName tableName key)
-    (Ops.countGroups schemaName tableName key)
+  readPage config mLimit mOffset (Ops.listGroups schemaName tableName key) (Ops.countGroups schemaName tableName key)
   where
-    toResponse page total offset limit =
-      GroupsResponse {groups = page, groupsTotal = total, groupsOffset = offset, groupsLimit = limit}
     schemaName = serverSchema config
     key = nonBlank mGroupKey
 
--- | Read one page and the total it pages through in one transaction, then build
--- the response from the page, the total, the offset and the limit.
+-- | Read one page and the total it pages through in one transaction.
 readPage
   :: (MonadArbiter m)
   => ArbiterServerConfig m registry
   -> Maybe Int
   -> Maybe Int
-  -> ([a] -> Int -> Int -> Int -> response)
   -> (Int -> Int -> m [a])
   -> m Int64
-  -> Handler response
-readPage config mLimit mOffset toResponse page count = do
-  let (limit, offset) = validatePagination defaultPageLimit mLimit mOffset
+  -> Handler (Page a)
+readPage config mLimit mOffset page count = do
+  let pagination@(limit, offset) = validatePagination defaultPageLimit mLimit mOffset
   (rows, total) <- runDb config . withDbTransaction $ (,) <$> page limit offset <*> count
-  pure (toResponse rows (fromIntegral total) offset limit)
+  pure (toPage pagination total rows)
+
+-- | Rows read at a limit and offset, and the total they page through.
+toPage :: (Int, Int) -> Int64 -> [a] -> Page a
+toPage (limit, offset) total rows =
+  Page {pageItems = rows, pageTotal = fromIntegral total, pageOffset = offset, pageLimit = limit}
 
 -- | Lease visible jobs to a consumer outside a worker pool. Each returned job
 -- contains the claim sequence and claimant required for finalization.
@@ -1019,7 +1010,7 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 -- backend's shared listener for the response's lifetime and gets a @connected@
 -- event once its channel is subscribed. If 'enableSSE' is false or the backend
 -- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then stops reconnection attempts.
+-- then polls and retries the stream with an exponential backoff.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
@@ -1036,7 +1027,7 @@ eventsServer config = Tagged $ \_req sendResponse -> do
       let deliver = atomically . writeTChan events . notificationData
       -- The registration wraps the whole response. The hub is released when the
       -- streaming body never runs.
-      withChannels listener (hubLogFor (serverLogConfig config)) [(eventStreamingChannel, deliver)] $ \ready ->
+      withChannels listener (toHubLog (serverLogConfig config)) [(eventStreamingChannel, deliver)] $ \ready ->
         sendResponse $ responseStream status200 sseHeaders $ \write flush ->
           -- A failed write (client gone) ends the stream. The keepalive comment
           -- every 15s is how a gone client is noticed.
@@ -1254,17 +1245,9 @@ healthCacheTtl = 2
 healthProbeMicros :: Int
 healthProbeMicros = 5_000_000
 
--- | Poll-collapsing TTL for the dashboard list-policy stats.
-policyStatsCacheTtl :: NominalDiffTime
-policyStatsCacheTtl = 10
-
--- | Shorter TTL for the faster-polling all-queues overview.
-overviewStatsCacheTtl :: NominalDiffTime
-overviewStatsCacheTtl = 5
-
--- | Default floor between per-queue stats scans.
-defaultQueueStatsCacheTtl :: NominalDiffTime
-defaultQueueStatsCacheTtl = 2
+-- | Stats are read live by default.
+defaultStatsCacheTtl :: NominalDiffTime
+defaultStatsCacheTtl = 0
 
 -- | No minimum gap. An explicit maintenance call runs every operation.
 -- Concurrent callers exclude each other on the gate.
@@ -1283,7 +1266,7 @@ defaultMaintenanceBucketIdle = 300
 defaultMaintenanceTimeout :: NominalDiffTime
 defaultMaintenanceTimeout = 300
 
--- | Keyed TTL cache under an epoch bumped by 'invalidate'.
+-- | Keyed TTL cache under an epoch bumped by @invalidate@.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
   , cacheFilling :: TVar (Set.Set Text)
@@ -1339,7 +1322,7 @@ listRateLimitsHandler
   => ArbiterServerConfig m registry
   -> Handler RateLimitPoliciesResponse
 listRateLimitsHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (rateLimitPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (rateLimitPoliciesCache config) $ do
     views <- runDb config HL.listRateLimitPolicies
     pure $ RateLimitPoliciesResponse {policies = views}
 
@@ -1355,7 +1338,7 @@ listRateLimitBucketsHandler
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
-  pure $ RateLimitBucketsResponse {buckets = rows}
+  pure Items {items = rows}
 
 updateThenView
   :: ArbiterServerConfig m registry
@@ -1461,7 +1444,7 @@ listConcurrencyHandler
   => ArbiterServerConfig m registry
   -> Handler ConcurrencyPoliciesResponse
 listConcurrencyHandler config =
-  liftIO $ cachedFor policyStatsCacheTtl (concurrencyPoliciesCache config) $ do
+  liftIO $ cachedFor (statsCacheTtl config) (concurrencyPoliciesCache config) $ do
     views <- runDb config HL.listConcurrencyPolicies
     pure $ ConcurrencyPoliciesResponse {policies = views}
 
@@ -1477,7 +1460,7 @@ listConcurrencyKeysHandler
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
   let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
-  pure $ ConcurrencyKeysResponse {keys = rows}
+  pure Items {items = rows}
 
 -- | Set or clear a pool's override limit, then return the updated view.
 updateConcurrencyPolicyHandler
@@ -1532,8 +1515,10 @@ sharedServer config =
     :<|> concurrencyServer config
     :<|> healthServer config
 
--- | Builds a registry's per-queue server implementations.
+-- | Builds a registry's per-queue server implementations. @registry@ is the whole
+-- registry. @reg@ is the part still to build.
 class BuildServer registry (reg :: JobPayloadRegistry) where
+  -- | The server for the queues in @reg@, then the shared routes.
   buildServer :: (HasRegistry m registry) => ArbiterServerConfig m registry -> ServerT (RegistryToAPI reg) Handler
 
 -- The empty registry builds the shared top-level routes alone.
@@ -1578,8 +1563,8 @@ arbiterServerHoisted
 arbiterServerHoisted natTrans config =
   hoistServer (Proxy @(ArbiterAPI registry)) natTrans (arbiterServer config)
 
--- | Convert to WAI Application. Each 'QueueWithResult' result type needs
--- @FromJSON@ and @ToJSON@.
+-- | Convert to WAI Application. Each 'Arbiter.Core.QueueRegistry.QueueWithResult'
+-- result type needs @FromJSON@ and @ToJSON@.
 arbiterApp
   :: forall registry m
    . ( BuildServer registry registry
@@ -1591,7 +1576,7 @@ arbiterApp
 arbiterApp config =
   serve (Proxy @(ArbiterAPI registry)) (arbiterServer config)
 
--- | Run the API server on a port.
+-- | Run the API server on a port. Prints a start line to stdout.
 runArbiterAPI
   :: forall registry m
    . ( BuildServer registry registry

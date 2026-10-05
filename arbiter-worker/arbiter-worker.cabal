@@ -1,9 +1,9 @@
 cabal-version:   3.0
 name:            arbiter-worker
 version:         0.1.0.0
-synopsis:        Worker framework for arbiter
+synopsis:        Worker pools for Arbiter
 description:
-  Worker pools for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Worker pools for Arbiter, a PostgreSQL job queue for Haskell.
 
   Runs concurrent pools that claim jobs under a visibility timeout, heartbeat
   long-running work, retry with a configurable backoff strategy, and move
@@ -17,7 +17,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -28,6 +28,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-worker
 
 common shared-properties
   default-language: GHC2024
@@ -50,9 +51,6 @@ library
     Arbiter.Worker.Cron
     Arbiter.Worker.Heartbeat
     Arbiter.Worker.Heartbeat.Guard
-    Arbiter.Worker.Heartbeat.Guard.Loop
-    Arbiter.Worker.Heartbeat.Guard.Signal
-    Arbiter.Worker.Heartbeat.Guard.State
     Arbiter.Worker.Logger
     Arbiter.Worker.WorkQueue
 
@@ -62,6 +60,9 @@ library
     Arbiter.Worker.Cron.Types
     Arbiter.Worker.Dispatcher
     Arbiter.Worker.EnabledQueues
+    Arbiter.Worker.Heartbeat.Guard.Loop
+    Arbiter.Worker.Heartbeat.Guard.Signal
+    Arbiter.Worker.Heartbeat.Guard.State
     Arbiter.Worker.MultiQueue
     Arbiter.Worker.Logger.Internal
     Arbiter.Worker.NotificationListener
@@ -83,7 +84,7 @@ library
     , fast-logger         >=3.0  && <3.3
     , hostname            >=1.0  && <1.1
     , io-classes          >=1.11 && <1.12
-    , io-classes:si-timers
+    , io-classes:si-timers >=1.11 && <1.12
     , monad-logger        >=0.3  && <0.4
     , monad-logger-aeson  >=0.4  && <0.5
     , random              >=1.2  && <1.4
@@ -115,12 +116,12 @@ test-suite arbiter-worker-tests
     , arbiter-core         >=0.1 && <0.2
     , arbiter-test-common  >=0.1 && <0.2
     , arbiter-worker
-    , base
+    , base >=4.20 && <5
     , containers
     , cron
     , hspec
-    , io-classes
-    , io-classes:si-timers
+    , io-classes >=1.11 && <1.12
+    , io-classes:si-timers >=1.11 && <1.12
     , io-sim
     , QuickCheck
     , text

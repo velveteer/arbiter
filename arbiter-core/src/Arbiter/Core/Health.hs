@@ -26,14 +26,23 @@ import Arbiter.Core.Sql.Query (rows)
 -- | Connection and age counters for the current database, shared with its other clients.
 data PgDbHealth = PgDbHealth
   { numBackends :: Int64
+  -- ^ Connections to the database, the reading one excluded.
   , connActive :: Int64
+  -- ^ Connections running a query and not waiting on a lock.
   , connIdle :: Int64
+  -- ^ Idle connections.
   , connIdleInTxn :: Int64
+  -- ^ Connections idle inside an open transaction.
   , connIdleInTxnAborted :: Int64
+  -- ^ Connections idle inside a failed transaction.
   , connBlocked :: Int64
+  -- ^ Connections running a query that waits on a lock.
   , connOther :: Int64
+  -- ^ Connections in any other state.
   , oldestTxnAge :: Double
+  -- ^ Age of the oldest open transaction, in seconds. 0 when none is open.
   , oldestQueryAge :: Double
+  -- ^ Age of the oldest running query, in seconds. 0 when none runs.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
