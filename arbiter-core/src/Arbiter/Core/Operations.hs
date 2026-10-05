@@ -1508,6 +1508,7 @@ retryFromDLQEditing
   -> Maybe RowEdit
   -> m (Maybe (JobRead (Stored payload)))
 retryFromDLQEditing schemaName tableName dlqId edit = withDbTransaction $ do
+  lockJobParents schemaName tableName . map Just =<< MA.executeQuery (Tmpl.dlqRetryParentSQL schemaName tableName dlqId)
   void (MA.executeQuery (Tmpl.lockDLQRetryParentSQL schemaName tableName dlqId))
   void (MA.executeStatement (Tmpl.lockDLQRetryGroupsSQL schemaName tableName dlqId))
   listToMaybe <$> MA.executeQuery (Tmpl.retryFromDLQSQL schemaName tableName dlqId edit)

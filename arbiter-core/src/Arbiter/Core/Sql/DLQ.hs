@@ -10,6 +10,7 @@ module Arbiter.Core.Sql.DLQ
   , moveToDLQSQL
   , selectExhaustedJobsSQL
   , retryFromDLQSQL
+  , dlqRetryParentSQL
   , lockDLQRetryParentSQL
   , lockDLQRetryGroupsSQL
   , dlqJobExistsSQL
@@ -193,9 +194,16 @@ dlqRetryTreeCte dlqTbl tbl dlqId =
     )
   |]
 
+-- | The main-queue parent of the tree a DLQ retry restores.
+dlqRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
+dlqRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId ""
+
 -- | Lock the main-queue parent of the tree a DLQ retry restores.
 lockDLQRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
-lockDLQRetryParentSQL schema tableName dlqId =
+lockDLQRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId "FOR UPDATE"
+
+dlqRetryParent :: Text -> Text -> Int64 -> Text -> Query Int64
+dlqRetryParent schema tableName dlqId lockClause =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
       walk = dlqRetryTreeCte dlqTbl tbl dlqId
@@ -203,7 +211,7 @@ lockDLQRetryParentSQL schema tableName dlqId =
         ${walk}
         SELECT @{id :: CInt8} FROM ${tbl}
         WHERE id = (SELECT dead.parent_id FROM ${dlqTbl} dead WHERE dead.job_id = (SELECT job_id FROM root_job_id))
-        FOR UPDATE
+        ${lockClause}
       |]
 
 -- | Create and lock, in key order, the group summaries of the tree a DLQ retry restores
