@@ -23,14 +23,14 @@ import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), createOrvilleConnectionOptions, runOrvilleDb)
+import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), toOrvilleConnectionOptions, runOrvilleDb)
 import Arbiter.Otel qualified as Otel
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker
   ( BatchCallbacks (..)
   , EncodeJobResult
   , WorkerConfig (..)
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , runWorkerPool
   , silentLogConfig
   , transactionalWorkerConfig
@@ -574,7 +574,7 @@ workerTrial runM statsConn mkSingle totalJobs durationUs numPools workersPerPool
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig workersPerPool batchSize (\jobs callbacks -> void $ flakyBatch callbacks jobs)
+      batchedWorkerConfig workersPerPool batchSize (\jobs callbacks -> void $ flakyBatch callbacks jobs)
   runWorkerTrial runM statsConn configs totalJobs durationUs
 
 simpleWorkerTrial :: RunM SimpleM -> Connection -> Int -> Int -> Int -> Int -> BenchMode -> IO SteadyResult
@@ -712,7 +712,7 @@ steadyStateTrial telemetry runM producerRunM statsConn mkSingle durationUs numPo
   processedCounter <- newIORef (0 :: Int)
   configs <- benchConfigs runM numPools $ case modeConfig of
     BenchSingleJobMode -> mkSingle workersPerPool processedCounter
-    BenchBatchedJobsMode batchSize -> defaultBatchedWorkerConfig workersPerPool batchSize $ \jobs callbacks -> do
+    BenchBatchedJobsMode batchSize -> batchedWorkerConfig workersPerPool batchSize $ \jobs callbacks -> do
       acked <- flakyBatch callbacks jobs
       countProcessedN processedCounter acked
   withInstrumentedPools telemetry otel configs $ \instrumented ->
@@ -917,7 +917,7 @@ hasqlGatedSteadyTrial runM producerRunM statsConn mode pools table mkJob duratio
       transactionalWorkerConfig 10 $ \(_conn :: Hasql.Connection) (_job :: JobRead payload) ->
         countProcessed processedCounter
     BenchBatchedJobsMode batchSize ->
-      defaultBatchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
+      batchedWorkerConfig 10 batchSize $ \(jobs :: NonEmpty (JobRead payload)) callbacks -> do
         ackAll callbacks (toList jobs)
         countProcessedN processedCounter (length jobs)
   runGatedSteadyTrial runM producerRunM statsConn (map benchTune cfgs) processedCounter table mkJob durationUs
@@ -1013,7 +1013,7 @@ main = do
       )
       hasqlTransports
 
-  let orvilleOptions = createOrvilleConnectionOptions benchConnStr benchPoolConfig
+  let orvilleOptions = toOrvilleConnectionOptions benchConnStr benchPoolConfig
   orvillePool <- O.createConnectionPool orvilleOptions
   let orvilleState = O.newOrvilleState O.defaultErrorDetailLevel orvillePool
 

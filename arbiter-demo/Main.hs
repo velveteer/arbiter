@@ -42,7 +42,7 @@ import Arbiter.Worker
   , TickKind
   , WorkerConfig (..)
   , cronJob
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , defaultLogConfig
   , mergedChildResults
   , namedWorkerPool
@@ -377,7 +377,7 @@ mkBulkWorker :: IO (WorkerConfig DemoM BulkPayload)
 mkBulkWorker = do
   count <- maybe 6 read <$> lookupEnv "BURST_WORKERS"
   batch <- maybe 25 read <$> lookupEnv "BURST_BATCH"
-  cfg <- defaultBatchedWorkerConfig count batch handler
+  cfg <- batchedWorkerConfig count batch handler
   pure cfg {pollInterval = 1, livenessFile = Nothing}
   where
     -- Roughly 300 jobs a second across the pool. A burst drains slowly enough

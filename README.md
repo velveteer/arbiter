@@ -16,7 +16,20 @@ A PostgreSQL job queue for Haskell applications.
 
 ## Installation
 
-Install directly from GitHub:
+Add the packages to `build-depends`:
+
+```
+build-depends:
+    arbiter-core
+  , arbiter-worker
+  , arbiter-simple
+  , arbiter-migrations
+```
+
+Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` to use that
+backend.
+
+To build from GitHub, add the repository.
 
 **Cabal** - add to your `cabal.project`:
 
@@ -29,6 +42,7 @@ source-repository-package
     arbiter-core
     arbiter-worker
     arbiter-simple
+    arbiter-libpq
     arbiter-migrations
 ```
 
@@ -42,11 +56,9 @@ extra-deps:
       - arbiter-core
       - arbiter-worker
       - arbiter-simple
+      - arbiter-libpq
       - arbiter-migrations
 ```
-
-Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` to use that
-backend.
 
 ## Quick Start
 

@@ -1,8 +1,10 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-servant-openapi
 version:         0.1.0.0
 synopsis:        OpenAPI 3 description of the Arbiter REST API
 description:
+  OpenAPI 3 document for Arbiter, a PostgreSQL job queue for
+  Haskell.
   Derives an OpenAPI 3 document from @arbiter-servant@'s route types, so paths,
   methods, parameters, request and response bodies and status codes come from the
   API itself.
@@ -15,7 +17,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -26,6 +28,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-servant-openapi
 
 common shared-properties
   default-language: GHC2024
@@ -65,7 +68,7 @@ test-suite arbiter-servant-openapi-tests
     , arbiter-core
     , arbiter-servant
     , arbiter-servant-openapi
-    , base
+    , base >=4.20 && <5
     , containers
     , insert-ordered-containers
     , openapi3

@@ -251,9 +251,11 @@ instance (ToJSON payload) => ToJSON (JobRead payload) where
   toJSON = object . jobReadPairs
   toEncoding = pairs . jobReadSeries
 
+-- | A job's JSON fields as key-value pairs.
 jobReadPairs :: (ToJSON payload) => JobRead payload -> [Pair]
 jobReadPairs = jobReadFields
 
+-- | A job's JSON fields as an encoding series.
 jobReadSeries :: (ToJSON payload) => JobRead payload -> Series
 jobReadSeries = mconcat . jobReadFields
 
@@ -391,7 +393,7 @@ type ErrorMsg = Text
 type BackoffDelay = NominalDiffTime
 
 -- | Callbacks fired at each point of a job's lifecycle, for metrics, logging or tracing.
--- An exception thrown inside one is caught and dropped.
+-- The worker catches an exception thrown inside one and logs it at Warning.
 data ObservabilityHooks m payload = ObservabilityHooks
   { onJobClaimed
       :: (JobPayload payload)
@@ -423,8 +425,8 @@ data ObservabilityHooks m payload = ObservabilityHooks
   -- ^ Called when a failed job is successfully scheduled for retry.
   , onJobFailedAndMovedToDLQ
       :: (JobPayload payload)
-      => ErrorMsg
-      -> JobRead payload
+      => JobRead payload
+      -> ErrorMsg
       -> m ()
   -- ^ Called when a job is successfully moved to the dead-letter queue.
   , onJobCancelled
@@ -480,7 +482,7 @@ hoistObservabilityHooks nat hooks =
     , onJobSuccess = \job start end -> nat (onJobSuccess hooks job start end)
     , onJobFailure = \job msg start end -> nat (onJobFailure hooks job msg start end)
     , onJobRetry = \job delay -> nat (onJobRetry hooks job delay)
-    , onJobFailedAndMovedToDLQ = \msg job -> nat (onJobFailedAndMovedToDLQ hooks msg job)
+    , onJobFailedAndMovedToDLQ = \job msg -> nat (onJobFailedAndMovedToDLQ hooks job msg)
     , onJobCancelled = \job msg -> nat (onJobCancelled hooks job msg)
     , onJobUnavailable = \job msg -> nat (onJobUnavailable hooks job msg)
     , onJobHeartbeat = \job now start -> nat (onJobHeartbeat hooks job now start)
@@ -495,7 +497,7 @@ instance (MonadUnliftIO m) => Semigroup (ObservabilityHooks m payload) where
       , onJobSuccess = \job start end -> onJobSuccess left job start end `andThen` onJobSuccess right job start end
       , onJobFailure = \job msg start end -> onJobFailure left job msg start end `andThen` onJobFailure right job msg start end
       , onJobRetry = \job delay -> onJobRetry left job delay `andThen` onJobRetry right job delay
-      , onJobFailedAndMovedToDLQ = \msg job -> onJobFailedAndMovedToDLQ left msg job `andThen` onJobFailedAndMovedToDLQ right msg job
+      , onJobFailedAndMovedToDLQ = \job msg -> onJobFailedAndMovedToDLQ left job msg `andThen` onJobFailedAndMovedToDLQ right job msg
       , onJobCancelled = \job msg -> onJobCancelled left job msg `andThen` onJobCancelled right job msg
       , onJobUnavailable = \job msg -> onJobUnavailable left job msg `andThen` onJobUnavailable right job msg
       , onJobHeartbeat = \job now start -> onJobHeartbeat left job now start `andThen` onJobHeartbeat right job now start

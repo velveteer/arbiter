@@ -17,7 +17,7 @@ module Arbiter.Worker.Logger
   , tryLog
   , warnEx
   , recoveryLevel
-  , hubLogFor
+  , toHubLog
 
     -- * Repeat suppression
   , FailureGate
@@ -68,11 +68,11 @@ data LogLevel
 
 -- | Where Arbiter writes log output.
 data LogDestination
-  = -- | Log to stdout (default)
+  = -- | Log to stdout. The default.
     LogStdout
-  | -- | Log to stderr
+  | -- | Log to stderr.
     LogStderr
-  | -- | Log to a custom fast-logger 'LoggerSet'
+  | -- | Log to a custom fast-logger 'LoggerSet'.
     LogFastLogger LoggerSet
   | -- | Log to a user-provided callback. The callback receives the 'LogLevel',
     -- the plain message 'Text', and all structured context as @['Pair']@
@@ -86,7 +86,7 @@ data LogDestination
     LogCallback (LogLevel -> Text -> [Pair] -> IO ())
   | -- | Emit every message to both destinations, the first one before the second.
     LogTee LogDestination LogDestination
-  | -- | Discard all logs (silent mode)
+  | -- | Discard all logs.
     LogDiscard
 
 -- | Worker log level, destination, and context.
@@ -102,7 +102,7 @@ data LogConfig = LogConfig
   -- ^ The library's pool and worker pairs. 'additionalContext' wins on a
   -- collision. Default: @[]@.
   , failureRepeatInterval :: NominalDiffTime
-  -- ^ Repeat interval for a persistent failure. Default: 60s.
+  -- ^ Repeat interval in seconds for a persistent failure. Default: @60@.
   }
 
 -- | Default log configuration: Info level to stdout, no additional context.
@@ -148,8 +148,8 @@ reportOutcome cfg level gate subject = \case
       >>= \recovered -> when recovered (tryLog cfg (recoveryLevel cfg level) (subject <> " recovered"))
 
 -- | Hub loggers over @cfg@. The hub's own events drop the 'identityContext'.
-hubLogFor :: LogConfig -> HubLog
-hubLogFor cfg =
+toHubLog :: LogConfig -> HubLog
+toHubLog cfg =
   HubLog
     { hubRecovered = tryLog shared (recoveryLevel cfg Error)
     , hubWarn = tryLog cfg Warning

@@ -31,7 +31,7 @@ import Arbiter.Worker.Config
   ( BatchCallbacks (..)
   , WorkerConfig (..)
   , ackAll
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Heartbeat (HeartbeatGuard, newHeartbeatGuard)
@@ -406,7 +406,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
 
         void (insertedPlainId env)
 
-        config <- defaultBatchedWorkerConfig 1 1 handler
+        config <- batchedWorkerConfig 1 1 handler
         let workerConfig =
               config
                 { pollInterval = 0.2

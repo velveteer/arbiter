@@ -3,51 +3,68 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Response types for the Arbiter REST API.
+-- | Request and response types for the Arbiter REST API.
 module Arbiter.Servant.Types
-  ( ApiJobWithStatus (..)
+  ( -- * Jobs
+    ApiJobWithStatus (..)
   , ApiJobWrite (..)
+  , JobResponse (..)
+  , JobsResponse (..)
+  , PayloadEdit (..)
+  , RescheduleRequest (..)
+  , BatchInsertRequest (..)
+  , BatchInsertResponse (..)
+  , BatchDeleteRequest (..)
+  , BatchDeleteResponse (..)
+
+    -- * Pages
   , Page (..)
   , Items (..)
   , ArchiveResponse
-  , JobResponse (..)
-  , JobsResponse (..)
+  , DLQResponse
+  , GroupsResponse
+
+    -- * Leases
   , ClaimRequest (..)
   , ClaimResponse (..)
   , JobLease (..)
   , jobLeasePairs
   , AckRequest (..)
   , ExtendRequest (..)
-  , MaintenanceResponse (..)
+
+    -- * Request bodies
   , OptionalJSON
   , bodylessContentType
-  , PayloadEdit (..)
-  , RescheduleRequest (..)
-  , AddTokensRequest (..)
-  , AddTokensResponse (..)
-  , PruneResponse (..)
-  , GroupsResponse
-  , DLQResponse
+
+    -- * Queues and stats
   , StatsResponse (..)
   , AllStatsResponse (..)
   , QueuesResponse (..)
-  , BatchInsertRequest (..)
-  , BatchInsertResponse (..)
-  , BatchDeleteRequest (..)
-  , BatchDeleteResponse (..)
+  , MaintenanceResponse (..)
+
+    -- * Cron and workers
   , CronScheduleView (..)
   , CronSchedulesResponse (..)
   , WorkersResponse (..)
+
+    -- * Admission policies
   , RateLimitPoliciesResponse (..)
   , RateLimitBucketsResponse
   , RateLimitResetResponse (..)
+  , AddTokensRequest (..)
+  , AddTokensResponse (..)
+  , PruneResponse (..)
   , ConcurrencyPoliciesResponse (..)
   , ConcurrencyKeysResponse
   , ConcurrencyReconcileResponse (..)
+
+    -- * Health
   , HealthStatus (..)
   , healthStatusToText
   , HealthResponse (..)
   , LivenessResponse (..)
+
+    -- * Re-exported row types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   , QueueOverview (..)
@@ -113,7 +130,7 @@ import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
 import Servant.API (Accept (..), JSON, MimeUnrender (..))
 
--- | A job row plus its SQL-derived status, for the list endpoint.
+-- | A job row plus its SQL-derived status, for the list and detail endpoints.
 data ApiJobWithStatus payload = ApiJobWithStatus
   { ajwsJob :: JobRead payload
   , ajwsStatus :: JobStatus
@@ -123,7 +140,7 @@ data ApiJobWithStatus payload = ApiJobWithStatus
 -- | Write-side job type for REST API insertion.
 --
 -- Accepts @payload@, @groupKey@, @priority@, @notVisibleUntil@, @dedupKey@,
--- and @maxAttempts@. Fields like @parentId@, @parentState@, and @suspended@
+-- @maxAttempts@, and @archiveFor@. Fields like @parentId@, @parentState@, and @suspended@
 -- are managed internally and cannot be set through the REST API.
 newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
   deriving newtype (Eq, Show)
@@ -169,8 +186,10 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
 data Page a = Page
   { pageItems :: [a]
   , pageTotal :: Int
+  -- ^ Rows that match the filters, across all pages.
   , pageOffset :: Int
   , pageLimit :: Int
+  -- ^ Page size. Default 50, range 1 to 1000.
   }
   deriving stock (Eq, Show)
 
@@ -207,8 +226,11 @@ newtype JobResponse a = JobResponse
 data JobsResponse payload = JobsResponse
   { jobsPage :: Page (ApiJobWithStatus (Stored payload))
   , childCounts :: Map Int64 Int64
+  -- ^ Child count, keyed by the id of each parent on the page.
   , pausedParents :: [Int64]
+  -- ^ Ids of the parents on the page whose children are all paused.
   , dlqChildCounts :: Map Int64 Int64
+  -- ^ DLQ child count, keyed by the id of each parent on the page.
   }
   deriving stock (Eq, Show)
 
@@ -228,7 +250,9 @@ instance FromJSON (JobsResponse payload) where
 -- | A consumer's request to lease visible jobs.
 data ClaimRequest = ClaimRequest
   { maxJobs :: Maybe Int
+  -- ^ Jobs to claim. Default 1, range 1 to 1000.
   , leaseSeconds :: Maybe Double
+  -- ^ Lease length in seconds. Default 60, range 1 to 3600.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -275,6 +299,7 @@ instance (ToJSON result) => ToJSON (AckRequest result) where
 data ExtendRequest = ExtendRequest
   { erLease :: JobLease
   , erSeconds :: Double
+  -- ^ Seconds, clamped to 1 to 3600.
   }
   deriving stock (Eq, Show)
 
@@ -369,6 +394,7 @@ type DLQResponse payload = Page (DLQ.DLQJob (Stored payload))
 data StatsResponse = StatsResponse
   { stats :: QueueStats
   , timestamp :: Text
+  -- ^ When the stats were read, as @YYYY-MM-DDTHH:MM:SS+HHMM@.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -402,14 +428,14 @@ data BatchInsertResponse payload = BatchInsertResponse
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically (BatchInsertResponse payload)
 
--- | Request body for batch DLQ delete.
+-- | Request body for a batch DLQ or archive delete.
 data BatchDeleteRequest = BatchDeleteRequest
   { ids :: [Int64]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Response body for batch DLQ delete.
+-- | Response body for a batch DLQ or archive delete.
 data BatchDeleteResponse = BatchDeleteResponse
   { deleted :: Int64
   }
@@ -465,7 +491,7 @@ data RateLimitResetResponse = RateLimitResetResponse
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Concurrency pools response.
+-- | Concurrency policies response.
 data ConcurrencyPoliciesResponse = ConcurrencyPoliciesResponse
   { policies :: [ConcurrencyPolicyView]
   }
@@ -492,6 +518,7 @@ instance ToJSON HealthStatus where
 instance FromJSON HealthStatus where
   parseJSON = withText "HealthStatus" $ either (fail . unpack) pure . enumFromText "health status" healthStatusToText
 
+-- | The JSON text of a status: @ok@ or @down@.
 healthStatusToText :: HealthStatus -> Text
 healthStatusToText = \case
   Ok -> "ok"
@@ -503,7 +530,7 @@ data HealthResponse = HealthResponse
   , schemaName :: Text
   , checkedAt :: UTCTime
   , dbLatencyMs :: Maybe Double
-  -- ^ Nothing when the database could not be reached.
+  -- ^ 'Nothing' when the database could not be reached.
   , db :: Maybe PgDbHealth
   -- ^ Connection and age counters, absent when the database is unreachable.
   }

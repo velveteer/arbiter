@@ -14,11 +14,15 @@
 --   type Handler MyApp job result = Hasql.Connection -> job -> MyApp result
 --   getSchema                = asks appSchema
 --   executeQuery             = hasqlExecuteQuery
+--   executeQueryPrepared     = hasqlExecuteQueryPrepared True
 --   executeStatement         = hasqlExecuteStatement
 --   withDbTransaction        = hasqlWithDbTransaction
 --   runHandlerWithConnection = hasqlRunHandlerWithConnection
 --   getListener              = asks appListener
 -- @
+--
+-- The primitives also need a @HasPoolState Hasql.Connection MyApp@ instance. See
+-- 'Arbiter.Core.Backend.HasPoolState'.
 --
 -- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
 -- 'Arbiter.Core.MonadArbiter.Handler' at that queue's job and declared result types.

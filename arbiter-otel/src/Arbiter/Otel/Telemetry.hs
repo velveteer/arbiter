@@ -79,6 +79,7 @@ data Telemetry = Telemetry
   { meters :: Maybe ArbiterMeters
   -- ^ 'Nothing' when nothing is exporting metrics. Then there are no job instruments and no gauge scan.
   , provider :: MeterProvider
+  -- ^ The meter provider the gauge instruments register on.
   , logDestination :: Maybe LogDestination
   -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
   , gaugeRefresh :: NominalDiffTime
@@ -225,7 +226,7 @@ baseTelemetry meterProvider =
 refreshFor :: PeriodicMetricReaderOptions -> NominalDiffTime
 refreshFor opts = fromIntegral (periodicIntervalMicros opts) / 1_000_000
 
--- | 'withTelemetry', or an inert handle when @OTEL_SDK_DISABLED@ is set.
+-- | 'withTelemetry', or an inert handle when @OTEL_SDK_DISABLED@ is @true@.
 withTelemetryFromEnv :: (Telemetry -> IO a) -> IO a
 withTelemetryFromEnv action = lookupBooleanEnv "OTEL_SDK_DISABLED" >>= \disabled -> withTelemetryIf (not disabled) action
 

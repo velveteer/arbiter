@@ -1,9 +1,9 @@
 cabal-version:   3.0
 name:            arbiter-otel
 version:         0.1.0.0
-synopsis:        OpenTelemetry traces, metrics, and logs for arbiter
+synopsis:        OpenTelemetry traces, metrics, and logs for Arbiter
 description:
-  OpenTelemetry for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  OpenTelemetry for Arbiter, a PostgreSQL job queue for Haskell.
 
   Exports job, worker, queue-depth, admission, and database-health instruments
   over OTLP, tees structured logs to the OpenTelemetry log pipeline, and resolves
@@ -14,9 +14,9 @@ license:         MIT
 license-file:    LICENSE
 author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
-category:        Database
+category:        Database, Monitoring
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -26,7 +26,8 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 
 source-repository head
   type:     git
-  location: https://github.com/velveteer/arbiter
+  location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-otel
 
 common shared-properties
   default-language:   GHC2024
@@ -86,7 +87,7 @@ test-suite arbiter-otel-tests
     , arbiter-simple                   >=0.1 && <0.2
     , arbiter-test-common              >=0.1 && <0.2
     , arbiter-worker                   >=0.1 && <0.2
-    , base
+    , base >=4.20 && <5
     , bytestring
     , directory
     , hs-opentelemetry-api

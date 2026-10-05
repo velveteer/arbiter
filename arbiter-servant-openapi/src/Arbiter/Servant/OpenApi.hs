@@ -104,6 +104,7 @@ import Servant (Get, JSON, Server, (:>))
 import Servant.OpenApi (HasOpenApi, toOpenApi)
 
 -- | The document's own route, for mounting beside 'Arbiter.Servant.API.ArbiterAPI'.
+-- Mount it before @Arbiter.Servant.UI.AdminUI@. That route is a @Raw@ catch-all.
 type OpenApiAPI = "openapi.json" :> Get '[JSON] Value
 
 -- | Serve the description of a registry's API.
@@ -240,7 +241,7 @@ sectionDescriptions =
   , ("cron", "Cron schedules, their overrides, and out-of-band runs.")
   , ("workers", "The worker registry, and pausing a pool.")
   , ("rate-limits", "Token-bucket policies, their live buckets, overrides, token grants and pruning.")
-  , ("concurrency", "Concurrency pools, their live keys, overrides and pruning.")
+  , ("concurrency", "Concurrency policies, their live keys, overrides and pruning.")
   , ("maintenance", "The sweep a worker pool's reaper runs, on demand.")
   , ("events", "A server-sent stream of job events.")
   , ("health", "Liveness and readiness.")

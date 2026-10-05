@@ -1,7 +1,10 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Every hasql version difference that arbiter-hasql depends on.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Every hasql version difference that arbiter-hasql depends on.
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
@@ -63,6 +66,8 @@ runScript = Session.sql
 -- | Connection settings for hasql 2: transport adapter (e.g. @Pqi.Ffi.adapter@) and connection string.
 data HasqlConnect = HasqlConnect PQ.Adapter ByteString
 
+-- | Connection settings from a pqi adapter and a connection string. With the @hasql2@
+-- flag off, the hasql 1.x shape takes only the connection string.
 toHasqlConnect :: PQ.Adapter -> ByteString -> HasqlConnect
 toHasqlConnect = HasqlConnect
 
@@ -77,6 +82,8 @@ withDedicatedListenConn (HasqlConnect adapter connStr) = withDriverListenConn (p
 -- | Connection settings for hasql 1.x: connection string.
 newtype HasqlConnect = HasqlConnect ByteString
 
+-- | Connection settings from a connection string. With the @hasql2@ flag on, the
+-- hasql 2 shape also takes a pqi adapter first.
 toHasqlConnect :: ByteString -> HasqlConnect
 toHasqlConnect = HasqlConnect
 

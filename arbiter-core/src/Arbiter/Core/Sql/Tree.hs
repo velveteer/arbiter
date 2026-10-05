@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Tree SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Tree SQL templates.
 module Arbiter.Core.Sql.Tree
   ( pauseChildrenSQL
   , resumeChildrenSQL
@@ -162,7 +165,8 @@ descendantsOfCte tbl jobIds =
   |]
 
 -- | Lock the named jobs and all their descendants descending, to match ack and
--- force-cancel. Several trees at once, their union in one pass. Then 'lockTreeGroupsCte'.
+-- force-cancel. Several trees at once, their union in one pass. Then lock the
+-- trees' group summaries.
 lockJobTreesSQL :: Text -> Text -> [Int64] -> Query Int64
 lockJobTreesSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
@@ -365,7 +369,8 @@ treeRollupIdsSQL schema tableName jobId =
         SELECT id AS @{result :: CInt8} FROM descendants WHERE parent_state IS NOT NULL
       |]
 
--- | Make a claimed job a rollup finalizer, handing back the attempt its claim consumed.
+-- | Mark a claimed, childless job as a rollup finalizer, matched on the claim token.
+-- The ack's suspend branch refunds the attempt.
 beginSpawnSQL :: Text -> Text -> Int64 -> Int64 -> Query ()
 beginSpawnSQL schema tableName jobId cseq =
   let tbl = jobQueueTable schema tableName

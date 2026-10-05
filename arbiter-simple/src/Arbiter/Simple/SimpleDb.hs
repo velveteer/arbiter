@@ -145,7 +145,7 @@ createSimpleEnv proxy connStr schemaName =
 --       , poolIdleTimeout = 120
 --       , poolStripes = Just 4
 --       }
--- env <- createSimpleEnvWithConfig (Proxy @MyRegistry) "host=localhost dbname=mydb" "arbiter" config
+-- env <- createSimpleEnvWithConfig (Proxy \@MyRegistry) "host=localhost dbname=mydb" "arbiter" config
 -- @
 createSimpleEnvWithConfig
   :: forall registry m

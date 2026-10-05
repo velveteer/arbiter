@@ -181,7 +181,10 @@ adminApplication :: Application
 adminApplication = serveStaticApp Versioned $ \filePath -> pure (lookup filePath embeddedAssets)
 
 -- | The dashboard served from disk, read per request.
-devAdminApplication :: FilePath -> Application
+devAdminApplication
+  :: FilePath
+  -- ^ The static directory.
+  -> Application
 devAdminApplication dir = serveStaticApp AlwaysFresh $ \filePath ->
   if isServed filePath
     then (Just . plainAsset <$> BS.readFile (dir </> filePath)) `catch` (\(_ :: IOException) -> pure Nothing)
@@ -290,12 +293,19 @@ contentSecurityPolicy =
     ]
 
 -- | Serve 'AdminUI' from disk.
-adminUIServerDev :: FilePath -> Server AdminUI
+adminUIServerDev
+  :: FilePath
+  -- ^ The static directory.
+  -> Server AdminUI
 adminUIServerDev dir = Tagged (devAdminApplication dir)
 
 -- | Hoisted dev-mode variant for integration into a route tree using a custom monad.
 adminUIServerDevHoisted
-  :: forall m. (forall x. Handler x -> m x) -> FilePath -> ServerT AdminUI m
+  :: forall m
+   . (forall x. Handler x -> m x)
+  -> FilePath
+  -- ^ The static directory.
+  -> ServerT AdminUI m
 adminUIServerDevHoisted natTrans dir = hoistServer (Proxy @AdminUI) natTrans (adminUIServerDev dir)
 
 -- | The API at @\/api\/v1@ and the admin UI at the root, in one application.
@@ -320,6 +330,7 @@ arbiterAppWithAdminDev
      , HasServer (ArbiterAPI registry) '[]
      )
   => FilePath
+  -- ^ The static directory.
   -> ArbiterServerConfig m registry
   -> Application
 arbiterAppWithAdminDev dir config =

@@ -1,5 +1,9 @@
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- The job record type and its field accessors.
 module Arbiter.Core.Job.Types.Internal
   ( JobRecord (..)
   , Stored (..)
@@ -46,6 +50,7 @@ import Arbiter.Core.Job.TraceContext (TraceContext)
 newtype Stored (payload :: Type) = Stored ByteString
   deriving stock (Eq, Show)
 
+-- | The JSON bytes of a stored payload.
 storedBytes :: Stored payload -> ByteString
 storedBytes (Stored bytes) = bytes
 
@@ -151,7 +156,7 @@ traceContext Job {traceContext = value} = value
 suspended :: JobRecord payload Int64 q insertedAt adm -> Bool
 suspended Job {suspended = value} = value
 
--- | Worker pool that most recently claimed the job.
+-- | Holder of the outstanding claim. 'Nothing' when no claim is outstanding.
 claimedBy :: JobRecord payload Int64 q insertedAt adm -> Maybe UUID
 claimedBy Job {claimedBy = value} = value
 

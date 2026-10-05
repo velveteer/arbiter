@@ -13,6 +13,7 @@ REST API for managing and monitoring Arbiter job queues, built on Servant.
 import Arbiter.Servant (Queue, initArbiterServer, runArbiterAPI)
 import Arbiter.Simple (createSimpleEnv, runSimpleDb)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.ByteString (ByteString)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.Generics (Generic)
@@ -23,11 +24,13 @@ data EmailPayload = SendEmail {to :: Text, subject :: Text, body :: Text}
 
 type AppRegistry = '[Queue "email_queue" EmailPayload]
 
+connStr :: ByteString
+connStr = "host=localhost dbname=arbiter"
+
 main :: IO ()
 main = do
-  -- Run the Arbiter migrations first. connStr is a libpq connection string and
-  -- "arbiter" is the migrated schema. Live SSE updates also need
-  -- enableEventStreaming = True.
+  -- Run the Arbiter migrations first. "arbiter" is the migrated schema.
+  -- Live SSE updates also need enableEventStreaming = True.
   env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
   config <- initArbiterServer (runSimpleDb env)
   runArbiterAPI 8080 config

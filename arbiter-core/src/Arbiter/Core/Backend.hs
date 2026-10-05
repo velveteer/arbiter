@@ -1,7 +1,10 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | The env, monad, pool state, and savepoint ladder shared by the pooled backends.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- The env, monad, pool state, and savepoint ladder shared by the pooled backends.
 module Arbiter.Core.Backend
   ( -- * Database Monad
     Db (..)
@@ -45,12 +48,17 @@ import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 -- | Pool and the pinned connection with its transaction depth.
 data PoolState conn = PoolState
   { connectionPool :: Maybe (Pool conn)
+  -- ^ The pool to check connections out of. 'Nothing' for a pinned-only env.
   , pinned :: Maybe (conn, Int)
+  -- ^ The pinned connection and its transaction depth. Depth 0 means no open transaction.
   }
 
 -- | Ambient access to the pool state.
 class (Monad m) => HasPoolState conn m | m -> conn where
+  -- | The current pool state.
   getPoolState :: m (PoolState conn)
+
+  -- | Run an action under an adjusted pool state.
   localPoolState :: (PoolState conn -> PoolState conn) -> m a -> m a
 
 -- | What a connection type contributes to its env.
@@ -58,15 +66,19 @@ data Driver conn cfg = Driver
   { withListenConn :: conn -> (ListenConn -> IO ()) -> IO ()
   -- ^ Run the listener loop on a connection's driver handle.
   , initialConfig :: cfg
+  -- ^ The driver state a new env starts with.
   }
 
 -- | Schema name, pool state, listener, and the driver's own state.
 data Env conn cfg (registry :: JobPayloadRegistry) = Env
   { schema :: SchemaName
+  -- ^ The schema the arbiter tables live in.
   , poolState :: PoolState conn
+  -- ^ The pool and the pinned connection.
   , listener :: Maybe Listener
   -- ^ Resolved LISTEN source. 'Nothing' runs poll-only.
   , driverConfig :: cfg
+  -- ^ The driver's own state.
   }
 
 -- | A pooled backend's database monad.

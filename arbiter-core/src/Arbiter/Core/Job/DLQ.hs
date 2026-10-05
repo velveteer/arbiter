@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Dead-letter queue types. Arbiter moves jobs here after their last retry.
+-- | Dead-letter queue types. Arbiter moves jobs here after a permanent failure or the last retry.
 -- Recover a job with 'Arbiter.Core.HighLevel.retryFromDLQ' or delete it with
 -- 'Arbiter.Core.HighLevel.deleteDLQJob'.
 module Arbiter.Core.Job.DLQ

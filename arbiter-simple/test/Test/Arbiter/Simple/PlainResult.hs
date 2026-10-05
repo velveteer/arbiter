@@ -30,7 +30,7 @@ import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( BatchCallbacks (..)
   , WorkerConfig (..)
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , transactionalWorkerConfig
   )
 import Control.Monad (void)
@@ -95,7 +95,7 @@ spec connStr =
                   ack cbs firstJob
                   ackAll cbs rest
                   liftIO $ atomicModifyIORef' ackedRef $ \count -> (count + 1 + length rest, ())
-          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          cfg <- batchedWorkerConfig 1 10 handler
           runSimpleDb env $
             traverse_
               (\name -> void $ HL.insertJob (setArchiveFor (Just dayRetention) $ defaultJob (NoResultTask name)))
@@ -167,7 +167,7 @@ spec connStr =
                       ack cbs parent
                   )
                   parents
-          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          cfg <- batchedWorkerConfig 1 10 handler
           void
             $ runSimpleDb env
             $ HL.insertJobTree
@@ -198,7 +198,7 @@ spec connStr =
                           liftIO $ writeIORef mergedRef (Just merged)
                           ack cbs job
                     PlainResultTask name -> ackWith cbs job ["from-" <> name]
-          cfg <- defaultBatchedWorkerConfig 1 10 handler
+          cfg <- batchedWorkerConfig 1 10 handler
           void $ runSimpleDb env $ HL.insertJob (defaultJob (PlainResultTask "acc-root"))
           withLinkedAsync (runSimpleDb env $ runWorkerPool cfg {pollInterval = 0.1, jitter = NoJitter}) $ \_ ->
             waitUntil 15_000 $ isJust <$> readIORef mergedRef

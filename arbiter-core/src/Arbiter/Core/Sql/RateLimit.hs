@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | RateLimit SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Rate-limit SQL templates.
 module Arbiter.Core.Sql.RateLimit
   ( defaultThrottleWaitSeconds
   , addRateLimitTokensSQL
@@ -85,7 +88,7 @@ pruneRateLimitBucketsSQL schema idleSeconds =
       |]
 
 -- | Refill a prefix's buckets to full. The fixed-window reset, which also wakes jobs,
--- is the HighLevel resetRateLimitBuckets.
+-- is 'Arbiter.Core.HighLevel.resetRateLimitBuckets'.
 resetRateLimitBucketsSQL :: SchemaName -> Text -> Query ()
 resetRateLimitBucketsSQL schema prefix =
   let buckets = arbiterRateLimitsTable schema

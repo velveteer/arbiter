@@ -5,14 +5,19 @@
 
 -- | The admin API's route types, generated from the registry.
 module Arbiter.Servant.API
-  ( ArbiterAPI
+  ( -- * Route tree
+    ArbiterAPI
   , RegistryToAPI
   , SharedAPI
+
+    -- * Per-queue routes
   , TableAPI (..)
   , JobsAPI (..)
   , DLQAPI (..)
   , ArchiveAPI (..)
   , StatsAPI (..)
+
+    -- * Shared routes
   , QueuesAPI (..)
   , MaintenanceAPI (..)
   , EventsAPI
@@ -82,7 +87,7 @@ type PayloadEditNote =
 
 -- | One queue's job routes.
 data JobsAPI payload result mode = JobsAPI
-  { -- GET /:table/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...
+  { -- | @GET \/:queue\/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&kind=X&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...@
     listJobs
       :: mode
         :- QueryParam "limit" Int
@@ -100,92 +105,92 @@ data JobsAPI payload result mode = JobsAPI
           :> QueryParam "sort_by" JobSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
-  , -- POST /:table/jobs (insert new job)
+  , -- | @POST \/:queue\/jobs@ Insert a new job.
     insertJob
       :: mode
         :- ReqBody '[JSON] (ApiJobWrite payload)
           :> Post '[JSON] (JobResponse (JobRead payload))
-  , -- POST /:table/jobs/batch (insert multiple jobs)
+  , -- | @POST \/:queue\/jobs\/batch@ Insert many jobs.
     insertJobsBatch
       :: mode
         :- "batch"
           :> ReqBody '[JSON] (BatchInsertRequest payload)
           :> Post '[JSON] (BatchInsertResponse payload)
-  , -- GET /:table/jobs/:id
+  , -- | @GET \/:queue\/jobs\/:id@
     getJob
       :: mode
         :- Capture "id" Int64
           :> Get '[JSON] (JobResponse (ApiJobWithStatus (Stored payload)))
-  , -- DELETE /:table/jobs/:id (cancel job)
+  , -- | @DELETE \/:queue\/jobs\/:id@ Cancel the job and its children.
     cancelJob
       :: mode
         :- Capture "id" Int64
           :> DeleteNoContent
-  , -- POST /:table/jobs/:id/force-cancel (cascade-delete + interrupt running handler)
+  , -- | @POST \/:queue\/jobs\/:id\/force-cancel@ Cancel the job and its children, and interrupt running handlers.
     forceCancelJob
       :: mode
         :- Capture "id" Int64
           :> "force-cancel"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/ack (complete a job this caller holds)
+  , -- | @POST \/:queue\/jobs\/:id\/ack@ Complete a job this caller holds.
     ackClaimedJob
       :: mode
         :- Capture "id" Int64
           :> "ack"
           :> ReqBody '[JSON] (AckRequest result)
           :> PostNoContent
-  , -- POST /:table/jobs/:id/nack (hand back a job this caller holds)
+  , -- | @POST \/:queue\/jobs\/:id\/nack@ Hand back a job this caller holds.
     nackClaimedJob
       :: mode
         :- Capture "id" Int64
           :> "nack"
           :> ReqBody '[JSON] JobLease
           :> PostNoContent
-  , -- POST /:table/jobs/:id/extend (push out the lease this caller holds)
+  , -- | @POST \/:queue\/jobs\/:id\/extend@ Push out the lease this caller holds.
     extendClaimedJob
       :: mode
         :- Capture "id" Int64
           :> "extend"
           :> ReqBody '[JSON] ExtendRequest
           :> PostNoContent
-  , -- POST /:table/jobs/:id/promote
+  , -- | @POST \/:queue\/jobs\/:id\/promote@
     promoteJob
       :: mode
         :- Capture "id" Int64
           :> "promote"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/reschedule
+  , -- | @POST \/:queue\/jobs\/:id\/reschedule@
     rescheduleJob
       :: mode
         :- Capture "id" Int64
           :> "reschedule"
           :> ReqBody '[JSON] RescheduleRequest
           :> PostNoContent
-  , -- POST /:table/jobs/:id/move-to-dlq
+  , -- | @POST \/:queue\/jobs\/:id\/move-to-dlq@
     moveToDLQ
       :: mode
         :- Capture "id" Int64
           :> "move-to-dlq"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/pause-children
+  , -- | @POST \/:queue\/jobs\/:id\/pause-children@
     pauseChildren
       :: mode
         :- Capture "id" Int64
           :> "pause-children"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/resume-children
+  , -- | @POST \/:queue\/jobs\/:id\/resume-children@
     resumeChildren
       :: mode
         :- Capture "id" Int64
           :> "resume-children"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/suspend
+  , -- | @POST \/:queue\/jobs\/:id\/suspend@
     suspendJob
       :: mode
         :- Capture "id" Int64
           :> "suspend"
           :> PostNoContent
-  , -- POST /:table/jobs/:id/resume
+  , -- | @POST \/:queue\/jobs\/:id\/resume@
     resumeJob
       :: mode
         :- Capture "id" Int64
@@ -196,7 +201,7 @@ data JobsAPI payload result mode = JobsAPI
 
 -- | One queue's DLQ routes.
 data DLQAPI payload mode = DLQAPI
-  { -- GET /:table/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...
+  { -- | @GET \/:queue\/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...@
     listDLQ
       :: mode
         :- QueryParam "limit" Int
@@ -210,19 +215,19 @@ data DLQAPI payload mode = DLQAPI
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
-  , -- POST /:table/dlq/:id/retry (move back to main queue, optionally with a new payload)
+  , -- | @POST \/:queue\/dlq\/:id\/retry@ Move the job back to the main queue, optionally with a new payload.
     retryFromDLQ
       :: mode
         :- Capture "id" Int64
           :> "retry"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  , -- DELETE /:table/dlq/:id (permanently delete)
+  , -- | @DELETE \/:queue\/dlq\/:id@ Delete the job permanently.
     deleteDLQ
       :: mode
         :- Capture "id" Int64
           :> DeleteNoContent
-  , -- POST /:table/dlq/batch-delete
+  , -- | @POST \/:queue\/dlq\/batch-delete@ Delete many jobs permanently.
     deleteDLQBatch
       :: mode
         :- "batch-delete"
@@ -233,7 +238,7 @@ data DLQAPI payload mode = DLQAPI
 
 -- | One queue's archive routes.
 data ArchiveAPI payload mode = ArchiveAPI
-  { -- GET /:table/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...
+  { -- | @GET \/:queue\/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...@
     listArchive
       :: mode
         :- QueryParam "limit" Int
@@ -248,19 +253,19 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "sort_by" ArchiveSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (ArchiveResponse payload)
-  , -- POST /:table/archive/:id/reenqueue (re-run as a fresh job, optionally with a new payload)
+  , -- | @POST \/:queue\/archive\/:id\/reenqueue@ Run the job again as a fresh job, optionally with a new payload.
     reEnqueueArchive
       :: mode
         :- Capture "id" Int64
           :> "reenqueue"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  , -- DELETE /:table/archive/:id (purge one)
+  , -- | @DELETE \/:queue\/archive\/:id@ Purge one entry.
     deleteArchive
       :: mode
         :- Capture "id" Int64
           :> DeleteNoContent
-  , -- POST /:table/archive/batch-delete (bulk purge)
+  , -- | @POST \/:queue\/archive\/batch-delete@ Purge many entries.
     deleteArchiveBatch
       :: mode
         :- "batch-delete"
@@ -271,7 +276,7 @@ data ArchiveAPI payload mode = ArchiveAPI
 
 -- | One queue's stats route.
 data StatsAPI mode = StatsAPI
-  { -- GET /:table/stats
+  { -- | @GET \/:queue\/stats@
     getStats
       :: mode
         :- Get '[JSON] StatsResponse
@@ -280,7 +285,7 @@ data StatsAPI mode = StatsAPI
 
 -- | Schema-wide maintenance. A running worker pool does the same work.
 newtype MaintenanceAPI mode = MaintenanceAPI
-  { -- POST /maintenance (run one gated maintenance pass)
+  { -- | @POST \/maintenance@ Run one gated maintenance pass.
     runMaintenance
       :: mode
         :- Post '[JSON] MaintenanceResponse
@@ -289,18 +294,23 @@ newtype MaintenanceAPI mode = MaintenanceAPI
 
 -- | One queue's routes.
 data TableAPI payload result mode = TableAPI
-  { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload result)
-  , -- POST /:table/claim (lease visible jobs)
+  { -- | @\/:queue\/jobs@ The job routes.
+    jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload result)
+  , -- | @POST \/:queue\/claim@ Lease visible jobs.
     claimJobs
       :: mode
         :- "claim"
           :> ReqBody '[JSON] ClaimRequest
           :> Post '[JSON] (ClaimResponse payload)
-  , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
-  , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
-  , stats :: mode :- "stats" :> NamedRoutes StatsAPI
-  , listKinds :: mode :- "kinds" :> Get '[JSON] [Text]
-  , -- GET /:table/groups?limit=N&offset=N&group_key=X
+  , -- | @\/:queue\/dlq@ The DLQ routes.
+    dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
+  , -- | @\/:queue\/archive@ The archive routes.
+    archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
+  , -- | @\/:queue\/stats@ The stats route.
+    stats :: mode :- "stats" :> NamedRoutes StatsAPI
+  , -- | @GET \/:queue\/kinds@ The payload kind labels.
+    listKinds :: mode :- "kinds" :> Get '[JSON] [Text]
+  , -- | @GET \/:queue\/groups?limit=N&offset=N&group_key=X@
     listGroups
       :: mode
         :- "groups"
@@ -313,28 +323,28 @@ data TableAPI payload result mode = TableAPI
 
 -- | The queue registry routes.
 data QueuesAPI mode = QueuesAPI
-  { -- GET /queues
+  { -- | @GET \/queues@
     listQueues
       :: mode
         :- Get '[JSON] QueuesResponse
-  , -- GET /queues/stats
+  , -- | @GET \/queues\/stats@
     getAllStats
       :: mode
         :- "stats"
           :> Get '[JSON] AllStatsResponse
-  , -- GET /queues/:queue/details
+  , -- | @GET \/queues\/:queue\/details@
     getDetails
       :: mode
         :- Capture "queue" Text
           :> "details"
           :> Get '[JSON] (Maybe QueueRow)
-  , -- POST /queues/:queue/pause
+  , -- | @POST \/queues\/:queue\/pause@
     pauseQueue
       :: mode
         :- Capture "queue" Text
           :> "pause"
           :> PostNoContent
-  , -- POST /queues/:queue/resume
+  , -- | @POST \/queues\/:queue\/resume@
     resumeQueue
       :: mode
         :- Capture "queue" Text
@@ -348,7 +358,7 @@ type EventsAPI = "stream" :> Raw
 
 -- | The cron schedule routes.
 data CronAPI mode = CronAPI
-  { -- GET /cron/schedules
+  { -- | @GET \/cron\/schedules@
     --
     -- Optional @?queue=name@ scopes the result to a single queue.
     listSchedules
@@ -356,14 +366,14 @@ data CronAPI mode = CronAPI
         :- "schedules"
           :> QueryParam "queue" Text
           :> Get '[JSON] CronSchedulesResponse
-  , -- PATCH /cron/schedules/:name
+  , -- | @PATCH \/cron\/schedules\/:name@
     updateSchedule
       :: mode
         :- "schedules"
           :> Capture "name" Text
           :> ReqBody '[JSON] CronScheduleUpdate
           :> Patch '[JSON] CronScheduleView
-  , -- POST /cron/schedules/:name/run
+  , -- | @POST \/cron\/schedules\/:name\/run@
     runSchedule
       :: mode
         :- "schedules"
@@ -375,7 +385,7 @@ data CronAPI mode = CronAPI
 
 -- | The worker registry routes.
 data WorkersAPI mode = WorkersAPI
-  { -- GET /workers
+  { -- | @GET \/workers@
     --
     -- Optional @?queue=name@ scopes the result to a single queue.
     -- Optional @?live=seconds@ filters to workers with a heartbeat inside the
@@ -385,7 +395,7 @@ data WorkersAPI mode = WorkersAPI
         :- QueryParam "queue" Text
           :> QueryParam "live" Double
           :> Get '[JSON] WorkersResponse
-  , -- POST /workers/:id/pause
+  , -- | @POST \/workers\/:id\/pause@
     --
     -- Sets the worker's @paused@ flag.
     pauseWorker
@@ -393,7 +403,7 @@ data WorkersAPI mode = WorkersAPI
         :- Capture "id" UUID
           :> "pause"
           :> PostNoContent
-  , -- POST /workers/:id/resume
+  , -- | @POST \/workers\/:id\/resume@
     resumeWorker
       :: mode
         :- Capture "id" UUID
@@ -404,27 +414,31 @@ data WorkersAPI mode = WorkersAPI
 
 -- | Rate limits API routes, schema-wide.
 data RateLimitsAPI mode = RateLimitsAPI
-  { listRateLimits
+  { -- | @GET \/rate-limits@
+    listRateLimits
       :: mode
         :- Get '[JSON] RateLimitPoliciesResponse
-  , listRateLimitBuckets
+  , -- | @GET \/rate-limits\/:prefix\/buckets?limit=N&offset=N@
+    listRateLimitBuckets
       :: mode
         :- Capture "prefix" Text
           :> "buckets"
           :> QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> Get '[JSON] RateLimitBucketsResponse
-  , updateRateLimitPolicy
+  , -- | @PATCH \/rate-limits\/:prefix@
+    updateRateLimitPolicy
       :: mode
         :- Capture "prefix" Text
           :> ReqBody '[JSON] RateLimitPolicyUpdate
           :> Patch '[JSON] RateLimitPolicyView
-  , resetRateLimitBuckets
+  , -- | @POST \/rate-limits\/:prefix\/reset@
+    resetRateLimitBuckets
       :: mode
         :- Capture "prefix" Text
           :> "reset"
           :> Post '[JSON] RateLimitResetResponse
-  , -- POST /rate-limits/:prefix/buckets/:key/tokens
+  , -- | @POST \/rate-limits\/:prefix\/buckets\/:key\/tokens@
     addRateLimitTokens
       :: mode
         :- Capture "prefix" Text
@@ -433,7 +447,7 @@ data RateLimitsAPI mode = RateLimitsAPI
           :> "tokens"
           :> ReqBody '[JSON] AddTokensRequest
           :> Post '[JSON] AddTokensResponse
-  , -- POST /rate-limits/prune?idle=seconds
+  , -- | @POST \/rate-limits\/prune?idle=seconds@
     pruneRateLimitBuckets
       :: mode
         :- "prune"
@@ -444,26 +458,30 @@ data RateLimitsAPI mode = RateLimitsAPI
 
 -- | Concurrency API routes, schema-wide.
 data ConcurrencyAPI mode = ConcurrencyAPI
-  { listConcurrency
+  { -- | @GET \/concurrency@
+    listConcurrency
       :: mode
         :- Get '[JSON] ConcurrencyPoliciesResponse
-  , listConcurrencyKeys
+  , -- | @GET \/concurrency\/:prefix\/keys?limit=N&offset=N@
+    listConcurrencyKeys
       :: mode
         :- Capture "prefix" Text
           :> "keys"
           :> QueryParam "limit" Int
           :> QueryParam "offset" Int
           :> Get '[JSON] ConcurrencyKeysResponse
-  , updateConcurrencyPolicy
+  , -- | @PATCH \/concurrency\/:prefix@
+    updateConcurrencyPolicy
       :: mode
         :- Capture "prefix" Text
           :> ReqBody '[JSON] ConcurrencyPolicyUpdate
           :> Patch '[JSON] ConcurrencyPolicyView
-  , reconcileConcurrency
+  , -- | @POST \/concurrency\/reconcile@
+    reconcileConcurrency
       :: mode
         :- "reconcile"
           :> Post '[JSON] ConcurrencyReconcileResponse
-  , -- POST /concurrency/prune
+  , -- | @POST \/concurrency\/prune@
     pruneConcurrencyKeys
       :: mode
         :- "prune"
@@ -473,7 +491,7 @@ data ConcurrencyAPI mode = ConcurrencyAPI
 
 -- | Liveness and readiness.
 data HealthAPI mode = HealthAPI
-  { -- GET /health
+  { -- | @GET \/health@
     --
     -- Readiness. Reaches the database and reports its connection counters.
     -- Returns 200 when the database is reachable and 503 when it is down.
@@ -481,7 +499,7 @@ data HealthAPI mode = HealthAPI
     getHealth
       :: mode
         :- Get '[JSON] HealthResponse
-  , -- GET /health/live
+  , -- | @GET \/health\/live@
     --
     -- Liveness. Does not touch the database.
     getLiveness

@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Conversion of declared 'Policy' values to upsertable rows, plus DDL for the
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Conversion of declared 'Policy' values to upsertable rows, plus DDL for the
 -- policies table, bucket table, and job columns. No database execution here.
 module Arbiter.Core.RateLimit.Schema
   ( -- * Table name helpers

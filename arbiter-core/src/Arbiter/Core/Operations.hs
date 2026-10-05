@@ -15,11 +15,18 @@ module Arbiter.Core.Operations
   , insertJobsBatch_
   , TraceStamp
   , traceStamp
+
+    -- * Results and Rollup State
   , insertResult
   , insertResultsBatch
   , getResultsByParent
   , getDLQChildErrorsByParent
   , persistParentState
+  , getParentStateSnapshot
+  , readChildResultsRaw
+  , mergeRawChildResults
+
+    -- * Claiming
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
@@ -27,10 +34,14 @@ module Arbiter.Core.Operations
   , claimJobsBatchedCached
   , RejectedRow
   , deadLetterRejected
+
+    -- * Row Decoding
   , decodeRow
   , typedRow
   , typedDLQRow
   , typedArchiveRow
+
+    -- * Rate-Limit Operations
   , addRateLimitTokens
   , pruneRateLimitBuckets
   , resetRateLimitBuckets
@@ -40,15 +51,19 @@ module Arbiter.Core.Operations
   , getRateLimitPolicy
   , rateLimitPolicyExists
   , listRateLimitBuckets
+  , updateRateLimitPolicyOverrides
+
+    -- * Concurrency Operations
   , listConcurrencyPolicies
   , getConcurrencyPolicy
   , listConcurrencyKeys
-  , updateRateLimitPolicyOverrides
   , updateConcurrencyPolicyOverrides
   , pruneConcurrencyKeys
   , reconcileConcurrencyCounts
   , reconcileConcurrencyCountsIfStale
   , reconcileAndPruneConcurrency
+
+    -- * Ack, Nack and Visibility
   , ackJob
   , JobStatements
   , mkJobStatements
@@ -70,6 +85,8 @@ module Arbiter.Core.Operations
   , updateJobForRetry
   , nackJob
   , nackJobsBatch
+
+    -- * Dead Letter Queue Operations
   , moveToDLQ
   , moveToDLQFields
   , moveToDLQBatch
@@ -79,9 +96,8 @@ module Arbiter.Core.Operations
   , listDLQJobs
   , deleteDLQJob
   , deleteDLQJobsBatch
-  , deleteCancelledJobs
 
-    -- * Completed-Job Archive
+    -- * Archive Operations
   , listArchiveJobs
   , listArchiveFiltered
   , getArchivedJobById
@@ -97,6 +113,14 @@ module Arbiter.Core.Operations
 
     -- * Filtered Query Operations
   , Tmpl.JobFilter (..)
+  , Tmpl.SortDir (..)
+  , Tmpl.sortDirName
+  , Tmpl.JobSortColumn (..)
+  , Tmpl.jobSortColumnName
+  , Tmpl.DLQSortColumn (..)
+  , Tmpl.dlqSortColumnName
+  , Tmpl.ArchiveSortColumn (..)
+  , Tmpl.archiveSortColumnName
   , buildWhereClause
   , listJobsFiltered
   , listJobsFilteredOrdered
@@ -146,6 +170,7 @@ module Arbiter.Core.Operations
   , cancelJobCascade
   , cancelJobTree
   , forceCancelJob
+  , deleteCancelledJobs
 
     -- * Suspend/Resume Operations
   , suspendJob
@@ -200,11 +225,6 @@ module Arbiter.Core.Operations
   , micros
   , gateNameFor
   , Shared (..)
-
-    -- * Internal Operations
-  , getParentStateSnapshot
-  , readChildResultsRaw
-  , mergeRawChildResults
   ) where
 
 import Control.Monad (foldM, join, unless, void, when)
@@ -361,9 +381,11 @@ decodeRow row = (\typed -> row {payload = typed}) <$> decodeStored (payload row)
 typedRow :: (FromJSON payload, MonadArbiter m) => JobRead (Stored payload) -> m (JobRead payload)
 typedRow = either throwParsing pure . decodeRow
 
+-- | 'typedRow' over a DLQ entry's job snapshot.
 typedDLQRow :: (FromJSON payload, MonadArbiter m) => DLQ.DLQJob (Stored payload) -> m (DLQ.DLQJob payload)
 typedDLQRow entry = (\snapshot -> entry {DLQ.jobSnapshot = snapshot}) <$> typedRow (DLQ.jobSnapshot entry)
 
+-- | 'typedRow' over an archive entry's job snapshot.
 typedArchiveRow
   :: (FromJSON payload, MonadArbiter m) => Archive.ArchiveJob (Stored payload) -> m (Archive.ArchiveJob payload)
 typedArchiveRow entry = (\snapshot -> entry {Archive.jobSnapshot = snapshot}) <$> typedRow (Archive.jobSnapshot entry)
@@ -705,20 +727,21 @@ updateRateLimitPolicyOverrides schemaName prefix (RateLimitPolicyUpdate mMax mRe
   MA.executeStatement
     (Tmpl.updateRateLimitOverridesSQL schemaName mMax mRefill mInterval prefix)
 
--- | Apply a pool's override-limit patch (retunes every key under the prefix).
+-- | Apply a concurrency policy's override-limit patch (retunes every key under the prefix).
 -- Returns rows affected.
 updateConcurrencyPolicyOverrides :: (MonadArbiter m) => SchemaName -> Text -> ConcurrencyPolicyUpdate -> m Int64
 updateConcurrencyPolicyOverrides schemaName prefix (ConcurrencyPolicyUpdate mLim) =
   MA.executeStatement
     (Tmpl.updateConcurrencyPolicyOverrideSQL schemaName mLim prefix)
 
--- | List every concurrency pool with its default/override limit and live key and
+-- | List every concurrency policy with its default/override limit and live key and
 -- in-flight aggregates.
 listConcurrencyPolicies :: (MonadArbiter m) => SchemaName -> m [ConcurrencyPolicyView]
 listConcurrencyPolicies schemaName =
   MA.executeQuery (Tmpl.concurrencyPoliciesSQL schemaName Nothing)
 
--- | One prefix's concurrency pool view with live aggregates.
+-- | One prefix's concurrency policy view with live aggregates. 'Nothing' when the
+-- prefix has no policy.
 getConcurrencyPolicy :: (MonadArbiter m) => SchemaName -> Text -> m (Maybe ConcurrencyPolicyView)
 getConcurrencyPolicy schemaName prefix =
   listToMaybe
@@ -1049,11 +1072,14 @@ mkAckStatements schemaName tableName =
 -- | A pool's statements, rendered once. A call binds only its parameters.
 data JobStatements = JobStatements
   { claimBatchSize :: Int
+  -- ^ Jobs per claim batch.
   , claimFor :: Int -> Q.Query (JobRead (Stored Value))
   -- ^ The claim at a capacity, with this pool's claimant bound.
   , statementsAck :: AckStatements
+  -- ^ The pool's ack statements.
   }
 
+-- | Assemble a pool's statements once. Batch size 1 is the single-job claim.
 mkJobStatements
   :: forall payload
    . (JobPayload payload)
@@ -1445,8 +1471,9 @@ moveToDLQBatch schemaName tableName jobsWithErrors = withDbTransaction $ do
 -- Dead Letter Queue Operations
 -- ---------------------------------------------------------------------------
 
--- | Retry a job from the DLQ, re-inserting it with a fresh attempt count. The dedup key
--- is left behind.
+-- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
+-- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
+-- gone or the root's parent no longer exists.
 retryFromDLQ
   :: forall m payload
    . (MonadArbiter m)
@@ -1455,7 +1482,7 @@ retryFromDLQ
   -> TableName
   -- ^ Table name
   -> Int64
-  -- ^ DLQ job id
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> m (Maybe (JobRead (Stored payload)))
 retryFromDLQ schemaName tableName dlqId = retryFromDLQEditing schemaName tableName dlqId Nothing
 
@@ -1467,7 +1494,7 @@ retryFromDLQWithPayload
   => SchemaName
   -> TableName
   -> Int64
-  -- ^ DLQ job id
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> Maybe payload
   -> m (Maybe (JobRead (Stored payload)))
 retryFromDLQWithPayload schemaName tableName dlqId =
@@ -1489,7 +1516,7 @@ retryFromDLQEditing schemaName tableName dlqId edit = withDbTransaction $ do
 payloadEdit :: (JobPayload payload) => payload -> RowEdit
 payloadEdit = rowEdit payloadWriteCodec . payloadWrite
 
--- | Whether a DLQ job with the given id exists.
+-- | Whether a DLQ row with the given DLQ primary key exists.
 dlqJobExists
   :: (MonadArbiter m)
   => Text
@@ -1515,9 +1542,9 @@ listJobsFilteredOrdered
   -> [Tmpl.JobFilter]
   -- ^ Composable filters
   -> Maybe Tmpl.JobSortColumn
-  -- ^ Sort column (defaults to 'Tmpl.JsId')
+  -- ^ Sort column (defaults to 'Arbiter.Core.Sql.Jobs.JsId')
   -> Maybe Tmpl.SortDir
-  -- ^ Sort direction (defaults to 'Tmpl.SortDesc')
+  -- ^ Sort direction (defaults to 'Arbiter.Core.Sql.Jobs.SortDesc')
   -> Int
   -- ^ Limit
   -> Int
@@ -1622,9 +1649,9 @@ listDLQFilteredOrdered
   -> [Tmpl.JobFilter]
   -- ^ Composable filters
   -> Maybe Tmpl.DLQSortColumn
-  -- ^ Sort column (defaults to 'Tmpl.DlqFailedAt')
+  -- ^ Sort column (defaults to 'Arbiter.Core.Sql.Jobs.DlqFailedAt')
   -> Maybe Tmpl.SortDir
-  -- ^ Sort direction (defaults to 'Tmpl.SortDesc')
+  -- ^ Sort direction (defaults to 'Arbiter.Core.Sql.Jobs.SortDesc')
   -> Int
   -- ^ Limit
   -> Int
@@ -1873,7 +1900,7 @@ deleteDLQJob
   -> TableName
   -- ^ Table name
   -> Int64
-  -- ^ DLQ job id
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> m Int64
 deleteDLQJob schemaName tableName dlqId = deleteDLQJobsBatch schemaName tableName [dlqId]
 
@@ -1903,7 +1930,7 @@ deleteDLQJobsBatch
   -> TableName
   -- ^ Table name
   -> [Int64]
-  -- ^ DLQ job ids
+  -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> m Int64
 deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
   parents <- MA.executeQuery (Tmpl.dlqParentIdsSQL schemaName tableName dlqIds)
@@ -2085,7 +2112,7 @@ data QueueStats = QueueStats
   , readyJobs :: Int64
   -- ^ Jobs claimable right now (visible and unleased)
   , inFlightJobs :: Int64
-  -- ^ Jobs currently leased by a worker (a retry attempt in progress)
+  -- ^ Jobs currently leased by a worker
   , scheduledJobs :: Int64
   -- ^ Jobs delayed until a future @not_visible_until@ (never yet attempted)
   , backoffJobs :: Int64
@@ -2194,7 +2221,7 @@ queueStatusCounts stats =
 blockedStatusLabel :: Text
 blockedStatusLabel = "blocked"
 
--- | Decodes the single aggregate row produced by 'Tmpl.getQueueStatsSQL', whose
+-- | Decodes the single aggregate row produced by 'Arbiter.Core.Sql.Stats.getQueueStatsSQL', whose
 -- select list is built from these same columns.
 statsRowCodec :: RowCodec QueueStats
 statsRowCodec =
@@ -2587,7 +2614,9 @@ resumeJob schemaName tableName jobId =
 -- walk the key space independently.
 data GroupsCursor = GroupsCursor
   { groupsWindowFrom :: Maybe Text
+  -- ^ The last key the summary window reached. 'Nothing' starts at the first key.
   , groupsEmptiedFrom :: Maybe Text
+  -- ^ The last key the emptied scan reached. 'Nothing' starts at the first key.
   }
   deriving stock (Eq, Show)
 
@@ -2603,8 +2632,11 @@ instance FromJSON GroupsCursor where
 -- repair threw, and where the next pass resumes.
 data GroupsPass = GroupsPass
   { passRewritten :: Int64
+  -- ^ Summary rows the pass rewrote.
   , passRepairFailed :: Bool
+  -- ^ Whether the missing-summary repair threw.
   , passResume :: Maybe GroupsCursor
+  -- ^ Where the next pass resumes. 'Nothing' once both walks have wrapped.
   }
 
 -- | 'Nothing' once both walks have wrapped. The queue starts over at its first key.
@@ -2894,7 +2926,15 @@ tryAcquireCronLeader schemaName queueName scheduleName =
   fromMaybe False . listToMaybe <$> MA.executeQuery (Tmpl.tryAcquireCronLeaderSQL schemaName queueName scheduleName)
 
 -- | Result of a manual run request.
-data RunRequestOutcome = RunReqNotFound | RunReqDisabled | RunReqStamped | RunReqPending
+data RunRequestOutcome
+  = -- | No schedule has the name.
+    RunReqNotFound
+  | -- | The schedule is disabled.
+    RunReqDisabled
+  | -- | The request was stamped and announced.
+    RunReqStamped
+  | -- | An unexpired request was already pending.
+    RunReqPending
   deriving stock (Eq, Show)
 
 -- | Stamp a manual run request on an enabled schedule and NOTIFY the run-now

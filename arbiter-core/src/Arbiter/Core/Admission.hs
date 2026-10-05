@@ -4,8 +4,11 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Shared machinery for per-job admission policies (rate limits and concurrency
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Shared machinery for per-job admission policies (rate limits and concurrency
 -- pools). Both kinds pick a policy and a @prefix:suffix@ key per job via a
 -- 'Selector', seed every policy a registry references, and store policies in a
 -- default\/override table.
@@ -68,6 +71,7 @@ splitPrefixedSuffix prefix key = T.drop (T.length prefix + 1) key
 
 -- | A policy that admits jobs under a named prefix.
 class (Ord p) => AdmissionPolicy p where
+  -- | The prefix the policy's keys start with.
   policyPrefixOf :: p -> Text
 
 -- | This payload is unrestricted by this policy kind.
@@ -108,10 +112,12 @@ policyUpsertSQL policiesTable prefixLit defaults =
 -- provides an instance from its 'Arbiter.Core.RateLimit.Spec.HasRateLimit' \/
 -- 'Arbiter.Core.Concurrency.Spec.HasConcurrency' selector.
 class CollectFor payload p where
+  -- | The policies the payload's selector can reach.
   collectFor :: Set p
 
 -- | Each registry table's policies of kind @p@, in registry order.
 class RegistryPolicies (registry :: JobPayloadRegistry) p where
+  -- | Each table name paired with the policies its payload can reach.
   registryTablePolicies :: [(Text, Set p)]
 
 instance RegistryPolicies '[] p where

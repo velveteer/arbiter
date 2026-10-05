@@ -121,7 +121,7 @@ registerInstruments meter cache = do
   reg Name.PgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
   reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum, absent until one runs" $
     perTableMaybe Health.autovacuumAge
-  reg Name.PgTableSizeBytes "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
+  reg Name.PgTableSize "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
   reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table (wraparound headroom)" $
     perTableMaybe (fmap fromIntegral . Health.xidAge)
   reg Name.PgDbConnections "{connection}" "Backends by state, across the whole database" $

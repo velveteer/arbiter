@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Postgres health SQL: reads over the stats and catalog views. The caller
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Postgres health SQL: reads over the stats and catalog views. The caller
 -- attaches the row decoder.
 module Arbiter.Core.Sql.Health
   ( pgDbHealthSQL

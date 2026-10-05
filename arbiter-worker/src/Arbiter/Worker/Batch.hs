@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Batch settlement, outcome reporting, and force-cancel finalization.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Batch settlement, outcome reporting, and force-cancel finalization.
 --
 -- Each 'Effects' action runs one transaction or hook. The pool runs the
 -- lifecycle in IO. Tests use io-sim.
@@ -72,8 +75,10 @@ import Arbiter.Worker.Logger (LogLevel (..))
 
 -- | A hook the lifecycle fires.
 data Report job
-  = Claimed job UTCTime
-  | Succeeded job UTCTime UTCTime
+  = -- | The job was claimed. The batch start time.
+    Claimed job UTCTime
+  | -- | The job was acked. Its start and end times.
+    Succeeded job UTCTime UTCTime
   | -- | A handler failure, written as the outcome says.
     Failed job Text UTCTime UTCTime Outcome
   | -- | A force-cancel or a tree cancel took the job, for the reason given.
@@ -116,7 +121,9 @@ data Effects n ctx job kids stored = Effects
   , effectSpawn :: ctx -> job -> kids -> n ()
   -- ^ Attach children to one job and settle it suspended, in one transaction.
   , effectReport :: ctx -> Report job -> n ()
+  -- ^ Fire the hook for one report.
   , effectLog :: LogLevel -> [job] -> Text -> n ()
+  -- ^ The pool log, with the jobs in context.
   }
 
 -- | How the pool runs a batch's handler.
@@ -129,10 +136,15 @@ data Mode n ctx job kids stored
 -- | The settle operations a batch handler drives its jobs through.
 data Callbacks n ctx job kids stored = Callbacks
   { callbackAck :: ctx -> job -> Maybe stored -> n ()
+  -- ^ Ack one job and store its result.
   , callbackAckAll :: ctx -> [(job, Maybe stored)] -> n ()
+  -- ^ Ack in bulk, storing each result.
   , callbackFail :: ctx -> Failure -> job -> n ()
+  -- ^ Write one job's failure.
   , callbackNack :: ctx -> job -> n ()
+  -- ^ Release one job for reprocessing.
   , callbackSpawn :: ctx -> job -> kids -> n ()
+  -- ^ Attach children to one job and suspend it.
   }
 
 -- ---------------------------------------------------------------------------

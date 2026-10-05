@@ -103,7 +103,7 @@ otelHooks meterSet queue =
         histogramRecord (duration meterSet) (secs start end) attributes
     , onJobFailure = \job _ start end -> liftIO (histogramRecord (duration meterSet) (secs start end) (failureAttr (labelOf job)))
     , onJobRetry = \job _ -> liftIO (counterAdd (retried meterSet) 1 (queueAttr (labelOf job)))
-    , onJobFailedAndMovedToDLQ = \_ job -> liftIO (counterAdd (processed meterSet) 1 (dlqAttr (labelOf job)))
+    , onJobFailedAndMovedToDLQ = \job _ -> liftIO (counterAdd (processed meterSet) 1 (dlqAttr (labelOf job)))
     , onJobCancelled = \job _ -> liftIO (counterAdd (processed meterSet) 1 (cancelledAttr (labelOf job)))
     , onJobUnavailable = \job _ -> liftIO (counterAdd (processed meterSet) 1 (unavailableAttr (labelOf job)))
     }

@@ -22,16 +22,22 @@ import Arbiter.Core.SqlLiterals (quoteIdentifier)
 -- | A row of the @arbiter_queues@ pause/resume table.
 data QueueRow = QueueRow
   { queueName :: Text
+  -- ^ The queue's table name.
   , paused :: Bool
+  -- ^ Whether the queue is paused.
   , pausedAt :: Maybe UTCTime
+  -- ^ When the queue was paused. 'Nothing' while it runs.
   , metadata :: Maybe Value
+  -- ^ Free-form metadata.
   , createdAt :: UTCTime
+  -- ^ When the row was created.
   , updatedAt :: UTCTime
+  -- ^ When the row last changed.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | Qualified table name for the arbiter_queues table.
+-- | Qualified table name for the @arbiter_queues@ table.
 arbiterQueuesTable :: SchemaName -> Text
 arbiterQueuesTable schemaName = quoteIdentifier schemaName <> "." <> arbiterQueuesTableName
 

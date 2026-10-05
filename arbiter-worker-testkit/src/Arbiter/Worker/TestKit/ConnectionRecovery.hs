@@ -33,7 +33,7 @@ import UnliftIO.Async (withAsync)
 
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
--- | Connection recovery suite.
+-- | Connection recovery suite. The queue under test declares @()@ as its result type.
 connectionRecoverySpec
   :: forall payload m env
    . ( Eq payload

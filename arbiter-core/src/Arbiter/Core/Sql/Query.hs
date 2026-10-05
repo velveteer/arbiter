@@ -27,7 +27,11 @@ import Data.Text qualified as T
 import Arbiter.Core.Codec (Params, RowCodec, SomeParam)
 
 -- | One run of literal SQL or one parameter hole.
-data Piece = Lit !Text | Hole
+data Piece
+  = -- | Literal SQL text.
+    Lit !Text
+  | -- | A parameter hole.
+    Hole
   deriving stock (Eq, Show)
 
 -- | A parameterized query paired with the decoder for its result rows.
@@ -99,6 +103,7 @@ mwhen False _ = mempty
 -- | Values a @${...}@ splice accepts: raw 'Text' (a bare clause or table name)
 -- or a 'Query' fragment (whose parameters interleave at the splice site).
 class ToFragment a where
+  -- | The value as a fragment.
   toFragment :: a -> Query ()
 
 instance ToFragment Text where

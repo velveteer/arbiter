@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Concurrency SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Concurrency SQL templates.
 module Arbiter.Core.Sql.Concurrency
   ( updateConcurrencyPolicyOverrideSQL
   , lockDeadConcurrencyKeysSQL
@@ -34,7 +37,7 @@ import Arbiter.Core.Sql.Jobs (unionAllOverQueueTables)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 
--- | Set a pool's operator override limit. @Nothing@ leaves it untouched.
+-- | Set a concurrency policy's operator override limit. @Nothing@ leaves it untouched.
 -- @Just v@ writes @v@ (a null clears the override back to the default).
 updateConcurrencyPolicyOverrideSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
 updateConcurrencyPolicyOverrideSQL schema mLimit prefix =
@@ -102,7 +105,7 @@ lockConcurrencyCountsSQL schema =
         SELECT @{concurrency_key :: CText} FROM ${concTbl} ORDER BY concurrency_key FOR UPDATE
       |]
 
--- | Recount in_flight for the passed locked keys and seed a row for a live key that
+-- | Recount @in_flight@ for the passed locked keys and seed a row for a live key that
 -- has none. Writes the rows the caller locked and fresh inserts. Run after
 -- 'lockConcurrencyCountsSQL' in one transaction. Returns the number repaired.
 reconcileConcurrencyCountsSQL :: SchemaName -> [TableName] -> [Text] -> Query Int64
@@ -143,7 +146,7 @@ reconcileConcurrencyCountsSQL schema tableNames heldKeys =
         SELECT ((SELECT COUNT(*) FROM fixed) + (SELECT COUNT(*) FROM seeded))::int8 AS @{reconciled :: CInt8}
       |]
 
--- | The policy views, every pool or the one a prefix names.
+-- | The policy views, every policy or the one a prefix names.
 concurrencyPoliciesSQL :: SchemaName -> Maybe Text -> Query ConcurrencyPolicyView
 concurrencyPoliciesSQL schema mPrefix =
   let policies = arbiterConcurrencyPoliciesTable schema

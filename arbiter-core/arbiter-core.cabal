@@ -1,11 +1,9 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-core
 version:         0.1.0.0
-synopsis:
-  Core types, queue registry, and SQL for a PostgreSQL job queue
-
+synopsis:        Core types, queue registry, and SQL for Arbiter
 description:
-  Core of Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  Core of Arbiter, a PostgreSQL job queue for Haskell.
   This package holds the job and dead-letter queue types, the type-level queue
   registry, the SQL the queue runs on, and the @MonadArbiter@ backend interface
   the postgresql-simple, hasql, and Orville packages are built against.
@@ -18,7 +16,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -29,6 +27,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-core
 
 common shared-properties
   default-language: GHC2024

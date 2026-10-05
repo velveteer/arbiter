@@ -138,7 +138,7 @@ runWorkerPool config = do
         pure (pure True)
       Just listener ->
         ContT $
-          Listen.withChannels listener (hubLogFor (logConfig config)) handlers
+          Listen.withChannels listener (toHubLog (logConfig config)) handlers
     void . ContT $ Async.withAsync (publishListenerReady config listenerReady)
     let spawn = spawnRetried (workerStateVar config) (logConfig config) queueName
     heartbeat <-
@@ -223,8 +223,8 @@ drainProgressInterval :: NominalDiffTime
 drainProgressInterval = 10
 
 -- | Wait for the dispatcher to stop, the work queue to drain and all worker threads to go idle,
--- optionally bounded by a timeout. Logs the entry, periodic progress (every
--- 10s) when no timeout is set, and the result.
+-- optionally bounded by a timeout. Logs the entry, progress every
+-- 'drainProgressInterval' when no timeout is set, and the result.
 drainPool
   :: (MonadUnliftIO m)
   => LogConfig
@@ -257,7 +257,7 @@ drainPool logCfg mTimeout workQueue claimsStopped = do
               <> " job(s) in queue..."
           drainLoop
 
--- | Ticks at @pollInterval@, gated by a proof-of-work signal unless paused.
+-- | Ticks at most once per 'workerHeartbeatInterval', gated by a proof-of-work signal unless paused.
 -- Each tick bumps @arbiter_workers.last_heartbeat@, reconciles the registry
 -- @paused@ flag into local state, and re-registers if the sweeper deleted
 -- the row.

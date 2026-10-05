@@ -17,16 +17,20 @@ module Arbiter.Orville.OrvilleDb
   ( OrvilleDb (..)
   , OrvilleEnv (..)
   , runOrvilleDb
+  , toOrvilleConnectionOptions
   ) where
 
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Listen (Listener)
 import Arbiter.Core.MonadArbiter (MonadArbiter (..))
+import Arbiter.Core.PoolConfig (PoolConfig (..))
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Class (MonadTrans (..))
 import Control.Monad.Trans.Reader (ReaderT (..), asks)
+import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as BS8
 import Orville.PostgreSQL qualified as O
 import UnliftIO (MonadUnliftIO)
 
@@ -40,7 +44,7 @@ import Arbiter.Orville.MonadArbiter
 data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
   { schema :: SchemaName
   , listener :: Maybe Listener
-  -- ^ 'Nothing' for poll-only
+  -- ^ A listener such as @Arbiter.LibPQ.newLibPQListener@ from arbiter-libpq. 'Nothing' for poll-only.
   }
 
 -- | The Orville database monad. Handlers run in the base monad.
@@ -77,3 +81,20 @@ instance (MonadUnliftIO m, O.MonadOrville m) => MonadArbiter (OrvilleDb registry
 -- | Run an 'OrvilleDb' action in the base monad.
 runOrvilleDb :: OrvilleEnv registry -> OrvilleDb registry m a -> m a
 runOrvilleDb env = flip runReaderT env . unOrvilleDb
+
+-- | Orville @ConnectionOptions@ from an arbiter 'Arbiter.Core.PoolConfig.PoolConfig'.
+toOrvilleConnectionOptions
+  :: ByteString
+  -- ^ PostgreSQL connection string
+  -> PoolConfig
+  -- ^ Arbiter pool configuration
+  -> O.ConnectionOptions
+toOrvilleConnectionOptions connStr config =
+  let stripes = maybe O.OneStripePerCapability O.StripeCount (poolStripes config)
+   in O.ConnectionOptions
+        { O.connectionString = BS8.unpack connStr
+        , O.connectionNoticeReporting = O.DisableNoticeReporting
+        , O.connectionPoolStripes = stripes
+        , O.connectionPoolLingerTime = fromIntegral (poolIdleTimeout config)
+        , O.connectionPoolMaxConnections = O.MaxConnectionsTotal (poolSize config)
+        }

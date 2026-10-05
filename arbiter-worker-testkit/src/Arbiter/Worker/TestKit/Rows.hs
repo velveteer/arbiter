@@ -43,7 +43,7 @@ flagCancelled connStr schema table = updateJob connStr schema table "cancel_requ
 releaseRow :: ByteString -> Text -> Text -> Int64 -> IO ()
 releaseRow connStr schema table = updateJob connStr schema table "claimed_by = NULL, not_visible_until = NULL"
 
--- | Take every open claim without bumping its token. The extend then reports 'VisibilityUnchanged'.
+-- | Take every open claim without bumping its token. The extend then reports 'Arbiter.Core.HighLevel.VisibilityUnchanged'.
 takeClaimHolder :: ByteString -> Text -> Text -> IO ()
 takeClaimHolder connStr schema table = withConn connStr $ \conn ->
   execute_

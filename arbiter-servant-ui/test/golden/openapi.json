@@ -4192,7 +4192,7 @@
             "name": "rate-limits"
         },
         {
-            "description": "Concurrency pools, their live keys, overrides and pruning.",
+            "description": "Concurrency policies, their live keys, overrides and pruning.",
             "name": "concurrency"
         },
         {

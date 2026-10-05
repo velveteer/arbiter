@@ -1,6 +1,9 @@
 {-# LANGUAGE DeriveAnyClass #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Shared state for gauge instruments and the refresh loop.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Shared state for gauge instruments and the refresh loop.
 module Arbiter.Otel.Gauges.Cache
   ( Snapshot (..)
   , Cached (..)
@@ -101,11 +104,13 @@ data Baseline = Baseline
   , countedTotal :: !Double
   }
 
--- | What a total scanned at @scannedAt@ adds to its series.
+-- | What a scanned total adds to its series.
 riseSince
   :: SeriesKey
   -> Double
+  -- ^ Monotonic time the total was scanned at.
   -> Double
+  -- ^ The scanned total.
   -> HashMap SeriesKey Baseline
   -> (HashMap SeriesKey Baseline, Double)
 riseSince key scannedAt total seen = case HM.lookup key seen of

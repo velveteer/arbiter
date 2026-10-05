@@ -25,6 +25,7 @@ module Arbiter.Hasql.HasqlDb
     -- * Environment Creation
   , HasqlConnect
   , toHasqlConnect
+  , acquireConnect
   , createHasqlEnv
   , createHasqlEnvWithConfig
   , createHasqlEnvWithPool
@@ -34,6 +35,7 @@ module Arbiter.Hasql.HasqlDb
   , setPreparedStatements
 
     -- * Hasql Settings
+  , HasqlSettings
   , hasqlSettings
 
     -- * Exceptions
@@ -69,6 +71,7 @@ import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Hasql.Compat
   ( HasqlConnect
+  , HasqlSettings
   , acquireConnect
   , hasqlSettings
   , toHasqlConnect
@@ -83,7 +86,7 @@ import Arbiter.Hasql.MonadArbiter
   , hasqlWithDbTransaction
   )
 
--- | Thrown when a hasql connection cannot be acquired from the pool.
+-- | Thrown when a new hasql connection cannot be opened.
 newtype HasqlConnectionError = HasqlConnectionError String
   deriving stock (Show)
   deriving anyclass (Exception)
@@ -92,7 +95,10 @@ newtype HasqlConnectionError = HasqlConnectionError String
 type HasqlEnv = Env Hasql.Connection HasqlConfig
 
 -- | The env state only hasql has.
-newtype HasqlConfig = HasqlConfig {preparedStatements :: Bool}
+newtype HasqlConfig = HasqlConfig
+  { preparedStatements :: Bool
+  -- ^ Prepare hot statements once per connection. Default: 'True'.
+  }
 
 hasqlDriver :: Driver Hasql.Connection HasqlConfig
 hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = HasqlConfig True}
@@ -140,21 +146,29 @@ runHasqlDb env = runDb env . unHasqlDb
 --   Arb.insertJob (Arb.defaultJob myPayload)
 -- _ <- Hasql.use conn (Session.script "COMMIT")
 -- @
+--
+-- @Session.script@ exists only on hasql >= 1.10. Use @Session.sql@ on older versions.
 inTransaction
   :: forall registry m a
    . Hasql.Connection
+  -- ^ Connection with an open transaction
   -> SchemaName
+  -- ^ Schema name
   -> HasqlDb registry m a
   -> m a
 inTransaction conn schemaName = Backend.inTransaction hasqlDriver conn schemaName . unHasqlDb
 
--- | Create a 'HasqlEnv' with conservative pool defaults.
+-- | Create a 'HasqlEnv' with conservative pool defaults. Size worker pools with
+-- 'createHasqlEnvWithConfig' and @poolConfigForWorkers@.
 createHasqlEnv
   :: forall registry m
    . (MonadIO m)
   => Proxy registry
+  -- ^ Type-level job payload registry
   -> HasqlConnect
+  -- ^ Connection settings
   -> SchemaName
+  -- ^ Schema name
   -> m (HasqlEnv registry)
 createHasqlEnv proxy connect schemaName = createHasqlEnvWithConfig proxy connect schemaName PC.defaultPoolConfig
 
@@ -163,9 +177,13 @@ createHasqlEnvWithConfig
   :: forall registry m
    . (MonadIO m)
   => Proxy registry
+  -- ^ Type-level job payload registry
   -> HasqlConnect
+  -- ^ Connection settings
   -> SchemaName
+  -- ^ Schema name
   -> PoolConfig
+  -- ^ Pool configuration
   -> m (HasqlEnv registry)
 createHasqlEnvWithConfig _proxy connect = createEnvWithConfig hasqlDriver (acquireOrThrow connect) Hasql.release
 
@@ -181,11 +199,15 @@ createHasqlEnvWithPool
   :: forall registry m
    . (MonadIO m)
   => Proxy registry
+  -- ^ Type-level job payload registry
   -> Pool Hasql.Connection
+  -- ^ Caller's connection pool
   -> SchemaName
+  -- ^ Schema name
   -> m (HasqlEnv registry)
 createHasqlEnvWithPool _proxy = createEnvWithPool hasqlDriver
 
--- | Enable or disable prepared hot statements. Needs direct connections or a pooler that supports them.
+-- | Enable or disable prepared statements on the hot path. On by default. Needs direct
+-- connections or a pooler that supports them.
 setPreparedStatements :: Bool -> HasqlEnv registry -> HasqlEnv registry
 setPreparedStatements flag env = env {driverConfig = HasqlConfig flag}

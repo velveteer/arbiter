@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- RTS thread labels for an eventlog, ThreadScope session or @ghc-debug@ dump.
 module Arbiter.Core.Threads
   ( labelArbiterThread
   ) where

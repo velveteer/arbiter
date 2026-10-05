@@ -13,37 +13,66 @@ import Data.Text (Text)
 data MetricName
   = -- Worker lifecycle
     JobsClaimed
+    -- ^ Counter, no unit. Attributes: @queue@, @kind@.
   | JobsProcessed
+    -- ^ Counter, no unit. Attributes: @queue@, @outcome@, @kind@.
   | JobsRetries
+    -- ^ Counter, no unit. Attributes: @queue@, @kind@.
   | AdmissionAdmitted
+    -- ^ Counter, no unit. Attributes: @queue@, @policy_kind@, @policy@.
   | MaintenanceRows
+    -- ^ Counter, no unit. Attributes: @op@.
   | HandlerDuration
+    -- ^ Histogram, @s@. Attributes: @queue@, @outcome@, @kind@.
   | -- Queue depth
     QueueDepth
+    -- ^ Gauge, @{job}@. Attributes: @queue@, @status@.
   | QueueDepthByKind
+    -- ^ Gauge, @{job}@. Attributes: @queue@, @kind@.
   | QueueOldestReadyAge
+    -- ^ Gauge, @s@. Attributes: @queue@.
   | QueueOldestInFlightAge
+    -- ^ Gauge, @s@. Attributes: @queue@.
   | Workers
+    -- ^ Gauge, @{worker}@. Attributes: @queue@, @state@.
   | -- Admission
     AdmissionKeys
+    -- ^ Gauge, @{key}@. Attributes: @policy_kind@, @policy@.
   | AdmissionLimit
+    -- ^ Gauge, @{slot}@. Attributes: @policy_kind@, @policy@.
   | AdmissionInFlight
+    -- ^ Gauge, @{job}@. Attributes: @policy@.
   | AdmissionBusiestKey
+    -- ^ Gauge, @{job}@. Attributes: @policy@.
   | AdmissionTokens
+    -- ^ Gauge, @{token}@. Attributes: @policy@, @stat@.
   | -- Postgres health
     PgTableDeadTuples
+    -- ^ Gauge, @{tuple}@. Attributes: @table@.
   | PgTableLiveTuples
+    -- ^ Gauge, @{tuple}@. Attributes: @table@.
   | PgTableAutovacuumAge
-  | PgTableSizeBytes
+    -- ^ Gauge, @s@. Attributes: @table@.
+  | PgTableSize
+    -- ^ Gauge, @By@. Attributes: @table@.
   | PgTableScans
+    -- ^ Counter, @{scan}@. Attributes: @table@, @path@.
   | PgTableBlocks
+    -- ^ Counter, @{block}@. Attributes: @table@, @source@.
   | PgTableXidAge
+    -- ^ Gauge, @{transaction}@. Attributes: @table@.
   | PgDbConnections
+    -- ^ Gauge, @{connection}@. Attributes: @state@.
   | PgDbBackends
+    -- ^ Gauge, @{backend}@. No attributes.
   | PgDbOldestTransactionAge
+    -- ^ Gauge, @s@. No attributes.
   | PgDbOldestQueryAge
+    -- ^ Gauge, @s@. No attributes.
   | DbReachable
+    -- ^ Gauge, @{status}@, 1 when reachable and 0 when not. No attributes.
   | GaugesAge
+    -- ^ Gauge, @s@. No attributes.
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | The exported name of a metric.
@@ -54,7 +83,7 @@ metricName = \case
   JobsRetries -> "arbiter.jobs.retries"
   AdmissionAdmitted -> "arbiter.admission.admitted"
   MaintenanceRows -> "arbiter.maintenance.rows"
-  HandlerDuration -> "arbiter.job.handler.duration"
+  HandlerDuration -> "arbiter.jobs.handler.duration"
   QueueDepth -> "arbiter.queue.depth"
   QueueDepthByKind -> "arbiter.queue.depth_by_kind"
   QueueOldestReadyAge -> "arbiter.queue.oldest_ready_age"
@@ -68,7 +97,7 @@ metricName = \case
   PgTableDeadTuples -> "arbiter.pg.table.dead_tuples"
   PgTableLiveTuples -> "arbiter.pg.table.live_tuples"
   PgTableAutovacuumAge -> "arbiter.pg.table.autovacuum_age"
-  PgTableSizeBytes -> "arbiter.pg.table.size_bytes"
+  PgTableSize -> "arbiter.pg.table.size"
   PgTableScans -> "arbiter.pg.table.scans"
   PgTableBlocks -> "arbiter.pg.table.blocks"
   PgTableXidAge -> "arbiter.pg.table.xid_age"

@@ -1,9 +1,9 @@
 cabal-version:   3.0
 name:            arbiter-worker-testkit
 version:         0.1.0.0
-synopsis:        Backend-parameterized worker-pool test suite for arbiter
+synopsis:        Backend-parameterized worker-pool test suite for Arbiter
 description:
-  Worker conformance tests for Arbiter, an opinionated PostgreSQL job queue for
+  Worker conformance tests for Arbiter, a PostgreSQL job queue for
   Haskell.
 
   A worker-pool test suite parameterized over a @MonadArbiter@ runner, so a new
@@ -16,7 +16,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Testing
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -27,6 +27,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-worker-testkit
 
 common shared-properties
   default-language: GHC2024
@@ -49,6 +50,8 @@ library
     Arbiter.Worker.TestKit.Deadline
     Arbiter.Worker.TestKit.Lifecycle
     Arbiter.Worker.TestKit.Reclaim
+
+  other-modules:
     Arbiter.Worker.TestKit.Rows
   build-depends:
     , aeson                >=2.0  && <2.3

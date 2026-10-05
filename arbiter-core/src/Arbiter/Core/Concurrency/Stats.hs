@@ -19,15 +19,21 @@ import GHC.Generics (Generic)
 
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 
--- | A pool with its default and override limits plus live key and in-flight stats.
--- The effective cap is @override@ when set, else @default@.
+-- | A concurrency policy with its default and override limits plus live key and
+-- in-flight stats. The effective cap is @override@ when set, else @default@.
 data ConcurrencyPolicyView = ConcurrencyPolicyView
   { prefix :: Text
+  -- ^ The policy's key prefix.
   , defaultLimit :: Int32
+  -- ^ The declared per-key limit, in jobs.
   , overrideLimit :: Maybe Int32
+  -- ^ The operator's per-key limit, in jobs. 'Nothing' when unset.
   , keyCount :: Int64
+  -- ^ Count rows under the prefix.
   , totalInFlight :: Int64
+  -- ^ In-flight jobs summed over every key.
   , maxInFlight :: Maybe Int32
+  -- ^ The highest in-flight count of one key. 'Nothing' when the prefix has no key.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -35,10 +41,15 @@ data ConcurrencyPolicyView = ConcurrencyPolicyView
 -- | A single key's in-flight count, its effective cap, and fill fraction.
 data ConcurrencyKeyView = ConcurrencyKeyView
   { concurrencyKey :: Text
+  -- ^ The full @prefix:suffix@ key.
   , concurrencyPrefix :: Text
+  -- ^ The policy's key prefix.
   , inFlight :: Int32
+  -- ^ Jobs in flight under the key.
   , effectiveLimit :: Int32
+  -- ^ The override limit when set, else the default, in jobs.
   , fillFraction :: Maybe Double
+  -- ^ In-flight jobs divided by the effective limit. 'Nothing' when the limit is 0.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -61,7 +72,7 @@ instance FromJSON ConcurrencyKeyView where
       <*> obj .: "effectiveLimit"
       <*> obj .:? "fillFraction"
 
--- | A patch over a pool's override limit. 'Nothing' leaves it unchanged, @Just
+-- | A patch over a concurrency policy's override limit. 'Nothing' leaves it unchanged, @Just
 -- Nothing@ clears the override (reverts to the default), @Just (Just v)@ sets it.
 data ConcurrencyPolicyUpdate = ConcurrencyPolicyUpdate
   { overrideLimit :: Maybe (Maybe Int32)

@@ -68,8 +68,8 @@ instance FromJSON ConcurrencyKey where
 concurrencyKeyText :: ConcurrencyKey -> Text
 concurrencyKeyText (ConcurrencyKey prefix suffix) = prefixedKeyText prefix suffix
 
--- | A concurrency pool. At most @cpLimit@ jobs share a key under @cpPrefix@. The
--- default is seeded. An operator override on the pool takes precedence.
+-- | A concurrency policy. At most @cpLimit@ jobs share a key under @cpPrefix@. The
+-- default is seeded. An operator override on the policy takes precedence.
 data ConcurrencyPolicy = ConcurrencyPolicy
   { cpPrefix :: Text
   , cpLimit :: Int32
@@ -109,6 +109,7 @@ concurrencyByCase = selectByCase
 -- | A payload's per-job pool selection. Defaults to unbounded. Only capped
 -- payloads need an instance.
 class HasConcurrency payload where
+  -- | The selector deciding which policy (if any) caps a given job.
   concurrencyFor :: ConcurrencyFor payload
   concurrencyFor = noConcurrency
 
@@ -117,14 +118,14 @@ instance {-# OVERLAPPABLE #-} HasConcurrency payload
 instance (HasConcurrency payload) => CollectFor payload ConcurrencyPolicy where
   collectFor = collectPolicies (concurrencyFor @payload)
 
--- | Collect every pool declared across a registry's payloads, by statically
+-- | Collect every policy declared across a registry's payloads, by statically
 -- inspecting each payload's 'concurrencyFor'. The migration seeds these.
 type RegistryConcurrencyPolicies registry = RegistryPolicies registry ConcurrencyPolicy
 
--- | Every distinct pool declared across the registry's payloads.
+-- | Every distinct policy declared across the registry's payloads.
 registryConcurrencyPolicies :: forall registry. (RegistryConcurrencyPolicies registry) => Set ConcurrencyPolicy
 registryConcurrencyPolicies = registryPolicies @registry @ConcurrencyPolicy
 
--- | Each registry table paired with whether its payload declares any pool.
+-- | Each registry table paired with whether its payload declares any policy.
 registryConcurrencyTables :: forall registry. (RegistryConcurrencyPolicies registry) => [(Text, Bool)]
 registryConcurrencyTables = registryPolicyTables @registry @ConcurrencyPolicy

@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Jobs SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Jobs SQL templates.
 module Arbiter.Core.Sql.Jobs
   ( JobFilter (..)
   , JobSortColumn (..)
@@ -65,25 +68,40 @@ import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 
--- | A narrowing predicate on a job listing. @FilterJobId@ and the @completed_at@
--- range name DLQ and archive columns.
+-- | A narrowing predicate on a job listing. Filters combine with AND.
 data JobFilter
-  = FilterGroupKey Text
-  | FilterParentId Int64
-  | FilterRootsOnly
-  | FilterStatus JobStatus
-  | FilterId Int64
-  | FilterJobId Int64
-  | FilterClaimedBy UUID
-  | FilterKind Text
-  | FilterPayloadText Text
-  | FilterErrorText Text
-  | FilterRateLimitPrefix Text
-  | FilterConcurrencyPrefix Text
-  | FilterInsertedAfter UTCTime
-  | FilterInsertedBefore UTCTime
-  | FilterCompletedAfter UTCTime
-  | FilterCompletedBefore UTCTime
+  = -- | Jobs in this group.
+    FilterGroupKey Text
+  | -- | Children of this parent.
+    FilterParentId Int64
+  | -- | Jobs with no parent.
+    FilterRootsOnly
+  | -- | Jobs with this derived status. Main table only.
+    FilterStatus JobStatus
+  | -- | The row with this primary key.
+    FilterId Int64
+  | -- | The row with this original job id. DLQ and archive only.
+    FilterJobId Int64
+  | -- | Jobs claimed by this worker pool.
+    FilterClaimedBy UUID
+  | -- | Jobs with this kind label.
+    FilterKind Text
+  | -- | Jobs whose payload text holds this substring, ignoring case.
+    FilterPayloadText Text
+  | -- | Jobs whose last error holds this substring, ignoring case.
+    FilterErrorText Text
+  | -- | Jobs under this rate-limit prefix.
+    FilterRateLimitPrefix Text
+  | -- | Jobs under this concurrency prefix.
+    FilterConcurrencyPrefix Text
+  | -- | Jobs inserted at or after this time.
+    FilterInsertedAfter UTCTime
+  | -- | Jobs inserted before this time.
+    FilterInsertedBefore UTCTime
+  | -- | Jobs completed at or after this time. Archive only.
+    FilterCompletedAfter UTCTime
+  | -- | Jobs completed before this time. Archive only.
+    FilterCompletedBefore UTCTime
   deriving stock (Eq, Show)
 
 -- | Sortable columns on the main jobs table.
@@ -110,8 +128,8 @@ jobSortColumnName = \case
   JsParentId -> "parent_id"
   JsLastAttemptedAt -> "last_attempted_at"
 
--- | Sortable columns on the DLQ table. @DlqId@ is the DLQ primary key and
--- @DlqJobId@ the original job id.
+-- | Sortable columns on the DLQ table. 'DlqId' is the DLQ primary key and
+-- 'DlqJobId' the original job id.
 data DLQSortColumn
   = DlqId
   | DlqFailedAt
@@ -137,8 +155,8 @@ dlqSortColumnName = \case
   DlqParentId -> "parent_id"
   DlqLastAttemptedAt -> "last_attempted_at"
 
--- | Sortable columns on the archive table. @ArchiveId@ is the archive primary
--- key and @ArchiveJobId@ the original job id.
+-- | Sortable columns on the archive table. 'ArchiveId' is the archive primary
+-- key and 'ArchiveJobId' the original job id.
 data ArchiveSortColumn
   = ArchiveId
   | ArchiveCompletedAt
@@ -393,6 +411,7 @@ requeuedColumnNames =
   , "rate_limit_cost"
   ]
 
+-- | The job columns a DLQ retry carries back to the main table, as a column list.
 requeuedCols :: Text
 requeuedCols = joinColumns requeuedColumnNames
 
@@ -405,6 +424,7 @@ requeuedValsEditing edited reader = valsEditing edited reader requeuedColumnName
 enqueuedAgainColumnNames :: [Text]
 enqueuedAgainColumnNames = filter (`notElem` ["parent_id", "parent_state"]) requeuedColumnNames
 
+-- | The job columns an archive re-enqueue carries, as a column list. No parent link.
 enqueuedAgainCols :: Text
 enqueuedAgainCols = joinColumns enqueuedAgainColumnNames
 
@@ -496,7 +516,7 @@ insertJobsBatchSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Sto
 insertJobsBatchSQL schema tableName batchSrc =
   rows (jobRowCodec tableName) (insertJobsBatchBase schema tableName batchSrc [text|RETURNING ${jobColumns}|])
 
--- | 'insertJobsBatchBase' with no @RETURNING@.
+-- | 'insertJobsBatchSQL' with no @RETURNING@.
 insertJobsBatchSQL_ :: SchemaName -> TableName -> Query () -> Query ()
 insertJobsBatchSQL_ schema tableName batchSrc =
   insertJobsBatchBase schema tableName batchSrc ""
@@ -547,7 +567,7 @@ getJobByDedupKeySQL schema tableName key =
           WHERE dedup_key = #{key :: CText}
         |]
 
--- | Delete a job by id. Refuses one with children, which 'cancelJobCascadeSQL' takes.
+-- | Delete a job by id. Refuses one with children, which 'Arbiter.Core.Sql.Tree.cancelJobCascadeSQL' takes.
 -- A deleted child with no siblings left resumes its parent for a completion round.
 cancelJobSQL :: Text -> Text -> Int64 -> Query Int64
 cancelJobSQL schema tableName jobId =

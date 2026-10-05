@@ -3,6 +3,7 @@
 -- | Convenience re-exports for the @hasql@ backend.
 --
 -- @
+-- import Arbiter.Core
 -- import Arbiter.Hasql
 -- import Data.Proxy (Proxy (..))
 -- import Pqi.Ffi qualified as Ffi

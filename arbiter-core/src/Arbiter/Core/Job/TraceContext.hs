@@ -10,7 +10,9 @@ import GHC.Generics (Generic)
 -- | A job's W3C trace context.
 data TraceContext = TraceContext
   { traceparent :: Text
+  -- ^ The W3C @traceparent@ header value.
   , tracestate :: Maybe Text
+  -- ^ The W3C @tracestate@ header value, if any.
   }
   deriving stock (Eq, Generic, Show)
 

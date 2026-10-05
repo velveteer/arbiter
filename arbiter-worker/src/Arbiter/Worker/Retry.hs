@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Retry combinators for worker infrastructure threads (notification listener,
--- cron scheduler, etc.) that should survive transient database failures.
+-- | Spawn pool threads that survive transient failures.
 module Arbiter.Worker.Retry
   ( spawnRetried
   ) where

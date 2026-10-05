@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | DLQ SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- DLQ SQL templates.
 module Arbiter.Core.Sql.DLQ
   ( DLQMove (..)
   , moveToDLQSQL
@@ -32,7 +35,11 @@ import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
-data DLQMove = MoveNow | MoveIfExhausted
+data DLQMove
+  = -- | Move the job without a re-check.
+    MoveNow
+  | -- | Move the job only while it is still unsuspended, uncancelled, visible and out of attempts.
+    MoveIfExhausted
   deriving stock (Eq, Show)
 
 -- | The sweep's predicate. Claimable, uncancelled, and out of attempt budget.

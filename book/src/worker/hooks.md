@@ -7,7 +7,7 @@
 myHooks = Arb.defaultObservabilityHooks
   { Arb.onJobSuccess = \job startTime endTime ->
       liftIO $ recordHistogram "jobs.duration" (diffUTCTime endTime startTime)
-  , Arb.onJobFailedAndMovedToDLQ = \err job ->
+  , Arb.onJobFailedAndMovedToDLQ = \job err ->
       liftIO $ sendAlert (Arb.primaryKey job) err
   , Arb.onJobHeartbeat = \job now startTime ->
       liftIO $ recordGauge "jobs.running_duration" (realToFrac $ diffUTCTime now startTime)

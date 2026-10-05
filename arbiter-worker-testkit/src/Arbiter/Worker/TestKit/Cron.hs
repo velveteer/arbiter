@@ -80,7 +80,7 @@ cronSpec
   -> Spec
 cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
   before mkEnv $ do
-    describe "processCronTick" $ do
+    describe "processCronCatchUp schedule matching" $ do
       it "inserts a job when the schedule matches the tick time" $ \env -> do
         let Right cron =
               cronJob
@@ -606,7 +606,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
           Nothing -> expectationFailure "Expected cron schedule row to exist"
           Just row -> CS.lastFiredAt row `shouldSatisfy` isJust
 
-    describe "processCronCatchUp" $ do
+    describe "processCronCatchUp backfill" $ do
       it "fires every missed minute for schedules with Backfill policy" $ \env -> do
         -- Simulate a scheduler wake-up after a 5-minute gap. last_checked_at
         -- is 5 minutes in the past. With Backfill 600 (10 min window) the
@@ -677,7 +677,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         length jobs `shouldBe` 1
 
       it "sets last_checked_at to currentTick" $ \env -> do
-        -- Slow-processing regression. Watermark must equal the 'now' passed in.
+        -- Under slow processing the watermark equals the 'now' passed in.
         let Right cron =
               cronJob "watermark" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "x"))
             currentTickPast = mkTime 2025 6 15 12 0 0

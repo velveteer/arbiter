@@ -1,11 +1,9 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-test-common
 version:         0.1.0.0
-synopsis:
-  Shared fixtures and backend-parameterized suites for arbiter
-
+synopsis:        Shared test fixtures and backend-parameterized suites for Arbiter
 description:
-  Shared test support for Arbiter, an opinionated PostgreSQL job queue for
+  Shared test support for Arbiter, a PostgreSQL job queue for
   Haskell.
   Schema setup and teardown against a live PostgreSQL database, shared payload
   fixtures, and the backend-parameterized rate-limit, concurrency, and
@@ -18,7 +16,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Testing
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files: README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
@@ -26,6 +24,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-test-common
 
 common shared-properties
   default-language: GHC2024
@@ -62,7 +61,7 @@ library
     , containers            >=0.6  && <0.9
     , hedgehog              >=1.4  && <1.8
     , hspec                 >=2.8  && <2.12
-    , postgresql-libpq      >=0.9  && <0.12
+    , postgresql-libpq      >=0.10 && <0.12
     , postgresql-migration  >=0.2  && <0.3
     , postgresql-simple     >=0.6  && <0.8
     , resource-pool         >=0.4  && <0.6

@@ -38,8 +38,8 @@ encodeJobResult result
   | shouldStore result = Just (toJSON result)
   | otherwise = Nothing
 
--- | Read a stored result back. 'Arbiter.Worker.childResults' surfaces a failure
--- as the child's 'Left'. 'Arbiter.Worker.mergedChildResults' folds it to 'mempty'.
+-- | Read a stored result back. @Arbiter.Worker.childResults@ surfaces a failure
+-- as the child's 'Left'. @Arbiter.Worker.mergedChildResults@ folds it to 'mempty'.
 decodeJobResult :: (FromJSON a) => Value -> Either Text a
 decodeJobResult value = case Aeson.fromJSON value of
   Aeson.Success result -> Right result

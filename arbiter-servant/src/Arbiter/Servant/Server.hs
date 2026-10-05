@@ -23,6 +23,7 @@ module Arbiter.Servant.Server
   , defaultMaintenanceSparseInterval
   , defaultMaintenanceTimeout
   , BuildServer (..)
+  , CacheCell
   ) where
 
 import Arbiter.Core.CronSchedule qualified as CS
@@ -49,7 +50,7 @@ import Arbiter.Worker.Logger
   , LogConfig
   , LogLevel (..)
   , defaultLogConfig
-  , hubLogFor
+  , toHubLog
   , newFailureGates
   , tryReportedOn
   )
@@ -118,7 +119,7 @@ import Arbiter.Servant.API
 import Arbiter.Servant.Types
 
 -- | Configuration for the API server. @m@ is the backend monad every handler's
--- statements run in.
+-- statements run in. 'initArbiterServer' fills the cache fields.
 data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
   -- ^ Backend runner, e.g. @runSimpleDb env@ or @runHasqlDb env@.
@@ -127,7 +128,8 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   , enableSSE :: Bool
   -- ^ Enable the Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns one \"disabled\" event and closes.
-  -- The admin UI then polls. A backend with no listener answers the same way.
+  -- The admin UI then polls and retries the stream with an exponential backoff.
+  -- A backend with no listener answers the same way.
   -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
   -- ^ Cache for the rate-limit policy list, used when 'statsCacheTtl' is positive.
@@ -197,7 +199,7 @@ mutateJob tableName config jobId mutate refuse =
             <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
--- event-streaming triggers, which 'Arbiter.Migrations.runMigrationsForRegistry' installs
+-- event-streaming triggers, which @Arbiter.Migrations.runMigrationsForRegistry@ installs
 -- when @enableEventStreaming@ is set, and a backend with a listener.
 initArbiterServer
   :: forall m registry
@@ -1008,7 +1010,7 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 -- backend's shared listener for the response's lifetime and gets a @connected@
 -- event once its channel is subscribed. If 'enableSSE' is false or the backend
 -- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then reconnects with an exponential backoff.
+-- then polls and retries the stream with an exponential backoff.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
@@ -1025,7 +1027,7 @@ eventsServer config = Tagged $ \_req sendResponse -> do
       let deliver = atomically . writeTChan events . notificationData
       -- The registration wraps the whole response. The hub is released when the
       -- streaming body never runs.
-      withChannels listener (hubLogFor (serverLogConfig config)) [(eventStreamingChannel, deliver)] $ \ready ->
+      withChannels listener (toHubLog (serverLogConfig config)) [(eventStreamingChannel, deliver)] $ \ready ->
         sendResponse $ responseStream status200 sseHeaders $ \write flush ->
           -- A failed write (client gone) ends the stream. The keepalive comment
           -- every 15s is how a gone client is noticed.
@@ -1264,7 +1266,7 @@ defaultMaintenanceBucketIdle = 300
 defaultMaintenanceTimeout :: NominalDiffTime
 defaultMaintenanceTimeout = 300
 
--- | Keyed TTL cache under an epoch bumped by 'invalidate'.
+-- | Keyed TTL cache under an epoch bumped by @invalidate@.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
   , cacheFilling :: TVar (Set.Set Text)
@@ -1513,8 +1515,10 @@ sharedServer config =
     :<|> concurrencyServer config
     :<|> healthServer config
 
--- | Builds a registry's per-queue server implementations.
+-- | Builds a registry's per-queue server implementations. @registry@ is the whole
+-- registry. @reg@ is the part still to build.
 class BuildServer registry (reg :: JobPayloadRegistry) where
+  -- | The server for the queues in @reg@, then the shared routes.
   buildServer :: (HasRegistry m registry) => ArbiterServerConfig m registry -> ServerT (RegistryToAPI reg) Handler
 
 -- The empty registry builds the shared top-level routes alone.
@@ -1559,8 +1563,8 @@ arbiterServerHoisted
 arbiterServerHoisted natTrans config =
   hoistServer (Proxy @(ArbiterAPI registry)) natTrans (arbiterServer config)
 
--- | Convert to WAI Application. Each 'QueueWithResult' result type needs
--- @FromJSON@ and @ToJSON@.
+-- | Convert to WAI Application. Each 'Arbiter.Core.QueueRegistry.QueueWithResult'
+-- result type needs @FromJSON@ and @ToJSON@.
 arbiterApp
   :: forall registry m
    . ( BuildServer registry registry
@@ -1572,7 +1576,7 @@ arbiterApp
 arbiterApp config =
   serve (Proxy @(ArbiterAPI registry)) (arbiterServer config)
 
--- | Run the API server on a port.
+-- | Run the API server on a port. Prints a start line to stdout.
 runArbiterAPI
   :: forall registry m
    . ( BuildServer registry registry

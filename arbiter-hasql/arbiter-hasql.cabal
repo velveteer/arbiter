@@ -1,13 +1,13 @@
 cabal-version:   3.0
 name:            arbiter-hasql
 version:         0.1.0.0
-synopsis:        Hasql backend for arbiter
+synopsis:        Hasql backend for Arbiter
 description:
-  A hasql backend for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  A hasql backend for Arbiter, a PostgreSQL job queue for Haskell.
 
   Provides a @MonadArbiter@ instance over a hasql connection pool, with
-  savepoint-based nested transactions and optional prepared statements for the
-  claim path. Handlers receive the connection the job was claimed on.
+  savepoint-based nested transactions and prepared statements for the hot path
+  (on by default). Handlers receive the connection the job was claimed on.
 
 license:         MIT
 license-file:    LICENSE
@@ -15,7 +15,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -26,9 +26,12 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-hasql
 
 flag hasql2
-  description: Build against hasql 2, whose transport is a pqi adapter.
+  description:
+    Build against hasql 2, whose transport is a pqi adapter. The flag changes the
+    type of toHasqlConnect.
   default:     True
   manual:      False
 
@@ -48,10 +51,12 @@ library
   exposed-modules:
     Arbiter.Hasql
     Arbiter.Hasql.Compat
-    Arbiter.Hasql.Decode
-    Arbiter.Hasql.Encode
     Arbiter.Hasql.HasqlDb
     Arbiter.Hasql.MonadArbiter
+
+  other-modules:
+    Arbiter.Hasql.Decode
+    Arbiter.Hasql.Encode
 
   build-depends:
     , arbiter-core   >=0.1  && <0.2
@@ -96,7 +101,7 @@ test-suite arbiter-hasql-tests
     , arbiter-test-common     >=0.1 && <0.2
     , arbiter-worker          >=0.1 && <0.2
     , arbiter-worker-testkit  >=0.1 && <0.2
-    , base
+    , base >=4.20 && <5
     , bytestring
     , hasql
     , hspec                   >=2.0 && <2.12

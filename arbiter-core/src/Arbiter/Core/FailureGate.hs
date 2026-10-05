@@ -1,4 +1,8 @@
--- | Repeated failure suppression for a looping action.
+{-# OPTIONS_HADDOCK not-home #-}
+
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Repeated failure suppression for a looping action.
 module Arbiter.Core.FailureGate
   ( FailureGate
   , newFailureGate
@@ -25,7 +29,7 @@ newFailureGate = FailureGate <$> liftIO (newIORef Nothing)
 defaultFailureRepeatInterval :: NominalDiffTime
 defaultFailureRepeatInterval = 60
 
--- | Record @failure@. 'True' when reporting is due.
+-- | Record @failure@ when reporting is due. 'True' when it is due.
 holdFailure :: (MonadIO m) => FailureGate -> NominalDiffTime -> Text -> m Bool
 holdFailure (FailureGate ref) repeatAfter failure = liftIO $ do
   now <- getMonotonicTime

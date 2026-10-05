@@ -1,6 +1,5 @@
--- | Public worker API. Single-pool execution and multi-pool orchestration are
--- implemented separately in "Arbiter.Worker.Pool" and
--- "Arbiter.Worker.MultiQueue".
+-- | Public worker API: single-pool execution, multi-pool orchestration, job
+-- results, configuration, and logging.
 module Arbiter.Worker
   ( -- * Running workers
     runWorkerPool

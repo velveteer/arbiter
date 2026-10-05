@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Backend-agnostic LISTEN/NOTIFY hub over one connection per env.
+-- | Backend-agnostic LISTEN\/NOTIFY hub over one connection per env.
 module Arbiter.Core.Listen
   ( Notification (..)
   , ListenConn (..)
@@ -68,7 +68,9 @@ import Arbiter.Core.Threads (labelArbiterThread)
 -- | A received notification. The channel it arrived on and its payload.
 data Notification = Notification
   { notificationChannel :: ByteString
+  -- ^ The channel name.
   , notificationData :: ByteString
+  -- ^ The payload. Empty when the sender gave none.
   }
   deriving stock (Eq, Show)
 
@@ -95,11 +97,15 @@ data Listener = Listener
 -- | The connection operations the hub loop needs.
 data ListenConn = ListenConn
   { listenNotifies :: IO (Maybe Notification)
+  -- ^ The next pending notification. 'Nothing' when none is pending.
   , listenSocket :: IO (Maybe Fd)
+  -- ^ The connection's socket. 'Nothing' fails the connection, and the hub reconnects.
   , listenConsumeInput :: IO Bool
+  -- ^ Read input from the socket. 'False' fails the connection, and the hub reconnects.
   , listenExec :: ByteString -> IO (Either Text ())
   -- ^ Run a command. A failure comes back as its reason.
   , listenEscapeIdentifier :: ByteString -> IO (Maybe ByteString)
+  -- ^ Quote a channel name. 'Nothing' falls back to 'Arbiter.Core.SqlLiterals.quoteIdentifier'.
   }
 
 -- | A 'Listener' with a fresh hub slot over a connection runner.
@@ -118,7 +124,7 @@ data RunningHub = RunningHub
   }
 
 -- | Register this pool's channels on the env's shared hub for the duration of
--- @k@. The 'STM' action reports 'True' once they are all subscribed.
+-- the body. The 'STM' action reports 'True' once they are all subscribed.
 withChannels
   :: (MonadUnliftIO m)
   => Listener

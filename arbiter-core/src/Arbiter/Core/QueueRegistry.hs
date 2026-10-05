@@ -47,6 +47,7 @@ type Queue (table :: Symbol) (payload :: Type) = QueueWithResult table payload (
 -- | A type-level registry mapping table names to payload types.
 --
 -- Example:
+--
 -- @
 -- type MyAppRegistry =
 --   '[ Queue "email_jobs" EmailPayload
@@ -147,6 +148,7 @@ type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: 
 
 -- | Extract table names from a type-level registry at runtime (used by migrations).
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
+  -- | Every queue's table name, in registry order.
   registryTableNames :: Proxy registry -> [Text]
 
   -- | Each queue with the labels its payload declares.

@@ -24,23 +24,31 @@ import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Workers qualified as Sql
 import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
 
--- | Register or refresh a worker and return its effective paused state.
+-- | Register or refresh a worker and return its effective paused state (worker or
+-- queue). 'Nothing' when the upsert returns no row.
 registerWorker
   :: (MonadArbiter m)
   => SchemaName
   -> UUID
+  -- ^ Worker pool id
   -> Text
+  -- ^ Queue name
   -> Maybe Text
+  -- ^ Host name
   -> Maybe Int32
+  -- ^ Worker thread count
   -> NominalDiffTime
+  -- ^ Heartbeat age after which the worker counts as stale
   -> Maybe Value
+  -- ^ Free-form metadata
   -> m (Maybe Bool)
 registerWorker schema workerId queue host threads staleThreshold metadata =
   listToMaybe
     <$> MA.executeQuery
       (Sql.upsertWorkerSQL schema workerId queue host threads (realToFrac staleThreshold) metadata)
 
--- | Record a heartbeat and return the worker's effective paused state.
+-- | Record a heartbeat and return the worker's effective paused state (worker or queue).
+-- 'Nothing' when the worker has no registry row.
 heartbeatWorker :: (MonadArbiter m) => SchemaName -> UUID -> m (Maybe Bool)
 heartbeatWorker schema workerId =
   listToMaybe <$> MA.executeQuery (Sql.heartbeatWorkerSQL schema workerId)

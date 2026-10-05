@@ -34,7 +34,8 @@ import Arbiter.Worker.TestKit.Rows (reclaimJob)
 alwaysFailing :: Int
 alwaysFailing = 999
 
--- | Reclaim, heartbeat theft, and worker-loop exception safety suite.
+-- | Reclaim, heartbeat theft, and worker-loop exception safety suite. The queue
+-- under test declares @()@ as its result type.
 reclaimSpec
   :: forall payload m env
    . ( Eq payload

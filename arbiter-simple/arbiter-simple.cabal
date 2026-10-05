@@ -1,9 +1,9 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-simple
 version:         0.1.0.0
-synopsis:        PostgreSQL-simple backend for arbiter
+synopsis:        postgresql-simple backend for Arbiter
 description:
-  A postgresql-simple backend for Arbiter, an opinionated PostgreSQL job queue
+  A postgresql-simple backend for Arbiter, a PostgreSQL job queue
   for Haskell.
   Provides a @MonadArbiter@ instance over a postgresql-simple connection pool,
   with savepoint-based nested transactions so a handler's own database work
@@ -16,7 +16,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -27,6 +27,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-simple
 
 common shared-properties
   default-language: GHC2024
@@ -81,7 +82,7 @@ test-suite arbiter-simple-tests
     , arbiter-test-common     >=0.1 && <0.2
     , arbiter-worker          >=0.1 && <0.2
     , arbiter-worker-testkit  >=0.1 && <0.2
-    , base
+    , base >=4.20 && <5
     , bytestring
     , containers
     , hspec                >=2.0 && <2.12

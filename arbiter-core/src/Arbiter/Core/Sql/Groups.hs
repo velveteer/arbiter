@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Groups SQL templates.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Groups SQL templates.
 module Arbiter.Core.Sql.Groups
   ( groupsWindowSQL
   , emptiedWindowSQL
@@ -46,7 +49,7 @@ lockGroupKeysSQL schema tableName keys =
   let groupsTbl = jobQueueGroupsTable schema tableName
    in [sql|INSERT INTO ${groupsTbl} (group_key) SELECT DISTINCT unnest(#{keys :: [CText]}::text[]) AS group_key ORDER BY group_key ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE|]
 
--- | At most @limit@ groups keys past @cursor@, in the database's key order, unlocked.
+-- | At most @limit@ group keys past @cursor@, in the database's key order, unlocked.
 -- Its last key is the caller's resume cursor.
 groupsWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
 groupsWindowSQL schema tableName limit cursor =

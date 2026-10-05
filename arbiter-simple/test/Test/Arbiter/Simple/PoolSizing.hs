@@ -17,7 +17,7 @@ import Arbiter.Worker (namedWorkerPool, poolConfigForWorkers, runWorkerPools)
 import Arbiter.Worker.BackoffStrategy (Jitter (NoJitter))
 import Arbiter.Worker.Config
   ( WorkerConfig (..)
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , transactionalWorkerConfig
   , validateWorkerConfig
   )
@@ -56,7 +56,7 @@ spec connStr = do
 
     it "rejects a non-positive handler batch size" $ do
       config <-
-        defaultBatchedWorkerConfig 1 0 (\_ _ -> pure ())
+        batchedWorkerConfig 1 0 (\_ _ -> pure ())
           :: IO (WorkerConfig (SimpleDb SizingTestRegistry IO) WorkerTestPayload)
       validateWorkerConfig config `shouldSatisfy` isLeft
 

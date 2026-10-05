@@ -1,4 +1,5 @@
--- | 'Arbiter.Core.MonadArbiter.MonadArbiter' primitives backed by postgresql-simple.
+-- | postgresql-simple primitives for writing a custom
+-- 'Arbiter.Core.MonadArbiter.MonadArbiter' instance.
 module Arbiter.Simple.MonadArbiter
   ( -- * MonadArbiter implementation
     simpleExecuteQuery
@@ -90,7 +91,7 @@ simpleWithDbTransaction
 simpleWithDbTransaction =
   withSavepointTransaction (\conn sql -> void (PG.execute_ conn (Query sql))) PG.withTransaction
 
--- | Run a handler on the pinned connection.
+-- | Run a handler on the pinned connection, or on a borrowed pool connection when none is pinned.
 simpleRunHandlerWithConnection
   :: (HasPoolState Connection m, MonadUnliftIO m)
   => (Connection -> job -> m result)

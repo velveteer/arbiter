@@ -1,10 +1,13 @@
 cabal-version:   3.0
 name:            arbiter-libpq
 version:         0.1.0.0
-synopsis:        libpq listener connection for arbiter
+synopsis:        libpq listener connection for Arbiter
 description:
-  The LISTEN/NOTIFY connection adapter and dedicated listener for Arbiter
-  backends that talk to PostgreSQL through @postgresql-libpq@.
+  LISTEN\/NOTIFY support for Arbiter, a PostgreSQL job queue for
+  Haskell.
+
+  The connection adapter and dedicated listener for Arbiter backends that talk to
+  PostgreSQL through @postgresql-libpq@.
 
 license:         MIT
 license-file:    LICENSE
@@ -12,7 +15,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files: README.md
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
@@ -20,6 +23,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-libpq
 
 common shared-properties
   default-language: GHC2024

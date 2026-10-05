@@ -87,7 +87,7 @@ import Arbiter.Worker.Config
   , ackWith
   , cancelBranch
   , cancelTree
-  , defaultBatchedWorkerConfig
+  , batchedWorkerConfig
   , failPermanent
   , failRetry
   , nack
@@ -133,10 +133,6 @@ statementCommand :: (MonadArbiter m) => Text -> m ()
 statementCommand = void . executeStatement . raw
 
 -- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
---
--- @mkSimple@/@mkFailing@ construct the backend's payload, @mkHandler@ adapts a
--- plain job action into the backend's 'JobHandler' shape (some backends pass a
--- connection, others do not), and @runM@ runs a backend action in 'IO'.
 --
 -- The queue under test declares @Maybe [Text]@ as its result type.
 workerSpec
@@ -779,7 +775,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       dlqRef <- newIORef []
       let hooks =
             defaultObservabilityHooks
-              { onJobFailedAndMovedToDLQ = \errMsg job ->
+              { onJobFailedAndMovedToDLQ = \job errMsg ->
                   liftIO $ atomicModifyIORef' dlqRef $ \seen -> ((errMsg, primaryKey job) : seen, ())
               }
       config <- mkConfig $ \_job -> throwRetryable "always fails"
@@ -2112,11 +2108,11 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       -> Int
       -> (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
       -> IO (WorkerConfig m payload)
-    mkBatchedConfig = defaultBatchedWorkerConfig
+    mkBatchedConfig = batchedWorkerConfig
 
 -- | Env-owned LISTEN hub test suite, instantiated for each backend. Under a high
 -- @pollInterval@ only the NOTIFY can wake the dispatcher in time. Completion
--- proves the listener fired.
+-- proves the listener fired. The queue under test declares @()@ as its result type.
 listenerSpec
   :: forall payload m env
    . ( QueueOperation m payload

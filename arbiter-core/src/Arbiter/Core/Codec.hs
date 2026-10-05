@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Typed encoding and decoding for PostgreSQL queries.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Typed encoding and decoding for PostgreSQL queries.
 --
 --   * 'RowCodec' decodes result rows. It is a free applicative that each backend
 --     (postgresql-simple, hasql, orville) interprets natively.

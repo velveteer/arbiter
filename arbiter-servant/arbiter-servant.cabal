@@ -1,12 +1,13 @@
-cabal-version:   2.2
+cabal-version:   3.0
 name:            arbiter-servant
 version:         0.1.0.0
-synopsis:        Servant REST API for arbiter job queue
+synopsis:        Servant REST API for Arbiter
 description:
-  REST API for Arbiter, an opinionated PostgreSQL job queue for Haskell.
+  REST API for Arbiter, a PostgreSQL job queue for Haskell.
   Serves job, dead-letter, archive, cron, rate-limit, concurrency, queue, worker,
-  and statistics endpoints over a typed queue registry, plus a Server-Sent Events
-  stream for live updates. Ships no authentication of its own: it exposes a WAI
+  group, health, maintenance, and statistics endpoints over a typed queue
+  registry. Remote consumers claim, ack, nack, and extend jobs over HTTP. A
+  Server-Sent Events stream sends live updates. Ships no authentication of its own: it exposes a WAI
   @Application@, so wrap it in your own middleware or put it behind a gateway.
 
 license:         MIT
@@ -15,7 +16,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -26,6 +27,7 @@ bug-reports:     https://github.com/velveteer/arbiter/issues
 source-repository head
   type:     git
   location: https://github.com/velveteer/arbiter.git
+  subdir:   arbiter-servant
 
 common shared-properties
   default-language: GHC2024
@@ -79,7 +81,7 @@ test-suite arbiter-servant-tests
     , arbiter-simple       >=0.1 && <0.2
     , arbiter-test-common  >=0.1 && <0.2
     , arbiter-worker       >=0.1 && <0.2
-    , base
+    , base >=4.20 && <5
     , bytestring
     , containers
     , hspec

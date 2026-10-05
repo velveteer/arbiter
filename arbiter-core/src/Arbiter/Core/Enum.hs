@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Text lookups for finite enums.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Text lookups for finite enums.
 module Arbiter.Core.Enum
   ( enumFromText
   , enumFromTextCI

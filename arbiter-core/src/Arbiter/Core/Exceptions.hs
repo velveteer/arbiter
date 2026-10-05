@@ -166,7 +166,7 @@ throwPermanent msg = UE.throwIO (Permanent (JobPermanentException msg))
 throwTreeCancel :: (MonadIO m) => Text -> m a
 throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
 
--- | Cancel this job and its descendants.
+-- | Cancel this branch: the parent and every sibling.
 throwBranchCancel :: (MonadIO m) => Text -> m a
 throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
 

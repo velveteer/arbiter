@@ -22,20 +22,37 @@ import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.Listen (ListenConn (..))
 
 -- | Where an asynchronous connect stands.
-data ConnStatus = ConnOk | ConnBad | ConnPending
+data ConnStatus
+  = -- | The connection is open.
+    ConnOk
+  | -- | The connect failed.
+    ConnBad
+  | -- | The connect is still in progress.
+    ConnPending
   deriving stock (Eq, Show)
 
 -- | Wait target from a connection poll.
-data Polling = PollReading | PollWriting | PollDone
+data Polling
+  = -- | Wait until the socket is readable.
+    PollReading
+  | -- | Wait until the socket is writable.
+    PollWriting
+  | -- | The connect has finished.
+    PollDone
   deriving stock (Eq, Show)
 
--- | The driver calls that open a connection asynchronously.
+-- | The driver calls that open, inspect and close a connection.
 data ConnectDriver conn = ConnectDriver
   { connectStart :: ByteString -> IO conn
+  -- ^ Start an asynchronous connect from a connection string.
   , connectPoll :: conn -> IO Polling
+  -- ^ Advance the connect. Tells what to wait for next.
   , status :: conn -> IO ConnStatus
+  -- ^ Where the connection stands.
   , finish :: conn -> IO ()
+  -- ^ Close the connection.
   , errorMessage :: conn -> IO (Maybe ByteString)
+  -- ^ The driver's last error message, if any.
   }
 
 -- | Check command status against the driver's success status.

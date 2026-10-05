@@ -131,7 +131,7 @@ poolEffects config statements consumeSpan = do
         fireFailure config shape job errorMsg startTime endTime
         case outcome of
           Retrying delay -> hook job "onJobRetry" $ Job.onJobRetry hooks job delay
-          _ -> hook job "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks errorMsg job
+          _ -> hook job "onJobFailedAndMovedToDLQ" $ Job.onJobFailedAndMovedToDLQ hooks job errorMsg
       Cancelled job reason -> fireCancelled config job reason
       Unavailable job reason -> hook job "onJobUnavailable" $ Job.onJobUnavailable hooks job reason
 

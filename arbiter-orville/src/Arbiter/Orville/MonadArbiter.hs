@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | 'Arbiter.Core.MonadArbiter.MonadArbiter' primitives backed by Orville.
+-- | Orville-backed primitives for writing a custom
+-- 'Arbiter.Core.MonadArbiter.MonadArbiter' instance.
 module Arbiter.Orville.MonadArbiter
   ( orvilleExecuteQuery
   , orvilleExecuteStatement

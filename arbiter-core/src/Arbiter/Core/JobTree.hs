@@ -49,8 +49,8 @@ newtype TreeInsertFailed = TreeInsertFailed Text
 data JobTree payload
   = -- | A single job with no children.
     Leaf (JobWrite payload)
-  | -- | A finalizer job with children. The finalizer is suspended until
-    -- all children complete, then it becomes claimable for a completion round.
+  | -- | A finalizer job with children. The finalizer is suspended until no child
+    -- of it is left in the main queue. Then it becomes claimable for a completion round.
     Finalizer (JobWrite payload) (NonEmpty (JobTree payload))
 
 -- | A single job with no children.

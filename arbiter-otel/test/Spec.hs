@@ -303,7 +303,7 @@ spec = do
         runSimpleDb plainEnv $ do
           onJobClaimed hooks job now
           onJobSuccess hooks job now now
-          onJobFailedAndMovedToDLQ hooks "boom" job
+          onJobFailedAndMovedToDLQ hooks job "boom"
           onJobCancelled hooks job "cancelled"
           onJobUnavailable hooks job "no longer available"
         runSimpleDb plainEnv $ onMaintenance instrumented SweepExhaustedJobs 3

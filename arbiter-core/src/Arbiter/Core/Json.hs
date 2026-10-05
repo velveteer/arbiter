@@ -1,4 +1,8 @@
--- | Shared Aeson helpers for triple-state patch decoders. An omitted field leaves
+{-# OPTIONS_HADDOCK not-home #-}
+
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Shared Aeson helpers for triple-state patch decoders. An omitted field leaves
 -- the value unchanged. An explicit @null@ clears the override.
 module Arbiter.Core.Json
   ( patchOptions
@@ -11,8 +15,8 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 
--- | Generic options that omit @Nothing@ fields. A cleared override is absent
--- from the JSON.
+-- | Generic options that omit @Nothing@ fields. An unchanged field is absent. A
+-- cleared override is @null@.
 patchOptions :: Options
 patchOptions = defaultOptions {omitNothingFields = True}
 
