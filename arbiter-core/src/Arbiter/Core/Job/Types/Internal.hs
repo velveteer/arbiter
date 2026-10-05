@@ -6,6 +6,7 @@
 -- The job record type and its field accessors.
 module Arbiter.Core.Job.Types.Internal
   ( JobRecord (..)
+  , Job
   , Stored (..)
   , storedBytes
   , primaryKey
@@ -88,86 +89,91 @@ data JobRecord payload key q insertedAt adm = Job
   }
   deriving stock (Eq, Show)
 
+-- | A job parametrized over payload, primary key, queue name, insertion
+-- timestamp, and the columns derived from the payload. The constructor is internal.
+type Job payload key q insertedAt adm =
+  JobRecord payload key q insertedAt adm
+
 -- | Database-assigned identifier for a stored job.
-primaryKey :: JobRecord payload key q insertedAt adm -> key
+primaryKey :: Job payload key q insertedAt adm -> key
 primaryKey Job {primaryKey = value} = value
 
 -- | User-defined payload stored as JSONB.
-payload :: JobRecord payload key q insertedAt adm -> payload
+payload :: Job payload key q insertedAt adm -> payload
 payload Job {payload = value} = value
 
 -- | Queue containing a stored job.
-queueName :: JobRecord payload key q insertedAt adm -> q
+queueName :: Job payload key q insertedAt adm -> q
 queueName Job {queueName = value} = value
 
 -- | Serial-processing group, or 'Nothing' for an ungrouped job.
-groupKey :: JobRecord payload key q insertedAt adm -> Maybe Text
+groupKey :: Job payload key q insertedAt adm -> Maybe Text
 groupKey Job {groupKey = value} = value
 
 -- | Time at which the job was inserted.
-insertedAt :: JobRecord payload key q insertedAt adm -> insertedAt
+insertedAt :: Job payload key q insertedAt adm -> insertedAt
 insertedAt Job {insertedAt = value} = value
 
 -- | Time at which the job was last updated.
-updatedAt :: JobRecord payload Int64 q insertedAt adm -> Maybe UTCTime
+updatedAt :: Job payload Int64 q insertedAt adm -> Maybe UTCTime
 updatedAt Job {updatedAt = value} = value
 
 -- | Number of attempts made so far.
-attempts :: JobRecord payload Int64 q insertedAt adm -> Int32
+attempts :: Job payload Int64 q insertedAt adm -> Int32
 attempts Job {attempts = value} = value
 
 -- | Error message from the last failed attempt.
-lastError :: JobRecord payload Int64 q insertedAt adm -> Maybe Text
+lastError :: Job payload Int64 q insertedAt adm -> Maybe Text
 lastError Job {lastError = value} = value
 
 -- | Claim priority. Lower numbers have higher priority.
-priority :: JobRecord payload key q insertedAt adm -> Int32
+priority :: Job payload key q insertedAt adm -> Int32
 priority Job {priority = value} = value
 
 -- | Time at which a worker last claimed the job.
-lastAttemptedAt :: JobRecord payload Int64 q insertedAt adm -> Maybe UTCTime
+lastAttemptedAt :: Job payload Int64 q insertedAt adm -> Maybe UTCTime
 lastAttemptedAt Job {lastAttemptedAt = value} = value
 
 -- | Earliest time at which the job can be claimed.
-notVisibleUntil :: JobRecord payload key q insertedAt adm -> Maybe UTCTime
+notVisibleUntil :: Job payload key q insertedAt adm -> Maybe UTCTime
 notVisibleUntil Job {notVisibleUntil = value} = value
 
 -- | Deduplication strategy and key.
-dedupKey :: JobRecord payload key q insertedAt adm -> Maybe DedupKey
+dedupKey :: Job payload key q insertedAt adm -> Maybe DedupKey
 dedupKey Job {dedupKey = value} = value
 
 -- | Attempt limit before the job moves to the DLQ.
-maxAttempts :: JobRecord payload key q insertedAt adm -> Maybe Int32
+maxAttempts :: Job payload key q insertedAt adm -> Maybe Int32
 maxAttempts Job {maxAttempts = value} = value
 
 -- | Identifier of this job's parent in a job tree.
-parentId :: JobRecord payload Int64 q insertedAt adm -> Maybe Int64
+parentId :: Job payload Int64 q insertedAt adm -> Maybe Int64
 parentId Job {parentId = value} = value
 
 -- | Snapshot of accumulated child results for a rollup finalizer.
-parentState :: JobRecord payload Int64 q insertedAt adm -> Maybe Value
+parentState :: Job payload Int64 q insertedAt adm -> Maybe Value
 parentState Job {parentState = value} = value
 
 -- | W3C trace context captured at enqueue.
-traceContext :: JobRecord payload key q insertedAt adm -> Maybe TraceContext
+traceContext :: Job payload key q insertedAt adm -> Maybe TraceContext
 traceContext Job {traceContext = value} = value
 
--- | Whether the job is currently ineligible for claiming.
-suspended :: JobRecord payload Int64 q insertedAt adm -> Bool
+-- | Whether the job is suspended. It stays unclaimable until resumed.
+suspended :: Job payload Int64 q insertedAt adm -> Bool
 suspended Job {suspended = value} = value
 
 -- | Holder of the outstanding claim. 'Nothing' when no claim is outstanding.
-claimedBy :: JobRecord payload Int64 q insertedAt adm -> Maybe UUID
+claimedBy :: Job payload Int64 q insertedAt adm -> Maybe UUID
 claimedBy Job {claimedBy = value} = value
 
 -- | Monotonically increasing claim identifier.
-claimSeq :: JobRecord payload Int64 q insertedAt adm -> Int64
+claimSeq :: Job payload Int64 q insertedAt adm -> Int64
 claimSeq Job {claimSeq = value} = value
 
 -- | Completed-job archive retention in seconds.
-archiveFor :: JobRecord payload key q insertedAt adm -> Maybe Int32
+archiveFor :: Job payload key q insertedAt adm -> Maybe Int32
 archiveFor Job {archiveFor = value} = value
 
 -- | The labels and keys stamped from the payload at enqueue.
-payloadKeys :: JobRecord payload key q insertedAt adm -> adm
+payloadKeys :: Job payload key q insertedAt adm -> adm
 payloadKeys Job {payloadKeys = value} = value

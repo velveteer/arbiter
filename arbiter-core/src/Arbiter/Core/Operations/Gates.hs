@@ -54,11 +54,9 @@ runGatedBounded :: (MonadArbiter m) => SchemaName -> Text -> NominalDiffTime -> 
 runGatedBounded schemaName task interval limit work =
   runGated schemaName task interval (setLocalStatementTimeout limit >> work)
 
--- | Run @work@ at most once per @interval@ across every worker pool sharing
--- the same schema, keyed by @task@. Uses a watermark row in @arbiter_gates@
--- claimed via @SELECT FOR UPDATE SKIP LOCKED@. Returns @Just@ the work's result
--- when it ran. Returns @Nothing@ when the gate is too recent or another pool
--- holds the task.
+-- | Run @work@ at most once per @interval@ across the schema's pools, keyed by @task@.
+-- Claims the watermark row in @arbiter_gates@ with @SELECT FOR UPDATE SKIP LOCKED@.
+-- 'Nothing' when the gate ran too recently or another pool holds the task.
 runGated
   :: (MonadArbiter m)
   => SchemaName
@@ -118,7 +116,7 @@ runGatedInner schemaName task interval work = do
     intervalSecs = realToFrac interval :: Double
 
     checkGateOuter = do
-      rows <- MA.executeQuery (Sql.checkGateSQL schemaName intervalSecs task)
+      rows <- MA.executeQuery (Sql.checkGateSQL schemaName task intervalSecs)
       pure $ fromMaybe True (listToMaybe rows)
 
     tryClaimGate = listToMaybe <$> MA.executeQuery (Sql.tryClaimGateSQL schemaName task intervalSecs)
@@ -152,12 +150,12 @@ data Shared a
     Unreadable Text
   deriving stock (Eq, Functor, Show)
 
--- | Run gated work or read a result published by another caller. Return
--- 'Nothing' if there is no result newer than @maxAge@. The work starts after
--- the gate transaction commits. A slow operation does not retain the gate row
--- or a read snapshot. The exclusion interval starts after publication. A failed
--- operation or publication restores the watermark and permits another caller
--- to run. The compensation period is limited to @interval@.
+-- | Run gated work, or read a result another caller published within @maxAge@.
+-- 'Nothing' when there is no such result. The work starts after the gate transaction
+-- commits. A slow operation does not retain the gate row or a read snapshot. The
+-- exclusion interval starts after publication. A failed operation or publication
+-- restores the watermark and permits another caller to run. The compensation period is
+-- limited to @interval@.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName

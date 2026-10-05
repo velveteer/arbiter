@@ -34,6 +34,7 @@ import UnliftIO.Async (withAsync)
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 
 -- | Connection recovery suite. The queue under test declares @()@ as its result type.
+-- It terminates other connections on the database whose query names the schema.
 connectionRecoverySpec
   :: forall payload m env
    . ( Eq payload

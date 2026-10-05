@@ -4,6 +4,7 @@ version:            0.1.0.0
 synopsis:           Embedded admin dashboard for Arbiter
 description:
   Admin dashboard for Arbiter, a PostgreSQL job queue for Haskell.
+
   A browser interface over the arbiter-servant API for inspecting and operating
   queues: job, dead-letter, and archive browsing, retries and cancellation, cron
   schedules, rate-limit and concurrency policies, queue pausing, and worker
@@ -16,7 +17,7 @@ author:             Joshua Miller
 maintainer:         joshua.ian.miller@pm.me
 category:           Web
 build-type:         Simple
-tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13
+tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -101,8 +102,8 @@ test-suite arbiter-servant-ui-openapi
   build-depends:
     , aeson
     , aeson-pretty             >=0.8 && <0.9
-    , arbiter-core
-    , arbiter-servant-openapi
+    , arbiter-core             >=0.1 && <0.2
+    , arbiter-servant-openapi  >=0.1 && <0.2
     , base                     >=4.20 && <5
     , tasty                    >=1.4 && <1.6
     , tasty-golden             >=2.3 && <2.4

@@ -108,7 +108,7 @@ export const CronView = {
       async load(stale) {
         const data = await api.cron(props.queue);
         if (stale()) return;
-        schedules.value = data.cronSchedules;
+        schedules.value = data.schedules;
         d.resync(d.close);
       },
     });

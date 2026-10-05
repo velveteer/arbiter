@@ -4,7 +4,7 @@
 -- import Arbiter.Orville.Worker
 --
 -- config <- manualWorkerConfig 5 (orvilleBatchedHandler processJob)
--- let pool = config {observabilityHooks = orvilleHooks appHooks}
+-- let config' = config {observabilityHooks = orvilleHooks appHooks}
 -- @
 module Arbiter.Orville.Worker
   ( orvilleBatchedHandler

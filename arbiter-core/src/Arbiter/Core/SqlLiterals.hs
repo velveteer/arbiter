@@ -3,17 +3,21 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- Rendering Haskell values as inline SQL literals for statements that cannot
--- use parameter binding, such as migrations and seed upserts.
+-- Haskell values rendered as inline SQL literals.
 module Arbiter.Core.SqlLiterals
   ( textLiteral
   , quoteIdentifier
   , doubleLiteral
   , intLiteral
+  , defaultMaxAttemptsSQL
+  , attemptsLeftSQL
+  , minMaxAttemptsSQL
   ) where
 
 import Data.Text (Text)
 import Data.Text qualified as T
+
+import Arbiter.Core.Job.Types (defaultMaxAttempts, minMaxAttempts)
 
 -- | A single-quoted SQL text literal, escaping embedded quotes.
 textLiteral :: Text -> Text
@@ -32,3 +36,15 @@ doubleLiteral value
 -- | An integer literal.
 intLiteral :: (Integral a) => a -> Text
 intLiteral value = T.pack (show (toInteger value))
+
+-- | 'defaultMaxAttempts' as a SQL literal.
+defaultMaxAttemptsSQL :: Text
+defaultMaxAttemptsSQL = T.pack (show defaultMaxAttempts)
+
+-- | Whether a row has attempts left. @col@ prefixes each column.
+attemptsLeftSQL :: Text -> Text
+attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
+
+-- | 'minMaxAttempts' as a SQL literal.
+minMaxAttemptsSQL :: Text
+minMaxAttemptsSQL = T.pack (show minMaxAttempts)

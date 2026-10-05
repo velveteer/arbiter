@@ -36,8 +36,8 @@ ensureGateRowSQL schemaName task =
       |]
 
 -- | Read-only pre-transaction check. @TRUE@ when @last_run_at@ is older than the interval.
-checkGateSQL :: SchemaName -> Double -> Text -> Query Bool
-checkGateSQL schemaName intervalSecs task =
+checkGateSQL :: SchemaName -> Text -> Double -> Query Bool
+checkGateSQL schemaName task intervalSecs =
   let tbl = arbiterGatesTable schemaName
    in [sql|
         SELECT (last_run_at < NOW() - (#{intervalSecs :: CFloat8}::double precision * interval '1 second'))

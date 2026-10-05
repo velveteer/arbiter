@@ -32,7 +32,7 @@ scanSnapshot
   -> m Snapshot
 scanSnapshot statementTimeout schema queueKinds = do
   overviews <- map zeroFilled <$> boundedRead (getAllQueueStats schema queueKinds)
-  (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth schema queueTables)
+  (dbHealth, tableHealth) <- boundedRead (Health.getPgHealth queueTables)
   concurrencyPolicies <- boundedRead (listConcurrencyPolicies schema)
   rateLimitPolicies <- boundedRead (listRateLimitPolicies schema [])
   pure

@@ -4,26 +4,27 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- Conversion of declared 'Policy' values to upsertable rows, plus DDL for the
--- policies table, bucket table, and job columns. No database execution here.
+-- DDL and SQL fragments for the rate-limit feature. No database execution here.
 module Arbiter.Core.RateLimit.Schema
-  ( -- * Table name helpers
+  ( -- * Table names
     arbiterRateLimitPoliciesTable
   , arbiterRateLimitPoliciesTableName
   , arbiterRateLimitsTable
   , arbiterRateLimitsTableName
 
+    -- * SQL fragments
+  , bucketSeedInsert
+
     -- * DDL
   , createRateLimitPoliciesTableSQL
   , createRateLimitsTableSQL
   , alterRateLimitsDurabilitySQL
-  , upsertPolicyRowSQL
+  , upsertRateLimitPolicyRowSQL
   , addRateLimitColumnsSQL
   , addRateLimitCostColumnSQL
   , createThrottledIndexSQL
   , createRateLimitBucketTriggerFunctionsSQL
   , createRateLimitBucketTriggersSQL
-  , bucketSeedInsert
   ) where
 
 import Data.Text (Text)
@@ -40,7 +41,7 @@ import Arbiter.Core.Job.Schema
   , maintenanceFunctionNames
   , statementTriggerSQL
   )
-import Arbiter.Core.RateLimit.Spec (Durability (..), Policy (..))
+import Arbiter.Core.RateLimit.Spec (Durability (..), RateLimitPolicy (..))
 import Arbiter.Core.SqlLiterals (doubleLiteral, quoteIdentifier, textLiteral)
 
 -- | Qualified name of the app-global policies table.
@@ -52,7 +53,7 @@ arbiterRateLimitPoliciesTable schemaName =
 arbiterRateLimitPoliciesTableName :: Text
 arbiterRateLimitPoliciesTableName = "arbiter_rate_limit_policies"
 
--- | Bare (unqualified) name of the bucket table, for catalog lookups by relname.
+-- | Bare name of the bucket table, for catalog lookups by relname.
 arbiterRateLimitsTableName :: Text
 arbiterRateLimitsTableName = "arbiter_rate_limits"
 
@@ -93,8 +94,8 @@ createRateLimitsTableSQL schemaName =
 -- | Converge the bucket table's WAL persistence to a durability. Rewrites the
 -- table under @ACCESS EXCLUSIVE@. Callers issue it when the durability differs
 -- from the current state.
-alterRateLimitsDurabilitySQL :: Durability -> SchemaName -> Text
-alterRateLimitsDurabilitySQL dur schemaName =
+alterRateLimitsDurabilitySQL :: SchemaName -> Durability -> Text
+alterRateLimitsDurabilitySQL schemaName dur =
   "ALTER TABLE " <> arbiterRateLimitsTable schemaName <> set <> ";"
   where
     set = case dur of
@@ -102,8 +103,8 @@ alterRateLimitsDurabilitySQL dur schemaName =
       Unlogged -> " SET UNLOGGED"
 
 -- | Upsert a policy's @default_*@ params. Any operator @override_*@ is left untouched.
-upsertPolicyRowSQL :: SchemaName -> Policy -> Text
-upsertPolicyRowSQL schemaName policy =
+upsertRateLimitPolicyRowSQL :: SchemaName -> RateLimitPolicy -> Text
+upsertRateLimitPolicyRowSQL schemaName policy =
   policyUpsertSQL
     (arbiterRateLimitPoliciesTable schemaName)
     (textLiteral (policyPrefix policy))
@@ -113,8 +114,8 @@ upsertPolicyRowSQL schemaName policy =
     ]
 
 -- | Migration adding the rate-limit columns to a queue's job and DLQ tables. All
--- nullable. @throttled_until@ (job table only) marks a throttle-deferred grouped
--- head in-flight. Its group stays stalled and spends no attempt.
+-- nullable. @throttled_until@ (job table only) marks a throttle-deferred job. A
+-- deferred grouped job holds its group's in-flight slot. A deferral spends no attempt.
 addRateLimitColumnsSQL :: SchemaName -> TableName -> Text
 addRateLimitColumnsSQL schemaName tableName =
   T.unlines
@@ -139,9 +140,9 @@ addRateLimitCostColumnSQL schemaName tableName =
         <> " ADD COLUMN IF NOT EXISTS rate_limit_cost DOUBLE PRECISION NOT NULL DEFAULT 1;"
     ]
 
--- | Statement-level triggers that ensure a full token bucket row exists for every
+-- | Per-queue trigger functions that seed a full token bucket row for each
 -- rate-limited job's key whose prefix has a policy. Tokens are spent at claim and
--- refill over time. There is no delete trigger. Key creation or a dedup-replace key
+-- refill over time. There is no delete function. Key creation or a dedup-replace key
 -- move seeds a row.
 createRateLimitBucketTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createRateLimitBucketTriggerFunctionsSQL schemaName tableName =
@@ -235,7 +236,7 @@ createRateLimitBucketTriggersSQL schemaName tableName =
         ]
         <> "\n"
 
--- | Index backing the throttle wake and per-prefix count, in its own migration. The
+-- | Index backing the throttle wake and per-prefix count. The
 -- prefix leads and @rate_limit_key@ trails.
 createThrottledIndexSQL :: SchemaName -> TableName -> Text
 createThrottledIndexSQL schemaName tableName =

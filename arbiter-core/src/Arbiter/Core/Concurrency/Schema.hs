@@ -62,7 +62,7 @@ arbiterConcurrencyPoliciesTable schemaName =
 arbiterConcurrencyPoliciesTableName :: Text
 arbiterConcurrencyPoliciesTableName = "arbiter_concurrency_policies"
 
--- | The per-key advisory lock id, identical for the enqueue trigger and the prune.
+-- | The per-key advisory lock id.
 concurrencyAdvisoryLockExpr :: Text -> Text
 concurrencyAdvisoryLockExpr key =
   "hashtextextended('arbiter_conc:' || " <> key <> ", 0)"
@@ -101,7 +101,7 @@ addConcurrencyColumnsSQL schemaName tableName =
     , "ALTER TABLE " <> jobQueueDLQTable schemaName tableName <> " ADD COLUMN IF NOT EXISTS concurrency_prefix TEXT;"
     ]
 
--- | Index backing the per-key in-flight recount, over claimed jobs.
+-- | Partial index on @concurrency_key@ over keyed jobs, for the recount and the prune.
 createConcurrencyIndexSQL :: SchemaName -> TableName -> Text
 createConcurrencyIndexSQL schemaName tableName =
   indexSQL

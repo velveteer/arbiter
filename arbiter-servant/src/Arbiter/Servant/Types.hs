@@ -28,7 +28,6 @@ module Arbiter.Servant.Types
   , ClaimRequest (..)
   , ClaimResponse (..)
   , JobLease (..)
-  , jobLeasePairs
   , AckRequest (..)
   , ExtendRequest (..)
 
@@ -68,6 +67,7 @@ module Arbiter.Servant.Types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   , QueueOverview (..)
+  , QueueStats (..)
   , QueueRow (..)
   , WorkerRow (..)
   , RateLimitPolicyView (..)
@@ -78,6 +78,11 @@ module Arbiter.Servant.Types
   , ConcurrencyPolicyUpdate (..)
   , PgDbHealth (..)
   , GroupSummary (..)
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
+  , jobLeasePairs
   ) where
 
 import Arbiter.Core.Concurrency.Stats
@@ -92,7 +97,7 @@ import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Types (JobRead, JobStatus, JobWrite, Stored, jobReadPairs, jobReadSeries)
 import Arbiter.Core.Job.Types qualified as Arb
-import Arbiter.Core.Operations (GroupSummary (..), QueueOverview (..), QueueStats)
+import Arbiter.Core.Operations (GroupSummary (..), QueueOverview (..), QueueStats (..))
 import Arbiter.Core.Queues (QueueRow (..))
 import Arbiter.Core.RateLimit.Stats
   ( RateLimitBucketView (..)
@@ -133,16 +138,16 @@ import Servant.API (Accept (..), JSON, MimeUnrender (..))
 -- | A job row plus its SQL-derived status, for the list and detail endpoints.
 data ApiJobWithStatus payload = ApiJobWithStatus
   { ajwsJob :: JobRead payload
+  -- ^ The job. Its fields are flattened into the object.
   , ajwsStatus :: JobStatus
   }
   deriving stock (Eq, Show)
 
--- | Write-side job type for REST API insertion.
---
--- Accepts @payload@, @groupKey@, @priority@, @notVisibleUntil@, @dedupKey@,
--- @maxAttempts@, and @archiveFor@. Fields like @parentId@, @parentState@, and @suspended@
--- are managed internally and cannot be set through the REST API.
-newtype ApiJobWrite payload = ApiJobWrite {unApiJobWrite :: JobWrite payload}
+-- | Write-side job for REST insertion. Lineage, suspension and trace fields are not settable.
+newtype ApiJobWrite payload = ApiJobWrite
+  { unApiJobWrite :: JobWrite payload
+  -- ^ The job to insert. Its settable fields are flattened into the object.
+  }
   deriving newtype (Eq, Show)
 
 instance (ToJSON payload) => ToJSON (ApiJobWithStatus payload) where
@@ -207,7 +212,9 @@ parsePage :: (FromJSON a) => Object -> Parser (Page a)
 parsePage obj = Page <$> obj .: "items" <*> obj .: "total" <*> obj .: "offset" <*> obj .: "limit"
 
 -- | A list of rows without a total.
-newtype Items a = Items {items :: [a]}
+newtype Items a = Items
+  { items :: [a]
+  }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -225,6 +232,7 @@ newtype JobResponse a = JobResponse
 -- | A page of jobs with their tree counts.
 data JobsResponse payload = JobsResponse
   { jobsPage :: Page (ApiJobWithStatus (Stored payload))
+  -- ^ The page. Its fields are flattened into the object.
   , childCounts :: Map Int64 Int64
   -- ^ Child count, keyed by the id of each parent on the page.
   , pausedParents :: [Int64]
@@ -259,7 +267,9 @@ data ClaimRequest = ClaimRequest
 
 -- | Jobs returned by one claim. Each job contains the lease fields required for
 -- finalization.
-newtype ClaimResponse payload = ClaimResponse {jobs :: [JobRead payload]}
+newtype ClaimResponse payload = ClaimResponse
+  { jobs :: [JobRead payload]
+  }
   deriving stock (Eq, Generic, Show)
   deriving (FromJSON, ToJSON) via Generically (ClaimResponse payload)
 
@@ -284,6 +294,7 @@ instance ToJSON JobLease where
 -- | A lease and an optional stored result. An absent result performs a plain ack.
 data AckRequest result = AckRequest
   { arLease :: JobLease
+  -- ^ The lease. Its fields are flattened into the object.
   , arResult :: Maybe result
   }
   deriving stock (Eq, Show)
@@ -298,8 +309,9 @@ instance (ToJSON result) => ToJSON (AckRequest result) where
 -- | A lease plus the window to hide the job for, counted from now.
 data ExtendRequest = ExtendRequest
   { erLease :: JobLease
+  -- ^ The lease. Its fields are flattened into the object.
   , erSeconds :: Double
-  -- ^ Seconds, clamped to 1 to 3600.
+  -- ^ Clamped to 1 to 3600.
   }
   deriving stock (Eq, Show)
 
@@ -314,7 +326,9 @@ instance ToJSON ExtendRequest where
 -- operation in neither was skipped.
 data MaintenanceResponse = MaintenanceResponse
   { maintenanceOps :: Map Text Int64
+  -- ^ Rows touched, keyed by operation name.
   , maintenanceFailed :: [Text]
+  -- ^ Names of the operations that raised.
   }
   deriving stock (Eq, Show)
 
@@ -344,7 +358,9 @@ instance (FromJSON a) => MimeUnrender OptionalJSON (Maybe a) where
     | otherwise = Just <$> eitherDecode body
 
 -- | A replacement payload for a retry or a re-enqueue.
-newtype PayloadEdit payload = PayloadEdit {editPayload :: payload}
+newtype PayloadEdit payload = PayloadEdit
+  { editPayload :: payload
+  }
   deriving stock (Eq, Show)
 
 instance (FromJSON payload) => FromJSON (PayloadEdit payload) where
@@ -361,7 +377,9 @@ data RescheduleRequest = RescheduleRequest
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Tokens to add to one rate-limit bucket.
-newtype AddTokensRequest = AddTokensRequest {addedTokens :: Double}
+newtype AddTokensRequest = AddTokensRequest
+  { addedTokens :: Double
+  }
   deriving stock (Eq, Show)
 
 instance FromJSON AddTokensRequest where
@@ -393,8 +411,8 @@ type DLQResponse payload = Page (DLQ.DLQJob (Stored payload))
 -- | Queue statistics response.
 data StatsResponse = StatsResponse
   { stats :: QueueStats
-  , timestamp :: Text
-  -- ^ When the stats were read, as @YYYY-MM-DDTHH:MM:SS+HHMM@.
+  , timestamp :: UTCTime
+  -- ^ When the stats were read.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -409,13 +427,14 @@ data AllStatsResponse = AllStatsResponse
 -- | Queues list response.
 data QueuesResponse = QueuesResponse
   { queues :: [Text]
+  -- ^ Queue table names.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Request body for batch job insert.
 newtype BatchInsertRequest payload = BatchInsertRequest
-  { jobWrites :: [ApiJobWrite payload]
+  { jobs :: [ApiJobWrite payload]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -443,9 +462,11 @@ data BatchDeleteResponse = BatchDeleteResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- | A cron schedule row plus the next tick its effective expression fires at.
--- An expression that never fires again, or one the server cannot parse, has none.
+-- A disabled schedule, an expression that never fires again, or one the server
+-- cannot parse has none.
 data CronScheduleView = CronScheduleView
   { schedule :: CronScheduleRow
+  -- ^ The row. Its fields are flattened into the object.
   , nextRunAt :: Maybe UTCTime
   }
   deriving stock (Eq, Generic, Show)
@@ -462,7 +483,7 @@ instance FromJSON CronScheduleView where
 
 -- | Cron schedules response.
 data CronSchedulesResponse = CronSchedulesResponse
-  { cronSchedules :: [CronScheduleView]
+  { schedules :: [CronScheduleView]
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -484,7 +505,7 @@ data RateLimitPoliciesResponse = RateLimitPoliciesResponse
 -- | Rate-limit buckets response (one prefix's keys).
 type RateLimitBucketsResponse = Items RateLimitBucketView
 
--- | Number of buckets cleared by a reset.
+-- | Number of buckets a reset refilled to full.
 data RateLimitResetResponse = RateLimitResetResponse
   { reset :: Int64
   }
@@ -509,7 +530,11 @@ data ConcurrencyReconcileResponse = ConcurrencyReconcileResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- | Whether the API can reach its database.
-data HealthStatus = Ok | Down
+data HealthStatus
+  = -- | The database answered.
+    Ok
+  | -- | The database did not answer.
+    Down
   deriving stock (Bounded, Enum, Eq, Generic, Show)
 
 instance ToJSON HealthStatus where
@@ -528,11 +553,13 @@ healthStatusToText = \case
 data HealthResponse = HealthResponse
   { status :: HealthStatus
   , schemaName :: Text
+  -- ^ The schema the API serves.
   , checkedAt :: UTCTime
+  -- ^ When the probe finished.
   , dbLatencyMs :: Maybe Double
-  -- ^ 'Nothing' when the database could not be reached.
+  -- ^ Null when the database could not be reached.
   , db :: Maybe PgDbHealth
-  -- ^ Connection and age counters, absent when the database is unreachable.
+  -- ^ Connection and age counters. Null when the database is unreachable or reports no row.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

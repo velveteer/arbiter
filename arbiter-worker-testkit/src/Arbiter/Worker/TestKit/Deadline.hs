@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Fence tests: the deadlines the worker holds a handler to without asking the database.
+-- | Heartbeat guard, lease fence, and job deadline tests, instantiated for each backend.
 module Arbiter.Worker.TestKit.Deadline (deadlineSpec) where
 
 import Arbiter.Core.Exceptions (JobForceCancelled (..))

@@ -1,11 +1,37 @@
 -- | postgresql-simple primitives for writing a custom
 -- 'Arbiter.Core.MonadArbiter.MonadArbiter' instance.
+--
+-- Handlers receive a @Database.PostgreSQL.Simple.Connection@ for running queries
+-- inside the worker transaction:
+--
+-- @
+-- import Arbiter.Simple.MonadArbiter
+-- import Database.PostgreSQL.Simple (Connection)
+--
+-- instance MonadArbiter MyApp where
+--   type RegistryOf MyApp = MyRegistry
+--   type Handler MyApp job result = Connection -> job -> MyApp result
+--   getSchema                = asks appSchema
+--   executeQuery             = simpleExecuteQuery
+--   executeStatement         = simpleExecuteStatement
+--   withDbTransaction        = simpleWithDbTransaction
+--   runHandlerWithConnection = simpleRunHandlerWithConnection
+--   getListener              = asks appListener
+-- @
+--
+-- The primitives also need a @HasPoolState Connection MyApp@ instance. See
+-- 'Arbiter.Simple.SimpleDb.HasPoolState'.
+--
+-- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
+-- 'Arbiter.Core.MonadArbiter.Handler' at that queue's job and declared result types.
 module Arbiter.Simple.MonadArbiter
   ( -- * MonadArbiter implementation
     simpleExecuteQuery
   , simpleExecuteStatement
   , simpleWithDbTransaction
   , simpleRunHandlerWithConnection
+
+    -- * Connection
   , simpleWithConnection
   ) where
 

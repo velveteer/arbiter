@@ -27,13 +27,14 @@ import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (jobRowCodec)
-import Arbiter.Core.Job.Schema (jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
-import Arbiter.Core.Job.Types (JobRead, Stored, defaultMaxAttemptsSQL)
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueDLQTable, jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Types (JobRead, Stored)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
 import Arbiter.Core.Sql.Jobs (dlqCarriedCols, jobColumns, requeuedCols, requeuedValsEditing)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL)
 
 -- | Whether a DLQ move re-checks the attempt budget it was selected on.
 data DLQMove
@@ -54,7 +55,7 @@ sweepableGuard =
 
 -- | Move a job to the DLQ in one statement. Copy each job column and the
 -- failure message.
-moveToDLQSQL :: DLQMove -> Text -> Text -> Int64 -> Int64 -> Text -> Query Int64
+moveToDLQSQL :: DLQMove -> SchemaName -> TableName -> Int64 -> Int64 -> Text -> Query Int64
 moveToDLQSQL move schema tableName jobId cseq errorMsg =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
@@ -73,10 +74,8 @@ moveToDLQSQL move schema tableName jobId cseq errorMsg =
         SELECT count(*) AS @{count :: CInt8} FROM deleted_job
       |]
 
--- | Select up to @limit@ claimable jobs that reached their attempt limit.
--- Include the scalar fields required by the tree-aware DLQ operation. Process a
--- large backlog in multiple bounded passes.
-selectExhaustedJobsSQL :: Text -> Text -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
+-- | Up to @limit@ visible, unsuspended, uncancelled jobs with no attempts left.
+selectExhaustedJobsSQL :: SchemaName -> TableName -> Int -> Query (Int64, Int64, Maybe Int64, Bool)
 selectExhaustedJobsSQL schema tableName limit =
   let tbl = jobQueueTable schema tableName
       lim = T.pack (show limit)
@@ -91,11 +90,12 @@ selectExhaustedJobsSQL schema tableName limit =
 
 -- | Retry a DLQ job and its complete DLQ tree in one statement. Any member
 -- identifies the tree. Restore the root, all descendants in the DLQ, and their
--- finalizers. Keep a finalizer suspended when it has restored children. Make it
--- ready when it has no children. Refuse a root whose parent is absent from the
+-- finalizers. Keep a finalizer suspended when it has children in the retry or the
+-- main queue. Make it ready when it has no children. Re-suspend a main-queue
+-- rollup parent that gains restored children. Refuse a root whose parent is absent from the
 -- main queue. Remove the deduplication key during the retry. An @edit@ replaces
--- its columns on the target row only.
-retryFromDLQSQL :: Text -> Text -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
+-- its columns on the target row only. Returns the target's restored row.
+retryFromDLQSQL :: SchemaName -> TableName -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
 retryFromDLQSQL schema tableName dlqId edit =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
@@ -145,7 +145,7 @@ retryFromDLQSQL schema tableName dlqId edit =
           WHERE parent_state IS NOT NULL
             AND id IN (SELECT DISTINCT parent_id FROM inserted WHERE parent_id IS NOT NULL)
             AND NOT suspended
-            AND NOT (attempts > 0 AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
+            AND NOT (claimed_by IS NOT NULL AND not_visible_until IS NOT NULL AND not_visible_until > NOW())
         )
         SELECT ${jobColumns} FROM inserted WHERE id = (SELECT job_id FROM target)
       |]
@@ -195,14 +195,14 @@ dlqRetryTreeCte dlqTbl tbl dlqId =
   |]
 
 -- | The main-queue parent of the tree a DLQ retry restores.
-dlqRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
+dlqRetryParentSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 dlqRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId ""
 
 -- | Lock the main-queue parent of the tree a DLQ retry restores.
-lockDLQRetryParentSQL :: Text -> Text -> Int64 -> Query Int64
+lockDLQRetryParentSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 lockDLQRetryParentSQL schema tableName dlqId = dlqRetryParent schema tableName dlqId "FOR UPDATE"
 
-dlqRetryParent :: Text -> Text -> Int64 -> Text -> Query Int64
+dlqRetryParent :: SchemaName -> TableName -> Int64 -> Text -> Query Int64
 dlqRetryParent schema tableName dlqId lockClause =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
@@ -216,7 +216,7 @@ dlqRetryParent schema tableName dlqId lockClause =
 
 -- | Create and lock, in key order, the group summaries of the tree a DLQ retry restores
 -- and of its parent.
-lockDLQRetryGroupsSQL :: Text -> Text -> Int64 -> Query ()
+lockDLQRetryGroupsSQL :: SchemaName -> TableName -> Int64 -> Query ()
 lockDLQRetryGroupsSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
       tbl = jobQueueTable schema tableName
@@ -243,14 +243,14 @@ targetEdited column =
   [text|CASE WHEN dead.job_id = (SELECT job_id FROM target) THEN edit.${column} ELSE dead.${column} END|]
 
 -- | Whether a DLQ job with the given id exists.
-dlqJobExistsSQL :: Text -> Text -> Int64 -> Query Bool
+dlqJobExistsSQL :: SchemaName -> TableName -> Int64 -> Query Bool
 dlqJobExistsSQL schema tableName dlqId =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|SELECT EXISTS (SELECT 1 FROM ${dlqTbl} WHERE id = #{dlqId :: CInt8}) AS @{result :: CBool}|]
 
--- | 'moveToDLQSQL' over @unnest@ed @(id, claim_seq, error_msg)@ arrays, locking
--- descending to match ack. Returns the ids moved.
-moveToDLQBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Text] -> Query Int64
+-- | 'moveToDLQSQL' over @unnest@ed @(id, claim_seq, error_msg)@ arrays. Locks rows in
+-- descending id order. Returns the ids moved.
+moveToDLQBatchSQL :: SchemaName -> TableName -> [Int64] -> [Int64] -> [Text] -> Query Int64
 moveToDLQBatchSQL schema tableName ids cseqs errs =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
@@ -278,7 +278,7 @@ moveToDLQBatchSQL schema tableName ids cseqs errs =
       |]
 
 -- | Delete DLQ jobs by id, returning each one's parent id.
-deleteDLQJobsBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Maybe Int64)
+deleteDLQJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
 deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|
@@ -287,13 +287,13 @@ deleteDLQJobsBatchSQL schema tableName dlqIds =
       |]
 
 -- | The parents of the given DLQ rows.
-dlqParentIdsSQL :: Text -> Text -> [Int64] -> Query (Maybe Int64)
+dlqParentIdsSQL :: SchemaName -> TableName -> [Int64] -> Query (Maybe Int64)
 dlqParentIdsSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|SELECT @{parent_id :: Maybe CInt8} FROM ${dlqTbl} WHERE id = ANY(#{dlqIds :: [CInt8]})|]
 
 -- | Move every descendant of a rollup parent to the DLQ alongside it.
-cascadeChildrenToDLQSQL :: Text -> Text -> Int64 -> Text -> Query Int64
+cascadeChildrenToDLQSQL :: SchemaName -> TableName -> Int64 -> Text -> Query Int64
 cascadeChildrenToDLQSQL schema tableName parentId errorMsg =
   let tbl = jobQueueTable schema tableName
       dlqTbl = jobQueueDLQTable schema tableName
@@ -317,7 +317,7 @@ cascadeChildrenToDLQSQL schema tableName parentId errorMsg =
       |]
 
 -- | DLQ child count per parent, over a set of job ids.
-countDLQChildrenBatchSQL :: Text -> Text -> [Int64] -> Query (Int64, Int64)
+countDLQChildrenBatchSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Int64)
 countDLQChildrenBatchSQL schema tableName jobIds =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|

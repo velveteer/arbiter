@@ -1,8 +1,11 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Types for the @cron_schedules@ table.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Types for the @cron_schedules@ table.
 --
 -- Code-defined defaults and user overrides sit in separate columns. Worker startup
 -- upserts the defaults. An override survives every deploy.
@@ -41,33 +44,43 @@ import Data.Text qualified as T
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
+import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 import Arbiter.Core.SqlLiterals (quoteIdentifier)
 
 -- | A row from the @cron_schedules@ table.
 data CronScheduleRow = CronScheduleRow
   { name :: Text
+  -- ^ Schedule name.
   , queueName :: Text
+  -- ^ The queue the schedule inserts into.
   , defaultExpression :: Text
+  -- ^ Code-defined cron expression.
   , defaultOverlap :: Text
   -- ^ Code-defined overlap policy: @SkipOverlap@ or @AllowOverlap@.
   , defaultTimezone :: Maybe Text
-  -- ^ Code-defined IANA tz name. @NULL@ = UTC.
+  -- ^ Code-defined IANA tz name. 'Nothing' means UTC.
   , overrideExpression :: Maybe Text
+  -- ^ User override. 'Nothing' uses the default.
   , overrideOverlap :: Maybe Text
-  -- ^ User override: @SkipOverlap@ or @AllowOverlap@. @NULL@ = use default.
+  -- ^ User override: @SkipOverlap@ or @AllowOverlap@. 'Nothing' uses the default.
   , overrideTimezone :: Maybe Text
-  -- ^ User override. @NULL@ = use default. To force UTC when the default is
+  -- ^ User override. 'Nothing' uses the default. To force UTC when the default is
   -- not UTC, set to @\"UTC\"@.
   , enabled :: Bool
+  -- ^ A disabled schedule fires no jobs.
   , lastFiredAt :: Maybe UTCTime
+  -- ^ The minute of the last tick that fired. 'Nothing' when it never fired.
   , lastCheckedAt :: Maybe UTCTime
+  -- ^ How far the scheduler has checked for ticks. 'Nothing' when it never checked.
   , runRequestedAt :: Maybe UTCTime
-  -- ^ Manual run awaiting a worker pool. @NULL@ = none pending.
+  -- ^ Manual run awaiting a worker pool. 'Nothing' when none is pending.
   , lastManualRunAt :: Maybe UTCTime
-  -- ^ When a manual run last fired a job. @NULL@ = never.
+  -- ^ When a manual run last fired a job. 'Nothing' when it never fired.
   , createdAt :: UTCTime
+  -- ^ When the row was created.
   , updatedAt :: UTCTime
+  -- ^ When the row last changed.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -84,13 +97,17 @@ effectiveOverlap CronScheduleRow {defaultOverlap = def, overrideOverlap = mOvr} 
 effectiveTimezone :: CronScheduleRow -> Maybe Text
 effectiveTimezone CronScheduleRow {defaultTimezone = mDef, overrideTimezone = mOvr} = mOvr <|> mDef
 
--- | A patch over a cron schedule's overrides. 'Nothing' leaves a field unchanged, @Just
--- Nothing@ clears the override back to the default, @Just (Just v)@ sets it.
+-- | A patch over a cron schedule's overrides. 'Nothing' leaves a field unchanged,
+-- @Just Nothing@ clears the override back to the default, @Just (Just v)@ sets it.
 data CronScheduleUpdate = CronScheduleUpdate
   { overrideExpression :: Maybe (Maybe Text)
+  -- ^ The cron expression override.
   , overrideOverlap :: Maybe (Maybe Text)
+  -- ^ The overlap policy override.
   , overrideTimezone :: Maybe (Maybe Text)
+  -- ^ The timezone override.
   , enabled :: Maybe Bool
+  -- ^ The enabled flag. @Just@ sets it.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -113,8 +130,8 @@ instance FromJSON CronScheduleUpdate where
         , enabled = enabledPatch
         }
 
--- | Qualified table name for the cron_schedules table.
-cronSchedulesTable :: Text -> Text
+-- | Qualified table name for the @cron_schedules@ table.
+cronSchedulesTable :: SchemaName -> Text
 cronSchedulesTable schemaName = quoteIdentifier schemaName <> "." <> cronSchedulesTableName
 
 -- | Bare name of the cron table, for catalog lookups by relname.
@@ -122,7 +139,7 @@ cronSchedulesTableName :: Text
 cronSchedulesTableName = "cron_schedules"
 
 -- | DDL for the @cron_schedules@ table.
-createCronSchedulesTableSQL :: Text -> Text
+createCronSchedulesTableSQL :: SchemaName -> Text
 createCronSchedulesTableSQL schemaName =
   T.unlines
     [ "CREATE TABLE IF NOT EXISTS " <> cronSchedulesTable schemaName <> " ("
@@ -140,26 +157,26 @@ createCronSchedulesTableSQL schemaName =
     ]
 
 -- | Idempotent migration adding the timezone columns to an existing table.
-addTimezoneColumnSQL :: Text -> Text
+addTimezoneColumnSQL :: SchemaName -> Text
 addTimezoneColumnSQL schemaName =
   T.unlines
     [ "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS default_timezone TEXT;"
     , "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS override_timezone TEXT;"
     ]
 
--- | Migration adding the queue name column.
-addQueueNameColumnSQL :: Text -> Text
+-- | Idempotent migration adding the queue name column to an existing table.
+addQueueNameColumnSQL :: SchemaName -> Text
 addQueueNameColumnSQL schemaName =
   "ALTER TABLE "
     <> cronSchedulesTable schemaName
     <> " ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'pre-migration';"
 
 -- | Idempotent migration adding the manual run-request column to an existing table.
-addRunRequestedColumnSQL :: Text -> Text
+addRunRequestedColumnSQL :: SchemaName -> Text
 addRunRequestedColumnSQL schemaName =
   "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS run_requested_at TIMESTAMPTZ;"
 
--- | Idempotent migration adding the manual run-completed column to an existing table.
-addLastManualRunColumnSQL :: Text -> Text
+-- | Idempotent migration adding the manual last-run column to an existing table.
+addLastManualRunColumnSQL :: SchemaName -> Text
 addLastManualRunColumnSQL schemaName =
   "ALTER TABLE " <> cronSchedulesTable schemaName <> " ADD COLUMN IF NOT EXISTS last_manual_run_at TIMESTAMPTZ;"

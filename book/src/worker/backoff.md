@@ -11,8 +11,8 @@ config { Worker.jitter = EqualJitter }  -- delay/2 + random(0, delay/2) (default
 config { Worker.jitter = NoJitter }
 ```
 
-The first failure is attempt 1. `exponentialBackoff 2.0` waits two seconds
-before the first retry.
+The first failure is attempt 1. With the default `EqualJitter`,
+`exponentialBackoff 2.0` waits 1 to 2 seconds before the first retry.
 
 A nack skips the backoff. The job stays invisible for the rest of its lease.
 Set the visibility timeout before the nack to change that.

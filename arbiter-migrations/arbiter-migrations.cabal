@@ -4,6 +4,7 @@ version:            0.1.0.0
 synopsis:           Schema migrations and trigger reconciliation for Arbiter
 description:
   Schema migrations for Arbiter, a PostgreSQL job queue for Haskell.
+
   Derives the DDL for a type-level queue registry and applies it as tracked,
   checksummed migrations. Optional notification and event-streaming triggers are
   reconciled to the declared configuration on every run, so enabling or disabling
@@ -17,7 +18,7 @@ author:             Joshua Miller
 maintainer:         joshua.ian.miller@pm.me
 category:           Database
 build-type:         Simple
-tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13
+tested-with:        GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -48,7 +49,7 @@ library
   build-depends:
     , arbiter-core          >=0.1  && <0.2
     , base                  >=4.20 && <5
-    , bytestring            >=0.10 && <0.13
+    , bytestring            >=0.10.12 && <0.13
     , containers            >=0.6  && <0.9
     , postgresql-libpq      >=0.10 && <0.12
     , postgresql-migration  >=0.2  && <0.3
@@ -62,12 +63,12 @@ test-suite arbiter-migrations-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
-    , aeson                 >=2.0  && <2.3
+    , aeson                 >=2.2  && <2.3
     , arbiter-core          >=0.1  && <0.2
     , arbiter-migrations
     , async                 >=2.2  && <2.3
     , base                  >=4.20 && <5
-    , bytestring            >=0.10 && <0.13
+    , bytestring            >=0.10.12 && <0.13
     , filepath              >=1.4  && <1.6
     , postgresql-migration  >=0.2  && <0.3
     , postgresql-simple     >=0.6  && <0.8

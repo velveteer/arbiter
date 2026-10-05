@@ -79,7 +79,7 @@ newArbiterMeters meterProvider = do
       meter
       (Name.metricName Name.HandlerDuration)
       (Just "s")
-      (Just "Seconds a job spent in the handler (a batched pool records its batch's span for each job)")
+      (Just "Seconds a job spent in the handler. A batched pool records the batch duration for each job.")
       durationBuckets
 
 -- | Second-scale histogram bounds.

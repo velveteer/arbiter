@@ -42,7 +42,7 @@ benchmark benchmarks
   other-modules:  BenchHasql
   ghc-options:    -threaded -rtsopts "-with-rtsopts=-N -A128m"
   build-depends:
-    , aeson                 >=2.0
+    , aeson                 >=2.2
     , arbiter-core          >=0.1  && <0.2
     , arbiter-hasql         >=0.1  && <0.2
     , arbiter-migrations    >=0.1  && <0.2
@@ -52,7 +52,7 @@ benchmark benchmarks
     , arbiter-worker        >=0.1  && <0.2
     , async                 >=2.2
     , base                  >=4.20 && <5
-    , bytestring            >=0.10
+    , bytestring            >=0.10.12
     , hs-opentelemetry-api  >=1.0
     , hs-opentelemetry-sdk  >=1.0
     , orville-postgresql    >=1.0
@@ -61,7 +61,7 @@ benchmark benchmarks
     , tasty                 >=1.4
     , tasty-bench           >=0.3
     , text                  >=1.2
-    , time                  >=1.9
+    , time                  >=1.12
     , transformers          >=0.5
 
   if flag(hasql2)

@@ -7,31 +7,35 @@
 module Arbiter.Core.Trace
   ( -- * Job trace context
     TraceContext (..)
-  , stampTraceContext
 
     -- * Tracer
   , Tracer
-  , resolveTracer
 
     -- * Producer
   , currentTraceContext
   , withPublishSpan
 
     -- * Consumer
-  , ConsumeSpan
-  , ConsumeShape (..)
-  , toConsumeShape
-  , consumeSpanFor
-  , withConsumeSpan
   , withJobParent
-  , capturingContext
-  , capturingContextIO
 
     -- * Span enrichment
     -- $enrichment
   , markSpanError
   , recordJobFailure
   , recordJobCancelled
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
+  , ConsumeSpan
+  , ConsumeShape (..)
+  , toConsumeShape
+  , consumeSpanFor
+  , withConsumeSpan
+  , resolveTracer
+  , capturingContext
+  , capturingContextIO
+  , stampTraceContext
   ) where
 
 import Control.Applicative ((<|>))
@@ -112,7 +116,7 @@ currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
           (parent, state) <- encodeSpanContext activeSpan
           pure (Just (TraceContext (decodeUtf8 parent) (decodeUtf8 state <$ guard (not (BS.null state)))))
 
--- | Resolve the arbiter tracer once, or 'Nothing' when nothing is collecting.
+-- | Resolve the arbiter tracer, or 'Nothing' when nothing is collecting.
 resolveTracer :: (MonadIO m) => m (Maybe Tracer)
 resolveTracer = do
   provider <- getGlobalTracerProvider
@@ -153,7 +157,8 @@ markSpanError msg = withActiveSpan (\activeSpan -> setStatus activeSpan (Error m
 recordJobFailure :: (MonadIO m) => JobRead payload -> Text -> m ()
 recordJobFailure = jobEvent "job.failed" "arbiter.job.failure_reason"
 
--- | Record one job's cancellation as an event on the active span.
+-- | Record one job's cancellation as an event on the active span. A no-op when none is
+-- active.
 recordJobCancelled :: (MonadIO m) => JobRead payload -> Text -> m ()
 recordJobCancelled = jobEvent "job.cancelled" "arbiter.job.cancel_reason"
 
@@ -191,7 +196,7 @@ data ConsumeShape
 toConsumeShape :: Int -> ConsumeShape
 toConsumeShape n = if n > 1 then PerBatch else PerJob
 
--- | The consumer-span shape for a queue.
+-- | A queue's consumer-span name and attributes, under the given shape.
 consumeSpanFor :: TableName -> ConsumeShape -> ConsumeSpan
 consumeSpanFor queue shape =
   ConsumeSpan

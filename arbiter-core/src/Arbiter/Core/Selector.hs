@@ -3,6 +3,7 @@
 -- migration initialization.
 module Arbiter.Core.Selector
   ( Selector
+  , Prim
   , field
   , usePolicy
   , runSelector
@@ -59,8 +60,8 @@ usesAnyPolicy = any isUse . getEffects
     isUse (UsePolicy _ _) = True
     isUse (ReadField _) = False
 
--- | Select between two selectors with a job predicate. Policy collection
--- inspects both branches.
+-- | The first selector when the predicate holds, else the second. Policy
+-- collection inspects both branches.
 chooseWhen
   :: (payload -> Bool)
   -> Selector policy payload a

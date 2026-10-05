@@ -5,11 +5,12 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Orville
+-- import Control.Monad (void)
 --
 -- enqueue :: (MonadOrville m, MonadUnliftIO m) => m ()
 -- enqueue =
---   runOrvilleDb \@MyRegistry (OrvilleEnv "arbiter" Nothing) $
---     insertJob (defaultJob myPayload)
+--   runOrvilleDb \@MyRegistry OrvilleEnv {schema = "arbiter", listener = Nothing} $
+--     void $ insertJob (defaultJob myPayload)
 -- @
 --
 -- "Arbiter.Orville.MonadArbiter" has the primitives for an application's own instance.

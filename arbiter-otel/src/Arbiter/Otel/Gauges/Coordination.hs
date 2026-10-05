@@ -10,7 +10,7 @@ module Arbiter.Otel.Gauges.Coordination
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations (Shared (..), gateNameFor, micros, runGatedShared)
-import Arbiter.Worker (LogConfig, LogLevel (Warning), tryLog)
+import Arbiter.Worker.Logger (LogConfig, LogLevel (Warning), tryLog)
 import Control.Exception (SomeException)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)

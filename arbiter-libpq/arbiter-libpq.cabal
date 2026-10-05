@@ -15,8 +15,11 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
-extra-doc-files: README.md
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 homepage:        https://github.com/velveteer/arbiter
 bug-reports:     https://github.com/velveteer/arbiter/issues
 
@@ -42,5 +45,5 @@ library
   build-depends:
     , arbiter-core      >=0.1  && <0.2
     , base              >=4.20 && <5
-    , bytestring        >=0.10 && <0.13
+    , bytestring        >=0.10.12 && <0.13
     , postgresql-libpq  >=0.10 && <0.12

@@ -9,7 +9,7 @@
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
 -- Shared machinery for per-job admission policies (rate limits and concurrency
--- pools). Both kinds pick a policy and a @prefix:suffix@ key per job via a
+-- limits). Both kinds pick a policy and a @prefix:suffix@ key per job via a
 -- 'Selector', seed every policy a registry references, and store policies in a
 -- default\/override table.
 module Arbiter.Core.Admission
@@ -59,7 +59,7 @@ prefixedKeyText prefix suffix = prefix <> ":" <> suffix
 prefixedKeyToJSON :: Text -> Text -> Value
 prefixedKeyToJSON prefix suffix = object ["prefix" .= prefix, "suffix" .= suffix]
 
--- | Parse a @prefix:suffix@ key into a constructor.
+-- | Parse a JSON object with @prefix@ and @suffix@ fields into a key constructor.
 prefixedKeyParseJSON :: String -> (Text -> Text -> a) -> Value -> Parser a
 prefixedKeyParseJSON name mkKey = withObject name $ \obj -> mkKey <$> obj .: "prefix" <*> obj .: "suffix"
 
@@ -78,7 +78,7 @@ class (Ord p) => AdmissionPolicy p where
 selectNone :: Selector p payload (Maybe key)
 selectNone = pure Nothing
 
--- | Restrict by a fixed policy, keyed by a per-job suffix (e.g. a tenant id).
+-- | Restrict by a fixed policy, keyed by a per-job suffix, such as a tenant id.
 selectBy
   :: (AdmissionPolicy p)
   => (Text -> Text -> key)
@@ -109,8 +109,8 @@ policyUpsertSQL policiesTable prefixLit defaults =
 -- Registry reflection --------------------------------------------------------
 
 -- | The policies of kind @p@ a single payload's selector can reach. Each feature
--- provides an instance from its 'Arbiter.Core.RateLimit.Spec.HasRateLimit' \/
--- 'Arbiter.Core.Concurrency.Spec.HasConcurrency' selector.
+-- provides an instance from its t'Arbiter.Core.RateLimit.Spec.HasRateLimit' \/
+-- t'Arbiter.Core.Concurrency.Spec.HasConcurrency' selector.
 class CollectFor payload p where
   -- | The policies the payload's selector can reach.
   collectFor :: Set p

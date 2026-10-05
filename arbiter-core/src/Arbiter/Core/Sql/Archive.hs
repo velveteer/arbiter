@@ -25,7 +25,7 @@ import Data.Time (UTCTime)
 import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (archiveRowCodec, codecColumns, jobRowCodec, joinColumns)
-import Arbiter.Core.Job.Schema (jobQueueArchiveTable, jobQueueTable)
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueArchiveTable, jobQueueTable)
 import Arbiter.Core.Job.Types (JobRead, Stored)
 import Arbiter.Core.Sql.Insert (RowEdit (..), editJoin)
 import Arbiter.Core.Sql.Jobs (enqueuedAgainCols, enqueuedAgainValsEditing, jobColsExceptId, jobColumns)
@@ -38,9 +38,9 @@ allArchiveColumns :: Text
 allArchiveColumns = joinColumns (codecColumns (archiveRowCodec ""))
 
 -- | The @archived@ CTE teeing rows from the named @ack@ CTE into the archive, per-row
--- on @archive_for@. @archive_expires_at@ is precomputed. Shared by single and batch ack.
+-- on @archive_for@. @archive_expires_at@ is precomputed.
 -- The fragment ends with a comma, so another CTE must follow it.
-archiveAckCte :: Text -> Text -> Text -> Text
+archiveAckCte :: SchemaName -> TableName -> Text -> Text
 archiveAckCte schema tableName ackCte =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [text|
@@ -54,13 +54,13 @@ archiveAckCte schema tableName ackCte =
 
 -- | Set a completed root job's stored @result@ on its archive row. No-ops without
 -- an archive row.
-updateArchiveResultSQL :: Text -> Text -> Value -> Int64 -> Query ()
+updateArchiveResultSQL :: SchemaName -> TableName -> Value -> Int64 -> Query ()
 updateArchiveResultSQL schema tableName result jobId =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|UPDATE ${archiveTbl} SET result = #{result :: CJsonb} WHERE job_id = #{jobId :: CInt8}|]
 
 -- | 'updateArchiveResultSQL' for several jobs in one statement.
-updateArchiveResultsBatchSQL :: Text -> Text -> [Int64] -> [Value] -> Query ()
+updateArchiveResultsBatchSQL :: SchemaName -> TableName -> [Int64] -> [Value] -> Query ()
 updateArchiveResultsBatchSQL schema tableName jobIds results =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|
@@ -77,7 +77,7 @@ archivePurgeBatch :: Int
 archivePurgeBatch = 10000
 
 -- | Delete a bounded batch of archived jobs whose per-row @archive_expires_at@ has passed.
-purgeArchiveSQL :: Text -> Text -> Text
+purgeArchiveSQL :: SchemaName -> TableName -> Text
 purgeArchiveSQL schema tableName =
   let archiveTbl = jobQueueArchiveTable schema tableName
       lim = T.pack (show archivePurgeBatch)
@@ -92,7 +92,13 @@ purgeArchiveSQL schema tableName =
 
 -- | List archived jobs under a dynamic WHERE.
 listArchiveFilteredSQL
-  :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload), Maybe Value)
+  :: SchemaName
+  -> TableName
+  -> Query ()
+  -> Text
+  -> Int64
+  -> Int64
+  -> Query (Int64, UTCTime, JobRead (Stored payload), Maybe Value)
 listArchiveFilteredSQL schema tableName whereFrag orderBy limit offset =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in rows
@@ -106,13 +112,13 @@ listArchiveFilteredSQL schema tableName whereFrag orderBy limit offset =
         |]
 
 -- | Count archived jobs under a dynamic WHERE.
-countArchiveFilteredSQL :: Text -> Text -> Query () -> Query Int64
+countArchiveFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
 countArchiveFilteredSQL schema tableName whereFrag =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${archiveTbl} ${whereFrag}|]
 
 -- | Delete archived jobs by archive primary key.
-deleteArchiveJobsBatchSQL :: Text -> Text -> [Int64] -> Query ()
+deleteArchiveJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> Query ()
 deleteArchiveJobsBatchSQL schema tableName archiveIds =
   let archiveTbl = jobQueueArchiveTable schema tableName
    in [sql|DELETE FROM ${archiveTbl} WHERE id = ANY(#{archiveIds :: [CInt8]})|]
@@ -120,7 +126,7 @@ deleteArchiveJobsBatchSQL schema tableName archiveIds =
 -- | Re-enqueue an archived job as a fresh standalone job, keeping the archive
 -- row. Carries 'enqueuedAgainCols' and resets the other columns to their defaults.
 -- An @edit@ replaces its columns.
-reEnqueueFromArchiveSQL :: Text -> Text -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
+reEnqueueFromArchiveSQL :: SchemaName -> TableName -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
 reEnqueueFromArchiveSQL schema tableName archiveId edit =
   let archiveTbl = jobQueueArchiveTable schema tableName
       tbl = jobQueueTable schema tableName

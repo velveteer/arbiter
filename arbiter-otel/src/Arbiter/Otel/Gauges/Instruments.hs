@@ -88,9 +88,9 @@ registerInstruments meter cache = do
         [ ([("queue", overviewQueue overview), ("kind", kind)], fromIntegral count)
         | (kind, count) <- Map.toList (kindCounts (overviewStats overview))
         ]
-  reg Name.QueueOldestReadyAge "s" "Time the oldest ready or blocked job has waited (0 = none waiting)" $
+  reg Name.QueueOldestReadyAge "s" "Time the oldest ready or blocked job has waited, 0 when none is waiting" $
     perQueue oldestReadyAgeSeconds
-  reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased (0 = none in flight)" $
+  reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased, 0 when none is in flight" $
     perQueue oldestInFlightAgeSeconds
   -- Active and paused partition the pools with a fresh heartbeat. A queue's fleet is their sum.
   reg Name.Workers "{worker}" "Registered workers by state" $
@@ -104,7 +104,7 @@ registerInstruments meter cache = do
   -- Keyed by policy prefix.
   reg Name.AdmissionKeys "{key}" "Live admission keys, by policy" $
     bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
-  reg Name.AdmissionLimit "{slot}" "Effective cap per key (concurrency slots, rate-limit tokens)" $
+  reg Name.AdmissionLimit "{slot}" "Effective cap per key, in concurrency slots or rate-limit tokens" $
     bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
   reg Name.AdmissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
     perConcurrency (fromIntegral . Conc.totalInFlight)
@@ -119,10 +119,10 @@ registerInstruments meter cache = do
 
   reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
   reg Name.PgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
-  reg Name.PgTableAutovacuumAge "s" "Seconds since last (auto)vacuum, absent until one runs" $
+  reg Name.PgTableAutovacuumAge "s" "Seconds since the last vacuum or autovacuum, absent until one runs" $
     perTableMaybe Health.autovacuumAge
   reg Name.PgTableSize "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
-  reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table (wraparound headroom)" $
+  reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table" $
     perTableMaybe (fmap fromIntegral . Health.xidAge)
   reg Name.PgDbConnections "{connection}" "Backends by state, across the whole database" $
     perDbBy "state" (map (fmap fromIntegral) . connCounts)

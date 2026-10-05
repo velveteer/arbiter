@@ -41,8 +41,8 @@ import Arbiter.Worker
   , OverlapPolicy (..)
   , TickKind
   , WorkerConfig (..)
-  , cronJob
   , batchedWorkerConfig
+  , cronJob
   , defaultLogConfig
   , mergedChildResults
   , namedWorkerPool

@@ -2,7 +2,7 @@
 
 -- | Exceptions thrown by job handlers and by the worker engine.
 --
--- 'JobException' selects retry, DLQ, or tree/branch cancellation.
+-- 'JobException' selects retry, DLQ, or tree\/branch cancellation.
 -- 'JobNackException' requests reprocessing without a recorded failure.
 -- Engine signals use separate exception types.
 module Arbiter.Core.Exceptions
@@ -28,6 +28,10 @@ module Arbiter.Core.Exceptions
   , throwTreeCancel
   , throwBranchCancel
   , throwNack
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
   , throwParsing
   , throwInternal
   , throwJobGone
@@ -48,8 +52,10 @@ import UnliftIO.Exception qualified as UE
 -- | Decisions a handler can signal by throwing. Caught by the worker to
 -- decide retry vs DLQ vs cancellation.
 data JobException
-  = Retryable JobRetryableException
-  | Permanent JobPermanentException
+  = -- | Retries the job with backoff.
+    Retryable JobRetryableException
+  | -- | Moves the job to the DLQ.
+    Permanent JobPermanentException
   | -- | Deletes the entire job tree from root to leaves.
     TreeCancel TreeCancelException
   | -- | Cascade-deletes the parent and all siblings.
@@ -78,7 +84,7 @@ newtype JobPermanentException = JobPermanentException Text
 instance Exception JobPermanentException where
   displayException (JobPermanentException msg) = T.unpack msg
 
--- | Cancel a whole job tree, root to leaves, for a failure that invalidates all of it.
+-- | Cancel the whole job tree, root to leaves.
 newtype TreeCancelException = TreeCancelException Text
   deriving stock (Eq, Generic, Show)
 
@@ -110,7 +116,7 @@ newtype ParsingException = ParsingException Text
 instance Exception ParsingException where
   displayException (ParsingException msg) = T.unpack msg
 
--- | Generic engine-internal failure (e.g. missing connection, bad params).
+-- | Generic engine-internal failure, such as a missing connection or bad parameters.
 newtype InternalException = InternalException Text
   deriving stock (Eq, Generic, Show)
 
@@ -118,7 +124,7 @@ instance Exception InternalException where
   displayException (InternalException msg) = T.unpack msg
 
 -- | Job was deleted or reclaimed between claim and ack. The worker recognizes this
--- signal and skips retry/DLQ. The message is the reason reported to
+-- signal and skips retry\/DLQ. The message is the reason reported to
 -- 'Arbiter.Core.Job.Types.onJobUnavailable'. The ids are the jobs that are gone.
 -- Empty when the thrower did not name them.
 data JobGoneException = JobGoneException Text [Int64]
@@ -182,7 +188,7 @@ throwParsing msg = UE.throwIO (ParsingException msg)
 throwInternal :: (MonadIO m) => Text -> m a
 throwInternal msg = UE.throwIO (InternalException msg)
 
--- | Names the jobs that went away.
+-- | Throw 'JobGoneException' naming the jobs that went away.
 throwJobGoneIds :: (MonadIO m) => Text -> [Int64] -> m a
 throwJobGoneIds msg ids = UE.throwIO (JobGoneException msg ids)
 

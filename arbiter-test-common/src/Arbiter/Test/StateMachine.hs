@@ -11,39 +11,23 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Parameterized stateful property-based tests for the core job engine, using
--- hedgehog. Works against any 'MonadArbiter' backend via a passed runner and a
--- raw-connection accessor.
---
--- Generates random sequences of engine operations against the real database
--- (insert at varying priority, scheduled insert, claim, ack, cancel, suspend,
--- resume, promote, retry, extend-lease, move-to-DLQ, retry-from-DLQ, batch
--- insert/cancel/DLQ, dedup insert, and the reaper) and checks the core
--- invariants after every step:
---
---   * at most one in-flight job per group (the serialization guarantee)
---   * no job exceeds its @max_attempts@
---   * no duplicate live @dedup_key@
---   * no concurrency key has more claimed-in-flight jobs than its effective cap
---   * every group summary column matches its recompute from the main table
---
--- Generated inserts also carry rate-limit keys and concurrency slots.
---
--- A second property ('prop_concurrent') generates N independent branches of
--- self-contained actions, runs them concurrently under a gap-free serialization
--- detector (a row trigger that fires inside every claim), then quiesces with a
--- reaper tick and asserts both the detector log and the full settled oracle are
--- clean. All contention is in the generated, shrinkable model.
--- Deterministic guards back the known-critical races.
+-- | Hedgehog state-machine tests for the job engine against any 'MonadArbiter'
+-- backend. A sequential property checks the engine invariants after each step.
+-- A concurrent property runs parallel branches under a serialization detector.
 module Arbiter.Test.StateMachine
   ( stateMachineSpec
+  , ArbiterC
   , SMPayload (..)
-  , holViolTbl
-  , holInstallSql
-  , holRemoveSql
   , installHolDetector
   , holViolations
   , removeHolDetector
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
+  , holViolTbl
+  , holInstallSql
+  , holRemoveSql
   ) where
 
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyTable)
@@ -64,7 +48,6 @@ import Arbiter.Core.Job.Types
   , defaultGroupedJob
   , defaultJob
   , defaultMaxAttempts
-  , defaultMaxAttemptsSQL
   , notVisibleUntil
   , primaryKey
   , priority
@@ -80,15 +63,16 @@ import Arbiter.Core.JobTree ((<~~))
 import Arbiter.Core.MonadArbiter (MonadArbiter, RegistryOf, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables, TableForPayload)
-import Arbiter.Core.RateLimit.Schema (upsertPolicyRowSQL)
+import Arbiter.Core.RateLimit.Schema (upsertRateLimitPolicyRowSQL)
 import Arbiter.Core.RateLimit.Spec
   ( HasRateLimit (..)
-  , Policy
+  , RateLimitPolicy
   , limitBy
   , limitByCase
   , noLimit
   , tokenBucket
   )
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL)
 import Barbies qualified as B
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
@@ -125,7 +109,7 @@ import UnliftIO.Async (async, link, mapConcurrently, mapConcurrently_, wait, wit
 
 import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
 
--- | Constraints every HL-issuing helper in this module needs.
+-- | Constraints the runner of 'stateMachineSpec' must satisfy.
 type ArbiterC m =
   ( KnownSymbol (TableForPayload SMPayload (RegistryOf m))
   , MonadArbiter m
@@ -152,9 +136,12 @@ initialModel = Model Map.empty Map.empty
 -- Raw SQL string builders (schema/table threaded in)
 -- ---------------------------------------------------------------------------
 
--- | Names of the head-of-line detector's table, function, and trigger.
-holViolTbl, holFn, holTrigger :: Text -> Text -> Text
+-- | Qualified name of the head-of-line detector's violations table.
+holViolTbl :: Text -> Text -> Text
 holViolTbl schema table = schema <> "." <> table <> "_hol_violations"
+
+-- | Names of the head-of-line detector's function and trigger.
+holFn, holTrigger :: Text -> Text -> Text
 holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
 holTrigger _ table = "detect_hol_" <> table
 
@@ -510,8 +497,11 @@ applyExtras (Extras concSlot rateKey) job = setPayload ((Job.payload job) {smCon
 -- | A payload carrying optional concurrency and rate-limit keys.
 data SMPayload = SMPayload
   { smMessage :: Text
+  -- ^ Free text.
   , smConcSlot :: Maybe Text
+  -- ^ Concurrency pool: @cap-a@ (limit 1), @cap-b@ (limit 2) or @cap-c@ (limit 3). Other values take no slot.
   , smRateKey :: Maybe Text
+  -- ^ Rate-limit key: @rk-1@ or @rk-2@ on the @smrl@ bucket. Other values take no token.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -539,7 +529,7 @@ data SMRate = RateNone | RateK1 | RateK2
   deriving stock (Bounded, Enum, Eq)
 
 -- | A binding bucket. Capacity 3 with negligible refill over a test run.
-smBucket :: Policy
+smBucket :: RateLimitPolicy
 smBucket = tokenBucket "smrl" 3 60
 
 instance HasRateLimit SMPayload where
@@ -563,7 +553,7 @@ seedConcurrencyPools schema withConn = withConn $ \conn ->
 -- | Seed the rate-limit policy. Idempotent.
 seedRateLimitPolicies :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 seedRateLimitPolicies schema withConn = withConn $ \conn ->
-  void $ PG.execute_ conn (fromString (T.unpack (upsertPolicyRowSQL schema smBucket)))
+  void $ PG.execute_ conn (fromString (T.unpack (upsertRateLimitPolicyRowSQL schema smBucket)))
 
 -- | Reset the tables, then re-seed both admission policies.
 resetSeeded :: IO () -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
@@ -1549,8 +1539,8 @@ prop_engine run schema table withConn reset = withTests 300 $ property $ do
   settled <- evalIO (queryViolations schema table withConn)
   settled === []
 
--- | Concurrent property with up to eight independent action branches. The
--- branches are shrinkable and reproducible from the seed. Run them under the
+-- | Concurrent property with up to eight independent action branches. The seed
+-- reproduces the branches. Shrinking is off. Run them under the
 -- caller-installed HOL detector. Then run one reaper tick and check the detector
 -- log and settled summary.
 prop_concurrent
@@ -2539,15 +2529,16 @@ deferralClaimedByFlipGuard run schema table withConn reset = do
 -- | Parameterized state-machine property suite. The runner executes a backend
 -- action against the real database. @withConn@ exposes a raw 'PG.Connection' for
 -- the oracle and HOL-detector SQL. @reset@ truncates the test tables.
+-- The runner's registry must declare a queue for 'SMPayload' at the table name.
 stateMachineSpec
   :: forall sm
    . (ArbiterC sm)
   => (forall a. sm a -> IO a)
   -- ^ Runner
   -> Text
-  -- ^ schemaName
+  -- ^ Schema name
   -> Text
-  -- ^ tableName
+  -- ^ Table name
   -> (forall a. (PG.Connection -> IO a) -> IO a)
   -- ^ Raw-connection accessor
   -> IO ()

@@ -19,7 +19,7 @@ import Arbiter.Core.HighLevel (QueueOperation)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (DedupKey (IgnoreDuplicate), setDedupKey)
-import Arbiter.Core.MonadArbiter (MonadArbiter, withDbTransaction)
+import Arbiter.Core.MonadArbiter (MonadArbiter, getSchema, withDbTransaction)
 import Arbiter.Core.Operations qualified as Ops
 import Control.Concurrent.STM (retry)
 import Control.Monad (unless, void, when)
@@ -54,16 +54,13 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 -- existing row keeps its enabled state.
 initCronSchedules
   :: (MonadArbiter m)
-  => SchemaName
-  -- ^ Schema name
+  => LogConfig
   -> Text
   -- ^ Queue name
   -> [CronJob payload]
-  -- ^ Schedules to upsert
-  -> LogConfig
-  -- ^ Log destination
   -> m ()
-initCronSchedules schemaName queueName jobs logCfg = do
+initCronSchedules logCfg queueName jobs = do
+  schemaName <- getSchema
   for_ jobs $ \cron ->
     Ops.upsertCronDefault
       schemaName
@@ -79,17 +76,17 @@ initCronSchedules schemaName queueName jobs logCfg = do
 -- | Scheduler entry point. Exits when the worker state becomes 'ShuttingDown'.
 runCronScheduler
   :: (QueueOperation m payload)
-  => TVar WorkerState
+  => LogConfig
+  -> TVar WorkerState
   -> TVar Bool
   -- ^ Set by the run-now listener when a schedule this pool owns is requested.
-  -> LogConfig
   -> SchemaName
   -> Text
   -- ^ Queue name (recorded on each schedule row).
   -> [CronJob payload]
   -> m ()
-runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
-  initCronSchedules schemaName queueName jobs logCfg
+runCronScheduler logCfg stateVar runNowVar schemaName queueName jobs = do
+  initCronSchedules logCfg queueName jobs
   cronLog <- newCronLog logCfg
   startupNow <- liftIO getCurrentTime
   shuttingDown <- (== ShuttingDown) <$> readTVarIO stateVar
@@ -126,7 +123,7 @@ runCronScheduler stateVar runNowVar logCfg schemaName queueName jobs = do
 processCronCatchUp
   :: (QueueOperation m payload)
   => CronLog
-  -> Text
+  -> SchemaName
   -> Text
   -- ^ Queue name
   -> [CronJob payload]
@@ -141,7 +138,7 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
       void $ tryCron cronLog ("Cron '" <> name cron <> "' tick") $ do
         mRow <- Ops.getCronScheduleByName schemaName (name cron)
         completed <- processOne mRow currentTick cron
-        when completed $ void $ Ops.touchCronChecked schemaName currentTick [name cron]
+        when completed $ void $ Ops.touchCronChecked schemaName [name cron] currentTick
     processOne mRow currentTick cron = case resolveAndParse cron mRow of
       Disabled -> pure True
       ParseError expr err -> do
@@ -265,20 +262,20 @@ insertCronJob schemaName cron effectiveOv kind tick = do
     let key = makeDedupKeyFromParts (name cron) effectiveOv tick
         jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
     void $ HL.insertJob jobWrite
-  void $ Ops.touchCronChecked schemaName tick [name cron]
+  void $ Ops.touchCronChecked schemaName [name cron] tick
   pure fired
 
 data RunNowOutcome = Fired | Skipped | NotRequested
 
 -- | Claim and fire every schedule with a pending run request. A 'SkipOverlap'
--- schedule reuses its constant dedup key. A manual run is skipped while one of
--- its jobs is active.
+-- schedule reuses its constant dedup key, so its manual run is skipped while one
+-- of its jobs is active.
 --
 -- The claim and the insert are atomic. If either fails the other rolls back.
 processRunRequests
   :: forall payload m
    . (QueueOperation m payload)
-  => CronLog -> Text -> [CronJob payload] -> UTCTime -> m ()
+  => CronLog -> SchemaName -> [CronJob payload] -> UTCTime -> m ()
 processRunRequests cronLog schemaName jobs now = do
   scan <- tryCron cronLog "Cron run-request scan" $ Ops.pendingCronRuns schemaName (map name jobs)
   traverse_ (fireRequested . Set.fromList) scan
@@ -306,7 +303,7 @@ processRunRequests cronLog schemaName jobs now = do
       inserted <- HL.insertJob jobWrite
       case inserted of
         Just _ -> do
-          void $ Ops.touchCronManualRun schemaName tick (name cron)
+          void $ Ops.touchCronManualRun schemaName (name cron) tick
           pure Fired
         Nothing -> pure Skipped
 
@@ -329,7 +326,7 @@ logCron cronLog level msg = liftIO $ tryLog (cronLogConfig cronLog) level msg
 tryCron :: (MonadUnliftIO m) => CronLog -> Text -> m a -> m (Either SomeException a)
 tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cronLog)
 
--- | For 'AllowOverlap', the key includes the UTC tick minute.
+-- | The dedup key for a schedule's tick. An 'AllowOverlap' key includes the UTC tick minute.
 makeDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
 makeDedupKeyFromParts jobName overlapPolicy tick = case overlapPolicy of
   SkipOverlap -> skipOverlapKey jobName
@@ -345,7 +342,7 @@ maxTickDelayMicros :: Int
 maxTickDelayMicros = 120_000_000
 
 -- | Delay in microseconds until the next minute boundary, clamped to
--- @[0, 'maxTickDelayMicros']@.
+-- @[0, 120_000_000]@ (two minutes).
 computeDelayMicros :: UTCTime -> Int
 computeDelayMicros now =
   let nextMinute = truncateToMinute (addUTCTime 60 now)

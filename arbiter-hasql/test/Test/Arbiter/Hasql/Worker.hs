@@ -30,7 +30,7 @@ import Data.Foldable (for_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Maybe (isJust)
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import GHC.Generics (Generic)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -158,18 +158,24 @@ type HasqlMultiQRegistry =
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload
-      mqTableA
-      mqTableB
-      connStr
-      MqAPayload
-      MqBPayload
-      mkEnv
-      destroyHasqlEnv
-      TestKit.plainHandler
-      runHasqlDb
+    TestKit.multiQueueListenerSpec backend mqTableB MqBPayload TestKit.plainHandler
   where
-    mkEnv = do
+    backend =
+      TestKit.TestBackend
+        { schema = mqSchema
+        , table = mqTableA
+        , connStr
+        , mkSimple = MqAPayload
+        , mkFailing = MqAPayload . pack . show
+        , mkEnv = freshEnv
+        , pollOnly = disableListener
+        , mkFreshEnv = freshEnv
+        , destroyEnv = destroyHasqlEnv
+        , mkHandler = TestKit.plainHandler
+        , runCommand = runHasqlCommand
+        , runM = runHasqlDb
+        }
+    freshEnv = do
       cleanupOnce connStr mqSchema mqTableA
       cleanupOnce connStr mqSchema mqTableB
       createHasqlEnv (Proxy @HasqlMultiQRegistry) (testConnect connStr) mqSchema

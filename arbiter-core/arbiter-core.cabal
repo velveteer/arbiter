@@ -4,11 +4,13 @@ version:         0.1.0.0
 synopsis:        Core types, queue registry, and SQL for Arbiter
 description:
   Core of Arbiter, a PostgreSQL job queue for Haskell.
+
   This package holds the job and dead-letter queue types, the type-level queue
   registry, the SQL the queue runs on, and the @MonadArbiter@ backend interface
   the postgresql-simple, hasql, and Orville packages are built against.
   Application code normally reaches these through "Arbiter.Core.HighLevel", which
   resolves a queue's table name from the registry at compile time.
+  Per-job limits are declared through "Arbiter.Concurrency" and "Arbiter.RateLimit".
 
 license:         MIT
 license-file:    LICENSE
@@ -16,7 +18,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Database
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -112,9 +114,9 @@ library
     Arbiter.Core.Operations.Workers
 
   build-depends:
-    , aeson                            >=2.0  && <2.3
+    , aeson                            >=2.2  && <2.3
     , base                             >=4.20 && <5
-    , bytestring                       >=0.10 && <0.13
+    , bytestring                       >=0.10.12 && <0.13
     , containers                       >=0.6  && <0.9
     , exceptions                       >=0.10 && <0.11
     , free                             >=5.1  && <5.3
@@ -127,7 +129,7 @@ library
     , stm                              >=2.5  && <2.6
     , template-haskell                 >=2.18 && <2.25
     , text                             >=1.2  && <2.2
-    , time                             >=1.9  && <1.16
+    , time                             >=1.12 && <1.16
     , unliftio                         >=0.2  && <0.3
     , unordered-containers             >=0.2  && <0.3
     , uuid-types                       >=1.0  && <1.1
@@ -138,10 +140,10 @@ test-suite arbiter-core-tests
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
-    , aeson         >=2.0  && <2.3
+    , aeson         >=2.2  && <2.3
     , arbiter-core
     , base          >=4.20 && <5
-    , hspec         >=2.0  && <2.12
+    , hspec         >=2.8  && <2.12
     , text          >=1.2  && <2.2
-    , time          >=1.9  && <1.16
+    , time          >=1.12 && <1.16
     , uuid-types    >=1.0  && <1.1

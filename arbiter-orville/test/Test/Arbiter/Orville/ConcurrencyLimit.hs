@@ -30,4 +30,4 @@ spec connStr = do
       withConn = withResource pgPool
   before (cleanupOrvilleTest env >> pure env) $
     concurrencyLimitSpec (runOrvilleTest @CLReg)
-  concurrencyModelSpec run withConn testSchema
+  concurrencyModelSpec run testSchema withConn

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | @hasql@ implementation helpers for 'Arbiter.Core.MonadArbiter.MonadArbiter'.
+-- | hasql primitives for writing a custom 'Arbiter.Core.MonadArbiter.MonadArbiter' instance.
 --
 -- Handlers receive a @Hasql.Connection.Connection@ for running typed hasql
 -- queries inside the worker transaction:
@@ -22,7 +22,7 @@
 -- @
 --
 -- The primitives also need a @HasPoolState Hasql.Connection MyApp@ instance. See
--- 'Arbiter.Core.Backend.HasPoolState'.
+-- 'Arbiter.Hasql.HasqlDb.HasPoolState'.
 --
 -- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
 -- 'Arbiter.Core.MonadArbiter.Handler' at that queue's job and declared result types.
@@ -33,9 +33,12 @@ module Arbiter.Hasql.MonadArbiter
   , hasqlExecuteStatement
   , hasqlWithDbTransaction
   , hasqlRunHandlerWithConnection
+
+    -- * Connection
+  , hasqlWithConnection
   ) where
 
-import Arbiter.Core.Backend (HasPoolState (..), PoolState (..), withConn, withSavepointTransaction)
+import Arbiter.Core.Backend (HasPoolState (..), PoolState (..), pinConnection, withConn, withSavepointTransaction)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.MonadArbiter (Query (..))
 import Control.Monad (when)
@@ -51,6 +54,10 @@ import UnliftIO.Exception (SomeException, try)
 import Arbiter.Hasql.Compat (connectionInTransaction, runSQL)
 import Arbiter.Hasql.Decode qualified as Decode
 import Arbiter.Hasql.Encode qualified as Encode
+
+-- | Pin one pooled connection for the action.
+hasqlWithConnection :: (HasPoolState Hasql.Connection m, MonadUnliftIO m) => m a -> m a
+hasqlWithConnection = pinConnection
 
 -- | Run a query unprepared, decoding rows.
 hasqlExecuteQuery
@@ -106,8 +113,7 @@ beginCommitOrRollback conn action = mask $ \restore -> do
         _ <- try (runSQL conn "ROLLBACK") :: IO (Either SomeException ())
         pure ()
 
--- | Run a handler on the active connection. The handler can issue typed hasql queries
--- inside the worker transaction.
+-- | Run a handler on the pinned connection. Throws when no connection is pinned.
 hasqlRunHandlerWithConnection
   :: (HasPoolState Hasql.Connection m, MonadIO m)
   => (Hasql.Connection -> job -> m result)

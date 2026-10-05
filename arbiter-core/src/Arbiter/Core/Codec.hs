@@ -47,6 +47,8 @@ module Arbiter.Core.Codec
   , jobRowCodec
   , dlqRowCodec
   , archiveRowCodec
+
+    -- * Admission view codecs
   , rateLimitPolicyViewCodec
   , rateLimitBucketCodec
   , concurrencyPolicyViewCodec
@@ -109,7 +111,7 @@ data Col a where
   CUuid :: Col UUID
 
 -- | A named column with nullability. Carries the column name for
--- backends that use name-based decoding (e.g. orville).
+-- backends that use name-based decoding, such as orville.
 data NullCol a where
   NotNull :: Text -> Col a -> NullCol a
   Nullable :: Text -> Col a -> NullCol (Maybe a)
@@ -258,19 +260,24 @@ pgType = \case
 -- | The insert side of a job row. The payload encoding is built once by the caller.
 data JobWriteSource payload = JobWriteSource
   { sourceJob :: JobWrite payload
+  -- ^ The job to insert.
   , sourceEncoded :: Value
+  -- ^ The encoded payload.
   , sourceColumns :: PayloadColumns
+  -- ^ The columns the payload derives.
   , sourceParentId :: Maybe Int64
+  -- ^ The parent job id, if any.
   , sourceParentState :: Maybe Value
+  -- ^ The initial rollup state.
   , sourceSuspended :: Bool
+  -- ^ Whether the row is inserted suspended.
   }
 
 -- | A job codec pinned to a @Value@ payload, for the decode and column-list
 -- projections that ignore the write source.
 type JobCodec a = Codec (JobWriteSource Value) a
 
--- | Main-table codec. The write source contains public enqueue fields,
--- payload columns, parent id, rollup state, and suspension state.
+-- | Main-table codec over a 'JobWriteSource'.
 jobCodec :: Text -> Codec (JobWriteSource payload) (JobRead (Stored stored))
 jobCodec = jobCodecWith "id"
 

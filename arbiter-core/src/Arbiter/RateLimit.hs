@@ -2,29 +2,32 @@
 
 -- | Per-job rate limiting.
 --
--- This is the user-facing rate-limit module. Import it, not the @Arbiter.Core.RateLimit.*@ modules.
+-- This is the user-facing rate-limit module. The @Arbiter.Core.RateLimit.*@ modules are internal.
 --
--- Declare which policy (if any) limits each job with a 'HasRateLimit' instance,
--- building the selector from 'noLimit' \/ 'limitBy' \/ 'globalLimit' \/
--- 'chooseWhen' \/ 'limitByCase'. The migration statically collects every policy a
--- selector can reach and seeds it.
+-- Declare which policy (if any) limits each job with a 'HasRateLimit' instance.
+-- The migration seeds every policy a selector can reach.
 module Arbiter.RateLimit
   ( -- * Declaring a payload's limit
     HasRateLimit (..)
   , RateLimitFor
+  , Selector
   , noLimit
   , limitBy
   , globalLimit
   , chooseWhen
   , limitByCase
+  , RegistryRateLimitPolicies
 
     -- * Policies
-  , Policy (..)
+  , RateLimitPolicy (..)
   , tokenBucket
-  , policyPrefixOf
+  , AdmissionPolicy (..)
 
     -- * Bucket durability
   , Durability (..)
+
+    -- * Keys
+  , RateLimitKey (..)
 
     -- * Management and observability views
   , RateLimitPolicyView (..)
@@ -40,18 +43,19 @@ module Arbiter.RateLimit
   , updateRateLimitPolicyOverrides
   , setRateLimit
   , clearRateLimit
-
-    -- * Keys
-  , RateLimitKey (..)
+  , getRateLimitPolicy
+  , rateLimitPolicyExists
   ) where
 
 import Arbiter.Core.Admission (AdmissionPolicy (..))
 import Arbiter.Core.HighLevel
   ( addRateLimitTokens
   , clearRateLimit
+  , getRateLimitPolicy
   , listRateLimitBuckets
   , listRateLimitPolicies
   , pruneRateLimitBuckets
+  , rateLimitPolicyExists
   , resetRateLimitBuckets
   , setRateLimit
   , updateRateLimitPolicyOverrides
@@ -59,9 +63,10 @@ import Arbiter.Core.HighLevel
 import Arbiter.Core.RateLimit.Spec
   ( Durability (..)
   , HasRateLimit (..)
-  , Policy (..)
   , RateLimitFor
   , RateLimitKey (..)
+  , RateLimitPolicy (..)
+  , RegistryRateLimitPolicies
   , chooseWhen
   , globalLimit
   , limitBy
@@ -74,3 +79,4 @@ import Arbiter.Core.RateLimit.Stats
   , RateLimitPolicyUpdate (..)
   , RateLimitPolicyView (..)
   )
+import Arbiter.Core.Selector (Selector)

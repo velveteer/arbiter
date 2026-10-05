@@ -2,18 +2,14 @@
 
 -- | Versioned, tracked migrations for job queue schemas, run once in order.
 -- History lives in a @schema_migrations@ table inside the target schema.
+-- Each run also seeds the admission policies and reconciles the rate-limit durability
+-- and optional triggers in 'MigrationConfig'.
 module Arbiter.Migrations
-  ( -- * Registry
-    QueueSpec (..)
-  , Queue
-
-    -- * Configuration
-  , MigrationConfig (..)
+  ( -- * Configuration
+    MigrationConfig (..)
   , defaultMigrationConfig
-  , validateRegistryNames
-  , maxQueueNameBytes
 
-    -- * Tracked Migrations
+    -- * Tracked migrations
   , runMigrationsForRegistry
   , runMigrationsTrackedForTables
   , jobQueueMigrationsForTable
@@ -23,11 +19,17 @@ module Arbiter.Migrations
   , TableAdmission (..)
   , allTableAdmission
 
-    -- * Rate-limit reconciliation
+    -- * Validation
+  , validateRegistryNames
+  , maxQueueNameBytes
   , conflictingPolicyPrefixes
 
     -- * Re-exports
+  , QueueSpec (..)
+  , Queue
+  , MigrationCommand (..)
   , MigrationResult (..)
+  , Durability (..)
   ) where
 
 import Arbiter.Core.Concurrency.Schema
@@ -118,11 +120,11 @@ import Arbiter.Core.RateLimit.Schema
   , createRateLimitPoliciesTableSQL
   , createRateLimitsTableSQL
   , createThrottledIndexSQL
-  , upsertPolicyRowSQL
+  , upsertRateLimitPolicyRowSQL
   )
 import Arbiter.Core.RateLimit.Spec
   ( Durability (..)
-  , Policy (..)
+  , RateLimitPolicy (..)
   , registryRateLimitPolicies
   , registryRateLimitTables
   )
@@ -160,28 +162,27 @@ import Database.PostgreSQL.Simple.Migration
   )
 import Database.PostgreSQL.Simple.Types (PGArray (..), Query (..))
 
--- | The desired state reconciled after a schema's tracked migrations run.
+-- | Migration options and the desired state reconciled after a schema's tracked migrations run.
 data MigrationConfig = MigrationConfig
   { enableNotifications :: Bool
-  -- ^ Whether LISTEN/NOTIFY triggers for reactive job claiming should be
-  -- installed. Re-running migrations reconciles existing schemas in either
-  -- direction. Default: 'True'.
+  -- ^ Install the LISTEN\/NOTIFY triggers that wake workers. Each run adds or drops
+  -- them to match. Default: 'True'.
   , enableEventStreaming :: Bool
-  -- ^ Whether event-streaming triggers for the admin UI should be installed.
-  -- When enabled, every INSERT\/UPDATE\/DELETE on job tables fires an enriched
-  -- JSON event via @pg_notify@. Re-running migrations with this disabled drops
-  -- the triggers and shared function. Default: 'False'.
+  -- ^ Install the admin UI's event-streaming triggers, which send a JSON event via
+  -- @pg_notify@ for every insert, update and delete on the job tables. Each run adds or
+  -- drops them to match, and drops the shared function when no trigger uses it.
+  -- Default: 'False'.
   , rateLimitDurability :: Durability
   -- ^ WAL-logging for the rate-limit bucket table in this schema. 'Unlogged'
   -- (default) resets buckets on crash\/failover. 'Durable' preserves them at a
   -- throughput cost.
   , migrationLockTimeout :: Maybe NominalDiffTime
-  -- ^ How many seconds to wait for the schema's migration lock. The lock serializes
-  -- replicas that migrate at the same time. 'Nothing' (default) waits indefinitely.
+  -- ^ Seconds to wait for the schema's migration lock, then return 'MigrationError'.
+  -- 'Nothing' (default) waits indefinitely.
   }
   deriving stock (Eq, Show)
 
--- | Notify triggers on, event streaming off, unlogged rate-limit buckets.
+-- | Notify triggers on, event streaming off, unlogged rate-limit buckets, no lock timeout.
 defaultMigrationConfig :: MigrationConfig
 defaultMigrationConfig =
   MigrationConfig
@@ -192,7 +193,8 @@ defaultMigrationConfig =
     }
 
 -- | Migrate every queue in a registry into one schema. The schema itself is created
--- first, outside migration tracking.
+-- first, outside migration tracking. Names that fail 'validateRegistryNames' return
+-- 'MigrationError' before the connection opens.
 --
 -- @
 -- type AppRegistry =
@@ -219,11 +221,10 @@ runMigrationsForRegistry
   -> ByteString
   -- ^ Database connection string
   -> SchemaName
-  -- ^ Schema name
+  -- ^ Schema for the Arbiter tables
   -> MigrationConfig
-  -- ^ Migration configuration
+  -- ^ Migration options
   -> IO (MigrationResult String)
-  -- ^ Migration results
 runMigrationsForRegistry proxy connStr schemaName config = do
   let ccTables = Map.fromList (registryConcurrencyTables @registry)
       rlTables = Map.fromList (registryRateLimitTables @registry)
@@ -243,7 +244,7 @@ runMigrationsForRegistry proxy connStr schemaName config = do
 
 -- | Admission policy rows to seed after a successful migration.
 data AdmissionSeeds = AdmissionSeeds
-  { seedRateLimitPolicies :: [Policy]
+  { seedRateLimitPolicies :: [RateLimitPolicy]
   -- ^ Rate-limit policies to upsert into the policies table.
   , seedConcurrencyPolicies :: [ConcurrencyPolicy]
   -- ^ Concurrency pools to upsert into the policies table.
@@ -253,8 +254,8 @@ data AdmissionSeeds = AdmissionSeeds
 noAdmissionSeeds :: AdmissionSeeds
 noAdmissionSeeds = AdmissionSeeds {seedRateLimitPolicies = [], seedConcurrencyPolicies = []}
 
--- | Which admission trigger kinds a table's payload declares. Trigger migrations
--- are install-only. A kind removed from a payload keeps its triggers.
+-- | Which admission trigger kinds a table's payload declares. Trigger migrations are
+-- install-only. A kind removed from a payload keeps its triggers.
 data TableAdmission = TableAdmission
   { tableConcurrency :: Bool
   -- ^ Install the concurrency triggers.
@@ -267,8 +268,8 @@ data TableAdmission = TableAdmission
 allTableAdmission :: TableAdmission
 allTableAdmission = TableAdmission {tableConcurrency = True, tableRateLimit = True}
 
--- | The longest queue name whose generated identifiers survive PostgreSQL's 63-byte
--- truncation distinct. Derived by rendering a probe queue's own DDL at each length.
+-- | The longest queue name whose generated identifiers stay distinct after PostgreSQL
+-- truncates them to 63 bytes.
 maxQueueNameBytes :: Int
 maxQueueNameBytes = length (takeWhile identifiersDistinct [1 .. 63])
   where
@@ -289,9 +290,9 @@ renderedIdentifiers table =
     everyOther (_ : name : rest) = name : everyOther rest
     everyOther _ = []
 
--- | Reject queue names that generate a schema-wide arbiter table, or that generate
--- object or channel names PostgreSQL truncates into each other. The length limit is
--- where two of a queue's generated names collide.
+-- | Reject an empty or over-long schema name, and queue names that are empty, exceed
+-- 'maxQueueNameBytes', generate a schema-wide arbiter table, or generate the same
+-- object or channel name as another queue.
 validateRegistryNames :: SchemaName -> [TableName] -> Either Text ()
 validateRegistryNames schemaName tables
   | T.null schemaName = Left "Arbiter schema name must not be empty"
@@ -326,17 +327,22 @@ validateRegistryNames schemaName tables
     -- The first generated name more than one queue claims.
     sharedName = listToMaybe . conflictingPrefixes fst snd
 
--- | Run migrations for multiple tables within a single schema. On migration success,
--- seeds the rate-limit and concurrency policies, then reconciles durability and
--- optional triggers on the same connection. The table list must be the schema's whole queue
--- set. Reconciliation treats an omitted queue as removed and drops its notify and
--- event-streaming objects.
+-- | Migrate several tables in one schema. On success, seed the policies, then reconcile
+-- durability and triggers on the same connection. The table list must be the schema's
+-- whole queue set. An omitted queue loses its notify and event-streaming objects.
+-- Names that fail 'validateRegistryNames' return 'MigrationError' before the
+-- connection opens.
 runMigrationsTrackedForTables
   :: ByteString
+  -- ^ Database connection string
   -> SchemaName
+  -- ^ Schema for the Arbiter tables
   -> [(TableName, TableAdmission)]
+  -- ^ Every queue table in the schema, with its admission trigger kinds
   -> MigrationConfig
+  -- ^ Migration options
   -> AdmissionSeeds
+  -- ^ Admission policy rows to seed
   -> IO (MigrationResult String)
 runMigrationsTrackedForTables connStr schemaName tableNames config seeds =
   case validateRegistryNames schemaName (map fst tableNames) of
@@ -445,17 +451,17 @@ migrateSchema conn schemaName tableNames config seeds = do
 -- | Upsert each policy's @default_*@ params into the policies table. Operator
 -- @override_*@ values stay intact. Idempotent. Overrides and removed prefixes survive
 -- a deploy.
-reconcileRateLimitPolicies :: PG.Connection -> SchemaName -> [Policy] -> IO ()
+reconcileRateLimitPolicies :: PG.Connection -> SchemaName -> [RateLimitPolicy] -> IO ()
 reconcileRateLimitPolicies =
-  reconcilePolicyRows "rate-limit policy" "parameters" policyPrefix policyParamsKey upsertPolicyRowSQL
+  reconcilePolicyRows "rate-limit policy" "parameters" policyPrefix policyParamsKey upsertRateLimitPolicyRowSQL
 
 -- | Rate-limit policy prefixes declared with more than one parameter set.
-conflictingPolicyPrefixes :: [Policy] -> [Text]
+conflictingPolicyPrefixes :: [RateLimitPolicy] -> [Text]
 conflictingPolicyPrefixes = conflictingPrefixes policyPrefix policyParamsKey
 
 -- | A canonical conflict key for a policy's params, rendered as text. A NaN compares
 -- equal to itself.
-policyParamsKey :: Policy -> String
+policyParamsKey :: RateLimitPolicy -> String
 policyParamsKey policy = show (policyMax policy, policyRefill policy, policyInterval policy)
 
 -- | Upsert each pool's @default_limit@, leaving operator overrides intact. Two pools
@@ -523,7 +529,7 @@ reconcileRateLimitDurability conn schemaName durability = do
   case rows of
     (Only current : _)
       | current /= target ->
-          void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL durability schemaName)))
+          void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL schemaName durability)))
     _ -> pure ()
 
 -- | Reconcile optional triggers schema-wide after tracked migrations.
@@ -704,13 +710,12 @@ schemaLevelMigrations schemaName =
 -- The optional notify and event-streaming objects are reconciled after the migrations run.
 jobQueueMigrationsForTable
   :: SchemaName
-  -- ^ Schema name
+  -- ^ Schema for the Arbiter tables
   -> TableName
-  -- ^ Table name
+  -- ^ Queue table name
   -> TableAdmission
   -- ^ Which admission trigger kinds to install
   -> [MigrationCommand]
-  -- ^ List of migration commands
 jobQueueMigrationsForTable schemaName tableName admission =
   let prefix = T.unpack tableName <> "-"
       script name sql = MigrationScript (prefix <> name) (encodeUtf8 sql)

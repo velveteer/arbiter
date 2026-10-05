@@ -50,8 +50,8 @@ import Arbiter.Worker.Logger
   , LogConfig
   , LogLevel (..)
   , defaultLogConfig
-  , toHubLog
   , newFailureGates
+  , toHubLog
   , tryReportedOn
   )
 import Control.Concurrent.STM
@@ -87,7 +87,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.UUID.Types (UUID)
 import Data.UUID.V4 qualified as UUID
 import GHC.TypeLits (KnownSymbol, symbolVal)
@@ -122,13 +121,12 @@ import Arbiter.Servant.Types
 -- statements run in. 'initArbiterServer' fills the cache fields.
 data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
-  -- ^ Backend runner, e.g. @runSimpleDb env@ or @runHasqlDb env@.
+  -- ^ Backend runner, such as @runSimpleDb env@ or @runHasqlDb env@.
   , serverSchema :: Text
   -- ^ The schema every handler's statements run against.
   , enableSSE :: Bool
   -- ^ Enable the Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns one \"disabled\" event and closes.
-  -- The admin UI then polls and retries the stream with an exponential backoff.
   -- A backend with no listener answers the same way.
   -- Default: 'True'.
   , rateLimitPoliciesCache :: CacheCell RateLimitPoliciesResponse
@@ -145,11 +143,11 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   , healthCache :: CacheCell HealthResponse
   -- ^ Short-TTL cache for the readiness probe.
   , maintenanceInterval :: NominalDiffTime
-  -- ^ Minimum gap between runs of one maintenance operation. Zero runs every
-  -- operation on every call. Default: 'defaultMaintenanceInterval'.
+  -- ^ Minimum gap between runs of one ordinary maintenance operation. Zero runs
+  -- each ordinary operation on every call. Default: 'defaultMaintenanceInterval'.
   , maintenanceSparseInterval :: NominalDiffTime
-  -- ^ Gap between runs of one whole-schema operation, independent of
-  -- 'maintenanceInterval'. Default: 'defaultMaintenanceSparseInterval'.
+  -- ^ Minimum gap between runs of the bucket prune and the concurrency
+  -- reconcile-and-prune. Default: 'defaultMaintenanceSparseInterval'.
   , maintenanceBucketIdle :: NominalDiffTime
   -- ^ Idle age at which a pass prunes a rate-limit bucket.
   -- Default: 'defaultMaintenanceBucketIdle'.
@@ -199,8 +197,7 @@ mutateJob tableName config jobId mutate refuse =
             <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
--- event-streaming triggers, which @Arbiter.Migrations.runMigrationsForRegistry@ installs
--- when @enableEventStreaming@ is set, and a backend with a listener.
+-- @enableEventStreaming@ migration option and a backend with a listener.
 initArbiterServer
   :: forall m registry
    . (HasRegistry m registry)
@@ -349,9 +346,9 @@ insertJobsBatchHandler
   -> ArbiterServerConfig m registry
   -> BatchInsertRequest payload
   -> Handler (BatchInsertResponse payload)
-insertJobsBatchHandler tableName config (BatchInsertRequest jobWrites) = do
+insertJobsBatchHandler tableName config (BatchInsertRequest apiWrites) = do
   let schemaName = serverSchema config
-      writes = map unApiJobWrite jobWrites
+      writes = map unApiJobWrite apiWrites
 
   inserted <-
     runDb config
@@ -718,9 +715,8 @@ getStatsHandler tableName kinds config =
 
     queueStats <- runDb config $ Ops.getQueueStats schemaName tableName kinds
     now <- getCurrentTime
-    let timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%z" now
 
-    pure $ StatsResponse {stats = queueStats, timestamp = timestamp}
+    pure $ StatsResponse {stats = queueStats, timestamp = now}
 
 -- | Every queue's stats in one request, for the landing overview.
 getAllStatsHandler
@@ -834,7 +830,7 @@ ackClaimedJobHandler tableName config jobId req =
   withHeldJob @registry tableName config jobId (arLease req) $ \schemaName job ->
     withDbTransaction $ do
       rows <- Ops.ackJob schemaName tableName job
-      when (rows > 0) $ storeEncodedResult schemaName job (arResult req >>= encodeJobResult)
+      when (rows > 0) $ storeEncodedResult job (arResult req >>= encodeJobResult)
       pure rows
 
 -- | Restore the attempt used by a claim. The job becomes available when its
@@ -1009,8 +1005,7 @@ setQueuePausedHandler config knownQueues pauseFlag queue = do
 -- | Serve the SSE stream as a raw WAI application. Each client registers on the
 -- backend's shared listener for the response's lifetime and gets a @connected@
 -- event once its channel is subscribed. If 'enableSSE' is false or the backend
--- has no listener, send one @disabled@ event and close the stream. The admin UI
--- then polls and retries the stream with an exponential backoff.
+-- has no listener, send one @disabled@ event and close the stream.
 eventsServer
   :: forall registry m
    . (HasRegistry m registry)
@@ -1080,7 +1075,7 @@ listCronSchedulesHandler config mQueue = do
   let schemaName = serverSchema config
   rows <- runDb config $ Ops.listCronSchedules schemaName mQueue
   now <- liftIO getCurrentTime
-  pure $ CronSchedulesResponse {cronSchedules = map (cronScheduleView now) rows}
+  pure $ CronSchedulesResponse {schedules = map (cronScheduleView now) rows}
 
 -- | A schedule row with the next tick it fires at. A disabled schedule has none.
 cronScheduleView :: UTCTime -> CronScheduleRow -> CronScheduleView
@@ -1249,12 +1244,13 @@ healthProbeMicros = 5_000_000
 defaultStatsCacheTtl :: NominalDiffTime
 defaultStatsCacheTtl = 0
 
--- | No minimum gap. An explicit maintenance call runs every operation.
--- Concurrent callers exclude each other on the gate.
+-- | No minimum gap. Each call runs every ordinary operation. Concurrent callers
+-- exclude each other on the gate.
 defaultMaintenanceInterval :: NominalDiffTime
 defaultMaintenanceInterval = 0
 
--- | Gap the whole-schema operations keep, matching a worker pool's reaper.
+-- | Gap the bucket prune and the concurrency reconcile-and-prune keep, matching
+-- a worker pool's reaper.
 defaultMaintenanceSparseInterval :: NominalDiffTime
 defaultMaintenanceSparseInterval = 3600
 
@@ -1266,7 +1262,7 @@ defaultMaintenanceBucketIdle = 300
 defaultMaintenanceTimeout :: NominalDiffTime
 defaultMaintenanceTimeout = 300
 
--- | Keyed TTL cache under an epoch bumped by @invalidate@.
+-- | Keyed TTL cache. 'initArbiterServer' creates each cell.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
   , cacheFilling :: TVar (Set.Set Text)
@@ -1371,7 +1367,7 @@ updateRateLimitPolicyHandler config prefix upd@(RateLimitPolicyUpdate mMax mRefi
   invalidating (rateLimitPoliciesCache config) $
     updateThenView config (update >> HL.getRateLimitPolicy prefix) "Rate-limit policy not found"
 
--- | Clear every bucket for a prefix. Returns the number reset. 404s an unknown prefix.
+-- | Refill every bucket for a prefix to full. Returns the number reset. 404s an unknown prefix.
 resetRateLimitBucketsHandler
   :: forall registry m
    . (HasRegistry m registry, RegistryTables registry)
@@ -1516,7 +1512,8 @@ sharedServer config =
     :<|> healthServer config
 
 -- | Builds a registry's per-queue server implementations. @registry@ is the whole
--- registry. @reg@ is the part still to build.
+-- registry. @reg@ is the part still to build. Each
+-- 'Arbiter.Core.QueueRegistry.QueueWithResult' result type needs @FromJSON@ and @ToJSON@.
 class BuildServer registry (reg :: JobPayloadRegistry) where
   -- | The server for the queues in @reg@, then the shared routes.
   buildServer :: (HasRegistry m registry) => ArbiterServerConfig m registry -> ServerT (RegistryToAPI reg) Handler
@@ -1542,7 +1539,7 @@ instance
      in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
           :<|> buildServer @registry @rest config
 
--- | Complete Arbiter server at @\/api\/v1\/...@
+-- | Complete Arbiter server at @\/api\/v1\/...@.
 arbiterServer
   :: forall registry m
    . (BuildServer registry registry, HasRegistry m registry)
@@ -1563,8 +1560,7 @@ arbiterServerHoisted
 arbiterServerHoisted natTrans config =
   hoistServer (Proxy @(ArbiterAPI registry)) natTrans (arbiterServer config)
 
--- | Convert to WAI Application. Each 'Arbiter.Core.QueueRegistry.QueueWithResult'
--- result type needs @FromJSON@ and @ToJSON@.
+-- | Convert to WAI Application.
 arbiterApp
   :: forall registry m
    . ( BuildServer registry registry

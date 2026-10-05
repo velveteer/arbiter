@@ -6,9 +6,10 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Hasql
+-- import Control.Monad (void)
 --
 -- myFunction :: HasqlDb MyRegistry IO ()
--- myFunction = insertJob (defaultJob myPayload)
+-- myFunction = void $ insertJob (defaultJob myPayload)
 -- @
 module Arbiter.Hasql.HasqlDb
   ( -- * Database Monad
@@ -21,8 +22,9 @@ module Arbiter.Hasql.HasqlDb
   , HasPoolState (..)
   , runHasqlDb
   , inTransaction
+  , inTransactionWith
 
-    -- * Environment Creation
+    -- * Environment creation
   , HasqlConnect
   , toHasqlConnect
   , acquireConnect
@@ -34,7 +36,7 @@ module Arbiter.Hasql.HasqlDb
   , useDedicatedListener
   , setPreparedStatements
 
-    -- * Hasql Settings
+    -- * Hasql settings
   , HasqlSettings
   , hasqlSettings
 
@@ -91,7 +93,7 @@ newtype HasqlConnectionError = HasqlConnectionError String
   deriving stock (Show)
   deriving anyclass (Exception)
 
--- | Schema name and connection pool for 'HasqlDb'.
+-- | The 'Env' for 'HasqlDb'.
 type HasqlEnv = Env Hasql.Connection HasqlConfig
 
 -- | The env state only hasql has.
@@ -104,7 +106,9 @@ hasqlDriver :: Driver Hasql.Connection HasqlConfig
 hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = HasqlConfig True}
 
 -- | The hasql database monad.
-newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb {unHasqlDb :: Db Hasql.Connection HasqlConfig registry m a}
+newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb
+  { unHasqlDb :: Db Hasql.Connection HasqlConfig registry m a
+  }
   deriving newtype
     ( Applicative
     , Functor
@@ -156,10 +160,24 @@ inTransaction
   -- ^ Schema name
   -> HasqlDb registry m a
   -> m a
-inTransaction conn schemaName = Backend.inTransaction hasqlDriver conn schemaName . unHasqlDb
+inTransaction = inTransactionWith (initialConfig hasqlDriver)
 
--- | Create a 'HasqlEnv' with conservative pool defaults. Size worker pools with
--- 'createHasqlEnvWithConfig' and @poolConfigForWorkers@.
+-- | 'inTransaction' with explicit settings, such as prepared statements off.
+inTransactionWith
+  :: forall registry m a
+   . HasqlConfig
+  -- ^ Driver settings
+  -> Hasql.Connection
+  -- ^ Connection with an open transaction
+  -> SchemaName
+  -- ^ Schema name
+  -> HasqlDb registry m a
+  -> m a
+inTransactionWith config conn schemaName =
+  Backend.inTransaction hasqlDriver {initialConfig = config} conn schemaName . unHasqlDb
+
+-- | Create a 'HasqlEnv' with 'Arbiter.Core.PoolConfig.defaultPoolConfig'. Size worker pools with
+-- 'createHasqlEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@. The listener holds one pool slot.
 createHasqlEnv
   :: forall registry m
    . (MonadIO m)
@@ -172,7 +190,16 @@ createHasqlEnv
   -> m (HasqlEnv registry)
 createHasqlEnv proxy connect schemaName = createHasqlEnvWithConfig proxy connect schemaName PC.defaultPoolConfig
 
--- | Create a 'HasqlEnv' with custom pool settings.
+-- | Create a 'HasqlEnv' with custom pool settings. The listener holds one pool slot.
+--
+-- @
+-- let config = PoolConfig
+--       { poolSize = 50
+--       , poolIdleTimeout = 120
+--       , poolStripes = Just 4
+--       }
+-- env <- createHasqlEnvWithConfig (Proxy \@MyRegistry) (toHasqlConnect Ffi.adapter connStr) "arbiter" config
+-- @
 createHasqlEnvWithConfig
   :: forall registry m
    . (MonadIO m)

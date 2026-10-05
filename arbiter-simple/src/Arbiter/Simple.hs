@@ -5,13 +5,14 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Simple
+-- import Control.Monad (void)
 -- import Data.Proxy (Proxy (..))
 --
 -- main :: IO ()
 -- main = do
 --   env <- createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
 --   runSimpleDb env $ do
---     insertJob (defaultJob myPayload)
+--     void $ insertJob (defaultJob myPayload)
 -- @
 module Arbiter.Simple
   ( -- * Re-exports

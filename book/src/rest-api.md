@@ -27,9 +27,39 @@ type MyAPI =
     :<|> "arbiter" :> (Servant.ArbiterAPI AppRegistry :<|> ServantUI.AdminUI)
 ```
 
+Server and route types: [arbiter-servant Haddocks](https://arbiterq.dev/arbiter-servant/Arbiter-Servant.html).
 UI route type: [arbiter-servant-ui Haddocks](https://arbiterq.dev/arbiter-servant-ui/Arbiter-Servant-UI.html).
 
 `POST jobs` and `POST jobs/batch` enqueue from any language.
+
+## OpenAPI
+
+`arbiter-servant-openapi` serves an OpenAPI 3 description of the API at
+`/openapi.json`:
+
+```haskell
+import Arbiter.Servant (ArbiterAPI, arbiterServer, initArbiterServer)
+import Arbiter.Servant.OpenApi (OpenApiAPI, openApiServer)
+import Arbiter.Servant.UI (AdminUI, adminUIServer)
+
+type MyApp = ArbiterAPI AppRegistry :<|> OpenApiAPI :<|> AdminUI
+
+config <- initArbiterServer (runSimpleDb env)
+run 8080 $
+  serve (Proxy @MyApp) (arbiterServer config :<|> openApiServer @AppRegistry :<|> adminUIServer)
+```
+
+| Requirement | Detail |
+| --- | --- |
+| payload and result types | a `ToSchema` instance. `deriving anyclass (ToSchema)` works for generic JSON |
+| `Value` payloads | the module supplies the instance |
+| registry | given to `openApiServer` by type application |
+
+> [!NOTE]
+> Mount `OpenApiAPI` before `AdminUI`. `AdminUI` is a `Raw` route that matches every path.
+
+`openApiSpec @AppRegistry` returns the same document as a `Value`.
+Module: [arbiter-servant-openapi Haddocks](https://arbiterq.dev/arbiter-servant-openapi/Arbiter-Servant-OpenApi.html).
 
 ## Endpoints
 
@@ -72,7 +102,7 @@ Global endpoints under `/api/v1/`:
 |--------|------|-------------|
 | `GET` | `queues` | List all registered queues |
 | `GET` | `queues/stats` | Statistics for every registered queue |
-| `GET` | `queues/:queue/details` | Get queue override details |
+| `GET` | `queues/:queue/details` | Get the queue's pause state |
 | `POST` | `queues/:queue/pause` | Pause a queue (all workers stop claiming) |
 | `POST` | `queues/:queue/resume` | Resume a paused queue |
 | `GET` | `events/stream` | SSE stream for real-time notifications |
@@ -126,7 +156,7 @@ Content-Type: application/json
 {"runAt": "2026-10-01T09:00:00Z"}
 ```
 
-An in-flight, suspended or cancelled job returns 409.
+An in-flight, suspended, cancelled or exhausted job returns 409.
 
 ## Consuming over HTTP
 
@@ -185,7 +215,7 @@ summaries. Each operation runs in one caller at a time.
 | Server setting | Meaning |
 | --- | --- |
 | `maintenanceInterval` | minimum gap between runs of one operation (default: none) |
-| `maintenanceSparseInterval` | minimum gap for schema-wide operations |
+| `maintenanceSparseInterval` | minimum gap between runs of the bucket prune and the concurrency reconcile-and-prune |
 | `maintenanceTimeout` | statement timeout |
 | `maintenanceBucketIdle` | idle time before a rate-limit bucket is removed |
 

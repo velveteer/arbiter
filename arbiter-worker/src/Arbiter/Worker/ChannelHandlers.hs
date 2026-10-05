@@ -26,7 +26,7 @@ import Arbiter.Worker.Config (WorkerConfig (..), workerStateVar, writePause)
 import Arbiter.Worker.Heartbeat (HeartbeatGuard, recheckJob)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
--- | Decode the pause payload and, if it addresses this worker, write 'pauseVar'.
+-- | Decode the pause payload and, if it addresses this worker, write 'Arbiter.Worker.Config.pauseVar'.
 handlePauseNotif
   :: (MonadUnliftIO m)
   => WorkerConfig n payload

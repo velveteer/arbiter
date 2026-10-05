@@ -20,7 +20,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Job.Schema.Groups (groupAggregates, inFlightPredicate)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
@@ -28,7 +28,7 @@ import Arbiter.Core.Sql.Query (Query)
 -- | A @group_locks@ CTE over the group rows of the @deleted@ and @updated@ CTEs, in key
 -- order, taken only when an @updated@ CTE changed a row. The DELETE trigger and the
 -- UPDATE trigger each lock in key order, but the DELETE trigger runs first.
-settleGroupLocksCte :: Text -> Text -> Text -> [Text] -> Text
+settleGroupLocksCte :: SchemaName -> TableName -> Text -> [Text] -> Text
 settleGroupLocksCte schema tableName deleted updated =
   let groupsTbl = jobQueueGroupsTable schema tableName
       anyUpdated = T.intercalate " OR " ["EXISTS (SELECT 1 FROM " <> cte <> ")" | cte <- updated]
@@ -44,14 +44,14 @@ settleGroupLocksCte schema tableName deleted updated =
       |]
 
 -- | Create the missing group summaries among @keys@ and lock them all, in key order.
-lockGroupKeysSQL :: Text -> Text -> [Text] -> Query ()
+lockGroupKeysSQL :: SchemaName -> TableName -> [Text] -> Query ()
 lockGroupKeysSQL schema tableName keys =
   let groupsTbl = jobQueueGroupsTable schema tableName
    in [sql|INSERT INTO ${groupsTbl} (group_key) SELECT DISTINCT unnest(#{keys :: [CText]}::text[]) AS group_key ORDER BY group_key ON CONFLICT (group_key) DO UPDATE SET group_key = EXCLUDED.group_key WHERE FALSE|]
 
 -- | At most @limit@ group keys past @cursor@, in the database's key order, unlocked.
 -- Its last key is the caller's resume cursor.
-groupsWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
+groupsWindowSQL :: SchemaName -> TableName -> Int -> Maybe Text -> Query Text
 groupsWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
@@ -60,7 +60,7 @@ groupsWindowSQL schema tableName limit cursor =
 
 -- | At most @limit@ keys past @cursor@ the maintenance triggers emptied in place, in the
 -- database's key order. Its last key is the caller's resume cursor.
-emptiedWindowSQL :: Text -> Text -> Int -> Maybe Text -> Query Text
+emptiedWindowSQL :: SchemaName -> TableName -> Int -> Maybe Text -> Query Text
 emptiedWindowSQL schema tableName limit cursor =
   let groupsTbl = jobQueueGroupsTable schema tableName
       lim = fromIntegral limit :: Int64
@@ -74,7 +74,7 @@ emptiedWindowSQL schema tableName limit cursor =
 -- | @FOR UPDATE SKIP LOCKED@ over the window 'groupsWindowSQL' returned plus the keys
 -- 'emptiedWindowSQL' returned, one ascending pass in the key order the maintenance
 -- triggers use. Returns the keys this transaction holds.
-lockGroupsSQL :: Text -> Text -> Maybe Text -> Maybe Text -> [Text] -> Query Text
+lockGroupsSQL :: SchemaName -> TableName -> Maybe Text -> Maybe Text -> [Text] -> Query Text
 lockGroupsSQL schema tableName cursor upper emptied =
   let groupsTbl = jobQueueGroupsTable schema tableName
       after = foldMap (\key -> [sql|AND group_key > #{key :: CText}|]) cursor
@@ -103,7 +103,7 @@ summaryAggregates =
 
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
 -- Returns the count of rows it rewrote. A separate statement whose snapshot post-dates the lock.
-refreshGroupsSQL :: Text -> Text -> [Text] -> Query Int64
+refreshGroupsSQL :: SchemaName -> TableName -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -144,10 +144,9 @@ refreshGroupsSQL schema tableName keys =
         SELECT (SELECT count(*) FROM deleted) + (SELECT count(*) FROM updated) AS @{rewritten :: CInt8}
       |]
 
--- | Insert summary rows for grouped jobs the triggers left without one, at most
--- @limit@ keys per call in key order, bounded to the @lower@ to @upper@ key window its
--- caller locked. Returns each key it covered and whether the insert landed.
-insertMissingGroupsSQL :: Text -> Text -> Int -> Maybe Text -> Maybe Text -> Query (Text, Bool)
+-- | Insert summary rows for grouped jobs that have none, at most @limit@ keys past
+-- @lower@ up to @upper@, in key order. Returns each key and whether its insert landed.
+insertMissingGroupsSQL :: SchemaName -> TableName -> Int -> Maybe Text -> Maybe Text -> Query (Text, Bool)
 insertMissingGroupsSQL schema tableName limit lower upper =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName

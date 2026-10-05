@@ -30,7 +30,7 @@ import Test.Hspec
 import Arbiter.Worker.TestKit.Backend (TestBackend (..))
 import Arbiter.Worker.TestKit.Rows (reclaimJob)
 
--- | A failing payload's remaining failure count, high enough to fail every attempt.
+-- | The tag on the failing payloads. The handler fails each payload with this tag.
 alwaysFailing :: Int
 alwaysFailing = 999
 

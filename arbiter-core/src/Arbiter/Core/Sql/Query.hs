@@ -1,11 +1,14 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | A SQL query bundling its text, its positional parameters, and its row
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- A SQL query bundling its text, its positional parameters, and its row
 -- decoder in one value. The text is a list of literals and parameter holes, rendered
 -- in the placeholder form each backend needs. Built by the @sql@
 -- quasiquoter in "Arbiter.Core.Sql.QQ". The parameters and decoder use the
--- same 'Arbiter.Core.Codec.Col'-driven vocabulary as the profunctor codec in
+-- same t'Arbiter.Core.Codec.Col'-driven vocabulary as the profunctor codec in
 -- "Arbiter.Core.Codec".
 module Arbiter.Core.Sql.Query
   ( Query (..)
@@ -87,7 +90,7 @@ rawRows :: RowCodec a -> Text -> Query a
 rawRows decoder = rows decoder . raw
 
 -- | Join fragments with a separator, concatenating their text and parameters
--- in order. Used for @WHERE ... AND ...@ and runtime-sized @VALUES@ lists.
+-- in order.
 sepBy :: Text -> [Query ()] -> Query ()
 sepBy sep queries =
   mkQuery

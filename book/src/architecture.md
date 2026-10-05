@@ -10,8 +10,9 @@ The lifecycle under `transactionalWorkerConfig`:
 1. **Claim:** The dispatcher claims visible jobs in per-group order,
    increments each attempt count, and hides each job for the visibility
    timeout. The same statement applies admission: a job with an empty
-   rate-limit bucket or a full concurrency pool is skipped. A heartbeat extends
-   the timeout while the handler runs.
+   rate-limit bucket is parked until its bucket refills, and a job with a full
+   concurrency pool is skipped. A heartbeat extends the timeout while the
+   handler runs.
 2. **Run:** The handler runs in a transaction. Its database work, its stored
    result, and the ack commit together.
 3. **Success:** The transaction commits.

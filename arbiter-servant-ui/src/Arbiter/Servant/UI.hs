@@ -3,7 +3,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Embedded admin dashboard (Bootstrap 5 CSS + Vue 3, compiled-in static files).
+-- | Embedded admin dashboard. Bootstrap 5 CSS and Vue 3, compiled in.
 --
 -- __Security:__ No built-in authentication. All queue management operations
 -- (view, delete, retry) are publicly accessible. Add auth middleware before

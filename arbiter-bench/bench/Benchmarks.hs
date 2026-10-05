@@ -23,7 +23,7 @@ import Arbiter.Core.QueueRegistry (Queue, RegistryTables)
 import Arbiter.Core.RateLimit.Spec (HasRateLimit (..), limitBy, tokenBucket)
 import Arbiter.Hasql (HasqlDb, createHasqlEnvWithConfig, runHasqlDb)
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), toOrvilleConnectionOptions, runOrvilleDb)
+import Arbiter.Orville (OrvilleDb, OrvilleEnv (..), runOrvilleDb, toOrvilleConnectionOptions)
 import Arbiter.Otel qualified as Otel
 import Arbiter.Simple (SimpleDb, SimpleEnv, createSimpleEnv, createSimpleEnvWithConfig, runSimpleDb)
 import Arbiter.Worker

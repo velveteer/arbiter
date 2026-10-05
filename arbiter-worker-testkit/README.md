@@ -2,4 +2,4 @@
 
 Reusable conformance tests for Arbiter worker backends.
 
-See the [Arbiter guide](https://arbiterq.dev/docs/) for installation, setup, and examples.
+Build a `TestBackend` for your backend and pass it to the specs. Setup and spec list: [`Arbiter.Worker.TestKit` Haddocks](https://arbiterq.dev/arbiter-worker-testkit/Arbiter-Worker-TestKit.html).

@@ -33,7 +33,7 @@ instance {-# OVERLAPPABLE #-} HasKind payload where
   kindOf _ = Nothing
   kindsFor = []
 
--- | Constructor name of a wrapped sum. Requires @Generic@ on the wrapped type.
+-- | A value's constructor name, for a payload that wraps a sum. Requires @Generic@.
 --
 -- @
 -- instance HasKind Envelope where
@@ -49,7 +49,10 @@ constructorKinds = gKindsOf @(Rep a)
 
 -- | Constructor names of a generic representation, in declaration order.
 class GKind f where
+  -- | The constructor name of a value.
   gKindOf :: f a -> Text
+
+  -- | Every constructor name.
   gKindsOf :: [Text]
 
 instance (GKind f) => GKind (D1 d f) where

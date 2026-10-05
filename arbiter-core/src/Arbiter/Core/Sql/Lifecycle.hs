@@ -21,19 +21,19 @@ import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 
-import Arbiter.Core.Job.Schema (jobQueueGroupsTable, jobQueueTable)
-import Arbiter.Core.Job.Types (attemptsLeftSQL)
+import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
 import Arbiter.Core.Sql.Archive (archiveAckCte)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql, stmt)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.Tree (lockedByIdsCte)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
 
 -- | Parent-aware ack. Deletes a childless job, suspends one whose children are still
 -- running, and wakes a suspended parent whose last child left the queue. Returns 1,
 -- or 0 for a job gone, reclaimed or cancelled. When @archiveEnabled@, the deleted row
 -- is teed into the archive per-row on @archive_for@.
-smartAckJobSQL :: Bool -> Text -> Text -> Int64 -> Int64 -> Query Int64
+smartAckJobSQL :: Bool -> SchemaName -> TableName -> Int64 -> Int64 -> Query Int64
 smartAckJobSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "*" else "id, parent_id, group_key" :: Text
@@ -77,9 +77,9 @@ smartAckJobSQL archiveEnabled schema tableName =
 -- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays. Deletes leaves,
 -- suspends finalizers that still have children, and wakes parents whose last
 -- child completed. The wake check excludes acked children explicitly. Returns the
--- acked ids. Reclaimed jobs are absent. Locks children-first to match nack and
--- force-cancel. The caller holds the parent locks.
-smartAckJobsBatchSQL :: Bool -> Text -> Text -> [Int64] -> [Int64] -> Query Int64
+-- ids acked or suspended. Reclaimed jobs are absent. Locks rows in descending id order.
+-- The caller holds the parent locks.
+smartAckJobsBatchSQL :: Bool -> SchemaName -> TableName -> [Int64] -> [Int64] -> Query Int64
 smartAckJobsBatchSQL archiveEnabled schema tableName =
   let tbl = jobQueueTable schema tableName
       returning = if archiveEnabled then "job.*" else "job.id, job.parent_id, job.group_key" :: Text
@@ -133,7 +133,7 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
 
 -- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows
 -- hold no lease. @secs@ at or below 0 clears the lease.
-setVisibilityTimeoutSQL :: Text -> Text -> Double -> Int64 -> Int64 -> Query ()
+setVisibilityTimeoutSQL :: SchemaName -> TableName -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
@@ -151,8 +151,8 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 -- carries the input @(id, claim_seq, claimed_by)@ rows. @secs@ at or below 0 clears the
 -- lease. The statement never waits on a lock. It takes the group summaries first, then
 -- the rows, both with SKIP LOCKED, and a row whose summary or row is busy reads back
--- unchanged.
-setVisibilityTimeoutBatchSQL :: Text -> Text -> Query () -> [Int64] -> Double -> Query ()
+-- unchanged. The caller attaches the row decoder.
+setVisibilityTimeoutBatchSQL :: SchemaName -> TableName -> Query () -> [Int64] -> Double -> Query ()
 setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
   let tbl = jobQueueTable schema tableName
       groupsTbl = jobQueueGroupsTable schema tableName
@@ -211,7 +211,7 @@ setVisibilityTimeoutBatchSQL schema tableName valuesFrag ids secs =
       |]
 
 -- | Park a failed job for its retry backoff. Matches on the claim token.
-updateJobForRetrySQL :: Text -> Text -> Int64 -> Text -> Int64 -> Int64 -> Query ()
+updateJobForRetrySQL :: SchemaName -> TableName -> Int64 -> Text -> Int64 -> Int64 -> Query ()
 updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
   let tbl = jobQueueTable schema tableName
    in [sql|
@@ -225,7 +225,7 @@ updateJobForRetrySQL schema tableName backoff errorMsg jobId cseq =
 
 -- | Soft nack. Releases the claim and hands back the attempt it consumed, recording no
 -- failure. Leaves @not_visible_until@ as it stands.
-nackJobSQL :: Text -> Text -> Int64 -> Int64 -> Int32 -> Query ()
+nackJobSQL :: SchemaName -> TableName -> Int64 -> Int64 -> Int32 -> Query ()
 nackJobSQL schema tableName jobId cseq att =
   let tbl = jobQueueTable schema tableName
    in [sql|
@@ -237,9 +237,9 @@ nackJobSQL schema tableName jobId cseq att =
           AND claimed_by IS NOT NULL
       |]
 
--- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays, locking
--- children-first to match ack and force-cancel. Returns the ids nacked.
-nackJobsBatchSQL :: Text -> Text -> [Int64] -> [Int64] -> [Int32] -> Query Int64
+-- | 'nackJobSQL' over @unnest@ed @(id, claim_seq, attempts)@ arrays. Locks rows in
+-- descending id order. Returns the ids nacked.
+nackJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> [Int64] -> [Int32] -> Query Int64
 nackJobsBatchSQL schema tableName ids cseqs atts =
   let tbl = jobQueueTable schema tableName
       locked = lockedByIdsCte tbl ids
@@ -261,8 +261,8 @@ nackJobsBatchSQL schema tableName ids cseqs atts =
         RETURNING @{id :: CInt8}
       |]
 
--- | Make a delayed or retrying job immediately visible. Refuses an in-flight job.
-promoteJobSQL :: Text -> Text -> Int64 -> Query ()
+-- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
+promoteJobSQL :: SchemaName -> TableName -> Int64 -> Query ()
 promoteJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in [sql|
@@ -278,7 +278,7 @@ promoteJobSQL schema tableName jobId =
 
 -- | Set when a job next becomes visible, clear its throttle marker and void a lapsed
 -- claim. Refuses an in-flight, suspended, cancel-flagged or exhausted job.
-rescheduleJobSQL :: Text -> Text -> Int64 -> UTCTime -> Query ()
+rescheduleJobSQL :: SchemaName -> TableName -> Int64 -> UTCTime -> Query ()
 rescheduleJobSQL schema tableName jobId runAt =
   let tbl = jobQueueTable schema tableName
       attemptsLeft = attemptsLeftSQL ""

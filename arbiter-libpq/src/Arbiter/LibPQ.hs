@@ -1,4 +1,4 @@
--- | The LISTEN/NOTIFY hub over a libpq connection.
+-- | LISTEN\/NOTIFY connections and listeners over libpq.
 module Arbiter.LibPQ
   ( libpqListenConn
   , withLibPQListenConn
@@ -23,9 +23,9 @@ connectDriver =
   ConnectDriver
     { connectStart = PQ.connectStart
     , connectPoll = fmap polling . PQ.connectPoll
-    , status = fmap connStatus . PQ.status
-    , finish = PQ.finish
-    , errorMessage = PQ.errorMessage
+    , connectStatus = fmap connStatus . PQ.status
+    , connectFinish = PQ.finish
+    , connectErrorMessage = PQ.errorMessage
     }
   where
     polling PQ.PollingReading = PollReading

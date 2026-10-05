@@ -44,7 +44,7 @@ type data QueueSpec = QueueWithResult Symbol Type Type
 -- needs @import Arbiter.Core hiding (Queue)@ or a qualified import.
 type Queue (table :: Symbol) (payload :: Type) = QueueWithResult table payload ()
 
--- | A type-level registry mapping table names to payload types.
+-- | A type-level registry mapping table names to payload and result types.
 --
 -- Example:
 --
@@ -146,7 +146,7 @@ type family NotInPayloads (payload :: Type) (registry :: JobPayloadRegistry) :: 
   NotInPayloads payload (QueueWithResult _ payload _ ': _) = TypeError (DuplicatePayloadMsg payload)
   NotInPayloads payload (_ ': rest) = NotInPayloads payload rest
 
--- | Extract table names from a type-level registry at runtime (used by migrations).
+-- | A type-level registry's queue names and labels, read at runtime.
 class (AllQueuesUnique registry) => RegistryTables (registry :: JobPayloadRegistry) where
   -- | Every queue's table name, in registry order.
   registryTableNames :: Proxy registry -> [Text]

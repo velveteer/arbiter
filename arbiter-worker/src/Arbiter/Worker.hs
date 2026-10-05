@@ -1,5 +1,5 @@
--- | Public worker API: single-pool execution, multi-pool orchestration, job
--- results, configuration, and logging.
+-- | Public worker API: pools, job results, configuration, logging, maintenance,
+-- and cron.
 module Arbiter.Worker
   ( -- * Running workers
     runWorkerPool
@@ -14,16 +14,46 @@ module Arbiter.Worker
   , storeJobResult
   , storeEncodedResult
 
-    -- * Configuration and logging
-  , module Arbiter.Worker.Config
+    -- * Configuration
+  , WorkerConfig (..)
+  , transactionalWorkerConfig
+  , manualWorkerConfig
+  , batchedWorkerConfig
+  , withHooks
+  , withMaintenance
+  , HandlerMode (..)
+  , handlerBatchSize
+  , MaintenanceOp (..)
+  , maintenanceOpName
+  , ResultOf
+  , WorkerConfigException (..)
+  , validateWorkerConfig
   , module Arbiter.Worker.BackoffStrategy
-  , module Arbiter.Worker.Logger
+
+    -- * Batch callbacks
+  , BatchCallbacks (..)
+  , hoistBatchCallbacks
+
+    -- * Worker state
   , module Arbiter.Worker.WorkerState
+  , WorkerRuntime
+  , shutdownWorker
+  , getWorkerState
+  , getListenerReady
+  , readEffectiveState
+
+    -- * Logging
+  , LogConfig (..)
+  , LogDestination (..)
+  , defaultLogConfig
+  , silentLogConfig
+  , LogLevel (..)
+  , Pair
+  , (.=)
 
     -- * Reaper
   , runMaintenancePass
   , MaintenancePace (..)
-  , runReaperOp
 
     -- * Cron
   , CronJob (..)
@@ -32,7 +62,6 @@ module Arbiter.Worker
   , TickKind (..)
   , cronJob
   , cronJobInTimezone
-  , initCronSchedules
   , overlapPolicyToText
   , overlapPolicyFromText
   , validateCronScheduleUpdate
@@ -43,7 +72,27 @@ import Arbiter.Core.JobResult
 
 import Arbiter.Worker.BackoffStrategy
 import Arbiter.Worker.Config
-import Arbiter.Worker.Cron.Scheduler (initCronSchedules)
+  ( BatchCallbacks (..)
+  , HandlerMode (..)
+  , MaintenanceOp (..)
+  , ResultOf
+  , WorkerConfig (..)
+  , WorkerConfigException (..)
+  , WorkerRuntime
+  , batchedWorkerConfig
+  , getListenerReady
+  , getWorkerState
+  , handlerBatchSize
+  , hoistBatchCallbacks
+  , maintenanceOpName
+  , manualWorkerConfig
+  , readEffectiveState
+  , shutdownWorker
+  , transactionalWorkerConfig
+  , validateWorkerConfig
+  , withHooks
+  , withMaintenance
+  )
 import Arbiter.Worker.Cron.Types
   ( BackfillPolicy (..)
   , CronJob (..)
@@ -58,8 +107,16 @@ import Arbiter.Worker.Cron.Types
   )
 import Arbiter.Worker.EnabledQueues (getEnabledQueues)
 import Arbiter.Worker.Logger
+  ( LogConfig (..)
+  , LogDestination (..)
+  , LogLevel (..)
+  , Pair
+  , defaultLogConfig
+  , silentLogConfig
+  , (.=)
+  )
 import Arbiter.Worker.MultiQueue
-import Arbiter.Worker.Pool (runReaperOp, runWorkerPool)
+import Arbiter.Worker.Pool (runWorkerPool)
 import Arbiter.Worker.Reaper (MaintenancePace (..), runMaintenancePass)
 import Arbiter.Worker.Results (childResults, mergeChildResults, mergedChildResults, storeEncodedResult, storeJobResult)
 import Arbiter.Worker.WorkerState

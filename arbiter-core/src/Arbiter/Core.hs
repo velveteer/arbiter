@@ -9,6 +9,9 @@ module Arbiter.Core
   , module Arbiter.Core.QueueRegistry
 
     -- * High-level operations
+
+    -- | The admin row records share field names with each other and with 'Job'.
+    -- Unqualified use needs @DuplicateRecordFields@ or @OverloadedRecordDot@.
   , module Arbiter.Core.HighLevel
 
     -- * Job tree DSL
@@ -27,22 +30,17 @@ module Arbiter.Core
     -- * Exceptions
   , module Arbiter.Core.Exceptions
 
-    -- * Cron schedule overrides and worker health
-
-    -- | The admin row records share field names with each other and with 'Job'.
-    -- Unqualified use needs @DuplicateRecordFields@ or @OverloadedRecordDot@.
-  , CronScheduleRow (..)
-  , CronScheduleUpdate (..)
+    -- * Cron schedule and worker health helpers
   , effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
-  , WorkerHealth (..)
   , workerHealthFromText
+  , workerHealthToText
 
     -- * Connection pool settings
   , module Arbiter.Core.PoolConfig
 
-    -- * Listener types
+    -- * Listener
 
     -- | 'Arbiter.Core.Listen.Notification' collides with @Database.PostgreSQL.Simple.Notification@.
     -- Import it from @Arbiter.Core.Listen@.
@@ -54,9 +52,7 @@ module Arbiter.Core
   ) where
 
 import Arbiter.Core.CronSchedule
-  ( CronScheduleRow (..)
-  , CronScheduleUpdate (..)
-  , effectiveExpression
+  ( effectiveExpression
   , effectiveOverlap
   , effectiveTimezone
   )
@@ -65,7 +61,7 @@ import Arbiter.Core.HighLevel
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
-import Arbiter.Core.Job.Types hiding (attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
+import Arbiter.Core.Job.Types
 import Arbiter.Core.JobResult
 import Arbiter.Core.JobTree hiding (insertJobTree) -- use HighLevel.insertJobTree
 import Arbiter.Core.Listen
@@ -75,7 +71,15 @@ import Arbiter.Core.Listen
   , newListener
   , withChannels
   )
-import Arbiter.Core.MonadArbiter hiding (Query (..), countOr0, countOr0Prepared)
+import Arbiter.Core.MonadArbiter hiding
+  ( ParamType (..)
+  , Params
+  , Query (..)
+  , SomeParam (..)
+  , countOr0
+  , countOr0Prepared
+  , mkQuery
+  )
 import Arbiter.Core.PoolConfig
 import Arbiter.Core.QueueRegistry
-import Arbiter.Core.Worker (WorkerHealth (..), workerHealthFromText)
+import Arbiter.Core.Worker (workerHealthFromText, workerHealthToText)

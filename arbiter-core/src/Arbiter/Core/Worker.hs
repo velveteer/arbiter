@@ -1,8 +1,12 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Types and DDL for the @arbiter_workers@ table.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Types and DDL for the @arbiter_workers@ table, and column migrations for the queue
+-- job tables.
 module Arbiter.Core.Worker
   ( WorkerRow (..)
   , WorkerHealth (..)

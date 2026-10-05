@@ -1,19 +1,16 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS_HADDOCK not-home #-}
 
--- | Internal to the arbiter packages. Not covered by the PVP.
---
--- The env, monad, pool state, and savepoint ladder shared by the pooled backends.
+-- | The env, monad, pool state, and savepoint ladder shared by the pooled backends.
 module Arbiter.Core.Backend
-  ( -- * Database Monad
+  ( -- * Database monad
     Db (..)
   , Env (..)
   , Driver (..)
   , runDb
   , inTransaction
 
-    -- * Environment Creation
+    -- * Environment creation
   , createEnvWithConfig
   , createEnvWithPool
   , destroyEnv
@@ -82,7 +79,10 @@ data Env conn cfg (registry :: JobPayloadRegistry) = Env
   }
 
 -- | A pooled backend's database monad.
-newtype Db conn cfg (registry :: JobPayloadRegistry) m a = Db {unDb :: ReaderT (Env conn cfg registry) m a}
+newtype Db conn cfg (registry :: JobPayloadRegistry) m a = Db
+  { unDb :: ReaderT (Env conn cfg registry) m a
+  -- ^ The action as a reader over its env.
+  }
   deriving newtype
     ( Applicative
     , Functor
@@ -134,7 +134,8 @@ useDedicatedListener withDedicated env = liftIO $ do
 poolListener :: Driver conn cfg -> Pool conn -> IO Listener
 poolListener drv pool = newListener (\action -> withResource pool (\conn -> withListenConn drv conn action))
 
--- | Create an env over a new pool opened with the connect and release actions.
+-- | Create an env over a new pool opened with the connect and release actions. While
+-- anything listens, the listener holds one pool slot.
 createEnvWithConfig
   :: (MonadIO m)
   => Driver conn cfg
@@ -150,7 +151,8 @@ createEnvWithConfig drv connect release schemaName config = liftIO $ do
       $ defaultPoolConfig connect release (fromIntegral $ poolIdleTimeout config) (poolSize config)
   createEnvWithPool drv connPool schemaName
 
--- | Create an env over a caller's own connection pool. The listener holds one pool slot.
+-- | Create an env over a caller's own connection pool. While anything listens, the
+-- listener holds one pool slot.
 createEnvWithPool :: (MonadIO m) => Driver conn cfg -> Pool conn -> SchemaName -> m (Env conn cfg registry)
 createEnvWithPool drv connPool schemaName = liftIO $ do
   lstn <- poolListener drv connPool

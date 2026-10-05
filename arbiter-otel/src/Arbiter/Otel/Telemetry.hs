@@ -77,10 +77,10 @@ import Arbiter.Otel.Metrics (ArbiterMeters, newArbiterMeters)
 -- | A running telemetry handle: instruments, provider, and resolved settings.
 data Telemetry = Telemetry
   { meters :: Maybe ArbiterMeters
-  -- ^ 'Nothing' when nothing is exporting metrics. Then there are no job instruments and no gauge scan.
+  -- ^ 'Nothing' when metrics are off. Then no job instruments and no gauge scan.
   , provider :: MeterProvider
   -- ^ The meter provider the gauge instruments register on.
-  , logDestination :: Maybe LogDestination
+  , telemetryLogDestination :: Maybe LogDestination
   -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
   , gaugeRefresh :: NominalDiffTime
   -- ^ The metric export interval this handle resolved.
@@ -88,8 +88,8 @@ data Telemetry = Telemetry
   -- ^ What this handle exports and where, for the caller to log at startup.
   }
 
--- | Bracketed OpenTelemetry init/shutdown. Nested brackets unwind partial setup. Every
--- signal is the SDK's, resolved from its own @OTEL_@ variables.
+-- | Bracketed OpenTelemetry init and shutdown. Every signal is the SDK's, resolved from
+-- its own @OTEL_@ variables.
 -- 'withTelemetryFromEnv' is the gated form.
 withTelemetry :: (Telemetry -> IO a) -> IO a
 withTelemetry action = do
@@ -110,7 +110,7 @@ withTelemetry action = do
       action
         (baseTelemetry meterProvider)
           { meters = either (const Nothing) Just instruments
-          , logDestination = either (const Nothing) (Just . loggerDestination) logs
+          , telemetryLogDestination = either (const Nothing) (Just . loggerDestination) logs
           , gaugeRefresh = refreshFor readerOpts
           , telemetrySummary =
               summarize (serviceName resources) (catMaybes [detectNote, noteOf traces, noteOf instruments, noteOf logs])
@@ -217,7 +217,7 @@ baseTelemetry meterProvider =
   Telemetry
     { meters = Nothing
     , provider = meterProvider
-    , logDestination = Nothing
+    , telemetryLogDestination = Nothing
     , gaugeRefresh = refreshFor defaultPeriodicMetricReaderOptions
     , telemetrySummary = "telemetry off"
     }
@@ -237,7 +237,7 @@ withTelemetryIf False action = action inertTelemetry
 
 -- | Send log output to the configured destination and this handle's destination.
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
-telemetryLogConfig = otelLogs . logDestination
+telemetryLogConfig = otelLogs . telemetryLogDestination
 
 -- | Run an action with application-owned providers. Missing providers disable
 -- their applicable signals.
@@ -249,7 +249,7 @@ withExternalTelemetry mmp mlp action = do
   action
     (baseTelemetry (fromMaybe noopMeterProvider mmp))
       { meters = either (const Nothing) Just =<< instruments
-      , logDestination = loggerDestination <$> mlp
+      , telemetryLogDestination = loggerDestination <$> mlp
       , gaugeRefresh = refreshFor readerOpts
       , telemetrySummary =
           T.intercalate ", " $

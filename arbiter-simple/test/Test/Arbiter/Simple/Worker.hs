@@ -33,7 +33,7 @@ import Data.ByteString (ByteString)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (..))
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import Database.PostgreSQL.Simple (Connection)
 import GHC.Generics (Generic)
 import Test.Hspec (Spec, afterAll_, beforeAll, describe, it, runIO, shouldBe)
@@ -154,18 +154,24 @@ mqTableB = "mq_listen_b"
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @QueueAPayload @QueueBPayload
-      mqTableA
-      mqTableB
-      connStr
-      QueueAPayload
-      QueueBPayload
-      mkEnv
-      destroySimpleEnv
-      TestKit.plainHandler
-      runSimpleDb
+    TestKit.multiQueueListenerSpec backend mqTableB QueueBPayload TestKit.plainHandler
   where
-    mkEnv = do
+    backend =
+      TestKit.TestBackend
+        { schema = mqSchema
+        , table = mqTableA
+        , connStr
+        , mkSimple = QueueAPayload
+        , mkFailing = QueueAPayload . pack . show
+        , mkEnv = freshEnv
+        , pollOnly = disableListener
+        , mkFreshEnv = freshEnv
+        , destroyEnv = destroySimpleEnv
+        , mkHandler = TestKit.plainHandler
+        , runCommand = TestKit.statementCommand
+        , runM = runSimpleDb
+        }
+    freshEnv = do
       cleanupOnce connStr mqSchema mqTableA
       cleanupOnce connStr mqSchema mqTableB
       createSimpleEnv (Proxy @MultiQRegistry) connStr mqSchema

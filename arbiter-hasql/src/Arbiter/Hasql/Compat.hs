@@ -63,7 +63,7 @@ runScript = Session.sql
 #endif
 
 #if MIN_VERSION_hasql(2,0,0)
--- | Connection settings for hasql 2: transport adapter (e.g. @Pqi.Ffi.adapter@) and connection string.
+-- | Connection settings for hasql 2: transport adapter (for example @Pqi.Ffi.adapter@) and connection string.
 data HasqlConnect = HasqlConnect PQ.Adapter ByteString
 
 -- | Connection settings from a pqi adapter and a connection string. With the @hasql2@
@@ -142,9 +142,9 @@ pqiConnectDriver adapter =
   ConnectDriver
     { connectStart = PQ.connectStart adapter
     , connectPoll = fmap polling . PQ.connectPoll
-    , status = fmap connStatus . PQ.status
-    , finish = PQ.finish
-    , errorMessage = PQ.errorMessage
+    , connectStatus = fmap connStatus . PQ.status
+    , connectFinish = PQ.finish
+    , connectErrorMessage = PQ.errorMessage
     }
   where
     polling PQ.PollingReading = PollReading

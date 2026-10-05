@@ -156,7 +156,7 @@ listWorkersSQL schemaName queue liveSecs =
           ORDER BY queue_name, started_at DESC
         |]
 
--- | Delete worker rows older than their own @stale_threshold_secs@.
+-- | Delete workers whose last heartbeat is older than their own @stale_threshold_secs@.
 deleteStaleWorkersSQL :: SchemaName -> Query ()
 deleteStaleWorkersSQL schemaName =
   let tbl = arbiterWorkersTable schemaName

@@ -37,7 +37,7 @@ import Arbiter.Core.Trace
   , withPublishSpan
   )
 import Arbiter.Migrations (MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
-import Arbiter.RateLimit (HasRateLimit (..), Policy, limitBy, tokenBucket)
+import Arbiter.RateLimit (HasRateLimit (..), RateLimitPolicy, limitBy, tokenBucket)
 import Arbiter.Simple (SimpleDb, createSimpleEnv, runSimpleDb)
 import Arbiter.Test.Config (getTestConnectionString)
 import Arbiter.Test.Poll (waitUntil)
@@ -130,7 +130,7 @@ instance HasRateLimit Metered where
   rateLimitFor = limitBy meteredPolicy (\(Metered tenant) -> tenant)
   rateLimitCost = const 1
 
-meteredPolicy :: Policy
+meteredPolicy :: RateLimitPolicy
 meteredPolicy = tokenBucket meteredPrefix 3 2
 
 meteredPrefix :: Text
@@ -278,7 +278,7 @@ spec = do
       let job = setArchiveFor (Just 3600) $ defaultJob (Greeting "archived")
       stored <- withAttachedSpan sampleTraceparent $ insertRaw plainEnv job
       void $ runSimpleDb plainEnv (Ops.ackJob schema queue stored)
-      archived <- runSimpleDb plainEnv (Ops.getArchivedJobById @_ @Greeting schema queue (primaryKey stored))
+      archived <- runSimpleDb plainEnv (Ops.getArchiveJobById @_ @Greeting schema queue (primaryKey stored))
       fmap (traceContext . jobSnapshot) archived `shouldBe` Just (traceContext stored)
 
     it "survives the DLQ round trip" $ do

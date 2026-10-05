@@ -17,7 +17,7 @@ module Main (main) where
 
 import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitsTableName)
-import Arbiter.Core.RateLimit.Spec (Durability (Durable), Policy (..))
+import Arbiter.Core.RateLimit.Spec (Durability (Durable), RateLimitPolicy (..))
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception (bracket, bracket_)
 import Control.Monad (void)
@@ -84,7 +84,7 @@ conflictTests =
       conflictingPolicyPrefixes [row "a" 1 1 1, row "a" 2 1 1] @?= ["a"]
   ]
   where
-    row = Policy
+    row = RateLimitPolicy
 
 registryNameTests :: [TestTree]
 registryNameTests =

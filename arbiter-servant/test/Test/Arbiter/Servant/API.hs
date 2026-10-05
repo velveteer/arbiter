@@ -71,7 +71,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID.Types qualified as UUID
 import Database.PostgreSQL.Simple qualified as PG
 import GHC.Generics (Generic)
@@ -104,6 +104,10 @@ import Arbiter.Servant.Types
   , StatsResponse (..)
   , WorkersResponse (..)
   )
+
+-- | Clock slack for a server-stamped time.
+clockSlack :: NominalDiffTime
+clockSlack = 1
 
 -- | A JSON POST. Servant answers a typed body with 415 when the header is absent.
 postJson :: ByteString -> LB.ByteString -> WaiSession st SResponse
@@ -895,7 +899,7 @@ spec connStr = do
         _ <- runSimpleDb mkEnv $ HL.ackJob claimed
         corruptPayload (Schema.jobQueueArchiveTable testSchema testTable) "job_id" (primaryKey jobRead)
         Just archived :: Maybe (ArchiveJob (Stored ServantTestPayload)) <-
-          runSimpleDb mkEnv $ Ops.getArchivedJobById testSchema testTable (primaryKey jobRead)
+          runSimpleDb mkEnv $ Ops.getArchiveJobById testSchema testTable (primaryKey jobRead)
         pure $ archivePrimaryKey archived
 
       liftIO $
@@ -1074,7 +1078,7 @@ spec connStr = do
         [claimed] <- runSimpleDb mkEnv $ HL.claimNextVisibleJobsAs @ServantTestPayload 1 60 UUID.nil
         _ <- runSimpleDb mkEnv $ HL.ackJob claimed
         Just archived :: Maybe (ArchiveJob (Stored ServantTestPayload)) <-
-          runSimpleDb mkEnv $ Ops.getArchivedJobById testSchema testTable (primaryKey jobRead)
+          runSimpleDb mkEnv $ Ops.getArchiveJobById testSchema testTable (primaryKey jobRead)
         pure $ archivePrimaryKey archived
 
       postJson
@@ -1569,6 +1573,7 @@ spec connStr = do
 
   describe "Stats API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/stats returns zero counts for empty queue" $ do
+      requestedAt <- liftIO getCurrentTime
       resp <- get "/api/v1/arbiter_servant_test/stats"
       liftIO $ do
         body :: StatsResponse <- decodeBody resp
@@ -1580,7 +1585,7 @@ spec connStr = do
         Ops.backoffJobs queueStats `shouldBe` 0
         Ops.suspendedJobs queueStats `shouldBe` 0
         Ops.oldestReadyAgeSeconds queueStats `shouldBe` Nothing
-        timestamp body `shouldSatisfy` (not . T.null)
+        timestamp body `shouldSatisfy` (>= addUTCTime (negate clockSlack) requestedAt)
 
     it "GET /api/v1/arbiter_servant_test/stats reflects inserted and claimed jobs" $ do
       -- Insert 3 jobs, claim 1
@@ -1615,9 +1620,9 @@ spec connStr = do
         simpleStatus resp `shouldBe` status200
         let body = decode @(Map.Map Text [CS.CronScheduleRow]) (simpleBody resp)
         case body of
-          Just decoded -> case Map.lookup "cronSchedules" decoded of
+          Just decoded -> case Map.lookup "schedules" decoded of
             Just rows -> length rows `shouldSatisfy` (>= 2)
-            Nothing -> fail "Missing cronSchedules key"
+            Nothing -> fail "Missing schedules key"
           Nothing -> fail "Failed to decode response"
 
     it "PATCH /api/v1/cron/schedules/:name with empty body is a no-op" $ do

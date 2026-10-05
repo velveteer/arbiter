@@ -48,6 +48,7 @@ import Arbiter.Test.Concurrency (findDuplicates)
 import Arbiter.Test.Setup (execQuery, execStatement, truncateToMicros)
 
 -- | Build a test suite for the given 'MonadArbiter' runner.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
 operationsSpec
   :: forall payload m env
    . ( EncodeJobResult (ResultOf m payload)
@@ -705,6 +706,23 @@ operationsSpec mkMessage mkResult runM = do
 
       runM env (HL.setVisibilityTimeoutBatch 120 [claimedParent])
         >>= (`shouldBe` [JobSuspended (primaryKey parent)])
+
+    it "re-suspends a finalizer in retry backoff when a DLQ retry restores its child" $ \env -> do
+      Right (parent :| [_child]) <-
+        runM env
+          $ HL.insertJobTree
+          $ JT.rollup
+            (defaultJob (mkMessage "BackoffFinalizer"))
+            (JT.leaf (defaultJob (mkMessage "BackoffFinalizerChild")) :| [])
+      [claimedChild] <- claimJobs env 1
+      runM env (HL.moveToDLQ "boom" claimedChild) `shouldReturn` 1
+      [claimedParent] <- claimJobs env 1
+      primaryKey claimedParent `shouldBe` primaryKey parent
+      runM env (HL.updateJobForRetry 3600 "boom" claimedParent) `shouldReturn` 1
+
+      [dlqChild] <- dlqAll env
+      Just _ <- runM env (HL.retryFromDLQ @payload (DLQ.dlqPrimaryKey dlqChild))
+      assertSuspended env (primaryKey parent)
 
     it "refuses a flagged job to a lapsed claim carrying the same worker id" $ \env -> do
       let owner = UUID.nil
@@ -2114,7 +2132,7 @@ operationsSpec mkMessage mkResult runM = do
       found <- getJob env 999999
       found `shouldBe` Nothing
 
-    it "getJobsByGroup returns jobs filtered by group key" $ \env -> do
+    it "listJobsByGroup returns jobs filtered by group key" $ \env -> do
       -- Insert jobs in different groups
       forM_ [1 .. 3 :: Int] $ \index ->
         void $ runM env (HL.insertJob (defaultGroupedJob "group-filter-a" (mkMessage (T.pack $ "A" <> show index))))
@@ -2122,7 +2140,7 @@ operationsSpec mkMessage mkResult runM = do
         void $ runM env (HL.insertJob (defaultGroupedJob "group-filter-b" (mkMessage (T.pack $ "B" <> show index))))
 
       -- Get only group A
-      groupAJobs <- runM env (HL.getJobsByGroup @payload "group-filter-a" 10 0)
+      groupAJobs <- runM env (HL.listJobsByGroup @payload "group-filter-a" 10 0)
       length groupAJobs `shouldBe` 3
       forM_ groupAJobs $ \job -> groupKey job `shouldBe` Just "group-filter-a"
 
@@ -2237,7 +2255,7 @@ operationsSpec mkMessage mkResult runM = do
         let archiveTbl = Schema.jobQueueArchiveTable schemaName (HL.queueTable @payload @m)
         void $
           execStatement ("UPDATE " <> archiveTbl <> " SET max_attempts = 0 WHERE job_id = ?") [pval CInt8 (primaryKey inserted)]
-      Just archived <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just archived <- runM env (HL.getArchiveJobById @payload (primaryKey inserted))
       Just again <- runM env (HL.reEnqueueFromArchive @payload (archivePrimaryKey archived))
       maxAttempts again `shouldBe` Just minMaxAttempts
 
@@ -2259,11 +2277,11 @@ operationsSpec mkMessage mkResult runM = do
         runM env (HL.insertJob (setArchiveFor (Just dayRetention) (defaultJob (mkMessage "ArchivedOriginal"))))
       claimed <- claimJobs env 1
       void $ runM env (HL.ackJob (head claimed))
-      Just archived <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just archived <- runM env (HL.getArchiveJobById @payload (primaryKey inserted))
       Just again <- runM env (HL.reEnqueueFromArchiveWithPayload (archivePrimaryKey archived) (mkMessage "ArchivedEdited"))
       payload again `shouldBe` mkMessage "ArchivedEdited"
       jobKind (payloadKeys again) `shouldBe` kindOf (mkMessage "ArchivedEdited" :: payload)
-      Just kept <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just kept <- runM env (HL.getArchiveJobById @payload (primaryKey inserted))
       payload (Archive.jobSnapshot kept) `shouldBe` mkMessage "ArchivedOriginal"
 
     it "reEnqueueFromArchive stamps a stored null attempt limit with the default" $ \env -> do
@@ -2278,7 +2296,7 @@ operationsSpec mkMessage mkResult runM = do
           execStatement
             ("UPDATE " <> archiveTbl <> " SET max_attempts = NULL WHERE job_id = ?")
             [pval CInt8 (primaryKey inserted)]
-      Just archived <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just archived <- runM env (HL.getArchiveJobById @payload (primaryKey inserted))
       Just again <- runM env (HL.reEnqueueFromArchive @payload (archivePrimaryKey archived))
       maxAttempts again `shouldBe` Just defaultMaxAttempts
 
@@ -2305,7 +2323,7 @@ operationsSpec mkMessage mkResult runM = do
         runM env (HL.insertJob (setArchiveFor (Just dayRetention) (defaultJob (mkMessage "BogusArchive"))))
       claimed <- claimJobs env 1
       void $ runM env (HL.ackJob (head claimed))
-      Just archived <- runM env (HL.getArchivedJobById @payload (primaryKey inserted))
+      Just archived <- runM env (HL.getArchiveJobById @payload (primaryKey inserted))
       runM env $ do
         schemaName <- getSchema
         let archiveTbl = Schema.jobQueueArchiveTable schemaName (HL.queueTable @payload @m)
@@ -2690,6 +2708,14 @@ operationsSpec mkMessage mkResult runM = do
       -- Suspend fails with 0 rows.
       suspendedRows <- runM env (HL.suspendJob @payload (primaryKey inserted))
       suspendedRows `shouldBe` 0
+
+    it "suspendJob suspends a job in retry backoff" $ \env -> do
+      Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "BackoffSuspend")))
+      [held] <- claimJobs env 1
+      runM env (HL.updateJobForRetry 3600 "boom" held) `shouldReturn` 1
+
+      runM env (HL.suspendJob @payload (primaryKey inserted)) `shouldReturn` 1
+      assertSuspended env (primaryKey inserted)
 
     it "suspendJob on already-suspended job returns 0" $ \env -> do
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "DoubleSuspend")))

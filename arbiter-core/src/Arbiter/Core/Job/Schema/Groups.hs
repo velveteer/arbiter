@@ -14,16 +14,16 @@ module Arbiter.Core.Job.Schema.Groups
   , createJobQueueGroupedDueIndexSQL
   , createJobQueueGroupInFlightIndexSQL
 
-    -- * Groups Table SQL
+    -- * Groups table SQL
   , createGroupsTableSQL
   , migrateGroupsReadyRankingSQL
   , createGroupsEmptiedIndexSQL
 
-    -- * Summary Column Definitions
+    -- * Summary column definitions
   , groupAggregates
   , inFlightPredicate
 
-    -- * Groups Trigger SQL
+    -- * Groups trigger SQL
   , createGroupsTriggerFunctionsSQL
   , createGroupsTriggersSQL
   ) where
@@ -33,19 +33,19 @@ import Data.Text qualified as T
 import NeatInterpolation (text)
 
 import Arbiter.Core.Job.Schema
-  ( createMaintenanceTriggersSQL
+  ( SchemaName
+  , TableName
+  , createMaintenanceTriggersSQL
   , indexSQL
   , jobQueueGroupsTable
   , jobQueueTable
   , maintenanceFunctionNames
   )
-import Arbiter.Core.Job.Types (attemptsLeftSQL)
-import Arbiter.Core.SqlLiterals (quoteIdentifier)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, quoteIdentifier)
 
 -- | Partial index over @(group_key, priority, id)@, read by the claim's LATERAL
--- subqueries and by the maintenance triggers recomputing a group's minima and
--- @in_flight_until@.
-createJobQueueGroupKeyIndexSQL :: Text -> Text -> Text
+-- subqueries and by the maintenance triggers recomputing a group's minima.
+createJobQueueGroupKeyIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueGroupKeyIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_group_key")
@@ -56,7 +56,7 @@ createJobQueueGroupKeyIndexSQL schemaName tableName =
 -- | Partial index over @(group_key, attempts DESC, priority, id)@ for retried rows,
 -- read by the claim's group head gate. Retried rows rank ahead of the rest. The
 -- gate merges this run with the @(group_key, priority, id)@ scan.
-createJobQueueGroupRetriedIndexSQL :: Text -> Text -> Text
+createJobQueueGroupRetriedIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueGroupRetriedIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_group_retried")
@@ -66,7 +66,7 @@ createJobQueueGroupRetriedIndexSQL schemaName tableName =
 
 -- | Scheduled grouped jobs by due time. Group maintenance uses this index to
 -- replace @next_due@ with one point lookup.
-createJobQueueGroupedDueIndexSQL :: Text -> Text -> Text
+createJobQueueGroupedDueIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueGroupedDueIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_grouped_due")
@@ -76,7 +76,7 @@ createJobQueueGroupedDueIndexSQL schemaName tableName =
 
 -- | Possible in-flight grouped jobs by descending lease deadline. The query
 -- applies the time-dependent part of the predicate at runtime.
-createJobQueueGroupInFlightIndexSQL :: Text -> Text -> Text
+createJobQueueGroupInFlightIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueGroupInFlightIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_group_in_flight")
@@ -87,9 +87,9 @@ createJobQueueGroupInFlightIndexSQL schemaName tableName =
     )
 
 -- | Create a queue's groups table, one summary row per @group_key@ carrying the group's
--- precomputed minima, counts and @in_flight_until@. Maintained by the statement-level
--- AFTER triggers in 'createGroupsTriggerFunctionsSQL'.
-createGroupsTableSQL :: Text -> Text -> Text
+-- precomputed minima, counts and @in_flight_until@. Maintained by the triggers
+-- 'createGroupsTriggersSQL' installs.
+createGroupsTableSQL :: SchemaName -> TableName -> Text
 createGroupsTableSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
    in T.unlines
@@ -104,7 +104,7 @@ createGroupsTableSQL schemaName tableName =
 
 -- | Add @ready_count@ and @next_due@ to the groups summary, make the ranking
 -- index partial on ready rows, and add the @next_due@ due-finder.
-migrateGroupsReadyRankingSQL :: Text -> Text -> Text
+migrateGroupsReadyRankingSQL :: SchemaName -> TableName -> Text
 migrateGroupsReadyRankingSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
       tbl = jobQueueTable schemaName tableName
@@ -136,7 +136,7 @@ migrateGroupsReadyRankingSQL schemaName tableName =
         ]
 
 -- | Index over the summary rows the maintenance triggers emptied in place.
-createGroupsEmptiedIndexSQL :: Text -> Text -> Text
+createGroupsEmptiedIndexSQL :: SchemaName -> TableName -> Text
 createGroupsEmptiedIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_groups_emptied")
@@ -211,8 +211,8 @@ groupsInsertFunction funcName groupsTbl dollarQuote =
     ${dollarQuote} LANGUAGE plpgsql;
   |]
 
--- | The group summary aggregates over job rows grouped by @group_key@. @min_id@ is the
--- id of the head row, the one the claim ranks first. @col@ prefixes each column.
+-- | The group summary aggregates over job rows grouped by @group_key@. @min_priority@
+-- and @min_id@ rank the group. @col@ prefixes each column.
 groupAggregates :: Text -> Text
 groupAggregates col =
   let ready = readyPredicate col
@@ -452,7 +452,7 @@ groupsUpdateFunction funcName groupsTbl tbl dollarQuote =
 
 -- | Group maintenance with indexed extremum replacement. Transition tables
 -- supply count deltas. No update or delete scans all rows in an affected group.
-createGroupsTriggerFunctionsSQL :: Text -> Text -> Text
+createGroupsTriggerFunctionsSQL :: SchemaName -> TableName -> Text
 createGroupsTriggerFunctionsSQL schemaName tableName =
   let groupsTbl = jobQueueGroupsTable schemaName tableName
       tbl = jobQueueTable schemaName tableName
@@ -467,6 +467,6 @@ createGroupsTriggerFunctionsSQL schemaName tableName =
 
 -- | The three statement-level AFTER triggers calling a queue's groups maintenance
 -- functions, each handed its affected rows through a transition table.
-createGroupsTriggersSQL :: Text -> Text -> Text
+createGroupsTriggersSQL :: SchemaName -> TableName -> Text
 createGroupsTriggersSQL schemaName tableName =
   createMaintenanceTriggersSQL schemaName (jobQueueTable schemaName tableName) ("maintain_" <> tableName <> "_groups")

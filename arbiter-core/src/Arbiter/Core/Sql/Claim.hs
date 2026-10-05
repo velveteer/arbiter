@@ -21,12 +21,12 @@ import NeatInterpolation (text)
 import Arbiter.Core.Admission (effectivePolicyCol)
 import Arbiter.Core.Concurrency.Schema (arbiterConcurrencyPoliciesTable, arbiterConcurrencyTable)
 import Arbiter.Core.Job.Schema (SchemaName, TableName, jobQueueGroupsTable, jobQueueTable)
-import Arbiter.Core.Job.Types (attemptsLeftSQL)
 import Arbiter.Core.RateLimit.Schema (arbiterRateLimitPoliciesTable, arbiterRateLimitsTable, bucketSeedInsert)
 import Arbiter.Core.Sql.Jobs (claimablePred, jobColumns)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen)
 import Arbiter.Core.Sql.RateLimit (defaultThrottleWaitSeconds, refilledExpr)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL)
 
 -- | Which admission filters the claim SQL renders. A payload type that declares
 -- no policy of a kind gets no filter for it.
@@ -49,8 +49,7 @@ grpRankExpr =
          END AS grp_rank
   |]
 
--- | A job's cost, floored at 0 and capped at the bucket max. Shared by
--- admission, debit, and the deny-wait.
+-- | A job's cost, floored at 0 and capped at the bucket max.
 clampedCostExpr :: Text
 clampedCostExpr = "LEAST(GREATEST(candidate.rate_limit_cost, 0), bucket.max_tokens)"
 
@@ -318,8 +317,7 @@ lockedCandidateCtes tbl batchLimit ungroupedLimit ccGate =
 
 -- | Concurrency headroom over a candidate row alias. Keeps a full key off the
 -- bounded candidate window, in the ungrouped pool and at each group's head.
--- OFFSET 0 keeps the probe correlated. Without it the planner hashes the whole
--- count table once per claim.
+-- OFFSET 0 keeps the probe correlated.
 concHeadroomPred :: Text -> Text -> Text -> Text
 concHeadroomPred concTbl concPolicies alias =
   let effLimit = effectivePolicyCol "policy" "limit"
@@ -605,6 +603,7 @@ claimedCte admission tbl timeout claimant
 -- | The single-CTE batched claim, which at batch size 1 is the single-job claim. Takes
 -- any unsuspended, uncancelled, visible job within its attempt budget, rollup children
 -- and woken rollup parents included. Each gate's CTEs render from the 'ClaimAdmission' flags.
+-- The caller attaches the row decoder.
 claimJobsBatchedSQL :: SchemaName -> TableName -> ClaimAdmission -> Int -> Int -> NominalDiffTime -> UUID -> Query ()
 claimJobsBatchedSQL schema tableName admission batchSize maxBatches timeoutSeconds =
   let tbl = jobQueueTable schema tableName

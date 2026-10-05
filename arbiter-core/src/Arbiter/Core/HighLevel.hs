@@ -4,13 +4,12 @@
 -- | The job queue operations with their table names resolved from the payload type. A
 -- payload reaches the queue its registry entry declares.
 module Arbiter.Core.HighLevel
-  ( -- * Constraint Aliases
+  ( -- * Constraint aliases
     QueueOperation
   , JobOperation
-  , queueTable
   , RegistryAdmissionPolicies
 
-    -- * Job Operations
+    -- * Job operations
   , insertJob
   , insertJobsBatch
   , insertJobsBatch_
@@ -18,6 +17,7 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
   , mkJobStatements
+  , Ops.JobStatements
   , ackJob
   , ackJobsBatch
   , updateJobForRetry
@@ -27,7 +27,7 @@ module Arbiter.Core.HighLevel
   , setVisibilityTimeoutBatch
   , SetVisibilityResult (..)
 
-    -- * Rate-Limit Operations
+    -- * Rate-limit operations
   , addRateLimitTokens
   , pruneRateLimitBuckets
   , resetRateLimitBuckets
@@ -39,9 +39,10 @@ module Arbiter.Core.HighLevel
   , setRateLimit
   , clearRateLimit
 
-    -- * Concurrency Operations
+    -- * Concurrency operations
   , listConcurrencyPolicies
   , getConcurrencyPolicy
+  , concurrencyPolicyExists
   , listConcurrencyKeys
   , updateConcurrencyPolicyOverrides
   , setConcurrencyLimit
@@ -51,22 +52,14 @@ module Arbiter.Core.HighLevel
   , reconcileConcurrencyCountsIfStale
   , reconcileAndPruneConcurrency
 
-    -- * Filtered Query Operations
+    -- * Filtered query operations
   , Ops.JobFilter (..)
-  , Ops.SortDir (..)
-  , Ops.sortDirName
-  , Ops.JobSortColumn (..)
-  , Ops.jobSortColumnName
-  , Ops.DLQSortColumn (..)
-  , Ops.dlqSortColumnName
-  , Ops.ArchiveSortColumn (..)
-  , Ops.archiveSortColumnName
   , listJobsFiltered
   , countJobsFiltered
   , listDLQFiltered
   , countDLQFiltered
 
-    -- * Dead Letter Queue Operations
+    -- * Dead-letter queue operations
   , moveToDLQ
   , moveToDLQBatch
   , listDLQJobs
@@ -76,21 +69,21 @@ module Arbiter.Core.HighLevel
   , deleteDLQJob
   , deleteDLQJobsBatch
 
-    -- * Archive Operations
+    -- * Archive operations
   , listArchiveJobs
-  , getArchivedJobById
-  , listArchivedJobsByGroupKey
+  , getArchiveJobById
+  , listArchiveJobsByGroup
   , deleteArchiveJob
   , deleteArchiveJobsBatch
   , reEnqueueFromArchive
   , reEnqueueFromArchiveWithPayload
 
-    -- * Admin Operations
+    -- * Admin operations
   , listJobs
   , getJobById
   , jobExists
-  , getJobsByGroup
-  , getJobsByParent
+  , listJobsByGroup
+  , listJobsByParent
   , cancelJob
   , cancelJobsBatch
   , forceCancelJob
@@ -99,7 +92,7 @@ module Arbiter.Core.HighLevel
   , Ops.QueueStats (..)
   , getQueueStats
 
-    -- * Count Operations
+    -- * Count operations
   , countJobs
   , countJobsByGroup
   , countJobsByParent
@@ -108,16 +101,16 @@ module Arbiter.Core.HighLevel
   , countDLQChildren
   , countDLQChildrenBatch
 
-    -- * Job Dependency Operations
+    -- * Job dependency operations
   , pauseChildren
   , resumeChildren
   , cancelJobCascade
 
-    -- * Suspend/Resume Operations
+    -- * Suspend and resume operations
   , suspendJob
   , resumeJob
 
-    -- * Results Table Operations
+    -- * Results table operations
   , insertResult
   , insertResultUnsafe
   , getResultsByParent
@@ -127,10 +120,10 @@ module Arbiter.Core.HighLevel
   , persistParentState
   , getParentStateSnapshot
 
-    -- * Groups Table Operations
+    -- * Groups table operations
   , refreshAllGroupsFully
 
-    -- * Worker Registry Operations
+    -- * Worker registry operations
   , registerWorker
   , heartbeatWorker
   , setWorkerPaused
@@ -139,25 +132,31 @@ module Arbiter.Core.HighLevel
   , listWorkers
   , sweepStaleWorkers
   , WorkerRow (..)
+  , WorkerHealth (..)
 
-    -- * Queue Operations
+    -- * Queue operations
   , ensureQueue
   , setQueuePaused
   , getQueue
   , listQueues
   , QueueRow (..)
 
-    -- * Cron Schedule Operations
+    -- * Cron schedule operations
   , listCronSchedules
   , getCronScheduleByName
   , updateCronScheduleUnchecked
+  , CronScheduleRow (..)
+  , CronScheduleUpdate (..)
 
-    -- * Global Gate
+    -- * Global gate
   , runGated
 
-    -- * Job Tree DSL
+    -- * Job tree DSL
   , insertJobTree
   , spawnChildren
+
+    -- * Table lookup
+  , queueTable
 
     -- * Re-exports
   , getSchema
@@ -181,9 +180,9 @@ import GHC.TypeLits (KnownSymbol, symbolVal)
 import UnliftIO (MonadUnliftIO)
 
 import Arbiter.Core.Admission (AdmissionPolicy (..))
-import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy)
+import Arbiter.Core.Concurrency.Spec (ConcurrencyPolicy (..))
 import Arbiter.Core.Concurrency.Stats (ConcurrencyKeyView, ConcurrencyPolicyUpdate (..), ConcurrencyPolicyView)
-import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate)
+import Arbiter.Core.CronSchedule (CronScheduleRow (..), CronScheduleUpdate (..))
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
@@ -207,10 +206,10 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..), ResultOf)
 import Arbiter.Core.Operations qualified as Ops
 import Arbiter.Core.QueueRegistry (RegistryTables (..), TableForPayload)
 import Arbiter.Core.Queues (QueueRow (..))
-import Arbiter.Core.RateLimit.Spec (Policy (..), RateLimitKey (..))
+import Arbiter.Core.RateLimit.Spec (RateLimitKey (..), RateLimitPolicy (..))
 import Arbiter.Core.RateLimit.Stats (RateLimitBucketView, RateLimitPolicyUpdate (..), RateLimitPolicyView)
 import Arbiter.Core.Trace (withPublishSpan)
-import Arbiter.Core.Worker (WorkerRow (..))
+import Arbiter.Core.Worker (WorkerHealth (..), WorkerRow (..))
 
 -- | Constraints for queue operations (requires table name lookup from registry).
 type QueueOperation m payload =
@@ -261,7 +260,7 @@ publishSpan = withPublishSpan (queueTable @payload @m)
 -- | Insert a job. Returns the inserted job. 'Nothing' when an
 -- 'Arbiter.Core.Job.Dedup.IgnoreDuplicate' key already exists, or a
 -- 'Arbiter.Core.Job.Dedup.ReplaceDuplicate' key names a job that is claimed,
--- force-cancel flagged, or has children.
+-- force-cancel flagged, has a different parent, or has children (DLQ children count).
 insertJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -269,8 +268,8 @@ insertJob
   -> m (Maybe (JobRead payload))
 insertJob job = publishSpan @payload [job] $ onQueue @payload $ \schemaName tableName -> Ops.insertJob schemaName tableName job
 
--- | Insert multiple jobs in one round-trip. Returns the jobs that were inserted.
--- Dedup'd jobs are excluded. Use 'insertJobTree' for parent-child relationships.
+-- | Insert multiple jobs in one round-trip. Returns the jobs inserted or replaced. An
+-- ignored duplicate is left out. Use 'insertJobTree' for parent-child relationships.
 insertJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -279,7 +278,7 @@ insertJobsBatch
 insertJobsBatch [] = pure []
 insertJobsBatch jobs = publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName -> Ops.insertJobsBatch schemaName tableName jobs
 
--- | 'insertJobsBatch' returning the count of inserted rows.
+-- | 'insertJobsBatch' returning the rows affected, dedup replacements included.
 insertJobsBatch_
   :: forall payload m
    . (QueueOperation m payload)
@@ -289,8 +288,8 @@ insertJobsBatch_ [] = pure 0
 insertJobsBatch_ jobs = publishSpan @payload jobs $ onQueue @payload $ \schemaName tableName -> Ops.insertJobsBatch_ schemaName tableName jobs
 
 -- | Claim visible jobs, at most one per group, and fewer than the limit once the groups
--- run out. Stamps the anonymous claimant. A concurrency pool caps this path as it
--- caps any other claim.
+-- run out. Stamps the anonymous claimant. A concurrency policy caps this path as it
+-- caps any other claim. A row whose payload fails to decode moves to the DLQ.
 claimNextVisibleJobs
   :: forall payload m
    . (QueueOperation m payload)
@@ -314,7 +313,7 @@ addRateLimitTokens key amount =
     Ops.addRateLimitTokens schemaName key amount >> Ops.wakeThrottledJobsForKey schemaName queues key
 
 -- | Override a policy with this shape, until it is cleared. Returns rows affected.
-setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => Policy -> m Int64
+setRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
 setRateLimit policy =
   updateRateLimitPolicyOverrides (policyPrefixOf policy) $
     RateLimitPolicyUpdate
@@ -324,7 +323,7 @@ setRateLimit policy =
       }
 
 -- | Drop a policy's overrides. Its declared params apply again. Returns rows affected.
-clearRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => Policy -> m Int64
+clearRateLimit :: (MonadArbiter m, RegistryTables (RegistryOf m)) => RateLimitPolicy -> m Int64
 clearRateLimit policy =
   updateRateLimitPolicyOverrides (policyPrefixOf policy) $
     RateLimitPolicyUpdate
@@ -379,13 +378,16 @@ rateLimitPolicyExists
   -> m Bool
 rateLimitPolicyExists prefix = onSchema $ \schemaName -> Ops.rateLimitPolicyExists schemaName prefix
 
--- | List a prefix's buckets with fill levels, paginated.
+-- | List a prefix's buckets with fill levels, emptiest first.
 listRateLimitBuckets
   :: forall m
    . (MonadArbiter m)
   => Text
+  -- ^ Prefix
   -> Int
+  -- ^ Limit
   -> Int
+  -- ^ Offset
   -> m [RateLimitBucketView]
 listRateLimitBuckets prefix limit offset = onSchema $ \schemaName -> Ops.listRateLimitBuckets schemaName prefix limit offset
 
@@ -403,7 +405,7 @@ updateRateLimitPolicyOverrides prefix upd = onRegistry $ \schemaName queues -> d
   when (affected > 0) $ void $ Ops.wakeThrottledJobs schemaName queues prefix
   pure affected
 
--- | List every concurrency policy with its default/override limit and live key and
+-- | List every concurrency policy with its default\/override limit and live key and
 -- in-flight aggregates.
 listConcurrencyPolicies
   :: forall m
@@ -411,7 +413,7 @@ listConcurrencyPolicies
   => m [ConcurrencyPolicyView]
 listConcurrencyPolicies = onSchema Ops.listConcurrencyPolicies
 
--- | One prefix's concurrency policy with its default/override limit and live aggregates.
+-- | One prefix's concurrency policy with its default\/override limit and live aggregates.
 -- 'Nothing' when the prefix has no policy.
 getConcurrencyPolicy
   :: forall m
@@ -420,18 +422,29 @@ getConcurrencyPolicy
   -> m (Maybe ConcurrencyPolicyView)
 getConcurrencyPolicy prefix = onSchema $ \schemaName -> Ops.getConcurrencyPolicy schemaName prefix
 
--- | List a prefix's keys with effective cap and in-flight fill fraction, paginated.
+-- | Whether a concurrency policy exists for a prefix.
+concurrencyPolicyExists
+  :: forall m
+   . (MonadArbiter m)
+  => Text
+  -> m Bool
+concurrencyPolicyExists prefix = onSchema $ \schemaName -> Ops.concurrencyPolicyExists schemaName prefix
+
+-- | List a prefix's keys with effective cap and in-flight fill fraction, fullest first.
 listConcurrencyKeys
   :: forall m
    . (MonadArbiter m)
   => Text
+  -- ^ Prefix
   -> Int
+  -- ^ Limit
   -> Int
+  -- ^ Offset
   -> m [ConcurrencyKeyView]
 listConcurrencyKeys prefix limit offset = onSchema $ \schemaName -> Ops.listConcurrencyKeys schemaName prefix limit offset
 
 -- | Apply a concurrency policy's override-limit patch on its policy row, retuning every key under
--- the prefix live. Lowering it does not preempt in-flight jobs until they drain.
+-- the prefix live. Lowering it never preempts in-flight jobs.
 -- Returns rows affected.
 updateConcurrencyPolicyOverrides
   :: forall m
@@ -441,17 +454,17 @@ updateConcurrencyPolicyOverrides
   -> m Int64
 updateConcurrencyPolicyOverrides prefix upd = onSchema $ \schemaName -> Ops.updateConcurrencyPolicyOverrides schemaName prefix upd
 
--- | Override a declared concurrency policy's limit for every key under it. Returns rows affected.
-setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> Int32 -> m Int64
-setConcurrencyLimit pool limit =
-  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just (Just limit)))
+-- | Override the policy's limit with its 'cpLimit', until it is cleared. Returns rows affected.
+setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
+setConcurrencyLimit pool =
+  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just (Just (cpLimit pool))))
 
 -- | Drop a concurrency policy's override. Its declared limit applies again. Returns rows affected.
 clearConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
 clearConcurrencyLimit pool =
   updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just Nothing))
 
--- | Delete drained concurrency rows with no live job. The reaper runs this.
+-- | Delete drained concurrency rows with no live job.
 pruneConcurrencyKeys
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -465,15 +478,14 @@ reconcileConcurrencyCounts
   => m Int64
 reconcileConcurrencyCounts = onRegistry Ops.reconcileConcurrencyCounts
 
--- | Rebuild the concurrency counts when a crash truncated the UNLOGGED table. The
--- reaper runs this periodically.
+-- | Rebuild the concurrency counts when a crash truncated the UNLOGGED table.
 reconcileConcurrencyCountsIfStale
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 reconcileConcurrencyCountsIfStale = onRegistry Ops.reconcileConcurrencyCountsIfStale
 
--- | Reconcile then prune. The reaper runs this.
+-- | Reconcile then prune.
 reconcileAndPruneConcurrency
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -497,12 +509,15 @@ mkJobStatements batchSize poolSize timeout workerId =
   onQueue @payload $ \schemaName tableName ->
     pure $ Ops.mkJobStatements @payload schemaName tableName batchSize poolSize timeout workerId
 
--- | 'claimNextVisibleJobs' under a given worker id. The dispatcher claims this way.
+-- | 'claimNextVisibleJobs' under a given worker id. A row whose payload fails to decode
+-- moves to the DLQ.
 claimNextVisibleJobsAs
   :: forall payload m
    . (QueueOperation m payload)
   => Int
+  -- ^ Maximum number of jobs to claim.
   -> NominalDiffTime
+  -- ^ How long the claimed jobs should remain invisible (in seconds).
   -> UUID
   -- ^ Worker UUID stamped on each claimed row.
   -> m [JobRead payload]
@@ -511,23 +526,24 @@ claimNextVisibleJobsAs limit timeout workerId =
     Ops.claimNextVisibleJobsAs schemaName tableName limit timeout workerId
 
 -- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each group, still in
--- per-group order.
+-- per-group order. Stamps the anonymous claimant. A row whose payload fails to decode
+-- moves to the DLQ.
 claimNextVisibleJobsBatched
   :: forall payload m
    . (QueueOperation m payload)
   => Int
   -- ^ Batch size: maximum number of jobs to claim per group.
   -> Int
-  -- ^ Max groups: maximum number of groups/batches to claim.
+  -- ^ Maximum number of batches to claim. A group gives at most one batch.
   -> NominalDiffTime
   -- ^ How long the claimed jobs should remain invisible (in seconds).
   -> m [NonEmpty (JobRead payload)]
-claimNextVisibleJobsBatched batchSize maxGroups timeout =
+claimNextVisibleJobsBatched batchSize maxBatches timeout =
   onQueue @payload $ \schemaName tableName ->
-    Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxGroups timeout
+    Ops.claimNextVisibleJobsBatched schemaName tableName batchSize maxBatches timeout
 
 -- | Ack a completed job, deleting it or suspending it when its children are still
--- running. Returns 1, or 0 for a job already gone.
+-- running. Returns 1, or 0 for a job that is gone or reclaimed.
 ackJob
   :: forall payload m
    . (MonadArbiter m)
@@ -550,7 +566,7 @@ updateJobForRetry
   :: forall payload m
    . (MonadArbiter m)
   => NominalDiffTime
-  -- ^ The delay before this job becomes visible again for retry.
+  -- ^ The delay before the retry, rounded up to whole seconds.
   -> Text
   -- ^ An error message to store with the job.
   -> JobRead payload
@@ -602,7 +618,8 @@ data SetVisibilityResult
     JobCancelled JobId
   | -- | Job is a finalizer waiting on its children. It holds no lease.
     JobSuspended JobId
-  | -- | The row changed under this claim mid-statement. Nothing was extended.
+  | -- | Nothing was extended. The row or its group summary was locked, the row changed
+    -- mid-statement, or another claimant holds it at the same claim token.
     VisibilityUnchanged JobId
   deriving stock (Eq, Show)
 
@@ -667,16 +684,16 @@ listArchiveJobs
 listArchiveJobs limit offset = onQueue @payload $ \schemaName tableName -> Ops.listArchiveJobs schemaName tableName limit offset >>= traverse Ops.typedArchiveRow
 
 -- | Fetch a single archived job by its original job id.
-getArchivedJobById
+getArchiveJobById
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
   -- ^ Original job id
   -> m (Maybe (Archive.ArchiveJob payload))
-getArchivedJobById jobId = onQueue @payload $ \schemaName tableName -> Ops.getArchivedJobById schemaName tableName jobId >>= traverse Ops.typedArchiveRow
+getArchiveJobById jobId = onQueue @payload $ \schemaName tableName -> Ops.getArchiveJobById schemaName tableName jobId >>= traverse Ops.typedArchiveRow
 
 -- | List archived jobs in a group, most recent first, with pagination.
-listArchivedJobsByGroupKey
+listArchiveJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
   => Text
@@ -686,9 +703,9 @@ listArchivedJobsByGroupKey
   -> Int
   -- ^ Offset
   -> m [Archive.ArchiveJob payload]
-listArchivedJobsByGroupKey groupKey limit offset =
+listArchiveJobsByGroup groupKey limit offset =
   onQueue @payload $ \schemaName tableName ->
-    Ops.listArchivedJobsByGroupKey schemaName tableName groupKey limit offset >>= traverse Ops.typedArchiveRow
+    Ops.listArchiveJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedArchiveRow
 
 -- | Delete one archived job by its archive primary key. Returns rows deleted.
 deleteArchiveJob
@@ -732,9 +749,9 @@ reEnqueueFromArchiveWithPayload archiveId replacement = onQueue @payload $ \sche
   withDbTransaction
     (Ops.reEnqueueFromArchiveWithPayload schemaName tableName archiveId (Just replacement) >>= traverse Ops.typedRow)
 
--- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. Returns
--- the restored job for that row. 'Nothing' when the row is gone or the root's parent
--- no longer exists.
+-- | Retry the whole DLQ tree that holds a DLQ row, with a fresh attempt count. The dedup
+-- key is left behind. Returns the restored job for that row. 'Nothing' when the row is
+-- gone or the root's parent no longer exists.
 retryFromDLQ
   :: forall payload m
    . (QueueOperation m payload)
@@ -761,6 +778,7 @@ dlqJobExists
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
+  -- ^ DLQ primary key ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> m Bool
 dlqJobExists dlqId = onQueue @payload $ \schemaName tableName -> Ops.dlqJobExists schemaName tableName dlqId
 
@@ -876,7 +894,7 @@ jobExists
 jobExists jobId = onQueue @payload $ \schemaName tableName -> Ops.jobExists schemaName tableName jobId
 
 -- | List a group's jobs.
-getJobsByGroup
+listJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
   => Text
@@ -886,10 +904,10 @@ getJobsByGroup
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-getJobsByGroup groupKey limit offset = onQueue @payload $ \schemaName tableName -> Ops.getJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedRow
+listJobsByGroup groupKey limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedRow
 
 -- | List a parent's children.
-getJobsByParent
+listJobsByParent
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
@@ -899,7 +917,7 @@ getJobsByParent
   -> Int
   -- ^ Offset
   -> m [JobRead payload]
-getJobsByParent pid limit offset = onQueue @payload $ \schemaName tableName -> Ops.getJobsByParent schemaName tableName pid limit offset >>= traverse Ops.typedRow
+listJobsByParent pid limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsByParent schemaName tableName pid limit offset >>= traverse Ops.typedRow
 
 -- | Delete a job by id. Returns 0 for a job with children. 'cancelJobCascade' deletes
 -- those.
@@ -912,7 +930,8 @@ cancelJob
 cancelJob jobId = onQueue @payload $ \schemaName tableName -> Ops.cancelJob schemaName tableName jobId
 
 -- | Cascade-cancel a job subtree. Flags still-live claimed jobs, deletes the rest,
--- and NOTIFYs the queue's cancel channel for every claimed job affected.
+-- and NOTIFYs the queue's cancel channel for every claimed job affected. Returns the
+-- number flagged or deleted.
 forceCancelJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -921,7 +940,7 @@ forceCancelJob
   -> m Int64
 forceCancelJob jobId = onQueue @payload $ \schemaName tableName -> Ops.forceCancelJob schemaName tableName jobId
 
--- | Delete jobs by id. Returns the number deleted.
+-- | Delete jobs by id. A job with children is skipped. Returns the number deleted.
 cancelJobsBatch
   :: forall payload m
    . (QueueOperation m payload)
@@ -930,7 +949,7 @@ cancelJobsBatch
   -> m Int64
 cancelJobsBatch jobIds = onQueue @payload $ \schemaName tableName -> Ops.cancelJobsBatch schemaName tableName jobIds
 
--- | Make a delayed or retrying job immediately visible. Refuses an in-flight job.
+-- | Make a delayed or retrying job immediately visible. Refuses an in-flight or suspended job.
 promoteJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -994,16 +1013,17 @@ countDLQJobs
   => m Int64
 countDLQJobs = onQueue @payload $ \schemaName tableName -> Ops.countDLQJobs schemaName tableName
 
--- | Child counts as @(total, paused)@ per parent id, over a batch. Parents with none
+-- | Child counts as @(total, suspended)@ per parent id, over a batch. Parents with none
 -- are absent.
 countChildrenBatch
   :: forall payload m
    . (QueueOperation m payload)
   => [Int64]
+  -- ^ Parent job ids
   -> m (Map Int64 (Int64, Int64))
 countChildrenBatch ids = onQueue @payload $ \schemaName tableName -> Ops.countChildrenBatch schemaName tableName ids
 
--- | Count a parent's DLQ'd children.
+-- | Count a parent's children in the DLQ.
 countDLQChildren
   :: forall payload m
    . (QueueOperation m payload)
@@ -1019,6 +1039,7 @@ countDLQChildrenBatch
   :: forall payload m
    . (QueueOperation m payload)
   => [Int64]
+  -- ^ Parent job ids
   -> m (Map Int64 Int64)
 countDLQChildrenBatch ids = onQueue @payload $ \schemaName tableName -> Ops.countDLQChildrenBatch schemaName tableName ids
 
@@ -1026,8 +1047,8 @@ countDLQChildrenBatch ids = onQueue @payload $ \schemaName tableName -> Ops.coun
 -- Job Dependency Operations
 -- ---------------------------------------------------------------------------
 
--- | Suspend a parent's claimable children. In-flight ones are left alone. Returns the
--- number suspended.
+-- | Suspend every claimable job in a parent's subtree. In-flight ones are left alone.
+-- Returns the number suspended.
 pauseChildren
   :: forall payload m
    . (QueueOperation m payload)
@@ -1036,7 +1057,8 @@ pauseChildren
   -> m Int64
 pauseChildren parentJobId = onQueue @payload $ \schemaName tableName -> Ops.pauseChildren schemaName tableName parentJobId
 
--- | Resume a parent's suspended children. Returns the number resumed.
+-- | Resume the suspended jobs in a parent's subtree. A finalizer with children still in
+-- the queue stays suspended. Returns the number resumed.
 resumeChildren
   :: forall payload m
    . (QueueOperation m payload)
@@ -1067,7 +1089,7 @@ suspendJob
   -> m Int64
 suspendJob jobId = onQueue @payload $ \schemaName tableName -> Ops.suspendJob schemaName tableName jobId
 
--- | Resume a suspended job, making it claimable again.
+-- | Resume a suspended job. Refuses a finalizer with children still in the main queue.
 resumeJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -1122,7 +1144,7 @@ getResultsByParent
   -> m (Map Int64 Value)
 getResultsByParent parentJobId = onQueue @payload $ \schemaName tableName -> Ops.getResultsByParent schemaName tableName parentJobId
 
--- | A parent's DLQ'd children's last errors, keyed by child id.
+-- | The last errors of a parent's children in the DLQ, keyed by child id.
 getDLQChildErrorsByParent
   :: forall payload m
    . (QueueOperation m payload)
@@ -1146,7 +1168,9 @@ persistParentState
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
+  -- ^ Job id
   -> Value
+  -- ^ Snapshot to store
   -> m Int64
 persistParentState jobId state = onQueue @payload $ \schemaName tableName -> Ops.persistParentState schemaName tableName jobId state
 
@@ -1155,6 +1179,7 @@ getParentStateSnapshot
   :: forall payload m
    . (QueueOperation m payload)
   => Int64
+  -- ^ Job id
   -> m (Maybe Value)
 getParentStateSnapshot jobId = onQueue @payload $ \schemaName tableName -> Ops.getParentStateSnapshot schemaName tableName jobId
 
@@ -1162,10 +1187,8 @@ getParentStateSnapshot jobId = onQueue @payload $ \schemaName tableName -> Ops.g
 -- Groups Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Schema-wide groups-table refresh, correcting every registered queue's summary drift.
--- Walks each groups table to the end, one bounded batch and one transaction at a time.
--- This is a repair operation. The reaper runs 'Arbiter.Core.Operations.refreshAllGroups' for
--- a single batch per tick. Returns the rows rewritten and the queue names that failed.
+-- | Refresh every registered queue's groups table to the end. Returns the rows rewritten
+-- and the queue names that failed.
 refreshAllGroupsFully
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -1201,7 +1224,7 @@ registerWorker workerId queue host threads staleThreshold metadata =
 heartbeatWorker :: (MonadArbiter m) => UUID -> m (Maybe Bool)
 heartbeatWorker workerId = onSchema $ \schemaName -> Ops.heartbeatWorker schemaName workerId
 
--- | Set a worker's pause flag.
+-- | Set a worker's pause flag and notify the worker.
 setWorkerPaused :: (MonadArbiter m) => UUID -> Bool -> m Int64
 setWorkerPaused workerId paused = onSchema $ \schemaName -> Ops.setWorkerPaused schemaName workerId paused
 
@@ -1217,7 +1240,7 @@ deregisterWorker workerId = onSchema $ \schemaName -> Ops.deregisterWorker schem
 listWorkers :: (MonadArbiter m) => Maybe Text -> Maybe NominalDiffTime -> m [WorkerRow]
 listWorkers queue liveSecs = onSchema $ \schemaName -> Ops.listWorkers schemaName queue liveSecs
 
--- | Delete workers older than their recorded stale threshold.
+-- | Delete workers whose last heartbeat is older than their stale threshold.
 sweepStaleWorkers :: (MonadArbiter m) => m Int64
 sweepStaleWorkers = onSchema Ops.sweepStaleWorkers
 
@@ -1225,7 +1248,7 @@ sweepStaleWorkers = onSchema Ops.sweepStaleWorkers
 -- Queue Registry
 -- ---------------------------------------------------------------------------
 
--- | Ensure a queue registry row exists.
+-- | Ensure a queue's pause-state row exists.
 ensureQueue :: (MonadArbiter m) => Text -> m Int64
 ensureQueue queue = onSchema $ \schemaName -> Ops.ensureQueue schemaName queue
 
@@ -1233,11 +1256,11 @@ ensureQueue queue = onSchema $ \schemaName -> Ops.ensureQueue schemaName queue
 setQueuePaused :: (MonadArbiter m) => Text -> Bool -> m Int64
 setQueuePaused queue paused = onSchema $ \schemaName -> Ops.setQueuePaused schemaName queue paused
 
--- | Get one queue registry row.
+-- | Get one queue's pause-state row.
 getQueue :: (MonadArbiter m) => Text -> m (Maybe QueueRow)
 getQueue queue = onSchema $ \schemaName -> Ops.getQueue schemaName queue
 
--- | List all queues registered in the schema.
+-- | List the queue pause-state rows, ordered by queue name.
 listQueues :: (MonadArbiter m) => m [QueueRow]
 listQueues = onSchema Ops.listQueues
 
@@ -1264,7 +1287,7 @@ getCronScheduleByName
 getCronScheduleByName scheduleName = onSchema $ \schemaName -> Ops.getCronScheduleByName schemaName scheduleName
 
 -- | Patch a cron schedule, writing the overrides as given. Returns rows affected, 0 for
--- a name that is not there. @Arbiter.Worker.updateCronScheduleChecked@ rejects overrides
+-- a name that is not there or an empty patch. @Arbiter.Worker.updateCronScheduleChecked@ rejects overrides
 -- the scheduler cannot parse.
 updateCronScheduleUnchecked
   :: forall m
@@ -1280,13 +1303,14 @@ updateCronScheduleUnchecked scheduleName upd = onSchema $ \schemaName -> Ops.upd
 -- ---------------------------------------------------------------------------
 
 -- | Run @work@ at most once per @interval@ across every worker pool sharing
--- the same schema. See 'Arbiter.Core.Operations.runGated'.
+-- the same schema. 'Nothing' when the gate ran too recently or another pool holds the task.
 runGated
   :: forall m a
    . (MonadArbiter m)
   => Text
   -- ^ Task identifier
   -> NominalDiffTime
+  -- ^ Minimum interval between runs, in seconds.
   -> m a
   -> m (Maybe a)
 runGated task interval work = onSchema $ \schemaName -> Ops.runGated schemaName task interval work
@@ -1295,7 +1319,7 @@ runGated task interval work = onSchema $ \schemaName -> Ops.runGated schemaName 
 -- Job Tree DSL
 -- ---------------------------------------------------------------------------
 
--- | Insert a 'Arbiter.Core.JobTree.JobTree' atomically. Returns all inserted jobs (pre-order).
+-- | Insert a t'Arbiter.Core.JobTree.JobTree' atomically. Returns all inserted jobs in pre-order.
 -- @Left@ on a dedup conflict at any node, with nothing committed.
 insertJobTree
   :: forall payload m
@@ -1305,7 +1329,9 @@ insertJobTree
 insertJobTree tree = onQueue @payload $ \schemaName tableName -> JT.insertJobTree schemaName tableName tree
 
 -- | Insert children under a claimed job, making it a rollup finalizer. Ack it in the
--- same transaction.
+-- same transaction. Throws 'Arbiter.Core.Exceptions.JobGoneException' when the claim is
+-- gone, and 'Arbiter.Core.Exceptions.JobScopedFailure' with 'Arbiter.Core.Exceptions.Retryable'
+-- on a dedup conflict or a second spawn in the same round.
 spawnChildren
   :: forall payload m
    . (JobOperation m payload)

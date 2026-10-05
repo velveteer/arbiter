@@ -3,8 +3,11 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | View and patch types for the concurrency management/observability API.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- View and patch types for the concurrency management and observability API.
 module Arbiter.Core.Concurrency.Stats
   ( ConcurrencyPolicyView (..)
   , ConcurrencyKeyView (..)
@@ -20,7 +23,7 @@ import GHC.Generics (Generic)
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 
 -- | A concurrency policy with its default and override limits plus live key and
--- in-flight stats. The effective cap is @override@ when set, else @default@.
+-- in-flight stats. The effective cap is @overrideLimit@ when set, else @defaultLimit@.
 data ConcurrencyPolicyView = ConcurrencyPolicyView
   { prefix :: Text
   -- ^ The policy's key prefix.
@@ -29,7 +32,7 @@ data ConcurrencyPolicyView = ConcurrencyPolicyView
   , overrideLimit :: Maybe Int32
   -- ^ The operator's per-key limit, in jobs. 'Nothing' when unset.
   , keyCount :: Int64
-  -- ^ Count rows under the prefix.
+  -- ^ Keys tracked under the prefix.
   , totalInFlight :: Int64
   -- ^ In-flight jobs summed over every key.
   , maxInFlight :: Maybe Int32
@@ -72,10 +75,11 @@ instance FromJSON ConcurrencyKeyView where
       <*> obj .: "effectiveLimit"
       <*> obj .:? "fillFraction"
 
--- | A patch over a concurrency policy's override limit. 'Nothing' leaves it unchanged, @Just
--- Nothing@ clears the override (reverts to the default), @Just (Just v)@ sets it.
+-- | A patch over a concurrency policy's override limit. 'Nothing' leaves it unchanged,
+-- @Just Nothing@ clears the override (reverts to the default), and @Just (Just v)@ sets it.
 data ConcurrencyPolicyUpdate = ConcurrencyPolicyUpdate
   { overrideLimit :: Maybe (Maybe Int32)
+  -- ^ The per-key limit override, in jobs.
   }
   deriving stock (Eq, Generic, Show)
 

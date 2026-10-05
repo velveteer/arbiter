@@ -82,7 +82,7 @@ poolEffects config statements consumeSpan = do
           , effectAck = \(UnliftIO runIn) job stored ->
               runIn $ withDbTransaction $ do
                 ackOrGone statements job
-                storeEncodedResult schemaName job stored
+                storeEncodedResult job stored
           , effectAckAll = \(UnliftIO runIn) pairs ->
               runIn $ withDbTransaction $ do
                 let jobsToAck = map fst pairs
@@ -148,7 +148,6 @@ poolMode
   -> Ops.JobStatements
   -> m (PoolMode m payload)
 poolMode config statements = do
-  schemaName <- getSchema
   UnliftIO run <- askUnliftIO
   pure $ case handlerMode config of
     SingleJobMode handler ->
@@ -156,7 +155,7 @@ poolMode config statements = do
         run $ withDbTransaction $ do
           handlerResult <- runHandlerWithConnection handler job
           ackOrGone statements job
-          storeJobResult schemaName job handlerResult
+          storeJobResult job handlerResult
     BatchedJobsMode _ handler ->
       BatchedMode $ \jobs callbacks -> run (handler jobs (batchCallbacks callbacks))
 

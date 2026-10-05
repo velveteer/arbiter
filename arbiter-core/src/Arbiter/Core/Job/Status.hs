@@ -17,7 +17,8 @@ import Arbiter.Core.Enum (enumFromText)
 -- | Effective job status. Arbiter derives status from the stored fields. The status SQL
 -- in "Arbiter.Core.Sql.Jobs" is its source of truth.
 data JobStatus
-  = -- | Visible, with attempts left. A claim can take it.
+  = -- | Visible, with attempts left. It can still wait behind its group head or a full
+    -- concurrency or rate-limit key.
     Ready
   | -- | Claimed by a worker, with the lease still running.
     InFlight

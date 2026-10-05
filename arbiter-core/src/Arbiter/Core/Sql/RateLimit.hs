@@ -17,7 +17,7 @@ module Arbiter.Core.Sql.RateLimit
   , rateLimitPoliciesSQL
   , rateLimitPolicyExistsSQL
   , listRateLimitBucketsSQL
-  , updateRateLimitOverridesSQL
+  , updateRateLimitPolicyOverridesSQL
   ) where
 
 import Control.Monad (join)
@@ -44,7 +44,7 @@ defaultThrottleWaitSeconds = 0.5
 -- | Add @amount@ to a key's bucket, clamped to @[0, max]@, seeding an absent bucket at
 -- full. A no-op without a policy.
 addRateLimitTokensSQL :: SchemaName -> Text -> Text -> Double -> Query ()
-addRateLimitTokensSQL schema key prefix amount =
+addRateLimitTokensSQL schema prefix key amount =
   let buckets = arbiterRateLimitsTable schema
       policies = arbiterRateLimitPoliciesTable schema
       effMax = effectivePolicyCol "policy" "max_tokens"
@@ -147,7 +147,7 @@ refilledExpr maxTokens tokens lastRefill refill interval =
    in [text|LEAST(${maxTokens}, ${tokens} + ${accrued})|]
 
 -- | The lazily-refilled token count of the bucket at alias @bucket@ under the policy
--- at alias @policy@. Mirrors the gate's accrual.
+-- at alias @policy@.
 refilledBucketTokens :: Text
 refilledBucketTokens =
   refilledExpr
@@ -246,9 +246,9 @@ listRateLimitBucketsSQL schema prefix limit offset =
 
 -- | Set or clear a policy's override params. @Nothing@ leaves a field untouched.
 -- @Just v@ writes @v@ (a null clears the override back to the default).
-updateRateLimitOverridesSQL
+updateRateLimitPolicyOverridesSQL
   :: SchemaName -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Maybe (Maybe Double) -> Text -> Query ()
-updateRateLimitOverridesSQL schema mMax mRefill mInterval prefix =
+updateRateLimitPolicyOverridesSQL schema mMax mRefill mInterval prefix =
   let policies = arbiterRateLimitPoliciesTable schema
       setMax = isJust mMax
       maxTokens = join mMax

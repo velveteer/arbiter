@@ -8,15 +8,18 @@
 --
 -- O.withTransaction $ do
 --   O.insertEntity ordersTable order
---   runOrvilleDb \@MyRegistry (OrvilleEnv "arbiter" Nothing) $
+--   runOrvilleDb \@MyRegistry OrvilleEnv {schema = "arbiter", listener = Nothing} $
 --     insertJob (defaultJob (ProcessOrder orderId))
 -- @
 --
 -- Queries run on the base monad's connection and join its open transaction.
 module Arbiter.Orville.OrvilleDb
-  ( OrvilleDb (..)
+  ( -- * Database Monad
+    OrvilleDb (..)
   , OrvilleEnv (..)
   , runOrvilleDb
+
+    -- * Connection options
   , toOrvilleConnectionOptions
   ) where
 
@@ -40,15 +43,18 @@ import Arbiter.Orville.MonadArbiter
   , orvilleWithDbTransaction
   )
 
--- | The schema of the Arbiter tables and an optional LISTEN/NOTIFY listener.
+-- | The schema of the Arbiter tables and an optional LISTEN\/NOTIFY listener.
 data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
   { schema :: SchemaName
+  -- ^ The schema the arbiter tables live in.
   , listener :: Maybe Listener
   -- ^ A listener such as @Arbiter.LibPQ.newLibPQListener@ from arbiter-libpq. 'Nothing' for poll-only.
   }
 
 -- | The Orville database monad. Handlers run in the base monad.
-newtype OrvilleDb (registry :: JobPayloadRegistry) m a = OrvilleDb {unOrvilleDb :: ReaderT (OrvilleEnv registry) m a}
+newtype OrvilleDb (registry :: JobPayloadRegistry) m a = OrvilleDb
+  { unOrvilleDb :: ReaderT (OrvilleEnv registry) m a
+  }
   deriving newtype
     ( Applicative
     , Functor

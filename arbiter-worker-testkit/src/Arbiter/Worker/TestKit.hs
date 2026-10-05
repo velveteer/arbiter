@@ -3,7 +3,10 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Parameterized worker-pool test suite, instantiated for each 'Arbiter.Core.MonadArbiter.MonadArbiter' backend.
+-- | Worker conformance suites, instantiated for each backend.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' with notify on. Empty it in
+-- 'mkEnv' and 'mkFreshEnv' with 'Arbiter.Test.Setup.cleanupData' or
+-- 'Arbiter.Test.Setup.cleanupOnce'.
 module Arbiter.Worker.TestKit
   ( workerSpec
   , listenerSpec
@@ -85,9 +88,9 @@ import Arbiter.Worker.Config
   , ackAll
   , ackAllWith
   , ackWith
+  , batchedWorkerConfig
   , cancelBranch
   , cancelTree
-  , batchedWorkerConfig
   , failPermanent
   , failRetry
   , nack
@@ -128,13 +131,11 @@ import Arbiter.Worker.TestKit.Reclaim (reclaimSpec)
 plainHandler :: (job -> m r) -> conn -> job -> m r
 plainHandler handler _conn job = handler job
 
--- | Run a command through 'executeStatement', for drivers that report 0 rows for a command without a count.
+-- | Run a command through 'executeStatement' and discard its row count.
 statementCommand :: (MonadArbiter m) => Text -> m ()
 statementCommand = void . executeStatement . raw
 
--- | Build a worker-pool test suite for the given 'Arbiter.Core.MonadArbiter.MonadArbiter' runner.
---
--- The queue under test declares @Maybe [Text]@ as its result type.
+-- | Worker-pool suite. The queue under test declares @Maybe [Text]@ as its result type.
 workerSpec
   :: forall payload m env
    . ( Eq payload
@@ -193,7 +194,7 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
     it "retries failed jobs up to max attempts" $ \env -> do
       attemptsRef <- newIORef (0 :: Int)
-      -- mkFailing 3 marks a job that throws on its first two attempts.
+      -- The handler throws on the first two attempts.
       config <- mkConfig $ \_job -> do
         attempt <- liftIO $ atomicModifyIORef' attemptsRef $ \count -> (count + 1, count + 1)
         when (attempt < 3) $ throwRetryable "Not yet!"
@@ -245,9 +246,9 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
         waitUntil 10_000 $ isJust <$> archivedNamed env "arch-byid"
         arch <- archived env
         let jid = primaryKey (Archive.jobSnapshot (head arch))
-        found <- runM env $ HL.getArchivedJobById @payload jid
+        found <- runM env $ HL.getArchiveJobById @payload jid
         fmap (payload . Archive.jobSnapshot) found `shouldBe` Just (mkSimple "arch-byid")
-        miss <- runM env $ HL.getArchivedJobById @payload 999_999
+        miss <- runM env $ HL.getArchiveJobById @payload 999_999
         (miss :: Maybe (Archive.ArchiveJob payload)) `shouldBe` Nothing
 
     it "lists archived jobs by group key" $ \env -> do
@@ -261,9 +262,9 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
 
       withAsync (runM env $ runWorkerPool config {workerCount = 1, pollInterval = 0.1}) $ \_ -> do
         waitUntil 10_000 $ do
-          inGa <- runM env $ HL.listArchivedJobsByGroupKey @payload "ga" 100 0
+          inGa <- runM env $ HL.listArchiveJobsByGroup @payload "ga" 100 0
           pure (length inGa == 2)
-        inGa <- runM env $ HL.listArchivedJobsByGroupKey @payload "ga" 100 0
+        inGa <- runM env $ HL.listArchiveJobsByGroup @payload "ga" 100 0
         map (payload . Archive.jobSnapshot) inGa `shouldMatchList` [mkSimple "g-a", mkSimple "g-b"]
 
     it "does not archive a job whose archiveFor is Nothing" $ \env -> do
@@ -2110,9 +2111,10 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
       -> IO (WorkerConfig m payload)
     mkBatchedConfig = batchedWorkerConfig
 
--- | Env-owned LISTEN hub test suite, instantiated for each backend. Under a high
--- @pollInterval@ only the NOTIFY can wake the dispatcher in time. Completion
--- proves the listener fired. The queue under test declares @()@ as its result type.
+-- | Env-owned LISTEN hub suite. A poll-only test runs jobs with the listener removed.
+-- The queue under test declares @()@ as its result type.
+-- The queue table needs notify triggers and 'mkEnv' must give an env with a shared listener.
+-- It terminates other connections on the database whose LISTEN query names the schema.
 listenerSpec
   :: forall payload m env
    . ( QueueOperation m payload
@@ -2233,11 +2235,11 @@ bumpRef ref = atomicModifyIORef' ref (\count -> (count + 1, ()))
 bumping :: (MonadIO m) => IORef Int -> JobRead p -> m ()
 bumping ref _job = liftIO (bumpRef ref)
 
--- | Env-owned LISTEN hub test suite for two queues sharing one env, one worker
--- pool per queue. Each queue's job-arrival channel is derived from its table
--- name. These check that a shared hub wakes each pool for its own queue only.
--- The registry must map @payloadA@ to the
--- @tableA@ queue and @payloadB@ to @tableB@.
+-- | Env-owned LISTEN hub suite for two queues sharing one env, one worker pool per
+-- queue. Checks that a shared hub wakes each pool for its own queue only. The backend's queue is
+-- queue A. Queue A gets its notify trigger from 'Arbiter.Test.Setup.setupOnce' with
+-- notify on. Queue B gets its notify trigger from 'Arbiter.Test.Setup.addQueueTable'
+-- with notify on. 'mkFreshEnv' must give an env with a listener.
 multiQueueListenerSpec
   :: forall payloadA payloadB m env
    . ( QueueOperation m payloadA
@@ -2247,27 +2249,16 @@ multiQueueListenerSpec
      , ResultOf m payloadA ~ ()
      , ResultOf m payloadB ~ ()
      )
-  => Text
-  -- ^ Queue A table name, also its LISTEN channel prefix
+  => TestBackend payloadA m env
   -> Text
-  -- ^ Queue B table name, also its LISTEN channel prefix
-  -> ByteString
-  -- ^ Connection string, for issuing a raw NOTIFY
-  -> (Text -> payloadA)
-  -- ^ Construct a queue A payload
+  -- ^ Queue B table name, also its LISTEN channel prefix.
   -> (Text -> payloadB)
-  -- ^ Construct a queue B payload
-  -> IO env
-  -- ^ Create an env whose listener is enabled, with both queue tables set up
-  -> (env -> IO ())
-  -- ^ Release an env built by the action above
-  -> (forall p. (JobRead p -> m ()) -> JobHandler m p ())
-  -- ^ Adapt a job action into the backend's handler shape
-  -> (forall a. env -> m a -> IO a)
-  -- ^ Runner function
+  -- ^ Construct a queue B payload.
+  -> ((JobRead payloadB -> m ()) -> JobHandler m payloadB ())
+  -- ^ Adapt a queue B job action into the backend's handler shape.
   -> Spec
-multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroyEnv mkHandler runM =
-  around (bracket mkEnv destroyEnv) $
+multiQueueListenerSpec TestBackend {table = tableA, connStr, mkSimple = mkPayloadA, mkFreshEnv, destroyEnv, mkHandler, runM} tableB mkPayloadB mkHandlerB =
+  around (bracket mkFreshEnv destroyEnv) $
     describe "multi-queue listener" $ do
       it "wakes each pool only for its own queue's jobs under a high poll interval" $ \env -> do
         refA <- newIORef (0 :: Int)
@@ -2275,7 +2266,7 @@ multiQueueListenerSpec tableA tableB connStr mkPayloadA mkPayloadB mkEnv destroy
         cfgA :: WorkerConfig m payloadA <-
           runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refA :: JobRead payloadA -> m ()))
         cfgB :: WorkerConfig m payloadB <-
-          runM env $ transactionalWorkerConfig 1 (mkHandler (bumping refB :: JobRead payloadB -> m ()))
+          runM env $ transactionalWorkerConfig 1 (mkHandlerB (bumping refB :: JobRead payloadB -> m ()))
         let poolA = cfgA {workerCount = 1, pollInterval = 300, jitter = NoJitter}
             poolB = cfgB {workerCount = 1, pollInterval = 300, jitter = NoJitter}
         withAsync (runM env $ runWorkerPool poolA) $ \_ ->

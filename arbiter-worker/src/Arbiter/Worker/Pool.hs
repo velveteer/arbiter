@@ -7,7 +7,6 @@
 -- orchestration lives in "Arbiter.Worker.MultiQueue".
 module Arbiter.Worker.Pool
   ( runWorkerPool
-  , runReaperOp
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
@@ -60,7 +59,7 @@ import Arbiter.Worker.Heartbeat (newHeartbeatGuard, runHeartbeatGuard)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Logger.Internal (tryWarn, tryWarnWith)
 import Arbiter.Worker.Processing (workerLoop)
-import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop, runReaperOp)
+import Arbiter.Worker.Reaper (MaintenancePace (..), reaperLoop)
 import Arbiter.Worker.Retry (spawnRetried)
 import Arbiter.Worker.Settlement (poolEffects, poolMode)
 import Arbiter.Worker.WorkQueue (WorkQueue, busyCount, inFlight, newWorkQueue, queuedCount)
@@ -82,7 +81,8 @@ reaperPace config =
     , paceBucketIdle = reaperBucketIdle config
     }
 
--- | Run a worker pool: a dispatcher and its worker threads.
+-- | Run a worker pool until 'shutdownWorker', then drain within
+-- 'gracefulShutdownTimeout'. Throws 'WorkerConfigException' for an invalid config.
 runWorkerPool
   :: forall payload m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)
@@ -157,7 +157,7 @@ runWorkerPool config = do
     crons <-
       sequence
         [ spawn "Cron scheduler" $
-            runCronScheduler (workerStateVar config) cronRunVar (logConfig config) schemaName queueName (cronJobs config)
+            runCronScheduler (logConfig config) (workerStateVar config) cronRunVar schemaName queueName (cronJobs config)
         | not (null (cronJobs config))
         ]
     reaper <-
@@ -188,7 +188,7 @@ withLivenessFile config =
     (livenessFile config)
 
 -- | Re-insert the worker's registry row, returning the effective paused state for the
--- caller to seed 'pauseVar' with.
+-- caller to seed 'Arbiter.Worker.Config.pauseVar' with.
 registerSelf :: (MonadArbiter m) => WorkerConfig n payload -> SchemaName -> Text -> m (Maybe Bool)
 registerSelf config schemaName queueName =
   Ops.registerWorker

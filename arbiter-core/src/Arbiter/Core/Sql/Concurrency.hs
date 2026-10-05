@@ -6,13 +6,14 @@
 --
 -- Concurrency SQL templates.
 module Arbiter.Core.Sql.Concurrency
-  ( updateConcurrencyPolicyOverrideSQL
+  ( updateConcurrencyPolicyOverridesSQL
   , lockDeadConcurrencyKeysSQL
   , pruneLockedConcurrencyKeysSQL
   , tryLockDeadConcurrencyAdvisorySQL
   , lockConcurrencyCountsSQL
   , reconcileConcurrencyCountsSQL
   , concurrencyPoliciesSQL
+  , concurrencyPolicyExistsSQL
   , listConcurrencyKeysSQL
   , concurrencyHasAnyKeySQL
   , concurrencyCountsStaleSQL
@@ -39,8 +40,8 @@ import Arbiter.Core.Sql.Query (Query, rows)
 
 -- | Set a concurrency policy's operator override limit. @Nothing@ leaves it untouched.
 -- @Just v@ writes @v@ (a null clears the override back to the default).
-updateConcurrencyPolicyOverrideSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
-updateConcurrencyPolicyOverrideSQL schema mLimit prefix =
+updateConcurrencyPolicyOverridesSQL :: SchemaName -> Maybe (Maybe Int32) -> Text -> Query ()
+updateConcurrencyPolicyOverridesSQL schema mLimit prefix =
   let policies = arbiterConcurrencyPoliciesTable schema
       touch = isJust mLimit
       limit = join mLimit
@@ -145,6 +146,12 @@ reconcileConcurrencyCountsSQL schema tableNames heldKeys =
         )
         SELECT ((SELECT COUNT(*) FROM fixed) + (SELECT COUNT(*) FROM seeded))::int8 AS @{reconciled :: CInt8}
       |]
+
+-- | Whether a concurrency policy exists for a prefix.
+concurrencyPolicyExistsSQL :: SchemaName -> Text -> Query Bool
+concurrencyPolicyExistsSQL schema prefix =
+  let tbl = arbiterConcurrencyPoliciesTable schema
+   in [sql|SELECT EXISTS (SELECT 1 FROM ${tbl} WHERE prefix_id = #{prefix :: CText}) AS @{result :: CBool}|]
 
 -- | The policy views, every policy or the one a prefix names.
 concurrencyPoliciesSQL :: SchemaName -> Maybe Text -> Query ConcurrencyPolicyView

@@ -31,7 +31,7 @@ executable arbiter-demo
   main-is:        Main.hs
   hs-source-dirs: .
   build-depends:
-    , aeson                                 >=2.0
+    , aeson                                 >=2.2
     , arbiter-core                          >=0.1  && <0.2
     , arbiter-migrations                    >=0.1  && <0.2
     , arbiter-otel                          >=0.1  && <0.2
@@ -42,7 +42,7 @@ executable arbiter-demo
     , arbiter-worker                        >=0.1  && <0.2
     , async                                 >=2.2
     , base                                  >=4.20 && <5
-    , bytestring                            >=0.10
+    , bytestring                            >=0.10.12
     , hs-opentelemetry-api                  >=1.0  && <1.1
     , hs-opentelemetry-instrumentation-wai  >=1.0  && <1.1
     , openapi3
@@ -51,7 +51,7 @@ executable arbiter-demo
     , servant-server
     , servant-swagger-ui
     , text                                  >=1.2
-    , time                                  >=1.9
+    , time                                  >=1.12
     , unix                                  >=2.7
     , unordered-containers                  >=0.2  && <0.3
     , wai-cors                              >=0.2

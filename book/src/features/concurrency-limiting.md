@@ -19,7 +19,7 @@ instance HasConcurrency SyncPayload where
 ```
 
 Selectors: `noConcurrency`, `concurrencyBy`, `globalConcurrency`,
-`concurrencyByCase`. An operator can override the limit from the API or admin
+`chooseWhen`, `concurrencyByCase`. An operator can override the limit from the API or admin
 UI. Clearing the override restores the declared default. Limit 0 admits
 nothing.
 
@@ -48,7 +48,7 @@ A job can use both.
 Set the override from a handler when a vendor reports new capacity:
 
 ```haskell
-import Arbiter.Concurrency (setConcurrencyLimit)
+import Arbiter.Concurrency (ConcurrencyPolicy (..), setConcurrencyLimit)
 
 import MyApp.Queue.Policies (syncPool)
 
@@ -57,7 +57,7 @@ syncHandler _conn job = do
   outcome <- liftIO $ runSync (Arb.payload job)
   case outcome of
     CapacityChanged seats ->
-      void $ setConcurrencyLimit syncPool seats
+      void $ setConcurrencyLimit syncPool {cpLimit = seats}
     Ok -> pure ()
 ```
 

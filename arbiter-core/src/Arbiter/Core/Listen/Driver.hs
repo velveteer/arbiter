@@ -47,11 +47,11 @@ data ConnectDriver conn = ConnectDriver
   -- ^ Start an asynchronous connect from a connection string.
   , connectPoll :: conn -> IO Polling
   -- ^ Advance the connect. Tells what to wait for next.
-  , status :: conn -> IO ConnStatus
+  , connectStatus :: conn -> IO ConnStatus
   -- ^ Where the connection stands.
-  , finish :: conn -> IO ()
+  , connectFinish :: conn -> IO ()
   -- ^ Close the connection.
-  , errorMessage :: conn -> IO (Maybe ByteString)
+  , connectErrorMessage :: conn -> IO (Maybe ByteString)
   -- ^ The driver's last error message, if any.
   }
 
@@ -71,22 +71,22 @@ withDriverListenConn
   -> (ListenConn -> IO a)
   -> IO a
 withDriverListenConn connector toConn connStr action =
-  bracket (interruptibleConnect connector (listenSocket . toConn) connStr) (finish connector) $ \conn -> do
-    st <- status connector conn
+  bracket (interruptibleConnect connector (listenSocket . toConn) connStr) (connectFinish connector) $ \conn -> do
+    st <- connectStatus connector conn
     if st == ConnOk
       then action (toConn conn)
       else do
-        merr <- errorMessage connector conn
+        merr <- connectErrorMessage connector conn
         throwInternal $ "connect failed" <> foldMap ((": " <>) . T.pack . BSC.unpack) merr
 
 -- | Open a connection asynchronously. A teardown cancel interrupts the connect.
 interruptibleConnect :: ConnectDriver conn -> (conn -> IO (Maybe Fd)) -> ByteString -> IO conn
 interruptibleConnect connector socketOf connStr = do
   conn <- connectStart connector connStr
-  st <- status connector conn
+  st <- connectStatus connector conn
   if st == ConnBad
     then pure conn
-    else (poll conn >> pure conn) `onException` finish connector conn
+    else (poll conn >> pure conn) `onException` connectFinish connector conn
   where
     poll conn = connectPoll connector conn >>= traverse_ (\wait -> waitSocket conn wait >> poll conn) . waitFor
     waitFor PollReading = Just threadWaitRead

@@ -12,8 +12,8 @@ import System.Environment (lookupEnv)
 
 -- | Get the test database connection string.
 --
--- Reads @ARBITER_TEST_CONN_STRING@ when set. The default matches the local
--- compose.yml and sets a connect timeout.
+-- Reads @ARBITER_TEST_CONN_STRING@ when set. Otherwise it is
+-- @host=localhost port=5432 user=postgres password=master dbname=postgres connect_timeout=10@.
 getTestConnectionString :: IO ByteString
 getTestConnectionString = do
   mConnStr <- lookupEnv "ARBITER_TEST_CONN_STRING"

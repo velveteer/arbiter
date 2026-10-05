@@ -1,7 +1,10 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Types and DDL for the @arbiter_queues@ table. One row per queue, scoped to
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Types and DDL for the @arbiter_queues@ table. One row per queue, scoped to
 -- the schema. Holds operator-facing per-queue state (pause flag, metadata).
 module Arbiter.Core.Queues
   ( QueueRow (..)

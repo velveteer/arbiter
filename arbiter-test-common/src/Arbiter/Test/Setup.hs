@@ -150,13 +150,26 @@ placeholderPieces :: Text -> [Piece]
 placeholderPieces = intersperse Hole . map Lit . T.splitOn "?"
 
 -- | Connect and rebuild the schema once, for a suite's outer bracket.
-setupOnce :: ByteString -> Text -> Text -> Bool -> IO ()
+-- It drops the schema with CASCADE and creates it again.
+setupOnce
+  :: ByteString
+  -> Text
+  -> Text
+  -> Bool
+  -- ^ Install the job-arrival notify trigger
+  -> IO ()
 setupOnce connStr schemaName tableName withNotify = withConn connStr $ \conn -> do
   disableNoticeReporting conn
   setupDDLWithConfig withNotify schemaName tableName conn
 
 -- | Add one more job-queue table to an existing schema.
-addQueueTable :: ByteString -> Text -> Text -> Bool -> IO ()
+addQueueTable
+  :: ByteString
+  -> Text
+  -> Text
+  -> Bool
+  -- ^ Install the job-arrival notify trigger
+  -> IO ()
 addQueueTable connStr schemaName tableName withNotify = withConn connStr $ \conn -> do
   disableNoticeReporting conn
   traverse_ (runScript conn) (jobQueueMigrationsForTable schemaName tableName allTableAdmission)

@@ -5,9 +5,9 @@ synopsis:        OpenAPI 3 description of the Arbiter REST API
 description:
   OpenAPI 3 document for Arbiter, a PostgreSQL job queue for
   Haskell.
+
   Derives an OpenAPI 3 document from @arbiter-servant@'s route types, so paths,
-  methods, parameters, request and response bodies and status codes come from the
-  API itself.
+  methods, parameters, and request and response bodies come from the API itself.
   The schema instances are orphans. They live here so @arbiter-servant@ carries no
   OpenAPI dependency of its own.
 
@@ -17,7 +17,7 @@ author:          Joshua Miller
 maintainer:      joshua.ian.miller@pm.me
 category:        Web
 build-type:      Simple
-tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13
+tested-with:     GHC >=9.10 && <9.11 || >=9.12 && <9.13 || >=9.14 && <9.15
 extra-doc-files:
   CHANGELOG.md
   README.md
@@ -55,7 +55,7 @@ library
     , servant-openapi3           >=2.0  && <2.2
     , servant-server             >=0.19 && <0.21
     , text                       >=1.2  && <2.2
-    , time                       >=1.9  && <1.16
+    , time                       >=1.12 && <1.16
     , uuid-types                 >=1.0  && <1.1
 
 test-suite arbiter-servant-openapi-tests
@@ -65,8 +65,8 @@ test-suite arbiter-servant-openapi-tests
   main-is:        Spec.hs
   build-depends:
     , aeson
-    , arbiter-core
-    , arbiter-servant
+    , arbiter-core >=0.1 && <0.2
+    , arbiter-servant >=0.1 && <0.2
     , arbiter-servant-openapi
     , base >=4.20 && <5
     , containers

@@ -29,6 +29,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
 import UnliftIO.Exception qualified as UE
 
+import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.Job.Types
   ( JobPayload
   , JobRead
@@ -86,14 +87,14 @@ infixr 6 <~~
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
 parent <~~ children = Finalizer parent (fmap Leaf children)
 
--- | Insert a 'JobTree' in one transaction, returning every inserted job root-first.
--- @Left@ on any failure, such as a dedup conflict, with nothing committed.
+-- | Insert a 'JobTree' in one transaction, returning every inserted job in pre-order.
+-- @Left@ on a dedup conflict at any node, with nothing committed.
 insertJobTree
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
-  => Text
+  => SchemaName
   -- ^ PostgreSQL schema name
-  -> Text
+  -> TableName
   -- ^ Table name
   -> JobTree payload
   -> m (Either Text (NonEmpty (JobRead payload)))

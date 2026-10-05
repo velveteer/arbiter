@@ -6,17 +6,13 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI'. The route types
--- define paths, methods, parameters, bodies, responses, and status codes.
+-- define paths, methods, parameters, bodies, and success responses.
 -- @RegistryToAPI@ expands to the server route tree and includes each queue by
 -- its registry name with its payload and result schemas.
 --
--- Each payload requires a 'ToSchema' instance. For generic JSON, use
+-- Each payload and result type requires a 'ToSchema' instance. For generic JSON, use
 -- @deriving anyclass (ToSchema)@. This module defines a 'Data.Aeson.Value'
 -- instance for free-form payloads.
---
--- Handwritten schemas are present for handwritten JSON encodings. Each schema
--- applies the applicable record constructor. Missing, misordered, or incorrect
--- field types cause a compile error. Generic encodings use generic schemas.
 module Arbiter.Servant.OpenApi
   ( -- * The document
     openApiSpec
@@ -47,7 +43,6 @@ import Arbiter.Core.Job.Types
   , setPriority
   )
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
-import Arbiter.Core.Operations (QueueStats (QueueStats))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (RateLimitKey))
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
@@ -105,6 +100,12 @@ import Servant.OpenApi (HasOpenApi, toOpenApi)
 
 -- | The document's own route, for mounting beside 'Arbiter.Servant.API.ArbiterAPI'.
 -- Mount it before @Arbiter.Servant.UI.AdminUI@. That route is a @Raw@ catch-all.
+-- Give the registry by type application:
+--
+-- @
+-- type MyApp = ArbiterAPI MyRegistry :\<|\> OpenApiAPI :\<|\> AdminUI
+-- run port $ serve (Proxy \@MyApp) (arbiterServer config :\<|\> openApiServer \@MyRegistry :\<|\> adminUIServer)
+-- @
 type OpenApiAPI = "openapi.json" :> Get '[JSON] Value
 
 -- | Serve the description of a registry's API.
@@ -162,11 +163,11 @@ streamOperation =
     { _operationSummary = Just "Server-sent stream of job events"
     , _operationDescription =
         Just
-          "Streams an event per insert, update, delete and dead-letter, as they happen. \
+          "Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. \
           \Each event names its queue and the job id. A dead-letter event carries the id the \
           \job had in its queue and sets dlq. The stream starts with one \"connected\" event. \
-          \Sends a keepalive comment every 15 seconds. A server with streaming switched \
-          \off answers one \"disabled\" event and closes."
+          \Sends a keepalive comment after 15 seconds with no event. A server with streaming off, \
+          \or with no listener, answers one \"disabled\" event and closes."
     , _operationResponses =
         mempty
           { _responsesResponses =
@@ -232,7 +233,7 @@ describeSection name =
     , _tagExternalDocs = Nothing
     }
   where
-    queueDescription queueName = "Jobs, dead letters, archive, groups and stats for the " <> queueName <> " queue."
+    queueDescription queueName = "Jobs, leases, dead letters, archive, groups, kinds and stats for the " <> queueName <> " queue."
 
 -- | What each schema-wide section is for. A section not named here is a queue.
 sectionDescriptions :: [(TagName, Text)]
@@ -253,7 +254,7 @@ apiDescription =
   \service in any language can use all three sides of it: enqueue jobs, run them by \
   \claiming a lease and acking, nacking or extending it, and operate the queue itself. \
   \The schema-wide sections cover queues, cron, workers, rate limits, concurrency, \
-  \maintenance and health.\n\nThe document is derived from the server's own route \
+  \maintenance, events and health.\n\nThe document is derived from the server's own route \
   \types. Every payload and result below is the queue's real schema. The server ships \
   \no authentication. Put it behind your own."
 

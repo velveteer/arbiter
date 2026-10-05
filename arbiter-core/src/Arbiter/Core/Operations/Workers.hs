@@ -24,7 +24,7 @@ import Arbiter.Core.MonadArbiter qualified as MA
 import Arbiter.Core.Sql.Workers qualified as Sql
 import Arbiter.Core.Worker (WorkerRow (..), workerHealthFromText)
 
--- | Register or refresh a worker and return its effective paused state (worker or
+-- | Register or refresh a worker and return its effective pause state (worker or
 -- queue). 'Nothing' when the upsert returns no row.
 registerWorker
   :: (MonadArbiter m)
@@ -47,13 +47,13 @@ registerWorker schema workerId queue host threads staleThreshold metadata =
     <$> MA.executeQuery
       (Sql.upsertWorkerSQL schema workerId queue host threads (realToFrac staleThreshold) metadata)
 
--- | Record a heartbeat and return the worker's effective paused state (worker or queue).
+-- | Record a heartbeat and return the worker's effective pause state (worker or queue).
 -- 'Nothing' when the worker has no registry row.
 heartbeatWorker :: (MonadArbiter m) => SchemaName -> UUID -> m (Maybe Bool)
 heartbeatWorker schema workerId =
   listToMaybe <$> MA.executeQuery (Sql.heartbeatWorkerSQL schema workerId)
 
--- | Set a worker's pause flag.
+-- | Set a worker's pause flag and notify the worker.
 setWorkerPaused :: (MonadArbiter m) => SchemaName -> UUID -> Bool -> m Int64
 setWorkerPaused schema workerId paused =
   countOr0 (Sql.setWorkerPausedSQL schema paused workerId)
@@ -88,6 +88,6 @@ listWorkers schema queue liveSecs = do
       health <- either throwParsing pure (workerHealthFromText rawHealth)
       pure worker {health}
 
--- | Delete workers older than their recorded stale threshold.
+-- | Delete workers whose last heartbeat is older than their stale threshold.
 sweepStaleWorkers :: (MonadArbiter m) => SchemaName -> m Int64
 sweepStaleWorkers schema = MA.executeStatement (Sql.deleteStaleWorkersSQL schema)

@@ -1,9 +1,31 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Orville-backed primitives for writing a custom
+-- | Orville primitives for writing a custom
 -- 'Arbiter.Core.MonadArbiter.MonadArbiter' instance.
+--
+-- Handlers run in the application monad on Orville's own connection:
+--
+-- @
+-- import Arbiter.Orville.MonadArbiter
+--
+-- instance MonadArbiter MyApp where
+--   type RegistryOf MyApp = MyRegistry
+--   type Handler MyApp job result = job -> MyApp result
+--   getSchema                = asks appSchema
+--   executeQuery             = orvilleExecuteQuery
+--   executeStatement         = orvilleExecuteStatement
+--   withDbTransaction        = orvilleWithDbTransaction
+--   runHandlerWithConnection = orvilleRunHandlerWithConnection
+--   getListener              = asks appListener
+-- @
+--
+-- The primitives also need a @MonadOrville MyApp@ instance.
+--
+-- Write a handler's own signature as @JobHandler MyApp MyPayload MyResult@, which is
+-- 'Arbiter.Core.MonadArbiter.Handler' at that queue's job and declared result types.
 module Arbiter.Orville.MonadArbiter
-  ( orvilleExecuteQuery
+  ( -- * MonadArbiter implementation
+    orvilleExecuteQuery
   , orvilleExecuteStatement
   , orvilleWithDbTransaction
   , orvilleRunHandlerWithConnection

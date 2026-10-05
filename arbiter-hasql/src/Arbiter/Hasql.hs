@@ -5,6 +5,7 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Hasql
+-- import Control.Monad (void)
 -- import Data.Proxy (Proxy (..))
 -- import Pqi.Ffi qualified as Ffi
 --
@@ -12,10 +13,10 @@
 -- main = do
 --   env <- createHasqlEnv (Proxy \@MyRegistry) (toHasqlConnect Ffi.adapter connStr) "arbiter"
 --   runHasqlDb env $ do
---     insertJob (defaultJob myPayload)
+--     void $ insertJob (defaultJob myPayload)
 -- @
 --
--- On hasql 1.x 'toHasqlConnect' takes only the connection string.
+-- @Pqi.Ffi@ is in the pqi-ffi package. On hasql 1.x 'toHasqlConnect' takes only the connection string.
 module Arbiter.Hasql
   ( -- * Re-exports
     module Arbiter.Hasql.MonadArbiter

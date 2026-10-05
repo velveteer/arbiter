@@ -25,9 +25,10 @@ data DLQJob payload = DLQJob
   , failedAt :: UTCTime
   -- ^ When the job was moved to the DLQ
   , jobSnapshot :: JobSnapshot payload
-  -- ^ Full job state at time of failure (payload, attempts, last_error, etc.).
+  -- ^ Full job state at time of failure. Its 'Arbiter.Core.Job.Types.lastError' holds
+  -- the final error.
   -- For DLQ rollup finalizers, 'Arbiter.Core.Job.Types.parentState' in the snapshot contains the
-  -- accumulated child results captured before the cascade delete.
+  -- accumulated child results captured before the descendants moved to the DLQ.
   }
   deriving stock (Eq, Generic, Show)
 

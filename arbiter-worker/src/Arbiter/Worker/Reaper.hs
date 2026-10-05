@@ -1,8 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Schema-wide maintenance coordinated across worker pools.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Schema-wide maintenance coordinated across worker pools.
 module Arbiter.Worker.Reaper
   ( reaperLoop
   , runMaintenancePass
@@ -53,14 +56,16 @@ reaperLoop logCfg report pace stmtTimeout =
     void $ runMaintenancePass logCfg report pace stmtTimeout
     threadDelay (Ops.micros (paceWindow pace))
 
--- | Gaps a caller holds between runs of each kind of work. A zero gap runs it every pass.
+-- | Gaps between runs of each kind of work, and the bucket idle age. A zero gap
+-- runs that work every pass.
 data MaintenancePace = MaintenancePace
   { paceWindow :: NominalDiffTime
-  -- ^ Gap between runs of one ordinary operation.
+  -- ^ Gap in seconds between runs of one ordinary operation.
   , paceSparseWindow :: NominalDiffTime
-  -- ^ Gap between runs of the rate-limit bucket prune and the concurrency prune and reconcile.
+  -- ^ Gap in seconds between runs of the rate-limit bucket prune and the concurrency
+  -- prune and reconcile.
   , paceBucketIdle :: NominalDiffTime
-  -- ^ Idle age at which a prune collects a rate-limit bucket.
+  -- ^ Idle age in seconds at which a prune collects a rate-limit bucket.
   }
   deriving stock (Eq, Show)
 
@@ -139,12 +144,11 @@ reportOutcome
   -> m (Maybe MaintenanceOp)
 reportOutcome operation emit = either (const (pure (Just operation))) (\ran -> Nothing <$ emit ran)
 
--- | Run one gated maintenance operation. Database statement timeouts bound
--- individual statements. Failures are logged and do not stop the loop.
+-- | Run one gated maintenance operation. 'Nothing' when it failed, is running
+-- elsewhere, or its window has not elapsed. Failures are logged.
 runReaperOp
   :: (MonadArbiter m)
   => LogConfig
-  -> SchemaName
   -> NominalDiffTime
   -- ^ Statement timeout
   -> Text
@@ -153,10 +157,11 @@ runReaperOp
   -- ^ Gate window: minimum gap between runs across all callers
   -> m a
   -> m (Maybe a)
-runReaperOp logCfg schema stmtTimeout task every work =
+runReaperOp logCfg stmtTimeout task every work = do
+  schema <- Arb.getSchema
   fromRight Nothing <$> tryReaperOp logCfg schema stmtTimeout task every work
 
--- | 'runReaperOp', keeping the failure. @Right Nothing@ is an operation already running.
+-- | 'runReaperOp', keeping the failure. @Right Nothing@ is a gate that ran too recently or is held elsewhere.
 tryReaperOp
   :: (MonadArbiter m)
   => LogConfig

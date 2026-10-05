@@ -34,7 +34,7 @@ data WorkQueue a = WorkQueue
 newWorkQueue :: (MonadIO m) => m (WorkQueue a)
 newWorkQueue = WorkQueue <$> newChan <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO False
 
--- | Enqueue in order. Masking keeps the count consistent with channel writes.
+-- | Enqueue in order.
 pushWork :: (MonadUnliftIO m) => WorkQueue a -> [a] -> m ()
 pushWork _ [] = pure ()
 pushWork queue items = mask_ $ do

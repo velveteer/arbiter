@@ -64,7 +64,7 @@ reclaimedReason = "reclaimed by another worker"
 deletedReason :: Text
 deletedReason = "deleted while held by this worker"
 
--- | A wall-clock span as a monotonic one. Exact, no Rational detour.
+-- | A wall-clock span as a monotonic one.
 toDiffTime :: NominalDiffTime -> DiffTime
 toDiffTime elapsed = picosecondsToDiffTime picos
   where

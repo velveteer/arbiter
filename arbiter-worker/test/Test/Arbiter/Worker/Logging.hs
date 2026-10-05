@@ -18,9 +18,9 @@ import Arbiter.Worker.Logger
   , LogDestination (LogCallback)
   , LogLevel (..)
   , defaultLogConfig
-  , toHubLog
   , newFailureGate
   , newFailureGates
+  , toHubLog
   , tryReported
   , tryReportedOn
   , (.=)

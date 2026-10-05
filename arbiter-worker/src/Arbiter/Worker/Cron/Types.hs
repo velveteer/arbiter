@@ -64,12 +64,16 @@ data OverlapPolicy
 data BackfillPolicy
   = -- | Drop missed minutes silently. Default.
     NoBackfill
-  | -- | Replay missed minutes up to the given duration.
+  | -- | Replay missed minutes up to the given number of seconds.
     Backfill NominalDiffTime
   deriving stock (Eq, Generic, Show)
 
 -- | Whether a tick is for the current minute or a replay of a past minute.
-data TickKind = Live | Replay
+data TickKind
+  = -- | The current scheduler minute.
+    Live
+  | -- | A past minute, replayed at startup or in mid-flight catch-up.
+    Replay
   deriving stock (Eq, Generic, Show)
 
 -- | Convert an 'OverlapPolicy' to its text representation.
@@ -106,28 +110,26 @@ updateCronScheduleChecked scheduleName upd =
 -- | A cron schedule. Built with 'cronJob', or 'cronJobInTimezone' for a non-UTC one.
 data CronJob payload = CronJob
   { name :: Text
-  -- ^ Human-readable name for logging and dedup keys
+  -- ^ Name for logs and dedup keys.
   , cronExpression :: Text
-  -- ^ Original cron expression text (for DB storage)
+  -- ^ The cron expression the schedule row stores.
   , overlap :: OverlapPolicy
-  -- ^ How to handle overlapping ticks
+  -- ^ How to handle overlapping ticks.
   , backfill :: BackfillPolicy
   -- ^ How to replay missed ticks, at startup and mid-flight. Default: 'NoBackfill'.
   , timezone :: Maybe Text
   -- ^ IANA tz name (e.g. @\"America\/New_York\"@). 'Nothing' means UTC.
   -- The @override_timezone@ DB column wins if set.
   , initiallyEnabled :: Bool
-  -- ^ Default: 'True'. 'False' registers the schedule suspended.
+  -- ^ Default: 'True'. 'False' registers the schedule disabled.
   , builder :: TickKind -> UTCTime -> JobWrite payload
-  -- ^ Build a job for the given tick time. 'Replay' is passed for any tick
-  -- whose minute is not the current scheduler minute (startup or mid-flight
-  -- catch-up). 'Live' is passed for the current minute boundary.
+  -- ^ Build a job for the given tick time and 'TickKind'.
   }
   deriving stock (Generic)
 
--- | Build a 'CronJob'. A bad expression returns @Left@. The expression is
--- evaluated in UTC. 'cronJobInTimezone' is the local-time form. Set 'backfill'
--- and 'initiallyEnabled' by record update.
+-- | Build a 'CronJob' evaluated in UTC. A bad expression returns @Left@.
+-- 'cronJobInTimezone' is the local-time form. Set 'backfill' and 'initiallyEnabled' by
+-- record update.
 --
 -- @
 -- cronJob "nightly-report" "0 3 * * *" SkipOverlap
@@ -139,6 +141,7 @@ cronJob
   -> Text
   -- ^ Cron expression (5-field: minute hour day-of-month month day-of-week)
   -> OverlapPolicy
+  -- ^ Overlap policy
   -> (TickKind -> UTCTime -> JobWrite payload)
   -- ^ Job builder. Receives the tick kind and the tick time.
   -> Either String (CronJob payload)
@@ -164,7 +167,9 @@ cronJobInTimezone
   -> Text
   -- ^ Cron expression (5-field)
   -> OverlapPolicy
+  -- ^ Overlap policy
   -> (TickKind -> UTCTime -> JobWrite payload)
+  -- ^ Job builder
   -> Either String (CronJob payload)
 cronJobInTimezone cronName tzName expr overlapPolicy build =
   case resolveTZ tzName of
@@ -175,7 +180,7 @@ cronJobInTimezone cronName tzName expr overlapPolicy build =
 resolveTZ :: Text -> Maybe TZ
 resolveTZ name = fmap tzByLabel (fromTZName (encodeUtf8 name))
 
--- | Match a cron schedule against a UTC tick, evaluated in @tz@.
+-- | Match a cron schedule against a UTC tick in the given timezone.
 -- 'Nothing' means UTC. An unknown tz name returns 'False'. A fixed-time schedule
 -- skips the second reading of a repeated local hour. A wildcard one runs through both.
 matchesInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Bool
@@ -201,7 +206,7 @@ secondReading zone local tick = case localTimeToUTCFull zone local of
   LTUAmbiguous _ second _ _ -> tick >= second
   _ -> False
 
--- | The first tick after @now@ that @sched@ matches, evaluated in @tz@.
+-- | The first tick after @now@ that @sched@ matches in the given timezone.
 -- 'Nothing' means UTC. An unknown tz name returns 'Nothing'.
 nextRunInTimezone :: Maybe Text -> CronSchedule -> UTCTime -> Maybe UTCTime
 nextRunInTimezone Nothing sched now = nextMatch sched now
@@ -226,7 +231,7 @@ replayEnd zone tick = case localTimeToUTCFull zone (utcToLocalTimeTZ zone tick) 
   LTUAmbiguous _ second _ _ | tick < second -> Just second
   _ -> Nothing
 
--- | Every UTC tick whose local clock in @tz@ reads @local@, earliest first.
+-- | Every UTC tick whose local clock in @zone@ reads @local@, earliest first.
 ticksWearing :: TZ -> LocalTime -> [UTCTime]
 ticksWearing zone local = case localTimeToUTCFull zone local of
   LTUUnique tick _ -> [tick]

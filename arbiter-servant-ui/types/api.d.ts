@@ -360,7 +360,7 @@ export interface paths {
         };
         /**
          * Server-sent stream of job events
-         * @description Streams an event per insert, update, delete and dead-letter, as they happen. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one "connected" event. Sends a keepalive comment every 15 seconds. A server with streaming switched off answers one "disabled" event and closes.
+         * @description Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one "connected" event. Sends a keepalive comment after 15 seconds with no event. A server with streaming off, or with no listener, answers one "disabled" event and closes.
          */
         get: {
             parameters: {
@@ -2381,7 +2381,7 @@ export interface components {
             deleted: number;
         };
         BatchInsertRequest_AnyJson: {
-            jobWrites: components["schemas"]["JobWrite_AnyJson"][];
+            jobs: components["schemas"]["JobWrite_AnyJson"][];
         };
         BatchInsertResponse_AnyJson: {
             inserted: components["schemas"]["Job_AnyJson"][];
@@ -2464,7 +2464,7 @@ export interface components {
             nextRunAt: components["schemas"]["UTCTime"] | (never | null);
         };
         CronSchedulesResponse: {
-            cronSchedules: components["schemas"]["CronScheduleView"][];
+            schedules: components["schemas"]["CronScheduleView"][];
         };
         DLQEntry_AnyJson: {
             /** Format: int64 */
@@ -2779,7 +2779,7 @@ export interface components {
         };
         StatsResponse: {
             stats: components["schemas"]["QueueStats"];
-            timestamp: string;
+            timestamp: components["schemas"]["UTCTime"];
         };
         /**
          * Format: yyyy-mm-ddThh:MM:ssZ

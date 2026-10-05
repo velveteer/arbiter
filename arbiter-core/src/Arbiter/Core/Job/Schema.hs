@@ -10,10 +10,10 @@ module Arbiter.Core.Job.Schema
     SchemaName
   , TableName
 
-    -- * Schema Creation
+    -- * Schema creation
   , createSchemaSQL
 
-    -- * Table Creation SQL
+    -- * Table creation SQL
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueArchiveTableSQL
@@ -23,7 +23,7 @@ module Arbiter.Core.Job.Schema
   , addKindColumnSQL
   , setMaxAttemptsDefaultSQL
 
-    -- * Index Creation SQL
+    -- * Index creation SQL
   , indexSQL
   , migrateUngroupedReadySplitIndexesSQL
   , createDLQGroupKeyIndexSQL
@@ -37,16 +37,16 @@ module Arbiter.Core.Job.Schema
   , createDedupKeyIndexSQL
   , createParentIdIndexSQL
 
-    -- * NOTIFY Trigger SQL
+    -- * NOTIFY trigger SQL
   , createNotifyFunctionSQL
   , createNotifyTriggerSQL
 
-    -- * Event Streaming Trigger SQL
+    -- * Event-streaming trigger SQL
   , createEventStreamingFunctionSQL
   , createEventStreamingTriggersSQL
   , dropEventStreamingFunctionSQL
 
-    -- * Notification Channel Helpers
+    -- * Notification channel helpers
   , notificationChannelForTable
   , eventStreamingChannel
   , pauseNotifyChannel
@@ -54,7 +54,7 @@ module Arbiter.Core.Job.Schema
   , cancelNotifyChannel
   , cronRunNotifyChannel
 
-    -- * Trigger / Function Name Helpers
+    -- * Trigger and function name helpers
   , notifyFunctionName
   , notifyTriggerName
   , eventStreamingFunctionName
@@ -68,7 +68,7 @@ module Arbiter.Core.Job.Schema
   , eventStreamingObjectCommentPrefix
   , eventStreamingAdoptedObjectComment
 
-    -- * Table Name Helpers
+    -- * Table name helpers
   , qualifiedTable
   , jobQueueTable
   , jobQueueDLQTable
@@ -76,10 +76,10 @@ module Arbiter.Core.Job.Schema
   , jobQueueResultsTable
   , jobQueueGroupsTable
 
-    -- * Results Table
+    -- * Results table
   , createResultsTableSQL
 
-    -- * Maintenance Trigger SQL
+    -- * Maintenance trigger SQL
   , maintenanceFunctionNames
   , createMaintenanceTriggersSQL
   , statementTriggerSQL
@@ -89,8 +89,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import NeatInterpolation (text)
 
-import Arbiter.Core.Job.Types (defaultMaxAttemptsSQL)
-import Arbiter.Core.SqlLiterals (quoteIdentifier, textLiteral)
+import Arbiter.Core.SqlLiterals (defaultMaxAttemptsSQL, quoteIdentifier, textLiteral)
 
 -- | PostgreSQL schema name, e.g. @"arbiter"@.
 type SchemaName = Text
@@ -217,11 +216,11 @@ setMaxAttemptsDefaultSQL schemaName tableName =
       |]
 
 -- | Qualified results table name: @jobQueueResultsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_results"@
-jobQueueResultsTable :: Text -> Text -> Text
+jobQueueResultsTable :: SchemaName -> TableName -> Text
 jobQueueResultsTable schemaName tableName = qualifiedTable schemaName (tableName <> resultsSuffix)
 
 -- | Qualified groups table name: @jobQueueGroupsTable "arbiter" "email_jobs"@ -> @"arbiter"."email_jobs_groups"@
-jobQueueGroupsTable :: Text -> Text -> Text
+jobQueueGroupsTable :: SchemaName -> TableName -> Text
 jobQueueGroupsTable schemaName tableName = qualifiedTable schemaName (tableName <> groupsSuffix)
 
 dlqSuffix, archiveSuffix, resultsSuffix, groupsSuffix :: Text
@@ -263,7 +262,7 @@ jobColumns =
   ]
 
 -- | @ADD COLUMN IF NOT EXISTS@ over a queue's three job tables, one statement each.
-addJobColumnsSQL :: Text -> Text -> [Text] -> Text
+addJobColumnsSQL :: SchemaName -> TableName -> [Text] -> Text
 addJobColumnsSQL schemaName tableName columns =
   T.unlines [alter (tbl schemaName tableName) | tbl <- [jobQueueTable, jobQueueDLQTable, jobQueueArchiveTable]]
   where
@@ -271,17 +270,17 @@ addJobColumnsSQL schemaName tableName columns =
     addColumn column = "ADD COLUMN IF NOT EXISTS " <> column
 
 -- | Add the W3C trace-context columns to a queue's three job tables.
-addTraceContextColumnSQL :: Text -> Text -> Text
+addTraceContextColumnSQL :: SchemaName -> TableName -> Text
 addTraceContextColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["traceparent TEXT", "tracestate TEXT"]
 
 -- | Add the per-claim token column to a queue's three job tables.
-addClaimSeqColumnSQL :: Text -> Text -> Text
+addClaimSeqColumnSQL :: SchemaName -> TableName -> Text
 addClaimSeqColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["claim_seq BIGINT NOT NULL DEFAULT 0"]
 
 -- | Add the payload variant label to a queue's three job tables.
-addKindColumnSQL :: Text -> Text -> Text
+addKindColumnSQL :: SchemaName -> TableName -> Text
 addKindColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["kind TEXT"]
 
@@ -296,7 +295,7 @@ jobColumnsForDLQ =
     <> T.unlines (drop 1 jobColumns)
 
 -- | Create a queue's main job table, holding its pending and in-progress jobs.
-createJobQueueTableSQL :: Text -> Text -> Text
+createJobQueueTableSQL :: SchemaName -> TableName -> Text
 createJobQueueTableSQL schemaName tableName =
   T.unlines
     [ "CREATE TABLE IF NOT EXISTS " <> jobQueueTable schemaName tableName <> " ("
@@ -304,9 +303,9 @@ createJobQueueTableSQL schemaName tableName =
     , ") WITH (fillfactor = 70);"
     ]
 
--- | Create a queue's DLQ table, where a job that runs out of attempts lands as a full
--- snapshot plus its failure metadata.
-createJobQueueDLQTableSQL :: Text -> Text -> Text
+-- | Create a queue's DLQ table, where failed jobs land as a full snapshot plus their
+-- failure metadata.
+createJobQueueDLQTableSQL :: SchemaName -> TableName -> Text
 createJobQueueDLQTableSQL schemaName tableName =
   T.unlines
     [ "CREATE TABLE IF NOT EXISTS " <> jobQueueDLQTable schemaName tableName <> " ("
@@ -336,7 +335,7 @@ jobColumnsForArchive =
     <> T.unlines (drop 1 jobColumns)
 
 -- | Create the completed-job archive table. The table is logged.
-createJobQueueArchiveTableSQL :: Text -> Text -> Text
+createJobQueueArchiveTableSQL :: SchemaName -> TableName -> Text
 createJobQueueArchiveTableSQL schemaName tableName =
   T.unlines
     [ "CREATE TABLE IF NOT EXISTS " <> jobQueueArchiveTable schemaName tableName <> " ("
@@ -361,7 +360,7 @@ indexSQLWith create name tbl columns predicate =
       Just filterText -> ["ON " <> tbl <> " (" <> columns <> ")", "WHERE " <> filterText <> ";"]
 
 -- | Index on archive @completed_at@ for the most-recent-first history listing.
-createArchiveCompletedAtIndexSQL :: Text -> Text -> Text
+createArchiveCompletedAtIndexSQL :: SchemaName -> TableName -> Text
 createArchiveCompletedAtIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_archive_completed_at")
@@ -370,7 +369,7 @@ createArchiveCompletedAtIndexSQL schemaName tableName =
     Nothing
 
 -- | Index on archive @archive_expires_at@. Drives the retention purge sweep.
-createArchiveExpiresAtIndexSQL :: Text -> Text -> Text
+createArchiveExpiresAtIndexSQL :: SchemaName -> TableName -> Text
 createArchiveExpiresAtIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_archive_expires_at")
@@ -378,13 +377,13 @@ createArchiveExpiresAtIndexSQL schemaName tableName =
     "archive_expires_at"
     Nothing
 
--- | Index on archive @job_id@ for by-id lookups ('Arbiter.Core.HighLevel.getArchivedJobById').
-createArchiveJobIdIndexSQL :: Text -> Text -> Text
+-- | Index on archive @job_id@ for by-id lookups ('Arbiter.Core.HighLevel.getArchiveJobById').
+createArchiveJobIdIndexSQL :: SchemaName -> TableName -> Text
 createArchiveJobIdIndexSQL schemaName tableName =
   indexSQL ("idx_" <> tableName <> "_archive_job_id") (jobQueueArchiveTable schemaName tableName) "job_id" Nothing
 
 -- | Index on archive @parent_id@ for per-tree history lookups.
-createArchiveParentIdIndexSQL :: Text -> Text -> Text
+createArchiveParentIdIndexSQL :: SchemaName -> TableName -> Text
 createArchiveParentIdIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_archive_parent_id")
@@ -393,13 +392,13 @@ createArchiveParentIdIndexSQL schemaName tableName =
     (Just "parent_id IS NOT NULL")
 
 -- | Index on archive @group_key@ for per-group history lookups.
-createArchiveGroupKeyIndexSQL :: Text -> Text -> Text
+createArchiveGroupKeyIndexSQL :: SchemaName -> TableName -> Text
 createArchiveGroupKeyIndexSQL schemaName tableName =
   indexSQL ("idx_" <> tableName <> "_archive_group_key") (jobQueueArchiveTable schemaName tableName) "group_key" Nothing
 
 -- | Ranking index over ready ungrouped jobs (@not_visible_until IS NULL AND NOT
 -- suspended@). The claim's ordered @LIMIT@ stops the scan at the first ready rows.
-createJobQueueUngroupedReadyRankingIndexSQL :: Text -> Text -> Text
+createJobQueueUngroupedReadyRankingIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_ungrouped_ready_ranking")
@@ -409,7 +408,7 @@ createJobQueueUngroupedReadyRankingIndexSQL schemaName tableName =
 
 -- | Due-finder for ungrouped parked rows. The claim range-scans it by
 -- @not_visible_until <= NOW()@ for due scheduled, backoff and expired-lease jobs.
-createJobQueueUngroupedDueIndexSQL :: Text -> Text -> Text
+createJobQueueUngroupedDueIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueUngroupedDueIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_ungrouped_due")
@@ -419,7 +418,7 @@ createJobQueueUngroupedDueIndexSQL schemaName tableName =
 
 -- | Replace the full ungrouped ranking index with the ready-only ranking index
 -- plus the due-finder.
-migrateUngroupedReadySplitIndexesSQL :: Text -> Text -> Text
+migrateUngroupedReadySplitIndexesSQL :: SchemaName -> TableName -> Text
 migrateUngroupedReadySplitIndexesSQL schemaName tableName =
   T.unlines
     [ "DROP INDEX IF EXISTS "
@@ -432,17 +431,17 @@ migrateUngroupedReadySplitIndexesSQL schemaName tableName =
     ]
 
 -- | Index on DLQ @group_key@, for per-group failure listings.
-createDLQGroupKeyIndexSQL :: Text -> Text -> Text
+createDLQGroupKeyIndexSQL :: SchemaName -> TableName -> Text
 createDLQGroupKeyIndexSQL schemaName tableName =
   indexSQL ("idx_" <> tableName <> "_dlq_group_key") (jobQueueDLQTable schemaName tableName) "group_key" Nothing
 
 -- | Index on DLQ @failed_at@, for the most-recent-first listing.
-createDLQFailedAtIndexSQL :: Text -> Text -> Text
+createDLQFailedAtIndexSQL :: SchemaName -> TableName -> Text
 createDLQFailedAtIndexSQL schemaName tableName =
   indexSQL ("idx_" <> tableName <> "_dlq_failed_at") (jobQueueDLQTable schemaName tableName) "failed_at DESC" Nothing
 
 -- | Index on DLQ @parent_id@, for per-parent child lookups and counts.
-createDLQParentIdIndexSQL :: Text -> Text -> Text
+createDLQParentIdIndexSQL :: SchemaName -> TableName -> Text
 createDLQParentIdIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_dlq_parent_id")
@@ -451,7 +450,7 @@ createDLQParentIdIndexSQL schemaName tableName =
     (Just "parent_id IS NOT NULL")
 
 -- | Unique index on @dedup_key@. The dedup @ON CONFLICT@ resolves against it.
-createDedupKeyIndexSQL :: Text -> Text -> Text
+createDedupKeyIndexSQL :: SchemaName -> TableName -> Text
 createDedupKeyIndexSQL schemaName tableName =
   uniqueIndexSQL
     ("idx_" <> tableName <> "_dedup_key")
@@ -460,7 +459,7 @@ createDedupKeyIndexSQL schemaName tableName =
     (Just "dedup_key IS NOT NULL")
 
 -- | Partial index on @parent_id@, for per-parent child lookups.
-createParentIdIndexSQL :: Text -> Text -> Text
+createParentIdIndexSQL :: SchemaName -> TableName -> Text
 createParentIdIndexSQL schemaName tableName =
   indexSQL
     ("idx_" <> tableName <> "_parent_id")
@@ -470,7 +469,7 @@ createParentIdIndexSQL schemaName tableName =
 
 -- | Create a queue's results table, one row per child keyed by @(parent_id, child_id)@.
 -- Its foreign key cascades. Acking the parent clears them.
-createResultsTableSQL :: Text -> Text -> Text
+createResultsTableSQL :: SchemaName -> TableName -> Text
 createResultsTableSQL schemaName tableName =
   let resultsTbl = jobQueueResultsTable schemaName tableName
       mainTbl = jobQueueTable schemaName tableName
@@ -488,7 +487,7 @@ createResultsTableSQL schemaName tableName =
 -- ---------------------------------------------------------------------------
 
 -- | The qualified @\<baseName\>_{insert,delete,update}@ maintenance-function names.
-maintenanceFunctionNames :: Text -> Text -> (Text, Text, Text)
+maintenanceFunctionNames :: SchemaName -> Text -> (Text, Text, Text)
 maintenanceFunctionNames schemaName baseName =
   (func "_insert", func "_delete", func "_update")
   where
@@ -496,7 +495,7 @@ maintenanceFunctionNames schemaName baseName =
 
 -- | One statement-level AFTER trigger. Drops then recreates, wiring the
 -- @\<baseName\>\<suffix\>@ function over @tbl@ with the given event and REFERENCING clause.
-statementTriggerSQL :: Text -> Text -> Text -> Text -> Text -> Text -> Text
+statementTriggerSQL :: SchemaName -> Text -> Text -> Text -> Text -> Text -> Text
 statementTriggerSQL schemaName tbl baseName suffix event referencing =
   let func = quoteIdentifier schemaName <> "." <> quoteIdentifier (baseName <> suffix)
       trig = quoteIdentifier (baseName <> suffix)
@@ -511,7 +510,7 @@ statementTriggerSQL schemaName tbl baseName suffix event referencing =
 
 -- | The 3 statement-level AFTER triggers (insert\/delete\/update) wiring a table's
 -- maintenance functions, named @\<baseName\>_{insert,delete,update}@.
-createMaintenanceTriggersSQL :: Text -> Text -> Text -> Text
+createMaintenanceTriggersSQL :: SchemaName -> Text -> Text -> Text
 createMaintenanceTriggersSQL schemaName tbl baseName =
   T.intercalate
     "\n\n"
@@ -524,7 +523,7 @@ createMaintenanceTriggersSQL schemaName tbl baseName =
 -- | SQL for the per-table NOTIFY function, fired once per insert statement.
 -- A statement that inserted nothing notifies nothing. Channel name is quoted as
 -- a string literal.
-createNotifyFunctionSQL :: Text -> Text -> Text
+createNotifyFunctionSQL :: SchemaName -> TableName -> Text
 createNotifyFunctionSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
       channel = textLiteral (notificationChannelForTable tableName)
@@ -549,7 +548,7 @@ createNotifyFunctionSQL schemaName tableName =
 
 -- | A table's job-arrival NOTIFY trigger. Statement-level. A batch insert notifies
 -- one time.
-createNotifyTriggerSQL :: Text -> Text -> Text
+createNotifyTriggerSQL :: SchemaName -> TableName -> Text
 createNotifyTriggerSQL schemaName tableName =
   let functionName = notifyFunctionName tableName
       trigName = quoteIdentifier (notifyTriggerName tableName)
@@ -658,7 +657,7 @@ createEventStreamingTriggersSQL schemaName tableName =
 
 -- | Drop current and legacy event-streaming triggers for a queue and its DLQ.
 -- The shared function is dropped separately after every queue is detached.
-dropEventStreamingTriggersSQL :: Text -> Text -> Text
+dropEventStreamingTriggersSQL :: SchemaName -> TableName -> Text
 dropEventStreamingTriggersSQL schemaName tableName =
   let tbl = jobQueueTable schemaName tableName
       dlqTbl = jobQueueDLQTable schemaName tableName

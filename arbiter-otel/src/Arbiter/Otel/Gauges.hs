@@ -10,7 +10,7 @@ module Arbiter.Otel.Gauges
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations (Shared (..), micros)
-import Arbiter.Worker (FailureGate, LogConfig (..), LogLevel (Warning), newFailureGate, reportOutcome)
+import Arbiter.Worker.Logger (FailureGate, LogConfig (..), LogLevel (Warning), newFailureGate, reportOutcome)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically, readTVarIO)
 import Control.Exception (SomeException)

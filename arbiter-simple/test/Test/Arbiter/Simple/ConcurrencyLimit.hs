@@ -31,4 +31,4 @@ spec connStr =
         withConn = withResource sharedPool
     around (\action -> withConn (cleanupData testSchema concurrencyTable) >> action mkEnv) $
       concurrencyLimitSpec runSimpleDb
-    concurrencyModelSpec run withConn testSchema
+    concurrencyModelSpec run testSchema withConn

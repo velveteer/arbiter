@@ -63,10 +63,11 @@ import Arbiter.Core.Job.Schema
   , jobQueueDLQTable
   , jobQueueTable
   )
-import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
+import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored)
 import Arbiter.Core.Sql.Groups (settleGroupLocksCte)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, mwhen, rows)
+import Arbiter.Core.SqlLiterals (attemptsLeftSQL, defaultMaxAttemptsSQL, minMaxAttemptsSQL)
 
 -- | A narrowing predicate on a job listing. Filters combine with AND.
 data JobFilter
@@ -106,14 +107,22 @@ data JobFilter
 
 -- | Sortable columns on the main jobs table.
 data JobSortColumn
-  = JsId
-  | JsPriority
-  | JsAttempts
-  | JsInsertedAt
-  | JsNotVisibleUntil
-  | JsGroupKey
-  | JsParentId
-  | JsLastAttemptedAt
+  = -- | By @id@.
+    JsId
+  | -- | By @priority@.
+    JsPriority
+  | -- | By @attempts@.
+    JsAttempts
+  | -- | By @inserted_at@.
+    JsInsertedAt
+  | -- | By @not_visible_until@.
+    JsNotVisibleUntil
+  | -- | By @group_key@.
+    JsGroupKey
+  | -- | By @parent_id@.
+    JsParentId
+  | -- | By @last_attempted_at@.
+    JsLastAttemptedAt
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | Underlying SQL column name for a 'JobSortColumn'.
@@ -131,15 +140,24 @@ jobSortColumnName = \case
 -- | Sortable columns on the DLQ table. 'DlqId' is the DLQ primary key and
 -- 'DlqJobId' the original job id.
 data DLQSortColumn
-  = DlqId
-  | DlqFailedAt
-  | DlqJobId
-  | DlqPriority
-  | DlqAttempts
-  | DlqInsertedAt
-  | DlqGroupKey
-  | DlqParentId
-  | DlqLastAttemptedAt
+  = -- | By @id@, the DLQ primary key.
+    DlqId
+  | -- | By @failed_at@.
+    DlqFailedAt
+  | -- | By @job_id@, the original job id.
+    DlqJobId
+  | -- | By @priority@.
+    DlqPriority
+  | -- | By @attempts@.
+    DlqAttempts
+  | -- | By @inserted_at@.
+    DlqInsertedAt
+  | -- | By @group_key@.
+    DlqGroupKey
+  | -- | By @parent_id@.
+    DlqParentId
+  | -- | By @last_attempted_at@.
+    DlqLastAttemptedAt
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | The DLQ column a sort key names.
@@ -158,13 +176,20 @@ dlqSortColumnName = \case
 -- | Sortable columns on the archive table. 'ArchiveId' is the archive primary
 -- key and 'ArchiveJobId' the original job id.
 data ArchiveSortColumn
-  = ArchiveId
-  | ArchiveCompletedAt
-  | ArchiveInsertedAt
-  | ArchiveJobId
-  | ArchiveAttempts
-  | ArchiveGroupKey
-  | ArchiveParentId
+  = -- | By @id@, the archive primary key.
+    ArchiveId
+  | -- | By @completed_at@.
+    ArchiveCompletedAt
+  | -- | By @inserted_at@.
+    ArchiveInsertedAt
+  | -- | By @job_id@, the original job id.
+    ArchiveJobId
+  | -- | By @attempts@.
+    ArchiveAttempts
+  | -- | By @group_key@.
+    ArchiveGroupKey
+  | -- | By @parent_id@.
+    ArchiveParentId
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | The archive column a sort key names.
@@ -179,7 +204,11 @@ archiveSortColumnName = \case
   ArchiveParentId -> "parent_id"
 
 -- | Sort direction.
-data SortDir = SortAsc | SortDesc
+data SortDir
+  = -- | Ascending.
+    SortAsc
+  | -- | Descending.
+    SortDesc
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | A sort direction as SQL.
@@ -191,8 +220,8 @@ sortDirSql SortDesc = "DESC"
 sortDirName :: SortDir -> Text
 sortDirName = T.toLower . sortDirSql
 
--- | A throttle-deferred job with a live marker, still parked. Shared by status,
--- count, and wake. Claiming clears the marker.
+-- | A throttle-deferred job with a live marker, still parked. Claiming clears
+-- the marker.
 throttledPredicateSQL :: Text
 throttledPredicateSQL =
   "throttled_until > NOW() AND not_visible_until > NOW()"
@@ -228,13 +257,13 @@ claimablePred alias =
       |]
 
 -- | All job columns plus the derived @status@ column, aliased @job@, for filtering.
-jobsWithStatusSubquery :: Text -> Text -> Text
+jobsWithStatusSubquery :: SchemaName -> TableName -> Text
 jobsWithStatusSubquery schema tableName =
   let tbl = jobQueueTable schema tableName
    in [text|(SELECT ${jobColumns}, ${jobStatusCaseSQL} AS status FROM ${tbl}) job|]
 
 -- | List filtered jobs without the derived status.
-listJobsFilteredSQL :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (JobRead (Stored payload))
+listJobsFilteredSQL :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (JobRead (Stored payload))
 listJobsFilteredSQL schema tableName whereFrag orderBy limit offset =
   let tbl = jobQueueTable schema tableName
    in rows
@@ -247,7 +276,7 @@ listJobsFilteredSQL schema tableName whereFrag orderBy limit offset =
         |]
 
 -- | List filtered jobs with @status@ as a trailing column. The caller attaches the row decoder.
-listJobsWithStatusSQL :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query ()
+listJobsWithStatusSQL :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query ()
 listJobsWithStatusSQL schema tableName whereFrag orderBy limit offset =
   let sub = jobsWithStatusSubquery schema tableName
    in [sql|
@@ -257,20 +286,20 @@ listJobsWithStatusSQL schema tableName whereFrag orderBy limit offset =
       |]
 
 -- | Count filtered jobs through the status subquery.
-countJobsFilteredSQL :: Text -> Text -> Query () -> Query Int64
+countJobsFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
 countJobsFilteredSQL schema tableName whereFrag =
   let sub = jobsWithStatusSubquery schema tableName
    in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${sub} ${whereFrag}|]
 
 -- | Fetch a single job by id with its derived @status@ trailing column. The caller attaches the row decoder.
-getJobByIdWithStatusSQL :: Text -> Text -> Int64 -> Query ()
+getJobByIdWithStatusSQL :: SchemaName -> TableName -> Int64 -> Query ()
 getJobByIdWithStatusSQL schema tableName jobId =
   let sub = jobsWithStatusSubquery schema tableName
    in [sql|SELECT * FROM ${sub} WHERE id = #{jobId :: CInt8}|]
 
 -- | List DLQ jobs under a dynamic WHERE and an @orderBy@ from 'buildDLQOrderBy'.
 listDLQFilteredSQL
-  :: Text -> Text -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload))
+  :: SchemaName -> TableName -> Query () -> Text -> Int64 -> Int64 -> Query (Int64, UTCTime, JobRead (Stored payload))
 listDLQFilteredSQL schema tableName whereFrag orderBy limit offset =
   let dlqTbl = jobQueueDLQTable schema tableName
    in rows
@@ -361,7 +390,7 @@ buildArchiveOrderBy :: Maybe ArchiveSortColumn -> Maybe SortDir -> Text
 buildArchiveOrderBy = buildOrderBy archiveSortColumnName archiveColumnNulls ArchiveCompletedAt ArchiveId
 
 -- | Count DLQ jobs under a dynamic WHERE.
-countDLQFilteredSQL :: Text -> Text -> Query () -> Query Int64
+countDLQFilteredSQL :: SchemaName -> TableName -> Query () -> Query Int64
 countDLQFilteredSQL schema tableName whereFrag =
   let dlqTbl = jobQueueDLQTable schema tableName
    in [sql|SELECT COUNT(*) AS @{count :: CInt8} FROM ${dlqTbl} ${whereFrag}|]
@@ -511,7 +540,8 @@ insertJobReplaceSQL schema tableName valuesFrag =
         |]
 
 -- | Batch insert over @unnest@ed parallel arrays. An ignore-dedup job is skipped on
--- conflict. A replace-dedup job updates an idle existing row.
+-- conflict. A replace-dedup job updates an idle existing row. A row whose parent
+-- is absent is skipped.
 insertJobsBatchSQL :: SchemaName -> TableName -> Query () -> Query (JobRead (Stored payload))
 insertJobsBatchSQL schema tableName batchSrc =
   rows (jobRowCodec tableName) (insertJobsBatchBase schema tableName batchSrc [text|RETURNING ${jobColumns}|])
@@ -544,7 +574,7 @@ insertJobsBatchBase schema tableName batchSrc returning =
 -- ---------------------------------------------------------------------------
 
 -- | Fetch a job by id.
-getJobByIdSQL :: Text -> Text -> Int64 -> Query (JobRead (Stored payload))
+getJobByIdSQL :: SchemaName -> TableName -> Int64 -> Query (JobRead (Stored payload))
 getJobByIdSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
    in rows
@@ -556,7 +586,7 @@ getJobByIdSQL schema tableName jobId =
         |]
 
 -- | Fetch a job by its dedup key. The partial unique index guarantees at most one row.
-getJobByDedupKeySQL :: Text -> Text -> Text -> Query (JobRead (Stored payload))
+getJobByDedupKeySQL :: SchemaName -> TableName -> Text -> Query (JobRead (Stored payload))
 getJobByDedupKeySQL schema tableName key =
   let tbl = jobQueueTable schema tableName
    in rows
@@ -569,7 +599,7 @@ getJobByDedupKeySQL schema tableName key =
 
 -- | Delete a job by id. Refuses one with children, which 'Arbiter.Core.Sql.Tree.cancelJobCascadeSQL' takes.
 -- A deleted child with no siblings left resumes its parent for a completion round.
-cancelJobSQL :: Text -> Text -> Int64 -> Query Int64
+cancelJobSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 cancelJobSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName
       groupLocks = settleGroupLocksCte schema tableName "cancel" ["wake_parent"]

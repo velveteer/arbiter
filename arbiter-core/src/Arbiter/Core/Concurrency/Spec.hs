@@ -4,10 +4,13 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Per-job concurrency limits. A payload's 'concurrencyFor' describes how to
--- select a pool and key. Static inspection finds all pools that the migration
--- must initialize. Each selected pool supplies the limit.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- Per-job concurrency limits. A payload's 'concurrencyFor' describes how to
+-- select a policy and key. Static inspection finds all policies that the migration
+-- must initialize. Each selected policy supplies the limit.
 module Arbiter.Core.Concurrency.Spec
   ( -- * Core types
     ConcurrencyKey (..)
@@ -15,7 +18,7 @@ module Arbiter.Core.Concurrency.Spec
   , ConcurrencyPolicy (..)
   , concurrencyPool
 
-    -- * Selecting a pool per job
+    -- * Selecting a policy per job
   , HasConcurrency (..)
   , ConcurrencyFor
   , noConcurrency
@@ -50,11 +53,13 @@ import Arbiter.Core.Admission
   )
 import Arbiter.Core.Selector (Selector, chooseWhen, collectPolicies, selectByCase)
 
--- | A resolved concurrency key with a pool prefix and per-key suffix. The
+-- | A resolved concurrency key with a policy prefix and per-key suffix. The
 -- stored form is @prefix:suffix@. The separate prefix supports policy lookup.
 data ConcurrencyKey = ConcurrencyKey
   { ckPrefix :: Text
+  -- ^ The policy prefix.
   , ckSuffix :: Text
+  -- ^ The per-key suffix, such as a tenant id.
   }
   deriving stock (Eq, Show)
 
@@ -68,45 +73,50 @@ instance FromJSON ConcurrencyKey where
 concurrencyKeyText :: ConcurrencyKey -> Text
 concurrencyKeyText (ConcurrencyKey prefix suffix) = prefixedKeyText prefix suffix
 
--- | A concurrency policy. At most @cpLimit@ jobs share a key under @cpPrefix@. The
+-- | A concurrency policy. At most @cpLimit@ jobs are in flight per key under @cpPrefix@. The
 -- default is seeded. An operator override on the policy takes precedence.
 data ConcurrencyPolicy = ConcurrencyPolicy
   { cpPrefix :: Text
+  -- ^ The key prefix. It must not contain @:@.
   , cpLimit :: Int32
+  -- ^ The default in-flight limit per key, in jobs. The migration rejects a
+  -- declared limit below 1.
   }
   deriving stock (Eq, Ord, Show)
 
 instance AdmissionPolicy ConcurrencyPolicy where
   policyPrefixOf = cpPrefix
 
--- | A pool named @prefix@ admitting at most @limit@ concurrent jobs per key. The cap is
--- floored at 1. Pause a pool via an override. The prefix must not contain @:@, the key
+-- | A policy named @prefix@ admitting at most @limit@ concurrent jobs per key. The cap is
+-- floored at 1. Pause it with @'Arbiter.Core.HighLevel.setConcurrencyLimit' policy {cpLimit = 0}@. The prefix must not contain @:@, the key
 -- separator. The migration enforces this.
 concurrencyPool :: Text -> Int32 -> ConcurrencyPolicy
 concurrencyPool prefix limit = ConcurrencyPolicy prefix (max 1 limit)
 
 -- | A selective description of the concurrency key for a payload. Evaluation
--- returns the job key. Static inspection returns the reachable pools.
+-- returns the job key. Static inspection returns the reachable policies.
 type ConcurrencyFor payload = Selector ConcurrencyPolicy payload (Maybe ConcurrencyKey)
 
 -- | This payload is unbounded.
 noConcurrency :: ConcurrencyFor payload
 noConcurrency = selectNone
 
--- | Cap by a fixed pool, keyed by a per-job suffix (e.g. a tenant id).
+-- | Cap by a fixed policy, keyed by a per-job suffix, such as a tenant id.
 concurrencyBy :: ConcurrencyPolicy -> (payload -> Text) -> ConcurrencyFor payload
 concurrencyBy = selectBy ConcurrencyKey
 
--- | Cap by a fixed pool under one shared key (a single global pool).
+-- | Cap by a fixed policy under one shared key.
 globalConcurrency :: ConcurrencyPolicy -> Text -> ConcurrencyFor payload
 globalConcurrency pol suffix = concurrencyBy pol (const suffix)
 
--- | Concurrency 'selectByCase'. See 'selectByCase' for the totality requirement on @k@.
+-- | N-way 'chooseWhen'. Maps the job to a finite tag, then each tag to its selector.
+-- Policy collection evaluates every tag in @[minBound..maxBound]@. The tag's
+-- 'Bounded'\/'Enum' and the selector must be total over @k@.
 concurrencyByCase
   :: (Bounded k, Enum k, Eq k) => (payload -> k) -> (k -> ConcurrencyFor payload) -> ConcurrencyFor payload
 concurrencyByCase = selectByCase
 
--- | A payload's per-job pool selection. Defaults to unbounded. Only capped
+-- | A payload's per-job policy selection. Defaults to unbounded. Only capped
 -- payloads need an instance.
 class HasConcurrency payload where
   -- | The selector deciding which policy (if any) caps a given job.
@@ -118,8 +128,7 @@ instance {-# OVERLAPPABLE #-} HasConcurrency payload
 instance (HasConcurrency payload) => CollectFor payload ConcurrencyPolicy where
   collectFor = collectPolicies (concurrencyFor @payload)
 
--- | Collect every policy declared across a registry's payloads, by statically
--- inspecting each payload's 'concurrencyFor'. The migration seeds these.
+-- | The constraint that lets the migration collect a registry's declared policies.
 type RegistryConcurrencyPolicies registry = RegistryPolicies registry ConcurrencyPolicy
 
 -- | Every distinct policy declared across the registry's payloads.

@@ -4,7 +4,7 @@
 
 -- | Configuration types for the arbiter worker pool.
 module Arbiter.Worker.Config
-  ( -- * Worker Configuration
+  ( -- * Worker configuration
     WorkerConfig (..)
   , transactionalWorkerConfig
   , manualWorkerConfig
@@ -19,11 +19,11 @@ module Arbiter.Worker.Config
   , WorkerConfigException (..)
   , validateWorkerConfig
 
-    -- * Batch Callbacks
+    -- * Batch callbacks
   , BatchCallbacks (..)
   , hoistBatchCallbacks
 
-    -- * Worker State
+    -- * Worker state
   , WorkerState (..)
   , WorkerRuntime
   , shutdownWorker
@@ -33,8 +33,9 @@ module Arbiter.Worker.Config
 
     -- * Internal
 
-    -- | Pool runtime access for the arbiter packages. Use 'writePause' to change
-    -- the pause flag. A direct write to 'pauseVar' bypasses the epoch guard.
+    -- | Pool runtime access for the arbiter packages. Not covered by the PVP.
+    -- Use 'writePause' to change the pause flag. A direct write to 'pauseVar'
+    -- bypasses the epoch guard.
   , writePause
   , writePauseIfCurrent
   , workerStateVar
@@ -73,14 +74,22 @@ import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Which reaper op a maintenance report came from.
 data MaintenanceOp
-  = RefreshGroups
-  | SweepStaleWorkers
-  | SweepExhaustedJobs
-  | SweepCancelledJobs
-  | PruneRateLimitBuckets
-  | ReconcileConcurrencyStale
-  | ReconcilePruneConcurrency
-  | PurgeArchives
+  = -- | Refresh the group summary rows.
+    RefreshGroups
+  | -- | Delete worker rows whose heartbeat is stale.
+    SweepStaleWorkers
+  | -- | Move exhausted jobs to the DLQ.
+    SweepExhaustedJobs
+  | -- | Delete force-cancelled jobs whose lease has lapsed.
+    SweepCancelledJobs
+  | -- | Delete idle rate-limit buckets.
+    PruneRateLimitBuckets
+  | -- | Rebuild the concurrency counts after a crash truncated them.
+    ReconcileConcurrencyStale
+  | -- | Recount the concurrency keys, then delete the unused ones.
+    ReconcilePruneConcurrency
+  | -- | Delete expired archived jobs.
+    PurgeArchives
   deriving stock (Bounded, Enum, Eq, Ord, Show)
 
 -- | The op's stable name, used to coordinate replicas and to label its metrics.
@@ -120,25 +129,26 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Longest wait in seconds between dispatcher polls. A NOTIFY or a freed
   -- worker wakes the dispatcher sooner. Default: @5@.
   , visibilityTimeout :: NominalDiffTime
-  -- ^ Lease length for a claimed job.
+  -- ^ Lease length in seconds for a claimed job.
   -- Must be greater than 'jobHeartbeatInterval'. Default: @60@.
   , jobHeartbeatInterval :: NominalDiffTime
-  -- ^ Interval for extending a job's lease during processing.
+  -- ^ Interval in seconds for extending a job's lease during processing.
   -- Must be less than 'visibilityTimeout'. Default: @30@.
   , maxJobDuration :: Maybe NominalDiffTime
-  -- ^ Interrupt a handler that runs longer than this. 'Nothing' sets no bound.
+  -- ^ Interrupt a handler that runs longer than this many seconds. 'Nothing' sets no bound.
   -- Default: @Nothing@.
   , workerHeartbeatInterval :: NominalDiffTime
-  -- ^ Minimum gap between beats. A beat bumps @arbiter_workers.last_heartbeat@,
+  -- ^ Minimum gap in seconds between beats. A beat bumps the worker registry heartbeat,
   -- touches the optional liveness file, and reconciles pause state from the DB.
   -- Unless the pool is paused, a beat also waits for a dispatcher claim or a
-  -- lease extend. Must be well below 'workerStaleThreshold'. Default: @10@.
+  -- lease extend. Keep it well below 'workerStaleThreshold'. Default: @10@.
   , backoffStrategy :: BackoffStrategy
   -- ^ Retry backoff strategy. Default: @exponentialBackoff 2 1048576@.
   , jitter :: Jitter
-  -- ^ Jitter strategy for retry delays. Default: @EqualJitter@.
+  -- ^ Jitter strategy for retry delays. Default: 'EqualJitter'.
   , observabilityHooks :: ObservabilityHooks m payload
-  -- ^ Callbacks for metrics or tracing. Default: @defaultObservabilityHooks@.
+  -- ^ Callbacks for metrics or tracing.
+  -- Default: 'Arbiter.Core.Job.Types.defaultObservabilityHooks'.
   , onMaintenance :: MaintenanceOp -> Int64 -> m ()
   -- ^ Called after a reaper op this pool won the gate for, with the rows it touched.
   -- Reaper work is schema-wide and carries no queue. Default: no-op.
@@ -158,15 +168,15 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Cron schedules. A non-empty list gives the pool a scheduler thread, which reads
   -- the @cron_schedules@ table each tick for runtime overrides. Default: @[]@.
   , reaperInterval :: NominalDiffTime
-  -- ^ Sleep between reaper passes, and the gap between runs of each ordinary
+  -- ^ Sleep in seconds between reaper passes, and the gap between runs of each ordinary
   -- reaper operation. Default: @300@ (5 minutes).
   , reaperSparseInterval :: NominalDiffTime
-  -- ^ Gap between runs of the rate-limit bucket prune and the concurrency prune
+  -- ^ Gap in seconds between runs of the rate-limit bucket prune and the concurrency prune
   -- and reconcile. Default: @3600@ (1 hour).
   , reaperBucketIdle :: NominalDiffTime
-  -- ^ Idle age at which the reaper prunes a rate-limit bucket. Default: @300@ (5 minutes).
+  -- ^ Idle age in seconds at which the reaper prunes a rate-limit bucket. Default: @300@ (5 minutes).
   , reaperTimeout :: NominalDiffTime
-  -- ^ Abort any single reaper statement that runs longer than this. Default: @300@ (5 minutes).
+  -- ^ Abort any single reaper statement that runs longer than this many seconds. Default: @300@ (5 minutes).
   , workerId :: UUID
   -- ^ Identity for this pool. Default: a fresh random UUID.
   , workerHost :: Maybe Text
@@ -176,14 +186,13 @@ data WorkerConfig m payload = WorkerConfig
   -- git SHA, deploy id, etc.). Default: @Nothing@.
   , workerStaleThreshold :: NominalDiffTime
   -- ^ The reaper's stale-worker sweep removes this pool's row when its heartbeat
-  -- is older than this. Must be well above the heartbeat cadence
-  -- ('workerHeartbeatInterval', or 'jobHeartbeatInterval' while busy).
-  -- Default: @300@ (5 minutes).
+  -- is older than this many seconds. Keep it well above 'workerHeartbeatInterval',
+  -- 'pollInterval' and 'jobHeartbeatInterval'. Default: @300@ (5 minutes).
   }
 
--- | Per-job finalizers passed to a batched handler. Untouched jobs are
--- reprocessed. The @With@ variants store a result for the job's parent rollup
--- or its archive entry.
+-- | Per-job finalizers passed to a batched handler. When the handler returns, untouched
+-- jobs are reprocessed. When it throws, untouched jobs fail. The @With@ variants store a
+-- result for the job's parent rollup or its archive entry.
 --
 -- Each callback commits in its own transaction. Inside
 -- 'Arbiter.Core.MonadArbiter.withDbTransaction', it runs as a savepoint in the
@@ -207,18 +216,24 @@ data BatchCallbacks m payload result = BatchCallbacks
   , ackAllWith :: [(JobRead payload, result)] -> m ()
   -- ^ 'ackAll' storing each job's result for its parent rollup or archive entry.
   , failRetry :: JobRead payload -> Text -> m ()
-  -- ^ Retry with backoff, then DLQ at the job's @maxAttempts@.
+  -- ^ Retry with backoff, then DLQ at the job's @maxAttempts@. Fires
+  -- 'Arbiter.Core.Job.Types.onJobFailure', then 'Arbiter.Core.Job.Types.onJobRetry' or
+  -- 'Arbiter.Core.Job.Types.onJobFailedAndMovedToDLQ'.
   , failPermanent :: JobRead payload -> Text -> m ()
-  -- ^ Straight to the DLQ.
+  -- ^ Straight to the DLQ. Fires 'Arbiter.Core.Job.Types.onJobFailure' and
+  -- 'Arbiter.Core.Job.Types.onJobFailedAndMovedToDLQ'.
   , cancelBranch :: JobRead payload -> Text -> m ()
-  -- ^ Cancel this job's branch (its parent and all siblings).
+  -- ^ Cancel the job's branch: its parent with all descendants, or the job's own
+  -- subtree when it has no parent. Fires 'Arbiter.Core.Job.Types.onJobCancelled'.
   , cancelTree :: JobRead payload -> Text -> m ()
-  -- ^ Cancel the whole tree from the root down.
+  -- ^ Cancel the whole tree from the root down. Fires
+  -- 'Arbiter.Core.Job.Types.onJobCancelled'.
   , nack :: JobRead payload -> m ()
-  -- ^ Reprocess after the lease expires. Records no failure and consumes
-  -- no attempt.
+  -- ^ Reprocess after the lease expires. Records no failure, consumes no attempt, and
+  -- fires no hook.
   , spawn :: JobRead payload -> NonEmpty (JobWrite payload) -> m ()
-  -- ^ Insert children under this job and suspend it, in one transaction.
+  -- ^ Insert children under this job and suspend it, in one transaction. Fires
+  -- 'Arbiter.Core.Job.Types.onJobSuccess'.
   }
 
 -- | Callbacks for @m@, called from @n@ through the given natural transformation.
@@ -250,6 +265,7 @@ data HandlerMode m payload
     -- transaction. Batch size 1 is the manual single-job case.
     BatchedJobsMode
       Int
+      -- ^ N, the maximum jobs claimed per group.
       (NonEmpty (JobRead payload) -> BatchCallbacks m payload (ResultOf m payload) -> m ())
 
 -- | Jobs claimed per group by a pool.
@@ -334,21 +350,19 @@ require condition message = Validation (if condition then Right () else Left (me
 
 -- | Create a t'WorkerConfig' running one job per group in a worker transaction
 -- held for the duration of the handler.
---
--- The handler returns the result type @payload@'s registry entry declares.
 transactionalWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
   -> JobHandler n payload (ResultOf n payload)
+  -- ^ Handler returning the result type @payload@'s registry entry declares
   -> m (WorkerConfig n payload)
 transactionalWorkerConfig workerCnt handler =
   mkDefaultConfig workerCnt (SingleJobMode handler)
 
 -- | Create a t'WorkerConfig' for batched job processing, no worker transaction.
 -- The handler receives the batch and a 'BatchCallbacks' record to finalize each
--- job (ack, fail, cancel, or nack). Jobs left untouched are reprocessed. To store
--- a result per job, ack with 'ackWith' or 'ackAllWith'.
+-- job. To store a result per job, ack with 'ackWith' or 'ackAllWith'.
 batchedWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
@@ -356,18 +370,19 @@ batchedWorkerConfig
   -> Int
   -- ^ Batch size (max jobs per group to claim together)
   -> (NonEmpty (JobRead payload) -> BatchCallbacks n payload (ResultOf n payload) -> n ())
+  -- ^ Batch handler
   -> m (WorkerConfig n payload)
 batchedWorkerConfig workerCnt batchSize handler =
   mkDefaultConfig workerCnt (BatchedJobsMode batchSize handler)
 
 -- | Create a t'WorkerConfig' that passes one job per handler call, no worker transaction.
--- The handler finalizes the job through 'BatchCallbacks'. An unfinalized job is
--- reprocessed.
+-- The handler finalizes the job through 'BatchCallbacks'.
 manualWorkerConfig
   :: (MonadArbiter n, MonadIO m)
   => Int
   -- ^ Worker count
   -> (JobRead payload -> BatchCallbacks n payload (ResultOf n payload) -> n ())
+  -- ^ Job handler
   -> m (WorkerConfig n payload)
 manualWorkerConfig workerCnt handler =
   batchedWorkerConfig workerCnt 1 (\(job :| _) -> handler job)
@@ -443,7 +458,7 @@ withWorkerIdContext :: UUID -> LogConfig -> LogConfig
 withWorkerIdContext workerId logCfg =
   logCfg {identityContext = identityContext logCfg <> ["worker_id" .= workerId]}
 
--- | Run/shutdown state for a pool.
+-- | Run\/shutdown state for a pool.
 workerStateVar :: WorkerConfig n payload -> TVar WorkerState
 workerStateVar = runtimeStateVar . workerRuntime
 
@@ -494,7 +509,7 @@ writePauseIfCurrent config epoch paused = do
   current <- STM.readTVar (pauseEpoch config)
   when (current == epoch) $ writePause config paused
 
--- | 'getWorkerState' inside 'STM.STM'.
+-- | 'getWorkerState' inside 'UnliftIO.STM.STM'.
 readEffectiveState :: WorkerConfig n payload -> STM.STM WorkerState
 readEffectiveState config = do
   state <- STM.readTVar (workerStateVar config)

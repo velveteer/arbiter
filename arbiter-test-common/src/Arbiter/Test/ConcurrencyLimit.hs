@@ -9,7 +9,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Backend-parameterized integration tests for per-job concurrency limits over the shared
--- 'CLReg' registry. Each job's key comes from the 'HasConcurrency CLPayload' instance.
+-- 'CLReg' registry. Each job's key comes from the 'HasConcurrency' instance for 'CLPayload'.
 module Arbiter.Test.ConcurrencyLimit
   ( CLPayload (..)
   , CLReg
@@ -71,7 +71,9 @@ import UnliftIO.Async (async, mapConcurrently, wait)
 
 import Arbiter.Test.Setup (drainWith, execQuery, execStatement, seedConcurrencyPoolSQL)
 
--- | A payload declaring one concurrency pool.
+-- | A payload that selects a concurrency pool by its text. @mx@, @my@ and @mz@
+-- select those pools (limits 1, 2 and 3) on one key. Other text selects @declpool@
+-- (limit 2), keyed by the text.
 newtype CLPayload = CLPayload Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -121,6 +123,7 @@ groupedJob :: Text -> Text -> Text -> JobWrite CLPayload
 groupedJob groupKey pool suffix = defaultGroupedJob groupKey (CLPayload (pool <> ":" <> suffix))
 
 -- | The concurrency-limit suite, run against any backend.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
 concurrencyLimitSpec
   :: forall env m
    . (HasRegistry m CLReg)

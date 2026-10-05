@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Parameterized concurrency test suite that works with any MonadArbiter implementation.
+-- | Concurrency tests for any 'MonadArbiter' backend.
 module Arbiter.Test.Concurrency
   ( concurrencySpec
   , raceConditionSpec
@@ -72,7 +72,7 @@ findDuplicates = go Set.empty Set.empty
       | Set.member item seen = go seen (Set.insert item dups) rest
       | otherwise = go (Set.insert item seen) dups rest
 
--- | Lock a job's row with the given lock suffix. The ids locked.
+-- | Lock a job's row with the given lock suffix. Returns the ids it locked.
 lockJobRow :: (MonadArbiter m) => Text -> JobRead payload -> m [Int64]
 lockJobRow suffix job = do
   schema <- getSchema
@@ -86,6 +86,7 @@ lockJobRow suffix job = do
 
 -- | Parameterized concurrency test suite. These tests need a connection pool of
 -- at least 10 connections.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
 concurrencySpec
   :: forall payload m env
    . ( JobPayload payload
@@ -326,6 +327,7 @@ concurrencySpec mkMessage runM = do
 
 -- | High-contention tests for concurrency defects. Many workers, large job
 -- counts, and tight timing windows.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
 raceConditionSpec
   :: forall payload m env
    . ( JobPayload payload
@@ -333,7 +335,9 @@ raceConditionSpec
      , MonadArbiter m
      )
   => (Text -> payload)
+  -- ^ Constructor for a simple test message payload
   -> (forall a. env -> m a -> IO a)
+  -- ^ Runner for monad actions
   -> SpecWith env
 raceConditionSpec mkMessage runM = do
   describe "Race Condition Stress Tests" $ do

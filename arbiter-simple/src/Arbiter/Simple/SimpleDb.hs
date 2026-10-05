@@ -5,9 +5,10 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Simple
+-- import Control.Monad (void)
 --
 -- myFunction :: SimpleDb MyRegistry IO ()
--- myFunction = insertJob (defaultJob myPayload)
+-- myFunction = void $ insertJob (defaultJob myPayload)
 -- @
 module Arbiter.Simple.SimpleDb
   ( -- * Database Monad
@@ -20,7 +21,7 @@ module Arbiter.Simple.SimpleDb
   , runSimpleDb
   , inTransaction
 
-    -- * Environment Creation
+    -- * Environment creation
   , createSimpleEnv
   , createSimpleEnvWithConfig
   , createSimpleEnvWithPool
@@ -65,14 +66,16 @@ import Arbiter.Simple.MonadArbiter
   , simpleWithDbTransaction
   )
 
--- | Schema name and connection pool for 'SimpleDb'.
+-- | The 'Env' for 'SimpleDb'.
 type SimpleEnv = Env Connection ()
 
 simpleDriver :: Driver Connection ()
 simpleDriver = Driver {withListenConn = \conn action -> withConnection conn (action . libpqListenConn), initialConfig = ()}
 
 -- | The postgresql-simple database monad.
-newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb {unSimpleDb :: Db Connection () registry m a}
+newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb
+  { unSimpleDb :: Db Connection () registry m a
+  }
   deriving newtype
     ( Applicative
     , Functor
@@ -116,14 +119,15 @@ runSimpleDb env = runDb env . unSimpleDb
 inTransaction
   :: forall registry m a
    . Connection
+  -- ^ Connection with an open transaction
   -> SchemaName
   -- ^ Schema name
   -> SimpleDb registry m a
   -> m a
 inTransaction conn schemaName = Backend.inTransaction simpleDriver conn schemaName . unSimpleDb
 
--- | Create a 'SimpleEnv' with default pool settings. Size worker pools with
--- 'createSimpleEnvWithConfig' and @poolConfigForWorkers@.
+-- | Create a 'SimpleEnv' with 'Arbiter.Core.PoolConfig.defaultPoolConfig'. Size worker pools with
+-- 'createSimpleEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@. The listener holds one pool slot.
 createSimpleEnv
   :: forall registry m
    . (MonadIO m)
@@ -137,7 +141,7 @@ createSimpleEnv
 createSimpleEnv proxy connStr schemaName =
   createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
 
--- | Create a 'SimpleEnv' with custom pool settings.
+-- | Create a 'SimpleEnv' with custom pool settings. The listener holds one pool slot.
 --
 -- @
 -- let config = PoolConfig
@@ -168,7 +172,7 @@ createSimpleEnvWithPool
   => Proxy registry
   -- ^ Type-level job payload registry
   -> Pool Connection
-  -- ^ User-provided connection pool
+  -- ^ Caller's connection pool
   -> SchemaName
   -- ^ Schema name
   -> m (SimpleEnv registry)

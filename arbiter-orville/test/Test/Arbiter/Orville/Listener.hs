@@ -11,14 +11,16 @@ import Arbiter.Test.Setup (addQueueTable, cleanupOnce, setupOnce)
 import Arbiter.Worker.TestKit qualified as TestKit
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import GHC.Generics (Generic)
 import Test.Hspec (Spec, beforeAll)
 
 import Test.Arbiter.Orville.TestHelpers
-  ( TestOrville
+  ( OrvilleTestEnv
+  , TestOrville
   , createOrvilleTestEnv
   , destroyOrvilleTestEnv
+  , disableOrvilleListener
   , orvilleTestHandler
   , runOrvilleTest
   )
@@ -57,18 +59,25 @@ type OrvilleMultiQRegistry =
 multiQueueSpec :: ByteString -> Spec
 multiQueueSpec connStr =
   beforeAll (setupOnce connStr mqSchema mqTableA True >> addQueueTable connStr mqSchema mqTableB True) $
-    TestKit.multiQueueListenerSpec @MqAPayload @MqBPayload @(TestOrville OrvilleMultiQRegistry)
-      mqTableA
-      mqTableB
-      connStr
-      MqAPayload
-      MqBPayload
-      mkEnv
-      destroyOrvilleTestEnv
-      (orvilleTestHandler mqSchema)
-      runOrvilleTest
+    TestKit.multiQueueListenerSpec backend mqTableB MqBPayload (orvilleTestHandler mqSchema)
   where
-    mkEnv = do
+    backend :: TestKit.TestBackend MqAPayload (TestOrville OrvilleMultiQRegistry) (OrvilleTestEnv OrvilleMultiQRegistry)
+    backend =
+      TestKit.TestBackend
+        { schema = mqSchema
+        , table = mqTableA
+        , connStr
+        , mkSimple = MqAPayload
+        , mkFailing = MqAPayload . pack . show
+        , mkEnv = freshEnv
+        , pollOnly = disableOrvilleListener
+        , mkFreshEnv = freshEnv
+        , destroyEnv = destroyOrvilleTestEnv
+        , mkHandler = orvilleTestHandler mqSchema
+        , runCommand = TestKit.statementCommand
+        , runM = runOrvilleTest
+        }
+    freshEnv = do
       cleanupOnce connStr mqSchema mqTableA
       cleanupOnce connStr mqSchema mqTableB
       createOrvilleTestEnv connStr mqSchema mqTableA 10

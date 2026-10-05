@@ -3,8 +3,11 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | View and patch types for the rate-limit management/observability API.
+-- | Internal to the arbiter packages. Not covered by the PVP.
+--
+-- View and patch types for the rate-limit management and observability API.
 module Arbiter.Core.RateLimit.Stats
   ( RateLimitPolicyView (..)
   , RateLimitBucketView (..)
@@ -21,7 +24,7 @@ import GHC.Generics (Generic)
 import Arbiter.Core.Json (explicitOptionalField, patchOptions)
 
 -- | A policy with its default and override params plus live bucket and throttle
--- stats. The effective param is @override@ when set, else @default@.
+-- stats. Each effective param is its @override*@ field when set, else its @default*@ field.
 data RateLimitPolicyView = RateLimitPolicyView
   { prefix :: Text
   -- ^ The policy's key prefix.
@@ -57,7 +60,7 @@ data RateLimitPolicyView = RateLimitPolicyView
 data RateLimitBucketView = RateLimitBucketView
   { rateLimitKey :: Text
   -- ^ The full @prefix:suffix@ key.
-  , policyPrefix :: Text
+  , rateLimitPrefix :: Text
   -- ^ The policy's key prefix.
   , tokens :: Double
   -- ^ Tokens available now, refill included.
@@ -74,7 +77,7 @@ instance ToJSON RateLimitBucketView where
   toJSON view =
     object
       [ "key" .= rateLimitKey view
-      , "prefix" .= policyPrefix view
+      , "prefix" .= rateLimitPrefix view
       , "tokens" .= tokens view
       , "maxTokens" .= maxTokens view
       , "fillFraction" .= fillFraction view
@@ -96,8 +99,11 @@ instance FromJSON RateLimitBucketView where
 -- @Just (Just v)@ sets it.
 data RateLimitPolicyUpdate = RateLimitPolicyUpdate
   { overrideMaxTokens :: Maybe (Maybe Double)
+  -- ^ The bucket capacity override, in tokens.
   , overrideRefillAmount :: Maybe (Maybe Double)
+  -- ^ The tokens-per-interval override.
   , overrideInterval :: Maybe (Maybe Double)
+  -- ^ The refill interval override, in seconds.
   }
   deriving stock (Eq, Generic, Show)
 

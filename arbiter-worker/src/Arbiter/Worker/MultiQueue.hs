@@ -65,7 +65,7 @@ data NamedWorkerPool m
   { workerPoolName :: Text
   -- ^ The queue name from the registry.
   , workerPoolConfig :: WorkerConfig m payload
-  -- ^ The pool's config.
+  -- ^ The pool's config. Get it by pattern match, not as a selector.
   }
 
 -- | Name a pool from its payload's registry entry.
@@ -81,7 +81,8 @@ namedWorkerPool
 namedWorkerPool cfg = NamedWorkerPool (Arb.queueTable @payload @m) cfg
 
 -- | Run the pools selected by @ARBITER_ENABLED_QUEUES@, or every configured
--- pool when it is unset.
+-- pool when it is unset or blank. A selected queue with no pool throws
+-- 'WorkerPoolSelectionException'.
 runWorkerPools
   :: forall m
    . (MonadUnliftIO m, RegistryTables (RegistryOf m))
@@ -132,7 +133,9 @@ withPoolContext poolName logCfg =
   logCfg {identityContext = identityContext logCfg <> ["pool" .= poolName]}
 
 -- | A single-stripe pool sized at twice the enabled worker count plus one for
--- the listener, with a minimum size of three.
+-- the listener, with a minimum size of three. Throws 'WorkerConfigException' for an
+-- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' for
+-- an unknown or empty @ARBITER_ENABLED_QUEUES@.
 poolConfigForWorkers
   :: forall m
    . (RegistryTables (RegistryOf m))

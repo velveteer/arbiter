@@ -4,11 +4,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Property tests for per-job concurrency limits: a deterministic exact-model
--- sweep over a job lifecycle (insert, claim, ack, retry, override, prune,
--- reconcile), a concurrent never-over-admit check, and a grouped drain-to-empty
--- check. Each model key is a seeded pool driven through a single suffix. Claims
--- are attributed.
+-- | Property tests for per-job concurrency limits against an exact model.
 module Arbiter.Test.ConcurrencyModel
   ( concurrencyModelSpec
   ) where
@@ -73,14 +69,18 @@ claimBatch :: Int
 claimBatch = 500
 
 -- | The concurrency state-machine properties, run against any backend.
+-- The schema must hold the 'concurrencyTable' queue.
 concurrencyModelSpec
   :: forall sm
    . (HasRegistry sm CLReg)
   => (forall a. sm a -> IO a)
-  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -- ^ Runner
   -> Text
+  -- ^ Schema name
+  -> (forall a. (PG.Connection -> IO a) -> IO a)
+  -- ^ Raw-connection accessor
   -> Spec
-concurrencyModelSpec run withConn schema = do
+concurrencyModelSpec run schema withConn = do
   it "the lifecycle keeps in_flight exact for every key" $
     check (prop_model run withConn schema) >>= (`shouldBe` True)
   it "concurrent claimers never admit more than a key's limit" $

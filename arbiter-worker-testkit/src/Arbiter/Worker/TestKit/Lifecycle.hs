@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | Worker lifecycle test suite, instantiated for each 'Arbiter.Core.MonadArbiter.MonadArbiter' backend.
+-- | Worker lifecycle tests, instantiated for each backend.
 module Arbiter.Worker.TestKit.Lifecycle
   ( lifecycleSpec
   ) where
@@ -44,7 +44,6 @@ import Arbiter.Worker
   , WorkerState (..)
   , mergedChildResults
   , runMaintenancePass
-  , runReaperOp
   , runWorkerPool
   )
 import Arbiter.Worker.Config
@@ -61,6 +60,7 @@ import Arbiter.Worker.Config
   )
 import Arbiter.Worker.Cron (OverlapPolicy (AllowOverlap), cronJob)
 import Arbiter.Worker.Logger (silentLogConfig)
+import Arbiter.Worker.Reaper (runReaperOp)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, finally, throwIO, try)
@@ -139,7 +139,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         let sleep = runCommand "DO $$ BEGIN PERFORM pg_sleep(0.4); END $$"
         result <-
           runM env $
-            runReaperOp silentLogConfig schema 1 "test-reaper-slow-op" 0 $ do
+            runReaperOp silentLogConfig 1 "test-reaper-slow-op" 0 $ do
               sleep
               sleep
               sleep
@@ -148,7 +148,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
       it "aborts a stuck statement at the timeout without killing the caller" $ \env -> do
         result <-
           runM env
-            $ runReaperOp silentLogConfig schema 0.5 "test-reaper-stuck-op" 0
+            $ runReaperOp silentLogConfig 0.5 "test-reaper-stuck-op" 0
             $ runCommand "DO $$ BEGIN PERFORM pg_sleep(5); END $$"
         result `shouldBe` Nothing
 

@@ -3,13 +3,12 @@
 
 -- | Job records, the enqueue setters, and the lifecycle hook types.
 module Arbiter.Core.Job.Types
-  ( -- * Core Job Type
+  ( -- * Core job type
     Job
   , HasKind (..)
   , constructorKind
   , constructorKinds
   , PayloadKeys (..)
-  , PayloadColumns (..)
   , JobRead
   , jobReadPairs
   , jobReadSeries
@@ -51,10 +50,7 @@ module Arbiter.Core.Job.Types
   , setArchiveFor
   , mapPayload
   , defaultMaxAttempts
-  , defaultMaxAttemptsSQL
-  , attemptsLeftSQL
   , minMaxAttempts
-  , minMaxAttemptsSQL
   , dayRetention
   , isRollup
 
@@ -63,13 +59,12 @@ module Arbiter.Core.Job.Types
   , jobStatusToText
   , jobStatusFromText
 
-    -- * Type Constraints
+    -- * Type constraints
   , JobPayload
   , RegistryAdmissionPolicies
 
     -- * Deduplication
   , DedupKey (..)
-  , dedupParts
 
     -- * Trace context
   , TraceContext (..)
@@ -88,6 +83,13 @@ module Arbiter.Core.Job.Types
   , EndTime
   , ErrorMsg
   , BackoffDelay
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
+  , JobRecord
+  , PayloadColumns (..)
+  , dedupParts
   ) where
 
 import Control.Exception qualified as E
@@ -122,7 +124,8 @@ import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds)
 import Arbiter.Core.Job.Status (JobStatus (..), jobStatusFromText, jobStatusToText)
 import Arbiter.Core.Job.TraceContext (TraceContext (..), toTraceContext)
 import Arbiter.Core.Job.Types.Internal
-  ( JobRecord (..)
+  ( Job
+  , JobRecord (..)
   , Stored (..)
   , archiveFor
   , attempts
@@ -149,19 +152,14 @@ import Arbiter.Core.Job.Types.Internal
   )
 import Arbiter.Core.RateLimit.Spec (HasRateLimit, RateLimitKey, RegistryRateLimitPolicies)
 
--- | A job parametrized over payload, primary key, queue name, insertion
--- timestamp, and the columns derived from the payload. The constructor is internal.
-type Job payload key q insertedAt adm =
-  JobRecord payload key q insertedAt adm
-
 -- | The labels and keys a stored job carries from its payload, one field each.
 data PayloadKeys = PayloadKeys
   { jobKind :: Maybe Text
-  -- ^ From the payload's 'Arbiter.Core.Job.Kind.HasKind' instance.
+  -- ^ From the payload's t'Arbiter.Core.Job.Kind.HasKind' instance.
   , jobRateLimitKey :: Maybe RateLimitKey
-  -- ^ From the payload's 'Arbiter.Core.RateLimit.Spec.HasRateLimit' instance.
+  -- ^ From the payload's t'Arbiter.RateLimit.HasRateLimit' instance.
   , jobConcurrencyKey :: Maybe ConcurrencyKey
-  -- ^ From the payload's 'Arbiter.Core.Concurrency.Spec.HasConcurrency' instance.
+  -- ^ From the payload's t'Arbiter.Concurrency.HasConcurrency' instance.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -169,11 +167,17 @@ data PayloadKeys = PayloadKeys
 -- and @prefix@ columns round-trip via 'PayloadKeys'. @cost@ is write-only.
 data PayloadColumns = PayloadColumns
   { pcKind :: Maybe Text
+  -- ^ The job's kind label.
   , pcRateLimitKey :: Maybe Text
+  -- ^ The rate-limit bucket key.
   , pcRateLimitPrefix :: Maybe Text
+  -- ^ The rate-limit policy prefix.
   , pcRateLimitCost :: Double
+  -- ^ Tokens the job spends.
   , pcConcurrencyKey :: Maybe Text
+  -- ^ The concurrency key.
   , pcConcurrencyPrefix :: Maybe Text
+  -- ^ The concurrency policy prefix.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -181,23 +185,11 @@ data PayloadColumns = PayloadColumns
 defaultMaxAttempts :: Int32
 defaultMaxAttempts = 10
 
--- | 'defaultMaxAttempts' as a SQL literal.
-defaultMaxAttemptsSQL :: Text
-defaultMaxAttemptsSQL = T.pack (show defaultMaxAttempts)
-
--- | Whether a row has attempts left. @col@ prefixes each column.
-attemptsLeftSQL :: Text -> Text
-attemptsLeftSQL col = col <> "attempts < COALESCE(" <> col <> "max_attempts, " <> defaultMaxAttemptsSQL <> ")"
-
 -- | Lowest attempt limit a job is stamped with. Every job gets at least one attempt.
 minMaxAttempts :: Int32
 minMaxAttempts = 1
 
--- | 'minMaxAttempts' as a SQL literal.
-minMaxAttemptsSQL :: Text
-minMaxAttemptsSQL = T.pack (show minMaxAttempts)
-
--- | 24h in seconds, a convenience value for 'archiveFor'.
+-- | 24h in seconds, a convenience value for 'setArchiveFor'.
 dayRetention :: Int32
 dayRetention = 86400
 
@@ -340,7 +332,8 @@ setNotVisibleUntil value job = job {notVisibleUntil = value}
 setDedupKey :: Maybe DedupKey -> JobWrite payload -> JobWrite payload
 setDedupKey value job = job {dedupKey = value}
 
--- | Override the queue's attempt limit.
+-- | Set the attempt limit. 'Nothing' takes 'defaultMaxAttempts'. Values below
+-- 'minMaxAttempts' are raised to it.
 setMaxAttempts :: Maybe Int32 -> JobWrite payload -> JobWrite payload
 setMaxAttempts value job = job {maxAttempts = value}
 
@@ -359,12 +352,12 @@ mapPayload
   -> Job payload' key q insertedAt adm
 mapPayload transform job = job {payload = transform (payload job)}
 
--- | The full payload contract. JSON round-trip for JSONB storage plus the rate-limit
--- and concurrency declarations. Both default to unlimited.
+-- | The full payload contract. JSON round-trip for JSONB storage plus the kind,
+-- rate-limit and concurrency declarations. All three default to none.
 type JobPayload payload =
   (FromJSON payload, ToJSON payload, HasKind payload, HasRateLimit payload, HasConcurrency payload)
 
--- | The registry declares both admission policy kinds.
+-- | The constraint that lets the migration collect a registry's declared policies of both kinds.
 type RegistryAdmissionPolicies registry =
   (RegistryConcurrencyPolicies registry, RegistryRateLimitPolicies registry)
 
@@ -374,10 +367,10 @@ type JobId = Int64
 -- | The token identifying one claim of a job.
 type ClaimSeq = Int64
 
--- | When a claim was taken.
+-- | When a worker thread took the claimed job off its queue.
 type ClaimTime = UTCTime
 
--- | The transaction's clock reading.
+-- | The worker's clock reading after the extend landed.
 type CurrentTime = UTCTime
 
 -- | When a handler began.
@@ -400,7 +393,7 @@ data ObservabilityHooks m payload = ObservabilityHooks
       => JobRead payload
       -> ClaimTime
       -> m ()
-  -- ^ Called immediately after a job is claimed by a worker.
+  -- ^ Called when a worker thread starts a claimed job.
   , onJobSuccess
       :: (JobPayload payload)
       => JobRead payload
@@ -434,7 +427,8 @@ data ObservabilityHooks m payload = ObservabilityHooks
       => JobRead payload
       -> ErrorMsg
       -> m ()
-  -- ^ Called when a handler cancelled the job's tree or branch and the rows were deleted.
+  -- ^ Called when a handler or an operator force-cancel cancelled the job. It also fires
+  -- when no rows were deleted.
   , onJobUnavailable
       :: (JobPayload payload)
       => JobRead payload
@@ -474,7 +468,7 @@ defaultObservabilityHooks =
     }
 
 -- | Hooks written in @m@, run in @n@ through the given natural transformation.
--- It must be a monad morphism, such as 'Control.Monad.Trans.Class.lift'.
+-- It must be a monad morphism, such as @lift@.
 hoistObservabilityHooks :: (forall a. m a -> n a) -> ObservabilityHooks m payload -> ObservabilityHooks n payload
 hoistObservabilityHooks nat hooks =
   ObservabilityHooks

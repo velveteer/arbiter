@@ -35,10 +35,15 @@ import GHC.Generics (Generic)
 -- | Values from one database scan.
 data Snapshot = Snapshot
   { queues :: [QueueOverview]
+  -- ^ One overview per registry queue.
   , db :: Maybe Health.PgDbHealth
+  -- ^ Database counters. 'Nothing' when the database reports no row.
   , tables :: [Health.PgTableHealth]
+  -- ^ Health counters per Arbiter table.
   , concurrency :: [Conc.ConcurrencyPolicyView]
+  -- ^ One view per concurrency policy.
   , rateLimits :: [RL.RateLimitPolicyView]
+  -- ^ One view per rate-limit policy.
   }
   deriving stock (Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -46,11 +51,16 @@ data Snapshot = Snapshot
 -- | A snapshot and the monotonic time at which its scan started.
 data Cached = Cached
   { takenAt :: Double
+  -- ^ Monotonic time at which the scan started.
   , reading :: Snapshot
   }
 
 -- | Instrument export state. 'Idle' retains the last scan time, if available.
-data Export = Live Cached | Idle (Maybe Double)
+data Export
+  = -- | Export the readings of this scan.
+    Live Cached
+  | -- | Export nothing. Keep the last scan time, if any.
+    Idle (Maybe Double)
 
 -- | The scan behind an export, if it has one.
 live :: Export -> Maybe Cached
@@ -71,8 +81,11 @@ retire = Idle . lastScan
 -- | Mutable gauge state and its registration time.
 data GaugeCache = GaugeCache
   { export :: TVar Export
+  -- ^ What the instruments export now.
   , databaseReachable :: TVar (Maybe Bool)
+  -- ^ Result of the last database operation. 'Nothing' before the first scan.
   , registeredAt :: Double
+  -- ^ Monotonic time of the registration.
   }
 
 -- | Create an empty gauge cache for a registration starting at @now@.

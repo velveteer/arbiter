@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns -Wno-x-partial #-}
 
--- | Cron scheduler test suite, instantiated for each 'Arbiter.Core.MonadArbiter.MonadArbiter' backend.
+-- | Cron scheduler tests, instantiated for each backend.
 module Arbiter.Worker.TestKit.Cron (cronSpec) where
 
 import Arbiter.Core.CronSchedule (CronScheduleUpdate (..))
@@ -90,7 +90,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ _ -> defaultJob (mkSimple "cron-fired"))
             tick = mkTime 2025 6 15 12 0 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -108,7 +108,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ _ -> defaultJob (mkSimple "should-not-fire"))
             tick = mkTime 2025 6 15 12 0 0 -- 12:00
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -124,7 +124,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick1
           catchUpAt schema table [cron] tick2
 
@@ -142,7 +142,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             tick1 = mkTime 2025 6 15 12 0 0
             tick2 = mkTime 2025 6 15 12 1 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick1
           catchUpAt schema table [cron] tick2
 
@@ -164,7 +164,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ _ -> defaultJob (mkSimple "should-not-fire"))
             tick = mkTime 2025 6 15 12 0 0 -- 12:00
         runM env $ do
-          initCronSchedules schema table [cjAlways, cjNever] silentLogConfig
+          initCronSchedules silentLogConfig table [cjAlways, cjNever]
           catchUpAt schema table [cjAlways, cjNever] tick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -180,7 +180,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ tickAt -> defaultJob (mkSimple (formatMinute tickAt)))
             tick = mkTime 2025 6 15 14 30 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -203,7 +203,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             recovered = bad {builder = \_ _ -> defaultJob (mkSimple "recovered")}
             tick = mkTime 2025 6 15 12 0 0
         runM env $ do
-          initCronSchedules schema table [good, bad] silentLogConfig
+          initCronSchedules silentLogConfig table [good, bad]
           catchUpAt schema table [good, bad] tick
 
         rows <- runM env $ Ops.listCronSchedules schema Nothing
@@ -233,8 +233,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                   else defaultJob (mkSimple (formatMinute tick))
             cron = base {backfill = Backfill 600}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) [name cron]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema [name cron] (mkTime 2025 6 15 11 59 0)
           catchUpAt schema table [cron] currentTick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -258,8 +258,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             cron = base {backfill = Backfill 600}
             recovered = cron {builder = \_ tick -> defaultJob (mkSimple (formatMinute tick))}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema lastChecked [name cron]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema [name cron] lastChecked
           catchUpAt schema table [cron] failedTick
 
         Just held <- runM env $ Ops.getCronScheduleByName schema (name cron)
@@ -281,8 +281,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                   else defaultJob (mkSimple (formatMinute tick))
             cron = base {backfill = Backfill 600}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 11 59 0) [name cron]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema [name cron] (mkTime 2025 6 15 11 59 0)
           catchUpAt schema table [cron] currentTick
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -296,8 +296,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             Right base = cronJob "contended-backfill" "* * * * *" AllowOverlap (\_ tick -> defaultJob (mkSimple (formatMinute tick)))
             cron = base {backfill = Backfill 600}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema lastChecked [name cron]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema [name cron] lastChecked
         held <- newEmptyMVar
         release <- newEmptyMVar
         let holdLeader = runM env . withDbTransaction $ do
@@ -327,7 +327,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ _ -> defaultJob (mkSimple "manual"))
             now = mkTime 2025 6 15 12 30 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-nightly"
           runRequestsAt schema [cron] now
 
@@ -349,7 +349,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             Right working = cronJob "run-atomic" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "manual"))
             now = mkTime 2025 6 15 12 30 0
         runM env $ do
-          initCronSchedules schema table [failing] silentLogConfig
+          initCronSchedules silentLogConfig table [failing]
           _ <- Ops.requestCronRun schema "run-atomic"
           runRequestsAt schema [failing] now
 
@@ -367,7 +367,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         let Right cron = cronJob "run-gate" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "gate"))
             now = mkTime 2025 6 15 12 30 45
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-gate"
           runRequestsAt schema [cron] now
 
@@ -378,7 +378,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "leaves last_manual_run_at alone when the run is skipped" $ \env -> do
         let Right cron = cronJob "run-skipmark" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (mkSimple "skip"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-skipmark"
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun schema "run-skipmark"
@@ -390,7 +390,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "expires a request no pool claimed in time" $ \env -> do
         let Right cron = cronJob "run-expire" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "expire"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           void $ Ops.requestCronRun schema "run-expire"
 
         withConn connStr $ \conn ->
@@ -420,8 +420,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ tickAt -> defaultJob (mkSimple (formatMinute tickAt)))
             cron = base {backfill = Backfill 86400}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 9 0 0) ["run-backfill"]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema ["run-backfill"] (mkTime 2025 6 15 9 0 0)
           _ <- Ops.requestCronRun schema "run-backfill"
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 45)
           catchUpAt schema table [cron] (mkTime 2025 6 15 12 30 45)
@@ -441,8 +441,8 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ tickAt -> defaultJob (mkSimple (formatMinute tickAt)))
             cron = base {backfill = Backfill 86400}
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
-          void $ Ops.touchCronChecked schema (mkTime 2025 6 15 9 0 0) ["run-skipbf"]
+          initCronSchedules silentLogConfig table [cron]
+          void $ Ops.touchCronChecked schema ["run-skipbf"] (mkTime 2025 6 15 9 0 0)
           _ <- Ops.requestCronRun schema "run-skipbf"
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 45)
           catchUpAt schema table [cron] (mkTime 2025 6 15 12 30 45)
@@ -453,7 +453,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "does nothing without a pending request" $ \env -> do
         let Right cron = cronJob "run-none" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "nope"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 0)
 
         jobs <- runM env $ HL.claimNextVisibleJobs 10 60 :: IO [JobRead payload]
@@ -467,7 +467,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 AllowOverlap
                 (\_ tickAt -> defaultJob (mkSimple (T.pack (show tickAt))))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-tick"
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 45)
 
@@ -477,7 +477,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "refuses a second request while one is still pending" $ \env -> do
         let Right cron = cronJob "run-coalesce" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "once"))
         outcomes <- runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           first <- Ops.requestCronRun schema "run-coalesce"
           second <- Ops.requestCronRun schema "run-coalesce"
           pure (first, second)
@@ -486,7 +486,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "accepts a fresh request once the pending one is claimed" $ \env -> do
         let Right cron = cronJob "run-again" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "again"))
         outcome <- runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-again"
           _ <- Ops.claimCronRun schema "run-again"
           Ops.requestCronRun schema "run-again"
@@ -495,7 +495,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "claims a request exactly once across pools" $ \env -> do
         let Right cron = cronJob "run-once" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "once"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           void $ Ops.requestCronRun schema "run-once"
 
         won <- runM env $ Ops.claimCronRun schema "run-once"
@@ -506,7 +506,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "SkipOverlap: a request is skipped while a job is already active" $ \env -> do
         let Right cron = cronJob "run-skip" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (mkSimple "skip"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-skip"
           runRequestsAt schema [cron] (mkTime 2025 6 15 12 30 0)
           _ <- Ops.requestCronRun schema "run-skip"
@@ -518,7 +518,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "disabling a schedule drops its pending request" $ \env -> do
         let Right cron = cronJob "run-off" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "nope"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <- Ops.requestCronRun schema "run-off"
           _ <-
             Ops.updateCronSchedule
@@ -542,7 +542,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         let Right cj1 = cronJob "test-a" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (mkSimple "a"))
             Right cj2 = cronJob "test-b" "*/5 * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "b"))
         -- Phase 1: Insert
-        runM env $ initCronSchedules schema table [cj1, cj2] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cj1, cj2]
         rows <- runM env $ Ops.listCronSchedules schema Nothing
         length rows `shouldBe` 2
         map CS.name rows `shouldBe` ["test-a", "test-b"]
@@ -550,7 +550,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
 
         -- Phase 2: Re-upsert with a modified expression. The row is updated in place.
         let Right cj1' = cronJob "test-a" "*/10 * * * *" SkipOverlap (\_ _ -> defaultJob (mkSimple "a"))
-        runM env $ initCronSchedules schema table [cj1', cj2] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cj1', cj2]
         rows2 <- runM env $ Ops.listCronSchedules schema Nothing
         length rows2 `shouldBe` 2
         map CS.defaultExpression rows2 `shouldBe` ["*/10 * * * *", "*/5 * * * *"]
@@ -558,7 +558,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "skips disabled schedules" $ \env -> do
         let Right cron = cronJob "disabled-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "should-skip"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <-
             Ops.updateCronSchedule
               schema
@@ -578,7 +578,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         -- Create a schedule that fires every minute
         let Right cron = cronJob "override-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "override"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           _ <-
             Ops.updateCronSchedule
               schema
@@ -598,7 +598,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
       it "updates last_fired_at on successful fire" $ \env -> do
         let Right cron = cronJob "fire-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "fire"))
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] (mkTime 2025 6 15 12 0 0)
 
         mRow <- runM env $ Ops.getCronScheduleByName schema "fire-test"
@@ -618,7 +618,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 AllowOverlap
                 (\_ tickAt -> defaultJob (mkSimple (formatMinute tickAt)))
             cron = base {backfill = Backfill 600}
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
 
         withConn connStr $ \conn ->
           void $
@@ -643,7 +643,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 "* * * * *"
                 AllowOverlap
                 (\_ _ -> defaultJob (mkSimple "no-replay"))
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
 
         withConn connStr $ \conn ->
           void $
@@ -668,7 +668,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 AllowOverlap
                 (\_ _ -> defaultJob (mkSimple "fresh"))
             cron = base {backfill = Backfill 3600}
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
 
         now <- getCurrentTime
         runM env $ catchUpAt schema table [cron] now
@@ -682,7 +682,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
               cronJob "watermark" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "x"))
             currentTickPast = mkTime 2025 6 15 12 0 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] currentTickPast
 
         rows <- runM env $ Ops.listCronSchedules schema Nothing
@@ -697,7 +697,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             later = mkTime 2025 6 15 12 5 0
             earlier = mkTime 2025 6 15 12 0 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] later
           catchUpAt schema table [cron] earlier
 
@@ -718,7 +718,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
                 (\_ _ -> defaultJob (mkSimple "once"))
             tick = mkTime 2025 6 15 12 0 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] tick
 
         claimed <- runM env $ HL.claimNextVisibleJobs 100 60 :: IO [JobRead payload]
@@ -741,7 +741,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
             firstPass = mkTime 2025 11 2 5 30 0
             secondPass = mkTime 2025 11 2 6 30 0
         runM env $ do
-          initCronSchedules schema table [cron] silentLogConfig
+          initCronSchedules silentLogConfig table [cron]
           catchUpAt schema table [cron] firstPass
 
         claimed <- runM env $ HL.claimNextVisibleJobs 100 60 :: IO [JobRead payload]
@@ -757,7 +757,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         -- blocks a slow pool retrying the same minute.
         let Right cron = cronJob "skew-race" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "skew"))
             tick = mkTime 2025 6 15 12 0 0
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
         withConn connStr $ \conn ->
           void $
             PG.execute
@@ -772,7 +772,7 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         let Right cron = cronJob "skew-advance" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "advance"))
             tickPrev = mkTime 2025 6 15 12 0 0
             tickNext = mkTime 2025 6 15 12 1 0
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
         withConn connStr $ \conn ->
           void $
             PG.execute
@@ -788,28 +788,28 @@ cronSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, runM} =
         let Right cron = cronJob "touch-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "x"))
             tEarly = mkTime 2025 6 15 12 0 0
             tLate = mkTime 2025 6 15 12 5 0
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
 
-        nLate <- runM env $ Ops.touchCronChecked schema tLate ["touch-test"]
+        nLate <- runM env $ Ops.touchCronChecked schema ["touch-test"] tLate
         nLate `shouldBe` 1
         Just rowLate <- runM env $ Ops.getCronScheduleByName schema "touch-test"
         CS.lastCheckedAt rowLate `shouldBe` Just tLate
 
         -- An earlier watermark matches the row and leaves it in place.
-        nEarly <- runM env $ Ops.touchCronChecked schema tEarly ["touch-test"]
+        nEarly <- runM env $ Ops.touchCronChecked schema ["touch-test"] tEarly
         nEarly `shouldBe` 1
         Just rowEarly <- runM env $ Ops.getCronScheduleByName schema "touch-test"
         CS.lastCheckedAt rowEarly `shouldBe` Just tLate
 
         -- An unknown name matches nothing.
-        nMiss <- runM env $ Ops.touchCronChecked schema tLate ["no-such-schedule"]
+        nMiss <- runM env $ Ops.touchCronChecked schema ["no-such-schedule"] tLate
         nMiss `shouldBe` 0
 
       it "tryFireCronGate fires once per minute floor" $ \env -> do
         let Right cron = cronJob "gate-test" "* * * * *" AllowOverlap (\_ _ -> defaultJob (mkSimple "x"))
             minuteZero = mkTime 2025 6 15 12 0 0
             minuteOne = mkTime 2025 6 15 12 1 0
-        runM env $ initCronSchedules schema table [cron] silentLogConfig
+        runM env $ initCronSchedules silentLogConfig table [cron]
 
         firstFire <- runM env $ Ops.tryFireCronGate schema "gate-test" minuteZero
         firstFire `shouldBe` True

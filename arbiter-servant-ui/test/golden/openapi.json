@@ -178,7 +178,7 @@
             },
             "BatchInsertRequest_AnyJson": {
                 "properties": {
-                    "jobWrites": {
+                    "jobs": {
                         "items": {
                             "$ref": "#/components/schemas/JobWrite_AnyJson"
                         },
@@ -186,7 +186,7 @@
                     }
                 },
                 "required": [
-                    "jobWrites"
+                    "jobs"
                 ],
                 "type": "object"
             },
@@ -550,7 +550,7 @@
             },
             "CronSchedulesResponse": {
                 "properties": {
-                    "cronSchedules": {
+                    "schedules": {
                         "items": {
                             "$ref": "#/components/schemas/CronScheduleView"
                         },
@@ -558,7 +558,7 @@
                     }
                 },
                 "required": [
-                    "cronSchedules"
+                    "schedules"
                 ],
                 "type": "object"
             },
@@ -1992,7 +1992,7 @@
                         "$ref": "#/components/schemas/QueueStats"
                     },
                     "timestamp": {
-                        "type": "string"
+                        "$ref": "#/components/schemas/UTCTime"
                     }
                 },
                 "required": [
@@ -2101,7 +2101,7 @@
         }
     },
     "info": {
-        "description": "The Arbiter job queue over HTTP. Each registered queue has its own section, and a service in any language can use all three sides of it: enqueue jobs, run them by claiming a lease and acking, nacking or extending it, and operate the queue itself. The schema-wide sections cover queues, cron, workers, rate limits, concurrency, maintenance and health.\n\nThe document is derived from the server's own route types. Every payload and result below is the queue's real schema. The server ships no authentication. Put it behind your own.",
+        "description": "The Arbiter job queue over HTTP. Each registered queue has its own section, and a service in any language can use all three sides of it: enqueue jobs, run them by claiming a lease and acking, nacking or extending it, and operate the queue itself. The schema-wide sections cover queues, cron, workers, rate limits, concurrency, maintenance, events and health.\n\nThe document is derived from the server's own route types. Every payload and result below is the queue's real schema. The server ships no authentication. Put it behind your own.",
         "title": "Arbiter",
         "version": "v1"
     },
@@ -2366,7 +2366,7 @@
         },
         "/api/v1/events/stream": {
             "get": {
-                "description": "Streams an event per insert, update, delete and dead-letter, as they happen. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one \"connected\" event. Sends a keepalive comment every 15 seconds. A server with streaming switched off answers one \"disabled\" event and closes.",
+                "description": "Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one \"connected\" event. Sends a keepalive comment after 15 seconds with no event. A server with streaming off, or with no listener, answers one \"disabled\" event and closes.",
                 "responses": {
                     "200": {
                         "content": {
@@ -4164,7 +4164,7 @@
     },
     "tags": [
         {
-            "description": "Jobs, dead letters, archive, groups and stats for the queue queue.",
+            "description": "Jobs, leases, dead letters, archive, groups, kinds and stats for the queue queue.",
             "name": "queue"
         },
         {

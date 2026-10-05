@@ -50,7 +50,7 @@ data Jitter
     NoJitter
   | -- | @delay = random(0, calculated_delay)@.
     FullJitter
-  | -- | @delay = calculated_delay \/ 2 + random(0, calculated_delay \/ 2)@. Recommended.
+  | -- | @delay = calculated_delay \/ 2 + random(0, calculated_delay \/ 2)@. The default.
     EqualJitter
   deriving stock (Eq, Show)
 

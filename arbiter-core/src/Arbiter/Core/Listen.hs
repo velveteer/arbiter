@@ -5,7 +5,6 @@ module Arbiter.Core.Listen
   ( Notification (..)
   , ListenConn (..)
   , Listener
-  , RunningHub
   , HubLog (..)
   , withChannels
   , newListener
@@ -86,7 +85,7 @@ data HubLog = HubLog
   -- ^ Repeat interval for a persistent connection failure.
   }
 
--- | Shared listener configuration for one environment.
+-- | Handle to an environment's shared, refcounted LISTEN hub slot.
 data Listener = Listener
   { listenerSlot :: MVar (Maybe RunningHub)
   -- ^ Rendezvous, lazily started and refcounted. Shared across an env's pools.

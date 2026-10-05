@@ -5,9 +5,6 @@
 -- One guard per pool. It fences every batch in flight and extends their leases.
 -- A batch registers through 'guardBatch' and is signalled through 'recheck'.
 -- 'runHeartbeatGuard' is the loop that fences and extends.
---
--- Written against io-classes, so the pool runs it in IO and the tests run it
--- under io-sim.
 module Arbiter.Worker.Heartbeat.Guard
   ( HeartbeatGuard
   , GuardConfig (..)

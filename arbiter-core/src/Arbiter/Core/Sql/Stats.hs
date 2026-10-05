@@ -203,7 +203,7 @@ allQueueStatsSQL codec schema queueKinds =
 
 -- | Child counts as @(parent_id, total, suspended)@ per parent, over a set of job ids.
 -- The caller attaches the row decoder.
-countChildrenBatchSQL :: Text -> Text -> [Int64] -> Query ()
+countChildrenBatchSQL :: SchemaName -> TableName -> [Int64] -> Query ()
 countChildrenBatchSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
    in [sql|

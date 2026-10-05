@@ -42,13 +42,13 @@ import Arbiter.Core.QueueRegistry (Queue)
 import Arbiter.Core.RateLimit.Schema
   ( arbiterRateLimitPoliciesTable
   , arbiterRateLimitsTable
-  , upsertPolicyRowSQL
+  , upsertRateLimitPolicyRowSQL
   )
 import Arbiter.Core.RateLimit.Spec
   ( HasRateLimit (..)
-  , Policy
   , RateLimitFor
   , RateLimitKey (..)
+  , RateLimitPolicy
   , chooseWhen
   , collectPolicies
   , limitBy
@@ -84,7 +84,12 @@ import UnliftIO.Async (mapConcurrently)
 import Arbiter.Test.Setup (drainWith, execStatement, execute_)
 
 -- | A payload keyed by tenant, with a per-job token cost.
-data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
+data RLPayload = RLPayload
+  { rlTenant :: Text
+  -- ^ Rate-limit key on the @rl@ bucket.
+  , rlCost :: Double
+  -- ^ Tokens the job spends when claimed.
+  }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -92,7 +97,7 @@ data RLPayload = RLPayload {rlTenant :: Text, rlCost :: Double}
 type RLReg = '[Queue "arbiter_ratelimit_test" RLPayload]
 
 -- 3 tokens, burst 3, refilling 3 every 2 seconds (1.5 tokens/sec).
-rlPolicy :: Policy
+rlPolicy :: RateLimitPolicy
 rlPolicy = tokenBucket "rl" 3 2
 
 instance HasRateLimit RLPayload where
@@ -107,7 +112,7 @@ rateLimitTable = "arbiter_ratelimit_test"
 setupRateLimitPolicy :: ByteString -> Text -> IO ()
 setupRateLimitPolicy connStr schema = do
   conn <- connectPostgreSQL connStr
-  traverse_ (execute_ conn . upsertPolicyRowSQL schema) (Set.toList (registryRateLimitPolicies @RLReg))
+  traverse_ (execute_ conn . upsertRateLimitPolicyRowSQL schema) (Set.toList (registryRateLimitPolicies @RLReg))
   close conn
 
 job :: Text -> JobWrite RLPayload
@@ -120,6 +125,8 @@ groupedJob :: Text -> Text -> JobWrite RLPayload
 groupedJob groupKey tenant = defaultGroupedJob groupKey (RLPayload tenant 1)
 
 -- | The rate-limit suite, run against any backend.
+-- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
+-- Seed the policies once with 'setupRateLimitPolicy'. 'Arbiter.Test.Setup.cleanupData' keeps them.
 rateLimitSpec
   :: forall env m
    . (HasRegistry m RLReg)
@@ -511,7 +518,7 @@ rateLimitSpec runM = do
       _ -> expectationFailure "expected exactly the rl policy"
     buckets <- runM env (HL.listRateLimitBuckets "rl" 100 0)
     length buckets `shouldSatisfy` (>= 1)
-    map policyPrefix buckets `shouldSatisfy` all (== "rl")
+    map rateLimitPrefix buckets `shouldSatisfy` all (== "rl")
 
   it "applies and clears a policy override through the management plane" $ \env -> do
     -- Override max to 0 pauses the prefix. Clearing it restores the default.
@@ -530,7 +537,7 @@ rateLimitSpec runM = do
     -- With no policy row every job runs.
     let restore = runM env $ do
           schema <- getSchema
-          void $ execStatement (upsertPolicyRowSQL schema rlPolicy) []
+          void $ execStatement (upsertRateLimitPolicyRowSQL schema rlPolicy) []
     flip finally restore $ do
       runM env $ do
         schema <- getSchema

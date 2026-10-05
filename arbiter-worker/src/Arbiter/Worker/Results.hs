@@ -10,6 +10,7 @@ module Arbiter.Worker.Results
   , storeEncodedResults
   ) where
 
+import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (JobRead, parentId, primaryKey, queueName)
 import Arbiter.Core.JobResult (EncodeJobResult, decodeJobResult, encodeJobResult)
 import Arbiter.Core.MonadArbiter (MonadArbiter, ResultOf, getSchema)
@@ -25,8 +26,8 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 
 -- | A rollup parent's immediate child results, keyed by child id, and its DLQ
--- errors, keyed by DLQ row id for 'Arbiter.Core.HighLevel.retryFromDLQ'. A
--- decode failure is returned as 'Left'.
+-- errors, keyed by DLQ row id for 'Arbiter.Core.HighLevel.retryFromDLQ'. A 'Left'
+-- is a DLQ child's error or a decode failure.
 childResults
   :: (FromJSON (ResultOf m payload), MonadArbiter m)
   => JobRead payload
@@ -50,27 +51,27 @@ mergedChildResults job = do
   (results, dlqFailures) <- childResults job
   pure (mergeChildResults results, dlqFailures)
 
--- | Combine successful child results, treating decode failures as 'mempty'.
+-- | Combine successful child results. A 'Left' counts as 'mempty'.
 mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
 mergeChildResults = foldMap' fold
 
--- | Store a job's result for its parent rollup, if it has one.
+-- | Store a job's result for its parent rollup. A root job's result goes on its
+-- archive entry only when 'Arbiter.Core.Operations.archivesOnAck' holds.
 storeJobResult
   :: (EncodeJobResult result, MonadArbiter m)
-  => Text
-  -> JobRead payload
+  => JobRead payload
   -> result
   -> m ()
-storeJobResult schemaName job = storeEncodedResult schemaName job . encodeJobResult
+storeJobResult job = storeEncodedResult job . encodeJobResult
 
 -- | 'storeJobResult' on an already-encoded result. 'Nothing' stores nothing.
 storeEncodedResult
   :: (MonadArbiter m)
-  => Text
-  -> JobRead payload
+  => JobRead payload
   -> Maybe Value
   -> m ()
-storeEncodedResult schemaName job mVal =
+storeEncodedResult job mVal = do
+  schemaName <- getSchema
   case (parentId job, mVal) of
     (Just pid, Just val) ->
       void $ Ops.insertResult schemaName (queueName job) pid (primaryKey job) val
@@ -83,7 +84,7 @@ storeEncodedResult schemaName job mVal =
 -- child results and one the archived roots.
 storeEncodedResults
   :: (MonadArbiter m)
-  => Text
+  => SchemaName
   -> [(JobRead payload, Maybe Value)]
   -> m ()
 storeEncodedResults _ [] = pure ()

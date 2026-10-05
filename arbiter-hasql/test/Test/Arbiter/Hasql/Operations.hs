@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
@@ -6,22 +7,34 @@ module Test.Arbiter.Hasql.Operations (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-import Arbiter.Core.MonadArbiter (withDbTransaction)
+import Arbiter.Core.MonadArbiter (executeQuery, withDbTransaction)
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
+import Arbiter.Core.Sql.QQ (sql)
+import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Test.Fixtures (TestPayload (..))
 import Arbiter.Test.Operations (operationsSpec)
 import Arbiter.Test.Setup (cleanupOnce, setupOnce)
-import Control.Exception (SomeException, catch, throwIO)
+import Control.Exception (SomeException, bracket, catch, throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.Int (Int64)
 import Data.Pool (withResource)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import Hasql.Connection qualified as Hasql
 import Test.Hspec
 
+import Arbiter.Hasql.Compat (acquireConnect)
 import Arbiter.Hasql.Compat qualified as Compat
-import Arbiter.Hasql.HasqlDb (createHasqlEnvWithPool, inTransaction, runHasqlDb)
-import Test.Arbiter.Hasql.TestHelpers (createHasqlPool)
+import Arbiter.Hasql.HasqlDb
+  ( HasqlConfig (..)
+  , HasqlDb
+  , createHasqlEnvWithPool
+  , inTransaction
+  , inTransactionWith
+  , runHasqlDb
+  )
+import Test.Arbiter.Hasql.TestHelpers (createHasqlPool, testConnect)
 
 testSchema :: Text
 testSchema = "arbiter_hasql_ops_test"
@@ -30,6 +43,11 @@ type HasqlOpsTestRegistry = '[QueueWithResult "arbiter_hasql_ops_test" TestPaylo
 
 testTable :: Text
 testTable = "arbiter_hasql_ops_test"
+
+type HasqlOpsDb = HasqlDb HasqlOpsTestRegistry IO
+
+preparedCountSQL :: Query Int64
+preparedCountSQL = [sql|SELECT @{n :: CInt8} FROM (SELECT count(*) AS n FROM pg_prepared_statements) counted|]
 
 spec :: ByteString -> Spec
 spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
@@ -53,6 +71,15 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
         claimed <- runHasqlDb env (HL.claimNextVisibleJobs 1 60) :: IO [JobRead TestPayload]
         length claimed `shouldBe` 1
         payload (head claimed) `shouldBe` TestMessage "InTx"
+
+      it "prepares no statement when the config disables prepared statements" $ \_ -> do
+        bracket (acquireConnect (testConnect connStr) >>= either fail pure) Hasql.release $ \conn -> do
+          Compat.runSQL conn "BEGIN"
+          prepared <- inTransactionWith @HasqlOpsTestRegistry (HasqlConfig False) conn testSchema $ do
+            _ <- HL.claimNextVisibleJobs 1 60 :: HasqlOpsDb [JobRead TestPayload]
+            executeQuery preparedCountSQL
+          Compat.runSQL conn "ROLLBACK"
+          prepared `shouldBe` [0]
 
       it "rolls back job insertion when user transaction fails" $ \env -> do
         let job = defaultJob (TestMessage "RollbackTest")

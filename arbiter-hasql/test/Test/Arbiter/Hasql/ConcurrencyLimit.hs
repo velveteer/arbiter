@@ -33,4 +33,4 @@ spec connStr =
         withConn = withResource pgPool
     around (\action -> cleanupOnce connStr testSchema concurrencyTable >> action mkEnv) $
       concurrencyLimitSpec runHasqlDb
-    concurrencyModelSpec run withConn testSchema
+    concurrencyModelSpec run testSchema withConn

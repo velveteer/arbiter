@@ -1,7 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
--- | Servant REST API for Arbiter job queue administration. See 'ArbiterAPI'
--- for the route tree.
+-- | Servant REST API for Arbiter: queue operations and remote job consumers. See
+-- 'ArbiterAPI' for the route tree.
 --
 -- = Quick Start
 --
@@ -40,11 +40,12 @@ module Arbiter.Servant
   , BuildServer (..)
   , CacheCell
 
-    -- * API Types
+    -- * API types
   , ArbiterAPI
   , RegistryToAPI
   , TableAPI (..)
   , SharedAPI
+  , PayloadEditNote
   , EventsAPI
   , QueuesAPI (..)
   , JobsAPI (..)

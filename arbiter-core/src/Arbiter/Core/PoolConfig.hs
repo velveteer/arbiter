@@ -11,7 +11,7 @@ data PoolConfig = PoolConfig
   , poolIdleTimeout :: Int
   -- ^ Idle timeout (seconds)
   , poolStripes :: Maybe Int
-  -- ^ Sub-pools. 'Nothing' picks one per CPU.
+  -- ^ Sub-pools. 'Nothing' picks one per RTS capability.
   }
   deriving stock (Eq, Show)
 

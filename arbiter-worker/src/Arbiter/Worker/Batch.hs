@@ -5,8 +5,7 @@
 --
 -- Batch settlement, outcome reporting, and force-cancel finalization.
 --
--- Each 'Effects' action runs one transaction or hook. The pool runs the
--- lifecycle in IO. Tests use io-sim.
+-- Each 'Effects' action runs one transaction or hook.
 module Arbiter.Worker.Batch
   ( -- * The pool's side
     Effects (..)
@@ -86,15 +85,29 @@ data Report job
   | -- | This worker can no longer act on the job.
     Unavailable job Text
 
--- | Whether a failure deletes a job tree or updates the job claim.
-data FailureKind = RetryFailure | PermanentFailure | TreeCancelFailure | BranchCancelFailure
+-- | How a handler failure is written.
+data FailureKind
+  = -- | Retry with backoff, or move to the DLQ when attempts are exhausted.
+    RetryFailure
+  | -- | Move to the DLQ now.
+    PermanentFailure
+  | -- | Delete the whole job tree from its root.
+    TreeCancelFailure
+  | -- | Delete the job's parent, or the job when it has none, with all descendants.
+    BranchCancelFailure
   deriving stock (Eq, Show)
 
 -- | A handler failure: its message and disposition.
 type Failure = (Text, FailureKind)
 
 -- | Where a failure write left the job. A tree cancel carries the ids it deleted.
-data Outcome = Retrying NominalDiffTime | DeadLettered | TreeCancelled [JobId]
+data Outcome
+  = -- | Scheduled for retry after this backoff delay.
+    Retrying NominalDiffTime
+  | -- | Moved to the DLQ.
+    DeadLettered
+  | -- | Deleted by a tree or branch cancel.
+    TreeCancelled [JobId]
   deriving stock (Eq, Show)
 
 -- | Batch statements and hooks. Callbacks use the handler's context and join
@@ -431,11 +444,12 @@ callbacks base jobs startTime =
         endTime <- getCurrentTime
         pending <- pendingJobs (runHandoff base) jobs
         let siblings = cancelledSiblings pending job
-        void $ settleWith run (\_ -> effect effectFail run failure job) (finalized . (job :) . siblings) $
-          \at outcome -> do
-            reportFailed at msg startTime endTime job outcome
-            traverse_ (\sibling -> reportOnce at sibling (report at (Cancelled sibling msg))) (siblings outcome)
-            settleUnwritten at [(job, outcome)]
+        void $
+          settleWith run (\_ -> effect effectFail run failure job) (finalized . (job :) . siblings) $
+            \at outcome -> do
+              reportFailed at msg startTime endTime job outcome
+              traverse_ (\sibling -> reportOnce at sibling (report at (Cancelled sibling msg))) (siblings outcome)
+              settleUnwritten at [(job, outcome)]
     , callbackNack = \ctx job -> unlessHandled "nack" job $ within ctx $ \run -> releaseJobs run [job]
     , callbackSpawn = \ctx job kids -> unlessHandled "spawn" job $ within ctx $ \run ->
         settle run (finalized [job]) (effect effectSpawn run job kids) $ \at () ->

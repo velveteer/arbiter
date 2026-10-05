@@ -4,22 +4,27 @@
 -- context every message carries. Application-level job logging belongs on
 -- 'Arbiter.Core.Job.Types.ObservabilityHooks'.
 module Arbiter.Worker.Logger
-  ( -- * Log Configuration
+  ( -- * Log configuration
     LogConfig (..)
   , LogDestination (..)
   , defaultLogConfig
   , silentLogConfig
 
-    -- * Log Levels
+    -- * Log levels
   , LogLevel (..)
 
-    -- * Emitting
+    -- * Re-exports for structured context
+  , Pair
+  , (.=)
+
+    -- * Internal
+
+    -- | Emitting and repeat suppression for the arbiter packages. Not covered by
+    -- the PVP.
   , tryLog
   , warnEx
   , recoveryLevel
   , toHubLog
-
-    -- * Repeat suppression
   , FailureGate
   , newFailureGate
   , reportOutcome
@@ -27,10 +32,6 @@ module Arbiter.Worker.Logger
   , FailureGates
   , newFailureGates
   , tryReportedOn
-
-    -- * Re-exports for structured context
-  , Pair
-  , (.=)
   ) where
 
 import Arbiter.Core.Exceptions (displayEx)
@@ -60,10 +61,14 @@ import UnliftIO (MonadUnliftIO, SomeException, tryAny)
 
 -- | Log severity levels.
 data LogLevel
-  = Debug
-  | Info
-  | Warning
-  | Error
+  = -- | Detail for diagnosis.
+    Debug
+  | -- | Normal events.
+    Info
+  | -- | Problems that do not stop work.
+    Warning
+  | -- | Failed operations.
+    Error
   deriving stock (Bounded, Enum, Eq, Ord, Read, Show)
 
 -- | Where Arbiter writes log output.
@@ -76,8 +81,7 @@ data LogDestination
     LogFastLogger LoggerSet
   | -- | Log to a user-provided callback. The callback receives the 'LogLevel',
     -- the plain message 'Text', and all structured context as @['Pair']@
-    -- such as job information and additional context. Use this callback to
-    -- send Arbiter logs to an application logging system.
+    -- such as job information and additional context.
     --
     -- @
     -- let cb level msg ctx = myLogger level msg ctx

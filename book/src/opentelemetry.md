@@ -22,9 +22,11 @@ Standard `OTEL_*` variables configure the SDK. `OTEL_SDK_DISABLED=true` turns
 it off. Logs go to OTel and to the configured log destination, with the job
 trace, id, queue, and attempt.
 
-`runWorkerPoolsWith` and the brackets in `Arbiter.Otel` take a telemetry
-handle, a separate SDK, or another pool runner, plus the base log config for
-the gauge loop.
+To own the telemetry handle, open it with a bracket such as `withTelemetry`,
+or with `withExternalTelemetry` for providers your application owns. Pass it
+and the gauge loop's base log config to `runWorkerPoolsWith`. For another pool
+runner, apply `instrumentPools` to the pools and wrap the runner in
+`withGauges`.
 
 ## Traces
 
@@ -45,10 +47,11 @@ activity, Arbiter table health, and PostgreSQL health.
 [`Arbiter.Otel.MetricNames`](https://arbiterq.dev/arbiter-otel/Arbiter-Otel-MetricNames.html)
 lists each instrument with its type, unit, and attributes.
 
-Admission metrics are keyed by policy, with `policy_kind` of `rate_limit` or
-`concurrency`.
+Admission metrics are keyed by `policy`. The admitted counter and the keys and
+limit gauges also carry `policy_kind`, `rate_limit` or `concurrency`. The
+in-flight, busiest-key, and tokens gauges carry `policy` only.
 
-`kind` on queue depth and the job counters is one of the payload's `kindsFor`
+`kind` on `arbiter.queue.depth_by_kind` and the job counters is one of the payload's `kindsFor`
 labels, or absent.
 
 PostgreSQL health outside the Arbiter role needs `pg_read_all_stats`. One

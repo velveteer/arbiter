@@ -28,7 +28,7 @@ import NeatInterpolation (text)
 
 import Arbiter.Core.Codec (codecColumns, cronScheduleRowCodec, joinColumns)
 import Arbiter.Core.CronSchedule (CronScheduleRow, CronScheduleUpdate (..), cronSchedulesTable)
-import Arbiter.Core.Job.Schema (cronRunNotifyChannel)
+import Arbiter.Core.Job.Schema (SchemaName, cronRunNotifyChannel)
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query, rows)
 import Arbiter.Core.SqlLiterals (textLiteral)
@@ -51,7 +51,7 @@ cronReadColumns =
 -- | Upsert a cron schedule's default values, preserving @override_*@ columns on conflict.
 -- An unchanged schedule is left alone. @initialEnabled@ applies only to a row this
 -- statement creates. An existing row keeps the enabled state it already has.
-upsertCronDefaultSQL :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Bool -> Query ()
+upsertCronDefaultSQL :: SchemaName -> Text -> Text -> Text -> Text -> Maybe Text -> Bool -> Query ()
 upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz initialEnabled =
   let tbl = cronSchedulesTable schemaName
    in [sql|
@@ -70,7 +70,7 @@ upsertCronDefaultSQL schemaName name queueName defaultExpr defaultOv defaultTz i
       |]
 
 -- | List cron schedules ordered by name, optionally filtered by queue.
-listCronSchedulesSQL :: Text -> Maybe Text -> Query CronScheduleRow
+listCronSchedulesSQL :: SchemaName -> Maybe Text -> Query CronScheduleRow
 listCronSchedulesSQL schemaName queue =
   let tbl = cronSchedulesTable schemaName
    in rows
@@ -82,14 +82,14 @@ listCronSchedulesSQL schemaName queue =
         |]
 
 -- | Get a single cron schedule by name.
-getCronScheduleByNameSQL :: Text -> Text -> Query CronScheduleRow
+getCronScheduleByNameSQL :: SchemaName -> Text -> Query CronScheduleRow
 getCronScheduleByNameSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
    in rows cronScheduleRowCodec [sql|SELECT ${cronReadColumns} FROM ${tbl} WHERE name = #{name :: CText}|]
 
--- | Patch a cron schedule's overrides. 'Nothing' when the patch sets no column.
--- @Just Nothing@ clears an override. Disabling also drops a pending run request.
-updateCronScheduleSQL :: Text -> Text -> CronScheduleUpdate -> Maybe (Query ())
+-- | Patch a cron schedule's overrides and enabled flag. 'Nothing' when the patch sets
+-- no column. @Just Nothing@ clears an override. Disabling also drops a pending run request.
+updateCronScheduleSQL :: SchemaName -> Text -> CronScheduleUpdate -> Maybe (Query ())
 updateCronScheduleSQL _ _ (CronScheduleUpdate Nothing Nothing Nothing Nothing) = Nothing
 updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpression mOverlap mTimezone mEnabled) =
   let tbl = cronSchedulesTable schemaName
@@ -121,10 +121,9 @@ updateCronScheduleSQL schemaName name (CronScheduleUpdate mExpression mOverlap m
 
 -- | Set @last_checked_at@ to the caller-supplied watermark for the given
 -- schedule names. The watermark is the minute boundary the scheduler finished
--- evaluating. @GREATEST@ keeps it from moving backward under concurrent worker
--- pools with skewed clocks.
-touchCronCheckedSQL :: Text -> UTCTime -> [Text] -> Query ()
-touchCronCheckedSQL schemaName watermark names =
+-- evaluating. @GREATEST@ keeps it from moving backward.
+touchCronCheckedSQL :: SchemaName -> [Text] -> UTCTime -> Query ()
+touchCronCheckedSQL schemaName names watermark =
   let tbl = cronSchedulesTable schemaName
    in [sql|
         UPDATE ${tbl}
@@ -134,8 +133,8 @@ touchCronCheckedSQL schemaName watermark names =
 
 -- | Fire-once-per-minute gate. Advances @last_fired_at@ to the minute floor
 -- when the existing value is less. Zero rows means another pool won.
-tryFireCronGateSQL :: Text -> UTCTime -> Text -> Query ()
-tryFireCronGateSQL schemaName minuteFloor name =
+tryFireCronGateSQL :: SchemaName -> Text -> UTCTime -> Query ()
+tryFireCronGateSQL schemaName name minuteFloor =
   let tbl = cronSchedulesTable schemaName
    in [sql|
         UPDATE ${tbl}
@@ -145,7 +144,7 @@ tryFireCronGateSQL schemaName minuteFloor name =
       |]
 
 -- | Per-(schema, queue, name) transaction-scoped advisory lock for cron.
-tryAcquireCronLeaderSQL :: Text -> Text -> Text -> Query Bool
+tryAcquireCronLeaderSQL :: SchemaName -> Text -> Text -> Query Bool
 tryAcquireCronLeaderSQL schema queue name =
   [sql|
     SELECT pg_try_advisory_xact_lock(
@@ -163,7 +162,7 @@ cronRunPending = [text|(run_requested_at IS NOT NULL AND run_requested_at > NOW(
 
 -- | Stamp a run request on an enabled schedule and NOTIFY. Returns @stamped@,
 -- @pending@, @disabled@ or @not_found@.
-requestCronRunSQL :: Text -> Text -> Query Text
+requestCronRunSQL :: SchemaName -> Text -> Query Text
 requestCronRunSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
       chan = textLiteral (cronRunNotifyChannel schemaName)
@@ -181,7 +180,7 @@ requestCronRunSQL schemaName name =
       |]
 
 -- | Claim a pending run request, clearing the flag and returning the claimed row.
-claimCronRunSQL :: Text -> Text -> Query CronScheduleRow
+claimCronRunSQL :: SchemaName -> Text -> Query CronScheduleRow
 claimCronRunSQL schemaName name =
   let tbl = cronSchedulesTable schemaName
    in rows
@@ -193,8 +192,8 @@ claimCronRunSQL schemaName name =
         |]
 
 -- | Record when a manual run last fired a job.
-touchCronManualRunSQL :: Text -> UTCTime -> Text -> Query ()
-touchCronManualRunSQL schemaName firedAt name =
+touchCronManualRunSQL :: SchemaName -> Text -> UTCTime -> Query ()
+touchCronManualRunSQL schemaName name firedAt =
   let tbl = cronSchedulesTable schemaName
    in [sql|
         UPDATE ${tbl}
@@ -203,7 +202,7 @@ touchCronManualRunSQL schemaName firedAt name =
       |]
 
 -- | Names of enabled schedules with a pending run request among the given names.
-pendingCronRunsSQL :: Text -> [Text] -> Query Text
+pendingCronRunsSQL :: SchemaName -> [Text] -> Query Text
 pendingCronRunsSQL schemaName names =
   let tbl = cronSchedulesTable schemaName
    in [sql|SELECT @{name :: CText} FROM ${tbl} WHERE name = ANY(#{names :: [CText]}) AND enabled AND ${cronRunPending}|]

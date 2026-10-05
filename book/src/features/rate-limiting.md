@@ -11,7 +11,7 @@ import Arbiter.RateLimit
 isTransactional :: EmailPayload -> Bool
 recipientDomain :: EmailPayload -> Text
 
-transactional, bulk :: Policy
+transactional, bulk :: RateLimitPolicy
 transactional = tokenBucket "transactional" 100 1 -- 100/second, burst 100
 bulk          = tokenBucket "bulk" 1000 3600      -- 1000/hour, burst 1000
 
@@ -23,15 +23,15 @@ instance HasRateLimit EmailPayload where
 ```
 
 `tokenBucket prefix n period` admits `n` jobs per `period` seconds with a burst
-of `n`. For a different burst, build a `Policy`:
+of `n`. For a different burst, build a `RateLimitPolicy`:
 
 | Field | Meaning |
 | --- | --- |
 | `policyMax` | burst |
 | `policyRefill`, `policyInterval` | tokens added per interval |
 
-`rateLimitCost` sets a job's cost above 1. `addRateLimitTokens` adjusts a
-bucket's tokens.
+`rateLimitCost` sets a job's token cost, 0 or more. The default is 1.
+`addRateLimitTokens` adjusts a bucket's tokens.
 
 A denied job is invisible until its bucket has enough tokens. The API and admin
 UI show the throttled count per policy and accept policy changes at run time.
@@ -39,9 +39,9 @@ UI show the throttled count per policy and accept policy changes at run time.
 A fixed window is a bucket with refill 0, reset from a cron:
 
 ```haskell
-daily :: Policy
+daily :: RateLimitPolicy
 daily =
-  Policy
+  RateLimitPolicy
     { policyPrefix = "daily"
     , policyMax = 1000
     , policyRefill = 0
@@ -67,7 +67,8 @@ Durability is set per migrated schema.
 > [!IMPORTANT]
 > Tokens are spent at claim. Retries and redeliveries spend tokens again.
 >
-> A cost above `policyMax` is clamped to `policyMax`.
+> A cost above the effective max is clamped to it. The effective max is the
+> operator override when set, else `policyMax`.
 
 ## HTTP 429 Responses
 
@@ -97,7 +98,7 @@ sendEmail job cbs = do
 recovery:
 
 ```haskell
-import Arbiter.RateLimit (Policy (..), clearRateLimit, setRateLimit)
+import Arbiter.RateLimit (RateLimitPolicy (..), clearRateLimit, setRateLimit)
 
 import MyApp.Queue.Policies (transactional)
 

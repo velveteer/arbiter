@@ -2,26 +2,29 @@
 
 -- | Per-job concurrency limits.
 --
--- This is the user-facing concurrency module. Import it, not the @Arbiter.Core.Concurrency.*@ modules.
+-- This is the user-facing concurrency module. The @Arbiter.Core.Concurrency.*@ modules are internal.
 --
--- Declare which pool (if any) caps each job with a 'HasConcurrency' instance,
--- building the selector from 'noConcurrency' \/ 'concurrencyBy' \/
--- 'globalConcurrency' \/ 'concurrencyByCase'. The migration collects every pool a
--- selector can reach and seeds it. The pool holds the limit.
+-- Declare which policy (if any) caps each job with a 'HasConcurrency' instance.
+-- The migration seeds every policy a selector can reach. The policy holds the limit.
 module Arbiter.Concurrency
-  ( -- * Declaring a payload's pool
+  ( -- * Declaring a payload's policy
     HasConcurrency (..)
   , ConcurrencyFor
+  , Selector
   , noConcurrency
   , concurrencyBy
   , globalConcurrency
-  , concurrencyByCase
   , chooseWhen
+  , concurrencyByCase
+  , RegistryConcurrencyPolicies
 
-    -- * Pools
-  , ConcurrencyPolicy
+    -- * Policies
+  , ConcurrencyPolicy (..)
   , concurrencyPool
-  , policyPrefixOf
+  , AdmissionPolicy (..)
+
+    -- * Keys
+  , ConcurrencyKey (..)
 
     -- * Management and observability views
   , ConcurrencyPolicyView (..)
@@ -36,13 +39,17 @@ module Arbiter.Concurrency
   , reconcileConcurrencyCounts
   , listConcurrencyPolicies
   , listConcurrencyKeys
+  , getConcurrencyPolicy
+  , concurrencyPolicyExists
   ) where
 
 import Arbiter.Core.Admission (AdmissionPolicy (..))
 import Arbiter.Core.Concurrency.Spec
   ( ConcurrencyFor
-  , ConcurrencyPolicy
+  , ConcurrencyKey (..)
+  , ConcurrencyPolicy (..)
   , HasConcurrency (..)
+  , RegistryConcurrencyPolicies
   , chooseWhen
   , concurrencyBy
   , concurrencyByCase
@@ -57,6 +64,8 @@ import Arbiter.Core.Concurrency.Stats
   )
 import Arbiter.Core.HighLevel
   ( clearConcurrencyLimit
+  , concurrencyPolicyExists
+  , getConcurrencyPolicy
   , listConcurrencyKeys
   , listConcurrencyPolicies
   , pruneConcurrencyKeys
@@ -64,3 +73,4 @@ import Arbiter.Core.HighLevel
   , setConcurrencyLimit
   , updateConcurrencyPolicyOverrides
   )
+import Arbiter.Core.Selector (Selector)

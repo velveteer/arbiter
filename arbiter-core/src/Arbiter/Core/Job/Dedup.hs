@@ -16,7 +16,8 @@ data DedupKey
   = -- | Skip if a job with this key exists (@DO NOTHING@).
     IgnoreDuplicate Text
   | -- | Replace the existing job with this key (@DO UPDATE@), unless it is
-    -- actively claimed, force-cancel flagged, or has children.
+    -- actively claimed, force-cancel flagged, has a different parent, or has
+    -- children. Children in the DLQ count.
     ReplaceDuplicate Text
   deriving stock (Eq, Generic, Show)
 

@@ -9,70 +9,75 @@ module Arbiter.Otel.MetricNames
 
 import Data.Text (Text)
 
--- | Every instrument the library registers.
+-- | Every instrument the library registers. A job's @kind@ attribute is absent when its
+-- label is not declared.
 data MetricName
   = -- Worker lifecycle
+
+    -- | Counter, no unit. Attributes: @queue@, @kind@.
     JobsClaimed
-    -- ^ Counter, no unit. Attributes: @queue@, @kind@.
-  | JobsProcessed
-    -- ^ Counter, no unit. Attributes: @queue@, @outcome@, @kind@.
-  | JobsRetries
-    -- ^ Counter, no unit. Attributes: @queue@, @kind@.
-  | AdmissionAdmitted
-    -- ^ Counter, no unit. Attributes: @queue@, @policy_kind@, @policy@.
-  | MaintenanceRows
-    -- ^ Counter, no unit. Attributes: @op@.
-  | HandlerDuration
-    -- ^ Histogram, @s@. Attributes: @queue@, @outcome@, @kind@.
+  | -- | Counter, no unit. Attributes: @queue@, @outcome@ (success, dlq, cancelled, unavailable), @kind@.
+    JobsProcessed
+  | -- | Counter, no unit. Attributes: @queue@, @kind@.
+    JobsRetries
+  | -- | Counter, no unit. Attributes: @queue@, @policy_kind@, @policy@.
+    AdmissionAdmitted
+  | -- | Counter, no unit. Attributes: @op@.
+    MaintenanceRows
+  | -- | Histogram, @s@. Attributes: @queue@, @outcome@ (success, failure), @kind@.
+    HandlerDuration
   | -- Queue depth
+
+    -- | Gauge, @{job}@. Attributes: @queue@, @status@.
     QueueDepth
-    -- ^ Gauge, @{job}@. Attributes: @queue@, @status@.
-  | QueueDepthByKind
-    -- ^ Gauge, @{job}@. Attributes: @queue@, @kind@.
-  | QueueOldestReadyAge
-    -- ^ Gauge, @s@. Attributes: @queue@.
-  | QueueOldestInFlightAge
-    -- ^ Gauge, @s@. Attributes: @queue@.
-  | Workers
-    -- ^ Gauge, @{worker}@. Attributes: @queue@, @state@.
+  | -- | Gauge, @{job}@. Attributes: @queue@, @kind@.
+    QueueDepthByKind
+  | -- | Gauge, @s@. Attributes: @queue@.
+    QueueOldestReadyAge
+  | -- | Gauge, @s@. Attributes: @queue@.
+    QueueOldestInFlightAge
+  | -- | Gauge, @{worker}@. Attributes: @queue@, @state@.
+    Workers
   | -- Admission
+
+    -- | Gauge, @{key}@. Attributes: @policy_kind@, @policy@.
     AdmissionKeys
-    -- ^ Gauge, @{key}@. Attributes: @policy_kind@, @policy@.
-  | AdmissionLimit
-    -- ^ Gauge, @{slot}@. Attributes: @policy_kind@, @policy@.
-  | AdmissionInFlight
-    -- ^ Gauge, @{job}@. Attributes: @policy@.
-  | AdmissionBusiestKey
-    -- ^ Gauge, @{job}@. Attributes: @policy@.
-  | AdmissionTokens
-    -- ^ Gauge, @{token}@. Attributes: @policy@, @stat@.
+  | -- | Gauge, @{slot}@. Attributes: @policy_kind@, @policy@.
+    AdmissionLimit
+  | -- | Gauge, @{job}@. Attributes: @policy@.
+    AdmissionInFlight
+  | -- | Gauge, @{job}@. Attributes: @policy@.
+    AdmissionBusiestKey
+  | -- | Gauge, @{token}@. Attributes: @policy@, @stat@.
+    AdmissionTokens
   | -- Postgres health
+
+    -- | Gauge, @{tuple}@. Attributes: @table@.
     PgTableDeadTuples
-    -- ^ Gauge, @{tuple}@. Attributes: @table@.
-  | PgTableLiveTuples
-    -- ^ Gauge, @{tuple}@. Attributes: @table@.
-  | PgTableAutovacuumAge
-    -- ^ Gauge, @s@. Attributes: @table@.
-  | PgTableSize
-    -- ^ Gauge, @By@. Attributes: @table@.
-  | PgTableScans
-    -- ^ Counter, @{scan}@. Attributes: @table@, @path@.
-  | PgTableBlocks
-    -- ^ Counter, @{block}@. Attributes: @table@, @source@.
-  | PgTableXidAge
-    -- ^ Gauge, @{transaction}@. Attributes: @table@.
-  | PgDbConnections
-    -- ^ Gauge, @{connection}@. Attributes: @state@.
-  | PgDbBackends
-    -- ^ Gauge, @{backend}@. No attributes.
-  | PgDbOldestTransactionAge
-    -- ^ Gauge, @s@. No attributes.
-  | PgDbOldestQueryAge
-    -- ^ Gauge, @s@. No attributes.
-  | DbReachable
-    -- ^ Gauge, @{status}@, 1 when reachable and 0 when not. No attributes.
-  | GaugesAge
-    -- ^ Gauge, @s@. No attributes.
+  | -- | Gauge, @{tuple}@. Attributes: @table@.
+    PgTableLiveTuples
+  | -- | Gauge, @s@. Attributes: @table@.
+    PgTableAutovacuumAge
+  | -- | Gauge, @By@. Attributes: @table@.
+    PgTableSize
+  | -- | Counter, @{scan}@. Attributes: @table@, @path@.
+    PgTableScans
+  | -- | Counter, @{block}@. Attributes: @table@, @source@.
+    PgTableBlocks
+  | -- | Gauge, @{transaction}@. Attributes: @table@.
+    PgTableXidAge
+  | -- | Gauge, @{connection}@. Attributes: @state@.
+    PgDbConnections
+  | -- | Gauge, @{backend}@. No attributes.
+    PgDbBackends
+  | -- | Gauge, @s@. No attributes.
+    PgDbOldestTransactionAge
+  | -- | Gauge, @s@. No attributes.
+    PgDbOldestQueryAge
+  | -- | Gauge, @{status}@, 1 when reachable and 0 when not. No attributes.
+    DbReachable
+  | -- | Gauge, @s@. No attributes.
+    GaugesAge
   deriving stock (Bounded, Enum, Eq, Show)
 
 -- | The exported name of a metric.

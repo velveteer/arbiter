@@ -6,13 +6,17 @@ module Arbiter.Core.MonadArbiter
   , JobHandler
   , HasRegistry
   , ResultOf
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
+  , countOr0
+  , countOr0Prepared
   , Params
   , SomeParam (..)
   , ParamType (..)
   , Query (..)
   , mkQuery
-  , countOr0
-  , countOr0Prepared
   ) where
 
 import Data.Int (Int64)
@@ -47,7 +51,7 @@ class (MonadUnliftIO m) => MonadArbiter m where
             ':<>: 'Text " = YourRegistry"
         )
 
-  -- | Backend-specific handler shape (e.g. @Connection -> job -> m result@).
+  -- | Backend-specific handler shape (for example @Connection -> job -> m result@).
   -- 'JobHandler' instantiates it at one queue's job and result types.
   type Handler m job result :: Type
 
