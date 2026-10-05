@@ -1487,6 +1487,39 @@ workerSpec TestBackend {mkSimple, mkFailing, mkEnv, mkHandler, runM} = before mk
           mJob <- runM env $ HL.getJobById @payload rootId
           pure (isNothing mJob)
 
+    it "reports a sibling the batch's own cancelTree deleted as cancelled" $ \env -> do
+      cancelledRef <- newIORef ([] :: [payload])
+      unavailableRef <- newIORef ([] :: [payload])
+      batchSizesRef <- newIORef ([] :: [Int])
+      let hooks =
+            defaultObservabilityHooks
+              { onJobUnavailable = \job _ ->
+                  liftIO $ atomicModifyIORef' unavailableRef $ \seen -> (payload job : seen, ())
+              , onJobCancelled = \job _ ->
+                  liftIO $ atomicModifyIORef' cancelledRef $ \seen -> (payload job : seen, ())
+              }
+          named name = find ((== mkSimple name) . payload)
+          batchHandler jobs cbs = do
+            liftIO $ atomicModifyIORef' batchSizesRef (\sizes -> (length jobs : sizes, ()))
+            traverse_ (\job -> cancelTree cbs job "abort") (named "cts-c1" jobs)
+            traverse_ (ack cbs) (named "cts-c2" jobs)
+          child name = setGroupKey (Just "cts") $ defaultJob (mkSimple name)
+      Right _ <-
+        runM env
+          $ HL.insertJobTree
+          $ defaultJob (mkSimple "cts-root") <~~ (child "cts-c1" :| [child "cts-c2"])
+      config <- mkBatchedConfig 1 10 batchHandler
+
+      withAsync (runM env $ runWorkerPool config {pollInterval = 0.05, observabilityHooks = hooks}) $ \_ ->
+        waitUntil 10_000 $ do
+          cancelled <- readIORef cancelledRef
+          unavailable <- readIORef unavailableRef
+          pure (length cancelled + length unavailable >= 2)
+
+      readIORef batchSizesRef `shouldReturn` [2]
+      readIORef unavailableRef `shouldReturn` []
+      readIORef cancelledRef >>= (`shouldMatchList` [mkSimple "cts-c1", mkSimple "cts-c2"])
+
     it "cancelBranch callback deletes the job's branch" $ \env -> do
       Right (root :| _) <-
         runM env

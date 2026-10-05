@@ -25,6 +25,7 @@ module Arbiter.Worker.Heartbeat.Guard.State
   , settleGrace
   , leaseExpiredReason
   , reclaimedReason
+  , deletedReason
   ) where
 
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
@@ -59,6 +60,10 @@ leaseExpiredReason = "lease expired without renewal"
 -- | The reason a batch another worker reclaimed is stopped.
 reclaimedReason :: Text
 reclaimedReason = "reclaimed by another worker"
+
+-- | The reason a batch whose row was deleted under it is stopped.
+deletedReason :: Text
+deletedReason = "deleted while held by this worker"
 
 -- | A wall-clock span as a monotonic one. Exact, no Rational detour.
 toDiffTime :: NominalDiffTime -> DiffTime
@@ -128,6 +133,8 @@ data Status n = Status
   -- ^ The deadline signal went out. The fence writes it.
   , signalledAt :: !(Maybe Time)
   -- ^ When the last signal went out. Signal writes it.
+  , goneSeen :: !(Set JobId)
+  -- ^ Pending jobs the last settled extend found gone. Settle writes it.
   , couriers :: !(Maybe [ThreadId n])
   -- ^ Threads carrying a signal to the handler. Nothing once unregistered. Couriers and unregister write it.
   }

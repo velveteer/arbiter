@@ -153,6 +153,7 @@ import Control.Monad (void, when)
 import Data.Aeson (Value)
 import Data.Foldable (toList)
 import Data.Int (Int32, Int64)
+import Data.List (genericLength)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -1030,7 +1031,7 @@ cancelJobCascade
   => Int64
   -- ^ Root job id
   -> m Int64
-cancelJobCascade jobId = onQueue @payload $ \schemaName tableName -> Ops.cancelJobCascade schemaName tableName jobId
+cancelJobCascade jobId = onQueue @payload $ \schemaName tableName -> genericLength <$> Ops.cancelJobCascade schemaName tableName jobId
 
 -- ---------------------------------------------------------------------------
 -- Suspend/Resume Operations

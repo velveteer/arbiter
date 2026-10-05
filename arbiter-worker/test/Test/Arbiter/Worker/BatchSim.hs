@@ -267,18 +267,23 @@ flagRow job now rows = case Map.lookup job rows of
     | otherwise -> ((rowHolder row, Just Deleted), Map.delete job rows)
   Nothing -> ((Nothing, Nothing), rows)
 
--- | One job's failure write: the outcome it reports and the op that landed.
-failWrite :: Failure -> Job -> Statement (Either Text Outcome, Maybe Op)
+-- | A tree or branch cancel. The batch is one tree, and the cancel deletes every row in
+-- it, held or not.
+cancelTreeRows :: Statement [JobId]
+cancelTreeRows _ rows = (Map.keys rows, Map.empty)
+
+-- | One job's failure write: the outcome it reports and the ops that landed.
+failWrite :: Failure -> Job -> Statement (Either Text Outcome, [(JobId, Op)])
 failWrite (_, kind) job now rows
   | cancelsTree kind =
-      let ((_, op), rows') = flagRow (jobId job) now rows
-       in ((Right TreeCancelled, op), rows')
+      let (deleted, rows') = cancelTreeRows now rows
+       in ((Right (TreeCancelled deleted), [(gone, Deleted) | gone <- deleted]), rows')
   | kind == PermanentFailure = write Dlqed DeadLettered dlqRow unwrittenDlq
   | otherwise = write Retried (Retrying modelBackoff) retryRow unwrittenRetry
   where
     write op outcome stmt reason =
       let (landed, rows') = stmt job now rows
-       in ((if landed then Right outcome else Left reason, if landed then Just op else Nothing), rows')
+       in ((if landed then Right outcome else Left reason, [(jobId job, op) | landed]), rows')
 
 -- | The whole failure write, as the one transaction the pool runs for it.
 failWrites :: Failure -> [Job] -> [Job] -> Statement ([(Job, Either Text Outcome)], [(JobId, Op)])
@@ -286,12 +291,12 @@ failWrites failure unhandled unowned now rows =
   let (rows', failed) = mapAccumL onFail rows unhandled
       (rows'', cancelled) = mapAccumL onCancel rows' unowned
       onFail table job =
-        let ((outcome, op), table') = failWrite failure job now table
-         in (table', ((job, outcome), (jobId job, op)))
-      onCancel table job =
-        let ((_, op), table') = flagRow (jobId job) now table
-         in (table', (jobId job, op))
-      landings = [(job, op) | (job, Just op) <- map snd failed <> cancelled]
+        let ((outcome, ops), table') = failWrite failure job now table
+         in (table', ((job, outcome), ops))
+      onCancel table _ =
+        let (deleted, table') = cancelTreeRows now table
+         in (table', [(gone, Deleted) | gone <- deleted])
+      landings = concatMap snd failed <> concat cancelled
    in ((map fst failed, landings), rows'')
 
 -- | The reaper's pass: delete every flagged row whose lease lapsed.
@@ -378,13 +383,13 @@ modelEffects rows recorder =
   where
     reported job kind = recorder (Reported (jobId job) kind) >> threadDelay reportLatency
     failRow failure job = do
-      (outcome, op) <- statement rows (failWrite failure job)
-      for_ op (recorder . Landed (jobId job))
+      (outcome, landings) <- statement rows (failWrite failure job)
+      for_ landings $ \(gone, op) -> recorder (Landed gone op)
       pure outcome
     kindOf = \case
       Retrying _ -> RetryK
       DeadLettered -> DlqK
-      TreeCancelled -> CancelledK
+      TreeCancelled _ -> CancelledK
 
 guardConfigFor
   :: Rows s -> Recorder s Event -> TVar (IOSim s) [ExtendReply] -> Maybe DiffTime -> GuardConfig (IOSim s) Job

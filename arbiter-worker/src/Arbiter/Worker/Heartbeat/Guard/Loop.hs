@@ -274,33 +274,43 @@ settle
 settle guard issued currentTime byJob (entry, live) = do
   -- Rows this worker settled during the statement do not count.
   stillPending <- Set.fromList . map key <$> pendingOf entry
+  now <- getMonotonicTime
   let pendingLive = filter ((`Set.member` stillPending) . key) live
-      verdicts = mapMaybe ((`Map.lookup` byJob) . key) pendingLive
+      verdictOf job = Map.lookup (key job) byJob
+      verdicts = mapMaybe verdictOf pendingLive
       cancelledJobs = [jobId | JobCancelled jobId <- verdicts]
       stolenJobs = [jobId | JobReclaimed jobId _ _ <- verdicts]
-      goneJobs = [jobId | JobGone jobId <- verdicts]
-      extended = [job | job <- pendingLive, Just (VisibilityExtended _) <- [Map.lookup (key job) byJob]]
-  applied <- atomically $ do
+      gone = Set.fromList [jobId | JobGone jobId <- verdicts]
+      extended = filter (maybe False renewed . verdictOf) pendingLive
+      leaseFrom status
+        | all (maybe False renewed . verdictOf) pendingLive = addTime (configTimeout config) issued
+        | otherwise = leaseAt status
+      cadence lease = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
+      -- A first sighting can be an ack not yet recorded. The next extend confirms it.
+      beatFrom status
+        | gone `Set.isSubsetOf` goneSeen status = cadence (leaseFrom status)
+        | otherwise = min (cadence (leaseFrom status)) (addTime minRetryPause now)
+      renew status = rebeat (beatFrom status) status {leaseAt = leaseFrom status, goneSeen = gone}
+      stopFor seen
+        | not (null cancelledJobs) = Just (toException (JobForceCancelled cancelledJobs (stolenJobs <> Set.toList gone)))
+        | not (null stolenJobs) = Just (toException (JobGoneException reclaimedReason stolenJobs))
+        | not (Set.null deleted) = Just (toException (JobGoneException deletedReason (Set.toList deleted)))
+        | otherwise = Nothing
+        where
+          deleted = Set.intersection gone seen
+  -- What the last extend found gone. Nothing for a batch the fence stopped.
+  seenBefore <- atomically $ do
     current <- ownsAttempt guard issued
     stateTVar (guardedStatus entry) $ \status ->
-      let lease =
-            if all (maybe False renewed . (`Map.lookup` byJob) . key) pendingLive
-              then addTime (configTimeout config) issued
-              else leaseAt status
-          beat = addTime (heartbeatWait (configInterval config) True (lease `diffTime` issued)) issued
-       in if not current || leaseLapsed status then (False, status) else (True, rebeat beat status {leaseAt = lease})
-  when applied $ do
-    now <- getMonotonicTime
-    case (cancelledJobs, stolenJobs) of
-      (_ : _, _) -> signal guard now entry (toException (JobForceCancelled cancelledJobs (stolenJobs <> goneJobs)))
-      ([], _ : _) -> signal guard now entry (toException (JobGoneException reclaimedReason stolenJobs))
-      ([], []) ->
-        unless (null extended) . void . forkIO . batchInherit batch $
-          for_ extended $ \job -> do
-            pending <- pendingOf entry
-            when (any ((== key job) . key) pending) $
-              configHeartbeat config job currentTime (batchStart batch)
+      if current && not (leaseLapsed status) then (Just (goneSeen status), renew status) else (Nothing, status)
+  for_ seenBefore (maybe (heartbeats extended) (signal guard now entry) . stopFor)
   where
+    heartbeats extended =
+      unless (null extended) . void . forkIO . batchInherit batch $
+        for_ extended $ \job -> do
+          pending <- pendingOf entry
+          when (any ((== key job) . key) pending) $
+            configHeartbeat config job currentTime (batchStart batch)
     config = guardConfig guard
     key = configKey config
     batch = guardedBatch entry

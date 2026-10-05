@@ -1502,7 +1502,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
         void $ lockRow connA cid
 
         (etc, epA) <-
-          withAsync (try (runM env $ Ops.cancelJobTree schema table cid) :: IO (Either SomeException Int64)) $ \cancelAsync -> do
+          withAsync (try (runM env $ Ops.cancelJobTree schema table cid) :: IO (Either SomeException [Int64])) $ \cancelAsync -> do
             threadDelay 300_000
             epA <- lockRow connA pid
             void (try (PG.execute_ connA "COMMIT") :: IO (Either SomeException Int64))

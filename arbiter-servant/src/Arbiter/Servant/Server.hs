@@ -77,6 +77,7 @@ import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Int (Int64)
 import Data.Kind (Type)
+import Data.List (genericLength)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (clamp)
@@ -381,7 +382,7 @@ cancelJobHandler
   -> Handler NoContent
 cancelJobHandler tableName config jobId = do
   let schemaName = serverSchema config
-  runDb config (Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
+  runDb config (genericLength <$> Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler

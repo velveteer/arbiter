@@ -21,6 +21,7 @@ module Arbiter.Worker.Heartbeat.Guard
   , settleGrace
   , leaseExpiredReason
   , reclaimedReason
+  , deletedReason
   ) where
 
 import Arbiter.Worker.Heartbeat.Guard.Loop (runHeartbeatGuard, trySync)
@@ -29,6 +30,7 @@ import Arbiter.Worker.Heartbeat.Guard.State
   ( Batch (..)
   , GuardConfig (..)
   , HeartbeatGuard
+  , deletedReason
   , guardKey
   , leaseExpiredReason
   , minRetryPause

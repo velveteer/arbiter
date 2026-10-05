@@ -2488,7 +2488,7 @@ resumeChildren schemaName tableName parentJobId =
     (Tmpl.resumeChildrenSQL schemaName tableName parentJobId)
 
 -- | Delete a job and every descendant under it, resuming the parent of a root that is
--- itself a child. Returns the number deleted.
+-- itself a child. Returns the ids deleted.
 cancelJobCascade
   :: (MonadArbiter m)
   => Text
@@ -2497,33 +2497,34 @@ cancelJobCascade
   -- ^ Table name
   -> Int64
   -- ^ Root job id
-  -> m Int64
-cancelJobCascade = cascadeDeleteJob Tmpl.cancelJobCascadeSQL
+  -> m [Int64]
+cancelJobCascade = cascadeDeleteJob (not . null) (\schemaName tableName -> MA.executeQuery . Tmpl.cancelJobCascadeSQL schemaName tableName)
 
 -- | Transactional wrapper for cascade-delete SQL. Reads the root's parent, runs the
--- supplied delete template, and wakes the parent for a completion round when
--- anything was deleted. 'cancelJobCascade' and 'forceCancelJob' share this shell.
+-- supplied delete, and wakes the parent for a completion round when anything was
+-- deleted. 'cancelJobCascade' and 'forceCancelJob' share this shell.
 cascadeDeleteJob
   :: (MonadArbiter m)
-  => (SchemaName -> TableName -> Int64 -> Q.Query Int64)
-  -- ^ Cascade-delete query builder (returns the deleted count).
+  => (a -> Bool)
+  -- ^ Whether the delete removed anything.
+  -> (SchemaName -> TableName -> Int64 -> m a)
   -> SchemaName
   -> TableName
   -> Int64
-  -> m Int64
-cascadeDeleteJob mkSql schemaName tableName jobId = withDbTransaction $ do
+  -> m a
+cascadeDeleteJob deletedAny delete schemaName tableName jobId = withDbTransaction $ do
   rootParentId <- lockParentAndSelf schemaName tableName jobId
   held <- lockJobTrees schemaName tableName [jobId]
-  deleted <- countOr0 (mkSql schemaName tableName jobId)
+  deleted <- delete schemaName tableName jobId
 
-  when (deleted > 0)
+  when (deletedAny deleted)
     $ for_ rootParentId
     $ tryResumeParent held schemaName tableName
 
   pure deleted
 
 -- | Delete a whole job tree, named by any node in it. Walks up to the root, then deletes
--- from there down. The root has no parent to resume. Returns the number deleted.
+-- from there down. The root has no parent to resume. Returns the ids deleted.
 cancelJobTree
   :: (MonadArbiter m)
   => Text
@@ -2532,9 +2533,9 @@ cancelJobTree
   -- ^ Table name
   -> Int64
   -- ^ Any job id in the tree
-  -> m Int64
+  -> m [Int64]
 cancelJobTree schemaName tableName jobId =
-  countStrict "cancelJobTree" (Tmpl.cancelJobTreeSQL schemaName tableName jobId)
+  MA.executeQuery (Tmpl.cancelJobTreeSQL schemaName tableName jobId)
 
 -- | Cascade-cancel a job subtree. Flags still-live claimed jobs, deletes the rest,
 -- and NOTIFYs the queue's cancel channel for every claimed job affected. Workers
@@ -2548,7 +2549,7 @@ forceCancelJob
   -> Int64
   -- ^ Root job id
   -> m Int64
-forceCancelJob = cascadeDeleteJob Tmpl.forceCancelJobSQL
+forceCancelJob = cascadeDeleteJob (> 0) (\schemaName tableName -> countOr0 . Tmpl.forceCancelJobSQL schemaName tableName)
 
 -- ---------------------------------------------------------------------------
 -- Suspend/Resume Operations

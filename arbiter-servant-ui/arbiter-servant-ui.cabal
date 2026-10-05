@@ -81,7 +81,7 @@ test-suite arbiter-servant-ui-tests
   main-is:        Spec.hs
   build-depends:
     , arbiter-servant-ui
-    , base
+    , base                >=4.20 && <5
     , bytestring
     , directory
     , filepath
@@ -102,6 +102,6 @@ test-suite arbiter-servant-ui-openapi
     , aeson-pretty             >=0.8 && <0.9
     , arbiter-core
     , arbiter-servant-openapi
-    , base
+    , base                     >=4.20 && <5
     , tasty                    >=1.4 && <1.6
     , tasty-golden             >=2.3 && <2.4
