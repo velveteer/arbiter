@@ -146,8 +146,9 @@ holFn schema table = schema <> ".detect_hol_" <> table <> "_fn"
 holTrigger _ table = "detect_hol_" <> table
 
 -- | DDL to install the gap-free HOL detector. A row trigger logs a violation
--- when a job becomes in-flight while another @attempts > 0@ job in its group
--- already is. The @attempts > 0@ filter excludes scheduled jobs.
+-- when a claim makes a job in-flight while another @attempts > 0@ job in its
+-- group already is. Only a claim raises @attempts@. The @attempts > 0@ filter
+-- excludes scheduled jobs.
 holInstallSql :: Text -> Text -> [Text]
 holInstallSql schema table =
   [ "SET client_min_messages TO warning"
@@ -156,7 +157,7 @@ holInstallSql schema table =
   , "CREATE OR REPLACE FUNCTION "
       <> holFn schema table
       <> "() RETURNS TRIGGER AS $t$ BEGIN IF NEW.not_visible_until > NOW()"
-      <> " AND NOT NEW.suspended AND NEW.attempts > 0 AND NEW.group_key IS NOT NULL"
+      <> " AND NOT NEW.suspended AND NEW.attempts > OLD.attempts AND NEW.group_key IS NOT NULL"
       <> " AND EXISTS (SELECT 1 FROM "
       <> tbl
       <> " WHERE group_key = NEW.group_key AND id <> NEW.id"
