@@ -64,7 +64,8 @@ data OverlapPolicy
 data BackfillPolicy
   = -- | Drop missed minutes silently. Default.
     NoBackfill
-  | -- | Replay missed minutes up to the given number of seconds.
+  | -- | Replay minutes missed in the last given number of seconds. A 'SkipOverlap'
+    -- schedule replays only the earliest one.
     Backfill NominalDiffTime
   deriving stock (Eq, Generic, Show)
 
@@ -98,7 +99,8 @@ validateCronScheduleUpdate (CS.CronScheduleUpdate mExpr mOverlap mTz _) = do
     check field ok message = unless (all ok (join field)) (Left message)
 
 -- | 'Arbiter.Core.HighLevel.updateCronScheduleUnchecked' behind
--- 'validateCronScheduleUpdate'. Returns rows affected (0 = not found).
+-- 'validateCronScheduleUpdate'. Returns rows affected, 0 for an unknown name or an
+-- empty patch.
 updateCronScheduleChecked
   :: (MonadArbiter m)
   => Text

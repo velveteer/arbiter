@@ -5,9 +5,9 @@
 
 -- | Embedded admin dashboard. Bootstrap 5 CSS and Vue 3, compiled in.
 --
--- __Security:__ No built-in authentication. All queue management operations
--- (view, delete, retry) are publicly accessible. Add auth middleware before
--- exposing to untrusted networks.
+-- __Security:__ No built-in authentication. The dashboard calls the arbiter-servant
+-- API, which has no authentication. Add auth middleware before you expose either to
+-- untrusted networks.
 --
 -- = Quick Start
 --
@@ -35,8 +35,8 @@ module Arbiter.Servant.UI
   , adminUIServerDevHoisted
 
     -- * Standalone WAI app
-  , adminApplication
-  , devAdminApplication
+  , adminApp
+  , devAdminApp
 
     -- * Combined app helper
   , arbiterAppWithAdmin
@@ -170,22 +170,22 @@ type AdminUI = Raw
 
 -- | Serve 'AdminUI' from the embedded files.
 adminUIServer :: Server AdminUI
-adminUIServer = Tagged adminApplication
+adminUIServer = Tagged adminApp
 
 -- | Hoisted variant for integration into a route tree using a custom monad.
 adminUIServerHoisted :: forall m. (forall x. Handler x -> m x) -> ServerT AdminUI m
 adminUIServerHoisted natTrans = hoistServer (Proxy @AdminUI) natTrans adminUIServer
 
 -- | The dashboard as a standalone WAI application over the embedded files.
-adminApplication :: Application
-adminApplication = serveStaticApp Versioned $ \filePath -> pure (lookup filePath embeddedAssets)
+adminApp :: Application
+adminApp = serveStaticApp Versioned $ \filePath -> pure (lookup filePath embeddedAssets)
 
 -- | The dashboard served from disk, read per request.
-devAdminApplication
+devAdminApp
   :: FilePath
   -- ^ The static directory.
   -> Application
-devAdminApplication dir = serveStaticApp AlwaysFresh $ \filePath ->
+devAdminApp dir = serveStaticApp AlwaysFresh $ \filePath ->
   if isServed filePath
     then (Just . plainAsset <$> BS.readFile (dir </> filePath)) `catch` (\(_ :: IOException) -> pure Nothing)
     else pure Nothing
@@ -297,7 +297,7 @@ adminUIServerDev
   :: FilePath
   -- ^ The static directory.
   -> Server AdminUI
-adminUIServerDev dir = Tagged (devAdminApplication dir)
+adminUIServerDev dir = Tagged (devAdminApp dir)
 
 -- | Hoisted dev-mode variant for integration into a route tree using a custom monad.
 adminUIServerDevHoisted

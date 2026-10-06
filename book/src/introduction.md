@@ -3,7 +3,7 @@
 A PostgreSQL job queue for Haskell applications.
 
 - Transactional job processing: jobs and database operations commit together
-- At-least-once delivery with visibility timeouts and heartbeats
+- At-least-once delivery with leases and heartbeats
 - Per-group ordering (partitioned FIFO)
 - Concurrent worker pools with `LISTEN/NOTIFY` wakeups and polling fallback
 - Dead-letter queues

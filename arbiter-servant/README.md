@@ -10,7 +10,7 @@ REST API for managing and monitoring Arbiter job queues, built on Servant.
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-import Arbiter.Servant (Queue, initArbiterServer, runArbiterAPI)
+import Arbiter.Servant (Queue, createArbiterServer, runArbiterAPI)
 import Arbiter.Simple (createSimpleEnv, runSimpleDb)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString (ByteString)
@@ -32,11 +32,11 @@ main = do
   -- Run the Arbiter migrations first. "arbiter" is the migrated schema.
   -- Live SSE updates also need enableEventStreaming = True.
   env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-  config <- initArbiterServer (runSimpleDb env)
+  config <- createArbiterServer (runSimpleDb env)
   runArbiterAPI 8080 config
 ```
 
-`initArbiterServer` takes any backend runner, so a hasql application passes
+`createArbiterServer` takes any backend runner, so a hasql application passes
 `runHasqlDb env` and the server shares that env's pool and listener.
 
 A queue with a handler result is `QueueWithResult "email_queue" EmailPayload

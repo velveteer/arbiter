@@ -11,6 +11,7 @@ module Arbiter.Servant.Types
   , JobResponse (..)
   , JobsResponse (..)
   , PayloadEdit (..)
+  , OptionalJSON
   , RescheduleRequest (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
@@ -30,10 +31,6 @@ module Arbiter.Servant.Types
   , JobLease (..)
   , AckRequest (..)
   , ExtendRequest (..)
-
-    -- * Request bodies
-  , OptionalJSON
-  , bodylessContentType
 
     -- * Queues and stats
   , StatsResponse (..)
@@ -63,7 +60,7 @@ module Arbiter.Servant.Types
   , HealthResponse (..)
   , LivenessResponse (..)
 
-    -- * Re-exported row types
+    -- * Re-exported core types
   , CronScheduleRow (..)
   , CronScheduleUpdate (..)
   , QueueOverview (..)
@@ -82,6 +79,7 @@ module Arbiter.Servant.Types
     -- * Internal
 
     -- | Internal to the arbiter packages. Not covered by the PVP.
+  , bodylessContentType
   , jobLeasePairs
   ) where
 
@@ -317,10 +315,10 @@ data ExtendRequest = ExtendRequest
 
 instance FromJSON ExtendRequest where
   parseJSON = withObject "ExtendRequest" $ \obj ->
-    ExtendRequest <$> parseJSON (Object obj) <*> obj .: "seconds"
+    ExtendRequest <$> parseJSON (Object obj) <*> obj .: "leaseSeconds"
 
 instance ToJSON ExtendRequest where
-  toJSON req = object (jobLeasePairs (erLease req) <> ["seconds" .= erSeconds req])
+  toJSON req = object (jobLeasePairs (erLease req) <> ["leaseSeconds" .= erSeconds req])
 
 -- | Rows each maintenance operation touched, and the operations that raised. An
 -- operation in neither was skipped.

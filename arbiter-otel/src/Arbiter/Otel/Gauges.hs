@@ -7,7 +7,6 @@ module Arbiter.Otel.Gauges
   , reachabilityOf
   ) where
 
-import Arbiter.Core.Job.Schema (SchemaName, TableName)
 import Arbiter.Core.MonadArbiter (MonadArbiter)
 import Arbiter.Core.Operations (Shared (..), micros)
 import Arbiter.Worker.Logger (FailureGate, LogConfig (..), LogLevel (Warning), newFailureGate, reportOutcome)
@@ -37,7 +36,7 @@ import Arbiter.Otel.Metrics (arbiterMeter)
 import Arbiter.Otel.Telemetry qualified as Tel
 
 -- | Register gauge instruments and return their refresh loop. Run the loop on its own
--- thread. It runs until it is stopped. A stopped loop retires the exported readings.
+-- thread. It runs until it is stopped. A stopped loop leaves the last readings in place.
 -- With metrics off, the loop returns at once.
 startGauges
   :: (MonadArbiter m)
@@ -46,8 +45,9 @@ startGauges
   -- ^ Base log config for the loop.
   -> (forall a. m a -> IO a)
   -- ^ Runs a database action.
-  -> SchemaName
-  -> [(TableName, [Text])]
+  -> Text
+  -- ^ Schema name.
+  -> [(Text, [Text])]
   -- ^ Each queue table and its payload kind labels.
   -> NominalDiffTime
   -- ^ Refresh interval. The minimum is one second.
@@ -62,8 +62,8 @@ withGaugeLoop
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
-  -> SchemaName
-  -> [(TableName, [Text])]
+  -> Text
+  -> [(Text, [Text])]
   -> NominalDiffTime
   -> (IO () -> IO b)
   -> IO b
@@ -75,8 +75,8 @@ prepareGauges
   => Tel.Telemetry
   -> LogConfig
   -> (forall a. m a -> IO a)
-  -> SchemaName
-  -> [(TableName, [Text])]
+  -> Text
+  -> [(Text, [Text])]
   -> NominalDiffTime
   -> IO (IO (), IO ())
 prepareGauges tel baseLog runDb schema queueKinds requestedInterval

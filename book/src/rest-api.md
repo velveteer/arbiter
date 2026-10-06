@@ -9,7 +9,7 @@ import Arbiter.Servant qualified as Servant
 import Arbiter.Simple (createSimpleEnv, runSimpleDb)
 
 env <- createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
-config <- Servant.initArbiterServer (runSimpleDb env)
+config <- Servant.createArbiterServer (runSimpleDb env)
 Servant.runArbiterAPI 8080 config
 ```
 
@@ -38,13 +38,13 @@ UI route type: [arbiter-servant-ui Haddocks](https://arbiterq.dev/arbiter-servan
 `/openapi.json`:
 
 ```haskell
-import Arbiter.Servant (ArbiterAPI, arbiterServer, initArbiterServer)
+import Arbiter.Servant (ArbiterAPI, arbiterServer, createArbiterServer)
 import Arbiter.Servant.OpenApi (OpenApiAPI, openApiServer)
 import Arbiter.Servant.UI (AdminUI, adminUIServer)
 
 type MyApp = ArbiterAPI AppRegistry :<|> OpenApiAPI :<|> AdminUI
 
-config <- initArbiterServer (runSimpleDb env)
+config <- createArbiterServer (runSimpleDb env)
 run 8080 $
   serve (Proxy @MyApp) (arbiterServer config :<|> openApiServer @AppRegistry :<|> adminUIServer)
 ```
@@ -110,18 +110,18 @@ Global endpoints under `/api/v1/`:
 | `PATCH` | `cron/schedules/:name` | Override a schedule's expression, overlap policy, time zone, or enabled state |
 | `POST` | `cron/schedules/:name/run` | Run an enabled schedule once, out of band |
 | `GET` | `workers` | List registered workers |
-| `POST` | `workers/:id/pause` | Pause a single worker pool |
-| `POST` | `workers/:id/resume` | Resume a single worker pool |
+| `POST` | `workers/:id/pause` | Pause a single worker |
+| `POST` | `workers/:id/resume` | Resume a single worker |
 | `GET` | `rate-limits` | List policies with bucket and throttle stats |
 | `GET` | `rate-limits/:prefix/buckets` | List a prefix's per-key buckets |
 | `PATCH` | `rate-limits/:prefix` | Set or clear a policy's override params |
 | `POST` | `rate-limits/:prefix/reset` | Reset a prefix's buckets |
 | `POST` | `rate-limits/:prefix/buckets/:key/tokens` | Add tokens to one bucket and wake its throttled jobs |
 | `POST` | `rate-limits/prune` | Delete full buckets idle for `idle` seconds |
-| `GET` | `concurrency` | List pools with limit and in-flight stats |
-| `GET` | `concurrency/:prefix/keys` | List a pool's per-key in-flight counts |
-| `PATCH` | `concurrency/:prefix` | Set or clear a pool's override limit |
-| `POST` | `concurrency/reconcile` | Repair the in-flight counts of every pool |
+| `GET` | `concurrency` | List concurrency policies with limit and in-flight stats |
+| `GET` | `concurrency/:prefix/keys` | List a policy's per-key in-flight counts |
+| `PATCH` | `concurrency/:prefix` | Set or clear a policy's override limit |
+| `POST` | `concurrency/reconcile` | Repair the in-flight counts of every policy |
 | `POST` | `concurrency/prune` | Delete drained keys that have no live job |
 | `POST` | `maintenance` | Run one gated maintenance pass |
 | `GET` | `health` | Readiness check. Returns 503 when the database is unavailable |
@@ -195,9 +195,9 @@ that does not match the result type returns 400. Omit `result` to store none. Th
 | --- | --- |
 | `ack` | completes the job |
 | `nack` | refunds the attempt. The job stays invisible for the rest of the lease. |
-| `extend` | moves the lease expiry to `seconds` from now, at most 3600 |
+| `extend` | moves the lease expiry to `leaseSeconds` from now, at most 3600 |
 
-A mismatched lease, or one held by a worker pool, returns 409.
+A mismatched lease, or one held by a registered worker, returns 409.
 
 The server does not renew an HTTP lease. After it expires another consumer can
 claim the job.

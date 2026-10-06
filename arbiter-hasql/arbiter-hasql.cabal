@@ -1,13 +1,17 @@
 cabal-version:   3.0
 name:            arbiter-hasql
 version:         0.1.0.0
-synopsis:        Hasql backend for Arbiter
+synopsis:        hasql backend for Arbiter
 description:
   A hasql backend for Arbiter, a PostgreSQL job queue for Haskell.
 
-  Provides a @MonadArbiter@ instance over a hasql connection pool, with
+  Provides @HasqlDb@, a @MonadArbiter@ monad over a hasql connection pool, with
   savepoint-based nested transactions and prepared statements for the hot path
-  (on by default). Handlers receive the connection the job was claimed on.
+  (on by default). Single-job handlers receive the connection of the worker
+  transaction that acks the job. @inTransaction@ runs Arbiter operations in a
+  transaction the application already opened. The query, statement,
+  transaction, and handler primitives in "Arbiter.Hasql.MonadArbiter" are for
+  applications that write their own instance.
 
 license:         MIT
 license-file:    LICENSE
@@ -66,6 +70,7 @@ library
     , mtl            >=2.2  && <2.4
     , resource-pool  >=0.4  && <0.6
     , text           >=1.2  && <2.2
+    , transformers   >=0.5  && <0.7
     , unliftio       >=0.2  && <0.3
 
   if flag(hasql2)
@@ -76,7 +81,7 @@ library
   else
     build-depends:
       , arbiter-libpq     >=0.1  && <0.2
-      , hasql             >=1.9  && <1.11
+      , hasql             >=1.10 && <1.11
       , postgresql-libpq  >=0.10 && <0.12
 
 test-suite arbiter-hasql-tests
@@ -95,21 +100,21 @@ test-suite arbiter-hasql-tests
     Test.Arbiter.Hasql.Worker
 
   build-depends:
-    , aeson
+    , aeson                   >=2.2 && <2.3
     , arbiter-core            >=0.1 && <0.2
     , arbiter-hasql
     , arbiter-test-common     >=0.1 && <0.2
     , arbiter-worker          >=0.1 && <0.2
     , arbiter-worker-testkit  >=0.1 && <0.2
     , base >=4.20 && <5
-    , bytestring
+    , bytestring              >=0.10.12 && <0.13
     , hasql
     , hspec                   >=2.8 && <2.12
-    , postgresql-simple
-    , resource-pool
-    , stm
-    , text
-    , unliftio
+    , postgresql-simple       >=0.6 && <0.8
+    , resource-pool           >=0.4 && <0.6
+    , stm                     >=2.5 && <2.6
+    , text                    >=1.2 && <2.2
+    , unliftio                >=0.2 && <0.3
 
   if flag(hasql2)
     build-depends:

@@ -64,8 +64,8 @@ createJobQueueGroupRetriedIndexSQL schemaName tableName =
     "group_key, attempts DESC, priority ASC, id ASC"
     (Just "group_key IS NOT NULL AND attempts > 0")
 
--- | Scheduled grouped jobs by due time. Group maintenance uses this index to
--- replace @next_due@ with one point lookup.
+-- | Parked grouped jobs (scheduled, backoff or leased) by visibility deadline. Group
+-- maintenance uses this index to replace @next_due@ with one point lookup.
 createJobQueueGroupedDueIndexSQL :: SchemaName -> TableName -> Text
 createJobQueueGroupedDueIndexSQL schemaName tableName =
   indexSQL

@@ -6,7 +6,7 @@
 -- Typed encoding and decoding for PostgreSQL queries.
 --
 --   * 'RowCodec' decodes result rows. It is a free applicative that each backend
---     (postgresql-simple, hasql, orville) interprets natively.
+--     (postgresql-simple, hasql, Orville) interprets natively.
 --
 --   * 'Params' is the typed parameter list for query execution.
 --
@@ -111,7 +111,7 @@ data Col a where
   CUuid :: Col UUID
 
 -- | A named column with nullability. Carries the column name for
--- backends that use name-based decoding, such as orville.
+-- backends that use name-based decoding, such as Orville.
 data NullCol a where
   NotNull :: Text -> Col a -> NullCol a
   Nullable :: Text -> Col a -> NullCol (Maybe a)
@@ -410,7 +410,7 @@ rateLimitBucketCodec =
     <*> ncol "fill_fraction" CFloat8
     <*> col "last_refill" CTimestamptz
 
--- | A pool policy row as the admin API reports it.
+-- | A concurrency policy row as the admin API reports it.
 concurrencyPolicyViewCodec :: RowCodec ConcurrencyPolicyView
 concurrencyPolicyViewCodec =
   ConcurrencyPolicyView

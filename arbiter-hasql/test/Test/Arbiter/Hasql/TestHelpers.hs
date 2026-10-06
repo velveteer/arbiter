@@ -14,7 +14,6 @@ import Arbiter.Core.Backend (withConn)
 import Arbiter.Test.Setup (createPoolWith)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Data.ByteString.Char8 qualified as BS8
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
@@ -24,6 +23,7 @@ import Arbiter.Hasql.Compat (acquireConnect, runSQL)
 import Arbiter.Hasql.HasqlDb (HasqlConnect, HasqlDb, toHasqlConnect)
 
 #if MIN_VERSION_hasql(2,0,0)
+import Data.ByteString.Char8 qualified as BS8
 import Pqi qualified as PQ
 import Pqi.Ffi qualified as Ffi
 import Pqi.Native qualified as Native

@@ -3,6 +3,10 @@
 -- | Deduplication strategy carried by a job at enqueue.
 module Arbiter.Core.Job.Dedup
   ( DedupKey (..)
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
   , dedupParts
   ) where
 
@@ -13,11 +17,12 @@ import GHC.Generics (Generic)
 
 -- | Deduplication strategy, checked on INSERT via @ON CONFLICT@ on the dedup key.
 data DedupKey
-  = -- | Skip if a job with this key exists (@DO NOTHING@).
+  = -- | Skip if the main queue table holds a job with this key (@DO NOTHING@).
+    -- DLQ and archive rows do not conflict.
     IgnoreDuplicate Text
-  | -- | Replace the existing job with this key (@DO UPDATE@), unless it is
-    -- actively claimed, force-cancel flagged, has a different parent, or has
-    -- children. Children in the DLQ count.
+  | -- | Replace the main queue table's job with this key (@DO UPDATE@), unless it is
+    -- in flight (claimed under a live lease), force-cancel-flagged, has a different
+    -- parent, or has children. Children in the DLQ count.
     ReplaceDuplicate Text
   deriving stock (Eq, Generic, Show)
 

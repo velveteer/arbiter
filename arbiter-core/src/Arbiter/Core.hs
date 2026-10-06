@@ -56,12 +56,20 @@ import Arbiter.Core.CronSchedule
   , effectiveOverlap
   , effectiveTimezone
   )
-import Arbiter.Core.Exceptions
+import Arbiter.Core.Exceptions hiding
+  ( displayEx
+  , namedJobIds
+  , throwInternal
+  , throwJobGone
+  , throwJobGoneIds
+  , throwParsing
+  , throwScopedFailure
+  )
 import Arbiter.Core.HighLevel
 import Arbiter.Core.Job.Archive (ArchiveJob (..))
 import Arbiter.Core.Job.DLQ
 import Arbiter.Core.Job.Schema (SchemaName, TableName)
-import Arbiter.Core.Job.Types
+import Arbiter.Core.Job.Types hiding (JobRecord, PayloadColumns (..), dedupParts)
 import Arbiter.Core.JobResult
 import Arbiter.Core.JobTree hiding (insertJobTree) -- use HighLevel.insertJobTree
 import Arbiter.Core.Listen
@@ -72,13 +80,20 @@ import Arbiter.Core.Listen
   , withChannels
   )
 import Arbiter.Core.MonadArbiter hiding
-  ( ParamType (..)
+  ( Col (..)
+  , NullCol (..)
+  , ParamType (..)
   , Params
+  , Piece (..)
   , Query (..)
+  , RowCodec
   , SomeParam (..)
+  , Stored (..)
   , countOr0
   , countOr0Prepared
   , mkQuery
+  , runCodec
+  , storedBytes
   )
 import Arbiter.Core.PoolConfig
 import Arbiter.Core.QueueRegistry

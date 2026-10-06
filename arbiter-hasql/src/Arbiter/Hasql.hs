@@ -17,6 +17,8 @@
 -- @
 --
 -- @Pqi.Ffi@ is in the pqi-ffi package. On hasql 1.x 'toHasqlConnect' takes only the connection string.
+--
+-- "Arbiter.Hasql.MonadArbiter" has the primitives for an application's own instance.
 module Arbiter.Hasql
   ( -- * Re-exports
     module Arbiter.Hasql.MonadArbiter

@@ -28,7 +28,7 @@ import Arbiter.Core.Concurrency.Spec
   , collectPolicies
   , concurrencyBy
   , concurrencyByCase
-  , concurrencyPool
+  , concurrencyPolicy
   , registryConcurrencyPolicies
   )
 import Arbiter.Core.Concurrency.Stats (ConcurrencyPolicyUpdate (..))
@@ -69,17 +69,17 @@ import System.Timeout (timeout)
 import Test.Hspec
 import UnliftIO.Async (async, mapConcurrently, wait)
 
-import Arbiter.Test.Setup (drainWith, execQuery, execStatement, seedConcurrencyPoolSQL)
+import Arbiter.Test.Setup (drainWith, execQuery, execStatement, seedConcurrencyPolicySQL)
 
--- | A payload that selects a concurrency pool by its text. @mx@, @my@ and @mz@
--- select those pools (limits 1, 2 and 3) on one key. Other text selects @declpool@
+-- | A payload that selects a concurrency policy by its text. @mx@, @my@ and @mz@
+-- select those policies (limits 1, 2 and 3) on one key. Other text selects @declpolicy@
 -- (limit 2), keyed by the text.
 newtype CLPayload = CLPayload Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
--- | A finite tag per payload. "mx", "my", and "mz" select those pools. Any other
--- text selects "declpool", keyed by the payload text.
+-- | A finite tag per payload. "mx", "my", and "mz" select those policies. Any other
+-- text selects "declpolicy", keyed by the payload text.
 data CLTag = CLDecl | CLMx | CLMy | CLMz
   deriving stock (Bounded, Enum, Eq)
 
@@ -91,21 +91,21 @@ instance HasConcurrency CLPayload where
         | text == "my" = CLMy
         | text == "mz" = CLMz
         | otherwise = CLDecl
-      sel CLDecl = concurrencyBy (concurrencyPool "declpool" 2) (\(CLPayload text) -> text)
-      sel CLMx = concurrencyBy (concurrencyPool "mx" 1) (const "k")
-      sel CLMy = concurrencyBy (concurrencyPool "my" 2) (const "k")
-      sel CLMz = concurrencyBy (concurrencyPool "mz" 3) (const "k")
+      sel CLDecl = concurrencyBy (concurrencyPolicy "declpolicy" 2) (\(CLPayload text) -> text)
+      sel CLMx = concurrencyBy (concurrencyPolicy "mx" 1) (const "k")
+      sel CLMy = concurrencyBy (concurrencyPolicy "my" 2) (const "k")
+      sel CLMz = concurrencyBy (concurrencyPolicy "mz" 3) (const "k")
 
 -- | A one-queue registry over 'CLPayload'.
 type CLReg = '[Queue "arbiter_concurrency_test" CLPayload]
 
--- | A second payload declaring a different pool, with a two-payload registry.
+-- | A second payload declaring a different policy, with a two-payload registry.
 newtype CLPayload2 = CLPayload2 Text
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
 
 instance HasConcurrency CLPayload2 where
-  concurrencyFor = concurrencyBy (concurrencyPool "declpool2" 5) (\(CLPayload2 text) -> text)
+  concurrencyFor = concurrencyBy (concurrencyPolicy "declpolicy2" 5) (\(CLPayload2 text) -> text)
 
 type CLReg2 = '[Queue "clq1" CLPayload, Queue "clq2" CLPayload2]
 
@@ -114,13 +114,13 @@ concurrencyTable :: Text
 concurrencyTable = "arbiter_concurrency_test"
 
 fullKey :: Text -> Text -> Text
-fullKey pool suffix = "declpool:" <> pool <> ":" <> suffix
+fullKey policy suffix = "declpolicy:" <> policy <> ":" <> suffix
 
 job :: Text -> Text -> JobWrite CLPayload
-job pool suffix = defaultJob (CLPayload (pool <> ":" <> suffix))
+job policy suffix = defaultJob (CLPayload (policy <> ":" <> suffix))
 
 groupedJob :: Text -> Text -> Text -> JobWrite CLPayload
-groupedJob groupKey pool suffix = defaultGroupedJob groupKey (CLPayload (pool <> ":" <> suffix))
+groupedJob groupKey policy suffix = defaultGroupedJob groupKey (CLPayload (policy <> ":" <> suffix))
 
 -- | The concurrency-limit suite, run against any backend.
 -- Build the schema with 'Arbiter.Test.Setup.setupOnce' and empty it before each test with 'Arbiter.Test.Setup.cleanupData'.
@@ -138,7 +138,7 @@ concurrencyLimitSpec runM = do
       ackAll env jobs = runM env (traverse_ HL.ackJob jobs)
       retryAll env jobs = runM env (traverse_ (HL.updateJobForRetry 60 "boom") jobs)
       nackAll env jobs = runM env (traverse_ HL.nackJob jobs)
-      overridePool env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpool" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
+      overridePolicy env lim = void (runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" (ConcurrencyPolicyUpdate (Just lim))) :: IO Int64)
       prune env = runM env HL.pruneConcurrencyKeys :: IO Int64
       reconcile env = void (runM env HL.reconcileConcurrencyCounts :: IO Int64)
       reconcileIfStale env = void (runM env HL.reconcileConcurrencyCountsIfStale) :: IO ()
@@ -147,13 +147,13 @@ concurrencyLimitSpec runM = do
         runM env $ do
           schema <- getSchema
           void $ execStatement ("DELETE FROM " <> arbiterConcurrencyTable schema) []
-      -- Seed the declpool default limit and clear any override.
+      -- Seed the declpolicy default limit and clear any override.
       seed env (lim :: Int) =
         runM env $ do
           schema <- getSchema
           traverse_
             (\statement -> void (execStatement statement []))
-            (seedConcurrencyPoolSQL schema "declpool" (fromIntegral lim))
+            (seedConcurrencyPolicySQL schema "declpolicy" (fromIntegral lim))
       corrupt env key count =
         runM env $ do
           schema <- getSchema
@@ -201,7 +201,7 @@ concurrencyLimitSpec runM = do
             )
             []
 
-  it "admits up to the pool limit and blocks the rest" $ \env -> do
+  it "admits up to the policy limit and blocks the rest" $ \env -> do
     seed env 3
     enqueue env (replicate 5 (job "cap" "a"))
     first <- claimAs env
@@ -223,46 +223,46 @@ concurrencyLimitSpec runM = do
     HL.readyJobs stats `shouldBe` 1
     HL.blockedJobs stats `shouldBe` 1
 
-  it "an undeclared pool runs uncapped (fail open)" $ \env -> do
+  it "a policy with no seeded row runs uncapped (fail open)" $ \env -> do
     -- Claim well above any seeded limit.
-    enqueue env (replicate 20 (job "undeclared" "a"))
+    enqueue env (replicate 20 (job "unseeded" "a"))
     claimed <- claimAs env
     length claimed `shouldBe` 20
 
-  it "caps by a HasConcurrency instance's declared pool (no manual key)" $ \env -> do
+  it "caps by a HasConcurrency instance's declared policy (no manual key)" $ \env -> do
     seed env 2
-    enqueue env (replicate 5 (job "declpool" "tx"))
+    enqueue env (replicate 5 (job "declpolicy" "tx"))
     first <- claimAs env
     length first `shouldBe` 2
-    inFlight env (fullKey "declpool" "tx") `shouldReturn` Just 2
+    inFlight env (fullKey "declpolicy" "tx") `shouldReturn` Just 2
 
-  it "the registry collects the declared pool for migration seeding" $ \_ ->
+  it "the registry collects the declared policy for migration seeding" $ \_ ->
     registryConcurrencyPolicies @CLReg
       `shouldBe` Set.fromList
-        [ ConcurrencyPolicy "declpool" 2
+        [ ConcurrencyPolicy "declpolicy" 2
         , ConcurrencyPolicy "mx" 1
         , ConcurrencyPolicy "my" 2
         , ConcurrencyPolicy "mz" 3
         ]
 
-  it "the registry unions declared pools across all payloads" $ \_ ->
-    -- Two payloads, two pools.
+  it "the registry unions declared policies across all payloads" $ \_ ->
+    -- Two payloads, five policies.
     registryConcurrencyPolicies @CLReg2
       `shouldBe` Set.fromList
-        [ ConcurrencyPolicy "declpool" 2
+        [ ConcurrencyPolicy "declpolicy" 2
         , ConcurrencyPolicy "mx" 1
         , ConcurrencyPolicy "my" 2
         , ConcurrencyPolicy "mz" 3
-        , ConcurrencyPolicy "declpool2" 5
+        , ConcurrencyPolicy "declpolicy2" 5
         ]
 
-  it "concurrencyPool floors a non-positive limit at 1 (the policies table requires a positive default)" $ \_ -> do
-    cpLimit (concurrencyPool "p" 0) `shouldBe` 1
-    cpLimit (concurrencyPool "p" (-5)) `shouldBe` 1
+  it "concurrencyPolicy floors a non-positive limit at 1 (the policies table requires a positive default)" $ \_ -> do
+    cpLimit (concurrencyPolicy "p" 0) `shouldBe` 1
+    cpLimit (concurrencyPolicy "p" (-5)) `shouldBe` 1
 
   it "chooseWhen collects both concurrency branches and runs the chosen one" $ \_ -> do
-    let policyA = concurrencyPool "ca" 1
-        policyB = concurrencyPool "cb" 2
+    let policyA = concurrencyPolicy "ca" 1
+        policyB = concurrencyPolicy "cb" 2
         sel :: ConcurrencyFor Bool
         sel = chooseWhen id (concurrencyBy policyA (const "x")) (concurrencyBy policyB (const "y"))
     Set.toList (collectPolicies sel) `shouldMatchList` [policyA, policyB]
@@ -305,45 +305,45 @@ concurrencyLimitSpec runM = do
     reclaimed <- claimAs env
     length reclaimed `shouldBe` 3
 
-  it "keeps separate keys under one pool independent" $ \env -> do
+  it "keeps separate keys under one policy independent" $ \env -> do
     seed env 2
     enqueue env (replicate 5 (job "iso" "x") <> replicate 5 (job "iso" "y"))
     claimed <- claimAs env
     length claimed `shouldBe` 4
 
-  it "a pool override lowers the cap live" $ \env -> do
+  it "a policy override lowers the cap live" $ \env -> do
     seed env 3
     enqueue env (replicate 5 (job "ovlo" "a"))
-    overridePool env (Just 1)
+    overridePolicy env (Just 1)
     claimed <- claimAs env
     length claimed `shouldBe` 1
 
-  it "a pool override raises the cap live, across every key under the prefix" $ \env -> do
+  it "a policy override raises the cap live, across every key under the prefix" $ \env -> do
     seed env 2
     enqueue env (replicate 6 (job "ovhi" "x") <> replicate 6 (job "ovhi" "y"))
-    overridePool env (Just 5)
+    overridePolicy env (Just 5)
     claimed <- claimAs env
-    -- Both keys under the pool admit up to 5.
+    -- Both keys under the policy admit up to 5.
     length claimed `shouldBe` 10
 
-  it "an override of 0 pauses the pool until cleared" $ \env -> do
+  it "an override of 0 pauses the policy until cleared" $ \env -> do
     seed env 3
     enqueue env (replicate 3 (job "pause" "a"))
-    overridePool env (Just 0)
+    overridePolicy env (Just 0)
     paused <- claimAs env
     length paused `shouldBe` 0
-    overridePool env Nothing
+    overridePolicy env Nothing
     resumed <- claimAs env
     length resumed `shouldBe` 3
 
   it "an empty policy patch leaves the override unchanged, an explicit null clears it" $ \env -> do
     seed env 3
     enqueue env (replicate 6 (job "patch" "a"))
-    overridePool env (Just 1)
-    void (runM env (HL.updateConcurrencyPolicyOverrides "declpool" (ConcurrencyPolicyUpdate Nothing)) :: IO Int64)
+    overridePolicy env (Just 1)
+    void (runM env (HL.updateConcurrencyPolicyOverrides "declpolicy" (ConcurrencyPolicyUpdate Nothing)) :: IO Int64)
     claimed <- claimAs env
     length claimed `shouldBe` 1
-    overridePool env Nothing
+    overridePolicy env Nothing
     more <- claimAs env
     length more `shouldBe` 2
 
@@ -635,7 +635,7 @@ concurrencyLimitSpec runM = do
     -- Many distinct keys at once.
     seed env 2
     let keys = [tshow index | index <- [1 .. 12]]
-    enqueue env (concat [replicate 6 (job "declpool" suffix) | suffix <- keys])
+    enqueue env (concat [replicate 6 (job "declpolicy" suffix) | suffix <- keys])
     _ <- mapConcurrently (const (claimAs env)) [1 .. 8 :: Int]
     overCap <- runM env $ do
       schema <- getSchema
@@ -650,38 +650,38 @@ concurrencyLimitSpec runM = do
     (overCap :: [Text]) `shouldBe` []
     -- An uncontended drain fills every key to the cap.
     void (drainWith (claimAs env))
-    traverse_ (\suffix -> inFlight env (fullKey "declpool" suffix) `shouldReturn` Just 2) keys
+    traverse_ (\suffix -> inFlight env (fullKey "declpolicy" suffix) `shouldReturn` Just 2) keys
 
   it "a full concurrency key does not starve admissible ungrouped jobs behind it" $ \env -> do
     -- Fill the hot key to its cap, then flood it past the bounded candidate window.
     -- The cold job on another key still claims.
     seed env 2
-    enqueue env (replicate 150 (job "declpool" "hot"))
+    enqueue env (replicate 150 (job "declpolicy" "hot"))
     filled <- claimAs env
     length filled `shouldBe` 2
-    enqueue env [job "declpool" "cold"]
+    enqueue env [job "declpolicy" "cold"]
     _ <- claimAs env
-    inFlight env (fullKey "declpool" "cold") `shouldReturn` Just 1
+    inFlight env (fullKey "declpolicy" "cold") `shouldReturn` Just 1
 
   it "a full concurrency key does not starve admissible grouped jobs behind it" $ \env -> do
     -- Each blocked group takes a slot in the bounded window. A flood of groups on
     -- one full key leaves room for a cold group behind them.
     seed env 2
-    enqueue env [groupedJob ("hotg-" <> tshow index) "declpool" "ghot" | index <- [1 .. 150]]
+    enqueue env [groupedJob ("hotg-" <> tshow index) "declpolicy" "ghot" | index <- [1 .. 150]]
     filled <- claimAs env
     length filled `shouldBe` 2
-    enqueue env [groupedJob "coldg" "declpool" "gcold"]
+    enqueue env [groupedJob "coldg" "declpolicy" "gcold"]
     _ <- claimAs env
-    inFlight env (fullKey "declpool" "gcold") `shouldReturn` Just 1
+    inFlight env (fullKey "declpolicy" "gcold") `shouldReturn` Just 1
 
   for_ [False, True] $ \due ->
     it ("finds an admissible group beyond a capacity-one candidate window (" <> (if due then "due" else "ready") <> ")") $ \env -> do
       seed env 2
-      enqueue env (replicate 2 (job "declpool" "window-hot"))
+      enqueue env (replicate 2 (job "declpolicy" "window-hot"))
       filled <- claimAs env
       length filled `shouldBe` 2
-      enqueue env [groupedJob ("window-" <> tshow index) "declpool" "window-hot" | index <- [1 .. 12]]
-      enqueue env [groupedJob "window-cold" "declpool" "window-cold"]
+      enqueue env [groupedJob ("window-" <> tshow index) "declpolicy" "window-hot" | index <- [1 .. 12]]
+      enqueue env [groupedJob "window-cold" "declpolicy" "window-cold"]
       when due $ runM env $ do
         schema <- getSchema
         void $
@@ -692,30 +692,30 @@ concurrencyLimitSpec runM = do
             )
             []
       claimed <- runM env (HL.claimNextVisibleJobsAs 1 60 wid) :: IO [JobRead CLPayload]
-      map payload claimed `shouldBe` [CLPayload "declpool:window-cold"]
+      map payload claimed `shouldBe` [CLPayload "declpolicy:window-cold"]
 
   it "gates a group on the row it would claim" $ \env -> do
     -- A failed job keeps the head of its group's line. The head gate judges that
     -- row. Here the fresh low-id sibling sits on a full key.
     seed env 1
-    enqueue env [job "declpool" "gfresh"]
+    enqueue env [job "declpolicy" "gfresh"]
     filled <- claimAs env
     length filled `shouldBe` 1
-    enqueue env [groupedJob "rg" "declpool" "gfresh"]
-    enqueue env [groupedJob "rg" "declpool" "gretry"]
-    markAttempted env (fullKey "declpool" "gretry")
+    enqueue env [groupedJob "rg" "declpolicy" "gfresh"]
+    enqueue env [groupedJob "rg" "declpolicy" "gretry"]
+    markAttempted env (fullKey "declpolicy" "gretry")
     _ <- claimAs env
-    inFlight env (fullKey "declpool" "gretry") `shouldReturn` Just 1
+    inFlight env (fullKey "declpolicy" "gretry") `shouldReturn` Just 1
 
   it "keeps a group whose batch still has a claimable row under a blocked retry" $ \env -> do
     -- The batch is taken attempts-first and cut by (priority, id). It yields a
     -- claim when its lowest-id row is admissible. The gate judges that row.
     seed env 1
-    enqueue env [job "declpool" "bhot"]
+    enqueue env [job "declpolicy" "bhot"]
     filled <- claimAs env
     length filled `shouldBe` 1
-    enqueue env [groupedJob "bg" "declpool" "bfree"]
-    enqueue env [groupedJob "bg" "declpool" "bhot"]
-    markAttempted env (fullKey "declpool" "bhot")
+    enqueue env [groupedJob "bg" "declpolicy" "bfree"]
+    enqueue env [groupedJob "bg" "declpolicy" "bhot"]
+    markAttempted env (fullKey "declpolicy" "bhot")
     claimed <- runM env (HL.claimNextVisibleJobsBatched 2 100 60) :: IO [NE.NonEmpty (JobRead CLPayload)]
-    map payload (concatMap NE.toList claimed) `shouldBe` [CLPayload "declpool:bfree"]
+    map payload (concatMap NE.toList claimed) `shouldBe` [CLPayload "declpolicy:bfree"]

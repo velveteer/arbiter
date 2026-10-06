@@ -11,7 +11,7 @@
 -- myFunction = void $ insertJob (defaultJob myPayload)
 -- @
 module Arbiter.Simple.SimpleDb
-  ( -- * Database Monad
+  ( -- * Database monad
     SimpleDb (..)
   , SimpleEnv
   , Db
@@ -31,7 +31,7 @@ module Arbiter.Simple.SimpleDb
   ) where
 
 import Arbiter.Core.Backend
-  ( Db
+  ( Db (..)
   , Driver (..)
   , Env (..)
   , HasPoolState (..)
@@ -48,10 +48,11 @@ import Arbiter.Core.MonadArbiter (MonadArbiter (..))
 import Arbiter.Core.PoolConfig (PoolConfig)
 import Arbiter.Core.PoolConfig qualified as PC
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry)
-import Arbiter.LibPQ (libpqListenConn, withLibPQListenConn)
+import Arbiter.LibPQ (libPQListenConn, withLibPQListenConn)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (MonadReader, asks)
+import Control.Monad.Trans.Class (MonadTrans (..))
 import Data.ByteString (ByteString)
 import Data.Pool (Pool)
 import Data.Proxy (Proxy (..))
@@ -70,11 +71,12 @@ import Arbiter.Simple.MonadArbiter
 type SimpleEnv = Env Connection ()
 
 simpleDriver :: Driver Connection ()
-simpleDriver = Driver {withListenConn = \conn action -> withConnection conn (action . libpqListenConn), initialConfig = ()}
+simpleDriver = Driver {withListenConn = \conn action -> withConnection conn (action . libPQListenConn), initialConfig = ()}
 
 -- | The postgresql-simple database monad.
 newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb
   { unSimpleDb :: Db Connection () registry m a
+  -- ^ The action in the shared pooled-backend monad.
   }
   deriving newtype
     ( Applicative
@@ -90,6 +92,9 @@ newtype SimpleDb (registry :: JobPayloadRegistry) m a = SimpleDb
     , MonadUnliftIO
     )
 
+instance MonadTrans (SimpleDb registry) where
+  lift = SimpleDb . Db . lift
+
 instance (MonadUnliftIO m) => MonadArbiter (SimpleDb registry m) where
   type RegistryOf (SimpleDb registry m) = registry
   type Handler (SimpleDb registry m) job result = Connection -> job -> SimpleDb registry m result
@@ -100,7 +105,8 @@ instance (MonadUnliftIO m) => MonadArbiter (SimpleDb registry m) where
   runHandlerWithConnection = simpleRunHandlerWithConnection
   getListener = asks listener
 
--- | Release the env's connection pool, closing its open connections.
+-- | Close the idle connections in the env's pool. Connections in use stay open and go
+-- back to the pool. The pool stays usable.
 destroySimpleEnv :: (MonadIO m) => SimpleEnv registry -> m ()
 destroySimpleEnv = destroyEnv
 
@@ -111,9 +117,11 @@ runSimpleDb env = runDb env . unSimpleDb
 -- | Run a 'SimpleDb' action on one connection pinned as the caller's open transaction.
 --
 -- @
+-- import Arbiter.Core qualified as Arb
+--
 -- PG.withTransaction conn $ do
---   PG.execute conn "INSERT INTO orders ..." params
---   inTransaction conn "arbiter" $
+--   PG.execute conn \"INSERT INTO orders ...\" params
+--   inTransaction \@MyRegistry conn \"arbiter\" $
 --     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 -- @
 inTransaction
@@ -127,7 +135,8 @@ inTransaction
 inTransaction conn schemaName = Backend.inTransaction simpleDriver conn schemaName . unSimpleDb
 
 -- | Create a 'SimpleEnv' with 'Arbiter.Core.PoolConfig.defaultPoolConfig'. Size worker pools with
--- 'createSimpleEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@. The listener holds one pool slot.
+-- 'createSimpleEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@.
+-- While anything listens, the listener holds one pool slot.
 createSimpleEnv
   :: forall registry m
    . (MonadIO m)
@@ -141,7 +150,8 @@ createSimpleEnv
 createSimpleEnv proxy connStr schemaName =
   createSimpleEnvWithConfig proxy connStr schemaName PC.defaultPoolConfig
 
--- | Create a 'SimpleEnv' with custom pool settings. The listener holds one pool slot.
+-- | Create a 'SimpleEnv' with custom pool settings. While anything listens, the listener holds
+-- one pool slot.
 --
 -- @
 -- let config = PoolConfig
@@ -165,7 +175,8 @@ createSimpleEnvWithConfig
   -> m (SimpleEnv registry)
 createSimpleEnvWithConfig _proxy connStr = createEnvWithConfig simpleDriver (connectPostgreSQL connStr) close
 
--- | Create a 'SimpleEnv' over a caller's own connection pool. The listener holds one pool slot.
+-- | Create a 'SimpleEnv' over a caller's own connection pool. While anything listens, the
+-- listener holds one pool slot.
 createSimpleEnvWithPool
   :: forall registry m
    . (MonadIO m)

@@ -4,7 +4,7 @@
 
 module Main (main) where
 
-import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPool)
+import Arbiter.Core.Concurrency.Spec (HasConcurrency (..), concurrencyBy, concurrencyPolicy)
 import Arbiter.Core.Exceptions (throwRetryable)
 import Arbiter.Core.HighLevel (QueueOperation, RegistryAdmissionPolicies)
 import Arbiter.Core.HighLevel qualified as HL
@@ -138,13 +138,13 @@ instance HasRateLimit BenchRl where
   rateLimitFor = limitBy (tokenBucket "blr" 1.0e9 1) (\(BenchRl index) -> gateKey index)
 
 instance HasConcurrency BenchCc where
-  concurrencyFor = concurrencyBy (concurrencyPool "blc" 1000000) (\(BenchCc index) -> gateKey index)
+  concurrencyFor = concurrencyBy (concurrencyPolicy "blc" 1000000) (\(BenchCc index) -> gateKey index)
 
 instance HasRateLimit BenchBoth where
   rateLimitFor = limitBy (tokenBucket "bbr" 1.0e9 1) (\(BenchBoth index) -> gateKey index)
 
 instance HasConcurrency BenchBoth where
-  concurrencyFor = concurrencyBy (concurrencyPool "bbc" 1000000) (\(BenchBoth index) -> gateKey2 index)
+  concurrencyFor = concurrencyBy (concurrencyPolicy "bbc" 1000000) (\(BenchBoth index) -> gateKey2 index)
 
 type BenchRegistry =
   '[ Queue "bench_queue" BenchPayload

@@ -3,13 +3,17 @@
 -- migration initialization.
 module Arbiter.Core.Selector
   ( Selector
+  , chooseWhen
+
+    -- * Internal
+
+    -- | Internal to the arbiter packages. Not covered by the PVP.
   , Prim
   , field
   , usePolicy
   , runSelector
   , collectPolicies
   , usesAnyPolicy
-  , chooseWhen
   , selectByCase
   ) where
 

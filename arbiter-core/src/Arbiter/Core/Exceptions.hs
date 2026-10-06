@@ -49,8 +49,8 @@ import Data.Text qualified as T
 import GHC.Generics (Generic)
 import UnliftIO.Exception qualified as UE
 
--- | Decisions a handler can signal by throwing. Caught by the worker to
--- decide retry vs DLQ vs cancellation.
+-- | Decisions a handler can signal by throwing. The worker catches it and retries,
+-- dead-letters or cancels the job.
 data JobException
   = -- | Retries the job with backoff.
     Retryable JobRetryableException
@@ -58,7 +58,8 @@ data JobException
     Permanent JobPermanentException
   | -- | Deletes the entire job tree from root to leaves.
     TreeCancel TreeCancelException
-  | -- | Cascade-deletes the parent and all siblings.
+  | -- | Cancels the parent and every descendant. A job with no parent cancels only
+    -- itself and its descendants.
     BranchCancel BranchCancelException
   deriving stock (Show)
 
@@ -91,7 +92,8 @@ newtype TreeCancelException = TreeCancelException Text
 instance Exception TreeCancelException where
   displayException (TreeCancelException msg) = T.unpack msg
 
--- | Cancel this branch, the parent and every sibling. A grandparent above it is resumed.
+-- | Cancel the parent and every descendant. A job with no parent cancels only itself
+-- and its descendants. A grandparent above is resumed.
 newtype BranchCancelException = BranchCancelException Text
   deriving stock (Eq, Generic, Show)
 
@@ -142,8 +144,8 @@ instance Exception JobScopedFailure where
   backtraceDesired _ = False
   displayException (JobScopedFailure inner ids) = displayException inner <> T.unpack (namedJobIds ids)
 
--- | Async exception for user-initiated force-cancel, naming the jobs it cancels
--- and any the same check found reclaimed by another worker.
+-- | Async exception for a user force-cancel. Names the cancelled jobs, then the
+-- jobs the same check found reclaimed or gone.
 data JobForceCancelled = JobForceCancelled [Int64] [Int64]
   deriving stock (Show)
 
@@ -172,7 +174,8 @@ throwPermanent msg = UE.throwIO (Permanent (JobPermanentException msg))
 throwTreeCancel :: (MonadIO m) => Text -> m a
 throwTreeCancel msg = UE.throwIO (TreeCancel (TreeCancelException msg))
 
--- | Cancel this branch: the parent and every sibling.
+-- | Cancel the parent and every descendant. A job with no parent cancels only itself
+-- and its descendants.
 throwBranchCancel :: (MonadIO m) => Text -> m a
 throwBranchCancel msg = UE.throwIO (BranchCancel (BranchCancelException msg))
 

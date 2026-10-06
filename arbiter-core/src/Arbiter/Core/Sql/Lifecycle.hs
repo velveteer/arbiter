@@ -131,8 +131,8 @@ smartAckJobsBatchSQL archiveEnabled schema tableName =
         CROSS JOIN (SELECT count(*) FROM group_locks) held
       |]
 
--- | Extend a job's visibility timeout. Matches on the claim token. Suspended rows
--- hold no lease. @secs@ at or below 0 clears the lease.
+-- | Extend a job's visibility timeout. Matches on the claim token and does not check
+-- the holder. Suspended rows hold no lease. @secs@ at or below 0 clears the lease.
 setVisibilityTimeoutSQL :: SchemaName -> TableName -> Double -> Int64 -> Int64 -> Query ()
 setVisibilityTimeoutSQL schema tableName secs jobId cseq =
   let tbl = jobQueueTable schema tableName
@@ -277,7 +277,7 @@ promoteJobSQL schema tableName jobId =
       |]
 
 -- | Set when a job next becomes visible, clear its throttle marker and void a lapsed
--- claim. Refuses an in-flight, suspended, cancel-flagged or exhausted job.
+-- claim. Refuses an in-flight, suspended, force-cancel-flagged or exhausted job.
 rescheduleJobSQL :: SchemaName -> TableName -> Int64 -> UTCTime -> Query ()
 rescheduleJobSQL schema tableName jobId runAt =
   let tbl = jobQueueTable schema tableName

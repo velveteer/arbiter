@@ -20,7 +20,7 @@ module Arbiter.Concurrency
 
     -- * Policies
   , ConcurrencyPolicy (..)
-  , concurrencyPool
+  , concurrencyPolicy
   , AdmissionPolicy (..)
 
     -- * Keys
@@ -37,6 +37,8 @@ module Arbiter.Concurrency
   , clearConcurrencyLimit
   , pruneConcurrencyKeys
   , reconcileConcurrencyCounts
+  , reconcileConcurrencyCountsIfStale
+  , reconcileAndPruneConcurrency
   , listConcurrencyPolicies
   , listConcurrencyKeys
   , getConcurrencyPolicy
@@ -53,7 +55,7 @@ import Arbiter.Core.Concurrency.Spec
   , chooseWhen
   , concurrencyBy
   , concurrencyByCase
-  , concurrencyPool
+  , concurrencyPolicy
   , globalConcurrency
   , noConcurrency
   )
@@ -69,7 +71,9 @@ import Arbiter.Core.HighLevel
   , listConcurrencyKeys
   , listConcurrencyPolicies
   , pruneConcurrencyKeys
+  , reconcileAndPruneConcurrency
   , reconcileConcurrencyCounts
+  , reconcileConcurrencyCountsIfStale
   , setConcurrencyLimit
   , updateConcurrencyPolicyOverrides
   )

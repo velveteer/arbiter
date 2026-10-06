@@ -11,8 +11,15 @@ ArbH.runHasqlDb env $ Arb.insertJob (Arb.defaultJob $ SendWelcome "alice@example
 ```
 
 `toHasqlConnect` takes the transport adapter and the connection string.
-`pqi-ffi` wraps libpq. `pqi-native` is pure Haskell. On hasql 1.x,
-`toHasqlConnect` takes only the connection string.
+`pqi-ffi` wraps libpq. `pqi-native` is pure Haskell.
+
+For hasql 1.x, turn off the `hasql2` flag in `cabal.project`. Then
+`toHasqlConnect` takes only the connection string:
+
+```text
+package arbiter-hasql
+  flags: -hasql2
+```
 
 Share a transaction with external hasql work:
 

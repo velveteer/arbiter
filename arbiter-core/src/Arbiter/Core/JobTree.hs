@@ -82,13 +82,14 @@ emptyState = Object (mempty :: Object)
 -- @
 -- defaultJob reducer \<~~ (defaultJob mapper1 :| [defaultJob mapper2])
 -- @
-infixr 6 <~~
-
 (<~~) :: JobWrite payload -> NonEmpty (JobWrite payload) -> JobTree payload
 parent <~~ children = Finalizer parent (fmap Leaf children)
 
+infixr 6 <~~
+
 -- | Insert a 'JobTree' in one transaction, returning every inserted job in pre-order.
--- @Left@ on a dedup conflict at any node, with nothing committed.
+-- @Left@ on a dedup conflict at any node, with nothing committed. Application code uses
+-- 'Arbiter.Core.HighLevel.insertJobTree'.
 insertJobTree
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)

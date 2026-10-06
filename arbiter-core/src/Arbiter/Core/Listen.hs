@@ -122,8 +122,9 @@ data RunningHub = RunningHub
   , hubThread :: MVar (Async.Async ())
   }
 
--- | Register this pool's channels on the env's shared hub for the duration of
--- the body. The 'STM' action reports 'True' once they are all subscribed.
+-- | Register the caller's channels on the env's shared hub for the duration of
+-- the body. The 'STM' action reports 'True' while they are all subscribed. A reconnect
+-- resets it.
 withChannels
   :: (MonadUnliftIO m)
   => Listener

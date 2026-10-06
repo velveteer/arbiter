@@ -1,8 +1,8 @@
 -- | The handler side of the guard: registering a batch, asking for its extend,
 -- and asking it to stop.
 --
--- A signal is thrown from a courier thread, so a masked handler cannot stall
--- the guard. Unregister kills the couriers, which revokes a signal still in
+-- A courier thread throws each signal. A masked handler does not stall the
+-- guard. Unregister kills the couriers, which revokes a signal still in
 -- flight, and drains one that already landed. A second signal within one beat
 -- is dropped.
 module Arbiter.Worker.Heartbeat.Guard.Signal

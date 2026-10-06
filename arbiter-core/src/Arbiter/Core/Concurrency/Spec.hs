@@ -16,7 +16,7 @@ module Arbiter.Core.Concurrency.Spec
     ConcurrencyKey (..)
   , concurrencyKeyText
   , ConcurrencyPolicy (..)
-  , concurrencyPool
+  , concurrencyPolicy
 
     -- * Selecting a policy per job
   , HasConcurrency (..)
@@ -24,8 +24,8 @@ module Arbiter.Core.Concurrency.Spec
   , noConcurrency
   , concurrencyBy
   , globalConcurrency
-  , concurrencyByCase
   , chooseWhen
+  , concurrencyByCase
   , collectPolicies
 
     -- * Registry reflection
@@ -54,7 +54,7 @@ import Arbiter.Core.Admission
 import Arbiter.Core.Selector (Selector, chooseWhen, collectPolicies, selectByCase)
 
 -- | A resolved concurrency key with a policy prefix and per-key suffix. The
--- stored form is @prefix:suffix@. The separate prefix supports policy lookup.
+-- stored form is @prefix:suffix@.
 data ConcurrencyKey = ConcurrencyKey
   { ckPrefix :: Text
   -- ^ The policy prefix.
@@ -88,10 +88,10 @@ instance AdmissionPolicy ConcurrencyPolicy where
   policyPrefixOf = cpPrefix
 
 -- | A policy named @prefix@ admitting at most @limit@ concurrent jobs per key. The cap is
--- floored at 1. Pause it with @'Arbiter.Core.HighLevel.setConcurrencyLimit' policy {cpLimit = 0}@. The prefix must not contain @:@, the key
--- separator. The migration enforces this.
-concurrencyPool :: Text -> Int32 -> ConcurrencyPolicy
-concurrencyPool prefix limit = ConcurrencyPolicy prefix (max 1 limit)
+-- floored at 1. Pause it with @'Arbiter.Concurrency.setConcurrencyLimit' policy {cpLimit = 0}@.
+-- The prefix must not contain @:@, the key separator. The migration enforces this.
+concurrencyPolicy :: Text -> Int32 -> ConcurrencyPolicy
+concurrencyPolicy prefix limit = ConcurrencyPolicy prefix (max 1 limit)
 
 -- | A selective description of the concurrency key for a payload. Evaluation
 -- returns the job key. Static inspection returns the reachable policies.

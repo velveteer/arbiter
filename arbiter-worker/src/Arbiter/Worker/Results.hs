@@ -56,7 +56,8 @@ mergeChildResults :: (Monoid a) => Map Int64 (Either Text a) -> a
 mergeChildResults = foldMap' fold
 
 -- | Store a job's result for its parent rollup. A root job's result goes on its
--- archive entry only when 'Arbiter.Core.Operations.archivesOnAck' holds.
+-- archive entry only when its 'Arbiter.Core.Job.Types.archiveFor' is positive.
+-- The archive entry exists only after the job's ack.
 storeJobResult
   :: (EncodeJobResult result, MonadArbiter m)
   => JobRead payload

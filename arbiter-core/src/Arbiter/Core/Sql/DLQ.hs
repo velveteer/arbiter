@@ -44,7 +44,7 @@ data DLQMove
     MoveIfExhausted
   deriving stock (Eq, Show)
 
--- | The sweep's predicate. Claimable, uncancelled, and out of attempt budget.
+-- | The sweep's predicate. Unsuspended, uncancelled, visible, and out of attempts.
 sweepableGuard :: Text
 sweepableGuard =
   [text|
@@ -53,8 +53,8 @@ sweepableGuard =
         AND (not_visible_until IS NULL OR not_visible_until <= NOW())
       |]
 
--- | Move a job to the DLQ in one statement. Copy each job column and the
--- failure message.
+-- | Move a job to the DLQ in one statement. Copy the carried job columns
+-- ('Arbiter.Core.Sql.Jobs.dlqCarriedCols') and the failure message.
 moveToDLQSQL :: DLQMove -> SchemaName -> TableName -> Int64 -> Int64 -> Text -> Query Int64
 moveToDLQSQL move schema tableName jobId cseq errorMsg =
   let tbl = jobQueueTable schema tableName
@@ -92,7 +92,8 @@ selectExhaustedJobsSQL schema tableName limit =
 -- identifies the tree. Restore the root, all descendants in the DLQ, and their
 -- finalizers. Keep a finalizer suspended when it has children in the retry or the
 -- main queue. Make it ready when it has no children. Re-suspend a main-queue
--- rollup parent that gains restored children. Refuse a root whose parent is absent from the
+-- rollup parent that gains restored children, unless it is under a live lease. Refuse a
+-- root whose parent is absent from the
 -- main queue. Remove the deduplication key during the retry. An @edit@ replaces
 -- its columns on the target row only. Returns the target's restored row.
 retryFromDLQSQL :: SchemaName -> TableName -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))

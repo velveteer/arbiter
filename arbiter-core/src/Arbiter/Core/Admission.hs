@@ -109,8 +109,8 @@ policyUpsertSQL policiesTable prefixLit defaults =
 -- Registry reflection --------------------------------------------------------
 
 -- | The policies of kind @p@ a single payload's selector can reach. Each feature
--- provides an instance from its t'Arbiter.Core.RateLimit.Spec.HasRateLimit' \/
--- t'Arbiter.Core.Concurrency.Spec.HasConcurrency' selector.
+-- provides an instance from its t'Arbiter.RateLimit.HasRateLimit' \/
+-- t'Arbiter.Concurrency.HasConcurrency' selector.
 class CollectFor payload p where
   -- | The policies the payload's selector can reach.
   collectFor :: Set p

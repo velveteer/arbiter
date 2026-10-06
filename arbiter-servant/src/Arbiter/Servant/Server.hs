@@ -10,13 +10,13 @@
 -- __Security:__ No built-in authentication. All endpoints are publicly
 -- accessible. Add auth middleware before exposing to untrusted networks.
 module Arbiter.Servant.Server
-  ( -- * Server handlers
+  ( -- * Server
     arbiterServer
   , arbiterServerHoisted
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
-  , initArbiterServer
+  , createArbiterServer
   , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
@@ -118,12 +118,13 @@ import Arbiter.Servant.API
 import Arbiter.Servant.Types
 
 -- | Configuration for the API server. @m@ is the backend monad every handler's
--- statements run in. 'initArbiterServer' fills the cache fields.
+-- statements run in. 'createArbiterServer' fills the cache fields.
 data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfig
   { serverRun :: forall a. m a -> IO a
   -- ^ Backend runner, such as @runSimpleDb env@ or @runHasqlDb env@.
   , serverSchema :: Text
-  -- ^ The schema every handler's statements run against.
+  -- ^ The env's schema. 'createArbiterServer' reads it from the runner. Keep it equal
+  -- to the env's schema.
   , enableSSE :: Bool
   -- ^ Enable the Server-Sent Events streaming endpoint. When 'False', the
   -- @\/events\/stream@ endpoint returns one \"disabled\" event and closes.
@@ -155,7 +156,7 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   -- ^ Abort any single maintenance statement that runs longer than this.
   -- Default: 'defaultMaintenanceTimeout'.
   , serverLogConfig :: LogConfig
-  -- ^ Where the server reports maintenance and dead-letter failures.
+  -- ^ Where the server logs.
   -- Default: 'defaultLogConfig'.
   , deadLetterGates :: FailureGates
   -- ^ Per-queue failure gates for dead-letter reports.
@@ -198,12 +199,12 @@ mutateJob tableName config jobId mutate refuse =
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
 -- @enableEventStreaming@ migration option and a backend with a listener.
-initArbiterServer
+createArbiterServer
   :: forall m registry
    . (HasRegistry m registry)
   => (forall a. m a -> IO a)
   -> IO (ArbiterServerConfig m registry)
-initArbiterServer run = do
+createArbiterServer run = do
   schemaName <- run getSchema
   rlCache <- newCacheCell
   ccCache <- newCacheCell
@@ -861,7 +862,7 @@ extendClaimedJobHandler tableName config jobId req =
     Ops.setVisibilityTimeout schemaName tableName (realToFrac (clamp leaseSecondsRange (erSeconds req))) job
 
 -- | Finalize the job identified by a lease. Refuse a lease that the caller no
--- longer holds or a lease held by a worker pool. Each statement checks the claim
+-- longer holds or a lease held by a registered worker. Each statement checks the claim
 -- sequence and writes no change after a lease is lost.
 withHeldJob
   :: forall registry (payload :: Type) m
@@ -886,7 +887,7 @@ withHeldJob tableName config jobId lease finalize = do
         | otherwise -> do
             pooled <- Ops.workerRegistered schemaName (jlClaimedBy lease)
             if pooled
-              then pure $ refuse "Job is held by a worker pool"
+              then pure $ refuse "Job is held by a registered worker"
               else do
                 rowsAffected <- finalize schemaName job
                 pure $
@@ -984,7 +985,7 @@ getQueueDetailsHandler config queue = do
   runDb config $ Ops.getQueue schemaName queue
 
 -- | Flip the @paused@ flag for a queue, validated against the registry. The
--- @arbiter_queues@ row is created lazily on first pause.
+-- @arbiter_queues@ row is created on the first pause or resume.
 setQueuePausedHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1262,7 +1263,7 @@ defaultMaintenanceBucketIdle = 300
 defaultMaintenanceTimeout :: NominalDiffTime
 defaultMaintenanceTimeout = 300
 
--- | Keyed TTL cache. 'initArbiterServer' creates each cell.
+-- | Keyed TTL cache. 'createArbiterServer' creates each cell.
 data CacheCell a = CacheCell
   { cacheEntries :: TVar (Word, Map.Map Text (UTCTime, a))
   , cacheFilling :: TVar (Set.Set Text)
@@ -1433,7 +1434,7 @@ concurrencyServer config =
     , pruneConcurrencyKeys = pruneConcurrencyKeysHandler config
     }
 
--- | List pools with their default/override limit and live key/in-flight stats.
+-- | List concurrency policies with their default/override limit and live key/in-flight stats.
 listConcurrencyHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1458,7 +1459,7 @@ listConcurrencyKeysHandler config prefix mLimit mOffset = do
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
   pure Items {items = rows}
 
--- | Set or clear a pool's override limit, then return the updated view.
+-- | Set or clear a concurrency policy's override limit, then return the updated view.
 updateConcurrencyPolicyHandler
   :: forall registry m
    . (HasRegistry m registry)
@@ -1473,7 +1474,7 @@ updateConcurrencyPolicyHandler config prefix upd@(ConcurrencyPolicyUpdate mLimit
         Nothing -> HL.getConcurrencyPolicy prefix
         Just _ -> HL.updateConcurrencyPolicyOverrides prefix upd >> HL.getConcurrencyPolicy prefix
   invalidating (concurrencyPoliciesCache config) $
-    updateThenView config action "Concurrency pool not found"
+    updateThenView config action "Concurrency policy not found"
 
 -- | Recompute every key's in-flight count from live jobs. Returns rows repaired.
 reconcileConcurrencyHandler
@@ -1512,8 +1513,8 @@ sharedServer config =
     :<|> healthServer config
 
 -- | Builds a registry's per-queue server implementations. @registry@ is the whole
--- registry. @reg@ is the part still to build. Each
--- 'Arbiter.Core.QueueRegistry.QueueWithResult' result type needs @FromJSON@ and @ToJSON@.
+-- registry. @reg@ is the part still to build. Each result type needs @FromJSON@ and an
+-- 'EncodeJobResult' instance. Each payload type needs 'JobPayload'.
 class BuildServer registry (reg :: JobPayloadRegistry) where
   -- | The server for the queues in @reg@, then the shared routes.
   buildServer :: (HasRegistry m registry) => ArbiterServerConfig m registry -> ServerT (RegistryToAPI reg) Handler

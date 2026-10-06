@@ -15,7 +15,7 @@
 --   -- Run migrations with event streaming enabled before starting the server.
 --   -- The server runs over any backend env.
 --   env <- createSimpleEnv (Proxy \@MyRegistry) connStr "arbiter"
---   config <- initArbiterServer (runSimpleDb env)
+--   config <- createArbiterServer (runSimpleDb env)
 --
 --   -- Start API server on port 8080
 --   runArbiterAPI 8080 config
@@ -31,7 +31,7 @@ module Arbiter.Servant
   , arbiterApp
   , runArbiterAPI
   , ArbiterServerConfig (..)
-  , initArbiterServer
+  , createArbiterServer
   , defaultStatsCacheTtl
   , defaultMaintenanceInterval
   , defaultMaintenanceBucketIdle
@@ -58,6 +58,10 @@ module Arbiter.Servant
   , HealthAPI (..)
   , RateLimitsAPI (..)
   , ConcurrencyAPI (..)
+  , JobSortColumn (..)
+  , DLQSortColumn (..)
+  , ArchiveSortColumn (..)
+  , SortDir (..)
 
     -- * Request and response types
   , module Arbiter.Servant.Types
@@ -67,4 +71,4 @@ import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 
 import Arbiter.Servant.API
 import Arbiter.Servant.Server
-import Arbiter.Servant.Types
+import Arbiter.Servant.Types hiding (bodylessContentType, jobLeasePairs)

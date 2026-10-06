@@ -83,7 +83,7 @@ data GaugeCache = GaugeCache
   { export :: TVar Export
   -- ^ What the instruments export now.
   , databaseReachable :: TVar (Maybe Bool)
-  -- ^ Result of the last database operation. 'Nothing' before the first scan.
+  -- ^ Whether the last gauge scan reached the database. 'Nothing' before the first scan.
   , registeredAt :: Double
   -- ^ Monotonic time of the registration.
   }

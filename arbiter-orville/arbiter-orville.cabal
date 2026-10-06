@@ -1,17 +1,18 @@
 cabal-version:   3.0
 name:            arbiter-orville
 version:         0.1.0.0
-synopsis:        Orville backend for Arbiter
+synopsis:        orville-postgresql backend for Arbiter
 description:
-  An Orville backend for Arbiter, a PostgreSQL job queue for
+  An orville-postgresql backend for Arbiter, a PostgreSQL job queue for
   Haskell.
 
   Provides @OrvilleDb@, a @MonadArbiter@ transformer over any @MonadOrville@
-  monad. Arbiter queries run on the application's Orville connection and share
-  the transaction Orville is already managing. The query, statement,
-  transaction, and handler primitives are exported for applications that write
-  their own instance. "Arbiter.Orville.Worker" adapts handlers and hooks written
-  in the application monad to a worker running in @OrvilleDb@.
+  and @MonadUnliftIO@ monad. Arbiter queries run on the application's Orville
+  connection and share the transaction Orville is already managing. The query,
+  statement, transaction, and handler primitives in "Arbiter.Orville.MonadArbiter"
+  are for applications that write their own instance. "Arbiter.Orville.Worker"
+  adapts handlers and hooks written in the application monad to a worker running
+  in @OrvilleDb@.
 
 license:         MIT
 license-file:    LICENSE
@@ -84,7 +85,7 @@ test-suite arbiter-orville-tests
     Test.Arbiter.Orville.WorkerAdapters
 
   build-depends:
-    , aeson
+    , aeson                   >=2.2 && <2.3
     , arbiter-core            >=0.1 && <0.2
     , arbiter-libpq           >=0.1 && <0.2
     , arbiter-orville
@@ -92,11 +93,11 @@ test-suite arbiter-orville-tests
     , arbiter-worker          >=0.1 && <0.2
     , arbiter-worker-testkit  >=0.1 && <0.2
     , base >=4.20 && <5
-    , bytestring
+    , bytestring              >=0.10.12 && <0.13
     , hspec                   >=2.8 && <2.12
-    , orville-postgresql
-    , postgresql-simple
+    , orville-postgresql      >=1.0 && <1.2
+    , postgresql-simple       >=0.6 && <0.8
     , resource-pool           >=0.4 && <0.6
-    , text
-    , transformers
-    , unliftio
+    , text                    >=1.2 && <2.2
+    , transformers            >=0.5 && <0.7
+    , unliftio                >=0.2 && <0.3

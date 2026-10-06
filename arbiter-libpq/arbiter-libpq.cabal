@@ -6,8 +6,8 @@ description:
   LISTEN\/NOTIFY support for Arbiter, a PostgreSQL job queue for
   Haskell.
 
-  The connection adapter and dedicated listener for Arbiter backends that talk to
-  PostgreSQL through @postgresql-libpq@.
+  The connection adapter and dedicated listener for Arbiter backends that talk
+  to PostgreSQL through @postgresql-libpq@.
 
 license:         MIT
 license-file:    LICENSE

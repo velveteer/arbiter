@@ -92,8 +92,8 @@ registerInstruments meter cache = do
     perQueue oldestReadyAgeSeconds
   reg Name.QueueOldestInFlightAge "s" "Time the longest-running job has been leased, 0 when none is in flight" $
     perQueue oldestInFlightAgeSeconds
-  -- Active and paused partition the pools with a fresh heartbeat. A queue's fleet is their sum.
-  reg Name.Workers "{worker}" "Registered workers by state" $
+  -- Active and paused partition the live workers. A queue's fleet is their sum.
+  reg Name.Workers "{worker}" "Live workers by state" $
     observed $
       over queues $ \overview ->
         let paused = overviewWorkersPaused overview
@@ -104,7 +104,7 @@ registerInstruments meter cache = do
   -- Keyed by policy prefix.
   reg Name.AdmissionKeys "{key}" "Live admission keys, by policy" $
     bothKinds (fromIntegral . Conc.keyCount) (fromIntegral . RL.bucketCount)
-  reg Name.AdmissionLimit "{slot}" "Effective cap per key, in concurrency slots or rate-limit tokens" $
+  reg Name.AdmissionLimit "{admission}" "Effective cap per key, in concurrency slots or rate-limit tokens" $
     bothKinds (fromIntegral . effectiveLimit) effectiveMaxTokens
   reg Name.AdmissionInFlight "{job}" "Jobs holding a concurrency slot, by policy" $
     perConcurrency (fromIntegral . Conc.totalInFlight)
@@ -144,7 +144,7 @@ registerInstruments meter cache = do
   -- Absent until the first scan.
   regGauge
     Name.DbReachable
-    "{status}"
+    "1"
     "1 when the last health scan reached the database, 0 when it failed"
     [ \res ->
         readTVarIO (databaseReachable cache) >>= traverse_ (\reachable -> observe res (if reachable then 1 else 0) (attrs []))

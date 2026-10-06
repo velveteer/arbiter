@@ -156,7 +156,7 @@
         },
         {
           "refId": "B",
-          "expr": "sum(rate(arbiter_jobs_retries_total[5m]))",
+          "expr": "sum(rate(arbiter_jobs_retried_total[5m]))",
           "legendFormat": "retry (rescheduled)"
         }
       ]
@@ -891,7 +891,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(arbiter_db_reachable)"
+          "expr": "min(arbiter_pg_database_reachable_ratio)"
         }
       ]
     },

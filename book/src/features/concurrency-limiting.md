@@ -1,21 +1,21 @@
 # Concurrency Limiting
 
-A pool is a prefix and a default limit. It caps jobs in flight per key across
-every queue in the registry. `HasConcurrency` selects a pool and key for each
+A policy is a prefix and a default limit. It caps jobs in flight per key across
+every queue in the registry. `HasConcurrency` selects a policy and key for each
 job.
 
 ```haskell
-import Arbiter.Concurrency (ConcurrencyPolicy, HasConcurrency (..), concurrencyBy, concurrencyPool)
+import Arbiter.Concurrency (ConcurrencyPolicy, HasConcurrency (..), concurrencyBy, concurrencyPolicy)
 
 -- Application function on the payload.
 tenantOf :: SyncPayload -> Text
 
 -- At most 2 sync jobs per tenant in flight at once.
-syncPool :: ConcurrencyPolicy
-syncPool = concurrencyPool "tenant-sync" 2
+syncPolicy :: ConcurrencyPolicy
+syncPolicy = concurrencyPolicy "tenant-sync" 2
 
 instance HasConcurrency SyncPayload where
-  concurrencyFor = concurrencyBy syncPool tenantOf
+  concurrencyFor = concurrencyBy syncPolicy tenantOf
 ```
 
 Selectors: `noConcurrency`, `concurrencyBy`, `globalConcurrency`,
@@ -37,8 +37,8 @@ Both admit one in-flight job per key.
 A job can use both.
 
 > [!IMPORTANT]
-> A job holds a slot from claim until ack, retry, nack, or reclaim. A handler
-> timeout does not release it.
+> A job holds a slot from claim until ack, retry, nack, or reclaim. A lease
+> expiry does not release it.
 >
 > The reaper prunes idle keys and rebuilds in-flight counts after a restart or
 > failover.
@@ -50,18 +50,18 @@ Set the override from a handler when a vendor reports new capacity:
 ```haskell
 import Arbiter.Concurrency (ConcurrencyPolicy (..), setConcurrencyLimit)
 
-import MyApp.Queue.Policies (syncPool)
+import MyApp.Queue.Policies (syncPolicy)
 
 syncHandler :: Arb.JobHandler (ArbS.SimpleDb SyncRegistry IO) SyncPayload ()
 syncHandler _conn job = do
   outcome <- liftIO $ runSync (Arb.payload job)
   case outcome of
     CapacityChanged seats ->
-      void $ setConcurrencyLimit syncPool {cpLimit = seats}
+      void $ setConcurrencyLimit syncPolicy {cpLimit = seats}
     Ok -> pure ()
 ```
 
-`clearConcurrencyLimit syncPool` removes the override. In a transactional
+`clearConcurrencyLimit syncPolicy` removes the override. In a transactional
 handler the override commits with the ack.
 
-Selector DSL and pool type: [`Arbiter.Concurrency` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Concurrency.html).
+Selector DSL and policy type: [`Arbiter.Concurrency` Haddocks](https://arbiterq.dev/arbiter-core/Arbiter-Concurrency.html).

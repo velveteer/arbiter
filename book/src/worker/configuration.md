@@ -33,8 +33,14 @@ ARBITER_ENABLED_QUEUES=email_queue,image_queue
 | `manualWorkerConfig` | none | callbacks, one job per call |
 | `batchedWorkerConfig` | none | callbacks, up to `batchSize` jobs per call |
 
-A manual or batched handler must ack, fail, or nack each job. An unfinalized
-job is redelivered after its visibility timeout.
+A manual or batched handler must ack, fail, or nack each job:
+
+| Handler | Unfinalized job |
+| --- | --- |
+| returns | redelivered after its lease expires |
+| throws | fails, then retries or moves to the DLQ |
+
+A nack consumes no attempt. The job is redelivered after its lease expires.
 
 `withDbTransaction` around a callback commits the ack with the application
 writes. Inside an outer transaction the callback is a savepoint. `onJobSuccess`
@@ -44,7 +50,7 @@ fires at the savepoint release, before the outer commit.
 
 | Field | Meaning |
 | --- | --- |
-| `visibilityTimeout` | how long a claim holds a job |
+| `visibilityTimeout` | the lease length: how long a claim holds a job |
 | `jobHeartbeatInterval` | how often the worker renews the hold |
 | `maxJobDuration` | longest a handler can run |
 

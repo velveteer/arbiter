@@ -37,12 +37,12 @@ import Arbiter.Core.Worker (arbiterWorkersTable)
 
 -- | Per-status queue counts plus the age of the oldest @ready@ and @in_flight@ job.
 -- The ready age covers ready and blocked rows and runs from when the row became visible.
--- Counts follow the 'jobStatusCaseSQL' taxonomy and sum to @total_jobs@.
+-- Counts follow the 'jobStatusCaseSQL' taxonomy, with blocked rows split out of ready,
+-- and sum to @total_jobs@.
 getQueueStatsSQL :: RowCodec a -> SchemaName -> TableName -> [Text] -> Query a
 getQueueStatsSQL codec schema tableName kinds = rawRows codec (queueStatsSelect DlqByKind schema tableName kinds)
 
--- | How a stats row counts the DLQ. A count by label reads every DLQ row, where a
--- plain count reads only the primary key index.
+-- | How a stats row counts the DLQ.
 data DlqCount = DlqByKind | DlqTotal
 
 -- | One queue's stats row. The classified rows are aggregated once per kind and once
@@ -92,13 +92,13 @@ queueStatsSelect dlqCount schema tableName kinds =
                  COUNT(*) FILTER (WHERE status = 'exhausted') AS exhausted_jobs,
                  COUNT(*) FILTER (WHERE blocked) AS blocked_jobs,
                  EXTRACT(EPOCH FROM (
-                   clock_timestamp() - MIN(GREATEST(inserted_at, not_visible_until)) FILTER (WHERE status = 'ready')
+                   clock_timestamp() - MIN(GREATEST(inserted_at, not_visible_until, updated_at)) FILTER (WHERE status = 'ready')
                  ))::float8 AS oldest_ready_age_seconds,
                  EXTRACT(EPOCH FROM (
                    clock_timestamp() - MIN(last_attempted_at) FILTER (WHERE status = 'in_flight')
                  ))::float8 AS oldest_in_flight_age_seconds
           FROM (
-            SELECT inserted_at, not_visible_until, last_attempted_at, ${kindExpr} AS kind, ${jobStatusCaseSQL} AS status,
+            SELECT inserted_at, not_visible_until, updated_at, last_attempted_at, ${kindExpr} AS kind, ${jobStatusCaseSQL} AS status,
                    ${blocked} AS blocked
             FROM ${tbl} job
             LEFT JOIN (${heads}) head ON head.id = job.id
@@ -151,8 +151,8 @@ groupHeadsSQL schema tableName =
       |]
 
 -- | Whether a job's rate-limit policy admits its cost, over a row alias. A key without
--- a policy is admitted. The first claim seeds a full bucket for a key without one, so
--- only the policy's cap applies there. OFFSET 0 keeps the probe correlated.
+-- a policy is admitted. A key without a bucket is held only to the policy cap. The first
+-- claim seeds a full bucket for it. OFFSET 0 keeps the probe correlated.
 rateLimitHeadroomPred :: Text -> Text -> Text -> Text
 rateLimitHeadroomPred buckets rlPolicies alias =
   let effMax = effectivePolicyCol "policy" "max_tokens"
@@ -207,8 +207,8 @@ countChildrenBatchSQL :: SchemaName -> TableName -> [Int64] -> Query ()
 countChildrenBatchSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
    in [sql|
-        SELECT parent_id, COUNT(*),
-               COUNT(*) FILTER (WHERE suspended)
+        SELECT parent_id, COUNT(*) AS count,
+               COUNT(*) FILTER (WHERE suspended) AS count_suspended
         FROM ${tbl}
         WHERE parent_id = ANY(#{jobIds :: [CInt8]})
         GROUP BY parent_id

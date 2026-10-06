@@ -2488,7 +2488,7 @@ export interface components {
             claimSeq: number;
             claimedBy: components["schemas"]["UUID"];
             /** Format: double */
-            seconds: number;
+            leaseSeconds: number;
         };
         GroupSummary: {
             groupKey: string;

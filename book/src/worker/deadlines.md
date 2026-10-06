@@ -1,7 +1,7 @@
 # Leases and Deadlines
 
 ```haskell
-config { Worker.visibilityTimeout = 60 }     -- how long a claim holds a job (default)
+config { Worker.visibilityTimeout = 60 }     -- the lease length (default)
 config { Worker.jobHeartbeatInterval = 30 }  -- how often the worker renews that hold (default)
 config { Worker.maxJobDuration = Just 300 }  -- longest a handler may run (default: Nothing)
 ```

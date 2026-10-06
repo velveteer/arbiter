@@ -155,7 +155,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: sum(rate(arbiter_jobs_retries_total[5m])) / clamp_min(sum(rate(arbiter_jobs_retries_total[5m])) + sum(rate(arbiter_jobs_processed_total[5m])), 0.001)
+              expr: sum(rate(arbiter_jobs_retried_total[5m])) / clamp_min(sum(rate(arbiter_jobs_retried_total[5m])) + sum(rate(arbiter_jobs_processed_total[5m])), 0.001)
           - refId: threshold
             datasourceUid: __expr__
             model:

@@ -5,6 +5,7 @@
 -- @
 -- import Arbiter.Core
 -- import Arbiter.Orville
+-- import Orville.PostgreSQL qualified as O
 --
 -- O.withTransaction $ do
 --   O.insertEntity ordersTable order
@@ -14,7 +15,7 @@
 --
 -- Queries run on the base monad's connection and join its open transaction.
 module Arbiter.Orville.OrvilleDb
-  ( -- * Database Monad
+  ( -- * Database monad
     OrvilleDb (..)
   , OrvilleEnv (..)
   , runOrvilleDb
@@ -54,6 +55,7 @@ data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
 -- | The Orville database monad. Handlers run in the base monad.
 newtype OrvilleDb (registry :: JobPayloadRegistry) m a = OrvilleDb
   { unOrvilleDb :: ReaderT (OrvilleEnv registry) m a
+  -- ^ The action as a reader over its env.
   }
   deriving newtype
     ( Applicative
@@ -89,6 +91,7 @@ runOrvilleDb :: OrvilleEnv registry -> OrvilleDb registry m a -> m a
 runOrvilleDb env = flip runReaderT env . unOrvilleDb
 
 -- | Orville @ConnectionOptions@ from an arbiter 'Arbiter.Core.PoolConfig.PoolConfig'.
+-- Notice reporting is off.
 toOrvilleConnectionOptions
   :: ByteString
   -- ^ PostgreSQL connection string

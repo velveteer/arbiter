@@ -19,8 +19,8 @@ enabledQueuesEnvVar :: String
 enabledQueuesEnvVar = "ARBITER_ENABLED_QUEUES"
 
 -- | Validated, comma-separated queue names from @ARBITER_ENABLED_QUEUES@.
--- Unset or blank selects all registered queues. Unknown names throw
--- 'Arbiter.Core.Exceptions.InternalException'.
+-- Unset or blank selects all registered queues. Unknown names, or a value that names
+-- no queues, throw 'Arbiter.Core.Exceptions.InternalException'.
 getEnabledQueues :: (RegistryTables registry) => Proxy registry -> IO [Text]
 getEnabledQueues registry =
   fromMaybe (registryTableNames registry) <$> requestedQueues registry

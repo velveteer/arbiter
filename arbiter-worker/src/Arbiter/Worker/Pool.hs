@@ -102,8 +102,14 @@ runWorkerPool config = do
   schemaName <- getSchema
   workQueue <- newWorkQueue
   guard <- newHeartbeatGuard config
-  statements <-
-    Arb.mkJobStatements @payload (handlerBatchSize config) workerCap (visibilityTimeout config) (workerId config)
+  let statements =
+        Ops.mkJobStatements @payload
+          schemaName
+          queueName
+          (handlerBatchSize config)
+          workerCap
+          (visibilityTimeout config)
+          (workerId config)
   mode <- poolMode config statements
   effectsFor <- poolEffects config statements consumeSpan
 

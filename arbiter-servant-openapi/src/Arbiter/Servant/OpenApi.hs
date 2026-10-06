@@ -23,7 +23,6 @@ module Arbiter.Servant.OpenApi
   ) where
 
 import Arbiter.Core.Concurrency.Spec (ConcurrencyKey (ConcurrencyKey))
-import Arbiter.Core.Health (PgTableHealth)
 import Arbiter.Core.Job.Archive qualified as Archive
 import Arbiter.Core.Job.DLQ qualified as DLQ
 import Arbiter.Core.Job.Dedup (DedupKey (IgnoreDuplicate))
@@ -240,7 +239,7 @@ sectionDescriptions :: [(TagName, Text)]
 sectionDescriptions =
   [ ("queues", "The registered queues, their counters, and pausing them.")
   , ("cron", "Cron schedules, their overrides, and out-of-band runs.")
-  , ("workers", "The worker registry, and pausing a pool.")
+  , ("workers", "The worker registry, and pausing a worker.")
   , ("rate-limits", "Token-bucket policies, their live buckets, overrides, token grants and pruning.")
   , ("concurrency", "Concurrency policies, their live keys, overrides and pruning.")
   , ("maintenance", "The sweep a worker pool's reaper runs, on demand.")
@@ -514,7 +513,7 @@ instance (ToSchema result) => ToSchema (AckRequest result) where
 
 instance ToSchema ExtendRequest where
   declareNamedSchema _ =
-    closedSchema "ExtendRequest" (ExtendRequest <$> leaseFields <*> prop @Double "seconds")
+    closedSchema "ExtendRequest" (ExtendRequest <$> leaseFields <*> prop @Double "leaseSeconds")
 
 -- | Lease fields at the top level of the request body.
 leaseFields :: Fields JobLease
@@ -661,7 +660,6 @@ instance ToSchema WorkerRow where declareNamedSchema = generic
 instance ToSchema CronScheduleRow where declareNamedSchema = generic
 instance ToSchema CronScheduleUpdate where declareNamedSchema = generic
 instance ToSchema PgDbHealth where declareNamedSchema = generic
-instance ToSchema PgTableHealth where declareNamedSchema = generic
 instance ToSchema RateLimitPolicyView where declareNamedSchema = generic
 instance ToSchema ConcurrencyPolicyView where declareNamedSchema = generic
 

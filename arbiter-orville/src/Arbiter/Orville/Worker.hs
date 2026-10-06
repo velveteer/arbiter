@@ -2,6 +2,7 @@
 --
 -- @
 -- import Arbiter.Orville.Worker
+-- import Arbiter.Worker
 --
 -- config <- manualWorkerConfig 5 (orvilleBatchedHandler processJob)
 -- let config' = config {observabilityHooks = orvilleHooks appHooks}

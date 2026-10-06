@@ -7,7 +7,7 @@ module Test.Arbiter.Hasql.Operations (spec) where
 
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
-import Arbiter.Core.MonadArbiter (executeQuery, withDbTransaction)
+import Arbiter.Core.MonadArbiter (executeQuery, runHandlerWithConnection, withDbTransaction)
 import Arbiter.Core.QueueRegistry (QueueSpec (..))
 import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
@@ -55,6 +55,14 @@ spec connStr = beforeAll (setupOnce connStr testSchema testTable False) $ do
   mkEnv <- runIO (createHasqlEnvWithPool (Proxy @HasqlOpsTestRegistry) sharedPool testSchema)
   around (\action -> cleanupOnce connStr testSchema testTable >> action mkEnv) $ do
     operationsSpec @TestPayload TestMessage pure runHasqlDb
+
+    describe "Handler connection" $ do
+      it "runs a handler on a borrowed pool connection when none is pinned" $ \env -> do
+        result <- runHasqlDb env $ do
+          _ <- HL.insertJob (defaultJob (TestMessage "Unpinned"))
+          [job] <- HL.claimNextVisibleJobs 1 60 :: HasqlOpsDb [JobRead TestPayload]
+          runHandlerWithConnection (\conn _ -> ["ran"] <$ liftIO (Compat.runSQL conn "SELECT 1")) job
+        result `shouldBe` ["ran"]
 
     describe "Transaction Participation (inTransaction)" $ do
       it "commits job insertion within user transaction" $ \env -> do

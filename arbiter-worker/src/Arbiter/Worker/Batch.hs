@@ -5,7 +5,7 @@
 --
 -- Batch settlement, outcome reporting, and force-cancel finalization.
 --
--- Each 'Effects' action runs one transaction or hook.
+-- Each 'Effects' statement runs as one transaction or one hook.
 module Arbiter.Worker.Batch
   ( -- * The pool's side
     Effects (..)
@@ -111,7 +111,7 @@ data Outcome
   deriving stock (Eq, Show)
 
 -- | Batch statements and hooks. Callbacks use the handler's context and join
--- its active transaction. Each effect is one transaction or one hook.
+-- its active transaction. Each statement effect is one transaction or one hook.
 data Effects n ctx job kids stored = Effects
   { effectAmbient :: ctx
   -- ^ The context the batch runs in, outside the handler.

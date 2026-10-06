@@ -7,8 +7,8 @@ description:
 
   Exports job, worker, queue-depth, admission, and database-health instruments
   over OTLP, tees structured logs to the OpenTelemetry log pipeline, and installs
-  the tracer provider that arbiter-core's built-in job spans emit through. Configuration
-  comes from the standard @OTEL_@ environment variables.
+  the tracer provider that arbiter-core's built-in job spans emit through.
+  Configuration comes from the standard @OTEL_@ environment variables.
 
 license:         MIT
 license-file:    LICENSE
@@ -80,7 +80,7 @@ test-suite arbiter-otel-tests
   main-is:        Spec.hs
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-    , aeson
+    , aeson                            >=2.2 && <2.3
     , arbiter-core                     >=0.1 && <0.2
     , arbiter-migrations               >=0.1 && <0.2
     , arbiter-otel
@@ -88,12 +88,12 @@ test-suite arbiter-otel-tests
     , arbiter-test-common              >=0.1 && <0.2
     , arbiter-worker                   >=0.1 && <0.2
     , base >=4.20 && <5
-    , bytestring
-    , directory
-    , hs-opentelemetry-api
-    , hs-opentelemetry-propagator-w3c
-    , hs-opentelemetry-sdk
-    , hspec
-    , text
-    , time
-    , unliftio
+    , bytestring                       >=0.10.12 && <0.13
+    , directory                        >=1.3 && <1.4
+    , hs-opentelemetry-api             >=1.0 && <1.1
+    , hs-opentelemetry-propagator-w3c  >=1.0 && <1.1
+    , hs-opentelemetry-sdk             >=1.0 && <1.1
+    , hspec                            >=2.8 && <2.12
+    , text                             >=1.2 && <2.2
+    , time                             >=1.12 && <1.16
+    , unliftio                         >=0.2 && <0.3

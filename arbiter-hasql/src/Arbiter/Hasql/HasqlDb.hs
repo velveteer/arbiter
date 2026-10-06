@@ -12,7 +12,7 @@
 -- myFunction = void $ insertJob (defaultJob myPayload)
 -- @
 module Arbiter.Hasql.HasqlDb
-  ( -- * Database Monad
+  ( -- * Database monad
     HasqlDb (..)
   , HasqlEnv
   , Db
@@ -45,7 +45,7 @@ module Arbiter.Hasql.HasqlDb
   ) where
 
 import Arbiter.Core.Backend
-  ( Db
+  ( Db (..)
   , Driver (..)
   , Env (..)
   , HasPoolState (..)
@@ -66,6 +66,7 @@ import Control.Exception (Exception, throwIO)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (MonadReader, asks)
+import Control.Monad.Trans.Class (MonadTrans (..))
 import Data.Pool (Pool)
 import Data.Proxy (Proxy (..))
 import Hasql.Connection qualified as Hasql
@@ -96,7 +97,7 @@ newtype HasqlConnectionError = HasqlConnectionError String
 -- | The 'Env' for 'HasqlDb'.
 type HasqlEnv = Env Hasql.Connection HasqlConfig
 
--- | The env state only hasql has.
+-- | Driver settings for 'HasqlDb'.
 newtype HasqlConfig = HasqlConfig
   { preparedStatements :: Bool
   -- ^ Prepare hot statements once per connection. Default: 'True'.
@@ -108,6 +109,7 @@ hasqlDriver = Driver {withListenConn = withHasqlListenConn, initialConfig = Hasq
 -- | The hasql database monad.
 newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb
   { unHasqlDb :: Db Hasql.Connection HasqlConfig registry m a
+  -- ^ The action in the shared pooled-backend monad.
   }
   deriving newtype
     ( Applicative
@@ -123,6 +125,9 @@ newtype HasqlDb (registry :: JobPayloadRegistry) m a = HasqlDb
     , MonadUnliftIO
     )
 
+instance MonadTrans (HasqlDb registry) where
+  lift = HasqlDb . Db . lift
+
 instance (MonadUnliftIO m) => MonadArbiter (HasqlDb registry m) where
   type RegistryOf (HasqlDb registry m) = registry
   type Handler (HasqlDb registry m) job result = Hasql.Connection -> job -> HasqlDb registry m result
@@ -134,7 +139,8 @@ instance (MonadUnliftIO m) => MonadArbiter (HasqlDb registry m) where
   runHandlerWithConnection = hasqlRunHandlerWithConnection
   getListener = asks listener
 
--- | Release the env's connection pool, closing its open connections.
+-- | Close the idle connections in the env's pool. Connections in use stay open and go
+-- back to the pool. The pool stays usable.
 destroyHasqlEnv :: (MonadIO m) => HasqlEnv registry -> m ()
 destroyHasqlEnv = destroyEnv
 
@@ -145,13 +151,13 @@ runHasqlDb env = runDb env . unHasqlDb
 -- | Run a 'HasqlDb' action on one connection pinned as the caller's open transaction.
 --
 -- @
--- _ <- Hasql.use conn (Session.script "BEGIN")
--- inTransaction conn "arbiter" $ do
---   Arb.insertJob (Arb.defaultJob myPayload)
--- _ <- Hasql.use conn (Session.script "COMMIT")
--- @
+-- import Arbiter.Core qualified as Arb
 --
--- @Session.script@ exists only on hasql >= 1.10. Use @Session.sql@ on older versions.
+-- _ <- Hasql.use conn (Session.script \"BEGIN\")
+-- inTransaction \@MyRegistry conn \"arbiter\" $ do
+--   Arb.insertJob (Arb.defaultJob myPayload)
+-- _ <- Hasql.use conn (Session.script \"COMMIT\")
+-- @
 inTransaction
   :: forall registry m a
    . Hasql.Connection
@@ -177,7 +183,8 @@ inTransactionWith config conn schemaName =
   Backend.inTransaction hasqlDriver {initialConfig = config} conn schemaName . unHasqlDb
 
 -- | Create a 'HasqlEnv' with 'Arbiter.Core.PoolConfig.defaultPoolConfig'. Size worker pools with
--- 'createHasqlEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@. The listener holds one pool slot.
+-- 'createHasqlEnvWithConfig' and @Arbiter.Worker.poolConfigForWorkers@.
+-- While anything listens, the listener holds one pool slot.
 createHasqlEnv
   :: forall registry m
    . (MonadIO m)
@@ -190,7 +197,8 @@ createHasqlEnv
   -> m (HasqlEnv registry)
 createHasqlEnv proxy connect schemaName = createHasqlEnvWithConfig proxy connect schemaName PC.defaultPoolConfig
 
--- | Create a 'HasqlEnv' with custom pool settings. The listener holds one pool slot.
+-- | Create a 'HasqlEnv' with custom pool settings. While anything listens, the listener holds
+-- one pool slot.
 --
 -- @
 -- let config = PoolConfig
@@ -221,7 +229,8 @@ useDedicatedListener = Backend.useDedicatedListener . withDedicatedListenConn
 acquireOrThrow :: HasqlConnect -> IO Hasql.Connection
 acquireOrThrow connect = acquireConnect connect >>= either (throwIO . HasqlConnectionError) pure
 
--- | Create a 'HasqlEnv' over a caller's own connection pool. The listener holds one pool slot.
+-- | Create a 'HasqlEnv' over a caller's own connection pool. While anything listens, the
+-- listener holds one pool slot.
 createHasqlEnvWithPool
   :: forall registry m
    . (MonadIO m)

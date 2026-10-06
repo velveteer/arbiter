@@ -2,9 +2,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
--- | Internal to the arbiter packages. Not covered by the PVP.
+-- | Every hasql version difference that arbiter-hasql depends on.
 --
--- Every hasql version difference that arbiter-hasql depends on.
+-- Internal to the arbiter packages. Not covered by the PVP, except for the names
+-- that "Arbiter.Hasql.HasqlDb" re-exports.
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
@@ -37,15 +38,10 @@ import Arbiter.Core.Listen.Driver
   )
 import Hasql.Connection.Settings qualified as Settings
 import Pqi qualified as PQ
-#elif MIN_VERSION_hasql(1,10,0)
-import Arbiter.LibPQ (libpqListenConn, withLibPQListenConn)
+#else
+import Arbiter.LibPQ (libPQListenConn, withLibPQListenConn)
 import Database.PostgreSQL.LibPQ qualified as PQ
 import Hasql.Connection.Settings qualified as Settings
-#else
-import Arbiter.LibPQ (libpqListenConn, withLibPQListenConn)
-import Database.PostgreSQL.LibPQ qualified as PQ
-import Hasql.Connection.Setting qualified as Setting
-import Hasql.Connection.Setting.Connection qualified as ConnSetting
 #endif
 
 -- | Run a bare SQL command, such as @BEGIN@ or @COMMIT@.
@@ -54,13 +50,8 @@ runSQL conn sql =
   Hasql.use conn (runScript sql)
     >>= either (\err -> throwInternal $ "hasql runSQL error: " <> T.pack (show err)) pure
 
-#if MIN_VERSION_hasql(1,10,0)
 runScript :: ByteString -> Session.Session ()
 runScript = Session.script . TE.decodeUtf8With TE.lenientDecode
-#else
-runScript :: ByteString -> Session.Session ()
-runScript = Session.sql
-#endif
 
 #if MIN_VERSION_hasql(2,0,0)
 -- | Connection settings for hasql 2: transport adapter (for example @Pqi.Ffi.adapter@) and connection string.
@@ -98,7 +89,6 @@ withDedicatedListenConn (HasqlConnect connStr) = withLibPQListenConn connStr
 
 -- | Whether the connection is in a transaction block, valid or aborted.
 connectionInTransaction :: Hasql.Connection -> IO Bool
-#if MIN_VERSION_hasql(1,10,0)
 connectionInTransaction conn = do
   result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> do
     status <- PQ.transactionStatus libpq
@@ -106,23 +96,13 @@ connectionInTransaction conn = do
   case result of
     Right inTx -> pure inTx
     Left _ -> pure False
-#else
-connectionInTransaction conn =
-  Hasql.withLibPQConnection conn $ \libpq -> do
-    status <- PQ.transactionStatus libpq
-    pure (txStatusNeedsRollback status)
-#endif
 
 -- | Run the listener loop on the connection's driver handle. The loop runs outside the
 -- session, so a cancel reaches it directly.
 withHasqlListenConn :: Hasql.Connection -> (ListenConn -> IO a) -> IO a
-#if MIN_VERSION_hasql(1,10,0)
 withHasqlListenConn conn action = do
   result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> pure (Right libpq, libpq)
   either (const (throwInternal "connection lost")) (action . toListenConn) result
-#else
-withHasqlListenConn conn action = Hasql.withLibPQConnection conn (action . toListenConn)
-#endif
 
 #if MIN_VERSION_hasql(2,0,0)
 -- | A 'ListenConn' over a pqi connection. The native transport reads the socket only
@@ -155,7 +135,7 @@ pqiConnectDriver adapter =
     connStatus _ = ConnPending
 #else
 toListenConn :: PQ.Connection -> ListenConn
-toListenConn = libpqListenConn
+toListenConn = libPQListenConn
 #endif
 
 -- | @TransInTrans@ and @TransInError@ accept a @ROLLBACK@ without warning.
@@ -164,18 +144,9 @@ txStatusNeedsRollback PQ.TransInTrans = True
 txStatusNeedsRollback PQ.TransInError = True
 txStatusNeedsRollback _ = False
 
-#if MIN_VERSION_hasql(1,10,0)
--- | Connection settings, whose representation follows the hasql version.
+-- | hasql connection settings.
 type HasqlSettings = Settings.Settings
 
 -- | Convert a connection string ByteString to hasql settings.
 hasqlSettings :: ByteString -> HasqlSettings
 hasqlSettings = Settings.connectionString . TE.decodeUtf8With TE.lenientDecode
-#else
--- | Connection settings, whose representation follows the hasql version.
-type HasqlSettings = [Setting.Setting]
-
--- | Convert a connection string ByteString to hasql settings.
-hasqlSettings :: ByteString -> HasqlSettings
-hasqlSettings connStr = [Setting.connection (ConnSetting.string (TE.decodeUtf8With TE.lenientDecode connStr))]
-#endif

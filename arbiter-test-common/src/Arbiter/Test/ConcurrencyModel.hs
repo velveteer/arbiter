@@ -44,25 +44,25 @@ import Test.Hspec
 import UnliftIO.Async (mapConcurrently)
 
 import Arbiter.Test.ConcurrencyLimit (CLPayload (..), CLReg, concurrencyTable)
-import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
+import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL)
 
 -- A worker id that attributes claims.
 worker :: UUID.UUID
 worker = UUID.fromWords 0 0 0 11
 
--- Pools with a fixed seeded limit. The model is keyed by pool prefix.
-modelPools :: [(Text, Int)]
-modelPools = [("mx", 1), ("my", 2), ("mz", 3)]
+-- Policies with a fixed seeded limit. The model is keyed by policy prefix.
+modelPolicies :: [(Text, Int)]
+modelPolicies = [("mx", 1), ("my", 2), ("mz", 3)]
 
--- A single suffix per pool. Each pool drives one count-row key @prefix:k@.
-poolSuffix :: Text
-poolSuffix = "k"
+-- A single suffix per policy. Each policy drives one count-row key @prefix:k@.
+policySuffix :: Text
+policySuffix = "k"
 
 storedKey :: Text -> Text
-storedKey prefix = prefix <> ":" <> poolSuffix
+storedKey prefix = prefix <> ":" <> policySuffix
 
 limitOf :: Text -> Int
-limitOf prefix = fromMaybe 1 (lookup prefix modelPools)
+limitOf prefix = fromMaybe 1 (lookup prefix modelPolicies)
 
 -- A claim batch larger than any per-key gate.
 claimBatch :: Int
@@ -96,10 +96,10 @@ data KS = KS
   , ksClaimed :: Int
   }
 
--- Count rows, keyed by pool prefix.
+-- Count rows, keyed by policy prefix.
 type MM = Map Text KS
 
--- Pool overrides on the policy, keyed by prefix.
+-- Policy overrides, keyed by prefix.
 type Ov = Map Text Int
 
 eff :: Ov -> Text -> KS -> Int
@@ -116,7 +116,7 @@ data Op
   | OOverride Text (Maybe Int)
   | OPrune
   | OReconcile
-  | -- | Dedup-replace a fresh job from one pool's key onto another's. The third
+  | -- | Dedup-replace a fresh job from one policy's key onto another's. The third
     -- field is a dedup key that is unique per op.
     OMove Text Text Text
   deriving stock (Show)
@@ -135,7 +135,7 @@ genOps =
       , (1, OMove <$> genKey <*> genKey <*> genDedup)
       ]
   where
-    genKey = Gen.element (map fst modelPools)
+    genKey = Gen.element (map fst modelPolicies)
     genDedup = Gen.text (Range.singleton 12) Gen.alphaNum
 
 -- Apply a non-claim op to the pure model. Claim is handled with the live result.
@@ -203,7 +203,7 @@ step run withConn schema (model, overrides, held) operation = do
       let grouped = groupByKey claimed
           expected = claimDeltas overrides model
       -- The gate admitted exactly the model's per-key free slots.
-      for_ (map fst modelPools) $ \prefix ->
+      for_ (map fst modelPolicies) $ \prefix ->
         Map.findWithDefault 0 prefix (Map.map length grouped) === Map.findWithDefault 0 prefix expected
       let nextModel =
             Map.mapWithKey
@@ -239,7 +239,7 @@ step run withConn schema (model, overrides, held) operation = do
       done held
   -- A count row exists from the first insert until a prune drops it.
   stored <- evalIO (readCounts withConn schema)
-  for_ (map fst modelPools) $ \prefix ->
+  for_ (map fst modelPolicies) $ \prefix ->
     case Map.lookup prefix model' of
       Just state ->
         Map.lookup (storedKey prefix) stored === Just (fromIntegral (ksClaimed state))
@@ -260,7 +260,7 @@ prop_concurrent run withConn schema = withTests 30 $ property $ do
   let prefix = "mx"
       jobCount = lim + extra
       job = setMaxAttempts (Just 1000) $ defaultJob (CLPayload prefix)
-  evalIO (withConn $ \conn -> seedPool conn schema prefix lim)
+  evalIO (withConn $ \conn -> seedPolicy conn schema prefix lim)
   evalIO (void (run (HL.insertJobsBatch (replicate jobCount job)) :: IO [JobRead CLPayload]))
   results <-
     evalIO
@@ -277,7 +277,7 @@ prop_concurrent run withConn schema = withTests 30 $ property $ do
   stored <- evalIO (readCounts withConn schema)
   Map.lookup (storedKey prefix) stored === Just (fromIntegral claimed)
 
--- | One pool's key is pinned at its cap by a job that is never acked. Every group
+-- | One policy's key is pinned at its cap by a job that is never acked. Every group
 -- with no job on that key still drains. Generated over batch size, per-poll slot
 -- budget, group size, and key layout.
 prop_groupedDrain
@@ -291,12 +291,12 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
   batchSize <- forAll (Gen.int (Range.linear 1 3))
   -- Small enough for the slot budget to bind.
   maxBatches <- forAll (Gen.int (Range.linear 1 3))
-  keys <- forAll (Gen.list (Range.linear 2 16) (Gen.element (map fst modelPools)))
+  keys <- forAll (Gen.list (Range.linear 2 16) (Gen.element (map fst modelPolicies)))
   evalIO (resetState withConn schema)
-  -- Pin the hot pool at its cap with a claim that is never acked.
-  evalIO (void (run (HL.insertJobsBatch [defaultJob (CLPayload hotPool)]) :: IO [JobRead CLPayload]))
+  -- Pin the hot policy at its cap with a claim that is never acked.
+  evalIO (void (run (HL.insertJobsBatch [defaultJob (CLPayload hotPolicy)]) :: IO [JobRead CLPayload]))
   pinned <- evalIO (run (HL.claimNextVisibleJobsAs claimBatch 600 worker) :: IO [JobRead CLPayload])
-  length pinned === limitOf hotPool
+  length pinned === limitOf hotPolicy
   let groupOf index = "dg" <> T.pack (show (index `div` perGroup :: Int))
       tagged = [(groupOf index, prefix) | (index, prefix) <- zip [0 :: Int ..] keys]
       jobs = [setMaxAttempts (Just 1000) (defaultGroupedJob groupKey (CLPayload prefix)) | (groupKey, prefix) <- tagged]
@@ -304,7 +304,7 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
       cold =
         [ groupKey
         | groupKey <- Set.toList (Set.fromList (map fst tagged))
-        , all ((/= hotPool) . snd) (filter ((== groupKey) . fst) tagged)
+        , all ((/= hotPolicy) . snd) (filter ((== groupKey) . fst) tagged)
         ]
       statements = Ops.mkJobStatements @CLPayload schema concurrencyTable batchSize 0 60 worker
       round_ =
@@ -325,9 +325,9 @@ prop_groupedDrain run withConn schema = withTests 40 $ property $ do
 
 -- Helpers.
 
--- | The pool pinned at its cap by 'prop_groupedDrain'.
-hotPool :: Text
-hotPool = "mx"
+-- | The policy pinned at its cap by 'prop_groupedDrain'.
+hotPolicy :: Text
+hotPolicy = "mx"
 
 -- | Group keys that still have rows.
 remainingGroups :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO [Text]
@@ -349,11 +349,11 @@ resetState withConn schema =
   withConn $ \conn -> do
     execute_ conn ("DELETE FROM " <> jobQueueTable schema concurrencyTable)
     execute_ conn ("TRUNCATE " <> arbiterConcurrencyTable schema)
-    traverse_ (uncurry (seedPool conn schema)) modelPools
+    traverse_ (uncurry (seedPolicy conn schema)) modelPolicies
 
-seedPool :: PG.Connection -> Text -> Text -> Int -> IO ()
-seedPool conn schema prefix lim =
-  traverse_ (execute_ conn) (seedConcurrencyPoolSQL schema prefix (fromIntegral lim))
+seedPolicy :: PG.Connection -> Text -> Text -> Int -> IO ()
+seedPolicy conn schema prefix lim =
+  traverse_ (execute_ conn) (seedConcurrencyPolicySQL schema prefix (fromIntegral lim))
 
 readCounts :: (forall a. (PG.Connection -> IO a) -> IO a) -> Text -> IO (Map Text Int32)
 readCounts withConn schema =

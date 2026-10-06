@@ -19,7 +19,7 @@ module Arbiter.Test.Setup
   , createPoolWith
   , truncateToMicros
   , mkTime
-  , seedConcurrencyPoolSQL
+  , seedConcurrencyPolicySQL
   , drainWith
   ) where
 
@@ -71,7 +71,7 @@ runScript :: Connection -> MigrationCommand -> IO ()
 runScript conn (MigrationScript _ sql) = void $ execute conn (Query sql) ()
 runScript _ _ = pure ()
 
--- | Truncate the queue's tables between tests.
+-- | Truncate the queue's tables and the schema-wide tables, except rate-limit policies.
 cleanupData :: Text -> Text -> Connection -> IO ()
 cleanupData schemaName tableName conn = do
   execute_ conn "SET client_min_messages = WARNING"
@@ -206,9 +206,9 @@ sharedPoolSize = 5
 sharedPoolIdleSeconds :: Double
 sharedPoolIdleSeconds = 60
 
--- | Seed a concurrency pool's default limit and clear any override, as SQL statements.
-seedConcurrencyPoolSQL :: Text -> Text -> Int32 -> [Text]
-seedConcurrencyPoolSQL schema prefix lim =
+-- | Seed a concurrency policy's default limit and clear any override, as SQL statements.
+seedConcurrencyPolicySQL :: Text -> Text -> Int32 -> [Text]
+seedConcurrencyPolicySQL schema prefix lim =
   [ CC.upsertConcurrencyPolicyRowSQL schema (ConcurrencyPolicy prefix lim)
   , "UPDATE "
       <> CC.arbiterConcurrencyPoliciesTable schema

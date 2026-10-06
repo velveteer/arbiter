@@ -22,4 +22,4 @@ ArbS.runSimpleDb env $ Worker.runWorkerPools workers
 The dispatcher stops claiming and waits for in-flight jobs. `runWorkerPools`
 returns when they finish or after `gracefulShutdownTimeout`. A job still
 running at the timeout is left unfinalized and redelivered after its
-visibility timeout.
+lease expires.

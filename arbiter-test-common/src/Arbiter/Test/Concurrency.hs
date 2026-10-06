@@ -428,7 +428,7 @@ raceConditionSpec mkMessage runM = do
         claimed `shouldBe` inserted
 
     describe "Visibility Timeout Races" $ do
-      it "no duplicate processing with aggressive visibility expiration" $ \env -> do
+      it "acks every job under aggressive visibility expiration" $ \env -> do
         let numJobs = 50
             numWorkers = 20
             visibilityMs = 100 -- 100ms visibility
@@ -447,7 +447,7 @@ raceConditionSpec mkMessage runM = do
                 atomicModifyIORef' ackedRef (\acc -> (Set.insert (primaryKey job) acc, ()))
 
         acked <- readIORef ackedRef
-        -- Every job is acked exactly once.
+        -- Every job is acked.
         Set.size acked `shouldBe` numJobs
 
       it "exactly one ack succeeds per job under reclaim pressure" $ \env -> do

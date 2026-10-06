@@ -38,11 +38,11 @@ module Arbiter.Hasql.MonadArbiter
   , hasqlWithConnection
   ) where
 
-import Arbiter.Core.Backend (HasPoolState (..), PoolState (..), pinConnection, withConn, withSavepointTransaction)
+import Arbiter.Core.Backend (HasPoolState, pinConnection, withConn, withSavepointTransaction)
 import Arbiter.Core.Exceptions (throwInternal)
 import Arbiter.Core.MonadArbiter (Query (..))
 import Control.Monad (when)
-import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.Text qualified as T
 import Hasql.Connection qualified as Hasql
@@ -113,14 +113,12 @@ beginCommitOrRollback conn action = mask $ \restore -> do
         _ <- try (runSQL conn "ROLLBACK") :: IO (Either SomeException ())
         pure ()
 
--- | Run a handler on the pinned connection. Throws when no connection is pinned.
+-- | Run a handler on the pinned connection, or on a borrowed pool connection when none
+-- is pinned.
 hasqlRunHandlerWithConnection
-  :: (HasPoolState Hasql.Connection m, MonadIO m)
+  :: (HasPoolState Hasql.Connection m, MonadUnliftIO m)
   => (Hasql.Connection -> job -> m result)
   -> job
   -> m result
-hasqlRunHandlerWithConnection handler job = do
-  pool <- getPoolState
-  case fst <$> pinned pool of
-    Just conn -> handler conn job
-    Nothing -> throwInternal "hasqlRunHandlerWithConnection: no active connection"
+hasqlRunHandlerWithConnection handler job =
+  withConn $ \conn -> handler conn job

@@ -83,7 +83,7 @@ import Test.Hspec
 import Test.Hspec.Wai
 import Test.Hspec.Wai.Internal (runWaiSession)
 
-import Arbiter.Servant (ArbiterServerConfig (..), arbiterApp, initArbiterServer)
+import Arbiter.Servant (ArbiterServerConfig (..), arbiterApp, createArbiterServer)
 import Arbiter.Servant.Types
   ( AckRequest (..)
   , ApiJobWithStatus (..)
@@ -201,7 +201,7 @@ spec connStr = do
   runIO (setupOnce connStr testSchema testTable False)
   sharedPool <- runIO (createSharedPool connStr)
   mkEnv <- runIO (createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool testSchema)
-  serverConfig <- runIO (initArbiterServer (runSimpleDb mkEnv))
+  serverConfig <- runIO (createArbiterServer (runSimpleDb mkEnv))
   let app = arbiterApp @ServantTestRegistry serverConfig
 
   let cleanupDb :: IO ()
@@ -1542,7 +1542,7 @@ spec connStr = do
 
       postJson (ackPath job) body `shouldRespondWith` 400
 
-    it "POST /:id/ack refuses a job a worker pool holds" $ do
+    it "POST /:id/ack refuses a job a registered worker holds" $ do
       job <- liftIO $ do
         void $ runSimpleDb mkEnv $ HL.insertJob (defaultJob (TestMessage "pool job"))
         void $ runSimpleDb mkEnv $ Ops.registerWorker testSchema poolWorkerId testTable Nothing Nothing 300 Nothing
@@ -1928,7 +1928,7 @@ spec connStr = do
       setupOnce connStr pacedSchema rateLimitTable False
       setupRateLimitPolicy connStr pacedSchema
       pacedEnv <- createSimpleEnvWithPool (Proxy @RLReg) sharedPool pacedSchema
-      (,) pacedEnv <$> initArbiterServer (runSimpleDb pacedEnv)
+      (,) pacedEnv <$> createArbiterServer (runSimpleDb pacedEnv)
     let pacedCleanup = withResource sharedPool $ cleanupData pacedSchema rateLimitTable
 
     with (pacedCleanup >> pure (arbiterApp @RLReg pacedConfig)) $
@@ -1982,7 +1982,7 @@ spec connStr = do
 
     missingConfig <- runIO $ do
       missingEnv <- createSimpleEnvWithPool (Proxy @ServantTestRegistry) sharedPool missingSchema
-      initArbiterServer (runSimpleDb missingEnv)
+      createArbiterServer (runSimpleDb missingEnv)
     with (pure (arbiterApp @ServantTestRegistry missingConfig)) $
       it "POST /maintenance names the operations that raised" $ do
         resp <- post "/api/v1/maintenance" ""

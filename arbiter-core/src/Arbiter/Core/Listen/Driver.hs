@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | A 'ListenConn' and an interruptible connect over any libpq-shaped driver.
+--
+-- This is the API for backend authors.
 module Arbiter.Core.Listen.Driver
   ( ConnectDriver (..)
   , ConnStatus (..)
@@ -55,7 +57,7 @@ data ConnectDriver conn = ConnectDriver
   -- ^ The driver's last error message, if any.
   }
 
--- | Check command status against the driver's success status.
+-- | Check command status against the driver's success status. A missing result is 'Left'.
 execOutcome :: (Eq status, Show status) => status -> (result -> IO status) -> Maybe result -> IO (Either Text ())
 execOutcome okStatus resultStatus = maybe (pure (Left "returned no result")) (fmap judge . resultStatus)
   where

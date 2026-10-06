@@ -72,8 +72,8 @@ Durability is set per migrated schema.
 
 ## HTTP 429 Responses
 
-**One key is throttled.** Empty its bucket, set the visibility timeout to
-`Retry-After`, and nack:
+**One key is throttled.** Empty its bucket, set the lease to `Retry-After`,
+and nack:
 
 ```haskell
 import Arbiter.RateLimit (addRateLimitTokens)

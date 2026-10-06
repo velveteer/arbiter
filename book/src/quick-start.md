@@ -63,8 +63,8 @@ CREATE SCHEMA IF NOT EXISTS arbiter;
 GRANT USAGE, CREATE ON SCHEMA arbiter TO your_app_user;
 ```
 
-Rerun the migrations after changing `enableNotifications` or
-`enableEventStreaming`. Do not edit the migration history.
+Rerun the migrations after changing `enableNotifications`,
+`enableEventStreaming`, or `rateLimitDurability`. Do not edit the migration history.
 
 Replicas can migrate concurrently. `migrationLockTimeout` bounds the wait for
 the migration lock, unbounded by default. A transaction-mode pooler cannot

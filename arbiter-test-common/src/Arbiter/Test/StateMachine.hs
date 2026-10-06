@@ -13,7 +13,7 @@
 
 -- | Hedgehog state-machine tests for the job engine against any 'MonadArbiter'
 -- backend. A sequential property checks the engine invariants after each step.
--- A concurrent property runs parallel branches under a serialization detector.
+-- A concurrent property runs parallel branches under the HOL detector.
 module Arbiter.Test.StateMachine
   ( stateMachineSpec
   , ArbiterC
@@ -24,7 +24,7 @@ module Arbiter.Test.StateMachine
 
     -- * Internal
 
-    -- | Internal to the arbiter packages. Not covered by the PVP.
+    -- | Not covered by the PVP.
   , holViolTbl
   , holInstallSql
   , holRemoveSql
@@ -35,7 +35,7 @@ import Arbiter.Core.Concurrency.Spec
   ( HasConcurrency (..)
   , concurrencyBy
   , concurrencyByCase
-  , concurrencyPool
+  , concurrencyPolicy
   , noConcurrency
   )
 import Arbiter.Core.HighLevel qualified as HL
@@ -107,7 +107,7 @@ import Test.Hspec
 import UnliftIO (MonadUnliftIO, tryAny)
 import UnliftIO.Async (async, link, mapConcurrently, mapConcurrently_, wait, withAsync)
 
-import Arbiter.Test.Setup (execute_, seedConcurrencyPoolSQL)
+import Arbiter.Test.Setup (execute_, seedConcurrencyPolicySQL)
 
 -- | Constraints the runner of 'stateMachineSpec' must satisfy.
 type ArbiterC m =
@@ -325,7 +325,7 @@ driftViolations schema table withConn = withConn $ \conn -> do
 
 -- | Exact invariant violations, safe to sample live during concurrent churn:
 --
---   * serialization: more than one in-flight job per group
+--   * serialization: more than one claimed in-flight job per group
 --   * attempt bound: a live job past its limit
 --   * dedup uniqueness: two live jobs sharing a @dedup_key@
 --   * concurrency cap: more claimed jobs on a key than its effective cap
@@ -413,7 +413,7 @@ exactViolations schema table withConn = withConn $ \conn -> do
       "SELECT group_key FROM "
         <> tbl
         <> " WHERE group_key IS NOT NULL AND not_visible_until > NOW()"
-        <> " AND NOT suspended AND attempts > 0"
+        <> " AND NOT suspended AND claimed_by IS NOT NULL"
         <> " GROUP BY group_key HAVING COUNT(*) > 1"
     overSql =
       "SELECT id FROM "
@@ -426,7 +426,7 @@ exactViolations schema table withConn = withConn $ \conn -> do
         <> tbl
         <> " WHERE dedup_key IS NOT NULL GROUP BY dedup_key HAVING COUNT(*) > 1"
     -- More claimed jobs on a key than its effective cap. The effective cap is the
-    -- pool override, else the pool default.
+    -- policy override, else the policy default.
     concSql =
       "SELECT job.concurrency_key FROM "
         <> tbl
@@ -474,15 +474,15 @@ orphanViolations schema table withConn = withConn $ \conn -> do
 smWorker :: UUID.UUID
 smWorker = UUID.fromWords 0 0 0 7
 
--- | Per-job rate-limit key and concurrency pool a generated insert can carry.
+-- | Per-job rate-limit key and concurrency policy a generated insert can carry.
 data Extras = Extras (Maybe Text) (Maybe Text)
   deriving stock (Eq, Show)
 
--- | Seeded pools with a fixed limit.
+-- | Seeded policies with a fixed limit.
 smConcSlots :: [(Text, Int32)]
 smConcSlots = [("cap-a", 1), ("cap-b", 2), ("cap-c", 3)]
 
--- | One suffix per pool. Each pool drives a single count-row key.
+-- | One suffix per policy. Each policy drives a single count-row key.
 smConcSuffix :: Text
 smConcSuffix = "s"
 
@@ -500,7 +500,7 @@ data SMPayload = SMPayload
   { smMessage :: Text
   -- ^ Free text.
   , smConcSlot :: Maybe Text
-  -- ^ Concurrency pool: @cap-a@ (limit 1), @cap-b@ (limit 2) or @cap-c@ (limit 3). Other values take no slot.
+  -- ^ Concurrency policy: @cap-a@ (limit 1), @cap-b@ (limit 2) or @cap-c@ (limit 3). Other values take no slot.
   , smRateKey :: Maybe Text
   -- ^ Rate-limit key: @rk-1@ or @rk-2@ on the @smrl@ bucket. Other values take no token.
   }
@@ -522,9 +522,9 @@ instance HasConcurrency SMPayload where
         Just "cap-c" -> SlotC
         _ -> SlotNone
       slotSel SlotNone = noConcurrency
-      slotSel SlotA = concurrencyBy (concurrencyPool "cap-a" 1) (const smConcSuffix)
-      slotSel SlotB = concurrencyBy (concurrencyPool "cap-b" 2) (const smConcSuffix)
-      slotSel SlotC = concurrencyBy (concurrencyPool "cap-c" 3) (const smConcSuffix)
+      slotSel SlotA = concurrencyBy (concurrencyPolicy "cap-a" 1) (const smConcSuffix)
+      slotSel SlotB = concurrencyBy (concurrencyPolicy "cap-b" 2) (const smConcSuffix)
+      slotSel SlotC = concurrencyBy (concurrencyPolicy "cap-c" 3) (const smConcSuffix)
 
 data SMRate = RateNone | RateK1 | RateK2
   deriving stock (Bounded, Enum, Eq)
@@ -544,11 +544,12 @@ instance HasRateLimit SMPayload where
       rateSel RateK1 = limitBy smBucket (const "rk-1")
       rateSel RateK2 = limitBy smBucket (const "rk-2")
 
--- | Seed the concurrency pools. Idempotent.
-seedConcurrencyPools :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
-seedConcurrencyPools schema withConn = withConn $ \conn ->
+-- | Seed the concurrency policies. Idempotent.
+seedConcurrencyPolicies :: Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
+seedConcurrencyPolicies schema withConn = withConn $ \conn ->
   traverse_
-    (\(pool, limit) -> traverse_ (void . PG.execute_ conn . fromString . T.unpack) (seedConcurrencyPoolSQL schema pool limit))
+    ( \(policy, limit) -> traverse_ (void . PG.execute_ conn . fromString . T.unpack) (seedConcurrencyPolicySQL schema policy limit)
+    )
     smConcSlots
 
 -- | Seed the rate-limit policy. Idempotent.
@@ -560,7 +561,7 @@ seedRateLimitPolicies schema withConn = withConn $ \conn ->
 resetSeeded :: IO () -> Text -> (forall a. (PG.Connection -> IO a) -> IO a) -> IO ()
 resetSeeded reset schema withConn = do
   reset
-  seedConcurrencyPools schema withConn
+  seedConcurrencyPolicies schema withConn
   seedRateLimitPolicies schema withConn
 
 -- | @Insert group delay priority maxAttempts extras@. Insert a job at a varying
@@ -1168,8 +1169,8 @@ data Refresh (v :: Type -> Type) = Refresh
   deriving stock (Eq, Generic, Show)
   deriving anyclass (B.FunctorB, B.TraversableB)
 
--- | A reaper tick. Drift-correct the groups summary and sweep exhausted jobs to
--- the DLQ.
+-- | A reaper tick. Drift-correct the groups summary, sweep exhausted jobs to the
+-- DLQ and sweep lapsed force-cancelled jobs.
 runReaper
   :: forall sm
    . (MonadArbiter sm, RegistryTables (RegistryOf sm))
@@ -1353,11 +1354,11 @@ claimSpawnCount group childCount = length . filter id <$> claimThenWith @sm spaw
             void (HL.spawnChildren job children)
             void (HL.ackJob job)
         )
-        >>= either (\err -> False <$ rethrowRetryable err) (const (pure True))
+        >>= either (\err -> False <$ rethrowAbort err) (const (pure True))
 
 -- | Let a deadlock or serialization abort through, swallowing the rest.
-rethrowRetryable :: (MonadIO m) => SomeException -> m ()
-rethrowRetryable err = when (isRetryableError err) (liftIO (throwIO err))
+rethrowAbort :: (MonadIO m) => SomeException -> m ()
+rethrowAbort err = when (isRetryableError err || isDeadlock err) (liftIO (throwIO err))
 
 -- | Run one round of a deadlock guard, counting the deadlocks.
 countingDeadlocks :: IORef Int -> IO () -> IO ()
@@ -1366,7 +1367,7 @@ countingDeadlocks deadlocks act = do
   case outcome of
     Right () -> pure ()
     Left err
-      | "40P01" `isInfixOf` show err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
+      | isDeadlock err -> atomicModifyIORef' deadlocks (\count -> (count + 1, ()))
       | "40001" `isInfixOf` show err -> pure ()
       | otherwise -> throwIO err
 
@@ -1459,7 +1460,7 @@ deleteRandomDLQBatch schema table withConn = do
     pure [dlqId | Only dlqId <- rows]
   void (HL.deleteDLQJobsBatch @SMPayload ids)
 
--- | Run an action, retrying transient serialization and deadlock aborts.
+-- | Run an action, retrying transient serialization aborts.
 withRetry :: IO () -> IO ()
 withRetry act = go (5 :: Int)
   where
@@ -1475,6 +1476,10 @@ withRetry act = go (5 :: Int)
 -- A deadlock is a lock-order defect, so it fails the test.
 isRetryableError :: SomeException -> Bool
 isRetryableError err = "40001" `isInfixOf` show err
+
+-- | Detect a deadlock abort by the SQLSTATE in the rendered message.
+isDeadlock :: SomeException -> Bool
+isDeadlock err = "40P01" `isInfixOf` show err
 
 -- | Install the gap-free HOL violation detector on a raw connection.
 installHolDetector :: PG.Connection -> Text -> Text -> IO ()
@@ -2388,7 +2393,7 @@ treeRetryFromDLQGuard run schema table withConn reset = do
   mainCount >>= (`shouldBe` 0)
 
 -- | A job carrying both a concurrency slot and a rate-limit key is admitted only
--- up to the tighter cap. Assumes 'smBucket' capacity 3 and the cap-a\/cap-c pools.
+-- up to the tighter cap. Assumes 'smBucket' capacity 3 and the cap-a\/cap-c policies.
 combinedGateGuard
   :: forall sm
    . (ArbiterC sm)
@@ -2412,7 +2417,7 @@ combinedGateGuard run schema withConn reset = do
   insBoth "cap-a" "rk-1" 4
   concCapped <- claimN 10
   length concCapped `shouldBe` 1
-  -- Spend rk-2 to one token under the roomy cap-c pool.
+  -- Spend rk-2 to one token under the roomy cap-c policy.
   insBoth "cap-c" "rk-2" 2
   spent <- claimN 10
   length spent `shouldBe` 2

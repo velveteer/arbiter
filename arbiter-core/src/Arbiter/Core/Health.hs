@@ -38,7 +38,8 @@ data PgDbHealth = PgDbHealth
   , connBlocked :: Int64
   -- ^ Connections running a query that waits on a lock.
   , connOther :: Int64
-  -- ^ Connections in any other state.
+  -- ^ Connections in any other state, including ones whose state is hidden without
+  -- @pg_read_all_stats@.
   , oldestTxnAge :: Double
   -- ^ Age of the oldest open transaction, in seconds. 0 when none is open.
   , oldestQueryAge :: Double

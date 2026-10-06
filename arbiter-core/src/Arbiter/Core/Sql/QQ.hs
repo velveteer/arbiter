@@ -5,8 +5,8 @@
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
 -- The @sql@ quasiquoter. It builds a 'Arbiter.Core.Sql.Query.Query' whose text, parameters, and row
--- decoder all come from one template. The @stmt@ quasiquoter renders the text once and makes each
--- @#{...}@ hole a function argument.
+-- decoder all come from one template. The @stmt@ quasiquoter renders the text once and makes each distinct
+-- @#{...}@ identifier a function argument.
 --
 -- Holes reference in-scope identifiers, like @NeatInterpolation@'s @${var}@:
 --

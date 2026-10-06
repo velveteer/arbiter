@@ -7,7 +7,7 @@ queries use its connection and join its open transaction:
 ```haskell
 O.withTransaction $ do
   O.insertEntity ordersTable order
-  ArbO.runOrvilleDb @AppRegistry (ArbO.OrvilleEnv "arbiter" Nothing) $
+  ArbO.runOrvilleDb @AppRegistry (ArbO.OrvilleEnv {ArbO.schema = "arbiter", ArbO.listener = Nothing}) $
     Arb.insertJob (Arb.defaultJob (ProcessOrder orderId))
 ```
 

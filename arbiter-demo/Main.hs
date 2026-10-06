@@ -9,7 +9,7 @@
 
 module Main (main) where
 
-import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPool)
+import Arbiter.Concurrency (HasConcurrency (..), concurrencyBy, concurrencyPolicy)
 import Arbiter.Core.HighLevel qualified as HL
 import Arbiter.Core.Job.Types
   ( HasKind
@@ -29,7 +29,7 @@ import Arbiter.Core.QueueRegistry (Queue, QueueSpec (..))
 import Arbiter.Migrations (MigrationConfig (..), MigrationResult (..), defaultMigrationConfig, runMigrationsForRegistry)
 import Arbiter.Otel qualified as Otel
 import Arbiter.RateLimit (HasRateLimit (..), globalLimit, limitBy, limitByCase, tokenBucket)
-import Arbiter.Servant (initArbiterServer)
+import Arbiter.Servant (createArbiterServer)
 import Arbiter.Servant.API (ArbiterAPI)
 import Arbiter.Servant.OpenApi (openApiSpec)
 import Arbiter.Servant.Server (ArbiterServerConfig, arbiterServer)
@@ -179,9 +179,9 @@ instance HasRateLimit NotificationPayload where
   rateLimitFor = globalLimit (tokenBucket "notify" 2 20) "all"
 
 -- | At most 2 emails per recipient domain in flight at once, from the seeded
--- "email-domain" pool. Orthogonal to the rate limit on the same payload.
+-- "email-domain" policy. Orthogonal to the rate limit on the same payload.
 instance HasConcurrency EmailPayload where
-  concurrencyFor = concurrencyBy (concurrencyPool "email-domain" 2) emailKeySuffix
+  concurrencyFor = concurrencyBy (concurrencyPolicy "email-domain" 2) emailKeySuffix
 
 -- | The recipient address of an email job.
 emailAddress :: EmailPayload -> Text
@@ -233,7 +233,7 @@ runDemo tel = do
   -- Create server config over the producer env
   putStrLn ""
   putStrLn "Setting up server..."
-  serverConfig <- initArbiterServer (runSimpleDb producerEnv)
+  serverConfig <- createArbiterServer (runSimpleDb producerEnv)
   putStrLn "Server ready"
 
   -- Create worker configs with cron jobs

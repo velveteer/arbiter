@@ -475,7 +475,7 @@ const CC_KEY_COLS = [
   { key: 'fill', label: 'Fill', weight: 32 },
 ];
 
-// A pool's busiest key: a bar, or why there is none.
+// A policy's busiest key: a bar, or why there is none.
 const Busiest = {
   props: { p: Object },
   setup: () => ({ busiest, effLimit, isIdle }),
@@ -490,7 +490,7 @@ export const ConcurrencyView = {
   components: { Busiest, KeyList },
   setup() {
     const P = usePolicies({
-      noun: 'concurrency pools',
+      noun: 'concurrency policies',
       key: 'arb.concurrencyRefresh',
       summaryKey: 'arb.summary.concurrency',
       fetch: api.concurrency,
@@ -529,10 +529,10 @@ export const ConcurrencyView = {
   template: /* html */ `
     <load-error :view="P.view"/>
     <div class="queue-summary" :class="P.summary">
-      <qs :v="P.policies.length" :l="pluralize(P.policies.length, 'pool')"/>
+      <qs :v="P.policies.length" :l="pluralize(P.policies.length, 'policy', 'policies')"/>
       <qs :v="formatCompact(summary.keys)" :l="pluralize(summary.keys, 'key tracked', 'keys tracked')"/>
       <qs :v="formatCompact(summary.inFlight)" l="in flight"/>
-      <qs :v="summary.saturated" :l="pluralize(summary.saturated, 'pool at limit', 'pools at limit')" :c="{ warn: summary.saturated > 0 }"/>
+      <qs :v="summary.saturated" :l="pluralize(summary.saturated, 'policy at limit', 'policies at limit')" :c="{ warn: summary.saturated > 0 }"/>
     </div>
     <div class="toolbar" v-show="P.view.ready">
       <refresh-control :view="P.view"/>
@@ -554,11 +554,11 @@ export const ConcurrencyView = {
             <td><busiest :p="p"/></td>
           </tr>
         </tbody>
-        <skeleton-rows :view="P.view" :span="CC_COLS.length" :empty="!P.policies.length">No concurrency pools declared.</skeleton-rows>
+        <skeleton-rows :view="P.view" :span="CC_COLS.length" :empty="!P.policies.length">No concurrency policies declared.</skeleton-rows>
       </table>
     </div>
 
-    <drawer :d="P.d" :title="P.d.cur?.prefix || 'Pool'" :status="P.d.cur && saturated(P.d.cur) ? 'at limit' : ''"
+    <drawer :d="P.d" :title="P.d.cur?.prefix || 'Policy'" :status="P.d.cur && saturated(P.d.cur) ? 'at limit' : ''"
       status-class="bg-danger-subtle text-danger-emphasis" :sticky="P.editing">
       <template #actions>
         <action-menu v-if="P.d.cur && !P.editing" v-slot="{ close }">

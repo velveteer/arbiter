@@ -9,7 +9,6 @@ module Arbiter.Worker.Cron
   , cronJobInTimezone
   , overlapPolicyToText
   , overlapPolicyFromText
-  , initCronSchedules
 
     -- * Schedule updates
   , validateCronScheduleUpdate
@@ -18,23 +17,24 @@ module Arbiter.Worker.Cron
     -- * Next run
   , nextRunInTimezone
   , nextRunFromExpression
-  , formatMinute
 
     -- * Testing internals
 
     -- | Exposed for the arbiter test suites. Not covered by the PVP.
+  , formatMinute
   , resolveTZ
   , matchesInTimezone
   , enumMinutes
   , truncateToMinute
   , enumerateCatchUpTicks
-  , makeDedupKeyFromParts
+  , mkDedupKeyFromParts
   , computeDelayMicros
   , CronLog
   , newCronLog
   , runCronScheduler
   , processCronCatchUp
   , processRunRequests
+  , initCronSchedules
   ) where
 
 import Arbiter.Worker.Cron.Scheduler
@@ -42,7 +42,7 @@ import Arbiter.Worker.Cron.Scheduler
   , computeDelayMicros
   , enumerateCatchUpTicks
   , initCronSchedules
-  , makeDedupKeyFromParts
+  , mkDedupKeyFromParts
   , newCronLog
   , processCronCatchUp
   , processRunRequests

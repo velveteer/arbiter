@@ -7,7 +7,7 @@
 -- Declare which policy (if any) limits each job with a 'HasRateLimit' instance.
 -- The migration seeds every policy a selector can reach.
 module Arbiter.RateLimit
-  ( -- * Declaring a payload's limit
+  ( -- * Declaring a payload's policy
     HasRateLimit (..)
   , RateLimitFor
   , Selector

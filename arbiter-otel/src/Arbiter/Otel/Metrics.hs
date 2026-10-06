@@ -72,8 +72,8 @@ newArbiterMeters meterProvider = do
   ArbiterMeters
     <$> counter Name.JobsClaimed "Jobs claimed by workers"
     <*> counter Name.JobsProcessed "Jobs processed, by terminal outcome"
-    <*> counter Name.JobsRetries "Failed jobs scheduled for another attempt"
-    <*> counter Name.AdmissionAdmitted "Claimed jobs that passed an admission policy, by kind and policy"
+    <*> counter Name.JobsRetried "Failed jobs scheduled for another attempt"
+    <*> counter Name.AdmissionAdmitted "Claimed jobs that passed an admission policy, by policy kind and policy"
     <*> counter Name.MaintenanceRows "Rows a reaper op touched, by op"
     <*> meterCreateHistogram
       meter

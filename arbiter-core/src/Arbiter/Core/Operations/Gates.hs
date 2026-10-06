@@ -125,8 +125,8 @@ runGatedInner schemaName task interval work = do
       (result, next) <- work state
       result <$ MA.executeStatement (maybe (Sql.bumpGateSQL schemaName task) (Sql.bumpGateStateSQL schemaName task) next)
 
--- | A gate name for a set of parts. The sorted set itself while it fits the gate's
--- key, an md5 digest of it beyond that.
+-- | A gate name for a list of parts. The sorted list, duplicates kept, while it fits the
+-- gate's key, an md5 digest of it beyond that.
 gateNameFor :: (MonadArbiter m) => Text -> [Text] -> m Text
 gateNameFor prefix parts
   | T.length joined <= maxGateNameLength = pure (prefix <> ":" <> joined)
@@ -136,7 +136,7 @@ gateNameFor prefix parts
   where
     joined = T.intercalate "," (sort parts)
 
--- | Well under the btree index-row limit the gates table's primary key sits on.
+-- | The longest gate name kept as plain text.
 maxGateNameLength :: Int
 maxGateNameLength = 200
 
@@ -144,14 +144,15 @@ maxGateNameLength = 200
 data Shared a
   = -- | Result from work run by this caller.
     Ran a
-  | -- | Result read from the gate, with its age in seconds.
+  | -- | Result read from the gate, with its age in seconds from the claim that produced it.
     Published Double a
   | -- | A published result this caller could not decode, with the parse error.
     Unreadable Text
   deriving stock (Eq, Functor, Show)
 
--- | Run gated work, or read a result another caller published within @maxAge@.
--- 'Nothing' when there is no such result. The work starts after the gate transaction
+-- | Run gated work, or read a result another caller published, with an age within
+-- @maxAge@. The age counts from the claim that produced it. 'Nothing' when there is no
+-- such result. The work starts after the gate transaction
 -- commits. A slow operation does not retain the gate row or a read snapshot. The
 -- exclusion interval starts after publication. A failed operation or publication
 -- restores the watermark and permits another caller to run. The compensation period is

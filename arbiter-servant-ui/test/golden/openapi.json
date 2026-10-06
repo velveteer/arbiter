@@ -646,7 +646,7 @@
                     "claimedBy": {
                         "$ref": "#/components/schemas/UUID"
                     },
-                    "seconds": {
+                    "leaseSeconds": {
                         "format": "double",
                         "type": "number"
                     }
@@ -654,7 +654,7 @@
                 "required": [
                     "claimSeq",
                     "claimedBy",
-                    "seconds"
+                    "leaseSeconds"
                 ],
                 "type": "object"
             },
@@ -4184,7 +4184,7 @@
             "name": "cron"
         },
         {
-            "description": "The worker registry, and pausing a pool.",
+            "description": "The worker registry, and pausing a worker.",
             "name": "workers"
         },
         {

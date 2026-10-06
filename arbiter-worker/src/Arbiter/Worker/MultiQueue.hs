@@ -65,7 +65,7 @@ data NamedWorkerPool m
   { workerPoolName :: Text
   -- ^ The queue name from the registry.
   , workerPoolConfig :: WorkerConfig m payload
-  -- ^ The pool's config. Get it by pattern match, not as a selector.
+  -- ^ The pool's config. Get it by pattern match.
   }
 
 -- | Name a pool from its payload's registry entry.
@@ -81,8 +81,10 @@ namedWorkerPool
 namedWorkerPool cfg = NamedWorkerPool (Arb.queueTable @payload @m) cfg
 
 -- | Run the pools selected by @ARBITER_ENABLED_QUEUES@, or every configured
--- pool when it is unset or blank. A selected queue with no pool throws
--- 'WorkerPoolSelectionException'.
+-- pool when it is unset or blank. Throws 'Arbiter.Core.Exceptions.InternalException'
+-- when @ARBITER_ENABLED_QUEUES@ has an unknown name or names no queues, and
+-- 'WorkerPoolSelectionException' for a selected queue with no pool, or when no pool
+-- is selected.
 runWorkerPools
   :: forall m
    . (MonadUnliftIO m, RegistryTables (RegistryOf m))
@@ -98,8 +100,9 @@ shutdownPools pools =
   liftIO . STM.atomically $
     traverse_ (`STM.writeTVar` ShuttingDown) [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
--- | Run only named pools. A pool that exits winds down its peers. The first
--- failure among them is rethrown after every peer has been joined.
+-- | Run only named pools. A pool that exits winds down its peers. After every peer has
+-- been joined, the failure of the first failed pool in list order is rethrown. Throws
+-- 'WorkerPoolSelectionException' for a name with no pool, or when no pool is selected.
 runSelectedWorkerPools
   :: forall m
    . (MonadUnliftIO m)
@@ -132,10 +135,23 @@ withPoolContext :: Text -> LogConfig -> LogConfig
 withPoolContext poolName logCfg =
   logCfg {identityContext = identityContext logCfg <> ["pool" .= poolName]}
 
--- | A single-stripe pool sized at twice the enabled worker count plus one for
--- the listener, with a minimum size of three. Throws 'WorkerConfigException' for an
--- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' for
--- an unknown or empty @ARBITER_ENABLED_QUEUES@.
+-- | Pool connections per enabled worker.
+connectionsPerWorker :: Int
+connectionsPerWorker = 2
+
+-- | Floor on the worker share of the pool.
+minWorkerConnections :: Int
+minWorkerConnections = 2
+
+-- | Pool connections for the listener.
+listenerConnections :: Int
+listenerConnections = 1
+
+-- | A single-stripe connection pool sized at twice the enabled worker count plus one
+-- for the listener, with a minimum size of three. Unset or blank
+-- @ARBITER_ENABLED_QUEUES@ enables all queues. Throws 'WorkerConfigException' for an
+-- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' when
+-- @ARBITER_ENABLED_QUEUES@ has an unknown name or names no queues.
 poolConfigForWorkers
   :: forall m
    . (RegistryTables (RegistryOf m))
@@ -145,7 +161,8 @@ poolConfigForWorkers pools = do
   enabled <- getEnabledQueues (Proxy @(RegistryOf m))
   traverse_ (validateSelected enabled) pools
   let enabledWorkers = sum [workerCount cfg | NamedWorkerPool name cfg <- pools, name `elem` enabled]
-  pure defaultPoolConfig {poolSize = max 2 (2 * enabledWorkers) + 1}
+  pure
+    defaultPoolConfig {poolSize = max minWorkerConnections (connectionsPerWorker * enabledWorkers) + listenerConnections}
   where
     validateSelected :: [Text] -> NamedWorkerPool m -> IO ()
     validateSelected enabled (NamedWorkerPool name cfg)

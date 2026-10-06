@@ -22,15 +22,15 @@ data JobStatus
     Ready
   | -- | Claimed by a worker, with the lease still running.
     InFlight
-  | -- | Unclaimed after a failed attempt, waiting out a retry delay.
+  | -- | Unclaimed with an attempt used, waiting out a delay. A nacked retry is here.
     Backoff
-  | -- | Never attempted, delayed to a future time.
+  | -- | No attempt used, delayed to a future time. A nacked first attempt is here.
     Scheduled
   | -- | Not claimable until resumed, such as a rollup finalizer with children.
     Suspended
   | -- | Held by a rate limit until tokens refill.
     Throttled
-  | -- | Force-cancel flagged, waiting for teardown.
+  | -- | Force-cancel-flagged, waiting for teardown.
     Cancelled
   | -- | Visible but out of attempts, waiting for the reaper's DLQ sweep.
     Exhausted

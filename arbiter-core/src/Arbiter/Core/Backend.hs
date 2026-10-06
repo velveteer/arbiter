@@ -2,6 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The env, monad, pool state, and savepoint ladder shared by the pooled backends.
+--
+-- This is the API for backend authors.
 module Arbiter.Core.Backend
   ( -- * Database monad
     Db (..)
@@ -115,7 +117,8 @@ inTransaction drv conn schemaName =
       , driverConfig = initialConfig drv
       }
 
--- | Release the env's connection pool, closing its open connections.
+-- | Close the idle connections in the env's pool. Connections in use stay open and go
+-- back to the pool. The pool stays usable.
 destroyEnv :: (MonadIO m) => Env conn cfg registry -> m ()
 destroyEnv env = liftIO $ traverse_ destroyAllResources (connectionPool (poolState env))
 
@@ -177,7 +180,8 @@ withConn action = do
 pinConnection :: (HasPoolState conn m, MonadUnliftIO m) => m a -> m a
 pinConnection action = withConn $ \conn -> localPoolState (\st -> st {pinned = Just (conn, maybe 0 snd (pinned st))}) action
 
--- | Transaction bracket over the backend's own bracket and statement runner. Nests via savepoints.
+-- | Transaction bracket over the backend's own statement runner and bracket. Nests via
+-- savepoints.
 withSavepointTransaction
   :: (HasPoolState conn m, MonadUnliftIO m)
   => (conn -> ByteString -> IO ())

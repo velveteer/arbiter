@@ -60,28 +60,28 @@ instance FromJSON WorkerHealth where
 workerHealthFromText :: Text -> Either Text WorkerHealth
 workerHealthFromText = enumFromText "worker health" workerHealthToText
 
--- | A row in the worker registry. One row per running worker pool.
+-- | A row in the worker registry. One row per running worker.
 data WorkerRow = WorkerRow
   { workerId :: UUID
-  -- ^ The worker pool's id.
+  -- ^ The worker's id.
   , queueName :: Text
-  -- ^ The queue the pool works.
+  -- ^ The queue the worker works.
   , hostName :: Maybe Text
-  -- ^ The host the pool runs on.
+  -- ^ The host the worker runs on.
   , workerCount :: Maybe Int32
-  -- ^ The pool's worker thread count.
+  -- ^ The worker's thread count.
   , startedAt :: UTCTime
-  -- ^ When the pool registered.
+  -- ^ When the worker registered.
   , lastHeartbeat :: UTCTime
-  -- ^ When the pool last sent a heartbeat.
+  -- ^ When the worker last sent a heartbeat.
   , shuttingDown :: Bool
-  -- ^ Whether the pool is draining.
+  -- ^ Whether the worker is draining.
   , paused :: Bool
   -- ^ The worker's own pause flag. The queue's flag is separate.
   , staleThresholdSecs :: Double
-  -- ^ Heartbeat age in seconds after which the pool counts as stale.
+  -- ^ Heartbeat age in seconds after which the worker counts as stale.
   , metadata :: Maybe Value
-  -- ^ Free-form metadata the pool registered.
+  -- ^ Free-form metadata the worker registered.
   , health :: WorkerHealth
   -- ^ Health derived from the heartbeat and the shutdown flag.
   }

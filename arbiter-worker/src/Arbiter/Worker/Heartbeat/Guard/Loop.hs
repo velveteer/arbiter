@@ -254,7 +254,7 @@ retryLater guard issued entry = do
     when current $ modifyTVar' (guardedStatus entry) $ \status ->
       rebeat (addTime (heartbeatWait (configInterval (guardConfig guard)) False (leaseAt status `diffTime` now)) now) status
 
--- | 'try' for synchronous exceptions only.
+-- | @try@ for synchronous exceptions only.
 trySync :: (MonadCatch n) => n a -> n (Either SomeException a)
 trySync = tryJust (\exc -> if isSyncException exc then Just exc else Nothing)
 
@@ -315,7 +315,7 @@ settle guard issued currentTime byJob (entry, live) = do
     key = configKey config
     batch = guardedBatch entry
 
--- | Only a successful visibility update renews the lease.
+-- | Only a successful extend renews the lease.
 renewed :: SetVisibilityResult -> Bool
 renewed VisibilityExtended {} = True
 renewed _ = False

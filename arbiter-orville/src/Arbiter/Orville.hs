@@ -6,6 +6,8 @@
 -- import Arbiter.Core
 -- import Arbiter.Orville
 -- import Control.Monad (void)
+-- import Orville.PostgreSQL (MonadOrville)
+-- import UnliftIO (MonadUnliftIO)
 --
 -- enqueue :: (MonadOrville m, MonadUnliftIO m) => m ()
 -- enqueue =

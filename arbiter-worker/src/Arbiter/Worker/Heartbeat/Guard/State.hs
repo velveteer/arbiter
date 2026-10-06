@@ -95,7 +95,7 @@ data GuardConfig n job = GuardConfig
   , configExtend :: [job] -> n [SetVisibilityResult]
   -- ^ Extend the jobs' leases by 'configTimeout', reporting each.
   , configExtended :: n ()
-  -- ^ Runs after each extend that reached the database.
+  -- ^ Runs after each extend that lands before the guard abandons it.
   , configLog :: LogLevel -> [job] -> Text -> n ()
   -- ^ The pool log, with the jobs in context.
   , configHeartbeat :: job -> UTCTime -> UTCTime -> n ()

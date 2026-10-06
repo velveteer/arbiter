@@ -55,8 +55,8 @@ import Arbiter.Core.Sql.QQ (sql)
 import Arbiter.Core.Sql.Query (Query)
 import Arbiter.Core.SqlLiterals (textLiteral)
 
--- | Suspend every claimable job in a parent's subtree. A finalizer already waiting on
--- its own children is left as it stands. An in-flight job is left as it stands.
+-- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
+-- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
 pauseChildrenSQL :: SchemaName -> TableName -> Int64 -> Query ()
 pauseChildrenSQL schema tableName parentId =
   let tbl = jobQueueTable schema tableName
@@ -124,8 +124,7 @@ lockDescendantsCte tbl =
     )
   |]
 
--- | CTE binding @locked@ to the ids named, in the descending lock order of every
--- multi-row statement on a queue table. The statement carries
+-- | CTE binding @locked@ to the ids named, locked in descending id order. The statement carries
 -- @id IN (SELECT id FROM locked)@ to keep the CTE.
 lockedByIdsCte :: Text -> [Int64] -> Query ()
 lockedByIdsCte tbl ids =
@@ -138,7 +137,8 @@ lockedByIdsCte tbl ids =
   |]
 
 -- | Recursive CTEs binding @ancestors@ to the rows @seed@ names and every parent above
--- them, and @roots@ to the tops of those trees. Deduplicating.
+-- them, and @roots@ to the tops of those trees. Deduplicating. An orphan, whose walk
+-- ends at a parent missing from the table, gives no root.
 rootsFromCte :: Text -> Query () -> Query ()
 rootsFromCte tbl seed =
   [sql|
@@ -165,7 +165,7 @@ descendantsOfCte tbl jobIds =
   |]
 
 -- | Lock the named jobs and all their descendants, several trees in one pass. Locks rows
--- in descending id order. Then lock the trees' group summaries.
+-- in descending id order. Then lock the group summaries of the rows and their parents.
 lockJobTreesSQL :: SchemaName -> TableName -> [Int64] -> Query Int64
 lockJobTreesSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
@@ -320,7 +320,7 @@ selectCancelledReapableJobsSQL schema tableName limit =
 
 -- | Cancel an entire job tree by walking up from any node to the root,
 -- then cascade-deleting everything from the root down. Locks rows in descending id
--- order. Returns the ids deleted.
+-- order. Deletes nothing for an orphan. Returns the ids deleted.
 cancelJobTreeSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 cancelJobTreeSQL schema tableName jobId =
   let tbl = jobQueueTable schema tableName

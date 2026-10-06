@@ -30,7 +30,7 @@ registerWorker
   :: (MonadArbiter m)
   => SchemaName
   -> UUID
-  -- ^ Worker pool id
+  -- ^ Worker id
   -> Text
   -- ^ Queue name
   -> Maybe Text

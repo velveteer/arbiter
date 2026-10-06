@@ -63,7 +63,7 @@ data Durability
   deriving stock (Eq, Show)
 
 -- | A resolved key with a prefix and per-key suffix. The stored form is
--- @prefix:suffix@. The separate prefix supports policy lookup.
+-- @prefix:suffix@.
 data RateLimitKey = RateLimitKey
   { rlkPrefix :: Text
   -- ^ The policy prefix.
@@ -82,8 +82,8 @@ instance FromJSON RateLimitKey where
 rateLimitKeyText :: RateLimitKey -> Text
 rateLimitKeyText (RateLimitKey prefix suffix) = prefixedKeyText prefix suffix
 
--- | A token-bucket policy. Burst @policyMax@, refilling @policyRefill@ every
--- @policyInterval@. A @policyRefill@ of 0 is a manually-refilled bucket. Fields are
+-- | A token-bucket policy. Burst @policyMax@, refilling continuously at @policyRefill@
+-- per @policyInterval@. A @policyRefill@ of 0 is a manually-refilled bucket. Fields are
 -- non-negative and the interval is positive. The migration rejects other values.
 data RateLimitPolicy = RateLimitPolicy
   { policyPrefix :: Text

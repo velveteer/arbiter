@@ -36,8 +36,6 @@ module Arbiter.Simple.MonadArbiter
   ) where
 
 import Arbiter.Core.Backend (HasPoolState, pinConnection, withConn, withSavepointTransaction)
-import Arbiter.Core.Codec (Col (..), NullCol (..), runCodec)
-import Arbiter.Core.Job.Types.Internal (Stored (..), storedBytes)
 import Arbiter.Core.MonadArbiter hiding (Query (..))
 import Arbiter.Core.MonadArbiter qualified as MA
 import Control.Monad (void)

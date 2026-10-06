@@ -4,7 +4,7 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- DDL for the concurrency-limit feature: the seeded per-prefix pool policies (with
+-- DDL for the concurrency-limit feature: the seeded per-prefix concurrency policies (with
 -- the operator override), the global per-key count table, job columns, and the
 -- per-queue delta triggers that maintain the count. No database execution here.
 module Arbiter.Core.Concurrency.Schema
@@ -53,12 +53,12 @@ arbiterConcurrencyTable schemaName =
 arbiterConcurrencyTableName :: Text
 arbiterConcurrencyTableName = "arbiter_concurrency"
 
--- | Qualified name of the app-global pool policies table.
+-- | Qualified name of the app-global concurrency policies table.
 arbiterConcurrencyPoliciesTable :: SchemaName -> Text
 arbiterConcurrencyPoliciesTable schemaName =
   quoteIdentifier schemaName <> "." <> arbiterConcurrencyPoliciesTableName
 
--- | Bare name of the pool policies table, for catalog lookups by relname.
+-- | Bare name of the concurrency policies table, for catalog lookups by relname.
 arbiterConcurrencyPoliciesTableName :: Text
 arbiterConcurrencyPoliciesTableName = "arbiter_concurrency_policies"
 
@@ -67,7 +67,7 @@ concurrencyAdvisoryLockExpr :: Text -> Text
 concurrencyAdvisoryLockExpr key =
   "hashtextextended('arbiter_conc:' || " <> key <> ", 0)"
 
--- | DDL for the pool policies table. @default_limit@ is migration-owned.
+-- | DDL for the concurrency policies table. @default_limit@ is migration-owned.
 -- @override_limit@ is management-owned. The effective cap is @COALESCE(override, default)@.
 createConcurrencyPoliciesTableSQL :: SchemaName -> Text
 createConcurrencyPoliciesTableSQL schemaName =
@@ -91,7 +91,7 @@ createConcurrencyTableSQL schemaName =
     ]
 
 -- | Migration adding the concurrency columns to a queue's job and DLQ tables. The
--- key is @prefix:suffix@. The prefix is kept separate to join the pool policy.
+-- key is @prefix:suffix@. @concurrency_prefix@ holds the policy prefix.
 addConcurrencyColumnsSQL :: SchemaName -> TableName -> Text
 addConcurrencyColumnsSQL schemaName tableName =
   T.unlines
@@ -287,7 +287,7 @@ createConcurrencyTriggersSQL schemaName tableName =
     (jobQueueTable schemaName tableName)
     ("maintain_" <> tableName <> "_concurrency")
 
--- | Upsert a pool's @default_limit@. Any operator @override_limit@ is left untouched.
+-- | Upsert a policy's @default_limit@. Any operator @override_limit@ is left untouched.
 upsertConcurrencyPolicyRowSQL :: SchemaName -> ConcurrencyPolicy -> Text
 upsertConcurrencyPolicyRowSQL schemaName policy =
   policyUpsertSQL

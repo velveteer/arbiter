@@ -33,8 +33,8 @@ import Arbiter.Worker.Cron
   , enumMinutes
   , enumerateCatchUpTicks
   , formatMinute
-  , makeDedupKeyFromParts
   , matchesInTimezone
+  , mkDedupKeyFromParts
   , nextRunInTimezone
   , resolveTZ
   , truncateToMinute
@@ -85,16 +85,16 @@ spec = do
       let tick = mkTime 2025 1 9 8 5 0
       formatMinute tick `shouldBe` "2025-01-09T08:05"
 
-  describe "makeDedupKeyFromParts" $ do
+  describe "mkDedupKeyFromParts" $ do
     it "SkipOverlap produces arbiter_cron:<name> (no time)" $ do
       let Right cron = cronJob "nightly" "0 3 * * *" SkipOverlap (\_ _ -> defaultJob (SimpleTask "x"))
           tick = mkTime 2025 6 15 3 0 0
-      makeDedupKeyFromParts (name cron) (overlap cron) tick `shouldBe` "arbiter_cron:nightly"
+      mkDedupKeyFromParts (name cron) (overlap cron) tick `shouldBe` "arbiter_cron:nightly"
 
     it "AllowOverlap produces arbiter_cron:<name>:<utc minute>" $ do
       let Right cron = cronJob "nightly" "0 3 * * *" AllowOverlap (\_ _ -> defaultJob (SimpleTask "x"))
           tick = mkTime 2025 6 15 3 0 0
-      makeDedupKeyFromParts (name cron) (overlap cron) tick `shouldBe` "arbiter_cron:nightly:2025-06-15T03:00"
+      mkDedupKeyFromParts (name cron) (overlap cron) tick `shouldBe` "arbiter_cron:nightly:2025-06-15T03:00"
 
   describe "timezone handling" $ do
     it "cronJobInTimezone rejects an unknown Olson name" $ do

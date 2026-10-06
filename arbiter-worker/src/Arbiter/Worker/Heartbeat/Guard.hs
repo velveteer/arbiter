@@ -3,7 +3,7 @@
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
 -- One guard per pool. It fences every batch in flight and extends their leases.
--- A batch registers through 'guardBatch' and is signalled through 'recheck'.
+-- A batch registers through 'guardBatch'. 'recheck' asks for its extend now.
 -- 'runHeartbeatGuard' is the loop that fences and extends.
 module Arbiter.Worker.Heartbeat.Guard
   ( HeartbeatGuard

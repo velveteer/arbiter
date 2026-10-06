@@ -15,7 +15,7 @@ import GHC.Generics (Generic)
 
 import Arbiter.Core.Job.Types (JobRead)
 
--- | Full job state at the time of DLQ insertion.
+-- | Full job state when the job left the main queue.
 type JobSnapshot payload = JobRead payload
 
 -- | A job in the dead-letter queue.
@@ -23,7 +23,7 @@ data DLQJob payload = DLQJob
   { dlqPrimaryKey :: Int64
   -- ^ DLQ table primary key. The snapshot keeps its own job id.
   , failedAt :: UTCTime
-  -- ^ When the job was moved to the DLQ
+  -- ^ When the job was moved to the DLQ.
   , jobSnapshot :: JobSnapshot payload
   -- ^ Full job state at time of failure. Its 'Arbiter.Core.Job.Types.lastError' holds
   -- the final error.

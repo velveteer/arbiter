@@ -5,7 +5,7 @@
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
 --
--- Types for the @cron_schedules@ table.
+-- Types and DDL for the @cron_schedules@ table.
 --
 -- Code-defined defaults and user overrides sit in separate columns. Worker startup
 -- upserts the defaults. An override survives every deploy.
@@ -138,7 +138,7 @@ cronSchedulesTable schemaName = quoteIdentifier schemaName <> "." <> cronSchedul
 cronSchedulesTableName :: Text
 cronSchedulesTableName = "cron_schedules"
 
--- | DDL for the @cron_schedules@ table.
+-- | DDL for the @cron_schedules@ table. Later migrations add columns.
 createCronSchedulesTableSQL :: SchemaName -> Text
 createCronSchedulesTableSQL schemaName =
   T.unlines

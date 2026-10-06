@@ -19,7 +19,7 @@ data MetricName
   | -- | Counter, no unit. Attributes: @queue@, @outcome@ (success, dlq, cancelled, unavailable), @kind@.
     JobsProcessed
   | -- | Counter, no unit. Attributes: @queue@, @kind@.
-    JobsRetries
+    JobsRetried
   | -- | Counter, no unit. Attributes: @queue@, @policy_kind@, @policy@.
     AdmissionAdmitted
   | -- | Counter, no unit. Attributes: @op@.
@@ -28,7 +28,7 @@ data MetricName
     HandlerDuration
   | -- Queue depth
 
-    -- | Gauge, @{job}@. Attributes: @queue@, @status@.
+    -- | Gauge, @{job}@. Attributes: @queue@, @status@ (ready, blocked, in_flight, scheduled, backoff, throttled, suspended, cancelled, exhausted).
     QueueDepth
   | -- | Gauge, @{job}@. Attributes: @queue@, @kind@.
     QueueDepthByKind
@@ -36,19 +36,19 @@ data MetricName
     QueueOldestReadyAge
   | -- | Gauge, @s@. Attributes: @queue@.
     QueueOldestInFlightAge
-  | -- | Gauge, @{worker}@. Attributes: @queue@, @state@.
+  | -- | Gauge, @{worker}@. Attributes: @queue@, @state@ (active, paused).
     Workers
   | -- Admission
 
     -- | Gauge, @{key}@. Attributes: @policy_kind@, @policy@.
     AdmissionKeys
-  | -- | Gauge, @{slot}@. Attributes: @policy_kind@, @policy@.
+  | -- | Gauge, @{admission}@, in concurrency slots or rate-limit tokens. Attributes: @policy_kind@, @policy@.
     AdmissionLimit
   | -- | Gauge, @{job}@. Attributes: @policy@.
     AdmissionInFlight
   | -- | Gauge, @{job}@. Attributes: @policy@.
     AdmissionBusiestKey
-  | -- | Gauge, @{token}@. Attributes: @policy@, @stat@.
+  | -- | Gauge, @{token}@. Attributes: @policy@, @stat@ (min, avg).
     AdmissionTokens
   | -- Postgres health
 
@@ -60,13 +60,13 @@ data MetricName
     PgTableAutovacuumAge
   | -- | Gauge, @By@. Attributes: @table@.
     PgTableSize
-  | -- | Counter, @{scan}@. Attributes: @table@, @path@.
+  | -- | Counter, @{scan}@. Attributes: @table@, @path@ (seq, index).
     PgTableScans
-  | -- | Counter, @{block}@. Attributes: @table@, @source@.
+  | -- | Counter, @{block}@. Attributes: @table@, @source@ (hit, disk).
     PgTableBlocks
   | -- | Gauge, @{transaction}@. Attributes: @table@.
     PgTableXidAge
-  | -- | Gauge, @{connection}@. Attributes: @state@.
+  | -- | Gauge, @{connection}@. Attributes: @state@ (active, idle, idle_in_transaction, idle_in_transaction_aborted, blocked, other).
     PgDbConnections
   | -- | Gauge, @{backend}@. No attributes.
     PgDbBackends
@@ -74,7 +74,7 @@ data MetricName
     PgDbOldestTransactionAge
   | -- | Gauge, @s@. No attributes.
     PgDbOldestQueryAge
-  | -- | Gauge, @{status}@, 1 when reachable and 0 when not. No attributes.
+  | -- | Gauge, @1@, 1 when reachable and 0 when not. No attributes.
     DbReachable
   | -- | Gauge, @s@. No attributes.
     GaugesAge
@@ -85,7 +85,7 @@ metricName :: MetricName -> Text
 metricName = \case
   JobsClaimed -> "arbiter.jobs.claimed"
   JobsProcessed -> "arbiter.jobs.processed"
-  JobsRetries -> "arbiter.jobs.retries"
+  JobsRetried -> "arbiter.jobs.retried"
   AdmissionAdmitted -> "arbiter.admission.admitted"
   MaintenanceRows -> "arbiter.maintenance.rows"
   HandlerDuration -> "arbiter.jobs.handler.duration"
@@ -110,7 +110,7 @@ metricName = \case
   PgDbBackends -> "arbiter.pg.database.backends"
   PgDbOldestTransactionAge -> "arbiter.pg.database.oldest_transaction_age"
   PgDbOldestQueryAge -> "arbiter.pg.database.oldest_query_age"
-  DbReachable -> "arbiter.db.reachable"
+  DbReachable -> "arbiter.pg.database.reachable"
   GaugesAge -> "arbiter.gauges.age"
 
 -- | Every metric name arbiter exports.

@@ -30,6 +30,10 @@ module Arbiter.Migrations
   , MigrationCommand (..)
   , MigrationResult (..)
   , Durability (..)
+  , RateLimitPolicy (..)
+  , ConcurrencyPolicy (..)
+  , SchemaName
+  , TableName
   ) where
 
 import Arbiter.Core.Concurrency.Schema
@@ -169,8 +173,9 @@ data MigrationConfig = MigrationConfig
   -- them to match. Default: 'True'.
   , enableEventStreaming :: Bool
   -- ^ Install the admin UI's event-streaming triggers, which send a JSON event via
-  -- @pg_notify@ for every insert, update and delete on the job tables. Each run adds or
-  -- drops them to match, and drops the shared function when no trigger uses it.
+  -- @pg_notify@ for every insert, update and delete on a queue table and every insert on
+  -- its DLQ. A lease extend sends no event. Each run adds or drops them to match, and
+  -- drops the shared function when no trigger uses it.
   -- Default: 'False'.
   , rateLimitDurability :: Durability
   -- ^ WAL-logging for the rate-limit bucket table in this schema. 'Unlogged'
@@ -247,7 +252,7 @@ data AdmissionSeeds = AdmissionSeeds
   { seedRateLimitPolicies :: [RateLimitPolicy]
   -- ^ Rate-limit policies to upsert into the policies table.
   , seedConcurrencyPolicies :: [ConcurrencyPolicy]
-  -- ^ Concurrency pools to upsert into the policies table.
+  -- ^ Concurrency policies to upsert into the policies table.
   }
 
 -- | Seeds for a deployment with no admission policies.
@@ -464,11 +469,11 @@ conflictingPolicyPrefixes = conflictingPrefixes policyPrefix policyParamsKey
 policyParamsKey :: RateLimitPolicy -> String
 policyParamsKey policy = show (policyMax policy, policyRefill policy, policyInterval policy)
 
--- | Upsert each pool's @default_limit@, leaving operator overrides intact. Two pools
+-- | Upsert each policy's @default_limit@, leaving operator overrides intact. Two policies
 -- with the same prefix but different limits fail the migration.
 reconcileConcurrencyPolicies :: PG.Connection -> SchemaName -> [ConcurrencyPolicy] -> IO ()
 reconcileConcurrencyPolicies =
-  reconcilePolicyRows "concurrency pool" "limits" cpPrefix cpLimit upsertConcurrencyPolicyRowSQL
+  reconcilePolicyRows "concurrency policy" "limits" cpPrefix cpLimit upsertConcurrencyPolicyRowSQL
 
 -- | Upsert each policy row's @default_*@ params. Fails on a prefix that contains the
 -- @:@ key separator or is declared with conflicting params. Idempotent. Operator
@@ -532,9 +537,9 @@ reconcileRateLimitDurability conn schemaName durability = do
           void $ execute_ conn (Query (encodeUtf8 (alterRateLimitsDurabilitySQL schemaName durability)))
     _ -> pure ()
 
--- | Reconcile optional triggers schema-wide after tracked migrations.
--- Restore triggers removed by disabled options. Drop objects for queues outside
--- the supplied table list. Migration history remains unchanged.
+-- | Reconcile optional triggers schema-wide after tracked migrations. Install or drop
+-- each option's objects to match the config. Drop objects for queues outside the
+-- supplied table list. Migration history remains unchanged.
 reconcileOptionalTriggers :: PG.Connection -> SchemaName -> [TableName] -> MigrationConfig -> IO ()
 reconcileOptionalTriggers conn schemaName tables config =
   PG.withTransaction conn $ do

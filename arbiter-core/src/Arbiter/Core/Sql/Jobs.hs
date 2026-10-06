@@ -7,6 +7,7 @@
 -- Jobs SQL templates.
 module Arbiter.Core.Sql.Jobs
   ( JobFilter (..)
+  , FilterTable (..)
   , JobSortColumn (..)
   , jobSortColumnName
   , DLQSortColumn (..)
@@ -77,13 +78,13 @@ data JobFilter
     FilterParentId Int64
   | -- | Jobs with no parent.
     FilterRootsOnly
-  | -- | Jobs with this derived status. Main table only.
+  | -- | Jobs with this derived status. Matches nothing on the DLQ or archive.
     FilterStatus JobStatus
   | -- | The row with this primary key.
     FilterId Int64
-  | -- | The row with this original job id. DLQ and archive only.
+  | -- | The row with this original job id. On the main table, the row with this id.
     FilterJobId Int64
-  | -- | Jobs claimed by this worker pool.
+  | -- | Jobs claimed by this worker.
     FilterClaimedBy UUID
   | -- | Jobs with this kind label.
     FilterKind Text
@@ -99,10 +100,17 @@ data JobFilter
     FilterInsertedAfter UTCTime
   | -- | Jobs inserted before this time.
     FilterInsertedBefore UTCTime
-  | -- | Jobs completed at or after this time. Archive only.
+  | -- | Jobs completed at or after this time. Matches nothing outside the archive.
     FilterCompletedAfter UTCTime
-  | -- | Jobs completed before this time. Archive only.
+  | -- | Jobs completed before this time. Matches nothing outside the archive.
     FilterCompletedBefore UTCTime
+  deriving stock (Eq, Show)
+
+-- | The table a 'JobFilter' narrows.
+data FilterTable
+  = MainTable
+  | DLQTable
+  | ArchiveTable
   deriving stock (Eq, Show)
 
 -- | Sortable columns on the main jobs table.
@@ -256,7 +264,7 @@ claimablePred alias =
         AND ${attemptsLeft}
       |]
 
--- | All job columns plus the derived @status@ column, aliased @job@, for filtering.
+-- | The job read columns plus the derived @status@ column, aliased @job@, for filtering.
 jobsWithStatusSubquery :: SchemaName -> TableName -> Text
 jobsWithStatusSubquery schema tableName =
   let tbl = jobQueueTable schema tableName
@@ -490,7 +498,7 @@ dedupUpdateSet tbl =
     claimed_by = NULL
   |]
 
--- | Writable columns a replace re-arms instead of copying.
+-- | Writable columns a replace re-arms.
 dedupResetColumns :: [Text]
 dedupResetColumns = ["dedup_key", "attempts", "last_error"]
 

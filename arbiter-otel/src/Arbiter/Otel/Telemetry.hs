@@ -85,7 +85,7 @@ data Telemetry = Telemetry
   , gaugeRefresh :: NominalDiffTime
   -- ^ The metric export interval this handle resolved.
   , telemetrySummary :: Text
-  -- ^ What this handle exports and where, for the caller to log at startup.
+  -- ^ A startup line for the caller to log, with a note for each signal that failed to start.
   }
 
 -- | Bracketed OpenTelemetry init and shutdown. Every signal is the SDK's, resolved from
@@ -235,7 +235,8 @@ withTelemetryIf :: Bool -> (Telemetry -> IO a) -> IO a
 withTelemetryIf True action = withTelemetry action
 withTelemetryIf False action = action inertTelemetry
 
--- | Send log output to the configured destination and this handle's destination.
+-- | Also send the config's logs to this handle's destination. A config that discards
+-- its logs still exports them.
 telemetryLogConfig :: Telemetry -> LogConfig -> LogConfig
 telemetryLogConfig = otelLogs . telemetryLogDestination
 

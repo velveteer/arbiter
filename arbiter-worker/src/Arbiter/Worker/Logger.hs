@@ -13,6 +13,10 @@ module Arbiter.Worker.Logger
     -- * Log levels
   , LogLevel (..)
 
+    -- * Failure gates
+  , FailureGates
+  , newFailureGates
+
     -- * Re-exports for structured context
   , Pair
   , (.=)
@@ -29,8 +33,6 @@ module Arbiter.Worker.Logger
   , newFailureGate
   , reportOutcome
   , tryReported
-  , FailureGates
-  , newFailureGates
   , tryReportedOn
   ) where
 
@@ -103,8 +105,8 @@ data LogConfig = LogConfig
   , additionalContext :: IO [Pair]
   -- ^ Context merged into every message, read at log time. Default: @pure []@.
   , identityContext :: [Pair]
-  -- ^ The library's pool and worker pairs. 'additionalContext' wins on a
-  -- collision. Default: @[]@.
+  -- ^ The library's pool and worker pairs. 'additionalContext' wins on a collision,
+  -- except that a 'LogCallback' gets every pair, duplicates included. Default: @[]@.
   , failureRepeatInterval :: NominalDiffTime
   -- ^ Repeat interval in seconds for a persistent failure. Default: @60@.
   }

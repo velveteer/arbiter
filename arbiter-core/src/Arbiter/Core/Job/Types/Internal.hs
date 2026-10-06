@@ -126,7 +126,7 @@ attempts Job {attempts = value} = value
 lastError :: Job payload Int64 q insertedAt adm -> Maybe Text
 lastError Job {lastError = value} = value
 
--- | Claim priority. Lower numbers have higher priority.
+-- | Claim priority. Lower numbers have higher priority. In a group, a retried job goes first.
 priority :: Job payload key q insertedAt adm -> Int32
 priority Job {priority = value} = value
 

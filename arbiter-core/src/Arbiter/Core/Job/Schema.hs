@@ -17,7 +17,6 @@ module Arbiter.Core.Job.Schema
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueArchiveTableSQL
-  , queueTableNames
   , addTraceContextColumnSQL
   , addClaimSeqColumnSQL
   , addKindColumnSQL
@@ -69,6 +68,7 @@ module Arbiter.Core.Job.Schema
   , eventStreamingAdoptedObjectComment
 
     -- * Table name helpers
+  , queueTableNames
   , qualifiedTable
   , jobQueueTable
   , jobQueueDLQTable
@@ -239,7 +239,7 @@ createSchemaSQL :: SchemaName -> Text
 createSchemaSQL schemaName =
   "CREATE SCHEMA IF NOT EXISTS " <> quoteIdentifier schemaName <> ";"
 
--- | The job columns the queue and DLQ tables share. Checksummed by the create-table
+-- | The job columns the queue, DLQ and archive tables share. Checksummed by the create-table
 -- migration. A new column ships as its own ALTER script.
 jobColumns :: [Text]
 jobColumns =
@@ -284,7 +284,8 @@ addKindColumnSQL :: SchemaName -> TableName -> Text
 addKindColumnSQL schemaName tableName =
   addJobColumnsSQL schemaName tableName ["kind TEXT"]
 
--- | 'jobColumns' for the DLQ table, with @job_id@ in place of @id@.
+-- | 'jobColumns' for the DLQ table. Its own @id@, @failed_at@ and the original @job_id@
+-- come first.
 jobColumnsForDLQ :: Text
 jobColumnsForDLQ =
   T.unlines

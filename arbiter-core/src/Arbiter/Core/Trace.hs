@@ -103,8 +103,8 @@ stampTraceContext :: Maybe TraceContext -> JobWrite payload -> JobWrite payload
 stampTraceContext Nothing job = job
 stampTraceContext ctx job = JT.setTraceContext (JT.traceContext job <|> ctx) job
 
--- | The ambient span's trace context, or 'Nothing' when no span is active. Read from
--- the thread-local context of the enqueuing thread.
+-- | The ambient span's trace context, or 'Nothing' when no span is active or its span
+-- context is invalid. Read from the thread-local context of the enqueuing thread.
 currentTraceContext :: IO (Maybe TraceContext)
 currentTraceContext = maybe (pure Nothing) encoded =<< getActiveSpan
   where
@@ -148,7 +148,7 @@ withPublishSpan :: (HasKind payload, MonadUnliftIO m) => TableName -> [JobWrite 
 withPublishSpan queue jobs action =
   resolveTracer >>= \tracer -> spanning tracer ("publish " <> queue) (producerArgs queue jobs) action
 
--- | Mark the currently active span failed.
+-- | Mark the currently active span failed. A no-op when none is active.
 markSpanError :: (MonadIO m) => Text -> m ()
 markSpanError msg = withActiveSpan (\activeSpan -> setStatus activeSpan (Error msg))
 
@@ -206,6 +206,7 @@ consumeSpanFor queue shape =
     }
 
 -- | Run a job handler inside a @process \<queue\>@ consumer span linked to its producer.
+-- A batch span links each job's producer, up to a fixed cap.
 withConsumeSpan
   :: (MonadUnliftIO m) => Maybe Tracer -> ConsumeSpan -> NonEmpty (JobRead payload) -> m a -> m a
 withConsumeSpan mTracer consumeSpan jobs =

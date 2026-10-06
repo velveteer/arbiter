@@ -1,8 +1,8 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
--- | The job queue operations with their table names resolved from the payload type. A
--- payload reaches the queue its registry entry declares.
+-- | Job queue operations over the registry. A payload operation gets its table from the
+-- payload's registry entry.
 module Arbiter.Core.HighLevel
   ( -- * Constraint aliases
     QueueOperation
@@ -16,8 +16,6 @@ module Arbiter.Core.HighLevel
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
-  , mkJobStatements
-  , Ops.JobStatements
   , ackJob
   , ackJobsBatch
   , updateJobForRetry
@@ -54,10 +52,16 @@ module Arbiter.Core.HighLevel
 
     -- * Filtered query operations
   , Ops.JobFilter (..)
+  , Ops.JobSortColumn (..)
+  , Ops.DLQSortColumn (..)
+  , Ops.ArchiveSortColumn (..)
+  , Ops.SortDir (..)
   , listJobsFiltered
   , countJobsFiltered
   , listDLQFiltered
   , countDLQFiltered
+  , listArchiveFiltered
+  , countArchiveFiltered
 
     -- * Dead-letter queue operations
   , moveToDLQ
@@ -90,6 +94,8 @@ module Arbiter.Core.HighLevel
   , promoteJob
   , rescheduleJob
   , Ops.QueueStats (..)
+  , Ops.QueueOverview (..)
+  , Ops.GroupSummary (..)
   , getQueueStats
 
     -- * Count operations
@@ -257,10 +263,11 @@ publishSpan
   -> m a
 publishSpan = withPublishSpan (queueTable @payload @m)
 
--- | Insert a job. Returns the inserted job. 'Nothing' when an
+-- | Insert a job. Returns the job inserted or replaced. 'Nothing' when an
 -- 'Arbiter.Core.Job.Dedup.IgnoreDuplicate' key already exists, or a
--- 'Arbiter.Core.Job.Dedup.ReplaceDuplicate' key names a job that is claimed,
--- force-cancel flagged, has a different parent, or has children (DLQ children count).
+-- 'Arbiter.Core.Job.Dedup.ReplaceDuplicate' key names a job that is in flight (claimed
+-- under a live lease), force-cancel-flagged, has a different parent, or has children
+-- (DLQ children count).
 insertJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -300,8 +307,10 @@ claimNextVisibleJobs
   -> m [JobRead payload]
 claimNextVisibleJobs limit timeout = onQueue @payload $ \schemaName tableName -> Ops.claimNextVisibleJobs schemaName tableName limit timeout
 
--- | Add tokens to a key's bucket, capped at max, and wake any of its jobs parked
--- mid-wait. A no-op without a policy. Returns the number of jobs woken.
+-- | Add tokens to a key's bucket, clamped to @[0, max]@, and wake any of its throttled
+-- jobs. A key without a bucket gets a full bucket and the amount has no effect. Without a
+-- policy the bucket stays unchanged and the wake still runs. Returns the number of jobs
+-- woken.
 addRateLimitTokens
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -391,7 +400,7 @@ listRateLimitBuckets
   -> m [RateLimitBucketView]
 listRateLimitBuckets prefix limit offset = onSchema $ \schemaName -> Ops.listRateLimitBuckets schemaName prefix limit offset
 
--- | Set or clear a policy's override params and wake the prefix's parked jobs. Returns
+-- | Set or clear a policy's override params and wake the prefix's throttled jobs. Returns
 -- rows affected (0 if absent).
 updateRateLimitPolicyOverrides
   :: forall m
@@ -456,15 +465,15 @@ updateConcurrencyPolicyOverrides prefix upd = onSchema $ \schemaName -> Ops.upda
 
 -- | Override the policy's limit with its 'cpLimit', until it is cleared. Returns rows affected.
 setConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
-setConcurrencyLimit pool =
-  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just (Just (cpLimit pool))))
+setConcurrencyLimit policy =
+  updateConcurrencyPolicyOverrides (policyPrefixOf policy) (ConcurrencyPolicyUpdate (Just (Just (cpLimit policy))))
 
 -- | Drop a concurrency policy's override. Its declared limit applies again. Returns rows affected.
 clearConcurrencyLimit :: (MonadArbiter m) => ConcurrencyPolicy -> m Int64
-clearConcurrencyLimit pool =
-  updateConcurrencyPolicyOverrides (policyPrefixOf pool) (ConcurrencyPolicyUpdate (Just Nothing))
+clearConcurrencyLimit policy =
+  updateConcurrencyPolicyOverrides (policyPrefixOf policy) (ConcurrencyPolicyUpdate (Just Nothing))
 
--- | Delete drained concurrency rows with no live job.
+-- | Delete drained concurrency rows with no live job. Returns the number pruned.
 pruneConcurrencyKeys
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
@@ -472,42 +481,28 @@ pruneConcurrencyKeys
 pruneConcurrencyKeys = onRegistry Ops.pruneConcurrencyKeys
 
 -- | Recompute the concurrency counts from live jobs, repairing any trigger drift.
+-- Returns the rows repaired.
 reconcileConcurrencyCounts
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 reconcileConcurrencyCounts = onRegistry Ops.reconcileConcurrencyCounts
 
--- | Rebuild the concurrency counts when a crash truncated the UNLOGGED table.
+-- | Rebuild the concurrency counts when a crash truncated the UNLOGGED table. Returns the
+-- rows repaired.
 reconcileConcurrencyCountsIfStale
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 reconcileConcurrencyCountsIfStale = onRegistry Ops.reconcileConcurrencyCountsIfStale
 
--- | Reconcile then prune.
+-- | Reconcile then prune. Skipped when no concurrency key exists. Returns the rows
+-- repaired plus the rows pruned.
 reconcileAndPruneConcurrency
   :: forall m
    . (MonadArbiter m, RegistryTables (RegistryOf m))
   => m Int64
 reconcileAndPruneConcurrency = onRegistry Ops.reconcileAndPruneConcurrency
-
--- | Assemble a pool's statements once. Batch size 1 is the single-job claim.
-mkJobStatements
-  :: forall payload m
-   . (QueueOperation m payload)
-  => Int
-  -- ^ Batch size
-  -> Int
-  -- ^ Pool size
-  -> NominalDiffTime
-  -- ^ Visibility timeout
-  -> UUID
-  -- ^ Bound as the claim's @claimed_by@
-  -> m Ops.JobStatements
-mkJobStatements batchSize poolSize timeout workerId =
-  onQueue @payload $ \schemaName tableName ->
-    pure $ Ops.mkJobStatements @payload schemaName tableName batchSize poolSize timeout workerId
 
 -- | 'claimNextVisibleJobs' under a given worker id. A row whose payload fails to decode
 -- moves to the DLQ.
@@ -534,7 +529,8 @@ claimNextVisibleJobsBatched
   => Int
   -- ^ Batch size: maximum number of jobs to claim per group.
   -> Int
-  -- ^ Maximum number of batches to claim. A group gives at most one batch.
+  -- ^ Maximum number of batches to claim. Each batch is one group, or ungrouped jobs
+  -- batched together.
   -> NominalDiffTime
   -- ^ How long the claimed jobs should remain invisible (in seconds).
   -> m [NonEmpty (JobRead payload)]
@@ -561,7 +557,8 @@ ackJobsBatch
 ackJobsBatch [] = pure []
 ackJobsBatch jobs@(firstJob : _) = onJob firstJob $ \schemaName tableName -> Ops.ackJobsBatch schemaName tableName jobs
 
--- | Park a failed job for its retry backoff. Returns 0 for a job another worker holds.
+-- | Park a failed job for its retry backoff. Returns 0 for a job another worker holds or
+-- a suspended job.
 updateJobForRetry
   :: forall payload m
    . (MonadArbiter m)
@@ -575,7 +572,8 @@ updateJobForRetry delay errorMsg job =
   onJob job $ \schemaName tableName -> Ops.updateJobForRetry schemaName tableName delay errorMsg job
 
 -- | Soft-nack a job. It is reprocessed once its visibility timeout lapses. No failure
--- is recorded and no attempt is consumed. Returns 0 for a job another worker holds.
+-- is recorded and no attempt is consumed. Returns 0 for a job another worker holds, a
+-- suspended job, or a released claim.
 nackJob
   :: forall payload m
    . (MonadArbiter m)
@@ -593,9 +591,9 @@ nackJobsBatch
 nackJobsBatch [] = pure []
 nackJobsBatch jobs@(firstJob : _) = onJob firstJob $ \schemaName tableName -> Ops.nackJobsBatch schemaName tableName jobs
 
--- | Extend a job's visibility timeout by hand, for a long-running job. Returns 0 for a
--- job that is gone, reclaimed or suspended. 'setVisibilityTimeoutBatch' tells them
--- apart.
+-- | Extend a job's visibility timeout by hand, for a long-running job. Matches the claim
+-- token only. It also extends a job the caller released (nack, retry). Returns 0 for a
+-- job that is gone, reclaimed or suspended.
 setVisibilityTimeout
   :: forall payload m
    . (MonadArbiter m)
@@ -616,14 +614,16 @@ data SetVisibilityResult
     JobReclaimed JobId ClaimSeq ClaimSeq
   | -- | Job was force-cancel-flagged.
     JobCancelled JobId
-  | -- | Job is a finalizer waiting on its children. It holds no lease.
+  | -- | Job is suspended. It holds no lease.
     JobSuspended JobId
-  | -- | Nothing was extended. The row or its group summary was locked, the row changed
-    -- mid-statement, or another claimant holds it at the same claim token.
+  | -- | Nothing was extended. The claim was released, the row or its group summary was
+    -- locked, the row changed mid-statement, or another claimant holds it at the same
+    -- claim token.
     VisibilityUnchanged JobId
   deriving stock (Eq, Show)
 
--- | 'setVisibilityTimeout' over a batch from one queue.
+-- | Extend the visibility timeout of a batch from one queue. Each row must still match
+-- its holder. A row whose row lock or group lock is busy is skipped.
 setVisibilityTimeoutBatch
   :: forall payload m
    . (MonadArbiter m)
@@ -692,7 +692,7 @@ getArchiveJobById
   -> m (Maybe (Archive.ArchiveJob payload))
 getArchiveJobById jobId = onQueue @payload $ \schemaName tableName -> Ops.getArchiveJobById schemaName tableName jobId >>= traverse Ops.typedArchiveRow
 
--- | List archived jobs in a group, most recent first, with pagination.
+-- | List archived jobs in a group, most recently completed first, with pagination.
 listArchiveJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
@@ -860,6 +860,29 @@ countDLQFiltered
   -> m Int64
 countDLQFiltered filters = onQueue @payload $ \schemaName tableName -> Ops.countDLQFiltered schemaName tableName filters
 
+-- | List filtered archived jobs, most recently completed first.
+listArchiveFiltered
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Ops.JobFilter]
+  -- ^ Composable filters
+  -> Int
+  -- ^ Limit
+  -> Int
+  -- ^ Offset
+  -> m [Archive.ArchiveJob payload]
+listArchiveFiltered filters limit offset = onQueue @payload $ \schemaName tableName ->
+  Ops.listArchiveFiltered schemaName tableName filters Nothing Nothing limit offset >>= traverse Ops.typedArchiveRow
+
+-- | Count filtered archived jobs.
+countArchiveFiltered
+  :: forall payload m
+   . (QueueOperation m payload)
+  => [Ops.JobFilter]
+  -- ^ Composable filters
+  -> m Int64
+countArchiveFiltered filters = onQueue @payload $ \schemaName tableName -> Ops.countArchiveFiltered schemaName tableName filters
+
 -- ---------------------------------------------------------------------------
 -- Admin Operations
 -- ---------------------------------------------------------------------------
@@ -893,7 +916,7 @@ jobExists
   -> m Bool
 jobExists jobId = onQueue @payload $ \schemaName tableName -> Ops.jobExists schemaName tableName jobId
 
--- | List a group's jobs.
+-- | A page of a group's jobs, newest first.
 listJobsByGroup
   :: forall payload m
    . (QueueOperation m payload)
@@ -906,7 +929,7 @@ listJobsByGroup
   -> m [JobRead payload]
 listJobsByGroup groupKey limit offset = onQueue @payload $ \schemaName tableName -> Ops.listJobsByGroup schemaName tableName groupKey limit offset >>= traverse Ops.typedRow
 
--- | List a parent's children.
+-- | List a parent's children, newest first.
 listJobsByParent
   :: forall payload m
    . (QueueOperation m payload)
@@ -959,7 +982,7 @@ promoteJob
 promoteJob jobId = onQueue @payload $ \schemaName tableName -> Ops.promoteJob schemaName tableName jobId
 
 -- | Set when a job next becomes visible. Refuses an in-flight, suspended,
--- cancel-flagged or exhausted job.
+-- force-cancel-flagged or exhausted job.
 rescheduleJob
   :: forall payload m
    . (QueueOperation m payload)
@@ -1047,7 +1070,8 @@ countDLQChildrenBatch ids = onQueue @payload $ \schemaName tableName -> Ops.coun
 -- Job Dependency Operations
 -- ---------------------------------------------------------------------------
 
--- | Suspend every claimable job in a parent's subtree. In-flight ones are left alone.
+-- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
+-- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
 -- Returns the number suspended.
 pauseChildren
   :: forall payload m
@@ -1102,8 +1126,9 @@ resumeJob jobId = onQueue @payload $ \schemaName tableName -> Ops.resumeJob sche
 -- Results Table Operations
 -- ---------------------------------------------------------------------------
 
--- | Insert a child's result, encoded as the queue's declared result type and keyed by
--- @(parent_id, child_id)@. Its foreign key cascades. Acking the parent clears it.
+-- | Upsert a child's result, encoded as the queue's declared result type and keyed by
+-- @(parent_id, child_id)@. A second write replaces the first. Its foreign key cascades.
+-- Acking the parent clears it.
 -- Returns 0 for a result that stores nothing.
 insertResult
   :: forall payload m
@@ -1118,8 +1143,8 @@ insertResult
 insertResult parentJobId childId result =
   maybe (pure 0) (insertResultUnsafe @payload parentJobId childId) (encodeJobResult result)
 
--- | 'insertResult' with a raw JSON value, bypassing the queue's declared result
--- type. A value @Arbiter.Worker.childResults@ cannot decode surfaces there as a
+-- | 'insertResult' with a raw JSON value, as an upsert, bypassing the queue's declared
+-- result type. A value @Arbiter.Worker.childResults@ cannot decode surfaces there as a
 -- 'Left'.
 insertResultUnsafe
   :: forall payload m
@@ -1144,7 +1169,8 @@ getResultsByParent
   -> m (Map Int64 Value)
 getResultsByParent parentJobId = onQueue @payload $ \schemaName tableName -> Ops.getResultsByParent schemaName tableName parentJobId
 
--- | The last errors of a parent's children in the DLQ, keyed by child id.
+-- | The last errors of a parent's children in the DLQ, keyed by child id. Children with
+-- no recorded error are left out.
 getDLQChildErrorsByParent
   :: forall payload m
    . (QueueOperation m payload)
@@ -1204,7 +1230,7 @@ refreshAllGroupsFully = onRegistry Ops.refreshAllGroupsFully
 registerWorker
   :: (MonadArbiter m)
   => UUID
-  -- ^ Worker pool id
+  -- ^ Worker id
   -> Text
   -- ^ Queue name
   -> Maybe Text

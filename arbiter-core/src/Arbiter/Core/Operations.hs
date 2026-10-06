@@ -9,7 +9,7 @@
 --
 -- The job queue operations, over any 'MonadArbiter' backend.
 module Arbiter.Core.Operations
-  ( -- * Job Insertion
+  ( -- * Job insertion
     insertJob
   , insertJobTreeNodeStamped
   , insertJobTreeLeavesStamped
@@ -33,6 +33,8 @@ module Arbiter.Core.Operations
   , claimNextVisibleJobs
   , claimNextVisibleJobsAs
   , claimNextVisibleJobsBatched
+  , JobStatements
+  , mkJobStatements
   , claimJobsCached
   , claimJobsBatchedCached
   , RejectedRow
@@ -69,8 +71,6 @@ module Arbiter.Core.Operations
 
     -- * Ack, nack and visibility
   , ackJob
-  , JobStatements
-  , mkJobStatements
   , statementsAck
   , AckStatements
   , ackJobWith
@@ -117,6 +117,7 @@ module Arbiter.Core.Operations
 
     -- * Filtered query operations
   , Tmpl.JobFilter (..)
+  , Tmpl.FilterTable (..)
   , Tmpl.SortDir (..)
   , Tmpl.sortDirName
   , Tmpl.JobSortColumn (..)
@@ -186,6 +187,8 @@ module Arbiter.Core.Operations
   , refreshGroupsForQueue
   , refreshAllGroups
   , refreshAllGroupsFully
+
+    -- * Reaper sweeps
   , sweepExhaustedJobs
   , sweepCancelledJobs
 
@@ -430,30 +433,38 @@ parentCountCodec =
     <*> col "count" CInt8
     <*> col "count_suspended" CInt8
 
--- | The @WHERE@ clause a set of filters narrows a listing by. Empty for no filters.
-buildWhereClause :: [Tmpl.JobFilter] -> Q.Query ()
-buildWhereClause [] = mempty
-buildWhereClause filters = Q.raw "WHERE " <> Q.sepBy " AND " (map filterToClause filters)
+-- | The @WHERE@ clause a set of filters narrows a listing of one table by. Empty for no filters.
+buildWhereClause :: Tmpl.FilterTable -> [Tmpl.JobFilter] -> Q.Query ()
+buildWhereClause _ [] = mempty
+buildWhereClause table filters = Q.raw "WHERE " <> Q.sepBy " AND " (map (filterToClause table) filters)
 
-filterToClause :: Tmpl.JobFilter -> Q.Query ()
-filterToClause (Tmpl.FilterGroupKey key) = [QQ.sql|group_key = #{key :: CText}|]
-filterToClause (Tmpl.FilterParentId pid) = [QQ.sql|parent_id = #{pid :: CInt8}|]
-filterToClause Tmpl.FilterRootsOnly = Q.raw "parent_id IS NULL"
-filterToClause (Tmpl.FilterStatus status) = [QQ.sql|status = #{statusText :: CText}|]
+filterToClause :: Tmpl.FilterTable -> Tmpl.JobFilter -> Q.Query ()
+filterToClause _ (Tmpl.FilterGroupKey key) = [QQ.sql|group_key = #{key :: CText}|]
+filterToClause _ (Tmpl.FilterParentId pid) = [QQ.sql|parent_id = #{pid :: CInt8}|]
+filterToClause _ Tmpl.FilterRootsOnly = Q.raw "parent_id IS NULL"
+filterToClause Tmpl.MainTable (Tmpl.FilterStatus status) = [QQ.sql|status = #{statusText :: CText}|]
   where
     statusText = jobStatusToText status
-filterToClause (Tmpl.FilterId jobId) = [QQ.sql|id = #{jobId :: CInt8}|]
-filterToClause (Tmpl.FilterJobId jobId) = [QQ.sql|job_id = #{jobId :: CInt8}|]
-filterToClause (Tmpl.FilterClaimedBy workerId) = [QQ.sql|claimed_by = #{workerId :: CUuid}|]
-filterToClause (Tmpl.FilterKind kind) = [QQ.sql|kind = #{kind :: CText}|]
-filterToClause (Tmpl.FilterRateLimitPrefix prefix) = [QQ.sql|rate_limit_prefix = #{prefix :: CText}|]
-filterToClause (Tmpl.FilterConcurrencyPrefix prefix) = [QQ.sql|concurrency_prefix = #{prefix :: CText}|]
-filterToClause (Tmpl.FilterInsertedAfter time) = [QQ.sql|inserted_at >= #{time :: CTimestamptz}|]
-filterToClause (Tmpl.FilterInsertedBefore time) = [QQ.sql|inserted_at < #{time :: CTimestamptz}|]
-filterToClause (Tmpl.FilterCompletedAfter time) = [QQ.sql|completed_at >= #{time :: CTimestamptz}|]
-filterToClause (Tmpl.FilterCompletedBefore time) = [QQ.sql|completed_at < #{time :: CTimestamptz}|]
-filterToClause (Tmpl.FilterPayloadText needle) = containsClause "payload::text" needle
-filterToClause (Tmpl.FilterErrorText needle) = containsClause "last_error" needle
+filterToClause _ (Tmpl.FilterStatus _) = matchNothing
+filterToClause _ (Tmpl.FilterId jobId) = [QQ.sql|id = #{jobId :: CInt8}|]
+filterToClause Tmpl.MainTable (Tmpl.FilterJobId jobId) = [QQ.sql|id = #{jobId :: CInt8}|]
+filterToClause _ (Tmpl.FilterJobId jobId) = [QQ.sql|job_id = #{jobId :: CInt8}|]
+filterToClause _ (Tmpl.FilterClaimedBy workerId) = [QQ.sql|claimed_by = #{workerId :: CUuid}|]
+filterToClause _ (Tmpl.FilterKind kind) = [QQ.sql|kind = #{kind :: CText}|]
+filterToClause _ (Tmpl.FilterRateLimitPrefix prefix) = [QQ.sql|rate_limit_prefix = #{prefix :: CText}|]
+filterToClause _ (Tmpl.FilterConcurrencyPrefix prefix) = [QQ.sql|concurrency_prefix = #{prefix :: CText}|]
+filterToClause _ (Tmpl.FilterInsertedAfter time) = [QQ.sql|inserted_at >= #{time :: CTimestamptz}|]
+filterToClause _ (Tmpl.FilterInsertedBefore time) = [QQ.sql|inserted_at < #{time :: CTimestamptz}|]
+filterToClause Tmpl.ArchiveTable (Tmpl.FilterCompletedAfter time) = [QQ.sql|completed_at >= #{time :: CTimestamptz}|]
+filterToClause Tmpl.ArchiveTable (Tmpl.FilterCompletedBefore time) = [QQ.sql|completed_at < #{time :: CTimestamptz}|]
+filterToClause _ (Tmpl.FilterCompletedAfter _) = matchNothing
+filterToClause _ (Tmpl.FilterCompletedBefore _) = matchNothing
+filterToClause _ (Tmpl.FilterPayloadText needle) = containsClause "payload::text" needle
+filterToClause _ (Tmpl.FilterErrorText needle) = containsClause "last_error" needle
+
+-- | A predicate on a column the table does not have.
+matchNothing :: Q.Query ()
+matchNothing = Q.raw "FALSE"
 
 -- | A case-insensitive match of any @column@ text that contains @needle@ literally.
 containsClause :: Text -> Text -> Q.Query ()
@@ -665,8 +676,8 @@ spawnChildren schemaName tableName job children = withDbTransaction $ do
             "spawnChildren: job " <> T.pack (show jobId) <> " already spawned children in this round"
         else throwJobGoneIds "no longer claimed by this worker" [jobId]
 
--- | Add tokens to a key's bucket, capped at its max. For operator top-ups and
--- manually-refilled policies.
+-- | Add tokens to a key's bucket, clamped to @[0, max]@. A no-op without a policy. For
+-- operator top-ups and manually-refilled policies.
 addRateLimitTokens :: (MonadArbiter m) => SchemaName -> RateLimitKey -> Double -> m ()
 addRateLimitTokens schemaName key amount =
   void $
@@ -777,7 +788,8 @@ pruneConcurrencyKeys schemaName tableNames = withDbTransaction $ do
         else MA.executeStatement (Tmpl.pruneLockedConcurrencyKeysSQL schemaName tableNames locked)
 
 -- | Lock the count rows, then recount those keys under the lock. A key seeded after
--- the lock pass is left to its triggers.
+-- the lock pass is left to its triggers. Seeds a count row for a live key that has none.
+-- Returns the rows repaired.
 reconcileConcurrencyCounts :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileConcurrencyCounts _ [] = pure 0
 reconcileConcurrencyCounts schemaName tableNames = withDbTransaction $ do
@@ -785,7 +797,7 @@ reconcileConcurrencyCounts schemaName tableNames = withDbTransaction $ do
   countOr0 (Tmpl.reconcileConcurrencyCountsSQL schemaName tableNames held)
 
 -- | Rebuild the counts when a crash truncated the UNLOGGED table. Returns the
--- rows it recounted.
+-- rows it repaired.
 reconcileConcurrencyCountsIfStale :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileConcurrencyCountsIfStale _ [] = pure 0
 reconcileConcurrencyCountsIfStale schemaName tableNames = do
@@ -793,7 +805,7 @@ reconcileConcurrencyCountsIfStale schemaName tableNames = do
   if or stale then reconcileConcurrencyCounts schemaName tableNames else pure 0
 
 -- | Reconcile then prune, skipped when no concurrency key exists. Returns
--- the rows recounted and pruned.
+-- the rows repaired and pruned.
 reconcileAndPruneConcurrency :: (MonadArbiter m) => SchemaName -> [TableName] -> m Int64
 reconcileAndPruneConcurrency schemaName tableNames = do
   hasKeys <- MA.executeQuery (Tmpl.concurrencyHasAnyKeySQL schemaName)
@@ -806,8 +818,9 @@ reconcileAndPruneConcurrency schemaName tableNames = do
 
 -- | Insert a job, returning it with its database-generated fields. 'Nothing' when an
 -- @IgnoreDuplicate@ key already exists, or a @ReplaceDuplicate@ one names a job that is
--- claimed, force-cancel flagged, has a different parent, or has children (DLQ children
--- count). Parent and rollup state come from 'Arbiter.Core.JobTree.insertJobTree'.
+-- in flight (claimed under a live lease), force-cancel-flagged, has a different parent, or
+-- has children (DLQ children count). Parent and rollup state come from
+-- 'Arbiter.Core.JobTree.insertJobTree'.
 insertJob
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -851,8 +864,8 @@ insertJobsBatch_ schemaName tableName jobs =
     withDbTransaction $
       MA.executeStatement (Tmpl.insertJobsBatchSQL_ schemaName tableName (batchSource tableName stamp Nothing jobs))
 
--- | Insert a child's result, keyed by @(parent_id, child_id)@. Its foreign key cascades
--- on the parent's ack.
+-- | Upsert a child's result, keyed by @(parent_id, child_id)@. A second write replaces
+-- the first. Its foreign key cascades on the parent's ack.
 insertResult
   :: (MonadArbiter m)
   => SchemaName
@@ -871,6 +884,7 @@ insertResult schemaName tableName parentJobId childId result =
     (Tmpl.insertResultSQL schemaName tableName parentJobId childId result)
 
 -- | 'insertResult' for several @(parent id, child id, result)@ rows in one statement.
+-- Each row is an upsert.
 insertResultsBatch
   :: (MonadArbiter m) => SchemaName -> TableName -> [(Int64, Int64, Value)] -> m Int64
 insertResultsBatch _ _ [] = pure 0
@@ -892,7 +906,8 @@ getResultsByParent
 getResultsByParent schemaName tableName parentJobId =
   Map.fromList <$> MA.executeQuery (Tmpl.getResultsByParentSQL schemaName tableName parentJobId)
 
--- | The last errors of a parent's children in the DLQ, keyed by child id.
+-- | The last errors of a parent's children in the DLQ, keyed by child id. Children
+-- with no recorded error are left out.
 getDLQChildErrorsByParent
   :: (MonadArbiter m)
   => SchemaName
@@ -997,8 +1012,8 @@ claimJobsCached statements maxJobs =
 deadLetterRest :: (MonadArbiter m) => (a, [RejectedRow payload]) -> m a
 deadLetterRest (jobs, rejected) = jobs <$ traverse_ (tryAny . deadLetterRejected) rejected
 
--- | 'claimNextVisibleJobs' claiming up to @batchSize@ jobs from each of @maxBatches@
--- groups. Stamps the anonymous claimant.
+-- | 'claimNextVisibleJobs' claiming at most @maxBatches@ batches of up to @batchSize@ jobs.
+-- Each batch is one group, or ungrouped jobs batched together. Stamps the anonymous claimant.
 claimNextVisibleJobsBatched
   :: forall m payload
    . (JobPayload payload, MonadArbiter m)
@@ -1204,7 +1219,7 @@ ackJobsBatchWith statements jobs = do
   ackParents statements (map parentId jobs)
   MA.executeQueryPrepared (ackBatchFor statements (any archivesOnAck jobs) (map primaryKey jobs) (map claimSeq jobs))
 
--- | Extend a job's visibility timeout.
+-- | Extend a job's visibility timeout. Matches the claim token only.
 setVisibilityTimeout
   :: forall m payload
    . (MonadArbiter m)
@@ -1239,6 +1254,8 @@ data VisibilityUpdateInfo = VisibilityUpdateInfo
   deriving stock (Eq, Generic, Show)
 
 -- | 'setVisibilityTimeout' over a batch, reporting each row through 'VisibilityUpdateInfo'.
+-- Each row must also match its holder. A row whose row lock or group lock is busy is
+-- not extended.
 setVisibilityTimeoutBatch
   :: forall m payload
    . (MonadArbiter m)
@@ -1268,7 +1285,7 @@ setVisibilityTimeoutBatch schemaName tableName timeout jobs = do
     $ Tmpl.setVisibilityTimeoutBatchSQL schemaName tableName valuesFrag (map primaryKey jobs) (realToFrac timeout)
 
 -- | Park a failed job for its retry backoff, recording the error. Returns 0 for a job
--- another worker holds.
+-- another worker holds or a suspended job.
 updateJobForRetry
   :: forall m payload
    . (MonadArbiter m)
@@ -1287,7 +1304,7 @@ updateJobForRetry schemaName tableName backoff errorMsg job =
     (Tmpl.updateJobForRetrySQL schemaName tableName (ceiling backoff) errorMsg (primaryKey job) (claimSeq job))
 
 -- | Soft-nack a job. Hands back the attempt the claim consumed and records no failure.
--- Returns 0 for a job another worker holds.
+-- Returns 0 for a job another worker holds, a suspended job, or a released claim.
 nackJob
   :: forall m payload
    . (MonadArbiter m)
@@ -1571,7 +1588,7 @@ listJobsFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offs
         Tmpl.listJobsFilteredSQL
           schemaName
           tableName
-          (buildWhereClause filters)
+          (buildWhereClause Tmpl.MainTable filters)
           orderBy
           (fromIntegral limit)
           (fromIntegral offset)
@@ -1604,7 +1621,7 @@ listJobsWithStatus schemaName tableName filters mSortBy mSortDir limit offset = 
         Tmpl.listJobsWithStatusSQL
           schemaName
           tableName
-          (buildWhereClause filters)
+          (buildWhereClause Tmpl.MainTable filters)
           orderBy
           (fromIntegral limit)
           (fromIntegral offset)
@@ -1647,7 +1664,9 @@ countJobsFiltered
   -- ^ Composable filters
   -> m Int64
 countJobsFiltered schemaName tableName filters = do
-  countStrict "countJobsFiltered" (Tmpl.countJobsFilteredSQL schemaName tableName (buildWhereClause filters))
+  countStrict
+    "countJobsFiltered"
+    (Tmpl.countJobsFilteredSQL schemaName tableName (buildWhereClause Tmpl.MainTable filters))
 
 -- | List filtered DLQ jobs under an explicit sort spec. @Nothing@ for both sort
 -- arguments orders by @failed_at DESC@.
@@ -1676,7 +1695,7 @@ listDLQFilteredOrdered schemaName tableName filters mSortBy mSortDir limit offse
       Tmpl.listDLQFilteredSQL
         schemaName
         tableName
-        (buildWhereClause filters)
+        (buildWhereClause Tmpl.DLQTable filters)
         orderBy
         (fromIntegral limit)
         (fromIntegral offset)
@@ -1711,7 +1730,7 @@ countDLQFiltered
   -- ^ Composable filters
   -> m Int64
 countDLQFiltered schemaName tableName filters =
-  countStrict "countDLQFiltered" (Tmpl.countDLQFilteredSQL schemaName tableName (buildWhereClause filters))
+  countStrict "countDLQFiltered" (Tmpl.countDLQFilteredSQL schemaName tableName (buildWhereClause Tmpl.DLQTable filters))
 
 toDLQRow :: (Int64, UTCTime, JobRead (Stored payload)) -> DLQ.DLQJob (Stored payload)
 toDLQRow (dlqId, dlqFailedAt, jobSnapshot) =
@@ -1743,7 +1762,7 @@ listArchiveFiltered schemaName tableName filters mSortBy mSortDir limit offset =
       Tmpl.listArchiveFilteredSQL
         schemaName
         tableName
-        (buildWhereClause filters)
+        (buildWhereClause Tmpl.ArchiveTable filters)
         orderBy
         (fromIntegral limit)
         (fromIntegral offset)
@@ -1843,7 +1862,9 @@ countArchiveFiltered
   -> [Tmpl.JobFilter]
   -> m Int64
 countArchiveFiltered schemaName tableName filters =
-  countStrict "countArchiveFiltered" (Tmpl.countArchiveFilteredSQL schemaName tableName (buildWhereClause filters))
+  countStrict
+    "countArchiveFiltered"
+    (Tmpl.countArchiveFilteredSQL schemaName tableName (buildWhereClause Tmpl.ArchiveTable filters))
 
 toArchiveRow :: (Int64, UTCTime, JobRead (Stored payload), Maybe Value) -> Archive.ArchiveJob (Stored payload)
 toArchiveRow (aId, aCompletedAt, snapshot, aResult) =
@@ -1903,7 +1924,7 @@ countDLQJobsByParent
 countDLQJobsByParent schemaName tableName parentJobId =
   countDLQFiltered schemaName tableName [Tmpl.FilterParentId parentJobId]
 
--- | Delete a DLQ job, resuming its parent when no sibling is left.
+-- | Delete a DLQ job, resuming its parent when no child of it is left in the main queue.
 deleteDLQJob
   :: (MonadArbiter m)
   => SchemaName
@@ -2023,7 +2044,7 @@ getJobByDedupKey
 getJobByDedupKey schemaName tableName key = do
   listToMaybe <$> MA.executeQuery (Tmpl.getJobByDedupKeySQL schemaName tableName key)
 
--- | Get all jobs for a specific group key.
+-- | A page of a group's jobs, newest first.
 listJobsByGroup
   :: forall m payload
    . (MonadArbiter m)
@@ -2101,7 +2122,7 @@ promoteJob schemaName tableName jobId =
     (Tmpl.promoteJobSQL schemaName tableName jobId)
 
 -- | Set when a job next becomes visible. Refuses an in-flight, suspended,
--- cancel-flagged or exhausted job.
+-- force-cancel-flagged or exhausted job.
 rescheduleJob
   :: (MonadArbiter m)
   => SchemaName
@@ -2120,25 +2141,25 @@ rescheduleJob schemaName tableName jobId runAt =
 -- and sum to 'totalJobs'.
 data QueueStats = QueueStats
   { totalJobs :: Int64
-  -- ^ Total number of jobs in the queue
+  -- ^ Total number of jobs in the queue.
   , readyJobs :: Int64
-  -- ^ Jobs claimable right now (visible and unleased)
+  -- ^ Jobs claimable right now (visible, unleased and not blocked).
   , inFlightJobs :: Int64
-  -- ^ Jobs currently leased by a worker
+  -- ^ Jobs currently leased by a worker.
   , scheduledJobs :: Int64
-  -- ^ Jobs delayed until a future @not_visible_until@ (never yet attempted)
+  -- ^ Jobs with no attempt used, delayed until a future @not_visible_until@.
   , backoffJobs :: Int64
-  -- ^ Unclaimed jobs with an attempt spent, waiting out a delay
+  -- ^ Unclaimed jobs with an attempt spent, waiting out a delay.
   , throttledJobs :: Int64
-  -- ^ Jobs parked by a rate limit until tokens refill
+  -- ^ Jobs parked by a rate limit until tokens refill.
   , suspendedJobs :: Int64
-  -- ^ Suspended jobs (for example rollup finalizers awaiting their children)
+  -- ^ Suspended jobs (for example rollup finalizers awaiting their children).
   , cancelledJobs :: Int64
-  -- ^ Force-cancelled jobs flagged for teardown and awaiting the reaper
+  -- ^ Force-cancelled jobs flagged for teardown and awaiting the reaper.
   , exhaustedJobs :: Int64
-  -- ^ Visible jobs out of attempts, awaiting the reaper's DLQ sweep
+  -- ^ Visible jobs out of attempts, awaiting the reaper's DLQ sweep.
   , blockedJobs :: Int64
-  -- ^ Visible jobs a single claim would skip: behind a group's head, or behind a full concurrency or rate-limit key
+  -- ^ Visible jobs a single claim would skip: behind a group's head, or behind a full concurrency or rate-limit key.
   , oldestReadyAgeSeconds :: Maybe Double
   -- ^ Seconds since the oldest ready or blocked job became visible (Nothing when none wait).
   , oldestInFlightAgeSeconds :: Maybe Double
@@ -2150,7 +2171,7 @@ data QueueStats = QueueStats
   -- ^ Depth by declared payload variant. Rows with no declared label are left out.
   , dlqKindCounts :: Map Text Int64
   -- ^ DLQ entries by declared payload variant. Rows with no declared label are left out.
-  -- Empty in 'getAllQueueStats'.
+  -- Empty in the stats for all queues.
   }
   deriving stock (Eq, Generic, Show)
 
@@ -2339,9 +2360,9 @@ data GroupSummary = GroupSummary
   , gsJobCount :: Int64
   -- ^ Jobs in the group.
   , gsReadyCount :: Int64
-  -- ^ Jobs a claim could take now, before the group's in-flight gate.
+  -- ^ Jobs with no visibility time set that are not suspended, cancelled or out of attempts.
   , gsNextDue :: Maybe UTCTime
-  -- ^ When the group's earliest scheduled job becomes visible.
+  -- ^ The earliest visibility time of the group's jobs that are not suspended, cancelled or out of attempts.
   , gsInFlightUntil :: Maybe UTCTime
   -- ^ When the lease of the job that holds the group runs out.
   , gsInFlight :: Bool
@@ -2504,7 +2525,8 @@ countDLQChildrenBatch schemaName tableName ids =
 -- Job Dependency Operations
 -- ---------------------------------------------------------------------------
 
--- | Suspend every claimable job in a parent's subtree. In-flight ones are left alone.
+-- | Suspend every unsuspended visible job in a parent's subtree, lapsed leases included.
+-- Jobs with a future visibility (delayed, backoff, throttled, leased) are skipped.
 -- Returns the number suspended.
 pauseChildren
   :: (MonadArbiter m)
@@ -2549,12 +2571,12 @@ cancelJobCascade =
   cascadeDeleteJob (not . null) (\schemaName tableName -> MA.executeQuery . Tmpl.cancelJobCascadeSQL schemaName tableName)
 
 -- | Transactional wrapper for cascade-delete SQL. Reads the root's parent, runs the
--- supplied delete, and wakes the parent for a completion round when anything was
--- deleted. 'cancelJobCascade' and 'forceCancelJob' share this shell.
+-- supplied delete, and wakes the parent for a completion round when the delete changed
+-- anything. 'cancelJobCascade' and 'forceCancelJob' share this shell.
 cascadeDeleteJob
   :: (MonadArbiter m)
   => (a -> Bool)
-  -- ^ Whether the delete removed anything.
+  -- ^ Whether the delete changed anything.
   -> (SchemaName -> TableName -> Int64 -> m a)
   -> SchemaName
   -> TableName
@@ -2573,7 +2595,7 @@ cascadeDeleteJob deletedAny delete schemaName tableName jobId = withDbTransactio
 
 -- | Delete a whole job tree, named by any node in it. Walks up to the root, then deletes
 -- from there down. The root has no parent to resume. The caller holds
--- 'lockJobRootsAndParents' and 'lockJobTreesFromRoot'. Returns the ids deleted.
+-- 'lockJobParents' and 'lockJobTreesFromRoot'. Returns the ids deleted.
 cancelJobTree
   :: (MonadArbiter m)
   => SchemaName
@@ -2668,9 +2690,9 @@ resumeCursor window emptied = Just (GroupsCursor window emptied)
 
 -- | Recompute the groups table from the main queue, over one bounded batch of rows past
 -- the resume cursor. Locks the window's groups rows and the emptied ones (FOR UPDATE SKIP LOCKED),
--- then rewrites them, which deletes the emptied. The missing-summary repair runs in its
--- own transaction. The caller owns any cross-pool coordination (see 'runGatedState'
--- and 'refreshAllGroups').
+-- then rewrites them, which deletes the emptied. The rewrite and the missing-summary
+-- repair each run in their own transaction, or a savepoint inside the caller's. The
+-- caller owns any cross-pool coordination (see 'runGatedState' and 'refreshAllGroups').
 refreshGroupsForQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -2719,8 +2741,9 @@ groupsRefreshBatch = 20000
 
 -- | Schema-wide groups refresh over one bounded pass. Wrap in 'runGatedState' so one
 -- pool runs it per interval and every pool resumes from the same cursors. A caller that
--- discards the cursors refreshes the same head of each table forever. Each queue runs
--- in a savepoint. One queue's failure leaves the rest. Its row locks stand until the
+-- discards the cursors refreshes the same head of each table forever. Each queue's
+-- rewrite and repair run in their own savepoints. One queue's failure leaves the rest.
+-- Its row locks stand until the
 -- caller's transaction ends. Returns the rows rewritten, the queue names that failed or
 -- whose repair failed, and where each queue resumes.
 refreshAllGroups
@@ -2740,8 +2763,8 @@ refreshAllGroups schemaName queues cursors = do
     perQueue = max 1 (groupsRefreshBatch `div` max 1 (length queues))
     one schema tbl = refreshGroupsForQueue schema tbl perQueue (Map.lookup tbl cursors)
 
--- | Run 'refreshAllGroups' until it scans each queue's complete groups table, one batch
--- per pass.
+-- | Run 'refreshGroupsForQueue' on each queue at the full batch size until it scans the
+-- queue's complete groups table.
 refreshAllGroupsFully
   :: (MonadArbiter m)
   => SchemaName
@@ -2819,8 +2842,8 @@ sweepExhaustedForQueue schemaName tableName = withDbTransaction $ do
 exhaustedSweepBatch :: Int
 exhaustedSweepBatch = 1000
 
--- | Sweep force-cancel-flagged jobs whose lease has lapsed across all queues.
--- A live worker's jobs are left for the worker's own cancel handler. Returns the
+-- | Sweep force-cancel-flagged jobs whose lease has lapsed across the given queues.
+-- A job under a live lease is left for its holder's cancel handler. Returns the
 -- total deleted and the names of queues whose sweep failed.
 sweepCancelledJobs
   :: (MonadArbiter m)
@@ -2845,8 +2868,8 @@ sweepCancelledForQueue schemaName tableName = do
 cancelledSweepBatch :: Int
 cancelledSweepBatch = 1000
 
--- | Upsert a cron schedule's default expression and overlap policy, preserving user
--- overrides and the enabled flag. @queue_name@ is overwritten on conflict.
+-- | Upsert a cron schedule's default expression, overlap policy and timezone. User
+-- overrides and the enabled flag stay. @queue_name@ is overwritten on conflict.
 upsertCronDefault
   :: (MonadArbiter m)
   => SchemaName

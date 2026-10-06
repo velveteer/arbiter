@@ -31,7 +31,7 @@ import Arbiter.Core.Exceptions (displayEx, throwInternal, throwNack)
 import Arbiter.Core.Job.Kind (HasKind (..), constructorKind, constructorKinds)
 import Arbiter.Core.Job.Status (JobStatus (Ready), jobStatusFromText)
 import Arbiter.Core.Job.Types (PayloadColumns (..), defaultJob)
-import Arbiter.Core.Operations (QueueStats, buildWhereClause, statsRowCodec)
+import Arbiter.Core.Operations (FilterTable (..), QueueStats, buildWhereClause, statsRowCodec)
 import Arbiter.Core.Sql.Claim (ClaimAdmission (..), claimJobsBatchedSQL)
 import Arbiter.Core.Sql.Jobs (JobFilter (..))
 import Arbiter.Core.Sql.QQ (sql)
@@ -300,26 +300,26 @@ main = hspec $ do
       rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")
 
     it "renders each job filter against the column its table names" $ do
-      let rendered = squished (buildWhereClause allFilters)
+      let rendered = squished (buildWhereClause ArchiveTable allFilters)
       rendered
         `shouldBe` "WHERE claimed_by = ? AND kind = ? AND payload::text ILIKE ? ESCAPE '\\' \
                    \AND last_error ILIKE ? ESCAPE '\\' \
                    \AND rate_limit_prefix = ? AND concurrency_prefix = ? \
                    \AND inserted_at >= ? AND inserted_at < ? \
                    \AND completed_at >= ? AND completed_at < ?"
-      paramTags (qParams (buildWhereClause allFilters))
+      paramTags (qParams (buildWhereClause ArchiveTable allFilters))
         `shouldBe` ["uuid", "text", "text", "text", "text", "text", "ts", "ts", "ts", "ts"]
 
     it "matches a payload search literally, so its wildcards are not pattern syntax" $ do
-      let param = qParams (buildWhereClause [FilterPayloadText "50%_off"])
+      let param = qParams (buildWhereClause MainTable [FilterPayloadText "50%_off"])
       textParams param `shouldBe` ["%50\\%\\_off%"]
 
     it "matches an error search literally, so its wildcards are not pattern syntax" $ do
-      let param = qParams (buildWhereClause [FilterErrorText "50%_off"])
+      let param = qParams (buildWhereClause MainTable [FilterErrorText "50%_off"])
       textParams param `shouldBe` ["%50\\%\\_off%"]
 
     it "narrows nothing when no filter is given" $
-      squished (buildWhereClause []) `shouldBe` ""
+      squished (buildWhereClause MainTable []) `shouldBe` ""
 
     it "rolls up depth by label over the rows the stats query already reads" $ do
       let rendered = squished (statsSQL (kindsFor @KindPayload))

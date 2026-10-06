@@ -1,6 +1,6 @@
 -- | LISTEN\/NOTIFY connections and listeners over libpq.
 module Arbiter.LibPQ
-  ( libpqListenConn
+  ( libPQListenConn
   , withLibPQListenConn
   , newLibPQListener
   ) where
@@ -36,8 +36,8 @@ connectDriver =
     connStatus _ = ConnPending
 
 -- | A 'ListenConn' over a libpq connection.
-libpqListenConn :: PQ.Connection -> ListenConn
-libpqListenConn conn =
+libPQListenConn :: PQ.Connection -> ListenConn
+libPQListenConn conn =
   ListenConn
     { listenNotifies = fmap (fmap (Notification <$> PQ.notifyRelname <*> PQ.notifyExtra)) (PQ.notifies conn)
     , listenSocket = PQ.socket conn
@@ -48,7 +48,7 @@ libpqListenConn conn =
 
 -- | Run an action on a libpq connection of its own, opened from a connection string.
 withLibPQListenConn :: ByteString -> (ListenConn -> IO a) -> IO a
-withLibPQListenConn = withDriverListenConn connectDriver libpqListenConn
+withLibPQListenConn = withDriverListenConn connectDriver libPQListenConn
 
 -- | A 'Listener' over its own libpq connection, opened from a connection string.
 newLibPQListener :: (MonadIO m) => ByteString -> m Listener

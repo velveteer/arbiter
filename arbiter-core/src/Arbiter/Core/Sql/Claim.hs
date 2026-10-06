@@ -333,7 +333,7 @@ concHeadroomPred concTbl concPolicies alias =
       |]
 
 -- | Lock each referenced count row. Whoever holds the row gates that key this cycle.
--- eff_limit is COALESCE(pool override, default). An undeclared prefix leaves it NULL
+-- eff_limit is COALESCE(policy override, default). An undeclared prefix leaves it NULL
 -- and runs uncapped. Emits @conc_locked@.
 concLockedCte :: Text -> Text -> Text
 concLockedCte concTbl concPolicies =
@@ -461,10 +461,10 @@ judgedCte admission rlPolicies concJoin rlJoin =
         ),
       |]
 
--- | Rate-limit spend. Debits each held bucket by the cost admitted by every gate, banks
--- the accrued refill, then computes a jittered defer time for denied keyed jobs. A
--- stale-leased job on a count row this claim does not hold stays visible for a later
--- cycle, since parking it would make the update trigger lock that row.
+-- | Rate-limit spend. Debits each held bucket by the cost admitted by every gate, only
+-- where that cost is above 0, banks the accrued refill, then computes a jittered defer
+-- time for denied jobs whose bucket this claim holds. A stale-leased job on a count row
+-- this claim does not hold stays visible for a later cycle.
 rlSpendCtes :: ClaimAdmission -> Text -> Text
 rlSpendCtes admission buckets =
   let fallback = T.pack (show defaultThrottleWaitSeconds)
@@ -522,8 +522,8 @@ admittedCte admission =
            in [text|SELECT id FROM judged WHERE ${admit}|]
       | otherwise = "SELECT id FROM locked"
 
--- | With rate limiting the claim splits into an admit/defer decision. Denied keyed jobs
--- are parked with a defer time alongside the claimed ids.
+-- | With rate limiting the claim splits into an admit/defer decision. Denied jobs whose
+-- bucket this claim holds are parked with a defer time alongside the claimed ids.
 decisionCte :: ClaimAdmission -> Text
 decisionCte admission =
   mwhen

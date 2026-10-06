@@ -9,7 +9,7 @@ module Arbiter.Worker.Cron.Scheduler
   , processCronCatchUp
   , processRunRequests
   , enumerateCatchUpTicks
-  , makeDedupKeyFromParts
+  , mkDedupKeyFromParts
   , computeDelayMicros
   ) where
 
@@ -259,7 +259,7 @@ insertCronJob schemaName cron effectiveOv kind tick = do
   -- Gate first. Another pool may have fired this minute.
   fired <- Ops.tryFireCronGate schemaName (name cron) tick
   when fired $ do
-    let key = makeDedupKeyFromParts (name cron) effectiveOv tick
+    let key = mkDedupKeyFromParts (name cron) effectiveOv tick
         jobWrite = setDedupKey (Just (IgnoreDuplicate key)) $ builder cron kind tick
     void $ HL.insertJob jobWrite
   void $ Ops.touchCronChecked schemaName [name cron] tick
@@ -327,8 +327,8 @@ tryCron :: (MonadUnliftIO m) => CronLog -> Text -> m a -> m (Either SomeExceptio
 tryCron cronLog = tryReportedOn (cronLogConfig cronLog) Error (cronLogGates cronLog)
 
 -- | The dedup key for a schedule's tick. An 'AllowOverlap' key includes the UTC tick minute.
-makeDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
-makeDedupKeyFromParts jobName overlapPolicy tick = case overlapPolicy of
+mkDedupKeyFromParts :: Text -> OverlapPolicy -> UTCTime -> Text
+mkDedupKeyFromParts jobName overlapPolicy tick = case overlapPolicy of
   SkipOverlap -> skipOverlapKey jobName
   AllowOverlap -> "arbiter_cron:" <> jobName <> ":" <> formatMinute tick
 

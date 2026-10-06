@@ -4,6 +4,7 @@
 {-# OPTIONS_HADDOCK not-home #-}
 
 -- | Internal to the arbiter packages. Not covered by the PVP.
+-- 'runMaintenancePass' and 'MaintenancePace' are public through "Arbiter.Worker".
 --
 -- Schema-wide maintenance coordinated across worker pools.
 module Arbiter.Worker.Reaper
@@ -62,16 +63,17 @@ data MaintenancePace = MaintenancePace
   { paceWindow :: NominalDiffTime
   -- ^ Gap in seconds between runs of one ordinary operation.
   , paceSparseWindow :: NominalDiffTime
-  -- ^ Gap in seconds between runs of the rate-limit bucket prune and the concurrency
-  -- prune and reconcile.
+  -- ^ Gap in seconds between runs of 'PruneRateLimitBuckets' and
+  -- 'ReconcilePruneConcurrency'.
   , paceBucketIdle :: NominalDiffTime
-  -- ^ Idle age in seconds at which a prune collects a rate-limit bucket.
+  -- ^ Idle age in seconds at which a prune collects a full rate-limit bucket.
   }
   deriving stock (Eq, Show)
 
 -- | One pass of the maintenance the reaper runs, with each operation independently
 -- gated across all callers. An operation whose window has not elapsed is skipped.
--- Returns the operations that failed. A failure does not stop the pass.
+-- Returns the operations that threw. A failure for one queue is logged and not
+-- returned. A failure does not stop the pass.
 runMaintenancePass
   :: forall m
    . ( Arb.RegistryAdmissionPolicies (RegistryOf m)

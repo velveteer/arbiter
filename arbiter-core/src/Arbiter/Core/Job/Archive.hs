@@ -19,9 +19,9 @@ data ArchiveJob payload = ArchiveJob
   { archivePrimaryKey :: Int64
   -- ^ Archive table primary key. The snapshot keeps its own job id.
   , completedAt :: UTCTime
-  -- ^ When the job was acked and archived
+  -- ^ When the job was acked and archived.
   , jobSnapshot :: JobSnapshot payload
-  -- ^ Full job state at time of completion (payload, attempts, etc.)
+  -- ^ Full job state at completion.
   , archivedResult :: Maybe Value
   -- ^ Handler result stored for a completed root job (one with no parent).
   }

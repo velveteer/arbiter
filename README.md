@@ -27,7 +27,8 @@ build-depends:
 ```
 
 Replace `arbiter-simple` with `arbiter-orville` or `arbiter-hasql` to use that
-backend.
+backend. Make the same change in the `subdir` lists below. In `build-depends`,
+Orville also needs `arbiter-libpq` for the listener, and Hasql also needs `pqi-ffi`.
 
 To build from GitHub, add the repository.
 

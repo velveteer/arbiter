@@ -19,6 +19,9 @@ A producer-only process opens none.
 `useDedicatedListener` opens a separate listener connection:
 
 ```haskell
+import Arbiter.Hasql qualified as ArbH
+import Pqi.Ffi qualified as Ffi
+
 env <- ArbS.useDedicatedListener connStr =<< ArbS.createSimpleEnv (Proxy @AppRegistry) connStr "arbiter"
 
 let connect = ArbH.toHasqlConnect Ffi.adapter connStr

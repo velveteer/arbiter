@@ -27,16 +27,22 @@ module Arbiter.Servant.API
   , HealthAPI (..)
   , RateLimitsAPI (..)
   , ConcurrencyAPI (..)
+
+    -- * Sort parameters
+  , JobSortColumn (..)
+  , DLQSortColumn (..)
+  , ArchiveSortColumn (..)
+  , SortDir (..)
   ) where
 
 import Arbiter.Core.Enum (enumFromTextCI)
 import Arbiter.Core.Job.Types (JobRead, JobStatus, Stored, jobStatusToText)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, SpecName, SpecPayload, SpecResult)
 import Arbiter.Core.Sql.Jobs
-  ( ArchiveSortColumn
-  , DLQSortColumn
-  , JobSortColumn
-  , SortDir
+  ( ArchiveSortColumn (..)
+  , DLQSortColumn (..)
+  , JobSortColumn (..)
+  , SortDir (..)
   , archiveSortColumnName
   , dlqSortColumnName
   , jobSortColumnName
@@ -111,6 +117,8 @@ data JobsAPI payload result mode = JobsAPI
         :- ReqBody '[JSON] (ApiJobWrite payload)
           :> Post '[JSON] (JobResponse (JobRead payload))
   -- ^ @POST \/:queue\/jobs@ Insert a new job.
+  --
+  -- A dedup-ignore collision returns the existing job (200). A blocked replace is 409.
   , insertJobsBatch
       :: mode
         :- "batch"
@@ -140,6 +148,9 @@ data JobsAPI payload result mode = JobsAPI
           :> ReqBody '[JSON] (AckRequest result)
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/ack@ Complete a job this caller holds.
+  --
+  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
+  -- worker holds it, or the job is suspended.
   , nackClaimedJob
       :: mode
         :- Capture "id" Int64
@@ -147,6 +158,9 @@ data JobsAPI payload result mode = JobsAPI
           :> ReqBody '[JSON] JobLease
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/nack@ Hand back a job this caller holds.
+  --
+  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
+  -- worker holds it, or the job is suspended.
   , extendClaimedJob
       :: mode
         :- Capture "id" Int64
@@ -154,6 +168,9 @@ data JobsAPI payload result mode = JobsAPI
           :> ReqBody '[JSON] ExtendRequest
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/extend@ Push out the lease this caller holds.
+  --
+  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
+  -- worker holds it, or the job is suspended.
   , promoteJob
       :: mode
         :- Capture "id" Int64
@@ -302,7 +319,7 @@ data TableAPI payload result mode = TableAPI
         :- "claim"
           :> ReqBody '[JSON] ClaimRequest
           :> Post '[JSON] (ClaimResponse payload)
-  -- ^ @POST \/:queue\/claim@ Lease visible jobs.
+  -- ^ @POST \/:queue\/claim@ Lease visible jobs. A paused queue returns no jobs.
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
   -- ^ @\/:queue\/dlq@ The DLQ routes.
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
@@ -340,19 +357,19 @@ data QueuesAPI mode = QueuesAPI
           :> Get '[JSON] (Maybe QueueRow)
   -- ^ @GET \/queues\/:queue\/details@
   --
-  -- Null when the queue has no pause-state row. Pausing creates it.
+  -- Null when the queue has no pause-state row. A pause or a resume creates it.
   , pauseQueue
       :: mode
         :- Capture "queue" Text
           :> "pause"
           :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/pause@
+  -- ^ @POST \/queues\/:queue\/pause@ 404 for a queue not in the registry.
   , resumeQueue
       :: mode
         :- Capture "queue" Text
           :> "resume"
           :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/resume@
+  -- ^ @POST \/queues\/:queue\/resume@ 404 for a queue not in the registry.
   }
   deriving stock (Generic)
 
@@ -452,12 +469,17 @@ data RateLimitsAPI mode = RateLimitsAPI
           :> ReqBody '[JSON] AddTokensRequest
           :> Post '[JSON] AddTokensResponse
   -- ^ @POST \/rate-limits\/:prefix\/buckets\/:key\/tokens@
+  --
+  -- @:key@ is the full bucket key with its prefix, as the bucket listing shows it.
+  -- A key outside the prefix or a token count of 0 or less is 400. An unknown prefix is 404.
   , pruneRateLimitBuckets
       :: mode
         :- "prune"
           :> QueryParam "idle" Double
           :> Post '[JSON] PruneResponse
   -- ^ @POST \/rate-limits\/prune?idle=seconds@
+  --
+  -- The default idle is the server's maintenance bucket idle age. A negative value is 400.
   }
   deriving stock (Generic)
 

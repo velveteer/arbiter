@@ -7,16 +7,25 @@ module Arbiter.Core.MonadArbiter
   , HasRegistry
   , ResultOf
 
+    -- * Instance kit
+  , Query (..)
+  , Piece (..)
+  , mkQuery
+  , Params
+  , SomeParam (..)
+  , ParamType (..)
+  , RowCodec
+  , Col (..)
+  , NullCol (..)
+  , runCodec
+  , Stored (..)
+  , storedBytes
+
     -- * Internal
 
     -- | Internal to the arbiter packages. Not covered by the PVP.
   , countOr0
   , countOr0Prepared
-  , Params
-  , SomeParam (..)
-  , ParamType (..)
-  , Query (..)
-  , mkQuery
   ) where
 
 import Data.Int (Int64)
@@ -24,15 +33,16 @@ import Data.Kind (Type)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
 import UnliftIO (MonadUnliftIO)
 
-import Arbiter.Core.Codec (ParamType (..), Params, SomeParam (..))
+import Arbiter.Core.Codec (Col (..), NullCol (..), ParamType (..), Params, RowCodec, SomeParam (..), runCodec)
 import Arbiter.Core.Job.Schema (SchemaName)
 import Arbiter.Core.Job.Types (JobRead)
+import Arbiter.Core.Job.Types.Internal (Stored (..), storedBytes)
 import Arbiter.Core.Listen (Listener)
 import Arbiter.Core.QueueRegistry (JobPayloadRegistry, ResultFor)
-import Arbiter.Core.Sql.Query (Query (..), mkQuery)
+import Arbiter.Core.Sql.Query (Piece (..), Query (..), mkQuery)
 
 -- | Database abstraction for job queue operations. Each backend (postgresql-simple,
--- hasql, orville) provides an instance that maps queries to its native driver.
+-- hasql, Orville) provides an instance that maps queries to its native driver.
 --
 -- The instance also names the monad's schema and queue registry. The high-level
 -- API resolves table names and result types from them at compile time.
@@ -74,7 +84,7 @@ class (MonadUnliftIO m) => MonadArbiter m where
   -- | Run an action in a transaction. Nesting creates savepoints.
   withDbTransaction :: m a -> m a
 
-  -- | Run a job handler with a database connection from the pool.
+  -- | Run a job handler in the backend's handler shape.
   runHandlerWithConnection
     :: JobHandler m payload (ResultOf m payload)
     -> JobRead payload

@@ -102,7 +102,8 @@ summaryAggregates =
    in [text|${aggs}, MAX(not_visible_until) FILTER (WHERE ${inFlight}) AS in_flight_until|]
 
 -- | Recompute the groups table, scoped to the locked keys from 'lockGroupsSQL'.
--- Returns the count of rows it rewrote. A separate statement whose snapshot post-dates the lock.
+-- Deletes the summary of a key with no jobs left. Returns the count of rows updated or
+-- deleted. A separate statement whose snapshot post-dates the lock.
 refreshGroupsSQL :: SchemaName -> TableName -> [Text] -> Query Int64
 refreshGroupsSQL schema tableName keys =
   let tbl = jobQueueTable schema tableName

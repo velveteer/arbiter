@@ -17,6 +17,8 @@ module Arbiter.Core.Job.Types
   , toStored
   , decodeStored
   , JobWrite
+  , JobId
+  , ClaimSeq
   , primaryKey
   , payload
   , queueName
@@ -75,8 +77,6 @@ module Arbiter.Core.Job.Types
   , defaultObservabilityHooks
   , hoistObservabilityHooks
   , andThen
-  , JobId
-  , ClaimSeq
   , ClaimTime
   , CurrentTime
   , StartTime
@@ -194,7 +194,7 @@ dayRetention :: Int32
 dayRetention = 86400
 
 -- | A rollup finalizer is any job whose 'parentState' snapshot is present
--- (an empty object on insert, the merged child results before a DLQ move).
+-- (an empty object from its insert or spawn, the merged child results before a DLQ move).
 isRollup :: Job p Int64 q t adm -> Bool
 isRollup = isJust . parentState
 
@@ -320,7 +320,7 @@ setPayload value job = job {payload = value}
 setGroupKey :: Maybe Text -> JobWrite payload -> JobWrite payload
 setGroupKey value job = job {groupKey = value}
 
--- | Set the claim priority. Lower numbers claim first.
+-- | Set the claim priority. Lower numbers claim first. In a group, a retried job goes first.
 setPriority :: Int32 -> JobWrite payload -> JobWrite payload
 setPriority value job = job {priority = value}
 
@@ -373,10 +373,10 @@ type ClaimTime = UTCTime
 -- | The worker's clock reading after the extend landed.
 type CurrentTime = UTCTime
 
--- | When a handler began.
+-- | When the worker thread received the job's batch.
 type StartTime = UTCTime
 
--- | When a handler finished.
+-- | For a success, when the ack committed. For a failure, when the handler failed the job.
 type EndTime = UTCTime
 
 -- | A failure message.
@@ -400,7 +400,8 @@ data ObservabilityHooks m payload = ObservabilityHooks
       -> StartTime
       -> EndTime
       -> m ()
-  -- ^ Called after a job handler succeeds.
+  -- ^ Called when the job's ack or spawn commits. In batched mode this can occur while the
+  -- handler runs.
   , onJobFailure
       :: (JobPayload payload)
       => JobRead payload
@@ -421,7 +422,8 @@ data ObservabilityHooks m payload = ObservabilityHooks
       => JobRead payload
       -> ErrorMsg
       -> m ()
-  -- ^ Called when a job is successfully moved to the dead-letter queue.
+  -- ^ Called when a worker moves a job to the dead-letter queue after a handler failure.
+  -- A reaper sweep or an undecodable row fires no hook.
   , onJobCancelled
       :: (JobPayload payload)
       => JobRead payload

@@ -7,9 +7,9 @@ module Arbiter.Core.PoolConfig
 -- | Connection pool configuration.
 data PoolConfig = PoolConfig
   { poolSize :: Int
-  -- ^ Maximum connections
+  -- ^ Maximum connections.
   , poolIdleTimeout :: Int
-  -- ^ Idle timeout (seconds)
+  -- ^ Idle timeout (seconds).
   , poolStripes :: Maybe Int
   -- ^ Sub-pools. 'Nothing' picks one per RTS capability.
   }

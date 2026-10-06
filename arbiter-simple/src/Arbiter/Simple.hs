@@ -14,6 +14,8 @@
 --   runSimpleDb env $ do
 --     void $ insertJob (defaultJob myPayload)
 -- @
+--
+-- "Arbiter.Simple.MonadArbiter" has the primitives for an application's own instance.
 module Arbiter.Simple
   ( -- * Re-exports
     module Arbiter.Simple.MonadArbiter

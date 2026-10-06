@@ -5,7 +5,7 @@ synopsis:        Worker pools for Arbiter
 description:
   Worker pools for Arbiter, a PostgreSQL job queue for Haskell.
 
-  Runs concurrent pools that claim jobs under a visibility timeout, heartbeat
+  Runs concurrent pools that claim jobs under a lease, heartbeat
   long-running work, retry with a configurable backoff strategy, and move
   exhausted jobs to the dead-letter queue. Includes cron scheduling, background
   maintenance, graceful drain, observability callbacks, structured logging, and
@@ -117,13 +117,13 @@ test-suite arbiter-worker-tests
     , arbiter-test-common  >=0.1 && <0.2
     , arbiter-worker
     , base >=4.20 && <5
-    , containers
-    , cron
-    , hspec
+    , containers           >=0.6 && <0.9
+    , cron                 >=0.7 && <0.9
+    , hspec                >=2.8 && <2.12
     , io-classes >=1.11 && <1.12
     , io-classes:si-timers >=1.11 && <1.12
-    , io-sim
-    , QuickCheck
-    , text
-    , time
-    , unliftio
+    , io-sim               >=1.11 && <1.12
+    , QuickCheck           >=2.18 && <2.19
+    , text                 >=1.2 && <2.2
+    , time                 >=1.12 && <1.16
+    , unliftio             >=0.2 && <0.3
