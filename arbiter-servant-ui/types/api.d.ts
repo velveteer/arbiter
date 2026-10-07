@@ -11,25 +11,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ConcurrencyPoliciesResponse"];
-                    };
-                };
-            };
-        };
+        /** List concurrency policies */
+        get: operations["getConcurrency"];
         put?: never;
         post?: never;
         delete?: never;
@@ -47,25 +30,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["PruneResponse"];
-                    };
-                };
-            };
-        };
+        /**
+         * Prune drained concurrency keys
+         * @description Deletes keys with no live job.
+         */
+        post: operations["postConcurrencyPrune"];
         delete?: never;
         options?: never;
         head?: never;
@@ -81,25 +50,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ConcurrencyReconcileResponse"];
-                    };
-                };
-            };
-        };
+        /**
+         * Recount in-flight jobs per concurrency key
+         * @description Repairs each in-flight count from the live jobs. Returns the rows repaired.
+         */
+        post: operations["postConcurrencyReconcile"];
         delete?: never;
         options?: never;
         head?: never;
@@ -119,45 +74,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    prefix: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["ConcurrencyPolicyUpdate"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ConcurrencyPolicyView"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `prefix` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Override a concurrency limit
+         * @description A null overrideLimit clears the override. An absent one keeps it.
+         */
+        patch: operations["patchConcurrencyByPrefix"];
         trace?: never;
     };
     "/api/v1/concurrency/{prefix}/keys": {
@@ -167,44 +88,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                };
-                header?: never;
-                path: {
-                    prefix: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ConcurrencyKeysResponse"];
-                    };
-                };
-                /** @description Invalid `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `prefix` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List the keys of a concurrency policy */
+        get: operations["getConcurrencyByPrefixKeys"];
         put?: never;
         post?: never;
         delete?: never;
@@ -220,34 +105,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    queue?: string;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["CronSchedulesResponse"];
-                    };
-                };
-                /** @description Invalid `queue` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List cron schedules */
+        get: operations["getCronSchedules"];
         put?: never;
         post?: never;
         delete?: never;
@@ -269,45 +128,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    name: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["CronScheduleUpdate"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["CronScheduleView"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `name` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Override a cron schedule
+         * @description A null field clears its override. An absent field keeps it.
+         */
+        patch: operations["patchCronSchedulesByName"];
         trace?: never;
     };
     "/api/v1/cron/schedules/{name}/run": {
@@ -319,32 +144,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    name: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `name` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Run a cron schedule now */
+        post: operations["postCronSchedulesByNameRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -362,36 +163,7 @@ export interface paths {
          * Server-sent stream of job events
          * @description Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one "connected" event. Sends a keepalive comment after 15 seconds with no event. A server with streaming off, or with no listener, answers one "disabled" event and closes.
          */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description An event stream. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "text/event-stream": {
-                            /** @description The event comes from the DLQ table. */
-                            dlq?: boolean;
-                            /** @enum {string} */
-                            event: "job_inserted" | "job_updated" | "job_deleted" | "job_dlq" | "connected" | "disabled";
-                            /** @description The job id. A DLQ row gives the id of the job it holds. */
-                            job_id?: number;
-                            message?: string;
-                            /** @description The queue name. */
-                            table?: string;
-                        };
-                    };
-                };
-            };
-        };
+        get: operations["getEventsStream"];
         put?: never;
         post?: never;
         delete?: never;
@@ -407,25 +179,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["HealthResponse"];
-                    };
-                };
-            };
-        };
+        /** Check readiness */
+        get: operations["getHealth"];
         put?: never;
         post?: never;
         delete?: never;
@@ -441,25 +196,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["LivenessResponse"];
-                    };
-                };
-            };
-        };
+        /** Check liveness */
+        get: operations["getHealthLive"];
         put?: never;
         post?: never;
         delete?: never;
@@ -477,25 +215,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["MaintenanceResponse"];
-                    };
-                };
-            };
-        };
+        /**
+         * Run a maintenance pass
+         * @description Runs the work of the reaper once. An operation that another caller runs at the same time is skipped and is not in the response.
+         */
+        post: operations["postMaintenance"];
         delete?: never;
         options?: never;
         head?: never;
@@ -509,44 +233,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                    parent_id?: number;
-                    job_id?: number;
-                    group_key?: string;
-                    kind?: string;
-                    payload?: string;
-                    completed_after?: string;
-                    completed_before?: string;
-                    sort_by?: "id" | "completed_at" | "inserted_at" | "job_id" | "attempts" | "group_key" | "parent_id";
-                    sort_dir?: "asc" | "desc";
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ArchiveResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `sort_dir` or `sort_by` or `completed_before` or `completed_after` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * List archived jobs
+         * @description The payload filter searches the payload text.
+         */
+        get: operations["queueGetArchive"];
         put?: never;
         post?: never;
         delete?: never;
@@ -564,36 +255,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["BatchDeleteRequest"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["BatchDeleteResponse"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Delete archived jobs
+         * @description Returns the number deleted. Unknown ids are skipped.
+         */
+        post: operations["queuePostArchiveBatchDelete"];
         delete?: never;
         options?: never;
         head?: never;
@@ -610,32 +276,8 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Delete an archived job */
+        delete: operations["queueDeleteArchiveById"];
         options?: never;
         head?: never;
         patch?: never;
@@ -650,44 +292,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            /** @description Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload. */
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["PayloadEdit_AnyJson"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Run an archived job again
+         * @description Inserts a new job. The archive entry stays.
+         */
+        post: operations["queuePostArchiveByIdReenqueue"];
         delete?: never;
         options?: never;
         head?: never;
@@ -703,36 +312,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["ClaimRequest"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["ClaimResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Claim jobs
+         * @description Leases up to maxJobs visible jobs for leaseSeconds. Each job carries the claimSeq and claimedBy that ack, nack and extend need. The server does not renew the lease. A paused queue returns no jobs.
+         */
+        post: operations["queuePostClaim"];
         delete?: never;
         options?: never;
         head?: never;
@@ -746,43 +330,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                    parent_id?: number;
-                    job_id?: number;
-                    group_key?: string;
-                    kind?: string;
-                    payload?: string;
-                    error?: string;
-                    sort_by?: "id" | "failed_at" | "job_id" | "priority" | "attempts" | "inserted_at" | "group_key" | "parent_id" | "last_attempted_at";
-                    sort_dir?: "asc" | "desc";
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["DLQResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `sort_dir` or `sort_by` or `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * List dead-lettered jobs
+         * @description The payload and error filters search the payload and the last error.
+         */
+        get: operations["queueGetDlq"];
         put?: never;
         post?: never;
         delete?: never;
@@ -800,36 +352,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["BatchDeleteRequest"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["BatchDeleteResponse"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Delete dead-lettered jobs
+         * @description Returns the number deleted. Unknown ids are skipped.
+         */
+        post: operations["queuePostDlqBatchDelete"];
         delete?: never;
         options?: never;
         head?: never;
@@ -846,32 +373,11 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Delete a dead-lettered job
+         * @description Resumes its parent when no child of the parent is left in the queue.
+         */
+        delete: operations["queueDeleteDlqById"];
         options?: never;
         head?: never;
         patch?: never;
@@ -886,44 +392,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            /** @description Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload. */
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["PayloadEdit_AnyJson"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Retry a dead-lettered job
+         * @description Moves the job back to the queue.
+         */
+        post: operations["queuePostDlqByIdRetry"];
         delete?: never;
         options?: never;
         head?: never;
@@ -937,36 +410,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                    group_key?: string;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["GroupsResponse"];
-                    };
-                };
-                /** @description Invalid `group_key` or `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * List open groups
+         * @description The largest groups come first.
+         */
+        get: operations["queueGetGroups"];
         put?: never;
         post?: never;
         delete?: never;
@@ -982,78 +430,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                    group_key?: string;
-                    parent_id?: number;
-                    job_id?: number;
-                    roots_only?: boolean;
-                    status?: "ready" | "in_flight" | "backoff" | "scheduled" | "suspended" | "throttled" | "cancelled" | "exhausted";
-                    claimed_by?: string;
-                    kind?: string;
-                    payload?: string;
-                    rate_limit_prefix?: string;
-                    concurrency_prefix?: string;
-                    sort_by?: "id" | "priority" | "attempts" | "inserted_at" | "not_visible_until" | "group_key" | "parent_id" | "last_attempted_at";
-                    sort_dir?: "asc" | "desc";
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["JobsResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `sort_dir` or `sort_by` or `concurrency_prefix` or `rate_limit_prefix` or `payload` or `kind` or `claimed_by` or `status` or `roots_only` or `job_id` or `parent_id` or `group_key` or `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * List jobs
+         * @description Filters combine. The payload filter searches the payload text.
+         */
+        get: operations["queueGetJobs"];
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["JobWrite_AnyJson"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["JobResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Enqueue a job
+         * @description A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue.
+         */
+        post: operations["queuePostJobs"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1069,36 +456,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["BatchInsertRequest_AnyJson"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["BatchInsertResponse_AnyJson"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Enqueue many jobs
+         * @description Returns the jobs inserted or replaced. The response omits a job that an ignore dedup key skips, and a job that a replace dedup key cannot replace.
+         */
+        post: operations["queuePostJobsBatch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1112,62 +474,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["JobWithStatusResponse_AnyJson"];
-                    };
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Show a job
+         * @description The response includes the derived status.
+         */
+        get: operations["queueGetJobsById"];
         put?: never;
         post?: never;
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Cancel a job and its descendants
+         * @description Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler.
+         */
+        delete: operations["queueDeleteJobsById"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1182,43 +500,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["AckRequest_AnyJson"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Complete a held job
+         * @description Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive.
+         */
+        post: operations["queuePostJobsByIdAck"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1234,43 +520,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["ExtendRequest"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Extend a held lease
+         * @description Sets the lease to expire leaseSeconds from now.
+         */
+        post: operations["queuePostJobsByIdExtend"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1286,32 +540,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Cancel a job and interrupt its handlers
+         * @description Deletes the jobs in the tree that are not in flight. A job in flight receives a cancel flag and cannot be claimed again. A worker pool stops its handler. An HTTP claimant with a live lease receives 409 on its next ack, nack or extend, until the reaper deletes the job. Then it receives 404. A claimant whose lease expired before the force-cancel receives 404.
+         */
+        post: operations["queuePostJobsByIdForceCancel"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1327,32 +560,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Move a job to the DLQ
+         * @description A rollup takes its descendants with it. A job in flight is moved too. Its handler continues, and its ack finds no job.
+         */
+        post: operations["queuePostJobsByIdMoveToDlq"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1368,43 +580,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["JobLease"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Return a held job
+         * @description Restores the attempt that the claim used. The job becomes claimable when its lease expires.
+         */
+        post: operations["queuePostJobsByIdNack"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1420,32 +600,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Suspend the visible descendants of a job
+         * @description Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended.
+         */
+        post: operations["queuePostJobsByIdPauseChildren"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1461,32 +620,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Make a job visible now */
+        post: operations["queuePostJobsByIdPromote"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1502,43 +637,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["RescheduleRequest"];
-                };
-            };
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Set when a job becomes visible */
+        post: operations["queuePostJobsByIdReschedule"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1554,32 +654,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Resume a suspended job */
+        post: operations["queuePostJobsByIdResume"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1595,32 +671,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Resume the suspended descendants of a job
+         * @description A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed.
+         */
+        post: operations["queuePostJobsByIdResumeChildren"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1636,32 +691,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: number;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Suspend a job
+         * @description A suspended job cannot be claimed.
+         */
+        post: operations["queuePostJobsByIdSuspend"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1675,25 +709,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": string[];
-                    };
-                };
-            };
-        };
+        /** List payload kinds */
+        get: operations["queueGetKinds"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1709,25 +726,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["StatsResponse"];
-                    };
-                };
-            };
-        };
+        /** Show queue stats */
+        get: operations["queueGetStats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1743,25 +743,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["QueuesResponse"];
-                    };
-                };
-            };
-        };
+        /** List queues */
+        get: operations["getQueues"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1777,25 +760,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["AllStatsResponse"];
-                    };
-                };
-            };
-        };
+        /** Show stats for every queue */
+        get: operations["getQueuesStats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1811,34 +777,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    queue: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["QueueRow"];
-                    };
-                };
-                /** @description `queue` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Show the pause state of a queue
+         * @description Null when the queue was never paused or resumed.
+         */
+        get: operations["getQueuesByQueueDetails"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1856,32 +799,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    queue: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `queue` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Pause a queue
+         * @description Workers do not claim from the queue. Claims through this API return no jobs.
+         */
+        post: operations["postQueuesByQueuePause"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1897,32 +819,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    queue: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `queue` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Resume a queue */
+        post: operations["postQueuesByQueueResume"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1936,25 +834,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["RateLimitPoliciesResponse"];
-                    };
-                };
-            };
-        };
+        /** List rate-limit policies */
+        get: operations["getRateLimits"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1972,34 +853,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: {
-                    idle?: number;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["PruneResponse"];
-                    };
-                };
-                /** @description Invalid `idle` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Prune idle rate-limit buckets */
+        post: operations["postRateLimitsPrune"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2019,45 +874,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    prefix: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["RateLimitPolicyUpdate"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["RateLimitPolicyView"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `prefix` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Override a rate-limit policy
+         * @description A null field clears its override. An absent field keeps it.
+         */
+        patch: operations["patchRateLimitsByPrefix"];
         trace?: never;
     };
     "/api/v1/rate-limits/{prefix}/buckets": {
@@ -2067,44 +888,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    limit?: number;
-                    offset?: number;
-                };
-                header?: never;
-                path: {
-                    prefix: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["RateLimitBucketsResponse"];
-                    };
-                };
-                /** @description Invalid `offset` or `limit` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `prefix` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List the buckets of a rate-limit policy */
+        get: operations["getRateLimitsByPrefixBuckets"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2122,46 +907,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    prefix: string;
-                    key: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: {
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["AddTokensRequest"];
-                };
-            };
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["AddTokensResponse"];
-                    };
-                };
-                /** @description Invalid `body` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `prefix` or `key` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Add tokens to a rate-limit bucket
+         * @description Wakes the throttled jobs of the key.
+         */
+        post: operations["postRateLimitsByPrefixBucketsByKeyTokens"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2177,34 +927,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    prefix: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["RateLimitResetResponse"];
-                    };
-                };
-                /** @description `prefix` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Refill the buckets of a rate-limit policy
+         * @description Refills every bucket under the prefix to full. Returns the number refilled.
+         */
+        post: operations["postRateLimitsByPrefixReset"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2218,35 +945,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: {
-            parameters: {
-                query?: {
-                    queue?: string;
-                    live?: number;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json;charset=utf-8": components["schemas"]["WorkersResponse"];
-                    };
-                };
-                /** @description Invalid `live` or `queue` */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List workers */
+        get: operations["getWorkers"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2264,32 +964,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Pause a worker
+         * @description The worker does not claim new jobs.
+         */
+        post: operations["postWorkersByIdPause"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2305,32 +984,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description `id` not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Resume a worker */
+        post: operations["postWorkersByIdResume"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2388,9 +1043,17 @@ export interface components {
             insertedCount: number;
         };
         ClaimRequest: {
-            /** Format: double */
-            leaseSeconds?: number | null;
-            maxJobs?: number | null;
+            /**
+             * Format: double
+             * @description Clamped to 1 to 3600.
+             * @default 60
+             */
+            leaseSeconds: number | null;
+            /**
+             * @description Clamped to 1 to 1000.
+             * @default 1
+             */
+            maxJobs: number | null;
         };
         ClaimResponse_AnyJson: {
             jobs: components["schemas"]["Job_AnyJson"][];
@@ -2487,7 +1150,10 @@ export interface components {
             /** Format: int64 */
             claimSeq: number;
             claimedBy: components["schemas"]["UUID"];
-            /** Format: double */
+            /**
+             * Format: double
+             * @description Clamped to 1 to 3600.
+             */
             leaseSeconds: number;
         };
         GroupSummary: {
@@ -2819,4 +1485,1642 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    getConcurrency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ConcurrencyPoliciesResponse"];
+                };
+            };
+        };
+    };
+    postConcurrencyPrune: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["PruneResponse"];
+                };
+            };
+        };
+    };
+    postConcurrencyReconcile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ConcurrencyReconcileResponse"];
+                };
+            };
+        };
+    };
+    patchConcurrencyByPrefix: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prefix: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["ConcurrencyPolicyUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ConcurrencyPolicyView"];
+                };
+            };
+            /** @description The override limit is negative. Invalid `body`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `prefix` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getConcurrencyByPrefixKeys: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                prefix: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ConcurrencyKeysResponse"];
+                };
+            };
+            /** @description Invalid `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `prefix` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getCronSchedules: {
+        parameters: {
+            query?: {
+                queue?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["CronSchedulesResponse"];
+                };
+            };
+            /** @description Invalid `queue` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    patchCronSchedulesByName: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["CronScheduleUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["CronScheduleView"];
+                };
+            };
+            /** @description An override is not valid. Invalid `body`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `name` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postCronSchedulesByNameRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `name` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The schedule is disabled, or it already has a run that waits to start. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getEventsStream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description An event stream. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": {
+                        /** @description The event comes from the DLQ table. */
+                        dlq?: boolean;
+                        /** @enum {string} */
+                        event: "job_inserted" | "job_updated" | "job_deleted" | "job_dlq" | "connected" | "disabled";
+                        /** @description The job id. A DLQ row gives the id of the job it holds. */
+                        job_id?: number;
+                        message?: string;
+                        /** @description The queue name. */
+                        table?: string;
+                    };
+                };
+            };
+        };
+    };
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["HealthResponse"];
+                };
+            };
+            /** @description The database is not reachable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    getHealthLive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["LivenessResponse"];
+                };
+            };
+        };
+    };
+    postMaintenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["MaintenanceResponse"];
+                };
+            };
+        };
+    };
+    queueGetArchive: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                parent_id?: number;
+                job_id?: number;
+                group_key?: string;
+                kind?: string;
+                payload?: string;
+                completed_after?: string;
+                completed_before?: string;
+                sort_by?: "id" | "completed_at" | "inserted_at" | "job_id" | "attempts" | "group_key" | "parent_id";
+                sort_dir?: "asc" | "desc";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ArchiveResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `sort_dir` or `sort_by` or `completed_before` or `completed_after` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostArchiveBatchDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["BatchDeleteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["BatchDeleteResponse"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueDeleteArchiveById: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostArchiveByIdReenqueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** @description Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload. */
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["PayloadEdit_AnyJson"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostClaim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["ClaimRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["ClaimResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueGetDlq: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                parent_id?: number;
+                job_id?: number;
+                group_key?: string;
+                kind?: string;
+                payload?: string;
+                error?: string;
+                sort_by?: "id" | "failed_at" | "job_id" | "priority" | "attempts" | "inserted_at" | "group_key" | "parent_id" | "last_attempted_at";
+                sort_dir?: "asc" | "desc";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["DLQResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `sort_dir` or `sort_by` or `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostDlqBatchDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["BatchDeleteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["BatchDeleteResponse"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueDeleteDlqById: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostDlqByIdRetry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** @description Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload. */
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["PayloadEdit_AnyJson"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The parent of the job is gone from the queue and the DLQ. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueGetGroups: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                group_key?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["GroupsResponse"];
+                };
+            };
+            /** @description Invalid `group_key` or `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueGetJobs: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                group_key?: string;
+                parent_id?: number;
+                job_id?: number;
+                roots_only?: boolean;
+                status?: "ready" | "in_flight" | "backoff" | "scheduled" | "suspended" | "throttled" | "cancelled" | "exhausted";
+                claimed_by?: string;
+                kind?: string;
+                payload?: string;
+                rate_limit_prefix?: string;
+                concurrency_prefix?: string;
+                sort_by?: "id" | "priority" | "attempts" | "inserted_at" | "not_visible_until" | "group_key" | "parent_id" | "last_attempted_at";
+                sort_dir?: "asc" | "desc";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["JobsResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `sort_dir` or `sort_by` or `concurrency_prefix` or `rate_limit_prefix` or `payload` or `kind` or `claimed_by` or `status` or `roots_only` or `job_id` or `parent_id` or `group_key` or `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["JobWrite_AnyJson"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["JobResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A replace dedup key matched a job that is in flight, flagged for cancel, or has children. An ignore dedup key matched a job that was deleted before the server could read it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsBatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["BatchInsertRequest_AnyJson"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["BatchInsertResponse_AnyJson"];
+                };
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueGetJobsById: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["JobWithStatusResponse_AnyJson"];
+                };
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueDeleteJobsById: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdAck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["AckRequest_AnyJson"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdExtend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["ExtendRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdForceCancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdMoveToDlq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Another operation changed or deleted the job between the read and the move. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdNack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["JobLease"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdPauseChildren: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdPromote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The job is already visible, suspended, in flight, or flagged for cancel. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdReschedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["RescheduleRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid `body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The job is in flight, suspended, flagged for cancel, or out of attempts, or another operation changed it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdResume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The job is not suspended, it is a finalizer with children in the queue, or another operation changed it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdResumeChildren: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostJobsByIdSuspend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The job is already suspended, or it is in flight. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queueGetKinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": string[];
+                };
+            };
+        };
+    };
+    queueGetStats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["StatsResponse"];
+                };
+            };
+        };
+    };
+    getQueues: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["QueuesResponse"];
+                };
+            };
+        };
+    };
+    getQueuesStats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["AllStatsResponse"];
+                };
+            };
+        };
+    };
+    getQueuesByQueueDetails: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                queue: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["QueueRow"];
+                };
+            };
+            /** @description `queue` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postQueuesByQueuePause: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                queue: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `queue` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postQueuesByQueueResume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                queue: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `queue` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getRateLimits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["RateLimitPoliciesResponse"];
+                };
+            };
+        };
+    };
+    postRateLimitsPrune: {
+        parameters: {
+            query?: {
+                idle?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["PruneResponse"];
+                };
+            };
+            /** @description The idle value is negative. Invalid `idle`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    patchRateLimitsByPrefix: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prefix: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["RateLimitPolicyUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["RateLimitPolicyView"];
+                };
+            };
+            /** @description An override value is not valid. Invalid `body`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `prefix` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getRateLimitsByPrefixBuckets: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                prefix: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["RateLimitBucketsResponse"];
+                };
+            };
+            /** @description Invalid `offset` or `limit` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `prefix` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postRateLimitsByPrefixBucketsByKeyTokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prefix: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json;charset=utf-8": components["schemas"]["AddTokensRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["AddTokensResponse"];
+                };
+            };
+            /** @description The token count is 0 or less, or the key is not under the prefix. Invalid `body`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `prefix` or `key` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postRateLimitsByPrefixReset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prefix: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["RateLimitResetResponse"];
+                };
+            };
+            /** @description `prefix` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getWorkers: {
+        parameters: {
+            query?: {
+                queue?: string;
+                live?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["WorkersResponse"];
+                };
+            };
+            /** @description Invalid `live` or `queue` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postWorkersByIdPause: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    postWorkersByIdResume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `id` not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+}

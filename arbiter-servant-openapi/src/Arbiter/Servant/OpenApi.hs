@@ -42,6 +42,7 @@ import Arbiter.Core.Job.Types
   , setPriority
   )
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
+import Arbiter.Core.QueueRegistry (RegistryTables (registryTableNames))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (RateLimitKey))
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
@@ -54,16 +55,18 @@ import Arbiter.Core.Sql.Jobs
   , sortDirName
   )
 import Arbiter.Core.Worker (WorkerHealth, workerHealthToText)
-import Arbiter.Servant.API (ArbiterAPI)
+import Arbiter.Servant.API (ArbiterAPI, Throws')
 import Arbiter.Servant.Types
 import Data.Aeson (ToJSON (..), Value (Null))
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit, ord, toUpper)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (isJust)
 import Data.OpenApi
   ( Definitions
+  , HttpStatusCode
   , Info (..)
   , MediaTypeObject (..)
   , NamedSchema (..)
@@ -82,19 +85,22 @@ import Data.OpenApi
   , declareSchemaRef
   , defaultSchemaOptions
   , genericDeclareNamedSchema
+  , setResponseWith
   )
 import Data.OpenApi qualified as OpenApi
 import Data.OpenApi.Declare (Declare)
 import Data.OpenApi.Internal.Schema (GToSchema)
 import Data.Proxy (Proxy (..))
+import Data.Ratio (denominator, numerator)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.Typeable (Typeable)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Rep)
-import GHC.TypeLits (ErrorMessage (Text), TypeError)
-import Servant (Get, JSON, Server, (:>))
+import GHC.TypeLits (ErrorMessage (Text), KnownNat, KnownSymbol, TypeError, natVal, symbolVal)
+import Numeric (showHex)
+import Servant (Accept (contentType), Get, JSON, Server, (:>))
 import Servant.OpenApi (HasOpenApi, toOpenApi)
 
 -- | The document's own route, for mounting beside 'Arbiter.Servant.API.ArbiterAPI'.
@@ -108,12 +114,12 @@ import Servant.OpenApi (HasOpenApi, toOpenApi)
 type OpenApiAPI = "openapi.json" :> Get '[JSON] Value
 
 -- | Serve the description of a registry's API.
-openApiServer :: forall registry. (HasOpenApi (ArbiterAPI registry)) => Server OpenApiAPI
+openApiServer :: forall registry. (HasOpenApi (ArbiterAPI registry), RegistryTables registry) => Server OpenApiAPI
 openApiServer = pure (openApiSpec @registry)
 
 -- | The description of a registry's API, from its route types.
-openApiSpec :: forall registry. (HasOpenApi (ArbiterAPI registry)) => Value
-openApiSpec = toJSON (sectioned described)
+openApiSpec :: forall registry. (HasOpenApi (ArbiterAPI registry), RegistryTables registry) => Value
+openApiSpec = toJSON (sectioned (`elem` registryTableNames (Proxy @registry)) described)
   where
     described =
       (toOpenApi (Proxy @(ArbiterAPI registry)))
@@ -127,12 +133,12 @@ openApiSpec = toJSON (sectioned described)
 
 -- | Group operations by the first path segment below the mount point. Queue
 -- routes use the queue name. Other routes use the feature name.
-sectioned :: OpenApi -> OpenApi
-sectioned spec =
+sectioned :: (TagName -> Bool) -> OpenApi -> OpenApi
+sectioned isQueue spec =
   spec
     { _openApiPaths =
-        InsOrd.mapWithKey (tagPath . section) (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
-    , _openApiTags = InsOrdSet.fromList (map describeSection sections)
+        InsOrd.mapWithKey (annotatePath isQueue) (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
+    , _openApiTags = InsOrdSet.fromList (map (describeSection isQueue) sections)
     }
   where
     sections = map section (InsOrd.keys (_openApiPaths spec))
@@ -140,9 +146,28 @@ sectioned spec =
 -- | The path's section, the segment after the @\/api\/v1@ mount point.
 section :: FilePath -> TagName
 section path =
-  case drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path))) of
+  case mounted path of
     name : _ -> name
     [] -> "api"
+
+-- | The path's segments below the mount point.
+mounted :: FilePath -> [Text]
+mounted path = drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path)))
+
+-- | An operation id from the method and the path below the mount point. A capture reads as @By@ and its name.
+-- A queue route starts with the queue name. Each character that is not an ASCII letter or digit reads as @_@ and its hex code.
+operationName :: (TagName -> Bool) -> Text -> FilePath -> Text
+operationName isQueue method path =
+  case mounted path of
+    queue : rest | isQueue queue -> T.concatMap escape queue <> upperFirst method <> foldMap word rest
+    segments -> method <> foldMap word segments
+  where
+    escape c
+      | isAsciiUpper c || isAsciiLower c || isDigit c = T.singleton c
+      | otherwise = "_" <> T.pack (map toUpper (showHex (ord c) ""))
+    word segment = maybe (camel segment) (("By" <>) . camel) (T.stripPrefix "{" =<< T.stripSuffix "}" segment)
+    camel = foldMap upperFirst . T.split (`elem` ['-', '_'])
+    upperFirst text = maybe text (\(c, rest) -> T.cons (toUpper c) rest) (T.uncons text)
 
 -- | The segments the API is mounted under.
 mountSegments :: [Text]
@@ -182,6 +207,44 @@ streamOperation =
           }
     }
 
+-- | A declared error response. Reasons for the same status join into one description.
+instance (HasOpenApi api, KnownNat status, KnownSymbol reason) => HasOpenApi (Throws' status reason 'Nothing :> api) where
+  toOpenApi _ = setResponseWith joined (statusCode @status) (pure (reasonResponse @reason)) (toOpenApi (Proxy @api))
+
+-- | A declared error response with a JSON body.
+instance
+  (HasOpenApi api, KnownNat status, KnownSymbol reason, ToSchema body)
+  => HasOpenApi (Throws' status reason ('Just body) :> api)
+  where
+  toOpenApi _ = setResponseWith joined (statusCode @status) (withBody <$> declareSchemaRef (Proxy @body)) (toOpenApi (Proxy @api))
+    where
+      withBody ref =
+        (reasonResponse @reason)
+          { _responseContent = InsOrd.singleton (contentType (Proxy @JSON)) mempty {_mediaTypeObjectSchema = Just ref}
+          }
+
+statusCode :: forall status. (KnownNat status) => HttpStatusCode
+statusCode = fromInteger (natVal (Proxy @status))
+
+reasonResponse :: forall reason. (KnownSymbol reason) => Response
+reasonResponse = mempty {_responseDescription = T.pack (symbolVal (Proxy @reason))}
+
+-- | Put the new reason first, each as its own sentence. Two bodies of one content type become alternatives.
+joined :: Response -> Response -> Response
+joined old new =
+  old
+    { _responseDescription =
+        T.unwords (map sentence (filter (not . T.null) [_responseDescription new, _responseDescription old]))
+    , _responseContent = InsOrd.unionWith merged (_responseContent old) (_responseContent new)
+    }
+  where
+    sentence text = if "." `T.isSuffixOf` text then text else text <> "."
+    merged first second =
+      first {_mediaTypeObjectSchema = alternatives <$> _mediaTypeObjectSchema first <*> _mediaTypeObjectSchema second}
+    alternatives first second
+      | first == second = first
+      | otherwise = Inline mempty {_schemaOneOf = Just [first, second]}
+
 -- | The JSON in one job event's data line.
 jobEventSchema :: Schema
 jobEventSchema =
@@ -207,34 +270,41 @@ jobEventSchema =
       , ("message", Inline mempty {_schemaType = Just OpenApiString})
       ]
 
--- | Put every operation on a path into that path's section.
-tagPath :: TagName -> PathItem -> PathItem
-tagPath name item =
+-- | Put every operation on a path into that path's section, and give it an id.
+annotatePath :: (TagName -> Bool) -> FilePath -> PathItem -> PathItem
+annotatePath isQueue path item =
   item
-    { _pathItemGet = tagged (_pathItemGet item)
-    , _pathItemPut = tagged (_pathItemPut item)
-    , _pathItemPost = tagged (_pathItemPost item)
-    , _pathItemDelete = tagged (_pathItemDelete item)
-    , _pathItemOptions = tagged (_pathItemOptions item)
-    , _pathItemHead = tagged (_pathItemHead item)
-    , _pathItemPatch = tagged (_pathItemPatch item)
-    , _pathItemTrace = tagged (_pathItemTrace item)
+    { _pathItemGet = annotated "get" (_pathItemGet item)
+    , _pathItemPut = annotated "put" (_pathItemPut item)
+    , _pathItemPost = annotated "post" (_pathItemPost item)
+    , _pathItemDelete = annotated "delete" (_pathItemDelete item)
+    , _pathItemOptions = annotated "options" (_pathItemOptions item)
+    , _pathItemHead = annotated "head" (_pathItemHead item)
+    , _pathItemPatch = annotated "patch" (_pathItemPatch item)
+    , _pathItemTrace = annotated "trace" (_pathItemTrace item)
     }
   where
-    tagged = fmap (\operation -> operation {_operationTags = InsOrdSet.insert name (_operationTags operation)})
+    annotated method =
+      fmap
+        ( \operation ->
+            operation
+              { _operationTags = InsOrdSet.insert (section path) (_operationTags operation)
+              , _operationOperationId = Just (operationName isQueue method path)
+              }
+        )
 
 -- | A section's tag entry, a heading with a sentence under it.
-describeSection :: TagName -> Tag
-describeSection name =
+describeSection :: (TagName -> Bool) -> TagName -> Tag
+describeSection isQueue name =
   Tag
     { _tagName = name
-    , _tagDescription = Just (fromMaybe (queueDescription name) (lookup name sectionDescriptions))
+    , _tagDescription = if isQueue name then Just (queueDescription name) else lookup name sectionDescriptions
     , _tagExternalDocs = Nothing
     }
   where
     queueDescription queueName = "Jobs, leases, dead letters, archive, groups, kinds and stats for the " <> queueName <> " queue."
 
--- | What each schema-wide section is for. A section not named here is a queue.
+-- | What each schema-wide section is for.
 sectionDescriptions :: [(TagName, Text)]
 sectionDescriptions =
   [ ("queues", "The registered queues, their counters, and pausing them.")
@@ -314,6 +384,26 @@ patch name = Just <$> opt @a name
 inlineProp :: forall a. Text -> Schema -> Fields a
 inlineProp name schema = Fields (pure [(name, Inline schema)])
 
+-- | A field the server clamps to a range, with an optional default.
+within :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Fields a -> Fields a
+within range def (Fields declared) = Fields (map (fmap clampedRef) <$> declared)
+  where
+    clampedRef (Inline schema) = Inline (clamped range def schema)
+    clampedRef ref = Inline (clamped range def mempty {_schemaAllOf = Just [ref]})
+
+-- | A numeric schema the server clamps to a range, with an optional default.
+-- The range is a description, so a client does not refuse a value outside it.
+clamped :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Schema -> Schema
+clamped (low, high) def schema =
+  schema
+    { _schemaDescription = Just ("Clamped to " <> number low <> " to " <> number high <> ".")
+    , _schemaDefault = toJSON <$> def
+    }
+  where
+    number n
+      | denominator (toRational n) == 1 = T.pack (show (numerator (toRational n)))
+      | otherwise = T.pack (show (fromRational (toRational n) :: Double))
+
 -- | An object schema over some fields, naming which of them a value must carry.
 objectSchema :: Text -> [Text] -> Fields a -> Declare (Definitions Schema) NamedSchema
 objectSchema name required (Fields declared) =
@@ -372,6 +462,15 @@ instance ToParamSchema ArchiveSortColumn where
 
 instance ToParamSchema SortDir where
   toParamSchema = enumSchema sortDirName
+
+instance ToParamSchema PageLimit where
+  toParamSchema _ = pageSizeSchema defaultPageLimit
+
+instance ToParamSchema KeyPageLimit where
+  toParamSchema _ = pageSizeSchema defaultKeyPageLimit
+
+pageSizeSchema :: Int -> Schema
+pageSizeSchema def = clamped pageLimitRange (Just def) (toParamSchema (Proxy @Int))
 
 -- ---------------------------------------------------------------------------
 -- Hand-encoded types
@@ -513,7 +612,9 @@ instance (ToSchema result) => ToSchema (AckRequest result) where
 
 instance ToSchema ExtendRequest where
   declareNamedSchema _ =
-    closedSchema "ExtendRequest" (ExtendRequest <$> leaseFields <*> prop @Double "leaseSeconds")
+    closedSchema
+      "ExtendRequest"
+      (ExtendRequest <$> leaseFields <*> within leaseSecondsRange Nothing (prop @Double "leaseSeconds"))
 
 -- | Lease fields at the top level of the request body.
 leaseFields :: Fields JobLease
@@ -525,6 +626,13 @@ leaseRequired = ["claimSeq", "claimedBy"]
 instance (ToSchema payload) => ToSchema (PayloadEdit payload) where
   declareNamedSchema _ =
     carrying @payload $ closedSchema "PayloadEdit" (PayloadEdit <$> payloadProp @payload "payload")
+
+instance ToSchema ClaimRequest where
+  declareNamedSchema _ =
+    objectSchema "ClaimRequest" [] $
+      ClaimRequest
+        <$> within claimJobsRange (Just defaultClaimJobs) (opt @Int "maxJobs")
+        <*> within leaseSecondsRange (Just defaultLeaseSeconds) (opt @Double "leaseSeconds")
 
 instance ToSchema AddTokensRequest where
   declareNamedSchema _ = closedSchema "AddTokensRequest" (AddTokensRequest <$> prop @Double "tokens")
@@ -663,7 +771,6 @@ instance ToSchema PgDbHealth where declareNamedSchema = generic
 instance ToSchema RateLimitPolicyView where declareNamedSchema = generic
 instance ToSchema ConcurrencyPolicyView where declareNamedSchema = generic
 
-instance ToSchema ClaimRequest where declareNamedSchema = generic
 instance ToSchema BatchDeleteRequest where declareNamedSchema = generic
 instance ToSchema BatchDeleteResponse where declareNamedSchema = generic
 instance ToSchema StatsResponse where declareNamedSchema = generic

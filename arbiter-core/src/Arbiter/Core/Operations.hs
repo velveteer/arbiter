@@ -1344,7 +1344,8 @@ data TreeLocks
     LocksHeld TreesLocked
 
 -- | Move a job to the DLQ, cascading a rollup parent's descendants with it and waking
--- the parent of a child. Returns 0 for a job another worker holds.
+-- the parent of a child. A held job is moved too. Returns 0 when the job's claim token changed
+-- or the job was deleted after the read.
 moveToDLQ
   :: forall m payload
    . (MonadArbiter m)

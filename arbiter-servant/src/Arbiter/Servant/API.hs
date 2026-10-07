@@ -12,6 +12,10 @@ module Arbiter.Servant.API
 
     -- * Route descriptions
   , PayloadEditNote
+  , LeaseRefusal
+  , Throws'
+  , Throws
+  , ThrowsBody
 
     -- * Per-queue routes
   , TableAPI (..)
@@ -52,11 +56,15 @@ import Arbiter.Core.Sql.Jobs
   )
 import Data.Int (Int64)
 import Data.Kind (Type)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic)
+import GHC.TypeLits (Nat, Symbol)
 import Servant.API
+import Servant.Client.Core (HasClient (..))
+import Servant.Server (HasServer (..))
 
 import Arbiter.Servant.Types
 
@@ -94,11 +102,42 @@ instance ToHttpApiData JobStatus where
 type PayloadEditNote =
   "Optional. A payload replaces the stored payload, and the kind, rate-limit and concurrency columns come from it again. An empty body keeps the stored payload."
 
+-- | Why a lease route refuses the lease it was sent.
+type LeaseRefusal =
+  "This lease does not hold the job, a registered worker holds it, or the job is suspended."
+
+-- | An error response the route can return, with an optional JSON body. It documents
+-- the route. The server, client and links ignore it.
+data Throws' (status :: Nat) (reason :: Symbol) (body :: Maybe Type)
+
+-- | An error response with no body.
+type Throws status reason = Throws' status reason 'Nothing
+
+-- | An error response with a JSON body of type @body@.
+type ThrowsBody status reason body = Throws' status reason ('Just body)
+
+instance (HasServer api context) => HasServer (Throws' status reason body :> api) context where
+  type ServerT (Throws' status reason body :> api) m = ServerT api m
+  route _ = route (Proxy @api)
+  hoistServerWithContext _ = hoistServerWithContext (Proxy @api)
+
+instance (HasClient m api) => HasClient m (Throws' status reason body :> api) where
+  type Client m (Throws' status reason body :> api) = Client m api
+  clientWithRoute pm _ = clientWithRoute pm (Proxy @api)
+  hoistClientMonad pm _ = hoistClientMonad pm (Proxy @api)
+
+instance (HasLink api) => HasLink (Throws' status reason body :> api) where
+  type MkLink (Throws' status reason body :> api) link = MkLink api link
+  toLink toA _ = toLink toA (Proxy @api)
+
 -- | One queue's job routes.
 data JobsAPI payload result mode = JobsAPI
   { listJobs
       :: mode
-        :- QueryParam "limit" Int
+        :- Summary "List jobs"
+          :> Description
+               "Filters combine. The payload filter searches the payload text."
+          :> QueryParam "limit" PageLimit
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> QueryParam "parent_id" Int64
@@ -116,103 +155,137 @@ data JobsAPI payload result mode = JobsAPI
   -- ^ @GET \/:queue\/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&kind=X&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...@
   , insertJob
       :: mode
-        :- ReqBody '[JSON] (ApiJobWrite payload)
+        :- Summary "Enqueue a job"
+          :> Description
+               "A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue."
+          :> Throws 409 "A replace dedup key matched a job that is in flight, flagged for cancel, or has children."
+          :> Throws 409 "An ignore dedup key matched a job that was deleted before the server could read it."
+          :> ReqBody '[JSON] (ApiJobWrite payload)
           :> Post '[JSON] (JobResponse (JobRead payload))
-  -- ^ @POST \/:queue\/jobs@ Insert a new job.
-  --
-  -- A dedup-ignore collision returns the existing job (200). A blocked replace is 409.
+  -- ^ @POST \/:queue\/jobs@
   , insertJobsBatch
       :: mode
-        :- "batch"
+        :- Summary "Enqueue many jobs"
+          :> Description
+               "Returns the jobs inserted or replaced. The response omits a job that an ignore dedup key skips, and a job that a replace dedup key cannot replace."
+          :> "batch"
           :> ReqBody '[JSON] (BatchInsertRequest payload)
           :> Post '[JSON] (BatchInsertResponse payload)
-  -- ^ @POST \/:queue\/jobs\/batch@ Insert many jobs.
+  -- ^ @POST \/:queue\/jobs\/batch@
   , getJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Show a job"
+          :> Description "The response includes the derived status."
+          :> Capture "id" Int64
           :> Get '[JSON] (JobResponse (ApiJobWithStatus (Stored payload)))
   -- ^ @GET \/:queue\/jobs\/:id@
   , cancelJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Cancel a job and its descendants"
+          :> Description
+               "Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler."
+          :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/jobs\/:id@ Cancel the job and its children.
+  -- ^ @DELETE \/:queue\/jobs\/:id@
   , forceCancelJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Cancel a job and interrupt its handlers"
+          :> Description
+               "Deletes the jobs in the tree that are not in flight. A job in flight receives a cancel flag and cannot be claimed again. A worker pool stops its handler. An HTTP claimant with a live lease receives 409 on its next ack, nack or extend, until the reaper deletes the job. Then it receives 404. A claimant whose lease expired before the force-cancel receives 404."
+          :> Capture "id" Int64
           :> "force-cancel"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/force-cancel@ Cancel the job and its children, and interrupt running handlers.
+  -- ^ @POST \/:queue\/jobs\/:id\/force-cancel@
   , ackClaimedJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Complete a held job"
+          :> Description
+               "Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive."
+          :> Throws 409 LeaseRefusal
+          :> Capture "id" Int64
           :> "ack"
           :> ReqBody '[JSON] (AckRequest result)
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/ack@ Complete a job this caller holds.
-  --
-  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
-  -- worker holds it, or the job is suspended.
+  -- ^ @POST \/:queue\/jobs\/:id\/ack@
   , nackClaimedJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Return a held job"
+          :> Description "Restores the attempt that the claim used. The job becomes claimable when its lease expires."
+          :> Throws 409 LeaseRefusal
+          :> Capture "id" Int64
           :> "nack"
           :> ReqBody '[JSON] JobLease
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/nack@ Hand back a job this caller holds.
-  --
-  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
-  -- worker holds it, or the job is suspended.
+  -- ^ @POST \/:queue\/jobs\/:id\/nack@
   , extendClaimedJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Extend a held lease"
+          :> Description "Sets the lease to expire leaseSeconds from now."
+          :> Throws 409 LeaseRefusal
+          :> Capture "id" Int64
           :> "extend"
           :> ReqBody '[JSON] ExtendRequest
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/extend@ Push out the lease this caller holds.
-  --
-  -- 404 for a missing job. 409 when this lease does not hold the job, a registered
-  -- worker holds it, or the job is suspended.
+  -- ^ @POST \/:queue\/jobs\/:id\/extend@
   , promoteJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Make a job visible now"
+          :> Throws 409 "The job is already visible, suspended, in flight, or flagged for cancel."
+          :> Capture "id" Int64
           :> "promote"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/promote@
   , rescheduleJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Set when a job becomes visible"
+          :> Throws 409 "The job is in flight, suspended, flagged for cancel, or out of attempts, or another operation changed it."
+          :> Capture "id" Int64
           :> "reschedule"
           :> ReqBody '[JSON] RescheduleRequest
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/reschedule@
   , moveToDLQ
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Move a job to the DLQ"
+          :> Description
+               "A rollup takes its descendants with it. A job in flight is moved too. Its handler continues, and its ack finds no job."
+          :> Throws 409 "Another operation changed or deleted the job between the read and the move."
+          :> Capture "id" Int64
           :> "move-to-dlq"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/move-to-dlq@
   , pauseChildren
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Suspend the visible descendants of a job"
+          :> Description
+               "Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended."
+          :> Capture "id" Int64
           :> "pause-children"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/pause-children@
   , resumeChildren
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Resume the suspended descendants of a job"
+          :> Description
+               "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed."
+          :> Capture "id" Int64
           :> "resume-children"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/resume-children@
   , suspendJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Suspend a job"
+          :> Description "A suspended job cannot be claimed."
+          :> Throws 409 "The job is already suspended, or it is in flight."
+          :> Capture "id" Int64
           :> "suspend"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/suspend@
   , resumeJob
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Resume a suspended job"
+          :> Throws 409 "The job is not suspended, it is a finalizer with children in the queue, or another operation changed it."
+          :> Capture "id" Int64
           :> "resume"
           :> PostNoContent
   -- ^ @POST \/:queue\/jobs\/:id\/resume@
@@ -223,7 +296,10 @@ data JobsAPI payload result mode = JobsAPI
 data DLQAPI payload mode = DLQAPI
   { listDLQ
       :: mode
-        :- QueryParam "limit" Int
+        :- Summary "List dead-lettered jobs"
+          :> Description
+               "The payload and error filters search the payload and the last error."
+          :> QueryParam "limit" PageLimit
           :> QueryParam "offset" Int
           :> QueryParam "parent_id" Int64
           :> QueryParam "job_id" Int64
@@ -237,22 +313,29 @@ data DLQAPI payload mode = DLQAPI
   -- ^ @GET \/:queue\/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...@
   , retryFromDLQ
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Retry a dead-lettered job"
+          :> Description "Moves the job back to the queue."
+          :> Throws 409 "The parent of the job is gone from the queue and the DLQ."
+          :> Capture "id" Int64
           :> "retry"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  -- ^ @POST \/:queue\/dlq\/:id\/retry@ Move the job back to the main queue, optionally with a new payload.
+  -- ^ @POST \/:queue\/dlq\/:id\/retry@
   , deleteDLQ
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Delete a dead-lettered job"
+          :> Description "Resumes its parent when no child of the parent is left in the queue."
+          :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/dlq\/:id@ Delete the job permanently.
+  -- ^ @DELETE \/:queue\/dlq\/:id@
   , deleteDLQBatch
       :: mode
-        :- "batch-delete"
+        :- Summary "Delete dead-lettered jobs"
+          :> Description "Returns the number deleted. Unknown ids are skipped."
+          :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
-  -- ^ @POST \/:queue\/dlq\/batch-delete@ Delete many jobs permanently.
+  -- ^ @POST \/:queue\/dlq\/batch-delete@
   }
   deriving stock (Generic)
 
@@ -260,7 +343,9 @@ data DLQAPI payload mode = DLQAPI
 data ArchiveAPI payload mode = ArchiveAPI
   { listArchive
       :: mode
-        :- QueryParam "limit" Int
+        :- Summary "List archived jobs"
+          :> Description "The payload filter searches the payload text."
+          :> QueryParam "limit" PageLimit
           :> QueryParam "offset" Int
           :> QueryParam "parent_id" Int64
           :> QueryParam "job_id" Int64
@@ -275,22 +360,27 @@ data ArchiveAPI payload mode = ArchiveAPI
   -- ^ @GET \/:queue\/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...@
   , reEnqueueArchive
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Run an archived job again"
+          :> Description "Inserts a new job. The archive entry stays."
+          :> Capture "id" Int64
           :> "reenqueue"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  -- ^ @POST \/:queue\/archive\/:id\/reenqueue@ Run the job again as a fresh job, optionally with a new payload.
+  -- ^ @POST \/:queue\/archive\/:id\/reenqueue@
   , deleteArchive
       :: mode
-        :- Capture "id" Int64
+        :- Summary "Delete an archived job"
+          :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/archive\/:id@ Delete the entry permanently.
+  -- ^ @DELETE \/:queue\/archive\/:id@
   , deleteArchiveBatch
       :: mode
-        :- "batch-delete"
+        :- Summary "Delete archived jobs"
+          :> Description "Returns the number deleted. Unknown ids are skipped."
+          :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
-  -- ^ @POST \/:queue\/archive\/batch-delete@ Delete many entries permanently.
+  -- ^ @POST \/:queue\/archive\/batch-delete@
   }
   deriving stock (Generic)
 
@@ -298,7 +388,8 @@ data ArchiveAPI payload mode = ArchiveAPI
 data StatsAPI mode = StatsAPI
   { getStats
       :: mode
-        :- Get '[JSON] StatsResponse
+        :- Summary "Show queue stats"
+          :> Get '[JSON] StatsResponse
   -- ^ @GET \/:queue\/stats@
   }
   deriving stock (Generic)
@@ -307,8 +398,11 @@ data StatsAPI mode = StatsAPI
 newtype MaintenanceAPI mode = MaintenanceAPI
   { runMaintenance
       :: mode
-        :- Post '[JSON] MaintenanceResponse
-  -- ^ @POST \/maintenance@ Run one gated maintenance pass.
+        :- Summary "Run a maintenance pass"
+          :> Description
+               "Runs the work of the reaper once. An operation that another caller runs at the same time is skipped and is not in the response."
+          :> Post '[JSON] MaintenanceResponse
+  -- ^ @POST \/maintenance@
   }
   deriving stock (Generic)
 
@@ -318,22 +412,31 @@ data TableAPI payload result mode = TableAPI
   -- ^ @\/:queue\/jobs@ The job routes.
   , claimJobs
       :: mode
-        :- "claim"
+        :- Summary "Claim jobs"
+          :> Description
+               "Leases up to maxJobs visible jobs for leaseSeconds. Each job carries the claimSeq and claimedBy that ack, nack and extend need. The server does not renew the lease. A paused queue returns no jobs."
+          :> "claim"
           :> ReqBody '[JSON] ClaimRequest
           :> Post '[JSON] (ClaimResponse payload)
-  -- ^ @POST \/:queue\/claim@ Lease visible jobs. A paused queue returns no jobs.
+  -- ^ @POST \/:queue\/claim@
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
   -- ^ @\/:queue\/dlq@ The DLQ routes.
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
   -- ^ @\/:queue\/archive@ The archive routes.
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
   -- ^ @\/:queue\/stats@ The stats route.
-  , listKinds :: mode :- "kinds" :> Get '[JSON] [Text]
-  -- ^ @GET \/:queue\/kinds@ The payload kind labels.
+  , listKinds
+      :: mode
+        :- Summary "List payload kinds"
+          :> "kinds"
+          :> Get '[JSON] [Text]
+  -- ^ @GET \/:queue\/kinds@
   , listGroups
       :: mode
-        :- "groups"
-          :> QueryParam "limit" Int
+        :- Summary "List open groups"
+          :> Description "The largest groups come first."
+          :> "groups"
+          :> QueryParam "limit" PageLimit
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> Get '[JSON] GroupsResponse
@@ -345,33 +448,38 @@ data TableAPI payload result mode = TableAPI
 data QueuesAPI mode = QueuesAPI
   { listQueues
       :: mode
-        :- Get '[JSON] QueuesResponse
+        :- Summary "List queues"
+          :> Get '[JSON] QueuesResponse
   -- ^ @GET \/queues@
   , getAllStats
       :: mode
-        :- "stats"
+        :- Summary "Show stats for every queue"
+          :> "stats"
           :> Get '[JSON] AllStatsResponse
   -- ^ @GET \/queues\/stats@
   , getDetails
       :: mode
-        :- Capture "queue" Text
+        :- Summary "Show the pause state of a queue"
+          :> Description "Null when the queue was never paused or resumed."
+          :> Capture "queue" Text
           :> "details"
           :> Get '[JSON] (Maybe QueueRow)
   -- ^ @GET \/queues\/:queue\/details@
-  --
-  -- Null when the queue has no pause-state row. A pause or a resume creates it.
   , pauseQueue
       :: mode
-        :- Capture "queue" Text
+        :- Summary "Pause a queue"
+          :> Description "Workers do not claim from the queue. Claims through this API return no jobs."
+          :> Capture "queue" Text
           :> "pause"
           :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/pause@ 404 for a queue not in the registry.
+  -- ^ @POST \/queues\/:queue\/pause@
   , resumeQueue
       :: mode
-        :- Capture "queue" Text
+        :- Summary "Resume a queue"
+          :> Capture "queue" Text
           :> "resume"
           :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/resume@ 404 for a queue not in the registry.
+  -- ^ @POST \/queues\/:queue\/resume@
   }
   deriving stock (Generic)
 
@@ -382,7 +490,8 @@ type EventsAPI = "stream" :> Raw
 data CronAPI mode = CronAPI
   { listSchedules
       :: mode
-        :- "schedules"
+        :- Summary "List cron schedules"
+          :> "schedules"
           :> QueryParam "queue" Text
           :> Get '[JSON] CronSchedulesResponse
   -- ^ @GET \/cron\/schedules@
@@ -390,14 +499,19 @@ data CronAPI mode = CronAPI
   -- Optional @?queue=name@ scopes the result to a single queue.
   , updateSchedule
       :: mode
-        :- "schedules"
+        :- Summary "Override a cron schedule"
+          :> Description "A null field clears its override. An absent field keeps it."
+          :> Throws 400 "An override is not valid."
+          :> "schedules"
           :> Capture "name" Text
           :> ReqBody '[JSON] CronScheduleUpdate
           :> Patch '[JSON] CronScheduleView
   -- ^ @PATCH \/cron\/schedules\/:name@
   , runSchedule
       :: mode
-        :- "schedules"
+        :- Summary "Run a cron schedule now"
+          :> Throws 409 "The schedule is disabled, or it already has a run that waits to start."
+          :> "schedules"
           :> Capture "name" Text
           :> "run"
           :> PostNoContent
@@ -409,7 +523,8 @@ data CronAPI mode = CronAPI
 data WorkersAPI mode = WorkersAPI
   { listWorkers
       :: mode
-        :- QueryParam "queue" Text
+        :- Summary "List workers"
+          :> QueryParam "queue" Text
           :> QueryParam "live" Double
           :> Get '[JSON] WorkersResponse
   -- ^ @GET \/workers@
@@ -419,7 +534,9 @@ data WorkersAPI mode = WorkersAPI
   -- threshold. Without it all rows are returned.
   , pauseWorker
       :: mode
-        :- Capture "id" UUID
+        :- Summary "Pause a worker"
+          :> Description "The worker does not claim new jobs."
+          :> Capture "id" UUID
           :> "pause"
           :> PostNoContent
   -- ^ @POST \/workers\/:id\/pause@
@@ -427,7 +544,8 @@ data WorkersAPI mode = WorkersAPI
   -- Sets the worker's @paused@ flag.
   , resumeWorker
       :: mode
-        :- Capture "id" UUID
+        :- Summary "Resume a worker"
+          :> Capture "id" UUID
           :> "resume"
           :> PostNoContent
   -- ^ @POST \/workers\/:id\/resume@
@@ -438,33 +556,41 @@ data WorkersAPI mode = WorkersAPI
 data RateLimitsAPI mode = RateLimitsAPI
   { listRateLimits
       :: mode
-        :- Get '[JSON] RateLimitPoliciesResponse
+        :- Summary "List rate-limit policies"
+          :> Get '[JSON] RateLimitPoliciesResponse
   -- ^ @GET \/rate-limits@
   , listRateLimitBuckets
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "List the buckets of a rate-limit policy"
+          :> Capture "prefix" Text
           :> "buckets"
-          :> QueryParam "limit" Int
+          :> QueryParam "limit" KeyPageLimit
           :> QueryParam "offset" Int
           :> Get '[JSON] RateLimitBucketsResponse
   -- ^ @GET \/rate-limits\/:prefix\/buckets?limit=N&offset=N@
-  --
-  -- Default limit 100, range 1 to 1000.
   , updateRateLimitPolicy
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "Override a rate-limit policy"
+          :> Description "A null field clears its override. An absent field keeps it."
+          :> Throws 400 "An override value is not valid."
+          :> Capture "prefix" Text
           :> ReqBody '[JSON] RateLimitPolicyUpdate
           :> Patch '[JSON] RateLimitPolicyView
   -- ^ @PATCH \/rate-limits\/:prefix@
   , resetRateLimitBuckets
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "Refill the buckets of a rate-limit policy"
+          :> Description "Refills every bucket under the prefix to full. Returns the number refilled."
+          :> Capture "prefix" Text
           :> "reset"
           :> Post '[JSON] RateLimitResetResponse
   -- ^ @POST \/rate-limits\/:prefix\/reset@
   , addRateLimitTokens
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "Add tokens to a rate-limit bucket"
+          :> Description "Wakes the throttled jobs of the key."
+          :> Throws 400 "The token count is 0 or less, or the key is not under the prefix."
+          :> Capture "prefix" Text
           :> "buckets"
           :> Capture "key" Text
           :> "tokens"
@@ -473,15 +599,16 @@ data RateLimitsAPI mode = RateLimitsAPI
   -- ^ @POST \/rate-limits\/:prefix\/buckets\/:key\/tokens@
   --
   -- @:key@ is the full bucket key with its prefix, as the bucket listing shows it.
-  -- A key outside the prefix or a token count of 0 or less is 400. An unknown prefix is 404.
   , pruneRateLimitBuckets
       :: mode
-        :- "prune"
+        :- Summary "Prune idle rate-limit buckets"
+          :> Throws 400 "The idle value is negative."
+          :> "prune"
           :> QueryParam "idle" Double
           :> Post '[JSON] PruneResponse
   -- ^ @POST \/rate-limits\/prune?idle=seconds@
   --
-  -- The default idle is the server's maintenance bucket idle age. A negative value is 400.
+  -- The default idle is the server's maintenance bucket idle age.
   }
   deriving stock (Generic)
 
@@ -489,32 +616,39 @@ data RateLimitsAPI mode = RateLimitsAPI
 data ConcurrencyAPI mode = ConcurrencyAPI
   { listConcurrency
       :: mode
-        :- Get '[JSON] ConcurrencyPoliciesResponse
+        :- Summary "List concurrency policies"
+          :> Get '[JSON] ConcurrencyPoliciesResponse
   -- ^ @GET \/concurrency@
   , listConcurrencyKeys
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "List the keys of a concurrency policy"
+          :> Capture "prefix" Text
           :> "keys"
-          :> QueryParam "limit" Int
+          :> QueryParam "limit" KeyPageLimit
           :> QueryParam "offset" Int
           :> Get '[JSON] ConcurrencyKeysResponse
   -- ^ @GET \/concurrency\/:prefix\/keys?limit=N&offset=N@
-  --
-  -- Default limit 100, range 1 to 1000.
   , updateConcurrencyPolicy
       :: mode
-        :- Capture "prefix" Text
+        :- Summary "Override a concurrency limit"
+          :> Description "A null overrideLimit clears the override. An absent one keeps it."
+          :> Throws 400 "The override limit is negative."
+          :> Capture "prefix" Text
           :> ReqBody '[JSON] ConcurrencyPolicyUpdate
           :> Patch '[JSON] ConcurrencyPolicyView
   -- ^ @PATCH \/concurrency\/:prefix@
   , reconcileConcurrency
       :: mode
-        :- "reconcile"
+        :- Summary "Recount in-flight jobs per concurrency key"
+          :> Description "Repairs each in-flight count from the live jobs. Returns the rows repaired."
+          :> "reconcile"
           :> Post '[JSON] ConcurrencyReconcileResponse
   -- ^ @POST \/concurrency\/reconcile@
   , pruneConcurrencyKeys
       :: mode
-        :- "prune"
+        :- Summary "Prune drained concurrency keys"
+          :> Description "Deletes keys with no live job."
+          :> "prune"
           :> Post '[JSON] PruneResponse
   -- ^ @POST \/concurrency\/prune@
   }
@@ -524,15 +658,16 @@ data ConcurrencyAPI mode = ConcurrencyAPI
 data HealthAPI mode = HealthAPI
   { getHealth
       :: mode
-        :- Get '[JSON] HealthResponse
+        :- Summary "Check readiness"
+          :> ThrowsBody 503 "The database is not reachable." HealthResponse
+          :> Get '[JSON] HealthResponse
   -- ^ @GET \/health@
   --
   -- Readiness. Reaches the database and reports its connection counters.
-  -- Returns 200 when the database is reachable and 503 when it is down.
-  -- Both carry the same body.
   , getLiveness
       :: mode
-        :- "live"
+        :- Summary "Check liveness"
+          :> "live"
           :> Get '[JSON] LivenessResponse
   -- ^ @GET \/health\/live@
   --

@@ -213,11 +213,15 @@
             "ClaimRequest": {
                 "properties": {
                     "leaseSeconds": {
+                        "default": 60,
+                        "description": "Clamped to 1 to 3600.",
                         "format": "double",
                         "nullable": true,
                         "type": "number"
                     },
                     "maxJobs": {
+                        "default": 1,
+                        "description": "Clamped to 1 to 1000.",
                         "maximum": 9223372036854775807,
                         "minimum": -9223372036854775808,
                         "nullable": true,
@@ -647,6 +651,7 @@
                         "$ref": "#/components/schemas/UUID"
                     },
                     "leaseSeconds": {
+                        "description": "Clamped to 1 to 3600.",
                         "format": "double",
                         "type": "number"
                     }
@@ -2109,6 +2114,7 @@
     "paths": {
         "/api/v1/concurrency": {
             "get": {
+                "operationId": "getConcurrency",
                 "responses": {
                     "200": {
                         "content": {
@@ -2121,6 +2127,7 @@
                         "description": ""
                     }
                 },
+                "summary": "List concurrency policies",
                 "tags": [
                     "concurrency"
                 ]
@@ -2128,6 +2135,8 @@
         },
         "/api/v1/concurrency/prune": {
             "post": {
+                "description": "Deletes keys with no live job.",
+                "operationId": "postConcurrencyPrune",
                 "responses": {
                     "200": {
                         "content": {
@@ -2140,6 +2149,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Prune drained concurrency keys",
                 "tags": [
                     "concurrency"
                 ]
@@ -2147,6 +2157,8 @@
         },
         "/api/v1/concurrency/reconcile": {
             "post": {
+                "description": "Repairs each in-flight count from the live jobs. Returns the rows repaired.",
+                "operationId": "postConcurrencyReconcile",
                 "responses": {
                     "200": {
                         "content": {
@@ -2159,6 +2171,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Recount in-flight jobs per concurrency key",
                 "tags": [
                     "concurrency"
                 ]
@@ -2166,6 +2179,8 @@
         },
         "/api/v1/concurrency/{prefix}": {
             "patch": {
+                "description": "A null overrideLimit clears the override. An absent one keeps it.",
+                "operationId": "patchConcurrencyByPrefix",
                 "parameters": [
                     {
                         "in": "path",
@@ -2197,12 +2212,13 @@
                         "description": ""
                     },
                     "400": {
-                        "description": "Invalid `body`"
+                        "description": "The override limit is negative. Invalid `body`."
                     },
                     "404": {
                         "description": "`prefix` not found"
                     }
                 },
+                "summary": "Override a concurrency limit",
                 "tags": [
                     "concurrency"
                 ]
@@ -2210,6 +2226,7 @@
         },
         "/api/v1/concurrency/{prefix}/keys": {
             "get": {
+                "operationId": "getConcurrencyByPrefixKeys",
                 "parameters": [
                     {
                         "in": "path",
@@ -2224,6 +2241,8 @@
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 100,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -2258,6 +2277,7 @@
                         "description": "`prefix` not found"
                     }
                 },
+                "summary": "List the keys of a concurrency policy",
                 "tags": [
                     "concurrency"
                 ]
@@ -2265,6 +2285,7 @@
         },
         "/api/v1/cron/schedules": {
             "get": {
+                "operationId": "getCronSchedules",
                 "parameters": [
                     {
                         "in": "query",
@@ -2290,6 +2311,7 @@
                         "description": "Invalid `queue`"
                     }
                 },
+                "summary": "List cron schedules",
                 "tags": [
                     "cron"
                 ]
@@ -2297,6 +2319,8 @@
         },
         "/api/v1/cron/schedules/{name}": {
             "patch": {
+                "description": "A null field clears its override. An absent field keeps it.",
+                "operationId": "patchCronSchedulesByName",
                 "parameters": [
                     {
                         "in": "path",
@@ -2328,12 +2352,13 @@
                         "description": ""
                     },
                     "400": {
-                        "description": "Invalid `body`"
+                        "description": "An override is not valid. Invalid `body`."
                     },
                     "404": {
                         "description": "`name` not found"
                     }
                 },
+                "summary": "Override a cron schedule",
                 "tags": [
                     "cron"
                 ]
@@ -2341,6 +2366,7 @@
         },
         "/api/v1/cron/schedules/{name}/run": {
             "post": {
+                "operationId": "postCronSchedulesByNameRun",
                 "parameters": [
                     {
                         "in": "path",
@@ -2357,8 +2383,12 @@
                     },
                     "404": {
                         "description": "`name` not found"
+                    },
+                    "409": {
+                        "description": "The schedule is disabled, or it already has a run that waits to start."
                     }
                 },
+                "summary": "Run a cron schedule now",
                 "tags": [
                     "cron"
                 ]
@@ -2367,6 +2397,7 @@
         "/api/v1/events/stream": {
             "get": {
                 "description": "Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one \"connected\" event. Sends a keepalive comment after 15 seconds with no event. A server with streaming off, or with no listener, answers one \"disabled\" event and closes.",
+                "operationId": "getEventsStream",
                 "responses": {
                     "200": {
                         "content": {
@@ -2419,6 +2450,7 @@
         },
         "/api/v1/health": {
             "get": {
+                "operationId": "getHealth",
                 "responses": {
                     "200": {
                         "content": {
@@ -2429,8 +2461,19 @@
                             }
                         },
                         "description": ""
+                    },
+                    "503": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HealthResponse"
+                                }
+                            }
+                        },
+                        "description": "The database is not reachable."
                     }
                 },
+                "summary": "Check readiness",
                 "tags": [
                     "health"
                 ]
@@ -2438,6 +2481,7 @@
         },
         "/api/v1/health/live": {
             "get": {
+                "operationId": "getHealthLive",
                 "responses": {
                     "200": {
                         "content": {
@@ -2450,6 +2494,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Check liveness",
                 "tags": [
                     "health"
                 ]
@@ -2457,6 +2502,8 @@
         },
         "/api/v1/maintenance": {
             "post": {
+                "description": "Runs the work of the reaper once. An operation that another caller runs at the same time is skipped and is not in the response.",
+                "operationId": "postMaintenance",
                 "responses": {
                     "200": {
                         "content": {
@@ -2469,6 +2516,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Run a maintenance pass",
                 "tags": [
                     "maintenance"
                 ]
@@ -2476,12 +2524,16 @@
         },
         "/api/v1/queue/archive": {
             "get": {
+                "description": "The payload filter searches the payload text.",
+                "operationId": "queueGetArchive",
                 "parameters": [
                     {
                         "in": "query",
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 50,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -2606,6 +2658,7 @@
                         "description": "Invalid `sort_dir` or `sort_by` or `completed_before` or `completed_after` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit`"
                     }
                 },
+                "summary": "List archived jobs",
                 "tags": [
                     "queue"
                 ]
@@ -2613,6 +2666,8 @@
         },
         "/api/v1/queue/archive/batch-delete": {
             "post": {
+                "description": "Returns the number deleted. Unknown ids are skipped.",
+                "operationId": "queuePostArchiveBatchDelete",
                 "requestBody": {
                     "content": {
                         "application/json;charset=utf-8": {
@@ -2637,6 +2692,7 @@
                         "description": "Invalid `body`"
                     }
                 },
+                "summary": "Delete archived jobs",
                 "tags": [
                     "queue"
                 ]
@@ -2644,6 +2700,7 @@
         },
         "/api/v1/queue/archive/{id}": {
             "delete": {
+                "operationId": "queueDeleteArchiveById",
                 "parameters": [
                     {
                         "in": "path",
@@ -2665,6 +2722,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Delete an archived job",
                 "tags": [
                     "queue"
                 ]
@@ -2672,6 +2730,8 @@
         },
         "/api/v1/queue/archive/{id}/reenqueue": {
             "post": {
+                "description": "Inserts a new job. The archive entry stays.",
+                "operationId": "queuePostArchiveByIdReenqueue",
                 "parameters": [
                     {
                         "in": "path",
@@ -2706,6 +2766,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Run an archived job again",
                 "tags": [
                     "queue"
                 ]
@@ -2713,6 +2774,8 @@
         },
         "/api/v1/queue/claim": {
             "post": {
+                "description": "Leases up to maxJobs visible jobs for leaseSeconds. Each job carries the claimSeq and claimedBy that ack, nack and extend need. The server does not renew the lease. A paused queue returns no jobs.",
+                "operationId": "queuePostClaim",
                 "requestBody": {
                     "content": {
                         "application/json;charset=utf-8": {
@@ -2737,6 +2800,7 @@
                         "description": "Invalid `body`"
                     }
                 },
+                "summary": "Claim jobs",
                 "tags": [
                     "queue"
                 ]
@@ -2744,12 +2808,16 @@
         },
         "/api/v1/queue/dlq": {
             "get": {
+                "description": "The payload and error filters search the payload and the last error.",
+                "operationId": "queueGetDlq",
                 "parameters": [
                     {
                         "in": "query",
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 50,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -2866,6 +2934,7 @@
                         "description": "Invalid `sort_dir` or `sort_by` or `error` or `payload` or `kind` or `group_key` or `job_id` or `parent_id` or `offset` or `limit`"
                     }
                 },
+                "summary": "List dead-lettered jobs",
                 "tags": [
                     "queue"
                 ]
@@ -2873,6 +2942,8 @@
         },
         "/api/v1/queue/dlq/batch-delete": {
             "post": {
+                "description": "Returns the number deleted. Unknown ids are skipped.",
+                "operationId": "queuePostDlqBatchDelete",
                 "requestBody": {
                     "content": {
                         "application/json;charset=utf-8": {
@@ -2897,6 +2968,7 @@
                         "description": "Invalid `body`"
                     }
                 },
+                "summary": "Delete dead-lettered jobs",
                 "tags": [
                     "queue"
                 ]
@@ -2904,6 +2976,8 @@
         },
         "/api/v1/queue/dlq/{id}": {
             "delete": {
+                "description": "Resumes its parent when no child of the parent is left in the queue.",
+                "operationId": "queueDeleteDlqById",
                 "parameters": [
                     {
                         "in": "path",
@@ -2925,6 +2999,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Delete a dead-lettered job",
                 "tags": [
                     "queue"
                 ]
@@ -2932,6 +3007,8 @@
         },
         "/api/v1/queue/dlq/{id}/retry": {
             "post": {
+                "description": "Moves the job back to the queue.",
+                "operationId": "queuePostDlqByIdRetry",
                 "parameters": [
                     {
                         "in": "path",
@@ -2964,8 +3041,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "The parent of the job is gone from the queue and the DLQ."
                     }
                 },
+                "summary": "Retry a dead-lettered job",
                 "tags": [
                     "queue"
                 ]
@@ -2973,12 +3054,16 @@
         },
         "/api/v1/queue/groups": {
             "get": {
+                "description": "The largest groups come first.",
+                "operationId": "queueGetGroups",
                 "parameters": [
                     {
                         "in": "query",
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 50,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -3018,6 +3103,7 @@
                         "description": "Invalid `group_key` or `offset` or `limit`"
                     }
                 },
+                "summary": "List open groups",
                 "tags": [
                     "queue"
                 ]
@@ -3025,12 +3111,16 @@
         },
         "/api/v1/queue/jobs": {
             "get": {
+                "description": "Filters combine. The payload filter searches the payload text.",
+                "operationId": "queueGetJobs",
                 "parameters": [
                     {
                         "in": "query",
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 50,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -3190,11 +3280,14 @@
                         "description": "Invalid `sort_dir` or `sort_by` or `concurrency_prefix` or `rate_limit_prefix` or `payload` or `kind` or `claimed_by` or `status` or `roots_only` or `job_id` or `parent_id` or `group_key` or `offset` or `limit`"
                     }
                 },
+                "summary": "List jobs",
                 "tags": [
                     "queue"
                 ]
             },
             "post": {
+                "description": "A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue.",
+                "operationId": "queuePostJobs",
                 "requestBody": {
                     "content": {
                         "application/json;charset=utf-8": {
@@ -3217,8 +3310,12 @@
                     },
                     "400": {
                         "description": "Invalid `body`"
+                    },
+                    "409": {
+                        "description": "A replace dedup key matched a job that is in flight, flagged for cancel, or has children. An ignore dedup key matched a job that was deleted before the server could read it."
                     }
                 },
+                "summary": "Enqueue a job",
                 "tags": [
                     "queue"
                 ]
@@ -3226,6 +3323,8 @@
         },
         "/api/v1/queue/jobs/batch": {
             "post": {
+                "description": "Returns the jobs inserted or replaced. The response omits a job that an ignore dedup key skips, and a job that a replace dedup key cannot replace.",
+                "operationId": "queuePostJobsBatch",
                 "requestBody": {
                     "content": {
                         "application/json;charset=utf-8": {
@@ -3250,6 +3349,7 @@
                         "description": "Invalid `body`"
                     }
                 },
+                "summary": "Enqueue many jobs",
                 "tags": [
                     "queue"
                 ]
@@ -3257,6 +3357,8 @@
         },
         "/api/v1/queue/jobs/{id}": {
             "delete": {
+                "description": "Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler.",
+                "operationId": "queueDeleteJobsById",
                 "parameters": [
                     {
                         "in": "path",
@@ -3278,11 +3380,14 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Cancel a job and its descendants",
                 "tags": [
                     "queue"
                 ]
             },
             "get": {
+                "description": "The response includes the derived status.",
+                "operationId": "queueGetJobsById",
                 "parameters": [
                     {
                         "in": "path",
@@ -3311,6 +3416,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Show a job",
                 "tags": [
                     "queue"
                 ]
@@ -3318,6 +3424,8 @@
         },
         "/api/v1/queue/jobs/{id}/ack": {
             "post": {
+                "description": "Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive.",
+                "operationId": "queuePostJobsByIdAck",
                 "parameters": [
                     {
                         "in": "path",
@@ -3349,8 +3457,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
                     }
                 },
+                "summary": "Complete a held job",
                 "tags": [
                     "queue"
                 ]
@@ -3358,6 +3470,8 @@
         },
         "/api/v1/queue/jobs/{id}/extend": {
             "post": {
+                "description": "Sets the lease to expire leaseSeconds from now.",
+                "operationId": "queuePostJobsByIdExtend",
                 "parameters": [
                     {
                         "in": "path",
@@ -3389,8 +3503,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
                     }
                 },
+                "summary": "Extend a held lease",
                 "tags": [
                     "queue"
                 ]
@@ -3398,6 +3516,8 @@
         },
         "/api/v1/queue/jobs/{id}/force-cancel": {
             "post": {
+                "description": "Deletes the jobs in the tree that are not in flight. A job in flight receives a cancel flag and cannot be claimed again. A worker pool stops its handler. An HTTP claimant with a live lease receives 409 on its next ack, nack or extend, until the reaper deletes the job. Then it receives 404. A claimant whose lease expired before the force-cancel receives 404.",
+                "operationId": "queuePostJobsByIdForceCancel",
                 "parameters": [
                     {
                         "in": "path",
@@ -3419,6 +3539,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Cancel a job and interrupt its handlers",
                 "tags": [
                     "queue"
                 ]
@@ -3426,6 +3547,8 @@
         },
         "/api/v1/queue/jobs/{id}/move-to-dlq": {
             "post": {
+                "description": "A rollup takes its descendants with it. A job in flight is moved too. Its handler continues, and its ack finds no job.",
+                "operationId": "queuePostJobsByIdMoveToDlq",
                 "parameters": [
                     {
                         "in": "path",
@@ -3445,8 +3568,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "Another operation changed or deleted the job between the read and the move."
                     }
                 },
+                "summary": "Move a job to the DLQ",
                 "tags": [
                     "queue"
                 ]
@@ -3454,6 +3581,8 @@
         },
         "/api/v1/queue/jobs/{id}/nack": {
             "post": {
+                "description": "Restores the attempt that the claim used. The job becomes claimable when its lease expires.",
+                "operationId": "queuePostJobsByIdNack",
                 "parameters": [
                     {
                         "in": "path",
@@ -3485,8 +3614,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
                     }
                 },
+                "summary": "Return a held job",
                 "tags": [
                     "queue"
                 ]
@@ -3494,6 +3627,8 @@
         },
         "/api/v1/queue/jobs/{id}/pause-children": {
             "post": {
+                "description": "Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended.",
+                "operationId": "queuePostJobsByIdPauseChildren",
                 "parameters": [
                     {
                         "in": "path",
@@ -3515,6 +3650,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Suspend the visible descendants of a job",
                 "tags": [
                     "queue"
                 ]
@@ -3522,6 +3658,7 @@
         },
         "/api/v1/queue/jobs/{id}/promote": {
             "post": {
+                "operationId": "queuePostJobsByIdPromote",
                 "parameters": [
                     {
                         "in": "path",
@@ -3541,8 +3678,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "The job is already visible, suspended, in flight, or flagged for cancel."
                     }
                 },
+                "summary": "Make a job visible now",
                 "tags": [
                     "queue"
                 ]
@@ -3550,6 +3691,7 @@
         },
         "/api/v1/queue/jobs/{id}/reschedule": {
             "post": {
+                "operationId": "queuePostJobsByIdReschedule",
                 "parameters": [
                     {
                         "in": "path",
@@ -3581,8 +3723,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "The job is in flight, suspended, flagged for cancel, or out of attempts, or another operation changed it."
                     }
                 },
+                "summary": "Set when a job becomes visible",
                 "tags": [
                     "queue"
                 ]
@@ -3590,6 +3736,7 @@
         },
         "/api/v1/queue/jobs/{id}/resume": {
             "post": {
+                "operationId": "queuePostJobsByIdResume",
                 "parameters": [
                     {
                         "in": "path",
@@ -3609,8 +3756,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "The job is not suspended, it is a finalizer with children in the queue, or another operation changed it."
                     }
                 },
+                "summary": "Resume a suspended job",
                 "tags": [
                     "queue"
                 ]
@@ -3618,6 +3769,8 @@
         },
         "/api/v1/queue/jobs/{id}/resume-children": {
             "post": {
+                "description": "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed.",
+                "operationId": "queuePostJobsByIdResumeChildren",
                 "parameters": [
                     {
                         "in": "path",
@@ -3639,6 +3792,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Resume the suspended descendants of a job",
                 "tags": [
                     "queue"
                 ]
@@ -3646,6 +3800,8 @@
         },
         "/api/v1/queue/jobs/{id}/suspend": {
             "post": {
+                "description": "A suspended job cannot be claimed.",
+                "operationId": "queuePostJobsByIdSuspend",
                 "parameters": [
                     {
                         "in": "path",
@@ -3665,8 +3821,12 @@
                     },
                     "404": {
                         "description": "`id` not found"
+                    },
+                    "409": {
+                        "description": "The job is already suspended, or it is in flight."
                     }
                 },
+                "summary": "Suspend a job",
                 "tags": [
                     "queue"
                 ]
@@ -3674,6 +3834,7 @@
         },
         "/api/v1/queue/kinds": {
             "get": {
+                "operationId": "queueGetKinds",
                 "responses": {
                     "200": {
                         "content": {
@@ -3689,6 +3850,7 @@
                         "description": ""
                     }
                 },
+                "summary": "List payload kinds",
                 "tags": [
                     "queue"
                 ]
@@ -3696,6 +3858,7 @@
         },
         "/api/v1/queue/stats": {
             "get": {
+                "operationId": "queueGetStats",
                 "responses": {
                     "200": {
                         "content": {
@@ -3708,6 +3871,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Show queue stats",
                 "tags": [
                     "queue"
                 ]
@@ -3715,6 +3879,7 @@
         },
         "/api/v1/queues": {
             "get": {
+                "operationId": "getQueues",
                 "responses": {
                     "200": {
                         "content": {
@@ -3727,6 +3892,7 @@
                         "description": ""
                     }
                 },
+                "summary": "List queues",
                 "tags": [
                     "queues"
                 ]
@@ -3734,6 +3900,7 @@
         },
         "/api/v1/queues/stats": {
             "get": {
+                "operationId": "getQueuesStats",
                 "responses": {
                     "200": {
                         "content": {
@@ -3746,6 +3913,7 @@
                         "description": ""
                     }
                 },
+                "summary": "Show stats for every queue",
                 "tags": [
                     "queues"
                 ]
@@ -3753,6 +3921,8 @@
         },
         "/api/v1/queues/{queue}/details": {
             "get": {
+                "description": "Null when the queue was never paused or resumed.",
+                "operationId": "getQueuesByQueueDetails",
                 "parameters": [
                     {
                         "in": "path",
@@ -3778,6 +3948,7 @@
                         "description": "`queue` not found"
                     }
                 },
+                "summary": "Show the pause state of a queue",
                 "tags": [
                     "queues"
                 ]
@@ -3785,6 +3956,8 @@
         },
         "/api/v1/queues/{queue}/pause": {
             "post": {
+                "description": "Workers do not claim from the queue. Claims through this API return no jobs.",
+                "operationId": "postQueuesByQueuePause",
                 "parameters": [
                     {
                         "in": "path",
@@ -3803,6 +3976,7 @@
                         "description": "`queue` not found"
                     }
                 },
+                "summary": "Pause a queue",
                 "tags": [
                     "queues"
                 ]
@@ -3810,6 +3984,7 @@
         },
         "/api/v1/queues/{queue}/resume": {
             "post": {
+                "operationId": "postQueuesByQueueResume",
                 "parameters": [
                     {
                         "in": "path",
@@ -3828,6 +4003,7 @@
                         "description": "`queue` not found"
                     }
                 },
+                "summary": "Resume a queue",
                 "tags": [
                     "queues"
                 ]
@@ -3835,6 +4011,7 @@
         },
         "/api/v1/rate-limits": {
             "get": {
+                "operationId": "getRateLimits",
                 "responses": {
                     "200": {
                         "content": {
@@ -3847,6 +4024,7 @@
                         "description": ""
                     }
                 },
+                "summary": "List rate-limit policies",
                 "tags": [
                     "rate-limits"
                 ]
@@ -3854,6 +4032,7 @@
         },
         "/api/v1/rate-limits/prune": {
             "post": {
+                "operationId": "postRateLimitsPrune",
                 "parameters": [
                     {
                         "in": "query",
@@ -3877,9 +4056,10 @@
                         "description": ""
                     },
                     "400": {
-                        "description": "Invalid `idle`"
+                        "description": "The idle value is negative. Invalid `idle`."
                     }
                 },
+                "summary": "Prune idle rate-limit buckets",
                 "tags": [
                     "rate-limits"
                 ]
@@ -3887,6 +4067,8 @@
         },
         "/api/v1/rate-limits/{prefix}": {
             "patch": {
+                "description": "A null field clears its override. An absent field keeps it.",
+                "operationId": "patchRateLimitsByPrefix",
                 "parameters": [
                     {
                         "in": "path",
@@ -3918,12 +4100,13 @@
                         "description": ""
                     },
                     "400": {
-                        "description": "Invalid `body`"
+                        "description": "An override value is not valid. Invalid `body`."
                     },
                     "404": {
                         "description": "`prefix` not found"
                     }
                 },
+                "summary": "Override a rate-limit policy",
                 "tags": [
                     "rate-limits"
                 ]
@@ -3931,6 +4114,7 @@
         },
         "/api/v1/rate-limits/{prefix}/buckets": {
             "get": {
+                "operationId": "getRateLimitsByPrefixBuckets",
                 "parameters": [
                     {
                         "in": "path",
@@ -3945,6 +4129,8 @@
                         "name": "limit",
                         "required": false,
                         "schema": {
+                            "default": 100,
+                            "description": "Clamped to 1 to 1000.",
                             "maximum": 9223372036854775807,
                             "minimum": -9223372036854775808,
                             "type": "integer"
@@ -3979,6 +4165,7 @@
                         "description": "`prefix` not found"
                     }
                 },
+                "summary": "List the buckets of a rate-limit policy",
                 "tags": [
                     "rate-limits"
                 ]
@@ -3986,6 +4173,8 @@
         },
         "/api/v1/rate-limits/{prefix}/buckets/{key}/tokens": {
             "post": {
+                "description": "Wakes the throttled jobs of the key.",
+                "operationId": "postRateLimitsByPrefixBucketsByKeyTokens",
                 "parameters": [
                     {
                         "in": "path",
@@ -4025,12 +4214,13 @@
                         "description": ""
                     },
                     "400": {
-                        "description": "Invalid `body`"
+                        "description": "The token count is 0 or less, or the key is not under the prefix. Invalid `body`."
                     },
                     "404": {
                         "description": "`prefix` or `key` not found"
                     }
                 },
+                "summary": "Add tokens to a rate-limit bucket",
                 "tags": [
                     "rate-limits"
                 ]
@@ -4038,6 +4228,8 @@
         },
         "/api/v1/rate-limits/{prefix}/reset": {
             "post": {
+                "description": "Refills every bucket under the prefix to full. Returns the number refilled.",
+                "operationId": "postRateLimitsByPrefixReset",
                 "parameters": [
                     {
                         "in": "path",
@@ -4063,6 +4255,7 @@
                         "description": "`prefix` not found"
                     }
                 },
+                "summary": "Refill the buckets of a rate-limit policy",
                 "tags": [
                     "rate-limits"
                 ]
@@ -4070,6 +4263,7 @@
         },
         "/api/v1/workers": {
             "get": {
+                "operationId": "getWorkers",
                 "parameters": [
                     {
                         "in": "query",
@@ -4104,6 +4298,7 @@
                         "description": "Invalid `live` or `queue`"
                     }
                 },
+                "summary": "List workers",
                 "tags": [
                     "workers"
                 ]
@@ -4111,6 +4306,8 @@
         },
         "/api/v1/workers/{id}/pause": {
             "post": {
+                "description": "The worker does not claim new jobs.",
+                "operationId": "postWorkersByIdPause",
                 "parameters": [
                     {
                         "in": "path",
@@ -4130,6 +4327,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Pause a worker",
                 "tags": [
                     "workers"
                 ]
@@ -4137,6 +4335,7 @@
         },
         "/api/v1/workers/{id}/resume": {
             "post": {
+                "operationId": "postWorkersByIdResume",
                 "parameters": [
                     {
                         "in": "path",
@@ -4156,6 +4355,7 @@
                         "description": "`id` not found"
                     }
                 },
+                "summary": "Resume a worker",
                 "tags": [
                     "workers"
                 ]

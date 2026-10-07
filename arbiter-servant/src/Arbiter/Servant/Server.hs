@@ -264,7 +264,7 @@ listJobsHandler
    . (HasRegistry m registry)
   => Text
   -> ArbiterServerConfig m registry
-  -> Maybe Int
+  -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Text
   -> Maybe Int64
@@ -280,7 +280,7 @@ listJobsHandler
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
 listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mKind mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
-  let (limit, offset) = validatePagination defaultPageLimit mLimit mOffset
+  let (limit, offset) = validatePagination defaultPageLimit (unPageLimit <$> mLimit) mOffset
       schemaName = serverSchema config
       filters =
         catMaybes $
@@ -327,17 +327,18 @@ insertJobHandler
   -> Handler (JobResponse (Job.JobRead payload))
 insertJobHandler tableName config (ApiJobWrite jobWrite) = do
   let schemaName = serverSchema config
-  mJob <- runDb config $ withPublishSpan tableName [jobWrite] $ do
+  found <- runDb config $ withPublishSpan tableName [jobWrite] $ do
     inserted <- Ops.insertJob schemaName tableName jobWrite
     case (inserted, Job.dedupKey jobWrite) of
-      (Just fresh, _) -> pure (Just fresh)
+      (Just fresh, _) -> pure (Right fresh)
       (Nothing, Just (IgnoreDuplicate duplicateKey)) ->
-        Ops.getJobByDedupKey schemaName tableName duplicateKey >>= traverse (either throwParsing pure . Ops.decodeRow)
-      _ -> pure Nothing
-  case mJob of
-    Just found -> pure $ JobResponse found
-    Nothing ->
-      throwError err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
+        maybe (Left vanished) Right
+          <$> (Ops.getJobByDedupKey schemaName tableName duplicateKey >>= traverse (either throwParsing pure . Ops.decodeRow))
+      _ -> pure (Left blocked)
+  either throwError (pure . JobResponse) found
+  where
+    vanished = err409 {errBody = "Duplicate job was deleted before it could be read"}
+    blocked = err409 {errBody = "Replace blocked: existing job is actively claimed, force-cancel flagged, or has children"}
 
 -- | Insert multiple jobs in a single batch operation.
 insertJobsBatchHandler
@@ -463,7 +464,7 @@ pauseChildrenHandler
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId =
   -- Pausing nothing is a success. The children may be in flight, suspended or done.
-  NoContent <$ runDb config (Ops.pauseChildren (serverSchema config) tableName jobId)
+  underJob tableName config jobId Ops.pauseChildren
 
 -- | Resume all suspended children of a parent job.
 resumeChildrenHandler
@@ -475,7 +476,24 @@ resumeChildrenHandler
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId =
   -- Resuming nothing is a success. The children may be unsuspended or done.
-  NoContent <$ runDb config (Ops.resumeChildren (serverSchema config) tableName jobId)
+  underJob tableName config jobId Ops.resumeChildren
+
+-- | Run a subtree operation under a job. 404 when the job is gone.
+underJob
+  :: (MonadArbiter m)
+  => Text
+  -> ArbiterServerConfig m registry
+  -> Int64
+  -> (Text -> Text -> Int64 -> m Int64)
+  -> Handler NoContent
+underJob tableName config jobId operation = do
+  let schemaName = serverSchema config
+  found <- runDb config . withDbTransaction $ do
+    exists <- Ops.jobExists schemaName tableName jobId
+    when exists $ void (operation schemaName tableName jobId)
+    pure exists
+  unless found $ throwError err404 {errBody = "Job not found"}
+  pure NoContent
 
 -- | Suspend a job (make it unclaimable).
 suspendJobHandler
@@ -530,7 +548,7 @@ listDLQHandler
    . (HasRegistry m registry)
   => Text
   -> ArbiterServerConfig m registry
-  -> Maybe Int
+  -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Int64
   -> Maybe Int64
@@ -620,7 +638,7 @@ listArchiveHandler
    . (HasRegistry m registry)
   => Text
   -> ArbiterServerConfig m registry
-  -> Maybe Int
+  -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Int64
   -> Maybe Int64
@@ -755,7 +773,7 @@ listGroupsHandler
    . (HasRegistry m registry)
   => Text
   -> ArbiterServerConfig m registry
-  -> Maybe Int
+  -> Maybe PageLimit
   -> Maybe Int
   -> Maybe Text
   -> Handler GroupsResponse
@@ -769,13 +787,13 @@ listGroupsHandler tableName config mLimit mOffset mGroupKey =
 readPage
   :: (MonadArbiter m)
   => ArbiterServerConfig m registry
-  -> Maybe Int
+  -> Maybe PageLimit
   -> Maybe Int
   -> (Int -> Int -> m [a])
   -> m Int64
   -> Handler (Page a)
 readPage config mLimit mOffset page count = do
-  let pagination@(limit, offset) = validatePagination defaultPageLimit mLimit mOffset
+  let pagination@(limit, offset) = validatePagination defaultPageLimit (unPageLimit <$> mLimit) mOffset
   (rows, total) <- runDb config . withDbTransaction $ (,) <$> page limit offset <*> count
   pure (toPage pagination total rows)
 
@@ -928,34 +946,6 @@ maintenanceHandler config = liftIO $ do
   ops <- readIORef touched
   pure $ MaintenanceResponse ops (map maintenanceOpName failed)
 
--- | Bounds on jobs per claim.
-claimJobsRange :: (Int, Int)
-claimJobsRange = (1, 1000)
-
--- | Jobs per claim when the request omits it.
-defaultClaimJobs :: Int
-defaultClaimJobs = 1
-
--- | Bounds on lease seconds.
-leaseSecondsRange :: (Double, Double)
-leaseSecondsRange = (1, 3600)
-
--- | Lease seconds when the request omits it.
-defaultLeaseSeconds :: Double
-defaultLeaseSeconds = 60
-
--- | Bounds on page size.
-pageLimitRange :: (Int, Int)
-pageLimitRange = (1, 1000)
-
--- | Page size of a job, DLQ, archive or group listing when the request omits it.
-defaultPageLimit :: Int
-defaultPageLimit = 50
-
--- | Page size of a bucket or key listing when the request omits it.
-defaultKeyPageLimit :: Int
-defaultKeyPageLimit = 100
-
 -- | Queues API handler.
 queuesServer
   :: forall registry m
@@ -968,7 +958,7 @@ queuesServer registryProxy config =
    in QueuesAPI
         { listQueues = pure $ QueuesResponse {queues = known}
         , getAllStats = getAllStatsHandler config (registryQueueKinds registryProxy)
-        , getDetails = getQueueDetailsHandler config
+        , getDetails = getQueueDetailsHandler config known
         , pauseQueue = setQueuePausedHandler config known True
         , resumeQueue = setQueuePausedHandler config known False
         }
@@ -978,9 +968,11 @@ getQueueDetailsHandler
   :: forall registry m
    . (HasRegistry m registry)
   => ArbiterServerConfig m registry
+  -> [Text]
   -> Text
   -> Handler (Maybe QueueRow)
-getQueueDetailsHandler config queue = do
+getQueueDetailsHandler config knownQueues queue = do
+  registeredQueue knownQueues queue
   let schemaName = serverSchema config
   runDb config $ Ops.getQueue schemaName queue
 
@@ -995,13 +987,17 @@ setQueuePausedHandler
   -> Text
   -> Handler NoContent
 setQueuePausedHandler config knownQueues pauseFlag queue = do
-  unless (queue `elem` knownQueues) $
-    throwError err404 {errBody = "Unknown queue"}
+  registeredQueue knownQueues queue
   let schemaName = serverSchema config
   void . runDb config $ Ops.setQueuePaused schemaName queue pauseFlag
   -- The landing overview shows each queue's paused flag.
   invalidate (allQueueStatsCache config)
   NoContent <$ invalidate (queueStatsCache config)
+
+-- | 404 for a queue not in the registry.
+registeredQueue :: [Text] -> Text -> Handler ()
+registeredQueue knownQueues queue =
+  unless (queue `elem` knownQueues) $ throwError err404 {errBody = "Unknown queue"}
 
 -- | Serve the SSE stream as a raw WAI application. Each client registers on the
 -- backend's shared listener for the response's lifetime and gets a @connected@
@@ -1329,11 +1325,11 @@ listRateLimitBucketsHandler
    . (HasRegistry m registry)
   => ArbiterServerConfig m registry
   -> Text
-  -> Maybe Int
+  -> Maybe KeyPageLimit
   -> Maybe Int
   -> Handler RateLimitBucketsResponse
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
+  let (limit, offset) = validatePagination defaultKeyPageLimit (unKeyPageLimit <$> mLimit) mOffset
   rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
   pure Items {items = rows}
 
@@ -1451,11 +1447,11 @@ listConcurrencyKeysHandler
    . (HasRegistry m registry)
   => ArbiterServerConfig m registry
   -> Text
-  -> Maybe Int
+  -> Maybe KeyPageLimit
   -> Maybe Int
   -> Handler ConcurrencyKeysResponse
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination defaultKeyPageLimit mLimit mOffset
+  let (limit, offset) = validatePagination defaultKeyPageLimit (unKeyPageLimit <$> mLimit) mOffset
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
   pure Items {items = rows}
 
@@ -1601,7 +1597,7 @@ listingFilters mParentId mGroupKey mKind mPayload =
 nonBlank :: Maybe Text -> Maybe Text
 nonBlank = mfilter (not . T.null . T.strip)
 
--- | Clamp pagination parameters to a limit of 1 to 1000 and a non-negative offset.
+-- | Clamp the limit to 'pageLimitRange' with a default, and keep the offset non-negative.
 validatePagination :: Int -> Maybe Int -> Maybe Int -> (Int, Int)
-validatePagination defLimit mLimit mOffset =
-  (clamp pageLimitRange (fromMaybe defLimit mLimit), max 0 (fromMaybe 0 mOffset))
+validatePagination def mLimit mOffset =
+  (clamp pageLimitRange (fromMaybe def mLimit), max 0 (fromMaybe 0 mOffset))

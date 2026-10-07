@@ -22,15 +22,17 @@ import Arbiter.Servant.Types
   , Page (..)
   )
 import Data.Aeson (Object, ToJSON, Value (Array, Object, String), toJSON)
-import Data.Aeson.Key (toText)
+import Data.Aeson.Key (fromText, toText)
 import Data.Aeson.KeyMap (elems, keys)
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.List ((\\))
 import Data.OpenApi (Schema (..), ToSchema, toSchema)
 import Data.Proxy (Proxy (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (UTCTime (..), fromGregorian)
 import Test.Tasty (defaultMain, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -46,6 +48,24 @@ main =
           payloadTypes (openApiSpec @'[Queue "a" Int, Queue "b" Text]) @?= ["integer", "string"]
       , testCase "every path has an operation" $
           pathsWithoutOperation (openApiSpec @'[Queue "a" Int]) @?= []
+      , testCase "every operation has a summary" $
+          [name | (name, op) <- operations twoQueues, not (KeyMap.member "summary" op)] @?= []
+      , testCase "operation ids are present and unique across queues" $
+          let ids = [opId | (_, op) <- operations twoQueues, Just (String opId) <- [KeyMap.lookup "operationId" op]]
+           in (length ids, length (distinct ids)) @?= (length (operations twoQueues), length (operations twoQueues))
+      , testCase "operation ids keep queue names that differ only in case or separator apart" $
+          let doc = openApiSpec @'[Queue "fooBar" Int, Queue "foobar" Text, Queue "foo-bar" Bool, Queue "foo_bar" Double]
+              ids = [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op]]
+              folded = map (T.filter isAlphaNum) ids
+           in (length (distinct ids), length (distinct folded)) @?= (length (operations doc), length (operations doc))
+      , testCase "operation ids are identifiers" $
+          let doc = openApiSpec @'[Queue "foo-bar" Int, Queue "foo.bar" Text]
+           in [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op], not (T.all identChar opId)]
+                @?= []
+      , testCase "a down readiness answer declares its body" $
+          responseContent "get /api/v1/health" "503" twoQueues @?= responseContent "get /api/v1/health" "200" twoQueues
+      , testCase "a lease route declares its refusal" $
+          responseCodes "post /api/v1/a/jobs/{id}/ack" twoQueues @?= ["204", "400", "404", "409"]
       , testGroup
           "handwritten schemas name the keys the encoding sends"
           [ testCase "JobWithStatus" $ keyDrift ApiJobWithStatus {ajwsJob = job, ajwsStatus = InFlight} @?= ([], [])
@@ -126,6 +146,39 @@ payloadProps (Object o) =
 payloadProps (Array vs) = concatMap payloadProps vs
 payloadProps _ = []
 
+-- | A document with two queues, so per-queue routes appear twice.
+twoQueues :: Value
+twoQueues = openApiSpec @'[Queue "a" Int, Queue "b" Text]
+
+-- | Every operation in a document, named by its method and path.
+operations :: Value -> [(Text, Object)]
+operations (Object doc)
+  | Just (Object paths) <- KeyMap.lookup "paths" doc =
+      [ (toText method <> " " <> toText path, op)
+      | (path, Object item) <- KeyMap.toList paths
+      , (method, Object op) <- KeyMap.toList item
+      ]
+operations _ = []
+
+-- | The response codes one operation declares.
+responseCodes :: Text -> Value -> [Text]
+responseCodes name doc =
+  distinct
+    [ toText code | (n, op) <- operations doc, n == name, Just (Object rs) <- [KeyMap.lookup "responses" op], code <- keys rs
+    ]
+
+-- | The content types one response of one operation declares.
+responseContent :: Text -> Text -> Value -> [Text]
+responseContent name code doc =
+  [ toText contentType
+  | (n, op) <- operations doc
+  , n == name
+  , Just (Object rs) <- [KeyMap.lookup "responses" op]
+  , Just (Object r) <- [KeyMap.lookup (fromText code) rs]
+  , Just (Object content) <- [KeyMap.lookup "content" r]
+  , contentType <- keys content
+  ]
+
 -- | The paths in a document that declare no operation.
 pathsWithoutOperation :: Value -> [Text]
 pathsWithoutOperation (Object doc)
@@ -134,6 +187,9 @@ pathsWithoutOperation (Object doc)
   where
     operationKeys = ["get", "put", "post", "delete", "options", "head", "patch", "trace"]
 pathsWithoutOperation _ = []
+
+identChar :: Char -> Bool
+identChar c = isAsciiUpper c || isAsciiLower c || isDigit c || c == '_'
 
 distinct :: (Ord a) => [a] -> [a]
 distinct = Set.toList . Set.fromList

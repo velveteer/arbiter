@@ -22,6 +22,11 @@ module Arbiter.Servant.Types
 
     -- * Pages
   , Page (..)
+  , PageLimit (..)
+  , KeyPageLimit (..)
+  , pageLimitRange
+  , defaultPageLimit
+  , defaultKeyPageLimit
   , Items (..)
   , ArchiveResponse
   , DLQResponse
@@ -29,6 +34,10 @@ module Arbiter.Servant.Types
 
     -- * Leases
   , ClaimRequest (..)
+  , claimJobsRange
+  , defaultClaimJobs
+  , leaseSecondsRange
+  , defaultLeaseSeconds
   , ClaimResponse (..)
   , JobLease (..)
   , AckRequest (..)
@@ -113,6 +122,7 @@ import Data.Aeson
   , ToJSON (..)
   , Value (Object)
   , eitherDecode
+  , encode
   , object
   , pairs
   , withObject
@@ -135,7 +145,7 @@ import Data.Text (Text, unpack)
 import Data.Time.Clock (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
-import Servant.API (Accept (..), JSON, MimeUnrender (..))
+import Servant.API (Accept (..), FromHttpApiData, JSON, MimeRender (..), MimeUnrender (..), ToHttpApiData)
 
 -- | A job row plus its SQL-derived status, for the list and detail endpoints.
 data ApiJobWithStatus payload = ApiJobWithStatus
@@ -189,6 +199,26 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
       $ Arb.setGroupKey group
       $ Arb.defaultJob payload
 
+-- | Page size of a job, DLQ, archive or group listing.
+newtype PageLimit = PageLimit {unPageLimit :: Int}
+  deriving newtype (Eq, FromHttpApiData, Show, ToHttpApiData)
+
+-- | Page size of a bucket or key listing.
+newtype KeyPageLimit = KeyPageLimit {unKeyPageLimit :: Int}
+  deriving newtype (Eq, FromHttpApiData, Show, ToHttpApiData)
+
+-- | Bounds on page size.
+pageLimitRange :: (Int, Int)
+pageLimitRange = (1, 1000)
+
+-- | Page size of a job, DLQ, archive or group listing when the request omits it.
+defaultPageLimit :: Int
+defaultPageLimit = 50
+
+-- | Page size of a bucket or key listing when the request omits it.
+defaultKeyPageLimit :: Int
+defaultKeyPageLimit = 100
+
 -- | One page of a list, with the size of the full list.
 data Page a = Page
   { pageItems :: [a]
@@ -196,7 +226,7 @@ data Page a = Page
   -- ^ Rows that match the filters, across all pages.
   , pageOffset :: Int
   , pageLimit :: Int
-  -- ^ Page size. Default 50, range 1 to 1000.
+  -- ^ Page size, clamped to 'pageLimitRange'.
   }
   deriving stock (Eq, Show)
 
@@ -257,12 +287,28 @@ instance FromJSON (JobsResponse payload) where
   parseJSON = withObject "JobsResponse" $ \obj ->
     JobsResponse <$> parsePage obj <*> obj .: "childCounts" <*> obj .: "pausedParents" <*> obj .: "dlqChildCounts"
 
+-- | Bounds on jobs per claim.
+claimJobsRange :: (Int, Int)
+claimJobsRange = (1, 1000)
+
+-- | Jobs per claim when the request omits it.
+defaultClaimJobs :: Int
+defaultClaimJobs = 1
+
+-- | Bounds on lease seconds.
+leaseSecondsRange :: (Double, Double)
+leaseSecondsRange = (1, 3600)
+
+-- | Lease seconds when the request omits it.
+defaultLeaseSeconds :: Double
+defaultLeaseSeconds = 60
+
 -- | A consumer's request to lease visible jobs.
 data ClaimRequest = ClaimRequest
   { maxJobs :: Maybe Int
-  -- ^ Jobs to claim. Default 1, range 1 to 1000.
+  -- ^ Jobs to claim. See 'defaultClaimJobs' and 'claimJobsRange'.
   , leaseSeconds :: Maybe Double
-  -- ^ Lease length in seconds. Default 60, range 1 to 3600.
+  -- ^ Lease length in seconds. See 'defaultLeaseSeconds' and 'leaseSecondsRange'.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)
@@ -313,7 +359,7 @@ data ExtendRequest = ExtendRequest
   { erLease :: JobLease
   -- ^ The lease. Its fields are flattened into the object.
   , erSeconds :: Double
-  -- ^ Clamped to 1 to 3600.
+  -- ^ Clamped to 'leaseSecondsRange'.
   }
   deriving stock (Eq, Show)
 
@@ -358,6 +404,10 @@ instance (FromJSON a) => MimeUnrender OptionalJSON (Maybe a) where
     | LBS8.all isSpace body = Right Nothing
     | mediaType == bodylessContentType = Left "a request body needs a JSON content type"
     | otherwise = Just <$> eitherDecode body
+
+-- | 'Nothing' renders an empty body.
+instance (ToJSON a) => MimeRender OptionalJSON (Maybe a) where
+  mimeRender _ = maybe mempty encode
 
 -- | A replacement payload for a retry or a re-enqueue.
 newtype PayloadEdit payload = PayloadEdit

@@ -789,6 +789,12 @@ spec connStr = do
       post (TE.encodeUtf8 $ "/api/v1/arbiter_servant_test/jobs/" <> T.pack (show jobId) <> "/resume-children") ""
         `shouldRespondWith` 204
 
+    it "POST /api/v1/arbiter_servant_test/jobs/:id/pause-children returns 404 for unknown job" $ do
+      post "/api/v1/arbiter_servant_test/jobs/999999/pause-children" "" `shouldRespondWith` 404
+
+    it "POST /api/v1/arbiter_servant_test/jobs/:id/resume-children returns 404 for unknown job" $ do
+      post "/api/v1/arbiter_servant_test/jobs/999999/resume-children" "" `shouldRespondWith` 404
+
   describe "DLQ API" $ with (cleanupDb >> pure app) $ do
     it "GET /api/v1/arbiter_servant_test/dlq returns empty list initially" $ do
       get "/api/v1/arbiter_servant_test/dlq"
@@ -1853,6 +1859,9 @@ spec connStr = do
 
     it "POST /api/v1/queues/:queue/resume returns 404 for unknown queue" $ do
       post "/api/v1/queues/not-a-real-queue/resume" "" `shouldRespondWith` 404
+
+    it "GET /api/v1/queues/:queue/details returns 404 for unknown queue" $ do
+      get "/api/v1/queues/not-a-real-queue/details" `shouldRespondWith` 404
 
   describe "Workers API" $ with (cleanupDb >> pure app) $ do
     let testWorkerId = "11111111-1111-1111-1111-111111111111"
