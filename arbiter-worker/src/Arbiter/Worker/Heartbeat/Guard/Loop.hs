@@ -147,7 +147,7 @@ lapse guard woke entry = do
 
 durationMessage :: HeartbeatGuard n job -> T.Text
 durationMessage guard =
-  "handler ran past the maximum job duration"
+  "claim hooks and handler ran past the maximum job duration"
     <> foldMap ((" of " <>) . T.pack . show) (configMaxDuration (guardConfig guard))
 
 -- ---------------------------------------------------------------------------

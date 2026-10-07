@@ -152,8 +152,8 @@ rootsFromCte tbl seed =
     )
   |]
 
--- | 'descendantsFromCte' seeded from several roots. Their union locks in one pass.
--- Deduplicating.
+-- | Recursive CTE binding @descendants@ to several roots and all of theirs. Their union
+-- locks in one pass. Deduplicating.
 descendantsOfCte :: Text -> [Int64] -> Query ()
 descendantsOfCte tbl jobIds =
   [sql|
@@ -286,7 +286,7 @@ forceCancelJobSQL schema tableName jobId =
       |]
 
 -- | Delete force-cancel-flagged jobs @owner@ holds or no live lease holds, returning each
--- one's parent id. Locks rows in descending id order.
+-- one's id and parent id. Locks rows in descending id order.
 deleteCancelledJobsSQL :: SchemaName -> TableName -> Maybe UUID -> [Int64] -> Query (Int64, Maybe Int64)
 deleteCancelledJobsSQL schema tableName owner jobIds =
   let tbl = jobQueueTable schema tableName
@@ -354,7 +354,7 @@ tryWakeAncestorSQL schema tableName ancestorId =
           AND NOT EXISTS (SELECT 1 FROM ${tbl} child WHERE child.parent_id = #{ancestorId :: CInt8})
       |]
 
--- | Rollup finalizer ids in a job's tree, the job itself included. Read before a DLQ
+-- | Rollup finalizer ids in a job's subtree, the job itself included. Read before a DLQ
 -- move.
 treeRollupIdsSQL :: SchemaName -> TableName -> Int64 -> Query Int64
 treeRollupIdsSQL schema tableName jobId =

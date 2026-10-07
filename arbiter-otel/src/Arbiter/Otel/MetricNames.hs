@@ -57,7 +57,7 @@ data MetricName
   | -- | Gauge, @{tuple}@. Attributes: @table@.
     PgTableLiveTuples
   | -- | Gauge, @s@. Attributes: @table@.
-    PgTableAutovacuumAge
+    PgTableVacuumAge
   | -- | Gauge, @By@. Attributes: @table@.
     PgTableSize
   | -- | Counter, @{scan}@. Attributes: @table@, @path@ (seq, index).
@@ -101,7 +101,7 @@ metricName = \case
   AdmissionTokens -> "arbiter.admission.tokens"
   PgTableDeadTuples -> "arbiter.pg.table.dead_tuples"
   PgTableLiveTuples -> "arbiter.pg.table.live_tuples"
-  PgTableAutovacuumAge -> "arbiter.pg.table.autovacuum_age"
+  PgTableVacuumAge -> "arbiter.pg.table.vacuum_age"
   PgTableSize -> "arbiter.pg.table.size"
   PgTableScans -> "arbiter.pg.table.scans"
   PgTableBlocks -> "arbiter.pg.table.blocks"

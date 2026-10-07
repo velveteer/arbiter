@@ -41,11 +41,11 @@ import Arbiter.Test.StateMachine (holViolations, installHolDetector, removeHolDe
 
 -- | Claim and ack jobs in a loop until no more are available.
 -- Backs off with 10ms delay between empty claim attempts, gives up
--- after @maxStreak@ consecutive empties.
+-- after @maxStreak@ retries of an empty claim.
 claimAckLoop
   :: IO [a]
   -> Int
-  -- ^ Max consecutive empty claims before giving up
+  -- ^ Max retries of an empty claim
   -> (a -> IO ())
   -- ^ Per-job action
   -> IO ()
@@ -57,7 +57,7 @@ claimAckLoop claim maxStreak onJob = go 0
         then when (streak < maxStreak) $ threadDelay 10_000 >> go (streak + 1)
         else forM_ jobs onJob >> go 0
 
--- | Drain all remaining jobs with no streak limit.
+-- | Claim and run jobs until a claim returns none.
 drainAll :: IO [a] -> (a -> IO ()) -> IO ()
 drainAll claim onJob = do
   jobs <- claim

@@ -36,7 +36,7 @@ module Arbiter.Servant.UI
 
     -- * Standalone WAI app
   , adminApp
-  , devAdminApp
+  , adminAppDev
 
     -- * Combined app helper
   , arbiterAppWithAdmin
@@ -181,11 +181,11 @@ adminApp :: Application
 adminApp = serveStaticApp Versioned $ \filePath -> pure (lookup filePath embeddedAssets)
 
 -- | The dashboard served from disk, read per request.
-devAdminApp
+adminAppDev
   :: FilePath
   -- ^ The static directory.
   -> Application
-devAdminApp dir = serveStaticApp AlwaysFresh $ \filePath ->
+adminAppDev dir = serveStaticApp AlwaysFresh $ \filePath ->
   if isServed filePath
     then (Just . plainAsset <$> BS.readFile (dir </> filePath)) `catch` (\(_ :: IOException) -> pure Nothing)
     else pure Nothing
@@ -194,8 +194,8 @@ devAdminApp dir = serveStaticApp AlwaysFresh $ \filePath ->
 -- paths return the named file. Redirect a root path without a trailing slash.
 -- Refuse a path with a segment that could leave the served directory.
 --
--- Cache an asset under the current build's version as immutable. Do not cache
--- other responses. A version prefix is valid for asset paths. Send the gzip
+-- Cache an asset under the current build's version as immutable. Make other
+-- responses revalidate. A version prefix is valid for asset paths. Send the gzip
 -- encoding to a client that accepts it.
 serveStaticApp :: Caching -> (FilePath -> IO (Maybe Asset)) -> Application
 serveStaticApp caching resolveFile req sendResponse = sendResponse =<< reply
@@ -297,7 +297,7 @@ adminUIServerDev
   :: FilePath
   -- ^ The static directory.
   -> Server AdminUI
-adminUIServerDev dir = Tagged (devAdminApp dir)
+adminUIServerDev dir = Tagged (adminAppDev dir)
 
 -- | Hoisted dev-mode variant for integration into a route tree using a custom monad.
 adminUIServerDevHoisted

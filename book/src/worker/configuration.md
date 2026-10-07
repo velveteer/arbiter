@@ -5,7 +5,7 @@ Set fields before the pool starts.
 
 `poolConfigForWorkers` sizes the database pool for a list of worker pools. Pass
 the same list to `poolConfigForWorkers`, `runWorkerPools`, and
-[`shutdownPools`](shutdown.md).
+[`shutdownWorkerPools`](shutdown.md).
 
 ## Multiple Queues
 

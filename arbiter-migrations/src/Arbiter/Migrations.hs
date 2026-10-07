@@ -226,7 +226,7 @@ runMigrationsForRegistry
   -> ByteString
   -- ^ Database connection string
   -> SchemaName
-  -- ^ Schema for the Arbiter tables
+  -- ^ Schema for the arbiter tables
   -> MigrationConfig
   -- ^ Migration options
   -> IO (MigrationResult String)
@@ -341,7 +341,7 @@ runMigrationsTrackedForTables
   :: ByteString
   -- ^ Database connection string
   -> SchemaName
-  -- ^ Schema for the Arbiter tables
+  -- ^ Schema for the arbiter tables
   -> [(TableName, TableAdmission)]
   -- ^ Every queue table in the schema, with its admission trigger kinds
   -> MigrationConfig
@@ -356,7 +356,7 @@ runMigrationsTrackedForTables connStr schemaName tableNames config seeds =
       withMigrationLock conn schemaName (migrationLockTimeout config) $
         migrateSchema conn schemaName tableNames config seeds
 
--- | Hold the schema's migration lock for the whole session. Replicas that migrate at
+-- | Hold the schema's session-level migration lock for the run. Replicas that migrate at
 -- the same time run one after another. A session lock spans the reconciles, which run
 -- after the tracked migrations commit.
 withMigrationLock
@@ -402,7 +402,7 @@ migrateSchema conn schemaName tableNames config seeds = do
   withConnection conn $ \libpqConn ->
     LibPQ.disableNoticeReporting libpqConn
 
-  -- A CREATE that fails for want of privilege is fine when the schema exists.
+  -- A failed CREATE is fine when the schema exists.
   let schemaSQL = Query (encodeUtf8 $ createSchemaSQL schemaName)
   result <- try $ execute_ conn schemaSQL
   case result of
@@ -715,7 +715,7 @@ schemaLevelMigrations schemaName =
 -- The optional notify and event-streaming objects are reconciled after the migrations run.
 jobQueueMigrationsForTable
   :: SchemaName
-  -- ^ Schema for the Arbiter tables
+  -- ^ Schema for the arbiter tables
   -> TableName
   -- ^ Queue table name
   -> TableAdmission

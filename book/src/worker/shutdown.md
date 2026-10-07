@@ -1,7 +1,7 @@
 # Graceful Shutdown
 
 Install signal handlers after the worker configurations exist. Pass the same
-pool list to `shutdownPools` and `runWorkerPools`:
+pool list to `shutdownWorkerPools` and `runWorkerPools`:
 
 ```haskell
 import System.Posix.Signals qualified as Signals
@@ -10,7 +10,7 @@ emailConfig <- Worker.transactionalWorkerConfig 3 processEmail
 imageConfig <- Worker.transactionalWorkerConfig 2 processImage
 
 let workers = [Worker.namedWorkerPool emailConfig, Worker.namedWorkerPool imageConfig]
-    shutdown = Signals.Catch $ Worker.shutdownPools workers
+    shutdown = Signals.Catch $ Worker.shutdownWorkerPools workers
 void $ Signals.installHandler Signals.sigTERM shutdown Nothing
 void $ Signals.installHandler Signals.sigINT shutdown Nothing
 

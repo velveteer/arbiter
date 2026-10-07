@@ -1,7 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Worker-lifecycle OpenTelemetry instruments, bound through 'ObservabilityHooks'.
+-- | Job, admission and maintenance OpenTelemetry instruments, bound through
+-- 'ObservabilityHooks' and the maintenance hook.
 module Arbiter.Otel.Metrics
   ( ArbiterMeters
   , arbiterMeter
@@ -49,7 +50,7 @@ import OpenTelemetry.Metric.Core
 
 import Arbiter.Otel.MetricNames qualified as Name
 
--- | The job-lifecycle instruments.
+-- | The job, admission and maintenance instruments.
 data ArbiterMeters = ArbiterMeters
   { claimed :: Counter Int64
   , processed :: Counter Int64

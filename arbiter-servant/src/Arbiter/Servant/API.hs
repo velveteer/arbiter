@@ -9,6 +9,8 @@ module Arbiter.Servant.API
     ArbiterAPI
   , RegistryToAPI
   , SharedAPI
+
+    -- * Route descriptions
   , PayloadEditNote
 
     -- * Per-queue routes
@@ -282,13 +284,13 @@ data ArchiveAPI payload mode = ArchiveAPI
       :: mode
         :- Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/archive\/:id@ Purge one entry.
+  -- ^ @DELETE \/:queue\/archive\/:id@ Delete the entry permanently.
   , deleteArchiveBatch
       :: mode
         :- "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
-  -- ^ @POST \/:queue\/archive\/batch-delete@ Purge many entries.
+  -- ^ @POST \/:queue\/archive\/batch-delete@ Delete many entries permanently.
   }
   deriving stock (Generic)
 

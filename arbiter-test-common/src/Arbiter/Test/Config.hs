@@ -2,7 +2,7 @@
 
 -- | Test configuration shared across arbiter test suites.
 module Arbiter.Test.Config
-  ( -- * Connection Configuration
+  ( -- * Connection configuration
     getTestConnectionString
   ) where
 

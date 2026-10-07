@@ -25,7 +25,7 @@ import UnliftIO.Exception (isAsyncException)
 
 import Arbiter.Worker.Batch (newHandoff, runBatch)
 import Arbiter.Worker.Config
-import Arbiter.Worker.Heartbeat (HeartbeatGuard)
+import Arbiter.Worker.Heartbeat (PoolGuard)
 import Arbiter.Worker.Logger
 import Arbiter.Worker.Settlement (PoolEffects, PoolMode, batchLog)
 import Arbiter.Worker.WorkQueue (WorkQueue, finishWork, popWork)
@@ -39,7 +39,7 @@ workerLoop
   :: forall payload m
    . (MonadUnliftIO m)
   => WorkerConfig m payload
-  -> HeartbeatGuard payload
+  -> PoolGuard payload
   -> PoolMode m payload
   -> PoolEffects m payload
   -> WorkQueue (NonEmpty (Job.JobRead payload))

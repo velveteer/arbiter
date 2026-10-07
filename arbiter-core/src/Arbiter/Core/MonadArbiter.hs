@@ -65,7 +65,7 @@ class (MonadUnliftIO m) => MonadArbiter m where
   -- 'JobHandler' instantiates it at one queue's job and result types.
   type Handler m job result :: Type
 
-  -- | The schema name for this monad's Arbiter tables.
+  -- | The schema name for this monad's arbiter tables.
   getSchema :: m SchemaName
 
   -- | Run a query and decode the result rows. The text, its parameters, and the

@@ -2,10 +2,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
--- | Every hasql version difference that arbiter-hasql depends on.
---
--- Internal to the arbiter packages. Not covered by the PVP, except for the names
+-- | Internal to the arbiter packages. Not covered by the PVP, except for the names
 -- that "Arbiter.Hasql.HasqlDb" re-exports.
+--
+-- Every hasql version difference that arbiter-hasql depends on.
 module Arbiter.Hasql.Compat
   ( runSQL
   , connectionInTransaction
@@ -98,7 +98,7 @@ connectionInTransaction conn = do
     Left _ -> pure False
 
 -- | Run the listener loop on the connection's driver handle. The loop runs outside the
--- session, so a cancel reaches it directly.
+-- session.
 withHasqlListenConn :: Hasql.Connection -> (ListenConn -> IO a) -> IO a
 withHasqlListenConn conn action = do
   result <- Hasql.use conn $ Session.onLibpqConnection $ \libpq -> pure (Right libpq, libpq)

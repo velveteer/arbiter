@@ -44,7 +44,7 @@ import Arbiter.Orville.MonadArbiter
   , orvilleWithDbTransaction
   )
 
--- | The schema of the Arbiter tables and an optional LISTEN\/NOTIFY listener.
+-- | The schema of the arbiter tables and an optional LISTEN\/NOTIFY listener.
 data OrvilleEnv (registry :: JobPayloadRegistry) = OrvilleEnv
   { schema :: SchemaName
   -- ^ The schema the arbiter tables live in.

@@ -150,13 +150,10 @@ data Shared a
     Unreadable Text
   deriving stock (Eq, Functor, Show)
 
--- | Run gated work, or read a result another caller published, with an age within
--- @maxAge@. The age counts from the claim that produced it. 'Nothing' when there is no
--- such result. The work starts after the gate transaction
--- commits. A slow operation does not retain the gate row or a read snapshot. The
--- exclusion interval starts after publication. A failed operation or publication
--- restores the watermark and permits another caller to run. The compensation period is
--- limited to @interval@.
+-- | Run gated work, or read a result another caller published within @maxAge@ of its
+-- claim. 'Nothing' when there is no such result. The work runs after the gate transaction
+-- commits. The exclusion interval starts at publication. A failed run or publication
+-- restores the watermark. The restore is bounded by @interval@.
 runGatedShared
   :: (FromJSON a, MonadArbiter m, ToJSON a)
   => SchemaName

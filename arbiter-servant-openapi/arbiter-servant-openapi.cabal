@@ -8,8 +8,7 @@ description:
 
   Derives an OpenAPI 3 document from @arbiter-servant@'s route types, so paths,
   methods, parameters, and request and response bodies come from the API itself.
-  The schema instances are orphans. They live here so @arbiter-servant@ carries no
-  OpenAPI dependency of its own.
+  The schema instances are orphans.
 
 license:         MIT
 license-file:    LICENSE

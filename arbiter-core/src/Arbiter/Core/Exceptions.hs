@@ -144,7 +144,7 @@ instance Exception JobScopedFailure where
   backtraceDesired _ = False
   displayException (JobScopedFailure inner ids) = displayException inner <> T.unpack (namedJobIds ids)
 
--- | Async exception for a user force-cancel. Names the cancelled jobs, then the
+-- | Async exception for an operator force-cancel. Names the cancelled jobs, then the
 -- jobs the same check found reclaimed or gone.
 data JobForceCancelled = JobForceCancelled [Int64] [Int64]
   deriving stock (Show)
@@ -154,7 +154,7 @@ instance Exception JobForceCancelled where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
--- | Handler ran past the pool's maximum job duration. Classified as a retryable failure.
+-- | A batch's claim hooks and handler ran past the pool's maximum job duration. Classified as a retryable failure.
 newtype JobDeadlineExceeded = JobDeadlineExceeded Text
   deriving stock (Eq, Generic, Show)
 

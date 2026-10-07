@@ -166,7 +166,7 @@ suspended Job {suspended = value} = value
 claimedBy :: Job payload Int64 q insertedAt adm -> Maybe UUID
 claimedBy Job {claimedBy = value} = value
 
--- | Monotonically increasing claim identifier.
+-- | The claim token.
 claimSeq :: Job payload Int64 q insertedAt adm -> Int64
 claimSeq Job {claimSeq = value} = value
 

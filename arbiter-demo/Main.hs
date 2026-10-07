@@ -47,7 +47,7 @@ import Arbiter.Worker
   , mergedChildResults
   , namedWorkerPool
   , poolConfigForWorkers
-  , shutdownPools
+  , shutdownWorkerPools
   , transactionalWorkerConfig
   )
 import Control.Concurrent (forkIO, threadDelay)
@@ -278,7 +278,7 @@ runDemo tel = do
         , namedWorkerPool bulkWorkerCfg
         , namedWorkerPool pipelineWorkerCfg
         ]
-  let handler = Signals.Catch $ shutdownPools workers
+  let handler = Signals.Catch $ shutdownWorkerPools workers
   void $ Signals.installHandler Signals.sigTERM handler Nothing
   void $ Signals.installHandler Signals.sigINT handler Nothing
 

@@ -7,8 +7,8 @@
 --
 -- Types and DDL for the @cron_schedules@ table.
 --
--- Code-defined defaults and user overrides sit in separate columns. Worker startup
--- upserts the defaults. An override survives every deploy.
+-- Code-defined defaults and user overrides sit in separate columns. Worker pool
+-- startup upserts the defaults. An override survives every deploy.
 module Arbiter.Core.CronSchedule
   ( -- * Types
     CronScheduleRow (..)

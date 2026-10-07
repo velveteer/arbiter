@@ -116,7 +116,7 @@ module Arbiter.Core.HighLevel
   , suspendJob
   , resumeJob
 
-    -- * Results table operations
+    -- * Child results and parent state
   , insertResult
   , insertResultUnsafe
   , getResultsByParent
@@ -342,7 +342,7 @@ clearRateLimit policy =
       }
 
 -- | Delete reclaimable idle (full) buckets. Returns the number pruned. The worker
--- reaper runs this. A full bucket re-seeds at full on next use.
+-- pool reaper runs this. A full bucket re-seeds at full on next use.
 pruneRateLimitBuckets
   :: forall m
    . (MonadArbiter m)
@@ -548,7 +548,7 @@ ackJob
 ackJob job = onJob job $ \schemaName tableName -> Ops.ackJob schemaName tableName job
 
 -- | 'ackJob' over a batch from one queue in one statement, returning the ids acked.
--- Reclaimed jobs are absent.
+-- Gone or reclaimed jobs are absent.
 ackJobsBatch
   :: forall payload m
    . (MonadArbiter m)
@@ -582,7 +582,7 @@ nackJob
 nackJob job = onJob job $ \schemaName tableName -> Ops.nackJob schemaName tableName job
 
 -- | 'nackJob' over a batch from one queue in one statement, returning the ids nacked.
--- Jobs another worker holds are absent.
+-- Jobs another worker holds, suspended jobs and released claims are absent.
 nackJobsBatch
   :: forall payload m
    . (MonadArbiter m)
@@ -1271,7 +1271,7 @@ sweepStaleWorkers :: (MonadArbiter m) => m Int64
 sweepStaleWorkers = onSchema Ops.sweepStaleWorkers
 
 -- ---------------------------------------------------------------------------
--- Queue Registry
+-- Queues
 -- ---------------------------------------------------------------------------
 
 -- | Ensure a queue's pause-state row exists.

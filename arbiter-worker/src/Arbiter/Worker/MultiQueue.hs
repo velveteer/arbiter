@@ -8,7 +8,7 @@ module Arbiter.Worker.MultiQueue
   ( NamedWorkerPool (..)
   , namedWorkerPool
   , WorkerPoolSelectionException (..)
-  , shutdownPools
+  , shutdownWorkerPools
   , runWorkerPools
   , runSelectedWorkerPools
   , poolConfigForWorkers
@@ -95,8 +95,8 @@ runWorkerPools pools = do
   runSelectedWorkerPools (fromMaybe [name | NamedWorkerPool name _ <- pools] requested) pools
 
 -- | Signal graceful shutdown to every pool atomically.
-shutdownPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
-shutdownPools pools =
+shutdownWorkerPools :: (MonadIO m) => [NamedWorkerPool m'] -> m ()
+shutdownWorkerPools pools =
   liftIO . STM.atomically $
     traverse_ (`STM.writeTVar` ShuttingDown) [workerStateVar cfg | NamedWorkerPool _ cfg <- pools]
 
@@ -121,7 +121,7 @@ runSelectedWorkerPools enabled pools = do
       asyncs <- traverse withPoolAsync selected
       lift $ do
         _ <- Async.waitAnyCatch asyncs
-        shutdownPools selected
+        shutdownWorkerPools selected
         results <- traverse Async.waitCatch asyncs
         either (liftIO . E.throwIO) pure (sequence_ results)
   where
@@ -135,7 +135,7 @@ withPoolContext :: Text -> LogConfig -> LogConfig
 withPoolContext poolName logCfg =
   logCfg {identityContext = identityContext logCfg <> ["pool" .= poolName]}
 
--- | Pool connections per enabled worker.
+-- | Pool connections per handler thread of an enabled pool.
 connectionsPerWorker :: Int
 connectionsPerWorker = 2
 
@@ -147,7 +147,7 @@ minWorkerConnections = 2
 listenerConnections :: Int
 listenerConnections = 1
 
--- | A single-stripe connection pool sized at twice the enabled worker count plus one
+-- | A single-stripe connection pool sized at twice the enabled pools' thread count plus one
 -- for the listener, with a minimum size of three. Unset or blank
 -- @ARBITER_ENABLED_QUEUES@ enables all queues. Throws 'WorkerConfigException' for an
 -- invalid enabled pool config, and 'Arbiter.Core.Exceptions.InternalException' when

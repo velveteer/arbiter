@@ -56,7 +56,7 @@ data PgTableHealth = PgTableHealth
   -- ^ Estimated live rows.
   , deadTup :: Int64
   -- ^ Estimated dead rows.
-  , autovacuumAge :: Maybe Double
+  , vacuumAge :: Maybe Double
   -- ^ Seconds since the last vacuum, manual or auto. 'Nothing' when the table has never been vacuumed.
   , totalBytes :: Int64
   -- ^ Size with indexes and TOAST, in bytes.
@@ -94,7 +94,7 @@ pgTableHealthCodec =
     <$> col "relname" CText
     <*> col "n_live_tup" CInt8
     <*> col "n_dead_tup" CInt8
-    <*> ncol "autovacuum_age" CFloat8
+    <*> ncol "vacuum_age" CFloat8
     <*> col "total_bytes" CInt8
     <*> col "seq_scan" CFloat8
     <*> col "idx_scan" CFloat8

@@ -10,11 +10,13 @@ module Arbiter.Servant.Types
   , ApiJobWrite (..)
   , JobResponse (..)
   , JobsResponse (..)
-  , PayloadEdit (..)
-  , OptionalJSON
   , RescheduleRequest (..)
   , BatchInsertRequest (..)
   , BatchInsertResponse (..)
+
+    -- * DLQ and archive
+  , PayloadEdit (..)
+  , OptionalJSON
   , BatchDeleteRequest (..)
   , BatchDeleteResponse (..)
 
@@ -36,6 +38,8 @@ module Arbiter.Servant.Types
   , StatsResponse (..)
   , AllStatsResponse (..)
   , QueuesResponse (..)
+
+    -- * Maintenance
   , MaintenanceResponse (..)
 
     -- * Cron and workers
@@ -425,7 +429,7 @@ data AllStatsResponse = AllStatsResponse
 -- | Queues list response.
 data QueuesResponse = QueuesResponse
   { queues :: [Text]
-  -- ^ Queue table names.
+  -- ^ Registry queue names.
   }
   deriving stock (Eq, Generic, Show)
   deriving anyclass (FromJSON, ToJSON)

@@ -15,11 +15,11 @@ import Test.Hspec
 import Test.Hspec.Wai
 import Test.Hspec.Wai.Internal (runWaiSession)
 
-import Arbiter.Servant.UI (AdminUI, adminUIServer, devAdminApp)
+import Arbiter.Servant.UI (AdminUI, adminAppDev, adminUIServer)
 
 main :: IO ()
 main = hspec $ do
-  describe "devAdminApp" $
+  describe "adminAppDev" $
     around withStaticDir $ do
       it "serves a file inside the directory" $ \dir ->
         served dir $
@@ -93,7 +93,7 @@ stampedVersion page = BS8.takeWhile (/= '/') (BS.drop (BS.length marker) (snd (B
 
 -- | Run a session against the dashboard served from @dir@.
 served :: FilePath -> WaiSession () a -> IO a
-served dir session = runWaiSession session (devAdminApp dir)
+served dir session = runWaiSession session (adminAppDev dir)
 
 -- | A dashboard directory with a sibling file outside it.
 withStaticDir :: (FilePath -> IO ()) -> IO ()

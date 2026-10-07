@@ -367,7 +367,7 @@ type JobId = Int64
 -- | The token identifying one claim of a job.
 type ClaimSeq = Int64
 
--- | When a worker thread took the claimed job off its queue.
+-- | When the worker thread received the job's batch.
 type ClaimTime = UTCTime
 
 -- | The worker's clock reading after the extend landed.
@@ -453,7 +453,7 @@ data ObservabilityHooks m payload = ObservabilityHooks
 -- myHooks = defaultObservabilityHooks
 --   { onJobSuccess = \\job startTime endTime -> do
 --       let duration = diffUTCTime endTime startTime
---       logInfo $ "Job " <> show (primaryKey job) <> " took " <> show duration
+--       logInfo $ "Job " \<\> show (primaryKey job) \<\> " took " \<\> show duration
 --   }
 -- @
 defaultObservabilityHooks :: (Applicative m) => ObservabilityHooks m payload

@@ -81,7 +81,7 @@ reaperPace config =
     , paceBucketIdle = reaperBucketIdle config
     }
 
--- | Run a worker pool until 'shutdownWorker', then drain within
+-- | Run a worker pool until 'shutdownWorkerPool', then drain within
 -- 'gracefulShutdownTimeout'. Throws 'WorkerConfigException' for an invalid config.
 runWorkerPool
   :: forall payload m
@@ -217,7 +217,7 @@ shutdownPool
   -- ^ Retries until the dispatcher has stopped claiming.
   -> m ()
 shutdownPool config schemaName workQueue claimsStopped = do
-  shutdownWorker config
+  shutdownWorkerPool config
   let wid = workerId config
       logCfg = logConfig config
   tryWarn logCfg "Failed to mark worker shutting down" (Ops.markWorkerShuttingDown schemaName wid)

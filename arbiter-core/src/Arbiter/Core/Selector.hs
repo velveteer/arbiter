@@ -1,4 +1,4 @@
--- | A selector reads job fields and applies policies. Evaluation returns the
+-- | A selector reads payload fields and applies policies. Evaluation returns the
 -- selected result. Static inspection returns all reachable policies for
 -- migration initialization.
 module Arbiter.Core.Selector
@@ -34,7 +34,7 @@ data Prim policy payload a
 -- @a@. Static inspection returns the reachable policies.
 type Selector policy payload = Select (Prim policy payload)
 
--- | Read a field of the job (for predicates or key suffixes).
+-- | Read a field of the payload (for predicates or key suffixes).
 field :: (payload -> a) -> Selector policy payload a
 field = liftSelect . ReadField
 

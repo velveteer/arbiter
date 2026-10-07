@@ -34,7 +34,7 @@ import Arbiter.Worker.Config
   , batchedWorkerConfig
   , transactionalWorkerConfig
   )
-import Arbiter.Worker.Heartbeat (HeartbeatGuard, newHeartbeatGuard)
+import Arbiter.Worker.Heartbeat (PoolGuard, newHeartbeatGuard)
 import Arbiter.Worker.Heartbeat.Guard (Batch (..), guardBatch, leaseExpiredReason, reclaimedReason, runHeartbeatGuard)
 import Arbiter.Worker.Logger (LogConfig (..), LogDestination (..), defaultLogConfig, silentLogConfig)
 import Control.Concurrent (threadDelay)
@@ -127,7 +127,7 @@ dlqWaitMillis = 20_000
 -- | Run @action@ with the batch registered with the guard, as the pool does.
 withJobsHeartbeat
   :: (MonadUnliftIO m)
-  => HeartbeatGuard payload
+  => PoolGuard payload
   -> UTCTime
   -> NonEmpty (JobRead payload)
   -> m [JobRead payload]
@@ -350,7 +350,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
           finished <- readIORef finishedRef
           finished `shouldBe` 0
           map (lastError . jobSnapshot) dlq
-            `shouldBe` [Just "handler ran past the maximum job duration of 1s"]
+            `shouldBe` [Just "claim hooks and handler ran past the maximum job duration of 1s"]
 
       it "fences a batch on time while another batch's heartbeat hook is slow" $ \env -> do
         startedRef <- newIORef ([] :: [(Int64, Double)])
@@ -531,7 +531,7 @@ deadlineSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, mkHandler, ru
           reasons `shouldBe` []
           dlq <- listDLQ env
           map (lastError . jobSnapshot) dlq
-            `shouldBe` [Just "handler ran past the maximum job duration of 1s"]
+            `shouldBe` [Just "claim hooks and handler ran past the maximum job duration of 1s"]
           length (filter (> started + 1) beats) `shouldSatisfy` (>= 2)
 
     describe "Lease fence" $ do

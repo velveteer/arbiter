@@ -77,7 +77,7 @@ smartAckJobSQL archiveEnabled schema tableName =
 -- | Set-based smart ack over @unnest@ed @(id, claim_seq)@ arrays. Deletes leaves,
 -- suspends finalizers that still have children, and wakes parents whose last
 -- child completed. The wake check excludes acked children explicitly. Returns the
--- ids acked or suspended. Reclaimed jobs are absent. Locks rows in descending id order.
+-- ids acked or suspended. Gone or reclaimed jobs are absent. Locks rows in descending id order.
 -- The caller holds the parent locks.
 smartAckJobsBatchSQL :: Bool -> SchemaName -> TableName -> [Int64] -> [Int64] -> Query Int64
 smartAckJobsBatchSQL archiveEnabled schema tableName =
@@ -147,7 +147,7 @@ setVisibilityTimeoutSQL schema tableName secs jobId cseq =
 
 -- | 'setVisibilityTimeoutSQL' over a batch, for the heartbeat. Extends every job still
 -- under this claim, held by the same worker and unsuspended, and reports per row whether
--- the update landed alongside its claim token, cancel flag and suspension. @valuesFrag@
+-- the update landed alongside its claim token, holder, cancel flag and suspension. @valuesFrag@
 -- carries the input @(id, claim_seq, claimed_by)@ rows. @secs@ at or below 0 clears the
 -- lease. The statement never waits on a lock. It takes the group summaries first, then
 -- the rows, both with SKIP LOCKED, and a row whose summary or row is busy reads back

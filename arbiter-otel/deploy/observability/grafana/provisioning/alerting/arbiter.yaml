@@ -200,13 +200,13 @@ groups:
                     params: [1500000000]
 
       - uid: arbiter-autovacuum-age
-        title: Queue table has not been autovacuumed
+        title: Queue table has not been vacuumed
         condition: threshold
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.table }}: no autovacuum in over 24h."
+          summary: "{{ $labels.table }}: no vacuum in over 24h."
           description: A high-churn queue table that autovacuum has not reached accumulates dead tuples and slows the claim query.
         noDataState: OK
         execErrState: Error
@@ -219,7 +219,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: max by (table) (arbiter_pg_table_autovacuum_age_seconds)
+              expr: max by (table) (arbiter_pg_table_vacuum_age_seconds)
           - refId: threshold
             datasourceUid: __expr__
             model:
@@ -232,7 +232,7 @@ groups:
                     params: [86400]
 
       - uid: arbiter-autovacuum-never
-        title: Queue table has never been autovacuumed
+        title: Queue table has never been vacuumed
         condition: threshold
         for: 30m
         labels:
@@ -251,7 +251,7 @@ groups:
             model:
               refId: query
               instant: true
-              expr: max by (table) (arbiter_pg_table_dead_tuples > (50 + 0.2 * arbiter_pg_table_live_tuples)) unless max by (table) (arbiter_pg_table_autovacuum_age_seconds)
+              expr: max by (table) (arbiter_pg_table_dead_tuples > (50 + 0.2 * arbiter_pg_table_live_tuples)) unless max by (table) (arbiter_pg_table_vacuum_age_seconds)
           - refId: threshold
             datasourceUid: __expr__
             model:

@@ -39,7 +39,7 @@ data Snapshot = Snapshot
   , db :: Maybe Health.PgDbHealth
   -- ^ Database counters. 'Nothing' when the database reports no row.
   , tables :: [Health.PgTableHealth]
-  -- ^ Health counters per Arbiter table.
+  -- ^ Health counters per arbiter table.
   , concurrency :: [Conc.ConcurrencyPolicyView]
   -- ^ One view per concurrency policy.
   , rateLimits :: [RL.RateLimitPolicyView]
@@ -100,7 +100,7 @@ newGaugeCache now =
 publishSnapshot :: GaugeCache -> Cached -> STM ()
 publishSnapshot cache = writeTVar (export cache) . Live
 
--- | Update the result of the last database operation.
+-- | Record whether the last gauge scan reached the database.
 setReachable :: GaugeCache -> Bool -> STM ()
 setReachable cache = writeTVar (databaseReachable cache) . Just
 

@@ -13,7 +13,7 @@ module Arbiter.Core.Job.Schema
     -- * Schema creation
   , createSchemaSQL
 
-    -- * Table creation SQL
+    -- * Table creation and column migrations
   , createJobQueueTableSQL
   , createJobQueueDLQTableSQL
   , createJobQueueArchiveTableSQL
@@ -150,7 +150,7 @@ eventStreamingTriggerName tableName = "notify_job_event_" <> tableName
 eventStreamingDLQTriggerName :: TableName -> Text
 eventStreamingDLQTriggerName tableName = "notify_job_event_" <> tableName <> "_dlq"
 
--- | Event-streaming trigger names arbiter generated before the per-queue names, each
+-- | Event-streaming trigger names the reconcile adopts beside the per-queue names, each
 -- paired with whether it sits on the DLQ table.
 legacyEventStreamingTriggers :: [(Text, Bool)]
 legacyEventStreamingTriggers =
@@ -170,7 +170,7 @@ notifyObjectComment = notifyObjectCommentPrefix <> "v1"
 notifyObjectCommentPrefix :: Text
 notifyObjectCommentPrefix = "arbiter:notify:"
 
--- | Marker stamped on notify objects installed before arbiter marked them. Sweeps
+-- | Marker the reconcile stamps on an unmarked notify object it adopts. Sweeps
 -- match it. An adopted trigger is rebuilt.
 notifyAdoptedObjectComment :: Text
 notifyAdoptedObjectComment = notifyObjectCommentPrefix <> "adopted"

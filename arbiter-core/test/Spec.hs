@@ -296,7 +296,7 @@ main = hspec $ do
     it "measures queue ages from clock_timestamp, so none of them can go negative" $ do
       let rendered = squished (statsSQL [])
       rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(last_attempted_at)"
-      rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(GREATEST(inserted_at, not_visible_until))"
+      rendered `shouldSatisfy` T.isInfixOf "clock_timestamp() - MIN(GREATEST(inserted_at, not_visible_until, updated_at))"
       rendered `shouldSatisfy` (not . T.isInfixOf "NOW() - MIN(")
 
     it "renders each job filter against the column its table names" $ do

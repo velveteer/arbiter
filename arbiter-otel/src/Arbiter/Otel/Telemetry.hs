@@ -81,7 +81,7 @@ data Telemetry = Telemetry
   , provider :: MeterProvider
   -- ^ The meter provider the gauge instruments register on.
   , telemetryLogDestination :: Maybe LogDestination
-  -- ^ Where the pools' logs go. 'Nothing' leaves the caller's own destination.
+  -- ^ An extra destination the logs are copied to. 'Nothing' adds none.
   , gaugeRefresh :: NominalDiffTime
   -- ^ The metric export interval this handle resolved.
   , telemetrySummary :: Text
@@ -194,7 +194,7 @@ signalFailed signal exception = signal <> " exporter did not start: " <> display
 noteOf :: Either Text r -> Maybe Text
 noteOf = either Just (const Nothing)
 
--- | The lifecycle instruments over a provider, or why they could not be built.
+-- | The job, admission and maintenance instruments over a provider, or why they could not be built.
 arbiterInstruments :: MeterProvider -> IO (Either Text ArbiterMeters)
 arbiterInstruments meterProvider = first (signalFailed "metrics") <$> tryAny (newArbiterMeters meterProvider)
 

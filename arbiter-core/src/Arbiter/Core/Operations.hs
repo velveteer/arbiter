@@ -76,12 +76,6 @@ module Arbiter.Core.Operations
   , ackJobWith
   , ackJobsBatchWith
   , ackJobsBatch
-  , lockJobParents
-  , lockJobRootsAndParents
-  , lockJobTrees
-  , lockJobTreesFromRoot
-  , TreesLocked
-  , TreeLocks (..)
   , archivesOnAck
   , setVisibilityTimeout
   , setVisibilityTimeoutBatch
@@ -89,6 +83,14 @@ module Arbiter.Core.Operations
   , updateJobForRetry
   , nackJob
   , nackJobsBatch
+
+    -- * Parent and tree locks
+  , lockJobParents
+  , lockJobRootsAndParents
+  , lockJobTrees
+  , lockJobTreesFromRoot
+  , TreesLocked
+  , TreeLocks (..)
 
     -- * Dead-letter queue operations
   , moveToDLQ
@@ -1209,7 +1211,7 @@ ackJobsBatch
   -- ^ Table name
   -> [JobRead payload]
   -> m [Int64]
-  -- ^ Ids acked (deleted or suspended). Reclaimed jobs are absent.
+  -- ^ Ids acked (deleted or suspended). Gone or reclaimed jobs are absent.
 ackJobsBatch schemaName tableName = withDbTransaction . ackJobsBatchWith (mkAckStatements schemaName tableName)
 
 -- | 'ackJobsBatch' inside the caller's transaction, over staged statements.
@@ -1319,7 +1321,7 @@ nackJob schemaName tableName job =
     (Tmpl.nackJobSQL schemaName tableName (primaryKey job) (claimSeq job) (attempts job))
 
 -- | 'nackJob' over a batch in one statement, returning the ids nacked. Jobs another
--- worker holds are absent.
+-- worker holds, suspended jobs and released claims are absent.
 nackJobsBatch
   :: forall m payload
    . (MonadArbiter m)
@@ -1443,7 +1445,7 @@ cascadeChildrenToDLQ schemaName tableName parentJobId errorMsg =
     "cascadeChildrenToDLQ"
     (Tmpl.cascadeChildrenToDLQSQL schemaName tableName parentJobId errorMsg)
 
--- | Snapshot child results for every rollup finalizer in a job's tree, the job
+-- | Snapshot child results for every rollup finalizer in a job's subtree, the job
 -- included. Persists accumulated results into @parent_state@.
 snapshotTreeRollups
   :: (MonadArbiter m)
@@ -1917,7 +1919,7 @@ listDLQJobsByParent
 listDLQJobsByParent schemaName tableName parentJobId =
   listDLQFiltered schemaName tableName [Tmpl.FilterParentId parentJobId]
 
--- | Count DLQ jobs matching a parent_id.
+-- | Count DLQ jobs matching a @parent_id@.
 countDLQJobsByParent
   :: (MonadArbiter m)
   => SchemaName -> TableName -> Int64 -> m Int64
@@ -2085,9 +2087,8 @@ cancelJobInner schemaName tableName jobId = do
   countOr0 (Tmpl.cancelJobSQL schemaName tableName jobId)
 
 -- | 'cancelJob' over several ids in one transaction. A job with children is skipped.
--- The last sibling cancelled finds
--- the parent childless and resumes it. Locks the union of parents and rows first.
--- Returns the number deleted.
+-- The last sibling cancelled finds the parent childless and resumes it. Locks the union
+-- of parents and rows first. Returns the number deleted.
 cancelJobsBatch
   :: (MonadArbiter m)
   => SchemaName
@@ -2479,7 +2480,7 @@ jobExists :: (MonadArbiter m) => SchemaName -> TableName -> Int64 -> m Bool
 jobExists schemaName tableName jobId =
   or <$> MA.executeQuery (Tmpl.jobExistsSQL schemaName tableName jobId)
 
--- | List jobs filtered by parent_id with pagination.
+-- | List jobs filtered by @parent_id@ with pagination.
 listJobsByParent
   :: forall m payload
    . (MonadArbiter m)
@@ -2497,7 +2498,7 @@ listJobsByParent
 listJobsByParent schemaName tableName pid =
   listJobsFiltered schemaName tableName [Tmpl.FilterParentId pid]
 
--- | Count jobs matching a parent_id.
+-- | Count jobs matching a @parent_id@.
 countJobsByParent
   :: (MonadArbiter m)
   => SchemaName -> TableName -> Int64 -> m Int64
@@ -2739,13 +2740,12 @@ lastRow = foldl' (\_ row -> Just row) Nothing
 groupsRefreshBatch :: Int
 groupsRefreshBatch = 20000
 
--- | Schema-wide groups refresh over one bounded pass. Wrap in 'runGatedState' so one
--- pool runs it per interval and every pool resumes from the same cursors. A caller that
--- discards the cursors refreshes the same head of each table forever. Each queue's
--- rewrite and repair run in their own savepoints. One queue's failure leaves the rest.
--- Its row locks stand until the
--- caller's transaction ends. Returns the rows rewritten, the queue names that failed or
--- whose repair failed, and where each queue resumes.
+-- | Schema-wide groups refresh over one bounded pass. Under 'runGatedState', one worker
+-- pool runs it per interval and every worker pool resumes from the same cursors. Each
+-- queue's rewrite and repair run in their own savepoints. One queue's failure leaves
+-- the rest. Its row locks stand until the caller's transaction ends. Returns the rows
+-- rewritten, the queue names that failed or whose repair failed, and where each queue
+-- resumes.
 refreshAllGroups
   :: (MonadArbiter m)
   => SchemaName
@@ -3040,7 +3040,7 @@ pendingCronRuns schemaName names =
 -- Queue Operations
 -- ---------------------------------------------------------------------------
 
--- | Insert an arbiter_queues row with defaults when absent.
+-- | Insert an @arbiter_queues@ row with defaults when absent.
 ensureQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -3062,7 +3062,7 @@ setQueuePaused
 setQueuePaused schemaName queue paused =
   countOr0 (Tmpl.setQueuePausedSQL schemaName queue paused)
 
--- | Get the arbiter_queues row for a single queue. 'Nothing' when absent.
+-- | Get the @arbiter_queues@ row for a single queue. 'Nothing' when absent.
 getQueue
   :: (MonadArbiter m)
   => SchemaName
@@ -3072,7 +3072,7 @@ getQueue
 getQueue schemaName queue =
   listToMaybe <$> MA.executeQuery (Tmpl.getQueueSQL schemaName queue)
 
--- | List all arbiter_queues rows, ordered by queue name.
+-- | List all @arbiter_queues@ rows, ordered by queue name.
 listQueues
   :: (MonadArbiter m)
   => SchemaName
@@ -3080,7 +3080,7 @@ listQueues
 listQueues schemaName =
   MA.executeQuery (Tmpl.listQueuesSQL schemaName)
 
--- | Read child results, DLQ errors, and the parent_state snapshot for a rollup
+-- | Read child results, DLQ errors, and the @parent_state@ snapshot for a rollup
 -- finalizer in a single query. Returns
 -- @(childId->result, childId->error, parentStateSnapshot, dlqRowId->error)@.
 readChildResultsRaw

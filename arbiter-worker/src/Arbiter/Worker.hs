@@ -1,7 +1,7 @@
 -- | Public worker API: pools, job results, configuration, logging, maintenance,
 -- and cron.
 module Arbiter.Worker
-  ( -- * Running workers
+  ( -- * Running worker pools
     runWorkerPool
   , module Arbiter.Worker.MultiQueue
   , getEnabledQueues
@@ -23,8 +23,6 @@ module Arbiter.Worker
   , withMaintenance
   , HandlerMode (..)
   , handlerBatchSize
-  , MaintenanceOp (..)
-  , maintenanceOpName
   , ResultOf
   , WorkerConfigException (..)
   , validateWorkerConfig
@@ -37,7 +35,7 @@ module Arbiter.Worker
     -- * Worker state
   , module Arbiter.Worker.WorkerState
   , WorkerRuntime
-  , shutdownWorker
+  , shutdownWorkerPool
   , getWorkerState
   , getListenerReady
   , readEffectiveState
@@ -51,9 +49,11 @@ module Arbiter.Worker
   , Pair
   , (.=)
 
-    -- * Reaper
+    -- * Maintenance
   , runMaintenancePass
   , MaintenancePace (..)
+  , MaintenanceOp (..)
+  , maintenanceOpName
 
     -- * Cron
   , CronJob (..)
@@ -87,7 +87,7 @@ import Arbiter.Worker.Config
   , maintenanceOpName
   , manualWorkerConfig
   , readEffectiveState
-  , shutdownWorker
+  , shutdownWorkerPool
   , transactionalWorkerConfig
   , validateWorkerConfig
   , withHooks

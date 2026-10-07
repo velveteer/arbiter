@@ -17,8 +17,8 @@
 --     nullable, array, and nullable-array encoders.
 --   * @\@{name :: CInt8}@ emits the identifier @name@ and adds @col \"name\"
 --     CInt8@ to the decoder (@Maybe CInt8@ uses @ncol@). The quote's result type
---     is @Query ()@ with no holes, @Query@ of the bare value with one, and @Query@ of
---     a tuple with 2 to 8.
+--     is @Query ()@ with no @\@{...}@ holes, @Query@ of the bare value with
+--     one, and @Query@ of a tuple with 2 to 8.
 --
 -- A @?@ in the template is literal SQL. Do not use it in a template with holes.
 -- The @?@-placeholder form cannot tell it from a hole.

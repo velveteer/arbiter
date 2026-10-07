@@ -68,7 +68,7 @@ limitOf prefix = fromMaybe 1 (lookup prefix modelPolicies)
 claimBatch :: Int
 claimBatch = 500
 
--- | The concurrency state-machine properties, run against any backend.
+-- | The concurrency-limit model properties, run against any backend.
 -- The schema must hold the 'concurrencyTable' queue.
 concurrencyModelSpec
   :: forall sm

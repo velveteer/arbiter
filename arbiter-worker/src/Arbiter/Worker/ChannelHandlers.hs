@@ -23,7 +23,7 @@ import UnliftIO.STM (TVar)
 import UnliftIO.STM qualified as STM
 
 import Arbiter.Worker.Config (WorkerConfig (..), workerStateVar, writePause)
-import Arbiter.Worker.Heartbeat (HeartbeatGuard, recheckJob)
+import Arbiter.Worker.Heartbeat (PoolGuard, recheckJob)
 import Arbiter.Worker.WorkerState (WorkerState (..))
 
 -- | Decode the pause payload and, if it addresses this worker, write 'Arbiter.Worker.Config.pauseVar'.
@@ -44,7 +44,7 @@ handlePauseNotif config notif =
 handleCancelNotif
   :: (MonadUnliftIO m)
   => WorkerConfig n payload
-  -> HeartbeatGuard payload
+  -> PoolGuard payload
   -> Notification
   -> m ()
 handleCancelNotif config guard notif =

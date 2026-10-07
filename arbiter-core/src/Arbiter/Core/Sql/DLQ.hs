@@ -93,9 +93,9 @@ selectExhaustedJobsSQL schema tableName limit =
 -- finalizers. Keep a finalizer suspended when it has children in the retry or the
 -- main queue. Make it ready when it has no children. Re-suspend a main-queue
 -- rollup parent that gains restored children, unless it is under a live lease. Refuse a
--- root whose parent is absent from the
--- main queue. Remove the deduplication key during the retry. An @edit@ replaces
--- its columns on the target row only. Returns the target's restored row.
+-- root whose parent is absent from the main queue. Remove the deduplication key during
+-- the retry. An @edit@ replaces its columns on the target row only. Returns the
+-- target's restored row.
 retryFromDLQSQL :: SchemaName -> TableName -> Int64 -> Maybe RowEdit -> Query (JobRead (Stored payload))
 retryFromDLQSQL schema tableName dlqId edit =
   let dlqTbl = jobQueueDLQTable schema tableName
@@ -278,7 +278,7 @@ moveToDLQBatchSQL schema tableName ids cseqs errs =
         SELECT id AS @{result :: CInt8} FROM deleted_jobs
       |]
 
--- | Delete DLQ jobs by id, returning each one's parent id.
+-- | Delete DLQ jobs by id, returning each one's id and parent id.
 deleteDLQJobsBatchSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
 deleteDLQJobsBatchSQL schema tableName dlqIds =
   let dlqTbl = jobQueueDLQTable schema tableName

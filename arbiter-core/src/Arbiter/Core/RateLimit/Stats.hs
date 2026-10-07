@@ -111,7 +111,7 @@ instance ToJSON RateLimitPolicyUpdate where
   toJSON = Aeson.genericToJSON patchOptions
   toEncoding = Aeson.genericToEncoding patchOptions
 
--- | Hand-written. A missing key leaves the field unchanged. An explicit @null@
+-- | A missing key leaves the field unchanged. An explicit @null@
 -- clears the override.
 instance FromJSON RateLimitPolicyUpdate where
   parseJSON = withObject "RateLimitPolicyUpdate" $ \obj ->

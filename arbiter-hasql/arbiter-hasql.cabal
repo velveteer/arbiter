@@ -108,7 +108,6 @@ test-suite arbiter-hasql-tests
     , arbiter-worker-testkit  >=0.1 && <0.2
     , base >=4.20 && <5
     , bytestring              >=0.10.12 && <0.13
-    , hasql
     , hspec                   >=2.8 && <2.12
     , postgresql-simple       >=0.6 && <0.8
     , resource-pool           >=0.4 && <0.6
@@ -118,6 +117,11 @@ test-suite arbiter-hasql-tests
 
   if flag(hasql2)
     build-depends:
+      , hasql       >=2.0 && <2.1
       , pqi         >=1.0 && <1.2
       , pqi-ffi     >=1.0 && <1.1
       , pqi-native  >=1.0 && <1.1
+
+  else
+    build-depends:
+      , hasql  >=1.10 && <1.11

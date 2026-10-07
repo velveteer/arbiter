@@ -55,7 +55,7 @@ import Arbiter.Worker.Config
   , getListenerReady
   , getWorkerState
   , nack
-  , shutdownWorker
+  , shutdownWorkerPool
   , transactionalWorkerConfig
   )
 import Arbiter.Worker.Cron (OverlapPolicy (AllowOverlap), cronJob)
@@ -260,7 +260,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           waitUntil 10_000 $ readIORef startedRef
 
           -- Trigger shutdown while job is running
-          shutdownWorker configWithTimeout
+          shutdownWorkerPool configWithTimeout
 
           -- Wait for worker to exit (should complete job first)
           Async.wait worker
@@ -300,7 +300,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
 
           -- Measure the shutdown duration.
           startTime <- liftIO getCurrentTime
-          shutdownWorker configWithShortTimeout
+          shutdownWorkerPool configWithShortTimeout
           Async.wait worker
           endTime <- liftIO getCurrentTime
 
@@ -336,7 +336,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           void $ PG.execute_ lockConn (fromString (T.unpack ("LOCK TABLE " <> queueTable <> " IN ACCESS EXCLUSIVE MODE")))
           withLinkedAsync (runM env $ runWorkerPool cfg) $ \worker -> do
             waitUntil 10_000 claimWaiting
-            shutdownWorker cfg
+            shutdownWorkerPool cfg
             threadDelay 500_000
             PG.commit lockConn
             Async.wait worker
@@ -372,7 +372,7 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
           exists `shouldBe` True
 
           -- Shutdown and verify cleanup
-          shutdownWorker configWithLiveness
+          shutdownWorkerPool configWithLiveness
           _ <- Async.waitCatch worker
           waitUntil 5_000 $ not <$> Dir.doesFileExist livenessPath
           cleaned <- Dir.doesFileExist livenessPath

@@ -8,9 +8,6 @@ module Arbiter.Core.Trace
   ( -- * Job trace context
     TraceContext (..)
 
-    -- * Tracer
-  , Tracer
-
     -- * Producer
   , currentTraceContext
   , withPublishSpan
@@ -27,6 +24,7 @@ module Arbiter.Core.Trace
     -- * Internal
 
     -- | Internal to the arbiter packages. Not covered by the PVP.
+  , Tracer
   , ConsumeSpan
   , ConsumeShape (..)
   , toConsumeShape

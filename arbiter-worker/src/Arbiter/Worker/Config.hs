@@ -26,7 +26,7 @@ module Arbiter.Worker.Config
     -- * Worker state
   , WorkerState (..)
   , WorkerRuntime
-  , shutdownWorker
+  , shutdownWorkerPool
   , getWorkerState
   , getListenerReady
   , readEffectiveState
@@ -135,13 +135,12 @@ data WorkerConfig m payload = WorkerConfig
   -- ^ Interval in seconds for extending a job's lease during processing.
   -- Must be less than 'visibilityTimeout'. Default: @30@.
   , maxJobDuration :: Maybe NominalDiffTime
-  -- ^ Interrupt a handler call that runs longer than this many seconds. In batched mode
-  -- the call covers the whole batch. Its unfinalized jobs fail for retry. 'Nothing' sets
-  -- no bound. Default: @Nothing@.
+  -- ^ Interrupt a batch whose claim hooks and handler run longer than this many seconds.
+  -- Its unfinalized jobs fail for retry. 'Nothing' sets no bound. Default: @Nothing@.
   , workerHeartbeatInterval :: NominalDiffTime
   -- ^ Minimum gap in seconds between beats. A beat bumps the worker registry heartbeat,
   -- touches the optional liveness file, and reconciles pause state from the DB.
-  -- Unless the pool is paused, a beat also waits for a dispatcher claim or a
+  -- Unless the pool is paused, a beat also waits for a dispatcher claim attempt or a
   -- lease extend. Keep it well below 'workerStaleThreshold'. Default: @10@.
   , backoffStrategy :: BackoffStrategy
   -- ^ Retry backoff strategy. Default: @exponentialBackoff 2 1048576@.
@@ -495,8 +494,8 @@ listenerReadyVar = runtimeListenerReadyVar . workerRuntime
 --
 -- Stops claiming new jobs. In-flight jobs get up to 'gracefulShutdownTimeout' to
 -- finish. Then the pool exits.
-shutdownWorker :: (MonadIO m) => WorkerConfig n payload -> m ()
-shutdownWorker config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
+shutdownWorkerPool :: (MonadIO m) => WorkerConfig n payload -> m ()
+shutdownWorkerPool config = liftIO . STM.atomically $ STM.writeTVar (workerStateVar config) ShuttingDown
 
 -- | The pool's state, with a pause reported as paused.
 getWorkerState :: (MonadIO m) => WorkerConfig n payload -> m WorkerState

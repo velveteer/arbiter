@@ -6,7 +6,7 @@
 -- The pool's heartbeat guard, run in IO. These are the IO wrappers over
 -- "Arbiter.Worker.Heartbeat.Guard".
 module Arbiter.Worker.Heartbeat
-  ( HeartbeatGuard
+  ( PoolGuard
   , newHeartbeatGuard
   , runHeartbeatGuard
   , recheckJob
@@ -26,10 +26,10 @@ import Arbiter.Worker.Heartbeat.Guard qualified as Guard
 import Arbiter.Worker.Logger.Internal (jobHook, poolLog)
 
 -- | The pool's guard, run in IO and keyed on the job.
-type HeartbeatGuard payload = Guard.HeartbeatGuard IO (JobRead payload)
+type PoolGuard payload = Guard.HeartbeatGuard IO (JobRead payload)
 
 -- | Build the pool's guard from its config. IO wrapper over 'Arbiter.Worker.Heartbeat.Guard.newHeartbeatGuard'.
-newHeartbeatGuard :: (JobOperation m payload) => WorkerConfig m payload -> m (HeartbeatGuard payload)
+newHeartbeatGuard :: (JobOperation m payload) => WorkerConfig m payload -> m (PoolGuard payload)
 newHeartbeatGuard config = do
   UnliftIO run <- askUnliftIO
   liftIO . Guard.newHeartbeatGuard $
@@ -47,9 +47,9 @@ newHeartbeatGuard config = do
       }
 
 -- | Run the guard loop. IO wrapper over 'Arbiter.Worker.Heartbeat.Guard.runHeartbeatGuard'.
-runHeartbeatGuard :: (MonadIO m) => HeartbeatGuard payload -> m Void
+runHeartbeatGuard :: (MonadIO m) => PoolGuard payload -> m Void
 runHeartbeatGuard = liftIO . Guard.runHeartbeatGuard
 
 -- | Extend the batch that holds the job now.
-recheckJob :: (MonadIO m) => HeartbeatGuard payload -> JobId -> m ()
+recheckJob :: (MonadIO m) => PoolGuard payload -> JobId -> m ()
 recheckJob guard = liftIO . Guard.recheck guard

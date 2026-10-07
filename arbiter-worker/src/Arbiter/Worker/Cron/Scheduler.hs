@@ -176,16 +176,13 @@ processCronCatchUp cronLog schemaName queueName jobs now = do
                 TickFailed -> pure ()
               pure outcome
             replayedBy tick outcome = if tick /= currentTick && outcome == TickHandled True then 1 else 0
-            runTicks stopAt =
-              foldr
-                ( \tick rest (replayed, _) -> do
-                    outcome <- fireTick tick
-                    let next = (replayed + replayedBy tick outcome, outcome)
-                    if stopAt outcome then pure next else rest next
-                )
-                pure
-                ticksToFire
-                (0 :: Int, TickHandled False)
+            runTicks stopAt = go ticksToFire (0 :: Int, TickHandled False)
+              where
+                go [] acc = pure acc
+                go (tick : ticks) (replayed, _) = do
+                  outcome <- fireTick tick
+                  let next = (replayed + replayedBy tick outcome, outcome)
+                  if stopAt outcome then pure next else go ticks next
         (replayed, lastOutcome) <- case effectiveOv of
           AllowOverlap -> runTicks (== TickNoLeader)
           SkipOverlap -> runTicks (/= TickFailed)

@@ -105,7 +105,7 @@ cleanupOnce connStr schemaName tableName = withConn connStr (cleanupData schemaN
 withConn :: ByteString -> (Connection -> IO a) -> IO a
 withConn connStr = bracket (connectPostgreSQL connStr) close
 
--- | Terminate every other backend on this database whose current query matches the LIKE pattern.
+-- | Terminate every other backend on this database whose last query matches the LIKE pattern.
 terminateBackendsMatching :: ByteString -> Text -> IO ()
 terminateBackendsMatching connStr queryLike =
   withConn connStr $ \conn ->
@@ -120,7 +120,7 @@ terminatePid :: ByteString -> Int32 -> IO ()
 terminatePid connStr pid =
   withConn connStr $ \conn -> void $ query @_ @(Only Bool) conn "SELECT pg_terminate_backend(?)" (Only pid)
 
--- | Count distinct backends holding a LISTEN on any of this schema's channels.
+-- | Count distinct backends whose last query is a LISTEN that names this schema.
 listenerConnectionCount :: ByteString -> Text -> IO Int
 listenerConnectionCount connStr schema =
   withConn connStr $ \conn -> do

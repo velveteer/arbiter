@@ -8,8 +8,7 @@ description:
   A browser interface over the arbiter-servant API for inspecting and operating
   queues: job, dead-letter, and archive browsing, retries and cancellation, cron
   schedules, rate-limit and concurrency policies, queue pausing, and worker
-  health. Assets are embedded in the binary, so there are no runtime file
-  dependencies.
+  health. Assets are embedded in the binary.
 
 license:            MIT
 license-file:       LICENSE

@@ -74,7 +74,7 @@ import Arbiter.Otel.Telemetry
   )
 
 -- | Give a pool lifecycle metrics, maintenance metrics, and the telemetry log destination.
--- The pool's registry queue name labels its metrics and gauges. Apply it once per pool.
+-- The pool's registry queue name labels its metrics. Apply it once per pool.
 instrumentPool :: (MonadUnliftIO m) => Telemetry -> NamedWorkerPool m -> NamedWorkerPool m
 instrumentPool tel (NamedWorkerPool queue cfg) =
   NamedWorkerPool queue (labelledConfig tel queue cfg)

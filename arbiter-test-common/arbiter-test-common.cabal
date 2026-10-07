@@ -7,9 +7,9 @@ description:
   Haskell.
 
   Schema setup and teardown against a live PostgreSQL database, shared payload
-  fixtures, and the backend-parameterized operations, rate-limit, concurrency,
-  and state-machine suites. Useful when implementing a @MonadArbiter@ backend of your
-  own.
+  fixtures, and the backend-parameterized operations, claim-race, rate-limit,
+  concurrency-limit, concurrency-model and state-machine suites. Useful when
+  implementing a @MonadArbiter@ backend of your own.
 
 license:         MIT
 license-file:    LICENSE

@@ -776,7 +776,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (table) (arbiter_pg_table_autovacuum_age_seconds)",
+          "expr": "max by (table) (arbiter_pg_table_vacuum_age_seconds)",
           "legendFormat": "{{table}}"
         }
       ]
@@ -841,7 +841,7 @@
       "id": 30,
       "type": "stat",
       "title": "Database reachable",
-      "description": "0 when the last health scan did not reach the database. Aggregates with min, so one replica that cannot reach it shows here.",
+      "description": "0 when the last gauge scan did not reach the database. Aggregates with min, so one replica that cannot reach it shows here.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

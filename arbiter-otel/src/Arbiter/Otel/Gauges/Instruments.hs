@@ -119,8 +119,8 @@ registerInstruments meter cache = do
 
   reg Name.PgTableDeadTuples "{tuple}" "Dead tuples pending vacuum" $ perTable (fromIntegral . Health.deadTup)
   reg Name.PgTableLiveTuples "{tuple}" "Estimated live tuples" $ perTable (fromIntegral . Health.liveTup)
-  reg Name.PgTableAutovacuumAge "s" "Seconds since the last vacuum or autovacuum, absent until one runs" $
-    perTableMaybe Health.autovacuumAge
+  reg Name.PgTableVacuumAge "s" "Seconds since the last vacuum or autovacuum, absent until one runs" $
+    perTableMaybe Health.vacuumAge
   reg Name.PgTableSize "By" "Total relation size" $ perTable (fromIntegral . Health.totalBytes)
   reg Name.PgTableXidAge "{transaction}" "Transaction-id age of the table" $
     perTableMaybe (fmap fromIntegral . Health.xidAge)
@@ -145,7 +145,7 @@ registerInstruments meter cache = do
   regGauge
     Name.DbReachable
     "1"
-    "1 when the last health scan reached the database, 0 when it failed"
+    "1 when the last gauge scan reached the database, 0 when it failed"
     [ \res ->
         readTVarIO (databaseReachable cache) >>= traverse_ (\reachable -> observe res (if reachable then 1 else 0) (attrs []))
     ]

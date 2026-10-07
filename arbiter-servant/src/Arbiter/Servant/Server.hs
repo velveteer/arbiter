@@ -150,7 +150,7 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
   -- ^ Minimum gap between runs of the bucket prune and the concurrency
   -- reconcile-and-prune. Default: 'defaultMaintenanceSparseInterval'.
   , maintenanceBucketIdle :: NominalDiffTime
-  -- ^ Idle age at which a pass prunes a rate-limit bucket.
+  -- ^ Idle age at which a pass prunes a full rate-limit bucket.
   -- Default: 'defaultMaintenanceBucketIdle'.
   , maintenanceTimeout :: NominalDiffTime
   -- ^ Abort any single maintenance statement that runs longer than this.
