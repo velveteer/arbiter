@@ -280,7 +280,7 @@ listJobsHandler
   -> Maybe SortDir
   -> Handler (JobsResponse payload)
 listJobsHandler tableName config mLimit mOffset mGroupKey mParentId mJobId rootsOnly mStatus mClaimedBy mKind mPayload mRatePrefix mConcPrefix mSortBy mSortDir = liftIO $ do
-  let (limit, offset) = validatePagination defaultPageLimit (unPageLimit <$> mLimit) mOffset
+  let (limit, offset) = validatePagination mLimit mOffset
       schemaName = serverSchema config
       filters =
         catMaybes $
@@ -793,7 +793,7 @@ readPage
   -> m Int64
   -> Handler (Page a)
 readPage config mLimit mOffset page count = do
-  let pagination@(limit, offset) = validatePagination defaultPageLimit (unPageLimit <$> mLimit) mOffset
+  let pagination@(limit, offset) = validatePagination mLimit mOffset
   (rows, total) <- runDb config . withDbTransaction $ (,) <$> page limit offset <*> count
   pure (toPage pagination total rows)
 
@@ -1329,7 +1329,7 @@ listRateLimitBucketsHandler
   -> Maybe Int
   -> Handler RateLimitBucketsResponse
 listRateLimitBucketsHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination defaultKeyPageLimit (unKeyPageLimit <$> mLimit) mOffset
+  let (limit, offset) = validatePagination mLimit mOffset
   rows <- runDb config (HL.listRateLimitBuckets prefix limit offset)
   pure Items {items = rows}
 
@@ -1451,7 +1451,7 @@ listConcurrencyKeysHandler
   -> Maybe Int
   -> Handler ConcurrencyKeysResponse
 listConcurrencyKeysHandler config prefix mLimit mOffset = do
-  let (limit, offset) = validatePagination defaultKeyPageLimit (unKeyPageLimit <$> mLimit) mOffset
+  let (limit, offset) = validatePagination mLimit mOffset
   rows <- runDb config (HL.listConcurrencyKeys prefix limit offset)
   pure Items {items = rows}
 
@@ -1597,7 +1597,7 @@ listingFilters mParentId mGroupKey mKind mPayload =
 nonBlank :: Maybe Text -> Maybe Text
 nonBlank = mfilter (not . T.null . T.strip)
 
--- | Clamp the limit to 'pageLimitRange' with a default, and keep the offset non-negative.
-validatePagination :: Int -> Maybe Int -> Maybe Int -> (Int, Int)
-validatePagination def mLimit mOffset =
-  (clamp pageLimitRange (fromMaybe def mLimit), max 0 (fromMaybe 0 mOffset))
+-- | Clamp the limit to 'pageLimitRange' with its default, and keep the offset non-negative.
+validatePagination :: (PageSize limit) => Maybe limit -> Maybe Int -> (Int, Int)
+validatePagination mLimit mOffset =
+  (clamp pageLimitRange (pageSize (fromMaybe defaultPageSize mLimit)), max 0 (fromMaybe 0 mOffset))

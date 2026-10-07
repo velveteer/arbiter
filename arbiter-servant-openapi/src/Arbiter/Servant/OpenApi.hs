@@ -57,13 +57,14 @@ import Arbiter.Core.Sql.Jobs
 import Arbiter.Core.Worker (WorkerHealth, workerHealthToText)
 import Arbiter.Servant.API (ArbiterAPI, Throws')
 import Arbiter.Servant.Types
+import Control.Applicative ((<|>))
 import Data.Aeson (ToJSON (..), Value (Null))
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit, ord, toUpper)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.OpenApi
   ( Definitions
   , HttpStatusCode
@@ -131,40 +132,58 @@ openApiSpec = toJSON (sectioned (`elem` registryTableNames (Proxy @registry)) de
               }
         }
 
--- | Group operations by the first path segment below the mount point. Queue
--- routes use the queue name. Other routes use the feature name.
+-- | Group operations by section. Queue routes use the queue name. Other routes use
+-- the first path segment below the mount point.
 sectioned :: (TagName -> Bool) -> OpenApi -> OpenApi
 sectioned isQueue spec =
   spec
     { _openApiPaths =
-        InsOrd.mapWithKey (annotatePath isQueue) (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
-    , _openApiTags = InsOrdSet.fromList (map (describeSection isQueue) sections)
+        InsOrd.mapWithKey
+          (annotatePath (queueRoute isQueue))
+          (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
+    , _openApiTags = InsOrdSet.fromList (map (section (queueRoute isQueue)) (InsOrd.keys (_openApiPaths spec)))
     }
-  where
-    sections = map section (InsOrd.keys (_openApiPaths spec))
 
--- | The path's section, the segment after the @\/api\/v1@ mount point.
-section :: FilePath -> TagName
-section path =
+-- | A queue route's queue name and the segments after it.
+queueRoute :: (TagName -> Bool) -> FilePath -> Maybe (TagName, [Text])
+queueRoute isQueue path =
   case mounted path of
-    name : _ -> name
-    [] -> "api"
+    segment : queue : rest@(_ : _) | segment == queuesSegment && isQueue queue -> Just (queue, rest)
+    _ -> Nothing
+
+-- | The path's section, a heading with a sentence under it. A queue with the name of a shared
+-- section gets the heading @<name> queue@.
+section :: (FilePath -> Maybe (TagName, [Text])) -> FilePath -> Tag
+section queueOf path =
+  case queueOf path of
+    Just (queue, _) ->
+      tag
+        (if queue `elem` map fst sectionDescriptions then queue <> " queue" else queue)
+        (Just ("Jobs, leases, dead letters, archive, groups, kinds and stats for the " <> queue <> " queue."))
+    Nothing ->
+      let name = fromMaybe "api" (listToMaybe (mounted path)) in tag name (lookup name sectionDescriptions)
+  where
+    tag name description = Tag {_tagName = name, _tagDescription = description, _tagExternalDocs = Nothing}
 
 -- | The path's segments below the mount point.
 mounted :: FilePath -> [Text]
 mounted path = drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path)))
 
 -- | An operation id from the method and the path below the mount point. A capture reads as @By@ and its name.
--- A queue route starts with the queue name. Each character that is not an ASCII letter or digit reads as @_@ and its hex code.
-operationName :: (TagName -> Bool) -> Text -> FilePath -> Text
-operationName isQueue method path =
-  case mounted path of
-    queue : rest | isQueue queue -> T.concatMap escape queue <> upperFirst method <> foldMap word rest
-    segments -> method <> foldMap word segments
+-- A queue route starts with the queue name in place of the @queues@ segment. A leading digit, and each character that is not an ASCII letter or
+-- digit, reads as its hex code between two @_@.
+operationName :: (FilePath -> Maybe (TagName, [Text])) -> Text -> FilePath -> Text
+operationName queueOf method path =
+  maybe
+    (method <> foldMap word (mounted path))
+    (\(queue, rest) -> escapeQueue queue <> upperFirst method <> foldMap word rest)
+    (queueOf path)
   where
+    escapeQueue queue = maybe queue (\(c, rest) -> (if isDigit c then hex c else escape c) <> T.concatMap escape rest) (T.uncons queue)
     escape c
       | isAsciiUpper c || isAsciiLower c || isDigit c = T.singleton c
-      | otherwise = "_" <> T.pack (map toUpper (showHex (ord c) ""))
+      | otherwise = hex c
+    hex c = "_" <> T.pack (map toUpper (showHex (ord c) "")) <> "_"
     word segment = maybe (camel segment) (("By" <>) . camel) (T.stripPrefix "{" =<< T.stripSuffix "}" segment)
     camel = foldMap upperFirst . T.split (`elem` ['-', '_'])
     upperFirst text = maybe text (\(c, rest) -> T.cons (toUpper c) rest) (T.uncons text)
@@ -172,6 +191,10 @@ operationName isQueue method path =
 -- | The segments the API is mounted under.
 mountSegments :: [Text]
 mountSegments = ["api", "v1"]
+
+-- | The segment the queue routes are mounted under.
+queuesSegment :: Text
+queuesSegment = "queues"
 
 -- | The event stream's @Raw@ route, which 'toOpenApi' gives no operation.
 eventStreamPath :: FilePath
@@ -240,7 +263,8 @@ joined old new =
   where
     sentence text = if "." `T.isSuffixOf` text then text else text <> "."
     merged first second =
-      first {_mediaTypeObjectSchema = alternatives <$> _mediaTypeObjectSchema first <*> _mediaTypeObjectSchema second}
+      let (old', new') = (_mediaTypeObjectSchema first, _mediaTypeObjectSchema second)
+       in first {_mediaTypeObjectSchema = liftA2 alternatives old' new' <|> old' <|> new'}
     alternatives first second
       | first == second = first
       | otherwise = Inline mempty {_schemaOneOf = Just [first, second]}
@@ -271,8 +295,8 @@ jobEventSchema =
       ]
 
 -- | Put every operation on a path into that path's section, and give it an id.
-annotatePath :: (TagName -> Bool) -> FilePath -> PathItem -> PathItem
-annotatePath isQueue path item =
+annotatePath :: (FilePath -> Maybe (TagName, [Text])) -> FilePath -> PathItem -> PathItem
+annotatePath queueOf path item =
   item
     { _pathItemGet = annotated "get" (_pathItemGet item)
     , _pathItemPut = annotated "put" (_pathItemPut item)
@@ -288,21 +312,10 @@ annotatePath isQueue path item =
       fmap
         ( \operation ->
             operation
-              { _operationTags = InsOrdSet.insert (section path) (_operationTags operation)
-              , _operationOperationId = Just (operationName isQueue method path)
+              { _operationTags = InsOrdSet.insert (_tagName (section queueOf path)) (_operationTags operation)
+              , _operationOperationId = Just (operationName queueOf method path)
               }
         )
-
--- | A section's tag entry, a heading with a sentence under it.
-describeSection :: (TagName -> Bool) -> TagName -> Tag
-describeSection isQueue name =
-  Tag
-    { _tagName = name
-    , _tagDescription = if isQueue name then Just (queueDescription name) else lookup name sectionDescriptions
-    , _tagExternalDocs = Nothing
-    }
-  where
-    queueDescription queueName = "Jobs, leases, dead letters, archive, groups, kinds and stats for the " <> queueName <> " queue."
 
 -- | What each schema-wide section is for.
 sectionDescriptions :: [(TagName, Text)]
@@ -398,6 +411,8 @@ clamped (low, high) def schema =
   schema
     { _schemaDescription = Just ("Clamped to " <> number low <> " to " <> number high <> ".")
     , _schemaDefault = toJSON <$> def
+    , _schemaMinimum = Nothing
+    , _schemaMaximum = Nothing
     }
   where
     number n
@@ -464,13 +479,13 @@ instance ToParamSchema SortDir where
   toParamSchema = enumSchema sortDirName
 
 instance ToParamSchema PageLimit where
-  toParamSchema _ = pageSizeSchema defaultPageLimit
+  toParamSchema = pageSizeSchema
 
 instance ToParamSchema KeyPageLimit where
-  toParamSchema _ = pageSizeSchema defaultKeyPageLimit
+  toParamSchema = pageSizeSchema
 
-pageSizeSchema :: Int -> Schema
-pageSizeSchema def = clamped pageLimitRange (Just def) (toParamSchema (Proxy @Int))
+pageSizeSchema :: forall limit proxy. (PageSize limit) => proxy limit -> Schema
+pageSizeSchema _ = clamped pageLimitRange (Just (pageSize (defaultPageSize @limit))) (toParamSchema (Proxy @Int))
 
 -- ---------------------------------------------------------------------------
 -- Hand-encoded types

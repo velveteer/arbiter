@@ -222,8 +222,6 @@
                     "maxJobs": {
                         "default": 1,
                         "description": "Clamped to 1 to 1000.",
-                        "maximum": 9223372036854775807,
-                        "minimum": -9223372036854775808,
                         "nullable": true,
                         "type": "integer"
                     }
@@ -2243,8 +2241,6 @@
                         "schema": {
                             "default": 100,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },
@@ -2522,7 +2518,28 @@
                 ]
             }
         },
-        "/api/v1/queue/archive": {
+        "/api/v1/queues": {
+            "get": {
+                "operationId": "getQueues",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/QueuesResponse"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "summary": "List queues",
+                "tags": [
+                    "queues"
+                ]
+            }
+        },
+        "/api/v1/queues/queue/archive": {
             "get": {
                 "description": "The payload filter searches the payload text.",
                 "operationId": "queueGetArchive",
@@ -2534,8 +2551,6 @@
                         "schema": {
                             "default": 50,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },
@@ -2664,7 +2679,7 @@
                 ]
             }
         },
-        "/api/v1/queue/archive/batch-delete": {
+        "/api/v1/queues/queue/archive/batch-delete": {
             "post": {
                 "description": "Returns the number deleted. Unknown ids are skipped.",
                 "operationId": "queuePostArchiveBatchDelete",
@@ -2698,7 +2713,7 @@
                 ]
             }
         },
-        "/api/v1/queue/archive/{id}": {
+        "/api/v1/queues/queue/archive/{id}": {
             "delete": {
                 "operationId": "queueDeleteArchiveById",
                 "parameters": [
@@ -2728,7 +2743,7 @@
                 ]
             }
         },
-        "/api/v1/queue/archive/{id}/reenqueue": {
+        "/api/v1/queues/queue/archive/{id}/reenqueue": {
             "post": {
                 "description": "Inserts a new job. The archive entry stays.",
                 "operationId": "queuePostArchiveByIdReenqueue",
@@ -2772,7 +2787,7 @@
                 ]
             }
         },
-        "/api/v1/queue/claim": {
+        "/api/v1/queues/queue/claim": {
             "post": {
                 "description": "Leases up to maxJobs visible jobs for leaseSeconds. Each job carries the claimSeq and claimedBy that ack, nack and extend need. The server does not renew the lease. A paused queue returns no jobs.",
                 "operationId": "queuePostClaim",
@@ -2806,7 +2821,7 @@
                 ]
             }
         },
-        "/api/v1/queue/dlq": {
+        "/api/v1/queues/queue/dlq": {
             "get": {
                 "description": "The payload and error filters search the payload and the last error.",
                 "operationId": "queueGetDlq",
@@ -2818,8 +2833,6 @@
                         "schema": {
                             "default": 50,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },
@@ -2940,7 +2953,7 @@
                 ]
             }
         },
-        "/api/v1/queue/dlq/batch-delete": {
+        "/api/v1/queues/queue/dlq/batch-delete": {
             "post": {
                 "description": "Returns the number deleted. Unknown ids are skipped.",
                 "operationId": "queuePostDlqBatchDelete",
@@ -2974,7 +2987,7 @@
                 ]
             }
         },
-        "/api/v1/queue/dlq/{id}": {
+        "/api/v1/queues/queue/dlq/{id}": {
             "delete": {
                 "description": "Resumes its parent when no child of the parent is left in the queue.",
                 "operationId": "queueDeleteDlqById",
@@ -3005,7 +3018,7 @@
                 ]
             }
         },
-        "/api/v1/queue/dlq/{id}/retry": {
+        "/api/v1/queues/queue/dlq/{id}/retry": {
             "post": {
                 "description": "Moves the job back to the queue.",
                 "operationId": "queuePostDlqByIdRetry",
@@ -3052,7 +3065,7 @@
                 ]
             }
         },
-        "/api/v1/queue/groups": {
+        "/api/v1/queues/queue/groups": {
             "get": {
                 "description": "The largest groups come first.",
                 "operationId": "queueGetGroups",
@@ -3064,8 +3077,6 @@
                         "schema": {
                             "default": 50,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },
@@ -3109,7 +3120,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs": {
+        "/api/v1/queues/queue/jobs": {
             "get": {
                 "description": "Filters combine. The payload filter searches the payload text.",
                 "operationId": "queueGetJobs",
@@ -3121,8 +3132,6 @@
                         "schema": {
                             "default": 50,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },
@@ -3321,7 +3330,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/batch": {
+        "/api/v1/queues/queue/jobs/batch": {
             "post": {
                 "description": "Returns the jobs inserted or replaced. The response omits a job that an ignore dedup key skips, and a job that a replace dedup key cannot replace.",
                 "operationId": "queuePostJobsBatch",
@@ -3355,7 +3364,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}": {
+        "/api/v1/queues/queue/jobs/{id}": {
             "delete": {
                 "description": "Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler.",
                 "operationId": "queueDeleteJobsById",
@@ -3422,7 +3431,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/ack": {
+        "/api/v1/queues/queue/jobs/{id}/ack": {
             "post": {
                 "description": "Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive.",
                 "operationId": "queuePostJobsByIdAck",
@@ -3459,7 +3468,7 @@
                         "description": "`id` not found"
                     },
                     "409": {
-                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
+                        "description": "This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled."
                     }
                 },
                 "summary": "Complete a held job",
@@ -3468,7 +3477,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/extend": {
+        "/api/v1/queues/queue/jobs/{id}/extend": {
             "post": {
                 "description": "Sets the lease to expire leaseSeconds from now.",
                 "operationId": "queuePostJobsByIdExtend",
@@ -3505,7 +3514,7 @@
                         "description": "`id` not found"
                     },
                     "409": {
-                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
+                        "description": "This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled."
                     }
                 },
                 "summary": "Extend a held lease",
@@ -3514,7 +3523,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/force-cancel": {
+        "/api/v1/queues/queue/jobs/{id}/force-cancel": {
             "post": {
                 "description": "Deletes the jobs in the tree that are not in flight. A job in flight receives a cancel flag and cannot be claimed again. A worker pool stops its handler. An HTTP claimant with a live lease receives 409 on its next ack, nack or extend, until the reaper deletes the job. Then it receives 404. A claimant whose lease expired before the force-cancel receives 404.",
                 "operationId": "queuePostJobsByIdForceCancel",
@@ -3545,7 +3554,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/move-to-dlq": {
+        "/api/v1/queues/queue/jobs/{id}/move-to-dlq": {
             "post": {
                 "description": "A rollup takes its descendants with it. A job in flight is moved too. Its handler continues, and its ack finds no job.",
                 "operationId": "queuePostJobsByIdMoveToDlq",
@@ -3579,7 +3588,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/nack": {
+        "/api/v1/queues/queue/jobs/{id}/nack": {
             "post": {
                 "description": "Restores the attempt that the claim used. The job becomes claimable when its lease expires.",
                 "operationId": "queuePostJobsByIdNack",
@@ -3616,7 +3625,7 @@
                         "description": "`id` not found"
                     },
                     "409": {
-                        "description": "This lease does not hold the job, a registered worker holds it, or the job is suspended."
+                        "description": "This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled."
                     }
                 },
                 "summary": "Return a held job",
@@ -3625,7 +3634,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/pause-children": {
+        "/api/v1/queues/queue/jobs/{id}/pause-children": {
             "post": {
                 "description": "Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended.",
                 "operationId": "queuePostJobsByIdPauseChildren",
@@ -3656,7 +3665,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/promote": {
+        "/api/v1/queues/queue/jobs/{id}/promote": {
             "post": {
                 "operationId": "queuePostJobsByIdPromote",
                 "parameters": [
@@ -3689,7 +3698,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/reschedule": {
+        "/api/v1/queues/queue/jobs/{id}/reschedule": {
             "post": {
                 "operationId": "queuePostJobsByIdReschedule",
                 "parameters": [
@@ -3734,7 +3743,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/resume": {
+        "/api/v1/queues/queue/jobs/{id}/resume": {
             "post": {
                 "operationId": "queuePostJobsByIdResume",
                 "parameters": [
@@ -3767,7 +3776,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/resume-children": {
+        "/api/v1/queues/queue/jobs/{id}/resume-children": {
             "post": {
                 "description": "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed.",
                 "operationId": "queuePostJobsByIdResumeChildren",
@@ -3798,7 +3807,7 @@
                 ]
             }
         },
-        "/api/v1/queue/jobs/{id}/suspend": {
+        "/api/v1/queues/queue/jobs/{id}/suspend": {
             "post": {
                 "description": "A suspended job cannot be claimed.",
                 "operationId": "queuePostJobsByIdSuspend",
@@ -3832,7 +3841,7 @@
                 ]
             }
         },
-        "/api/v1/queue/kinds": {
+        "/api/v1/queues/queue/kinds": {
             "get": {
                 "operationId": "queueGetKinds",
                 "responses": {
@@ -3856,7 +3865,7 @@
                 ]
             }
         },
-        "/api/v1/queue/stats": {
+        "/api/v1/queues/queue/stats": {
             "get": {
                 "operationId": "queueGetStats",
                 "responses": {
@@ -3874,27 +3883,6 @@
                 "summary": "Show queue stats",
                 "tags": [
                     "queue"
-                ]
-            }
-        },
-        "/api/v1/queues": {
-            "get": {
-                "operationId": "getQueues",
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json;charset=utf-8": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/QueuesResponse"
-                                }
-                            }
-                        },
-                        "description": ""
-                    }
-                },
-                "summary": "List queues",
-                "tags": [
-                    "queues"
                 ]
             }
         },
@@ -4131,8 +4119,6 @@
                         "schema": {
                             "default": 100,
                             "description": "Clamped to 1 to 1000.",
-                            "maximum": 9223372036854775807,
-                            "minimum": -9223372036854775808,
                             "type": "integer"
                         }
                     },

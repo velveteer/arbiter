@@ -1,5 +1,5 @@
 // API client. The API lives under the page's own path: /foo/ serves /foo/api/v1/.
-// Types come from the OpenAPI document. Queue routes are typed as /api/v1/queue/...
+// Types come from the OpenAPI document. Queue routes are typed as /api/v1/queues/queue/...
 /** @import { Res, Query, Body } from '../../types/client' */
 import { TIMING } from './config.js';
 import { parseJson } from './format.js';
@@ -88,38 +88,38 @@ export const api = {
   /** @returns {Promise<Res<'/api/v1/maintenance', 'post'>>} */
   maintenance: () => post('/maintenance'),
 
-  /** @returns {Promise<Res<'/api/v1/queue/kinds'>>} */
-  kinds: (q) => get(`/${enc(q)}/kinds`),
-  /** @returns {Promise<Res<'/api/v1/queue/stats'>>} */
-  stats: (q) => get(`/${enc(q)}/stats`),
-  /** @type {(q: string, params: Query<'/api/v1/queue/groups'>) => Promise<Res<'/api/v1/queue/groups'>>} */
-  groups: (q, params) => get(`/${enc(q)}/groups`, params),
+  /** @returns {Promise<Res<'/api/v1/queues/queue/kinds'>>} */
+  kinds: (q) => get(`/queues/${enc(q)}/kinds`),
+  /** @returns {Promise<Res<'/api/v1/queues/queue/stats'>>} */
+  stats: (q) => get(`/queues/${enc(q)}/stats`),
+  /** @type {(q: string, params: Query<'/api/v1/queues/queue/groups'>) => Promise<Res<'/api/v1/queues/queue/groups'>>} */
+  groups: (q, params) => get(`/queues/${enc(q)}/groups`, params),
 
-  /** @type {(q: string, params: Query<'/api/v1/queue/jobs'>) => Promise<Res<'/api/v1/queue/jobs'>>} */
-  jobs: (q, params) => get(`/${enc(q)}/jobs`, params),
-  /** @returns {Promise<Res<'/api/v1/queue/jobs/{id}'>>} */
-  job: (q, id) => get(`/${enc(q)}/jobs/${id}`),
-  /** @type {(q: string, body: Body<'/api/v1/queue/jobs', 'post'>) => Promise<Res<'/api/v1/queue/jobs', 'post'>>} */
-  insertJob: (q, body) => post(`/${enc(q)}/jobs`, body),
+  /** @type {(q: string, params: Query<'/api/v1/queues/queue/jobs'>) => Promise<Res<'/api/v1/queues/queue/jobs'>>} */
+  jobs: (q, params) => get(`/queues/${enc(q)}/jobs`, params),
+  /** @returns {Promise<Res<'/api/v1/queues/queue/jobs/{id}'>>} */
+  job: (q, id) => get(`/queues/${enc(q)}/jobs/${id}`),
+  /** @type {(q: string, body: Body<'/api/v1/queues/queue/jobs', 'post'>) => Promise<Res<'/api/v1/queues/queue/jobs', 'post'>>} */
+  insertJob: (q, body) => post(`/queues/${enc(q)}/jobs`, body),
   /** @type {(q: string, id: number, action: 'promote' | 'force-cancel' | 'move-to-dlq' | 'suspend' | 'resume' | 'pause-children' | 'resume-children') => Promise<null>} */
-  jobAction: (q, id, action) => post(`/${enc(q)}/jobs/${id}/${action}`),
-  cancelJob: (q, id) => del(`/${enc(q)}/jobs/${id}`),
+  jobAction: (q, id, action) => post(`/queues/${enc(q)}/jobs/${id}/${action}`),
+  cancelJob: (q, id) => del(`/queues/${enc(q)}/jobs/${id}`),
   /** @type {(q: string, id: number, runAt: string) => Promise<null>} */
-  rescheduleJob: (q, id, runAt) => post(`/${enc(q)}/jobs/${id}/reschedule`, /** @type {Body<'/api/v1/queue/jobs/{id}/reschedule', 'post'>} */ ({ runAt })),
+  rescheduleJob: (q, id, runAt) => post(`/queues/${enc(q)}/jobs/${id}/reschedule`, /** @type {Body<'/api/v1/queues/queue/jobs/{id}/reschedule', 'post'>} */ ({ runAt })),
 
-  /** @type {(q: string, params: Query<'/api/v1/queue/dlq'>) => Promise<Res<'/api/v1/queue/dlq'>>} */
-  dlq: (q, params) => get(`/${enc(q)}/dlq`, params),
-  retryDlq: (q, id, payload) => post(`/${enc(q)}/dlq/${id}/retry`, withPayload(payload)),
-  deleteDlq: (q, id) => del(`/${enc(q)}/dlq/${id}`),
-  /** @returns {Promise<Res<'/api/v1/queue/dlq/batch-delete', 'post'>>} */
-  deleteDlqMany: (q, ids) => post(`/${enc(q)}/dlq/batch-delete`, { ids }),
+  /** @type {(q: string, params: Query<'/api/v1/queues/queue/dlq'>) => Promise<Res<'/api/v1/queues/queue/dlq'>>} */
+  dlq: (q, params) => get(`/queues/${enc(q)}/dlq`, params),
+  retryDlq: (q, id, payload) => post(`/queues/${enc(q)}/dlq/${id}/retry`, withPayload(payload)),
+  deleteDlq: (q, id) => del(`/queues/${enc(q)}/dlq/${id}`),
+  /** @returns {Promise<Res<'/api/v1/queues/queue/dlq/batch-delete', 'post'>>} */
+  deleteDlqMany: (q, ids) => post(`/queues/${enc(q)}/dlq/batch-delete`, { ids }),
 
-  /** @type {(q: string, params: Query<'/api/v1/queue/archive'>) => Promise<Res<'/api/v1/queue/archive'>>} */
-  archive: (q, params) => get(`/${enc(q)}/archive`, params),
-  requeueArchive: (q, id, payload) => post(`/${enc(q)}/archive/${id}/reenqueue`, withPayload(payload)),
-  deleteArchive: (q, id) => del(`/${enc(q)}/archive/${id}`),
-  /** @returns {Promise<Res<'/api/v1/queue/archive/batch-delete', 'post'>>} */
-  deleteArchiveMany: (q, ids) => post(`/${enc(q)}/archive/batch-delete`, { ids }),
+  /** @type {(q: string, params: Query<'/api/v1/queues/queue/archive'>) => Promise<Res<'/api/v1/queues/queue/archive'>>} */
+  archive: (q, params) => get(`/queues/${enc(q)}/archive`, params),
+  requeueArchive: (q, id, payload) => post(`/queues/${enc(q)}/archive/${id}/reenqueue`, withPayload(payload)),
+  deleteArchive: (q, id) => del(`/queues/${enc(q)}/archive/${id}`),
+  /** @returns {Promise<Res<'/api/v1/queues/queue/archive/batch-delete', 'post'>>} */
+  deleteArchiveMany: (q, ids) => post(`/queues/${enc(q)}/archive/batch-delete`, { ids }),
 
   /** @returns {Promise<Res<'/api/v1/cron/schedules'>>} */
   cron: (queue) => get('/cron/schedules', { queue }),

@@ -63,7 +63,7 @@ Module: [arbiter-servant-openapi Haddocks](https://arbiterq.dev/arbiter-servant-
 
 ## Endpoints
 
-Per-queue endpoints under `/api/v1/:queue/`:
+Per-queue endpoints under `/api/v1/queues/:queue/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -133,7 +133,7 @@ Global endpoints under `/api/v1/`:
 payload:
 
 ```http
-POST /api/v1/email_queue/dlq/12/retry
+POST /api/v1/queues/email_queue/dlq/12/retry
 Content-Type: application/json
 
 {"payload": {"tag": "SendWelcome", "contents": "alice@example.com"}}
@@ -150,7 +150,7 @@ Content-Type: application/json
 `jobs/:id/reschedule` sets when a job becomes visible:
 
 ```http
-POST /api/v1/email_queue/jobs/41/reschedule
+POST /api/v1/queues/email_queue/jobs/41/reschedule
 Content-Type: application/json
 
 {"runAt": "2026-10-01T09:00:00Z"}
@@ -165,7 +165,7 @@ the attempt count, records a claimant, and hides each job for the lease. A
 paused queue returns no leases.
 
 ```http
-POST /api/v1/email_queue/claim
+POST /api/v1/queues/email_queue/claim
 {"maxJobs": 5, "leaseSeconds": 60}
 ```
 
@@ -176,14 +176,14 @@ clamps to 3600.
 finalization request carries them:
 
 ```http
-POST /api/v1/email_queue/jobs/41/ack
+POST /api/v1/queues/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31"}
 ```
 
 On a `QueueWithResult` queue, `ack` takes the result:
 
 ```http
-POST /api/v1/email_queue/jobs/41/ack
+POST /api/v1/queues/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31", "result": ["delivered"]}
 ```
 

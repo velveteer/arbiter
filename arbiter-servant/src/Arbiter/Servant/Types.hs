@@ -24,9 +24,8 @@ module Arbiter.Servant.Types
   , Page (..)
   , PageLimit (..)
   , KeyPageLimit (..)
+  , PageSize (..)
   , pageLimitRange
-  , defaultPageLimit
-  , defaultKeyPageLimit
   , Items (..)
   , ArchiveResponse
   , DLQResponse
@@ -211,13 +210,18 @@ newtype KeyPageLimit = KeyPageLimit {unKeyPageLimit :: Int}
 pageLimitRange :: (Int, Int)
 pageLimitRange = (1, 1000)
 
--- | Page size of a job, DLQ, archive or group listing when the request omits it.
-defaultPageLimit :: Int
-defaultPageLimit = 50
+-- | A page-size parameter and the size a request gets when it omits it.
+class PageSize limit where
+  pageSize :: limit -> Int
+  defaultPageSize :: limit
 
--- | Page size of a bucket or key listing when the request omits it.
-defaultKeyPageLimit :: Int
-defaultKeyPageLimit = 100
+instance PageSize PageLimit where
+  pageSize = unPageLimit
+  defaultPageSize = PageLimit 50
+
+instance PageSize KeyPageLimit where
+  pageSize = unKeyPageLimit
+  defaultPageSize = KeyPageLimit 100
 
 -- | One page of a list, with the size of the full list.
 data Page a = Page

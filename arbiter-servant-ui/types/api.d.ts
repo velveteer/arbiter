@@ -226,7 +226,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/archive": {
+    "/api/v1/queues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List queues */
+        get: operations["getQueues"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/queues/queue/archive": {
         parameters: {
             query?: never;
             header?: never;
@@ -246,7 +263,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/archive/batch-delete": {
+    "/api/v1/queues/queue/archive/batch-delete": {
         parameters: {
             query?: never;
             header?: never;
@@ -266,7 +283,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/archive/{id}": {
+    "/api/v1/queues/queue/archive/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -283,7 +300,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/archive/{id}/reenqueue": {
+    "/api/v1/queues/queue/archive/{id}/reenqueue": {
         parameters: {
             query?: never;
             header?: never;
@@ -303,7 +320,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/claim": {
+    "/api/v1/queues/queue/claim": {
         parameters: {
             query?: never;
             header?: never;
@@ -323,7 +340,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/dlq": {
+    "/api/v1/queues/queue/dlq": {
         parameters: {
             query?: never;
             header?: never;
@@ -343,7 +360,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/dlq/batch-delete": {
+    "/api/v1/queues/queue/dlq/batch-delete": {
         parameters: {
             query?: never;
             header?: never;
@@ -363,7 +380,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/dlq/{id}": {
+    "/api/v1/queues/queue/dlq/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -383,7 +400,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/dlq/{id}/retry": {
+    "/api/v1/queues/queue/dlq/{id}/retry": {
         parameters: {
             query?: never;
             header?: never;
@@ -403,7 +420,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/groups": {
+    "/api/v1/queues/queue/groups": {
         parameters: {
             query?: never;
             header?: never;
@@ -423,7 +440,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs": {
+    "/api/v1/queues/queue/jobs": {
         parameters: {
             query?: never;
             header?: never;
@@ -447,7 +464,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/batch": {
+    "/api/v1/queues/queue/jobs/batch": {
         parameters: {
             query?: never;
             header?: never;
@@ -467,7 +484,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}": {
+    "/api/v1/queues/queue/jobs/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -491,7 +508,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/ack": {
+    "/api/v1/queues/queue/jobs/{id}/ack": {
         parameters: {
             query?: never;
             header?: never;
@@ -511,7 +528,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/extend": {
+    "/api/v1/queues/queue/jobs/{id}/extend": {
         parameters: {
             query?: never;
             header?: never;
@@ -531,7 +548,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/force-cancel": {
+    "/api/v1/queues/queue/jobs/{id}/force-cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -551,7 +568,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/move-to-dlq": {
+    "/api/v1/queues/queue/jobs/{id}/move-to-dlq": {
         parameters: {
             query?: never;
             header?: never;
@@ -571,7 +588,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/nack": {
+    "/api/v1/queues/queue/jobs/{id}/nack": {
         parameters: {
             query?: never;
             header?: never;
@@ -591,7 +608,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/pause-children": {
+    "/api/v1/queues/queue/jobs/{id}/pause-children": {
         parameters: {
             query?: never;
             header?: never;
@@ -611,7 +628,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/promote": {
+    "/api/v1/queues/queue/jobs/{id}/promote": {
         parameters: {
             query?: never;
             header?: never;
@@ -628,7 +645,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/reschedule": {
+    "/api/v1/queues/queue/jobs/{id}/reschedule": {
         parameters: {
             query?: never;
             header?: never;
@@ -645,7 +662,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/resume": {
+    "/api/v1/queues/queue/jobs/{id}/resume": {
         parameters: {
             query?: never;
             header?: never;
@@ -662,7 +679,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/resume-children": {
+    "/api/v1/queues/queue/jobs/{id}/resume-children": {
         parameters: {
             query?: never;
             header?: never;
@@ -682,7 +699,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/jobs/{id}/suspend": {
+    "/api/v1/queues/queue/jobs/{id}/suspend": {
         parameters: {
             query?: never;
             header?: never;
@@ -702,7 +719,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/kinds": {
+    "/api/v1/queues/queue/kinds": {
         parameters: {
             query?: never;
             header?: never;
@@ -719,7 +736,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queue/stats": {
+    "/api/v1/queues/queue/stats": {
         parameters: {
             query?: never;
             header?: never;
@@ -728,23 +745,6 @@ export interface paths {
         };
         /** Show queue stats */
         get: operations["queueGetStats"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/queues": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List queues */
-        get: operations["getQueues"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1816,6 +1816,25 @@ export interface operations {
             };
         };
     };
+    getQueues: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["QueuesResponse"];
+                };
+            };
+        };
+    };
     queueGetArchive: {
         parameters: {
             query?: {
@@ -2343,7 +2362,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            /** @description This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2387,7 +2406,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            /** @description This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2490,7 +2509,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description This lease does not hold the job, a registered worker holds it, or the job is suspended. */
+            /** @description This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2728,25 +2747,6 @@ export interface operations {
                 };
                 content: {
                     "application/json;charset=utf-8": components["schemas"]["StatsResponse"];
-                };
-            };
-        };
-    };
-    getQueues: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["QueuesResponse"];
                 };
             };
         };

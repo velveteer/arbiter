@@ -26,6 +26,7 @@ import Data.Aeson.Key (fromText, toText)
 import Data.Aeson.KeyMap (elems, keys)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
+import Data.Foldable (toList)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.List ((\\))
 import Data.OpenApi (Schema (..), ToSchema, toSchema)
@@ -58,14 +59,25 @@ main =
               ids = [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op]]
               folded = map (T.filter isAlphaNum) ids
            in (length (distinct ids), length (distinct folded)) @?= (length (operations doc), length (operations doc))
+      , testCase "operation ids keep queue names that escape to the same hex digits apart" $
+          let doc = openApiSpec @'[Queue "-41" Int, Queue "\x2D41" Text, Queue "\tA" Bool, Queue "\x9A" Double]
+              ids = [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op]]
+           in length (distinct ids) @?= length (operations doc)
       , testCase "operation ids are identifiers" $
-          let doc = openApiSpec @'[Queue "foo-bar" Int, Queue "foo.bar" Text]
-           in [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op], not (T.all identChar opId)]
+          let doc = openApiSpec @'[Queue "foo-bar" Int, Queue "foo.bar" Text, Queue "2fa" Bool]
+           in [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op], not (identifier opId)]
                 @?= []
+      , testCase "a queue named after a shared section leaves the shared ids alone" $
+          let shared = sharedIds twoQueues
+           in [entry | entry@(name, _) <- sharedIds (openApiSpec @'[Queue "health" Int]), name `elem` map fst shared] @?= shared
+      , testCase "a queue named after a shared section gets its own section" $
+          let doc = openApiSpec @'[Queue "health" Int]
+              tagsUnder prefix = distinct [tag | (name, op) <- operations doc, prefix `T.isInfixOf` name, tag <- operationTags op]
+           in filter (`elem` tagsUnder " /api/v1/health") (tagsUnder "/api/v1/queues/health/") @?= []
       , testCase "a down readiness answer declares its body" $
           responseContent "get /api/v1/health" "503" twoQueues @?= responseContent "get /api/v1/health" "200" twoQueues
       , testCase "a lease route declares its refusal" $
-          responseCodes "post /api/v1/a/jobs/{id}/ack" twoQueues @?= ["204", "400", "404", "409"]
+          responseCodes "post /api/v1/queues/a/jobs/{id}/ack" twoQueues @?= ["204", "400", "404", "409"]
       , testGroup
           "handwritten schemas name the keys the encoding sends"
           [ testCase "JobWithStatus" $ keyDrift ApiJobWithStatus {ajwsJob = job, ajwsStatus = InFlight} @?= ([], [])
@@ -150,6 +162,15 @@ payloadProps _ = []
 twoQueues :: Value
 twoQueues = openApiSpec @'[Queue "a" Int, Queue "b" Text]
 
+-- | The operation ids under the shared health section.
+sharedIds :: Value -> [(Text, Value)]
+sharedIds doc =
+  [ (name, opId)
+  | (name, op) <- operations doc
+  , "/api/v1/health" `T.isInfixOf` name
+  , Just opId <- [KeyMap.lookup "operationId" op]
+  ]
+
 -- | Every operation in a document, named by its method and path.
 operations :: Value -> [(Text, Object)]
 operations (Object doc)
@@ -159,6 +180,10 @@ operations (Object doc)
       , (method, Object op) <- KeyMap.toList item
       ]
 operations _ = []
+
+-- | The tags of one operation.
+operationTags :: Object -> [Text]
+operationTags op = [tag | Just (Array tags) <- [KeyMap.lookup "tags" op], String tag <- toList tags]
 
 -- | The response codes one operation declares.
 responseCodes :: Text -> Value -> [Text]
@@ -190,6 +215,9 @@ pathsWithoutOperation _ = []
 
 identChar :: Char -> Bool
 identChar c = isAsciiUpper c || isAsciiLower c || isDigit c || c == '_'
+
+identifier :: Text -> Bool
+identifier text = T.all identChar text && maybe False (not . isDigit . fst) (T.uncons text)
 
 distinct :: (Ord a) => [a] -> [a]
 distinct = Set.toList . Set.fromList

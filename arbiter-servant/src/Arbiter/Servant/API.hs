@@ -104,7 +104,7 @@ type PayloadEditNote =
 
 -- | Why a lease route refuses the lease it was sent.
 type LeaseRefusal =
-  "This lease does not hold the job, a registered worker holds it, or the job is suspended."
+  "This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled."
 
 -- | An error response the route can return, with an optional JSON body. It documents
 -- the route. The server, client and links ignore it.
@@ -152,7 +152,7 @@ data JobsAPI payload result mode = JobsAPI
           :> QueryParam "sort_by" JobSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (JobsResponse payload)
-  -- ^ @GET \/:queue\/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&kind=X&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/jobs?limit=N&offset=N&group_key=X&parent_id=N&job_id=N&roots_only&status=S&claimed_by=UUID&kind=X&payload=text&rate_limit_prefix=X&concurrency_prefix=X&sort_by=...&sort_dir=...@
   , insertJob
       :: mode
         :- Summary "Enqueue a job"
@@ -162,7 +162,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Throws 409 "An ignore dedup key matched a job that was deleted before the server could read it."
           :> ReqBody '[JSON] (ApiJobWrite payload)
           :> Post '[JSON] (JobResponse (JobRead payload))
-  -- ^ @POST \/:queue\/jobs@
+  -- ^ @POST \/queues\/:queue\/jobs@
   , insertJobsBatch
       :: mode
         :- Summary "Enqueue many jobs"
@@ -171,14 +171,14 @@ data JobsAPI payload result mode = JobsAPI
           :> "batch"
           :> ReqBody '[JSON] (BatchInsertRequest payload)
           :> Post '[JSON] (BatchInsertResponse payload)
-  -- ^ @POST \/:queue\/jobs\/batch@
+  -- ^ @POST \/queues\/:queue\/jobs\/batch@
   , getJob
       :: mode
         :- Summary "Show a job"
           :> Description "The response includes the derived status."
           :> Capture "id" Int64
           :> Get '[JSON] (JobResponse (ApiJobWithStatus (Stored payload)))
-  -- ^ @GET \/:queue\/jobs\/:id@
+  -- ^ @GET \/queues\/:queue\/jobs\/:id@
   , cancelJob
       :: mode
         :- Summary "Cancel a job and its descendants"
@@ -186,7 +186,7 @@ data JobsAPI payload result mode = JobsAPI
                "Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler."
           :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/jobs\/:id@
+  -- ^ @DELETE \/queues\/:queue\/jobs\/:id@
   , forceCancelJob
       :: mode
         :- Summary "Cancel a job and interrupt its handlers"
@@ -195,7 +195,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "force-cancel"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/force-cancel@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/force-cancel@
   , ackClaimedJob
       :: mode
         :- Summary "Complete a held job"
@@ -206,7 +206,7 @@ data JobsAPI payload result mode = JobsAPI
           :> "ack"
           :> ReqBody '[JSON] (AckRequest result)
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/ack@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/ack@
   , nackClaimedJob
       :: mode
         :- Summary "Return a held job"
@@ -216,7 +216,7 @@ data JobsAPI payload result mode = JobsAPI
           :> "nack"
           :> ReqBody '[JSON] JobLease
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/nack@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/nack@
   , extendClaimedJob
       :: mode
         :- Summary "Extend a held lease"
@@ -226,7 +226,7 @@ data JobsAPI payload result mode = JobsAPI
           :> "extend"
           :> ReqBody '[JSON] ExtendRequest
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/extend@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/extend@
   , promoteJob
       :: mode
         :- Summary "Make a job visible now"
@@ -234,7 +234,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "promote"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/promote@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/promote@
   , rescheduleJob
       :: mode
         :- Summary "Set when a job becomes visible"
@@ -243,7 +243,7 @@ data JobsAPI payload result mode = JobsAPI
           :> "reschedule"
           :> ReqBody '[JSON] RescheduleRequest
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/reschedule@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/reschedule@
   , moveToDLQ
       :: mode
         :- Summary "Move a job to the DLQ"
@@ -253,7 +253,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "move-to-dlq"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/move-to-dlq@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/move-to-dlq@
   , pauseChildren
       :: mode
         :- Summary "Suspend the visible descendants of a job"
@@ -262,7 +262,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "pause-children"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/pause-children@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/pause-children@
   , resumeChildren
       :: mode
         :- Summary "Resume the suspended descendants of a job"
@@ -271,7 +271,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "resume-children"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/resume-children@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/resume-children@
   , suspendJob
       :: mode
         :- Summary "Suspend a job"
@@ -280,7 +280,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "suspend"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/suspend@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/suspend@
   , resumeJob
       :: mode
         :- Summary "Resume a suspended job"
@@ -288,7 +288,7 @@ data JobsAPI payload result mode = JobsAPI
           :> Capture "id" Int64
           :> "resume"
           :> PostNoContent
-  -- ^ @POST \/:queue\/jobs\/:id\/resume@
+  -- ^ @POST \/queues\/:queue\/jobs\/:id\/resume@
   }
   deriving stock (Generic)
 
@@ -310,7 +310,7 @@ data DLQAPI payload mode = DLQAPI
           :> QueryParam "sort_by" DLQSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (DLQResponse payload)
-  -- ^ @GET \/:queue\/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/dlq?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&error=text&sort_by=...&sort_dir=...@
   , retryFromDLQ
       :: mode
         :- Summary "Retry a dead-lettered job"
@@ -320,14 +320,14 @@ data DLQAPI payload mode = DLQAPI
           :> "retry"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  -- ^ @POST \/:queue\/dlq\/:id\/retry@
+  -- ^ @POST \/queues\/:queue\/dlq\/:id\/retry@
   , deleteDLQ
       :: mode
         :- Summary "Delete a dead-lettered job"
           :> Description "Resumes its parent when no child of the parent is left in the queue."
           :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/dlq\/:id@
+  -- ^ @DELETE \/queues\/:queue\/dlq\/:id@
   , deleteDLQBatch
       :: mode
         :- Summary "Delete dead-lettered jobs"
@@ -335,7 +335,7 @@ data DLQAPI payload mode = DLQAPI
           :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
-  -- ^ @POST \/:queue\/dlq\/batch-delete@
+  -- ^ @POST \/queues\/:queue\/dlq\/batch-delete@
   }
   deriving stock (Generic)
 
@@ -357,7 +357,7 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> QueryParam "sort_by" ArchiveSortColumn
           :> QueryParam "sort_dir" SortDir
           :> Get '[JSON] (ArchiveResponse payload)
-  -- ^ @GET \/:queue\/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...@
+  -- ^ @GET \/queues\/:queue\/archive?limit=N&offset=N&parent_id=N&job_id=N&group_key=X&kind=X&payload=text&completed_after=T&completed_before=T&sort_by=...&sort_dir=...@
   , reEnqueueArchive
       :: mode
         :- Summary "Run an archived job again"
@@ -366,13 +366,13 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> "reenqueue"
           :> ReqBody' '[Description PayloadEditNote] '[OptionalJSON] (Maybe (PayloadEdit payload))
           :> PostNoContent
-  -- ^ @POST \/:queue\/archive\/:id\/reenqueue@
+  -- ^ @POST \/queues\/:queue\/archive\/:id\/reenqueue@
   , deleteArchive
       :: mode
         :- Summary "Delete an archived job"
           :> Capture "id" Int64
           :> DeleteNoContent
-  -- ^ @DELETE \/:queue\/archive\/:id@
+  -- ^ @DELETE \/queues\/:queue\/archive\/:id@
   , deleteArchiveBatch
       :: mode
         :- Summary "Delete archived jobs"
@@ -380,7 +380,7 @@ data ArchiveAPI payload mode = ArchiveAPI
           :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
-  -- ^ @POST \/:queue\/archive\/batch-delete@
+  -- ^ @POST \/queues\/:queue\/archive\/batch-delete@
   }
   deriving stock (Generic)
 
@@ -390,7 +390,7 @@ data StatsAPI mode = StatsAPI
       :: mode
         :- Summary "Show queue stats"
           :> Get '[JSON] StatsResponse
-  -- ^ @GET \/:queue\/stats@
+  -- ^ @GET \/queues\/:queue\/stats@
   }
   deriving stock (Generic)
 
@@ -409,7 +409,7 @@ newtype MaintenanceAPI mode = MaintenanceAPI
 -- | One queue's routes.
 data TableAPI payload result mode = TableAPI
   { jobs :: mode :- "jobs" :> NamedRoutes (JobsAPI payload result)
-  -- ^ @\/:queue\/jobs@ The job routes.
+  -- ^ @\/queues\/:queue\/jobs@ The job routes.
   , claimJobs
       :: mode
         :- Summary "Claim jobs"
@@ -418,19 +418,19 @@ data TableAPI payload result mode = TableAPI
           :> "claim"
           :> ReqBody '[JSON] ClaimRequest
           :> Post '[JSON] (ClaimResponse payload)
-  -- ^ @POST \/:queue\/claim@
+  -- ^ @POST \/queues\/:queue\/claim@
   , dlq :: mode :- "dlq" :> NamedRoutes (DLQAPI payload)
-  -- ^ @\/:queue\/dlq@ The DLQ routes.
+  -- ^ @\/queues\/:queue\/dlq@ The DLQ routes.
   , archive :: mode :- "archive" :> NamedRoutes (ArchiveAPI payload)
-  -- ^ @\/:queue\/archive@ The archive routes.
+  -- ^ @\/queues\/:queue\/archive@ The archive routes.
   , stats :: mode :- "stats" :> NamedRoutes StatsAPI
-  -- ^ @\/:queue\/stats@ The stats route.
+  -- ^ @\/queues\/:queue\/stats@ The stats route.
   , listKinds
       :: mode
         :- Summary "List payload kinds"
           :> "kinds"
           :> Get '[JSON] [Text]
-  -- ^ @GET \/:queue\/kinds@
+  -- ^ @GET \/queues\/:queue\/kinds@
   , listGroups
       :: mode
         :- Summary "List open groups"
@@ -440,7 +440,7 @@ data TableAPI payload result mode = TableAPI
           :> QueryParam "offset" Int
           :> QueryParam "group_key" Text
           :> Get '[JSON] GroupsResponse
-  -- ^ @GET \/:queue\/groups?limit=N&offset=N&group_key=X@
+  -- ^ @GET \/queues\/:queue\/groups?limit=N&offset=N&group_key=X@
   }
   deriving stock (Generic)
 
@@ -691,7 +691,7 @@ type SharedAPI =
 type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
   RegistryToAPI '[] = SharedAPI
   RegistryToAPI (spec ': rest) =
-    (SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)))
+    ("queues" :> SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)))
       :<|> RegistryToAPI rest
 
 -- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
