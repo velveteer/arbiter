@@ -22,7 +22,7 @@ import { plainClick, queueUrl } from '../router.js';
 import { toast } from '../store.js';
 import { ancestors, fillAncestors, submitForm, useArm, useBusy, useColumns, useDetail, useStored, useTable, useView } from '../use.js';
 /** @import { Res, Schema } from '../../../types/client' */
-/** @typedef {Res<'/api/v1/queues/queue/jobs'>['items'][number]} Job */
+/** @typedef {Res<'/api/queues/queue/jobs'>['items'][number]} Job */
 
 // Header and cell order. weight is a share of the width among the columns shown.
 const COLS = [
@@ -110,7 +110,7 @@ export const JobsTab = {
   props: { queue: String },
   setup(props) {
     const queue = props.queue;
-    /** @typedef {Pick<Res<'/api/v1/queues/queue/jobs'>, 'items' | 'total' | 'childCounts' | 'dlqChildCounts'>} Level */
+    /** @typedef {Pick<Res<'/api/queues/queue/jobs'>, 'items' | 'total' | 'childCounts' | 'dlqChildCounts'>} Level */
     const root = shallowRef(/** @type {Level} */ ({ items: [], total: 0, childCounts: {}, dlqChildCounts: {} }));
     // Open expansions by parent id.
     const expanded = shallowReactive(/** @type {Record<string, Level>} */ ({}));

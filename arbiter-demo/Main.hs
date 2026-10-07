@@ -137,7 +137,7 @@ demoApp :: Maybe FilePath -> ArbiterServerConfig (SimpleDb DemoRegistry IO) Demo
 demoApp mDevDir config =
   serve (Proxy @DemoAPI) $
     arbiterServer config
-      :<|> swaggerSchemaUIServer (openApiSpec @DemoRegistry)
+      :<|> swaggerSchemaUIServer (openApiSpec @DemoRegistry "demo")
       :<|> maybe adminUIServer adminUIServerDev mDevDir
 
 -- | Demo registry with multiple queues
@@ -259,7 +259,7 @@ runDemo tel = do
   -- Start server
   putStrLn ""
   putStrLn "=== Server Starting ==="
-  putStrLn $ "API:     http://localhost:" <> show port <> "/api/v1"
+  putStrLn $ "API:     http://localhost:" <> show port <> "/api"
   putStrLn $ "Admin:   http://localhost:" <> show port <> "/"
   putStrLn $ "Docs:    http://localhost:" <> show port <> "/docs"
   putStrLn "Workers and cron schedules running across all queues"

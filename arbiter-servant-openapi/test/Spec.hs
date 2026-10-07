@@ -25,7 +25,7 @@ import Data.Aeson (Object, ToJSON, Value (Array, Object, String), toJSON)
 import Data.Aeson.Key (fromText, toText)
 import Data.Aeson.KeyMap (elems, keys)
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Foldable (toList)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.List ((\\))
@@ -46,38 +46,49 @@ main =
     testGroup
       "schemas describe the encodings"
       [ testCase "queues with unnamed payload types keep their own job schemas" $
-          payloadTypes (openApiSpec @'[Queue "a" Int, Queue "b" Text]) @?= ["integer", "string"]
+          payloadTypes (openApiSpec @'[Queue "a" Int, Queue "b" Text] "test") @?= ["integer", "string"]
       , testCase "every path has an operation" $
-          pathsWithoutOperation (openApiSpec @'[Queue "a" Int]) @?= []
+          pathsWithoutOperation (openApiSpec @'[Queue "a" Int] "test") @?= []
       , testCase "every operation has a summary" $
           [name | (name, op) <- operations twoQueues, not (KeyMap.member "summary" op)] @?= []
       , testCase "operation ids are present and unique across queues" $
           let ids = [opId | (_, op) <- operations twoQueues, Just (String opId) <- [KeyMap.lookup "operationId" op]]
            in (length ids, length (distinct ids)) @?= (length (operations twoQueues), length (operations twoQueues))
       , testCase "operation ids keep queue names that differ only in case or separator apart" $
-          let doc = openApiSpec @'[Queue "fooBar" Int, Queue "foobar" Text, Queue "foo-bar" Bool, Queue "foo_bar" Double]
+          let doc = openApiSpec @'[Queue "fooBar" Int, Queue "foobar" Text, Queue "foo-bar" Bool, Queue "foo_bar" Double] "test"
               ids = [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op]]
-              folded = map (T.filter isAlphaNum) ids
-           in (length (distinct ids), length (distinct folded)) @?= (length (operations doc), length (operations doc))
+           in length (distinct ids) @?= length (operations doc)
       , testCase "operation ids keep queue names that escape to the same hex digits apart" $
-          let doc = openApiSpec @'[Queue "-41" Int, Queue "\x2D41" Text, Queue "\tA" Bool, Queue "\x9A" Double]
+          let doc = openApiSpec @'[Queue "-41" Int, Queue "\x2D41" Text, Queue "\tA" Bool, Queue "\x9A" Double] "test"
               ids = [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op]]
            in length (distinct ids) @?= length (operations doc)
       , testCase "operation ids are identifiers" $
-          let doc = openApiSpec @'[Queue "foo-bar" Int, Queue "foo.bar" Text, Queue "2fa" Bool]
+          let doc = openApiSpec @'[Queue "foo-bar" Int, Queue "foo.bar" Text, Queue "2fa" Bool] "test"
            in [opId | (_, op) <- operations doc, Just (String opId) <- [KeyMap.lookup "operationId" op], not (identifier opId)]
                 @?= []
+      , testCase "operation ids keep snake_case queue names readable" $
+          let doc = openApiSpec @'[Queue "email_queue" Int] "test"
+           in [ opId
+              | (_, op) <- operations doc
+              , Just (String opId) <- [KeyMap.lookup "operationId" op]
+              , "email_queueGet" `T.isPrefixOf` opId
+              ]
+                /= []
+                @?= True
       , testCase "a queue named after a shared section leaves the shared ids alone" $
           let shared = sharedIds twoQueues
-           in [entry | entry@(name, _) <- sharedIds (openApiSpec @'[Queue "health" Int]), name `elem` map fst shared] @?= shared
+           in [entry | entry@(name, _) <- sharedIds (openApiSpec @'[Queue "health" Int] "test"), name `elem` map fst shared]
+                @?= shared
       , testCase "a queue named after a shared section gets its own section" $
-          let doc = openApiSpec @'[Queue "health" Int]
+          let doc = openApiSpec @'[Queue "health" Int] "test"
               tagsUnder prefix = distinct [tag | (name, op) <- operations doc, prefix `T.isInfixOf` name, tag <- operationTags op]
-           in filter (`elem` tagsUnder " /api/v1/health") (tagsUnder "/api/v1/queues/health/") @?= []
+           in filter (`elem` tagsUnder " /api/health") (tagsUnder "/api/queues/health/") @?= []
       , testCase "a down readiness answer declares its body" $
-          responseContent "get /api/v1/health" "503" twoQueues @?= responseContent "get /api/v1/health" "200" twoQueues
+          responseContent "get /api/health" "503" twoQueues @?= responseContent "get /api/health" "200" twoQueues
       , testCase "a lease route declares its refusal" $
-          responseCodes "post /api/v1/queues/a/jobs/{id}/ack" twoQueues @?= ["204", "400", "404", "409"]
+          responseCodes "post /api/queues/a/jobs/{id}/ack" twoQueues @?= ["204", "400", "404", "409"]
+      , testCase "a refusal declares no content type" $
+          responseContent "post /api/queues/a/jobs/{id}/ack" "409" twoQueues @?= []
       , testGroup
           "handwritten schemas name the keys the encoding sends"
           [ testCase "JobWithStatus" $ keyDrift ApiJobWithStatus {ajwsJob = job, ajwsStatus = InFlight} @?= ([], [])
@@ -160,14 +171,14 @@ payloadProps _ = []
 
 -- | A document with two queues, so per-queue routes appear twice.
 twoQueues :: Value
-twoQueues = openApiSpec @'[Queue "a" Int, Queue "b" Text]
+twoQueues = openApiSpec @'[Queue "a" Int, Queue "b" Text] "test"
 
 -- | The operation ids under the shared health section.
 sharedIds :: Value -> [(Text, Value)]
 sharedIds doc =
   [ (name, opId)
   | (name, op) <- operations doc
-  , "/api/v1/health" `T.isInfixOf` name
+  , "/api/health" `T.isInfixOf` name
   , Just opId <- [KeyMap.lookup "operationId" op]
   ]
 

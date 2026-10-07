@@ -106,11 +106,10 @@ type PayloadEditNote =
 type LeaseRefusal =
   "This lease does not hold the job, a registered worker holds it, the job is suspended, or the job was force-cancelled."
 
--- | An error response the route can return, with an optional JSON body. It documents
--- the route. The server, client and links ignore it.
+-- | A documented error response with an optional JSON body. The server, client and links ignore it.
 data Throws' (status :: Nat) (reason :: Symbol) (body :: Maybe Type)
 
--- | An error response with no body.
+-- | An error response with no declared content type.
 type Throws status reason = Throws' status reason 'Nothing
 
 -- | An error response with a JSON body of type @body@.
@@ -200,7 +199,7 @@ data JobsAPI payload result mode = JobsAPI
       :: mode
         :- Summary "Complete a held job"
           :> Description
-               "Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive."
+               "Send the claimSeq and claimedBy from the claim. The server stores the optional result for the parent rollup or the archive."
           :> Throws 409 LeaseRefusal
           :> Capture "id" Int64
           :> "ack"
@@ -258,7 +257,7 @@ data JobsAPI payload result mode = JobsAPI
       :: mode
         :- Summary "Suspend the visible descendants of a job"
           :> Description
-               "Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended."
+               "The operation skips descendants that are in flight, delayed or throttled. Succeeds when nothing is suspended. 404 when the job is gone."
           :> Capture "id" Int64
           :> "pause-children"
           :> PostNoContent
@@ -267,7 +266,7 @@ data JobsAPI payload result mode = JobsAPI
       :: mode
         :- Summary "Resume the suspended descendants of a job"
           :> Description
-               "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed."
+               "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed. 404 when the job is gone."
           :> Capture "id" Int64
           :> "resume-children"
           :> PostNoContent
@@ -331,7 +330,7 @@ data DLQAPI payload mode = DLQAPI
   , deleteDLQBatch
       :: mode
         :- Summary "Delete dead-lettered jobs"
-          :> Description "Returns the number deleted. Unknown ids are skipped."
+          :> Description "Returns the number deleted. The server skips unknown ids."
           :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
@@ -376,7 +375,7 @@ data ArchiveAPI payload mode = ArchiveAPI
   , deleteArchiveBatch
       :: mode
         :- Summary "Delete archived jobs"
-          :> Description "Returns the number deleted. Unknown ids are skipped."
+          :> Description "Returns the number deleted. The server skips unknown ids."
           :> "batch-delete"
           :> ReqBody '[JSON] BatchDeleteRequest
           :> Post '[JSON] BatchDeleteResponse
@@ -441,6 +440,26 @@ data TableAPI payload result mode = TableAPI
           :> QueryParam "group_key" Text
           :> Get '[JSON] GroupsResponse
   -- ^ @GET \/queues\/:queue\/groups?limit=N&offset=N&group_key=X@
+  , getDetails
+      :: mode
+        :- Summary "Show the pause state of a queue"
+          :> Description "Null when the queue was never paused or resumed."
+          :> "details"
+          :> Get '[JSON] (Maybe QueueRow)
+  -- ^ @GET \/queues\/:queue\/details@
+  , pauseQueue
+      :: mode
+        :- Summary "Pause a queue"
+          :> Description "Workers do not claim from the queue. Claims through this API return no jobs."
+          :> "pause"
+          :> PostNoContent
+  -- ^ @POST \/queues\/:queue\/pause@
+  , resumeQueue
+      :: mode
+        :- Summary "Resume a queue"
+          :> "resume"
+          :> PostNoContent
+  -- ^ @POST \/queues\/:queue\/resume@
   }
   deriving stock (Generic)
 
@@ -457,29 +476,6 @@ data QueuesAPI mode = QueuesAPI
           :> "stats"
           :> Get '[JSON] AllStatsResponse
   -- ^ @GET \/queues\/stats@
-  , getDetails
-      :: mode
-        :- Summary "Show the pause state of a queue"
-          :> Description "Null when the queue was never paused or resumed."
-          :> Capture "queue" Text
-          :> "details"
-          :> Get '[JSON] (Maybe QueueRow)
-  -- ^ @GET \/queues\/:queue\/details@
-  , pauseQueue
-      :: mode
-        :- Summary "Pause a queue"
-          :> Description "Workers do not claim from the queue. Claims through this API return no jobs."
-          :> Capture "queue" Text
-          :> "pause"
-          :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/pause@
-  , resumeQueue
-      :: mode
-        :- Summary "Resume a queue"
-          :> Capture "queue" Text
-          :> "resume"
-          :> PostNoContent
-  -- ^ @POST \/queues\/:queue\/resume@
   }
   deriving stock (Generic)
 
@@ -694,7 +690,7 @@ type family RegistryToAPI (registry :: JobPayloadRegistry) :: Type where
     ("queues" :> SpecName spec :> NamedRoutes (TableAPI (SpecPayload spec) (SpecResult spec)))
       :<|> RegistryToAPI rest
 
--- | Top-level Arbiter API, mounted at @\/api\/v1@. The route tree under that
+-- | Top-level Arbiter API, mounted at @\/api@. The route tree under that
 -- prefix is generated from the registry. See 'RegistryToAPI' for the shape.
 type ArbiterAPI :: JobPayloadRegistry -> Type
-type ArbiterAPI registry = "api" :> "v1" :> RegistryToAPI registry
+type ArbiterAPI registry = "api" :> RegistryToAPI registry

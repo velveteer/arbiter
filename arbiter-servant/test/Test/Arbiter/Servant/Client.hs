@@ -23,4 +23,4 @@ spec =
   describe "servant interpreters" $
     it "link a lease route" $ do
       let queueLinks :<|> _ = allLinks (Proxy @(ArbiterAPI Registry))
-      show (linkURI (ackClaimedJob (jobs queueLinks) 7)) `shouldBe` "api/v1/queues/q/jobs/7/ack"
+      show (linkURI (ackClaimedJob (jobs queueLinks) 7)) `shouldBe` "api/queues/q/jobs/7/ack"

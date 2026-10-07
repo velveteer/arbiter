@@ -6,9 +6,9 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | OpenAPI 3 description of 'Arbiter.Servant.API.ArbiterAPI'. The route types
--- define paths, methods, parameters, bodies, and success responses.
--- @RegistryToAPI@ expands to the server route tree and includes each queue by
--- its registry name with its payload and result schemas.
+-- define paths, methods, parameters, bodies, success responses, and the declared
+-- error responses. @RegistryToAPI@ expands to the server route tree and includes
+-- each queue by its registry name with its payload and result schemas.
 --
 -- Each payload and result type requires a 'ToSchema' instance. For generic JSON, use
 -- @deriving anyclass (ToSchema)@. This module defines a 'Data.Aeson.Value'
@@ -42,7 +42,6 @@ import Arbiter.Core.Job.Types
   , setPriority
   )
 import Arbiter.Core.Job.Types.Internal (JobRecord (Job))
-import Arbiter.Core.QueueRegistry (RegistryTables (registryTableNames))
 import Arbiter.Core.RateLimit.Spec (RateLimitKey (RateLimitKey))
 import Arbiter.Core.Sql.Jobs
   ( ArchiveSortColumn
@@ -59,7 +58,7 @@ import Arbiter.Servant.API (ArbiterAPI, Throws')
 import Arbiter.Servant.Types
 import Control.Applicative ((<|>))
 import Data.Aeson (ToJSON (..), Value (Null))
-import Data.Char (isAsciiLower, isAsciiUpper, isDigit, ord, toUpper)
+import Data.Char (isAsciiLower, isDigit, ord, toUpper)
 import Data.HashMap.Strict.InsOrd qualified as InsOrd
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.Int (Int32, Int64)
@@ -93,6 +92,8 @@ import Data.OpenApi.Declare (Declare)
 import Data.OpenApi.Internal.Schema (GToSchema)
 import Data.Proxy (Proxy (..))
 import Data.Ratio (denominator, numerator)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime)
@@ -106,91 +107,101 @@ import Servant.OpenApi (HasOpenApi, toOpenApi)
 
 -- | The document's own route, for mounting beside 'Arbiter.Servant.API.ArbiterAPI'.
 -- Mount it before @Arbiter.Servant.UI.AdminUI@. That route is a @Raw@ catch-all.
--- Give the registry by type application:
+-- Give the registry by type application and the document version as an argument:
 --
 -- @
 -- type MyApp = ArbiterAPI MyRegistry :\<|\> OpenApiAPI :\<|\> AdminUI
--- run port $ serve (Proxy \@MyApp) (arbiterServer config :\<|\> openApiServer \@MyRegistry :\<|\> adminUIServer)
+-- run port $ serve (Proxy \@MyApp) (arbiterServer config :\<|\> openApiServer \@MyRegistry \"1.0.0\" :\<|\> adminUIServer)
 -- @
 type OpenApiAPI = "openapi.json" :> Get '[JSON] Value
 
--- | Serve the description of a registry's API.
-openApiServer :: forall registry. (HasOpenApi (ArbiterAPI registry), RegistryTables registry) => Server OpenApiAPI
-openApiServer = pure (openApiSpec @registry)
+-- | Serve the description of a registry's API at a given document version.
+openApiServer :: forall registry. (HasOpenApi (ArbiterAPI registry)) => Text -> Server OpenApiAPI
+openApiServer = pure . openApiSpec @registry
 
--- | The description of a registry's API, from its route types.
-openApiSpec :: forall registry. (HasOpenApi (ArbiterAPI registry), RegistryTables registry) => Value
-openApiSpec = toJSON (sectioned (`elem` registryTableNames (Proxy @registry)) described)
+-- | The description of a registry's API, from its route types. The version
+-- goes to @info.version@. The document also describes the registry's queues
+-- and payloads, so the caller owns its version.
+openApiSpec :: forall registry. (HasOpenApi (ArbiterAPI registry)) => Text -> Value
+openApiSpec docVersion = toJSON (sectioned described)
   where
     described =
       (toOpenApi (Proxy @(ArbiterAPI registry)))
         { _openApiInfo =
             mempty
               { _infoTitle = "Arbiter"
-              , _infoVersion = "v1"
+              , _infoVersion = docVersion
               , _infoDescription = Just apiDescription
               }
         }
 
 -- | Group operations by section. Queue routes use the queue name. Other routes use
 -- the first path segment below the mount point.
-sectioned :: (TagName -> Bool) -> OpenApi -> OpenApi
-sectioned isQueue spec =
+sectioned :: OpenApi -> OpenApi
+sectioned spec =
   spec
-    { _openApiPaths =
-        InsOrd.mapWithKey
-          (annotatePath (queueRoute isQueue))
-          (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
-    , _openApiTags = InsOrdSet.fromList (map (section (queueRoute isQueue)) (InsOrd.keys (_openApiPaths spec)))
+    { _openApiPaths = fmap snd annotated
+    , _openApiTags = InsOrdSet.fromList (map fst (InsOrd.elems annotated))
     }
+  where
+    routed =
+      InsOrd.mapWithKey
+        (\path item -> (queueRoute path, item))
+        (InsOrd.adjust describeStream eventStreamPath (_openApiPaths spec))
+    shared = Set.fromList [sharedSection path | (path, (Nothing, _)) <- InsOrd.toList routed]
+    annotated =
+      InsOrd.mapWithKey
+        (\path (route, item) -> let tag = section route shared path in (tag, annotatePath route tag path item))
+        routed
 
 -- | A queue route's queue name and the segments after it.
-queueRoute :: (TagName -> Bool) -> FilePath -> Maybe (TagName, [Text])
-queueRoute isQueue path =
+queueRoute :: FilePath -> Maybe (TagName, [Text])
+queueRoute path =
   case mounted path of
-    segment : queue : rest@(_ : _) | segment == queuesSegment && isQueue queue -> Just (queue, rest)
+    segment : queue : rest@(_ : _) | segment == queuesSegment -> Just (queue, rest)
     _ -> Nothing
 
--- | The path's section, a heading with a sentence under it. A queue with the name of a shared
--- section gets the heading @<name> queue@.
-section :: (FilePath -> Maybe (TagName, [Text])) -> FilePath -> Tag
-section queueOf path =
-  case queueOf path of
+-- | The path's section. A queue with the name of a shared section gets the heading @<name> queue@.
+section :: Maybe (TagName, [Text]) -> Set TagName -> FilePath -> Tag
+section route shared path =
+  case route of
     Just (queue, _) ->
       tag
-        (if queue `elem` map fst sectionDescriptions then queue <> " queue" else queue)
-        (Just ("Jobs, leases, dead letters, archive, groups, kinds and stats for the " <> queue <> " queue."))
+        (if Set.member queue shared then queue <> " queue" else queue)
+        (Just ("Jobs, leases, dead letters, archive, groups, kinds, stats and pause state for the " <> queue <> " queue."))
     Nothing ->
-      let name = fromMaybe "api" (listToMaybe (mounted path)) in tag name (lookup name sectionDescriptions)
+      let name = sharedSection path in tag name (lookup name sectionDescriptions)
   where
     tag name description = Tag {_tagName = name, _tagDescription = description, _tagExternalDocs = Nothing}
+
+-- | The section of a path outside the queue routes.
+sharedSection :: FilePath -> TagName
+sharedSection path = fromMaybe "api" (listToMaybe (mounted path))
 
 -- | The path's segments below the mount point.
 mounted :: FilePath -> [Text]
 mounted path = drop (length mountSegments) (filter (not . T.null) (T.splitOn "/" (T.pack path)))
 
--- | An operation id from the method and the path below the mount point. A capture reads as @By@ and its name.
--- A queue route starts with the queue name in place of the @queues@ segment. A leading digit, and each character that is not an ASCII letter or
--- digit, reads as its hex code between two @_@.
-operationName :: (FilePath -> Maybe (TagName, [Text])) -> Text -> FilePath -> Text
-operationName queueOf method path =
+-- | An operation id from the method and the path below the mount point.
+operationName :: Maybe (TagName, [Text]) -> Text -> FilePath -> Text
+operationName route method path =
   maybe
     (method <> foldMap word (mounted path))
     (\(queue, rest) -> escapeQueue queue <> upperFirst method <> foldMap word rest)
-    (queueOf path)
+    route
   where
     escapeQueue queue = maybe queue (\(c, rest) -> (if isDigit c then hex c else escape c) <> T.concatMap escape rest) (T.uncons queue)
     escape c
-      | isAsciiUpper c || isAsciiLower c || isDigit c = T.singleton c
+      | isAsciiLower c || isDigit c || c == '_' = T.singleton c
       | otherwise = hex c
-    hex c = "_" <> T.pack (map toUpper (showHex (ord c) "")) <> "_"
+    hex c = "X" <> T.pack (map toUpper (showHex (ord c) "")) <> "X"
     word segment = maybe (camel segment) (("By" <>) . camel) (T.stripPrefix "{" =<< T.stripSuffix "}" segment)
     camel = foldMap upperFirst . T.split (`elem` ['-', '_'])
     upperFirst text = maybe text (\(c, rest) -> T.cons (toUpper c) rest) (T.uncons text)
 
 -- | The segments the API is mounted under.
 mountSegments :: [Text]
-mountSegments = ["api", "v1"]
+mountSegments = ["api"]
 
 -- | The segment the queue routes are mounted under.
 queuesSegment :: Text
@@ -239,12 +250,19 @@ instance
   (HasOpenApi api, KnownNat status, KnownSymbol reason, ToSchema body)
   => HasOpenApi (Throws' status reason ('Just body) :> api)
   where
-  toOpenApi _ = setResponseWith joined (statusCode @status) (withBody <$> declareSchemaRef (Proxy @body)) (toOpenApi (Proxy @api))
-    where
-      withBody ref =
-        (reasonResponse @reason)
-          { _responseContent = InsOrd.singleton (contentType (Proxy @JSON)) mempty {_mediaTypeObjectSchema = Just ref}
-          }
+  toOpenApi _ =
+    setResponseWith
+      joined
+      (statusCode @status)
+      ((\ref -> withContent @JSON ref (reasonResponse @reason)) <$> declareSchemaRef (Proxy @body))
+      (toOpenApi (Proxy @api))
+
+-- | A response with one body of the given content type.
+withContent :: forall ctype. (Accept ctype) => Referenced Schema -> Response -> Response
+withContent schema response =
+  response
+    { _responseContent = InsOrd.singleton (contentType (Proxy @ctype)) mempty {_mediaTypeObjectSchema = Just schema}
+    }
 
 statusCode :: forall status. (KnownNat status) => HttpStatusCode
 statusCode = fromInteger (natVal (Proxy @status))
@@ -264,7 +282,7 @@ joined old new =
     sentence text = if "." `T.isSuffixOf` text then text else text <> "."
     merged first second =
       let (old', new') = (_mediaTypeObjectSchema first, _mediaTypeObjectSchema second)
-       in first {_mediaTypeObjectSchema = liftA2 alternatives old' new' <|> old' <|> new'}
+       in first {_mediaTypeObjectSchema = liftA2 alternatives new' old' <|> old' <|> new'}
     alternatives first second
       | first == second = first
       | otherwise = Inline mempty {_schemaOneOf = Just [first, second]}
@@ -294,9 +312,9 @@ jobEventSchema =
       , ("message", Inline mempty {_schemaType = Just OpenApiString})
       ]
 
--- | Put every operation on a path into that path's section, and give it an id.
-annotatePath :: (FilePath -> Maybe (TagName, [Text])) -> FilePath -> PathItem -> PathItem
-annotatePath queueOf path item =
+-- | Put every operation on a path into its section and give it an id.
+annotatePath :: Maybe (TagName, [Text]) -> Tag -> FilePath -> PathItem -> PathItem
+annotatePath route tag path item =
   item
     { _pathItemGet = annotated "get" (_pathItemGet item)
     , _pathItemPut = annotated "put" (_pathItemPut item)
@@ -312,15 +330,15 @@ annotatePath queueOf path item =
       fmap
         ( \operation ->
             operation
-              { _operationTags = InsOrdSet.insert (_tagName (section queueOf path)) (_operationTags operation)
-              , _operationOperationId = Just (operationName queueOf method path)
+              { _operationTags = InsOrdSet.insert (_tagName tag) (_operationTags operation)
+              , _operationOperationId = Just (operationName route method path)
               }
         )
 
 -- | What each schema-wide section is for.
 sectionDescriptions :: [(TagName, Text)]
 sectionDescriptions =
-  [ ("queues", "The registered queues, their counters, and pausing them.")
+  [ ("queues", "The registered queues and their counters.")
   , ("cron", "Cron schedules, their overrides, and out-of-band runs.")
   , ("workers", "The worker registry, and pausing a worker.")
   , ("rate-limits", "Token-bucket policies, their live buckets, overrides, token grants and pruning.")
@@ -398,14 +416,17 @@ inlineProp :: forall a. Text -> Schema -> Fields a
 inlineProp name schema = Fields (pure [(name, Inline schema)])
 
 -- | A field the server clamps to a range, with an optional default.
-within :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Fields a -> Fields a
-within range def (Fields declared) = Fields (map (fmap clampedRef) <$> declared)
-  where
-    clampedRef (Inline schema) = Inline (clamped range def schema)
-    clampedRef ref = Inline (clamped range def mempty {_schemaAllOf = Just [ref]})
+within :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Fields n -> Fields n
+within = clampedFields
+
+-- | An optional field the server clamps to a range, with an optional default.
+optWithin :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Fields (Maybe n) -> Fields (Maybe n)
+optWithin = clampedFields
+
+clampedFields :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Fields a -> Fields a
+clampedFields range def (Fields declared) = Fields (map (fmap (fmap (clamped range def))) <$> declared)
 
 -- | A numeric schema the server clamps to a range, with an optional default.
--- The range is a description, so a client does not refuse a value outside it.
 clamped :: (Real n, ToJSON n) => (n, n) -> Maybe n -> Schema -> Schema
 clamped (low, high) def schema =
   schema
@@ -478,14 +499,8 @@ instance ToParamSchema ArchiveSortColumn where
 instance ToParamSchema SortDir where
   toParamSchema = enumSchema sortDirName
 
-instance ToParamSchema PageLimit where
-  toParamSchema = pageSizeSchema
-
-instance ToParamSchema KeyPageLimit where
-  toParamSchema = pageSizeSchema
-
-pageSizeSchema :: forall limit proxy. (PageSize limit) => proxy limit -> Schema
-pageSizeSchema _ = clamped pageLimitRange (Just (pageSize (defaultPageSize @limit))) (toParamSchema (Proxy @Int))
+instance (KnownNat def) => ToParamSchema (PageSize def) where
+  toParamSchema _ = clamped pageLimitRange (Just (pageSizeDefault (Proxy @def))) (toParamSchema (Proxy @Int))
 
 -- ---------------------------------------------------------------------------
 -- Hand-encoded types
@@ -646,8 +661,8 @@ instance ToSchema ClaimRequest where
   declareNamedSchema _ =
     objectSchema "ClaimRequest" [] $
       ClaimRequest
-        <$> within claimJobsRange (Just defaultClaimJobs) (opt @Int "maxJobs")
-        <*> within leaseSecondsRange (Just defaultLeaseSeconds) (opt @Double "leaseSeconds")
+        <$> optWithin claimJobsRange (Just defaultClaimJobs) (opt @Int "maxJobs")
+        <*> optWithin leaseSecondsRange (Just defaultLeaseSeconds) (opt @Double "leaseSeconds")
 
 instance ToSchema AddTokensRequest where
   declareNamedSchema _ = closedSchema "AddTokensRequest" (AddTokensRequest <$> prop @Double "tokens")

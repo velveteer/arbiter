@@ -77,11 +77,11 @@ instance HasKind Envelope where
 
 | Interface | Label source |
 |-----------|--------------|
-| `GET /api/v1/queues/:queue/jobs?kind=` and the DLQ and archive filters | Stored job label |
-| `GET /api/v1/queues/:queue/kinds` | `kindsFor` |
+| `GET /api/queues/:queue/jobs?kind=` and the DLQ and archive filters | Stored job label |
+| `GET /api/queues/:queue/kinds` | `kindsFor` |
 | Admin UI kind column | Stored job label |
 | Admin UI kind filter | `kindsFor` |
-| `GET /api/v1/queues/:queue/stats` field `kindCounts` | Stored labels declared by `kindsFor` |
+| `GET /api/queues/:queue/stats` field `kindCounts` | Stored labels declared by `kindsFor` |
 | `arbiter.queue.depth_by_kind` | Stored labels declared by `kindsFor` |
 | `arbiter.jobs.*` metrics and the handler histogram | Stored labels declared by `kindsFor` |
 | Producer span attribute `arbiter.kind` | `kindOf` |

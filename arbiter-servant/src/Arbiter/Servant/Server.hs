@@ -67,7 +67,7 @@ import Control.Concurrent.STM
   , writeTChan
   )
 import Control.Exception (bracket_)
-import Control.Monad (guard, join, mfilter, unless, void, when)
+import Control.Monad (guard, join, mfilter, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
@@ -89,8 +89,8 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.UUID.Types (UUID)
 import Data.UUID.V4 qualified as UUID
-import GHC.TypeLits (KnownSymbol, symbolVal)
-import Network.HTTP.Types (status200)
+import GHC.TypeLits (KnownNat, KnownSymbol, symbolVal)
+import Network.HTTP.Types (hContentType, status200)
 import Network.Wai (responseStream)
 import Network.Wai.Handler.Warp (Port, defaultSettings, runSettings, setPort)
 import Servant
@@ -166,6 +166,10 @@ data ArbiterServerConfig m (registry :: JobPayloadRegistry) = ArbiterServerConfi
 runDb :: (MonadIO n) => ArbiterServerConfig m registry -> m a -> n a
 runDb config = liftIO . serverRun config
 
+-- | 404 body for a job id that matches no row.
+jobNotFound :: LBS.ByteString
+jobNotFound = "Job not found"
+
 -- | 'NoContent' when a statement touched a row, 404 otherwise.
 rowsOr404 :: LBS.ByteString -> Int64 -> Handler NoContent
 rowsOr404 missing rowsAffected
@@ -175,6 +179,21 @@ rowsOr404 missing rowsAffected
 -- | Answer a handler that decided its own error.
 noContentOr :: Either ServerError () -> Handler NoContent
 noContentOr = either throwError (const (pure NoContent))
+
+-- | Run a mutation. When it touches no row, answer what @probe@ finds.
+mutateOr
+  :: (Monad m)
+  => ArbiterServerConfig m registry
+  -> (Text -> m Int64)
+  -> (Text -> m (Either ServerError ()))
+  -> Handler NoContent
+mutateOr config mutate probe =
+  noContentOr =<< runDb config (mutate schemaName >>= diagnose)
+  where
+    schemaName = serverSchema config
+    diagnose rowsAffected
+      | rowsAffected > 0 = pure (Right ())
+      | otherwise = probe schemaName
 
 -- | Run a job mutation. When it touches no row, re-read the job and answer 404, or
 -- the 409 that @refuse@ derives from the job and its status.
@@ -188,14 +207,23 @@ mutateJob
   -> (Job.JobRead (Job.Stored payload) -> JobStatus -> LBS.ByteString)
   -> Handler NoContent
 mutateJob tableName config jobId mutate refuse =
-  noContentOr =<< runDb config (mutate schemaName >>= diagnose)
-  where
-    schemaName = serverSchema config
-    diagnose rowsAffected
-      | rowsAffected > 0 = pure (Right ())
-      | otherwise =
-          maybe (Left err404 {errBody = "Job not found"}) (\(job, status) -> Left err409 {errBody = refuse job status})
-            <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
+  mutateOr config mutate $ \schemaName ->
+    maybe (Left err404 {errBody = jobNotFound}) (\(job, status) -> Left err409 {errBody = refuse job status})
+      <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
+
+-- | Run a mutation over a parent's subtree. Touching no row is a success unless the parent is gone.
+mutateChildren
+  :: forall registry m
+   . (HasRegistry m registry)
+  => Text
+  -> ArbiterServerConfig m registry
+  -> Int64
+  -> (Text -> Text -> Int64 -> m Int64)
+  -> Handler NoContent
+mutateChildren tableName config jobId mutate =
+  mutateOr config (\schemaName -> mutate schemaName tableName jobId) $ \schemaName ->
+    (\exists -> if exists then Right () else Left err404 {errBody = jobNotFound})
+      <$> Ops.jobExists schemaName tableName jobId
 
 -- | Create an 'ArbiterServerConfig' over a backend runner. SSE needs the
 -- @enableEventStreaming@ migration option and a backend with a listener.
@@ -370,7 +398,7 @@ getJobHandler tableName config jobId = do
   let schemaName = serverSchema config
   mJob <- runDb config $ Ops.getJobByIdWithStatus schemaName tableName jobId
   case mJob of
-    Nothing -> throwError err404 {errBody = "Job not found"}
+    Nothing -> throwError err404 {errBody = jobNotFound}
     Just (found, jobStatus) -> pure $ JobResponse {job = ApiJobWithStatus found jobStatus}
 
 -- | Cancel a job (delete it from the queue).
@@ -383,7 +411,7 @@ cancelJobHandler
   -> Handler NoContent
 cancelJobHandler tableName config jobId = do
   let schemaName = serverSchema config
-  runDb config (genericLength <$> Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 "Job not found"
+  runDb config (genericLength <$> Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 jobNotFound
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler
@@ -395,7 +423,7 @@ forceCancelJobHandler
   -> Handler NoContent
 forceCancelJobHandler tableName config jobId = do
   let schemaName = serverSchema config
-  runDb config (Ops.forceCancelJob schemaName tableName jobId) >>= rowsOr404 "Job not found"
+  runDb config (Ops.forceCancelJob schemaName tableName jobId) >>= rowsOr404 jobNotFound
 
 -- | Promote a job (make it immediately visible).
 promoteJobHandler
@@ -448,7 +476,7 @@ moveToDLQHandler tableName config jobId =
   where
     schemaName = serverSchema config
     moved = Ops.getJobById schemaName tableName jobId >>= maybe (pure notFound) move
-    notFound = Left err404 {errBody = "Job not found"}
+    notFound = Left err404 {errBody = jobNotFound}
     move job = decide <$> Ops.moveToDLQ Ops.TakeLocks schemaName tableName "Manually moved to DLQ via admin API" job
     decide rowsAffected
       | rowsAffected > 0 = Right ()
@@ -463,8 +491,8 @@ pauseChildrenHandler
   -> Int64
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId =
-  -- Pausing nothing is a success. The children may be in flight, suspended or done.
-  underJob tableName config jobId Ops.pauseChildren
+  -- Pausing nothing is a success. The children may be in flight, suspended or done. A gone parent is a 404.
+  mutateChildren tableName config jobId Ops.pauseChildren
 
 -- | Resume all suspended children of a parent job.
 resumeChildrenHandler
@@ -475,25 +503,8 @@ resumeChildrenHandler
   -> Int64
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId =
-  -- Resuming nothing is a success. The children may be unsuspended or done.
-  underJob tableName config jobId Ops.resumeChildren
-
--- | Run a subtree operation under a job. 404 when the job is gone.
-underJob
-  :: (MonadArbiter m)
-  => Text
-  -> ArbiterServerConfig m registry
-  -> Int64
-  -> (Text -> Text -> Int64 -> m Int64)
-  -> Handler NoContent
-underJob tableName config jobId operation = do
-  let schemaName = serverSchema config
-  found <- runDb config . withDbTransaction $ do
-    exists <- Ops.jobExists schemaName tableName jobId
-    when exists $ void (operation schemaName tableName jobId)
-    pure exists
-  unless found $ throwError err404 {errBody = "Job not found"}
-  pure NoContent
+  -- Resuming nothing is a success. The children may be unsuspended or done. A gone parent is a 404.
+  mutateChildren tableName config jobId Ops.resumeChildren
 
 -- | Suspend a job (make it unclaimable).
 suspendJobHandler
@@ -765,6 +776,9 @@ tableServer table config =
     , stats = statsServer @registry @payload table config
     , listKinds = pure (kindsFor @payload)
     , listGroups = listGroupsHandler @registry table config
+    , getDetails = runDb config (Ops.getQueue (serverSchema config) table)
+    , pauseQueue = setQueuePausedHandler config table True
+    , resumeQueue = setQueuePausedHandler config table False
     }
 
 -- | A page of a queue's open groups, largest first.
@@ -899,7 +913,7 @@ withHeldJob tableName config jobId lease finalize = do
   result <- runDb config $ do
     mJob <- Ops.getJobById @_ @payload schemaName tableName jobId
     case mJob of
-      Nothing -> pure $ Left err404 {errBody = "Job not found"}
+      Nothing -> pure $ Left err404 {errBody = jobNotFound}
       Just job
         | not (held job) -> pure $ refuse "Job is not held by this lease"
         | otherwise -> do
@@ -954,50 +968,26 @@ queuesServer
   -> ArbiterServerConfig m registry
   -> QueuesAPI (AsServerT Handler)
 queuesServer registryProxy config =
-  let known = registryTableNames registryProxy
-   in QueuesAPI
-        { listQueues = pure $ QueuesResponse {queues = known}
-        , getAllStats = getAllStatsHandler config (registryQueueKinds registryProxy)
-        , getDetails = getQueueDetailsHandler config known
-        , pauseQueue = setQueuePausedHandler config known True
-        , resumeQueue = setQueuePausedHandler config known False
-        }
+  QueuesAPI
+    { listQueues = pure $ QueuesResponse {queues = registryTableNames registryProxy}
+    , getAllStats = getAllStatsHandler config (registryQueueKinds registryProxy)
+    }
 
--- | Get a queue's operator config.
-getQueueDetailsHandler
-  :: forall registry m
-   . (HasRegistry m registry)
-  => ArbiterServerConfig m registry
-  -> [Text]
-  -> Text
-  -> Handler (Maybe QueueRow)
-getQueueDetailsHandler config knownQueues queue = do
-  registeredQueue knownQueues queue
-  let schemaName = serverSchema config
-  runDb config $ Ops.getQueue schemaName queue
-
--- | Flip the @paused@ flag for a queue, validated against the registry. The
--- @arbiter_queues@ row is created on the first pause or resume.
+-- | Flip the @paused@ flag for a queue. The @arbiter_queues@ row is created on the
+-- first pause or resume.
 setQueuePausedHandler
   :: forall registry m
    . (HasRegistry m registry)
   => ArbiterServerConfig m registry
-  -> [Text]
-  -> Bool
   -> Text
+  -> Bool
   -> Handler NoContent
-setQueuePausedHandler config knownQueues pauseFlag queue = do
-  registeredQueue knownQueues queue
+setQueuePausedHandler config queue pauseFlag = do
   let schemaName = serverSchema config
   void . runDb config $ Ops.setQueuePaused schemaName queue pauseFlag
   -- The landing overview shows each queue's paused flag.
   invalidate (allQueueStatsCache config)
   NoContent <$ invalidate (queueStatsCache config)
-
--- | 404 for a queue not in the registry.
-registeredQueue :: [Text] -> Text -> Handler ()
-registeredQueue knownQueues queue =
-  unless (queue `elem` knownQueues) $ throwError err404 {errBody = "Unknown queue"}
 
 -- | Serve the SSE stream as a raw WAI application. Each client registers on the
 -- backend's shared listener for the response's lifetime and gets a @connected@
@@ -1202,7 +1192,7 @@ healthHandler config = do
       throwError
         err503
           { errBody = encode report
-          , errHeaders = [("Content-Type", "application/json;charset=utf-8")]
+          , errHeaders = [(hContentType, "application/json;charset=utf-8")]
           }
 
 -- | Timed database health probe. Cancellation propagates.
@@ -1536,7 +1526,7 @@ instance
      in tableServer @registry @(SpecPayload spec) @(SpecResult spec) tableName config
           :<|> buildServer @registry @rest config
 
--- | Complete Arbiter server at @\/api\/v1\/...@.
+-- | Complete Arbiter server at @\/api\/...@.
 arbiterServer
   :: forall registry m
    . (BuildServer registry registry, HasRegistry m registry)
@@ -1598,6 +1588,6 @@ nonBlank :: Maybe Text -> Maybe Text
 nonBlank = mfilter (not . T.null . T.strip)
 
 -- | Clamp the limit to 'pageLimitRange' with its default, and keep the offset non-negative.
-validatePagination :: (PageSize limit) => Maybe limit -> Maybe Int -> (Int, Int)
+validatePagination :: forall def. (KnownNat def) => Maybe (PageSize def) -> Maybe Int -> (Int, Int)
 validatePagination mLimit mOffset =
-  (clamp pageLimitRange (pageSize (fromMaybe defaultPageSize mLimit)), max 0 (fromMaybe 0 mOffset))
+  (clamp pageLimitRange (maybe (pageSizeDefault (Proxy @def)) unPageSize mLimit), max 0 (fromMaybe 0 mOffset))

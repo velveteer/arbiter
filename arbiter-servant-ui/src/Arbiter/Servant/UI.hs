@@ -25,7 +25,7 @@
 -- @
 --
 -- The admin UI auto-discovers the API path from its own URL.
--- If it loads at @\/arbiter\/@ it finds the API at @\/arbiter\/api\/v1\/@.
+-- If it loads at @\/arbiter\/@ it finds the API at @\/arbiter\/api\/@.
 module Arbiter.Servant.UI
   ( -- * Servant integration
     AdminUI
@@ -308,7 +308,7 @@ adminUIServerDevHoisted
   -> ServerT AdminUI m
 adminUIServerDevHoisted natTrans dir = hoistServer (Proxy @AdminUI) natTrans (adminUIServerDev dir)
 
--- | The API at @\/api\/v1@ and the admin UI at the root, in one application.
+-- | The API at @\/api@ and the admin UI at the root, in one application.
 arbiterAppWithAdmin
   :: forall registry m
    . ( BuildServer registry registry

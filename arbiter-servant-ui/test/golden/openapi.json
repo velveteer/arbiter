@@ -2106,11 +2106,11 @@
     "info": {
         "description": "The Arbiter job queue over HTTP. Each registered queue has its own section, and a service in any language can use all three sides of it: enqueue jobs, run them by claiming a lease and acking, nacking or extending it, and operate the queue itself. The schema-wide sections cover queues, cron, workers, rate limits, concurrency, maintenance, events and health.\n\nThe document is derived from the server's own route types. Every payload and result below is the queue's real schema. The server ships no authentication. Put it behind your own.",
         "title": "Arbiter",
-        "version": "v1"
+        "version": "test"
     },
     "openapi": "3.0.0",
     "paths": {
-        "/api/v1/concurrency": {
+        "/api/concurrency": {
             "get": {
                 "operationId": "getConcurrency",
                 "responses": {
@@ -2131,7 +2131,7 @@
                 ]
             }
         },
-        "/api/v1/concurrency/prune": {
+        "/api/concurrency/prune": {
             "post": {
                 "description": "Deletes keys with no live job.",
                 "operationId": "postConcurrencyPrune",
@@ -2153,7 +2153,7 @@
                 ]
             }
         },
-        "/api/v1/concurrency/reconcile": {
+        "/api/concurrency/reconcile": {
             "post": {
                 "description": "Repairs each in-flight count from the live jobs. Returns the rows repaired.",
                 "operationId": "postConcurrencyReconcile",
@@ -2175,7 +2175,7 @@
                 ]
             }
         },
-        "/api/v1/concurrency/{prefix}": {
+        "/api/concurrency/{prefix}": {
             "patch": {
                 "description": "A null overrideLimit clears the override. An absent one keeps it.",
                 "operationId": "patchConcurrencyByPrefix",
@@ -2222,7 +2222,7 @@
                 ]
             }
         },
-        "/api/v1/concurrency/{prefix}/keys": {
+        "/api/concurrency/{prefix}/keys": {
             "get": {
                 "operationId": "getConcurrencyByPrefixKeys",
                 "parameters": [
@@ -2279,7 +2279,7 @@
                 ]
             }
         },
-        "/api/v1/cron/schedules": {
+        "/api/cron/schedules": {
             "get": {
                 "operationId": "getCronSchedules",
                 "parameters": [
@@ -2313,7 +2313,7 @@
                 ]
             }
         },
-        "/api/v1/cron/schedules/{name}": {
+        "/api/cron/schedules/{name}": {
             "patch": {
                 "description": "A null field clears its override. An absent field keeps it.",
                 "operationId": "patchCronSchedulesByName",
@@ -2360,7 +2360,7 @@
                 ]
             }
         },
-        "/api/v1/cron/schedules/{name}/run": {
+        "/api/cron/schedules/{name}/run": {
             "post": {
                 "operationId": "postCronSchedulesByNameRun",
                 "parameters": [
@@ -2390,7 +2390,7 @@
                 ]
             }
         },
-        "/api/v1/events/stream": {
+        "/api/events/stream": {
             "get": {
                 "description": "Streams an event per insert, update, delete and dead-letter, as they happen. A lease extend sends no event. Each event names its queue and the job id. A dead-letter event carries the id the job had in its queue and sets dlq. The stream starts with one \"connected\" event. Sends a keepalive comment after 15 seconds with no event. A server with streaming off, or with no listener, answers one \"disabled\" event and closes.",
                 "operationId": "getEventsStream",
@@ -2444,7 +2444,7 @@
                 ]
             }
         },
-        "/api/v1/health": {
+        "/api/health": {
             "get": {
                 "operationId": "getHealth",
                 "responses": {
@@ -2475,7 +2475,7 @@
                 ]
             }
         },
-        "/api/v1/health/live": {
+        "/api/health/live": {
             "get": {
                 "operationId": "getHealthLive",
                 "responses": {
@@ -2496,7 +2496,7 @@
                 ]
             }
         },
-        "/api/v1/maintenance": {
+        "/api/maintenance": {
             "post": {
                 "description": "Runs the work of the reaper once. An operation that another caller runs at the same time is skipped and is not in the response.",
                 "operationId": "postMaintenance",
@@ -2518,7 +2518,7 @@
                 ]
             }
         },
-        "/api/v1/queues": {
+        "/api/queues": {
             "get": {
                 "operationId": "getQueues",
                 "responses": {
@@ -2539,7 +2539,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/archive": {
+        "/api/queues/queue/archive": {
             "get": {
                 "description": "The payload filter searches the payload text.",
                 "operationId": "queueGetArchive",
@@ -2679,9 +2679,9 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/archive/batch-delete": {
+        "/api/queues/queue/archive/batch-delete": {
             "post": {
-                "description": "Returns the number deleted. Unknown ids are skipped.",
+                "description": "Returns the number deleted. The server skips unknown ids.",
                 "operationId": "queuePostArchiveBatchDelete",
                 "requestBody": {
                     "content": {
@@ -2713,7 +2713,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/archive/{id}": {
+        "/api/queues/queue/archive/{id}": {
             "delete": {
                 "operationId": "queueDeleteArchiveById",
                 "parameters": [
@@ -2743,7 +2743,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/archive/{id}/reenqueue": {
+        "/api/queues/queue/archive/{id}/reenqueue": {
             "post": {
                 "description": "Inserts a new job. The archive entry stays.",
                 "operationId": "queuePostArchiveByIdReenqueue",
@@ -2787,7 +2787,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/claim": {
+        "/api/queues/queue/claim": {
             "post": {
                 "description": "Leases up to maxJobs visible jobs for leaseSeconds. Each job carries the claimSeq and claimedBy that ack, nack and extend need. The server does not renew the lease. A paused queue returns no jobs.",
                 "operationId": "queuePostClaim",
@@ -2821,7 +2821,29 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/dlq": {
+        "/api/queues/queue/details": {
+            "get": {
+                "description": "Null when the queue was never paused or resumed.",
+                "operationId": "queueGetDetails",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json;charset=utf-8": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/QueueRow"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                },
+                "summary": "Show the pause state of a queue",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/queues/queue/dlq": {
             "get": {
                 "description": "The payload and error filters search the payload and the last error.",
                 "operationId": "queueGetDlq",
@@ -2953,9 +2975,9 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/dlq/batch-delete": {
+        "/api/queues/queue/dlq/batch-delete": {
             "post": {
-                "description": "Returns the number deleted. Unknown ids are skipped.",
+                "description": "Returns the number deleted. The server skips unknown ids.",
                 "operationId": "queuePostDlqBatchDelete",
                 "requestBody": {
                     "content": {
@@ -2987,7 +3009,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/dlq/{id}": {
+        "/api/queues/queue/dlq/{id}": {
             "delete": {
                 "description": "Resumes its parent when no child of the parent is left in the queue.",
                 "operationId": "queueDeleteDlqById",
@@ -3018,7 +3040,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/dlq/{id}/retry": {
+        "/api/queues/queue/dlq/{id}/retry": {
             "post": {
                 "description": "Moves the job back to the queue.",
                 "operationId": "queuePostDlqByIdRetry",
@@ -3065,7 +3087,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/groups": {
+        "/api/queues/queue/groups": {
             "get": {
                 "description": "The largest groups come first.",
                 "operationId": "queueGetGroups",
@@ -3120,7 +3142,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs": {
+        "/api/queues/queue/jobs": {
             "get": {
                 "description": "Filters combine. The payload filter searches the payload text.",
                 "operationId": "queueGetJobs",
@@ -3330,7 +3352,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/batch": {
+        "/api/queues/queue/jobs/batch": {
             "post": {
                 "description": "Returns the jobs inserted or replaced. The response omits a job that an ignore dedup key skips, and a job that a replace dedup key cannot replace.",
                 "operationId": "queuePostJobsBatch",
@@ -3364,7 +3386,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}": {
+        "/api/queues/queue/jobs/{id}": {
             "delete": {
                 "description": "Deletes the job and every descendant, also the jobs in flight. The handler of a job in flight continues, and its ack finds no job. Use force-cancel to stop the handler.",
                 "operationId": "queueDeleteJobsById",
@@ -3431,9 +3453,9 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/ack": {
+        "/api/queues/queue/jobs/{id}/ack": {
             "post": {
-                "description": "Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive.",
+                "description": "Send the claimSeq and claimedBy from the claim. The server stores the optional result for the parent rollup or the archive.",
                 "operationId": "queuePostJobsByIdAck",
                 "parameters": [
                     {
@@ -3477,7 +3499,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/extend": {
+        "/api/queues/queue/jobs/{id}/extend": {
             "post": {
                 "description": "Sets the lease to expire leaseSeconds from now.",
                 "operationId": "queuePostJobsByIdExtend",
@@ -3523,7 +3545,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/force-cancel": {
+        "/api/queues/queue/jobs/{id}/force-cancel": {
             "post": {
                 "description": "Deletes the jobs in the tree that are not in flight. A job in flight receives a cancel flag and cannot be claimed again. A worker pool stops its handler. An HTTP claimant with a live lease receives 409 on its next ack, nack or extend, until the reaper deletes the job. Then it receives 404. A claimant whose lease expired before the force-cancel receives 404.",
                 "operationId": "queuePostJobsByIdForceCancel",
@@ -3554,7 +3576,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/move-to-dlq": {
+        "/api/queues/queue/jobs/{id}/move-to-dlq": {
             "post": {
                 "description": "A rollup takes its descendants with it. A job in flight is moved too. Its handler continues, and its ack finds no job.",
                 "operationId": "queuePostJobsByIdMoveToDlq",
@@ -3588,7 +3610,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/nack": {
+        "/api/queues/queue/jobs/{id}/nack": {
             "post": {
                 "description": "Restores the attempt that the claim used. The job becomes claimable when its lease expires.",
                 "operationId": "queuePostJobsByIdNack",
@@ -3634,9 +3656,9 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/pause-children": {
+        "/api/queues/queue/jobs/{id}/pause-children": {
             "post": {
-                "description": "Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended.",
+                "description": "The operation skips descendants that are in flight, delayed or throttled. Succeeds when nothing is suspended. 404 when the job is gone.",
                 "operationId": "queuePostJobsByIdPauseChildren",
                 "parameters": [
                     {
@@ -3665,7 +3687,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/promote": {
+        "/api/queues/queue/jobs/{id}/promote": {
             "post": {
                 "operationId": "queuePostJobsByIdPromote",
                 "parameters": [
@@ -3698,7 +3720,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/reschedule": {
+        "/api/queues/queue/jobs/{id}/reschedule": {
             "post": {
                 "operationId": "queuePostJobsByIdReschedule",
                 "parameters": [
@@ -3743,7 +3765,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/resume": {
+        "/api/queues/queue/jobs/{id}/resume": {
             "post": {
                 "operationId": "queuePostJobsByIdResume",
                 "parameters": [
@@ -3776,9 +3798,9 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/resume-children": {
+        "/api/queues/queue/jobs/{id}/resume-children": {
             "post": {
-                "description": "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed.",
+                "description": "A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed. 404 when the job is gone.",
                 "operationId": "queuePostJobsByIdResumeChildren",
                 "parameters": [
                     {
@@ -3807,7 +3829,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/jobs/{id}/suspend": {
+        "/api/queues/queue/jobs/{id}/suspend": {
             "post": {
                 "description": "A suspended job cannot be claimed.",
                 "operationId": "queuePostJobsByIdSuspend",
@@ -3841,7 +3863,7 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/kinds": {
+        "/api/queues/queue/kinds": {
             "get": {
                 "operationId": "queueGetKinds",
                 "responses": {
@@ -3865,7 +3887,36 @@
                 ]
             }
         },
-        "/api/v1/queues/queue/stats": {
+        "/api/queues/queue/pause": {
+            "post": {
+                "description": "Workers do not claim from the queue. Claims through this API return no jobs.",
+                "operationId": "queuePostPause",
+                "responses": {
+                    "204": {
+                        "description": ""
+                    }
+                },
+                "summary": "Pause a queue",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/queues/queue/resume": {
+            "post": {
+                "operationId": "queuePostResume",
+                "responses": {
+                    "204": {
+                        "description": ""
+                    }
+                },
+                "summary": "Resume a queue",
+                "tags": [
+                    "queue"
+                ]
+            }
+        },
+        "/api/queues/queue/stats": {
             "get": {
                 "operationId": "queueGetStats",
                 "responses": {
@@ -3886,7 +3937,7 @@
                 ]
             }
         },
-        "/api/v1/queues/stats": {
+        "/api/queues/stats": {
             "get": {
                 "operationId": "getQueuesStats",
                 "responses": {
@@ -3907,97 +3958,7 @@
                 ]
             }
         },
-        "/api/v1/queues/{queue}/details": {
-            "get": {
-                "description": "Null when the queue was never paused or resumed.",
-                "operationId": "getQueuesByQueueDetails",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "queue",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json;charset=utf-8": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/QueueRow"
-                                }
-                            }
-                        },
-                        "description": ""
-                    },
-                    "404": {
-                        "description": "`queue` not found"
-                    }
-                },
-                "summary": "Show the pause state of a queue",
-                "tags": [
-                    "queues"
-                ]
-            }
-        },
-        "/api/v1/queues/{queue}/pause": {
-            "post": {
-                "description": "Workers do not claim from the queue. Claims through this API return no jobs.",
-                "operationId": "postQueuesByQueuePause",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "queue",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": ""
-                    },
-                    "404": {
-                        "description": "`queue` not found"
-                    }
-                },
-                "summary": "Pause a queue",
-                "tags": [
-                    "queues"
-                ]
-            }
-        },
-        "/api/v1/queues/{queue}/resume": {
-            "post": {
-                "operationId": "postQueuesByQueueResume",
-                "parameters": [
-                    {
-                        "in": "path",
-                        "name": "queue",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": ""
-                    },
-                    "404": {
-                        "description": "`queue` not found"
-                    }
-                },
-                "summary": "Resume a queue",
-                "tags": [
-                    "queues"
-                ]
-            }
-        },
-        "/api/v1/rate-limits": {
+        "/api/rate-limits": {
             "get": {
                 "operationId": "getRateLimits",
                 "responses": {
@@ -4018,7 +3979,7 @@
                 ]
             }
         },
-        "/api/v1/rate-limits/prune": {
+        "/api/rate-limits/prune": {
             "post": {
                 "operationId": "postRateLimitsPrune",
                 "parameters": [
@@ -4053,7 +4014,7 @@
                 ]
             }
         },
-        "/api/v1/rate-limits/{prefix}": {
+        "/api/rate-limits/{prefix}": {
             "patch": {
                 "description": "A null field clears its override. An absent field keeps it.",
                 "operationId": "patchRateLimitsByPrefix",
@@ -4100,7 +4061,7 @@
                 ]
             }
         },
-        "/api/v1/rate-limits/{prefix}/buckets": {
+        "/api/rate-limits/{prefix}/buckets": {
             "get": {
                 "operationId": "getRateLimitsByPrefixBuckets",
                 "parameters": [
@@ -4157,7 +4118,7 @@
                 ]
             }
         },
-        "/api/v1/rate-limits/{prefix}/buckets/{key}/tokens": {
+        "/api/rate-limits/{prefix}/buckets/{key}/tokens": {
             "post": {
                 "description": "Wakes the throttled jobs of the key.",
                 "operationId": "postRateLimitsByPrefixBucketsByKeyTokens",
@@ -4212,7 +4173,7 @@
                 ]
             }
         },
-        "/api/v1/rate-limits/{prefix}/reset": {
+        "/api/rate-limits/{prefix}/reset": {
             "post": {
                 "description": "Refills every bucket under the prefix to full. Returns the number refilled.",
                 "operationId": "postRateLimitsByPrefixReset",
@@ -4247,7 +4208,7 @@
                 ]
             }
         },
-        "/api/v1/workers": {
+        "/api/workers": {
             "get": {
                 "operationId": "getWorkers",
                 "parameters": [
@@ -4290,7 +4251,7 @@
                 ]
             }
         },
-        "/api/v1/workers/{id}/pause": {
+        "/api/workers/{id}/pause": {
             "post": {
                 "description": "The worker does not claim new jobs.",
                 "operationId": "postWorkersByIdPause",
@@ -4319,7 +4280,7 @@
                 ]
             }
         },
-        "/api/v1/workers/{id}/resume": {
+        "/api/workers/{id}/resume": {
             "post": {
                 "operationId": "postWorkersByIdResume",
                 "parameters": [
@@ -4350,11 +4311,11 @@
     },
     "tags": [
         {
-            "description": "Jobs, leases, dead letters, archive, groups, kinds and stats for the queue queue.",
+            "description": "Jobs, leases, dead letters, archive, groups, kinds, stats and pause state for the queue queue.",
             "name": "queue"
         },
         {
-            "description": "The registered queues, their counters, and pausing them.",
+            "description": "The registered queues and their counters.",
             "name": "queues"
         },
         {

@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/api/v1/concurrency": {
+    "/api/concurrency": {
         parameters: {
             query?: never;
             header?: never;
@@ -21,7 +21,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/concurrency/prune": {
+    "/api/concurrency/prune": {
         parameters: {
             query?: never;
             header?: never;
@@ -41,7 +41,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/concurrency/reconcile": {
+    "/api/concurrency/reconcile": {
         parameters: {
             query?: never;
             header?: never;
@@ -61,7 +61,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/concurrency/{prefix}": {
+    "/api/concurrency/{prefix}": {
         parameters: {
             query?: never;
             header?: never;
@@ -81,7 +81,7 @@ export interface paths {
         patch: operations["patchConcurrencyByPrefix"];
         trace?: never;
     };
-    "/api/v1/concurrency/{prefix}/keys": {
+    "/api/concurrency/{prefix}/keys": {
         parameters: {
             query?: never;
             header?: never;
@@ -98,7 +98,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/cron/schedules": {
+    "/api/cron/schedules": {
         parameters: {
             query?: never;
             header?: never;
@@ -115,7 +115,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/cron/schedules/{name}": {
+    "/api/cron/schedules/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -135,7 +135,7 @@ export interface paths {
         patch: operations["patchCronSchedulesByName"];
         trace?: never;
     };
-    "/api/v1/cron/schedules/{name}/run": {
+    "/api/cron/schedules/{name}/run": {
         parameters: {
             query?: never;
             header?: never;
@@ -152,7 +152,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/events/stream": {
+    "/api/events/stream": {
         parameters: {
             query?: never;
             header?: never;
@@ -172,7 +172,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/health": {
+    "/api/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -189,7 +189,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/health/live": {
+    "/api/health/live": {
         parameters: {
             query?: never;
             header?: never;
@@ -206,7 +206,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/maintenance": {
+    "/api/maintenance": {
         parameters: {
             query?: never;
             header?: never;
@@ -226,7 +226,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues": {
+    "/api/queues": {
         parameters: {
             query?: never;
             header?: never;
@@ -243,7 +243,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/archive": {
+    "/api/queues/queue/archive": {
         parameters: {
             query?: never;
             header?: never;
@@ -263,7 +263,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/archive/batch-delete": {
+    "/api/queues/queue/archive/batch-delete": {
         parameters: {
             query?: never;
             header?: never;
@@ -274,7 +274,7 @@ export interface paths {
         put?: never;
         /**
          * Delete archived jobs
-         * @description Returns the number deleted. Unknown ids are skipped.
+         * @description Returns the number deleted. The server skips unknown ids.
          */
         post: operations["queuePostArchiveBatchDelete"];
         delete?: never;
@@ -283,7 +283,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/archive/{id}": {
+    "/api/queues/queue/archive/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -300,7 +300,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/archive/{id}/reenqueue": {
+    "/api/queues/queue/archive/{id}/reenqueue": {
         parameters: {
             query?: never;
             header?: never;
@@ -320,7 +320,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/claim": {
+    "/api/queues/queue/claim": {
         parameters: {
             query?: never;
             header?: never;
@@ -340,7 +340,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/dlq": {
+    "/api/queues/queue/details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Show the pause state of a queue
+         * @description Null when the queue was never paused or resumed.
+         */
+        get: operations["queueGetDetails"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/queues/queue/dlq": {
         parameters: {
             query?: never;
             header?: never;
@@ -360,7 +380,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/dlq/batch-delete": {
+    "/api/queues/queue/dlq/batch-delete": {
         parameters: {
             query?: never;
             header?: never;
@@ -371,7 +391,7 @@ export interface paths {
         put?: never;
         /**
          * Delete dead-lettered jobs
-         * @description Returns the number deleted. Unknown ids are skipped.
+         * @description Returns the number deleted. The server skips unknown ids.
          */
         post: operations["queuePostDlqBatchDelete"];
         delete?: never;
@@ -380,7 +400,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/dlq/{id}": {
+    "/api/queues/queue/dlq/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -400,7 +420,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/dlq/{id}/retry": {
+    "/api/queues/queue/dlq/{id}/retry": {
         parameters: {
             query?: never;
             header?: never;
@@ -420,7 +440,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/groups": {
+    "/api/queues/queue/groups": {
         parameters: {
             query?: never;
             header?: never;
@@ -440,7 +460,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs": {
+    "/api/queues/queue/jobs": {
         parameters: {
             query?: never;
             header?: never;
@@ -464,7 +484,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/batch": {
+    "/api/queues/queue/jobs/batch": {
         parameters: {
             query?: never;
             header?: never;
@@ -484,7 +504,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}": {
+    "/api/queues/queue/jobs/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -508,7 +528,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/ack": {
+    "/api/queues/queue/jobs/{id}/ack": {
         parameters: {
             query?: never;
             header?: never;
@@ -519,7 +539,7 @@ export interface paths {
         put?: never;
         /**
          * Complete a held job
-         * @description Send the claimSeq and claimedBy from the claim. The optional result is stored for the parent rollup or the archive.
+         * @description Send the claimSeq and claimedBy from the claim. The server stores the optional result for the parent rollup or the archive.
          */
         post: operations["queuePostJobsByIdAck"];
         delete?: never;
@@ -528,7 +548,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/extend": {
+    "/api/queues/queue/jobs/{id}/extend": {
         parameters: {
             query?: never;
             header?: never;
@@ -548,7 +568,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/force-cancel": {
+    "/api/queues/queue/jobs/{id}/force-cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -568,7 +588,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/move-to-dlq": {
+    "/api/queues/queue/jobs/{id}/move-to-dlq": {
         parameters: {
             query?: never;
             header?: never;
@@ -588,7 +608,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/nack": {
+    "/api/queues/queue/jobs/{id}/nack": {
         parameters: {
             query?: never;
             header?: never;
@@ -608,7 +628,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/pause-children": {
+    "/api/queues/queue/jobs/{id}/pause-children": {
         parameters: {
             query?: never;
             header?: never;
@@ -619,7 +639,7 @@ export interface paths {
         put?: never;
         /**
          * Suspend the visible descendants of a job
-         * @description Descendants that are in flight, delayed or throttled are skipped. Succeeds when nothing is suspended.
+         * @description The operation skips descendants that are in flight, delayed or throttled. Succeeds when nothing is suspended. 404 when the job is gone.
          */
         post: operations["queuePostJobsByIdPauseChildren"];
         delete?: never;
@@ -628,7 +648,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/promote": {
+    "/api/queues/queue/jobs/{id}/promote": {
         parameters: {
             query?: never;
             header?: never;
@@ -645,7 +665,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/reschedule": {
+    "/api/queues/queue/jobs/{id}/reschedule": {
         parameters: {
             query?: never;
             header?: never;
@@ -662,7 +682,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/resume": {
+    "/api/queues/queue/jobs/{id}/resume": {
         parameters: {
             query?: never;
             header?: never;
@@ -679,7 +699,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/resume-children": {
+    "/api/queues/queue/jobs/{id}/resume-children": {
         parameters: {
             query?: never;
             header?: never;
@@ -690,7 +710,7 @@ export interface paths {
         put?: never;
         /**
          * Resume the suspended descendants of a job
-         * @description A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed.
+         * @description A finalizer with children in the queue stays suspended. Succeeds when nothing is resumed. 404 when the job is gone.
          */
         post: operations["queuePostJobsByIdResumeChildren"];
         delete?: never;
@@ -699,7 +719,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/jobs/{id}/suspend": {
+    "/api/queues/queue/jobs/{id}/suspend": {
         parameters: {
             query?: never;
             header?: never;
@@ -719,7 +739,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/kinds": {
+    "/api/queues/queue/kinds": {
         parameters: {
             query?: never;
             header?: never;
@@ -736,7 +756,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/queue/stats": {
+    "/api/queues/queue/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause a queue
+         * @description Workers do not claim from the queue. Claims through this API return no jobs.
+         */
+        post: operations["queuePostPause"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/queues/queue/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume a queue */
+        post: operations["queuePostResume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/queues/queue/stats": {
         parameters: {
             query?: never;
             header?: never;
@@ -753,7 +810,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/stats": {
+    "/api/queues/stats": {
         parameters: {
             query?: never;
             header?: never;
@@ -770,64 +827,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/queues/{queue}/details": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Show the pause state of a queue
-         * @description Null when the queue was never paused or resumed.
-         */
-        get: operations["getQueuesByQueueDetails"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/queues/{queue}/pause": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Pause a queue
-         * @description Workers do not claim from the queue. Claims through this API return no jobs.
-         */
-        post: operations["postQueuesByQueuePause"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/queues/{queue}/resume": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Resume a queue */
-        post: operations["postQueuesByQueueResume"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/rate-limits": {
+    "/api/rate-limits": {
         parameters: {
             query?: never;
             header?: never;
@@ -844,7 +844,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/rate-limits/prune": {
+    "/api/rate-limits/prune": {
         parameters: {
             query?: never;
             header?: never;
@@ -861,7 +861,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/rate-limits/{prefix}": {
+    "/api/rate-limits/{prefix}": {
         parameters: {
             query?: never;
             header?: never;
@@ -881,7 +881,7 @@ export interface paths {
         patch: operations["patchRateLimitsByPrefix"];
         trace?: never;
     };
-    "/api/v1/rate-limits/{prefix}/buckets": {
+    "/api/rate-limits/{prefix}/buckets": {
         parameters: {
             query?: never;
             header?: never;
@@ -898,7 +898,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/rate-limits/{prefix}/buckets/{key}/tokens": {
+    "/api/rate-limits/{prefix}/buckets/{key}/tokens": {
         parameters: {
             query?: never;
             header?: never;
@@ -918,7 +918,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/rate-limits/{prefix}/reset": {
+    "/api/rate-limits/{prefix}/reset": {
         parameters: {
             query?: never;
             header?: never;
@@ -938,7 +938,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/workers": {
+    "/api/workers": {
         parameters: {
             query?: never;
             header?: never;
@@ -955,7 +955,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/workers/{id}/pause": {
+    "/api/workers/{id}/pause": {
         parameters: {
             query?: never;
             header?: never;
@@ -975,7 +975,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/workers/{id}/resume": {
+    "/api/workers/{id}/resume": {
         parameters: {
             query?: never;
             header?: never;
@@ -1997,6 +1997,25 @@ export interface operations {
             };
         };
     };
+    queueGetDetails: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json;charset=utf-8": components["schemas"]["QueueRow"];
+                };
+            };
+        };
+    };
     queueGetDlq: {
         parameters: {
             query?: {
@@ -2732,6 +2751,40 @@ export interface operations {
             };
         };
     };
+    queuePostPause: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    queuePostResume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     queueGetStats: {
         parameters: {
             query?: never;
@@ -2767,86 +2820,6 @@ export interface operations {
                 content: {
                     "application/json;charset=utf-8": components["schemas"]["AllStatsResponse"];
                 };
-            };
-        };
-    };
-    getQueuesByQueueDetails: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                queue: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json;charset=utf-8": components["schemas"]["QueueRow"];
-                };
-            };
-            /** @description `queue` not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    postQueuesByQueuePause: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                queue: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description `queue` not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    postQueuesByQueueResume: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                queue: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description `queue` not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

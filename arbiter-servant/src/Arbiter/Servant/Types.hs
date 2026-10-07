@@ -22,9 +22,10 @@ module Arbiter.Servant.Types
 
     -- * Pages
   , Page (..)
-  , PageLimit (..)
-  , KeyPageLimit (..)
   , PageSize (..)
+  , PageLimit
+  , KeyPageLimit
+  , pageSizeDefault
   , pageLimitRange
   , Items (..)
   , ArchiveResponse
@@ -144,6 +145,7 @@ import Data.Text (Text, unpack)
 import Data.Time.Clock (UTCTime)
 import Data.UUID.Types (UUID)
 import GHC.Generics (Generic, Generically (..))
+import GHC.TypeLits (KnownNat, Nat, natVal)
 import Servant.API (Accept (..), FromHttpApiData, JSON, MimeRender (..), MimeUnrender (..), ToHttpApiData)
 
 -- | A job row plus its SQL-derived status, for the list and detail endpoints.
@@ -198,30 +200,23 @@ instance (FromJSON payload) => FromJSON (ApiJobWrite payload) where
       $ Arb.setGroupKey group
       $ Arb.defaultJob payload
 
--- | Page size of a job, DLQ, archive or group listing.
-newtype PageLimit = PageLimit {unPageLimit :: Int}
+-- | Page size of a listing, with the size it takes when the request omits it.
+newtype PageSize (def :: Nat) = PageSize {unPageSize :: Int}
   deriving newtype (Eq, FromHttpApiData, Show, ToHttpApiData)
 
+-- | Page size of a job, DLQ, archive or group listing.
+type PageLimit = PageSize 50
+
 -- | Page size of a bucket or key listing.
-newtype KeyPageLimit = KeyPageLimit {unKeyPageLimit :: Int}
-  deriving newtype (Eq, FromHttpApiData, Show, ToHttpApiData)
+type KeyPageLimit = PageSize 100
 
 -- | Bounds on page size.
 pageLimitRange :: (Int, Int)
 pageLimitRange = (1, 1000)
 
--- | A page-size parameter and the size a request gets when it omits it.
-class PageSize limit where
-  pageSize :: limit -> Int
-  defaultPageSize :: limit
-
-instance PageSize PageLimit where
-  pageSize = unPageLimit
-  defaultPageSize = PageLimit 50
-
-instance PageSize KeyPageLimit where
-  pageSize = unKeyPageLimit
-  defaultPageSize = KeyPageLimit 100
+-- | The page size a listing takes when the request omits it.
+pageSizeDefault :: (KnownNat def) => proxy def -> Int
+pageSizeDefault = fromInteger . natVal
 
 -- | One page of a list, with the size of the full list.
 data Page a = Page

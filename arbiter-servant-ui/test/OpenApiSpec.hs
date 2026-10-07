@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- Pins the dashboard's OpenAPI document. Regenerate with --accept, then npm run types.
 import Arbiter.Core.QueueRegistry (QueueWithResult)
@@ -15,4 +16,4 @@ main :: IO ()
 main =
   defaultMain
     $ goldenVsString "openapi.json" "test/golden/openapi.json"
-    $ pure (encodePretty' defConfig {confCompare = compare} (openApiSpec @DashboardRegistry))
+    $ pure (encodePretty' defConfig {confCompare = compare} (openApiSpec @DashboardRegistry "test"))

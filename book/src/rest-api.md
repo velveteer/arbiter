@@ -46,7 +46,7 @@ type MyApp = ArbiterAPI AppRegistry :<|> OpenApiAPI :<|> AdminUI
 
 config <- createArbiterServer (runSimpleDb env)
 run 8080 $
-  serve (Proxy @MyApp) (arbiterServer config :<|> openApiServer @AppRegistry :<|> adminUIServer)
+  serve (Proxy @MyApp) (arbiterServer config :<|> openApiServer @AppRegistry "1.0.0" :<|> adminUIServer)
 ```
 
 | Requirement | Detail |
@@ -54,16 +54,17 @@ run 8080 $
 | payload and result types | a `ToSchema` instance. `deriving anyclass (ToSchema)` works for generic JSON |
 | `Value` payloads | the module supplies the instance |
 | registry | given to `openApiServer` by type application |
+| document version | given to `openApiServer` as `info.version`. The document describes your queues and payloads, so you own its version |
 
 > [!NOTE]
 > Mount `OpenApiAPI` before `AdminUI`. `AdminUI` is a `Raw` route that matches every path.
 
-`openApiSpec @AppRegistry` returns the same document as a `Value`.
+`openApiSpec @AppRegistry "1.0.0"` returns the same document as a `Value`.
 Module: [arbiter-servant-openapi Haddocks](https://arbiterq.dev/arbiter-servant-openapi/Arbiter-Servant-OpenApi.html).
 
 ## Endpoints
 
-Per-queue endpoints under `/api/v1/queues/:queue/`:
+Per-queue endpoints under `/api/queues/:queue/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -95,16 +96,16 @@ Per-queue endpoints under `/api/v1/queues/:queue/`:
 | `GET` | `stats` | Queue statistics |
 | `GET` | `kinds` | List the kind labels the queue declares |
 | `GET` | `groups` | List the queue's open groups, largest first |
+| `GET` | `details` | Get the queue's pause state |
+| `POST` | `pause` | Pause the queue (all workers stop claiming) |
+| `POST` | `resume` | Resume a paused queue |
 
-Global endpoints under `/api/v1/`:
+Global endpoints under `/api/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `queues` | List all registered queues |
 | `GET` | `queues/stats` | Statistics for every registered queue |
-| `GET` | `queues/:queue/details` | Get the queue's pause state |
-| `POST` | `queues/:queue/pause` | Pause a queue (all workers stop claiming) |
-| `POST` | `queues/:queue/resume` | Resume a paused queue |
 | `GET` | `events/stream` | SSE stream for real-time notifications |
 | `GET` | `cron/schedules` | List cron schedules |
 | `PATCH` | `cron/schedules/:name` | Override a schedule's expression, overlap policy, time zone, or enabled state |
@@ -133,7 +134,7 @@ Global endpoints under `/api/v1/`:
 payload:
 
 ```http
-POST /api/v1/queues/email_queue/dlq/12/retry
+POST /api/queues/email_queue/dlq/12/retry
 Content-Type: application/json
 
 {"payload": {"tag": "SendWelcome", "contents": "alice@example.com"}}
@@ -150,7 +151,7 @@ Content-Type: application/json
 `jobs/:id/reschedule` sets when a job becomes visible:
 
 ```http
-POST /api/v1/queues/email_queue/jobs/41/reschedule
+POST /api/queues/email_queue/jobs/41/reschedule
 Content-Type: application/json
 
 {"runAt": "2026-10-01T09:00:00Z"}
@@ -165,7 +166,7 @@ the attempt count, records a claimant, and hides each job for the lease. A
 paused queue returns no leases.
 
 ```http
-POST /api/v1/queues/email_queue/claim
+POST /api/queues/email_queue/claim
 {"maxJobs": 5, "leaseSeconds": 60}
 ```
 
@@ -176,14 +177,14 @@ clamps to 3600.
 finalization request carries them:
 
 ```http
-POST /api/v1/queues/email_queue/jobs/41/ack
+POST /api/queues/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31"}
 ```
 
 On a `QueueWithResult` queue, `ack` takes the result:
 
 ```http
-POST /api/v1/queues/email_queue/jobs/41/ack
+POST /api/queues/email_queue/jobs/41/ack
 {"claimSeq": 7, "claimedBy": "0f5e...c31", "result": ["delivered"]}
 ```
 
@@ -197,7 +198,8 @@ that does not match the result type returns 400. Omit `result` to store none. Th
 | `nack` | refunds the attempt. The job stays invisible for the rest of the lease. |
 | `extend` | moves the lease expiry to `leaseSeconds` from now, at most 3600 |
 
-A mismatched lease, or one held by a registered worker, returns 409.
+A mismatched lease, a lease that a registered worker holds, a suspended job, or a
+force-cancelled job returns 409.
 
 The server does not renew an HTTP lease. After it expires another consumer can
 claim the job.

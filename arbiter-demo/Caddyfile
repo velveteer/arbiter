@@ -15,7 +15,7 @@
 	}
 
 	# flush_interval -1 disables response buffering so the admin UI's SSE
-	# stream (/api/v1/events/stream) reaches the browser live.
+	# stream (/api/events/stream) reaches the browser live.
 	handle {
 		reverse_proxy {$DEMO_UPSTREAM:demo:8080} {
 			flush_interval -1
