@@ -105,7 +105,8 @@ export const api = {
   jobAction: (q, id, action) => post(`/queues/${enc(q)}/jobs/${id}/${action}`),
   cancelJob: (q, id) => del(`/queues/${enc(q)}/jobs/${id}`),
   /** @type {(q: string, id: number, runAt: string) => Promise<null>} */
-  rescheduleJob: (q, id, runAt) => post(`/queues/${enc(q)}/jobs/${id}/reschedule`, /** @type {Body<'/api/queues/queue/jobs/{id}/reschedule', 'post'>} */ ({ runAt })),
+  rescheduleJob: (q, id, runAt) =>
+    post(`/queues/${enc(q)}/jobs/${id}/reschedule`, /** @type {Body<'/api/queues/queue/jobs/{id}/reschedule', 'post'>} */ ({ runAt })),
 
   /** @type {(q: string, params: Query<'/api/queues/queue/dlq'>) => Promise<Res<'/api/queues/queue/dlq'>>} */
   dlq: (q, params) => get(`/queues/${enc(q)}/dlq`, params),
