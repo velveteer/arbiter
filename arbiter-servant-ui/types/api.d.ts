@@ -475,7 +475,7 @@ export interface paths {
         put?: never;
         /**
          * Enqueue a job
-         * @description A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue.
+         * @description A duplicate of an ignore dedup key returns the job that exists. A duplicate of a replace dedup key replaces the job in the queue.
          */
         post: operations["queuePostJobs"];
         delete?: never;

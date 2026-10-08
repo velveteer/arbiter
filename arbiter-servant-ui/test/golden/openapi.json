@@ -3317,7 +3317,7 @@
                 ]
             },
             "post": {
-                "description": "A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue.",
+                "description": "A duplicate of an ignore dedup key returns the job that exists. A duplicate of a replace dedup key replaces the job in the queue.",
                 "operationId": "queuePostJobs",
                 "requestBody": {
                     "content": {

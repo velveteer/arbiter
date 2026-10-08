@@ -156,7 +156,7 @@ data JobsAPI payload result mode = JobsAPI
       :: mode
         :- Summary "Enqueue a job"
           :> Description
-               "A duplicate of an ignore dedup key returns the existing job. A duplicate of a replace dedup key replaces the job in the queue."
+               "A duplicate of an ignore dedup key returns the job that exists. A duplicate of a replace dedup key replaces the job in the queue."
           :> Throws 409 "A replace dedup key matched a job that is in flight, flagged for cancel, or has children."
           :> Throws 409 "An ignore dedup key matched a job that was deleted before the server could read it."
           :> ReqBody '[JSON] (ApiJobWrite payload)

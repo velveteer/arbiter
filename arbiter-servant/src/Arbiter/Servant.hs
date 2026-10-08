@@ -46,6 +46,10 @@ module Arbiter.Servant
   , TableAPI (..)
   , SharedAPI
   , PayloadEditNote
+  , LeaseRefusal
+  , Throws'
+  , Throws
+  , ThrowsBody
   , EventsAPI
   , QueuesAPI (..)
   , JobsAPI (..)

@@ -170,12 +170,6 @@ runDb config = liftIO . serverRun config
 jobNotFound :: LBS.ByteString
 jobNotFound = "Job not found"
 
--- | 'NoContent' when a statement touched a row, 404 otherwise.
-rowsOr404 :: LBS.ByteString -> Int64 -> Handler NoContent
-rowsOr404 missing rowsAffected
-  | rowsAffected > 0 = pure NoContent
-  | otherwise = throwError err404 {errBody = missing}
-
 -- | Answer a handler that decided its own error.
 noContentOr :: Either ServerError () -> Handler NoContent
 noContentOr = either throwError (const (pure NoContent))
@@ -195,6 +189,16 @@ mutateOr config mutate probe =
       | rowsAffected > 0 = pure (Right ())
       | otherwise = probe schemaName
 
+-- | Run a mutation. When it touches no row, answer 404 with @missing@.
+mutateOr404
+  :: (Monad m)
+  => ArbiterServerConfig m registry
+  -> LBS.ByteString
+  -> (Text -> m Int64)
+  -> Handler NoContent
+mutateOr404 config missing mutate =
+  mutateOr config mutate (const (pure (Left err404 {errBody = missing})))
+
 -- | Run a job mutation. When it touches no row, re-read the job and answer 404, or
 -- the 409 that @refuse@ derives from the job and its status.
 mutateJob
@@ -211,7 +215,7 @@ mutateJob tableName config jobId mutate refuse =
     maybe (Left err404 {errBody = jobNotFound}) (\(job, status) -> Left err409 {errBody = refuse job status})
       <$> Ops.getJobByIdWithStatus @_ @payload schemaName tableName jobId
 
--- | Run a mutation over a parent's subtree. Touching no row is a success unless the parent is gone.
+-- | Run a mutation over a parent's subtree. When it changes no row, it succeeds, unless the parent is gone.
 mutateChildren
   :: forall registry m
    . (HasRegistry m registry)
@@ -409,9 +413,9 @@ cancelJobHandler
   -> ArbiterServerConfig m registry
   -> Int64
   -> Handler NoContent
-cancelJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  runDb config (genericLength <$> Ops.cancelJobCascade schemaName tableName jobId) >>= rowsOr404 jobNotFound
+cancelJobHandler tableName config jobId =
+  mutateOr404 config jobNotFound $ \schemaName ->
+    genericLength <$> Ops.cancelJobCascade schemaName tableName jobId
 
 -- | Cascade-cancel a job and async-cancel any in-flight handlers via NOTIFY.
 forceCancelJobHandler
@@ -421,9 +425,8 @@ forceCancelJobHandler
   -> ArbiterServerConfig m registry
   -> Int64
   -> Handler NoContent
-forceCancelJobHandler tableName config jobId = do
-  let schemaName = serverSchema config
-  runDb config (Ops.forceCancelJob schemaName tableName jobId) >>= rowsOr404 jobNotFound
+forceCancelJobHandler tableName config jobId =
+  mutateOr404 config jobNotFound $ \schemaName -> Ops.forceCancelJob schemaName tableName jobId
 
 -- | Promote a job (make it immediately visible).
 promoteJobHandler
@@ -491,7 +494,7 @@ pauseChildrenHandler
   -> Int64
   -> Handler NoContent
 pauseChildrenHandler tableName config jobId =
-  -- Pausing nothing is a success. The children may be in flight, suspended or done. A gone parent is a 404.
+  -- When no child is paused, it succeeds. The children can be in flight, suspended or done. A gone parent is a 404.
   mutateChildren tableName config jobId Ops.pauseChildren
 
 -- | Resume all suspended children of a parent job.
@@ -503,7 +506,7 @@ resumeChildrenHandler
   -> Int64
   -> Handler NoContent
 resumeChildrenHandler tableName config jobId =
-  -- Resuming nothing is a success. The children may be unsuspended or done. A gone parent is a 404.
+  -- When no child is resumed, it succeeds. The children can be unsuspended or done. A gone parent is a 404.
   mutateChildren tableName config jobId Ops.resumeChildren
 
 -- | Suspend a job (make it unclaimable).
@@ -611,9 +614,8 @@ deleteDLQHandler
   -> ArbiterServerConfig m registry
   -> Int64
   -> Handler NoContent
-deleteDLQHandler tableName config dlqId = do
-  let schemaName = serverSchema config
-  runDb config (Ops.deleteDLQJob schemaName tableName dlqId) >>= rowsOr404 "DLQ job not found"
+deleteDLQHandler tableName config dlqId =
+  mutateOr404 config "DLQ job not found" $ \schemaName -> Ops.deleteDLQJob schemaName tableName dlqId
 
 -- | Batch delete jobs from DLQ permanently.
 deleteDLQBatchHandler
@@ -702,9 +704,8 @@ deleteArchiveHandler
   -> ArbiterServerConfig m registry
   -> Int64
   -> Handler NoContent
-deleteArchiveHandler tableName config archiveId = do
-  let schemaName = serverSchema config
-  runDb config (Ops.deleteArchiveJob schemaName tableName archiveId) >>= rowsOr404 "Archived job not found"
+deleteArchiveHandler tableName config archiveId =
+  mutateOr404 config "Archived job not found" $ \schemaName -> Ops.deleteArchiveJob schemaName tableName archiveId
 
 -- | Bulk-purge archived jobs by archive primary key.
 deleteArchiveBatchHandler
@@ -1145,9 +1146,8 @@ setWorkerPausedHandler
   -> Bool
   -> UUID
   -> Handler NoContent
-setWorkerPausedHandler config pauseFlag workerId = do
-  let schemaName = serverSchema config
-  runDb config (Ops.setWorkerPaused schemaName workerId pauseFlag) >>= rowsOr404 "Worker not found"
+setWorkerPausedHandler config pauseFlag workerId =
+  mutateOr404 config "Worker not found" $ \schemaName -> Ops.setWorkerPaused schemaName workerId pauseFlag
 
 -- | Rate-limit management/observability handlers.
 rateLimitsServer
