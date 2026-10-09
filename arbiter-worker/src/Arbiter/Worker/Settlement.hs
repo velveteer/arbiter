@@ -112,7 +112,9 @@ poolEffects config statements consumeSpan = do
                 traverse_ (void . cancelJobFor kind) unowned
                 pure outcomes
           , effectDeleteCancelled = \(UnliftIO runIn) gone ->
-              runIn (Set.fromList <$> Ops.deleteCancelledJobs schemaName queue (Just (workerId config)) (map Job.primaryKey gone))
+              runIn . fmap Set.fromList
+                $ Ops.deleteCancelledJobs schemaName queue
+                $ Ops.HeldBy (workerId config) gone
           , effectRelease = \(UnliftIO runIn) released -> runIn (Set.fromList <$> Arb.nackJobsBatch released)
           , effectSpawn = \(UnliftIO runIn) job kids ->
               runIn $ withDbTransaction $ do

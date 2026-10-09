@@ -645,7 +645,7 @@ setVisibilityTimeoutBatch timeout jobs@(firstJob : _) =
        in case mActual of
             Nothing -> JobGone jobId
             Just actual
-              | cancelled, heldHere, actual == expected + 1 -> JobCancelled jobId
+              | cancelled, heldHere, actual == expected + Ops.cancelTokenBump -> JobCancelled jobId
               | actual /= expected -> JobReclaimed jobId expected actual
               | suspended -> JobSuspended jobId
               | heartbeated -> VisibilityExtended jobId

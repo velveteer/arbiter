@@ -17,6 +17,7 @@ import Arbiter.Core.Exceptions
   )
 import Arbiter.Core.HighLevel (SetVisibilityResult (..))
 import Arbiter.Core.Job.Types (JobId)
+import Arbiter.Core.Operations (cancelTokenBump)
 import Control.Concurrent.Class.MonadSTM (TVar, atomically, newTVarIO, readTVarIO, stateTVar)
 import Control.Monad (unless, when)
 import Control.Monad.Class.MonadFork (MonadFork (..))
@@ -231,10 +232,18 @@ spawnRow job _ rows = case Map.lookup (jobId job) rows of
         )
   _ -> (False, rows)
 
--- | Delete a flagged row this worker holds or no live lease holds.
+-- | The amount that a force-cancel flag adds to a row's token.
+cancelBump :: Int
+cancelBump = fromIntegral cancelTokenBump
+
+-- | Delete a flagged row this worker holds under the flagged token.
 deleteCancelledRow :: Job -> Statement Bool
-deleteCancelledRow job now rows = case Map.lookup (jobId job) rows of
-  Just row | rowFlagged row, rowHolder row == Just Us || maybe True (<= now) (rowLease row) -> (True, Map.delete (jobId job) rows)
+deleteCancelledRow job _ rows = case Map.lookup (jobId job) rows of
+  Just row
+    | rowFlagged row
+    , rowHolder row == Just Us
+    , rowSeq row == jobSeq job + cancelBump ->
+        (True, Map.delete (jobId job) rows)
   _ -> (False, rows)
 
 -- | The heartbeat's reading of a row.
@@ -242,7 +251,7 @@ extendRow :: Job -> Statement SetVisibilityResult
 extendRow job now rows = case Map.lookup (jobId job) rows of
   Nothing -> (JobGone (jobId job), rows)
   Just row
-    | rowFlagged row, rowHolder row == Just Us, rowSeq row == jobSeq job + 1 -> (JobCancelled (jobId job), rows)
+    | rowFlagged row, rowHolder row == Just Us, rowSeq row == jobSeq job + cancelBump -> (JobCancelled (jobId job), rows)
     | rowSuspended row, rowSeq row == jobSeq job -> (JobSuspended (jobId job), rows)
     | rowSeq row /= jobSeq job -> (JobReclaimed (jobId job) (fromIntegral (jobSeq job)) (fromIntegral (rowSeq row)), rows)
     | otherwise ->
@@ -262,7 +271,7 @@ flagRow job now rows = case Map.lookup job rows of
     | isJust (rowHolder row)
     , maybe False (> now) (rowLease row) ->
         ( (rowHolder row, Just Flagged)
-        , Map.insert job row {rowFlagged = True, rowSeq = rowSeq row + if rowFlagged row then 0 else 1} rows
+        , Map.insert job row {rowFlagged = True, rowSeq = rowSeq row + if rowFlagged row then 0 else cancelBump} rows
         )
     | otherwise -> ((rowHolder row, Just Deleted), Map.delete job rows)
   Nothing -> ((Nothing, Nothing), rows)

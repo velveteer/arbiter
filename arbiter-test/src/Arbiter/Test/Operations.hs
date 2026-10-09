@@ -82,10 +82,14 @@ operationsSpec mkMessage mkResult runM = do
       dlqAll env = runM env (HL.listDLQJobs 10 0) :: IO [DLQ.DLQJob payload]
       dlqNamed name = find ((== mkMessage name) . payload . DLQ.jobSnapshot)
       claimedFor job = find ((== primaryKey job) . primaryKey)
-      deleteCancelledAs env owner jobIds =
+      deleteCancelledAs env owner jobs =
         runM env $ do
           schemaName <- getSchema
-          Ops.deleteCancelledJobs schemaName (HL.queueTable @payload @m) (Just owner) jobIds
+          Ops.deleteCancelledJobs schemaName (HL.queueTable @payload @m) (Ops.HeldBy owner jobs)
+      sweepCancelled env jobIds =
+        runM env $ do
+          schemaName <- getSchema
+          Ops.deleteCancelledJobs schemaName (HL.queueTable @payload @m) (Ops.LapsedOnly jobIds)
       groupsTable = do
         schemaName <- getSchema
         pure (Schema.jobQueueGroupsTable schemaName (HL.queueTable @payload @m))
@@ -397,10 +401,43 @@ operationsSpec mkMessage mkResult runM = do
       flagged <- runM env (HL.forceCancelJob @payload jobId)
       flagged `shouldBe` 1
 
-      deleteCancelledAs env other [jobId] >>= (`shouldBe` [])
+      deleteCancelledAs env other claimed >>= (`shouldBe` [])
       getJob env jobId >>= (`shouldSatisfy` isJust)
 
-      deleteCancelledAs env owner [jobId] >>= (`shouldBe` [jobId])
+      deleteCancelledAs env owner claimed >>= (`shouldBe` [jobId])
+      assertGone env jobId
+
+    -- Both claims stamp the same worker. Only the later one holds the lease.
+    let flagStaleAndCurrent env owner name = do
+          Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage name)))
+          let jobId = primaryKey inserted
+          stale <- runM env (HL.claimNextVisibleJobsAs 1 0 owner) :: IO [JobRead payload]
+          map primaryKey stale `shouldBe` [jobId]
+          current <- claimJobsAs env 1 owner
+          map primaryKey current `shouldBe` [jobId]
+          runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
+          pure (jobId, stale, current)
+
+    it "leaves a force-cancel-flagged job to the later claim of the same worker" $ \env -> do
+      let owner = UUID.nil
+      (jobId, stale, current) <- flagStaleAndCurrent env owner "cancel-stale-claim"
+
+      deleteCancelledAs env owner stale >>= (`shouldBe` [])
+      getJob env jobId >>= (`shouldSatisfy` isJust)
+
+      deleteCancelledAs env owner current >>= (`shouldBe` [jobId])
+      assertGone env jobId
+
+    it "leaves a lapsed force-cancel-flagged job to its holder when an earlier claim deletes" $ \env -> do
+      let owner = UUID.nil
+      (jobId, stale, current) <- flagStaleAndCurrent env owner "cancel-stale-lapsed"
+      Just flaggedRow <- getJob env jobId
+      void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
+
+      deleteCancelledAs env owner stale >>= (`shouldBe` [])
+      getJob env jobId >>= (`shouldSatisfy` isJust)
+
+      deleteCancelledAs env owner current >>= (`shouldBe` [jobId])
       assertGone env jobId
 
   describe "nackJob" $ do
@@ -836,19 +873,18 @@ operationsSpec mkMessage mkResult runM = do
     it "sweeps a flagged job only once its lease lapses" $ \env -> do
       -- Window 5.
       let owner = UUID.nil
-          reaper = UUID.fromWords 2 2 2 2
       Just inserted <- runM env (HL.insertJob (defaultJob (mkMessage "window5")))
       let jobId = primaryKey inserted
       claimed <- claimJobsAs env 1 owner
       length claimed `shouldBe` 1
       runM env (HL.forceCancelJob @payload jobId) `shouldReturn` 1
 
-      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [])
+      sweepCancelled env [jobId] >>= (`shouldBe` [])
 
       -- The flag bumped the token. The lapse is written against the row's.
       Just flaggedRow <- getJob env jobId
       void $ runM env (HL.setVisibilityTimeout 0 flaggedRow)
-      deleteCancelledAs env reaper [jobId] >>= (`shouldBe` [jobId])
+      sweepCancelled env [jobId] >>= (`shouldBe` [jobId])
       assertGone env jobId
 
   describe "Guard pins" $ do
@@ -874,7 +910,7 @@ operationsSpec mkMessage mkResult runM = do
       length claimed `shouldBe` 2
       runM env (HL.forceCancelJob @payload (primaryKey flagged)) `shouldReturn` 1
 
-      deleteCancelledAs env UUID.nil [primaryKey flagged, primaryKey sibling]
+      deleteCancelledAs env UUID.nil claimed
         >>= (`shouldBe` [primaryKey flagged])
       isJust <$> getJob env (primaryKey sibling) `shouldReturn` True
 
@@ -1138,7 +1174,7 @@ operationsSpec mkMessage mkResult runM = do
       payload untouched `shouldBe` mkMessage "Original"
       claimJobs env 1 >>= (`shouldBe` [])
 
-      deleteCancelledAs env UUID.nil [jobId] >>= (`shouldBe` [jobId])
+      deleteCancelledAs env UUID.nil claimed >>= (`shouldBe` [jobId])
       Just fresh <- runM env (HL.insertJob job2)
       payload fresh `shouldBe` mkMessage "Replacement"
 

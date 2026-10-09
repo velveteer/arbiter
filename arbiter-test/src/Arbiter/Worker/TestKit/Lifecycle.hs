@@ -1424,8 +1424,8 @@ lifecycleSpec TestBackend {schema, table, connStr, mkSimple, mkEnv, pollOnly, mk
                   result `shouldSatisfy` isRight
                   waitUntil 5_000 $ isNothing <$> runM env (HL.getJobById @payload jid)
 
-      it "deletes a flagged job the handler already nacked" $ \env -> do
-        -- A nack keeps the claim. A later cancel flags the row.
+      it "deletes a nacked job outright on force-cancel" $ \env -> do
+        -- A nack releases the claim, so the force-cancel deletes the row outright.
         nackedRef <- newIORef False
         let jobs =
               [ setGroupKey (Just "fcn") $ defaultJob (mkSimple "fcn-1")

@@ -177,7 +177,9 @@ module Arbiter.Core.Operations
   , cancelJobCascade
   , cancelJobTree
   , forceCancelJob
+  , CancelledScope (..)
   , deleteCancelledJobs
+  , Tmpl.cancelTokenBump
 
     -- * Suspend and resume operations
   , suspendJob
@@ -1939,20 +1941,17 @@ deleteDLQJob
   -> m Int64
 deleteDLQJob schemaName tableName dlqId = deleteDLQJobsBatch schemaName tableName [dlqId]
 
--- | Delete jobs by id via the given query builder, then resume any parents left
--- childless. The query must return each deleted row's id and parent_id. Returns
--- the ids deleted.
+-- | Run a delete query, then resume any parents left childless. The query must
+-- return each deleted row's id and parent_id. Returns the ids deleted.
 deleteJobsResumingParents
   :: (MonadArbiter m)
   => TreesLocked
   -> SchemaName
   -> TableName
-  -> ([Int64] -> Q.Query (Int64, Maybe Int64))
-  -> [Int64]
+  -> Q.Query (Int64, Maybe Int64)
   -> m [Int64]
-deleteJobsResumingParents _ _ _ _ [] = pure []
-deleteJobsResumingParents held schemaName tableName mkSql jobIds = do
-  rows <- MA.executeQuery (mkSql jobIds)
+deleteJobsResumingParents held schemaName tableName query = do
+  rows <- MA.executeQuery query
   resumeJobParents held schemaName tableName (map snd rows)
   pure (map fst rows)
 
@@ -1967,27 +1966,43 @@ deleteDLQJobsBatch
   -> [Int64]
   -- ^ DLQ primary keys ('Arbiter.Core.Job.DLQ.dlqPrimaryKey')
   -> m Int64
+deleteDLQJobsBatch _ _ [] = pure 0
 deleteDLQJobsBatch schemaName tableName dlqIds = withDbTransaction $ do
   parents <- MA.executeQuery (Tmpl.dlqParentIdsSQL schemaName tableName dlqIds)
   lockJobParents schemaName tableName parents
   held <- lockJobTrees schemaName tableName (catMaybes parents)
   fromIntegral . length
-    <$> deleteJobsResumingParents held schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName) dlqIds
+    <$> deleteJobsResumingParents held schemaName tableName (Tmpl.deleteDLQJobsBatchSQL schemaName tableName dlqIds)
 
--- | Delete force-cancel-flagged jobs @owner@ holds or no live lease holds, resuming
--- any parents left childless. Returns the ids it deleted.
+-- | Which force-cancel-flagged jobs 'deleteCancelledJobs' deletes.
+data CancelledScope payload
+  = -- | Jobs that have no live lease. The reaper uses this scope.
+    LapsedOnly [Int64]
+  | -- | Jobs that this worker holds, as its claim returned them. Do not use a row from
+    -- a later read of a flagged job.
+    HeldBy UUID [JobRead payload]
+
+-- | Delete the force-cancel-flagged jobs in @scope@ and resume the parents that have
+-- no children after the delete. Returns the deleted ids.
 deleteCancelledJobs
   :: (MonadArbiter m)
   => SchemaName
   -> TableName
-  -> Maybe UUID
-  -> [Int64]
+  -> CancelledScope payload
   -> m [Int64]
-deleteCancelledJobs _ _ _ [] = pure []
-deleteCancelledJobs schemaName tableName owner jobIds = withDbTransaction $ do
-  lockJobParents schemaName tableName =<< MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName jobIds)
-  held <- lockJobTrees schemaName tableName jobIds
-  deleteJobsResumingParents held schemaName tableName (Tmpl.deleteCancelledJobsSQL schemaName tableName owner) jobIds
+deleteCancelledJobs schemaName tableName scope
+  | null jobIds = pure []
+  | otherwise = withDbTransaction $ do
+      lockJobParents schemaName tableName =<< MA.executeQuery (Tmpl.getParentIdsSQL schemaName tableName jobIds)
+      held <- lockJobTrees schemaName tableName jobIds
+      deleteJobsResumingParents held schemaName tableName deleteSql
+  where
+    (jobIds, deleteSql) = case scope of
+      LapsedOnly ids -> (ids, Tmpl.deleteLapsedCancelledJobsSQL schemaName tableName ids)
+      HeldBy owner jobs ->
+        ( map primaryKey jobs
+        , Tmpl.deleteHeldCancelledJobsSQL schemaName tableName owner [(primaryKey job, claimSeq job) | job <- jobs]
+        )
 
 -- ---------------------------------------------------------------------------
 -- Admin Operations
@@ -2863,7 +2878,7 @@ sweepCancelledForQueue
   -> m Int64
 sweepCancelledForQueue schemaName tableName = do
   ids <- MA.executeQuery (Tmpl.selectCancelledReapableJobsSQL schemaName tableName cancelledSweepBatch)
-  fromIntegral . length <$> deleteCancelledJobs schemaName tableName Nothing ids
+  fromIntegral . length <$> deleteCancelledJobs schemaName tableName (LapsedOnly ids)
 
 -- | Per-queue cap on flagged jobs reaped in one pass.
 cancelledSweepBatch :: Int

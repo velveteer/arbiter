@@ -2599,7 +2599,10 @@ stateMachineSpec run schema table withConn reset = do
     $ withinSecs 30
     $ crossGroupWakeLockOrderAfter @sm
       (void . HL.forceCancelJob @SMPayload . primaryKey)
-      (\job -> void (Ops.deleteCancelledJobs schema table (Job.claimedBy job) [primaryKey job]))
+      ( \job -> do
+          deleted <- Ops.deleteCancelledJobs schema table (Ops.HeldBy (fromJust (Job.claimedBy job)) [job])
+          liftIO (deleted `shouldBe` [primaryKey job])
+      )
       run
       schema
       table

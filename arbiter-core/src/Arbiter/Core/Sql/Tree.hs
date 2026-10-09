@@ -13,7 +13,9 @@ module Arbiter.Core.Sql.Tree
   , lockJobTreesFromRootSQL
   , cancelJobCascadeSQL
   , forceCancelJobSQL
-  , deleteCancelledJobsSQL
+  , cancelTokenBump
+  , deleteLapsedCancelledJobsSQL
+  , deleteHeldCancelledJobsSQL
   , selectCancelledReapableJobsSQL
   , cancelJobTreeSQL
   , tryWakeAncestorSQL
@@ -256,7 +258,7 @@ forceCancelJobSQL schema tableName jobId =
         cancelled AS (
           UPDATE ${tbl} job
           SET cancel_requested_at = COALESCE(job.cancel_requested_at, NOW()),
-              claim_seq = job.claim_seq + CASE WHEN job.cancel_requested_at IS NULL THEN 1 ELSE 0 END
+              claim_seq = job.claim_seq + CASE WHEN job.cancel_requested_at IS NULL THEN #{cancelTokenBump :: CInt8} ELSE 0 END
           FROM locked held
           WHERE job.id = held.id
             AND held.claimed_by IS NOT NULL
@@ -285,23 +287,52 @@ forceCancelJobSQL schema tableName jobId =
         WHERE (SELECT count(*) FROM notif) >= 0
       |]
 
--- | Delete force-cancel-flagged jobs @owner@ holds or no live lease holds, returning each
--- one's id and parent id. Locks rows in descending id order.
-deleteCancelledJobsSQL :: SchemaName -> TableName -> Maybe UUID -> [Int64] -> Query (Int64, Maybe Int64)
-deleteCancelledJobsSQL schema tableName owner jobIds =
+-- | The amount that a force-cancel flag adds to the claim token.
+cancelTokenBump :: Int64
+cancelTokenBump = 1
+
+-- | Delete the force-cancel-flagged jobs that have no live lease.
+deleteLapsedCancelledJobsSQL :: SchemaName -> TableName -> [Int64] -> Query (Int64, Maybe Int64)
+deleteLapsedCancelledJobsSQL schema tableName jobIds =
   let tbl = jobQueueTable schema tableName
-   in [sql|
-        WITH locked AS (
-          SELECT id FROM ${tbl}
-          WHERE id = ANY(#{jobIds :: [CInt8]})
-            AND cancel_requested_at IS NOT NULL
-            AND (claimed_by = #{owner :: Maybe CUuid} OR not_visible_until IS NULL OR not_visible_until <= NOW())
-          ORDER BY id DESC
+   in deleteLockedSQL
+        tbl
+        [sql|
+          SELECT job.id FROM ${tbl} job
+          WHERE job.id = ANY(#{jobIds :: [CInt8]})
+            AND job.cancel_requested_at IS NOT NULL
+            AND (job.not_visible_until IS NULL OR job.not_visible_until <= NOW())
+          ORDER BY job.id DESC
           FOR UPDATE
-        )
-        DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
-        RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}
-      |]
+        |]
+
+-- | Delete the force-cancel-flagged jobs that @owner@ holds.
+-- Each pair is a job id and the claim token that its claim returned.
+deleteHeldCancelledJobsSQL :: SchemaName -> TableName -> UUID -> [(Int64, Int64)] -> Query (Int64, Maybe Int64)
+deleteHeldCancelledJobsSQL schema tableName owner claims =
+  let tbl = jobQueueTable schema tableName
+      ids = map fst claims
+      tokens = map snd claims
+   in deleteLockedSQL
+        tbl
+        [sql|
+          SELECT job.id FROM ${tbl} job
+          JOIN unnest(#{ids :: [CInt8]}::bigint[], #{tokens :: [CInt8]}::bigint[]) AS held(id, claim_seq)
+            ON held.id = job.id AND job.claim_seq = held.claim_seq + #{cancelTokenBump :: CInt8}
+          WHERE job.cancel_requested_at IS NOT NULL
+            AND job.claimed_by = #{owner :: CUuid}
+          ORDER BY job.id DESC
+          FOR UPDATE OF job
+        |]
+
+-- | Delete the rows that @locked@ selects. Returns each id and its parent id.
+deleteLockedSQL :: Text -> Query () -> Query (Int64, Maybe Int64)
+deleteLockedSQL tbl locked =
+  [sql|
+    WITH locked AS (${locked})
+    DELETE FROM ${tbl} WHERE id IN (SELECT id FROM locked)
+    RETURNING @{id :: CInt8}, @{parent_id :: Maybe CInt8}
+  |]
 
 -- | Flagged jobs whose lease has lapsed. The reaper deletes them and resumes their
 -- parents.
